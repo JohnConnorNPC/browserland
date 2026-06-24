@@ -16,9 +16,6 @@ The name says it plainly: a whole little desktop — windows, terminals, and you
 fleet of AI coding agents — that lives entirely in a browser tab. (`webterm` is
 the Python package/module name.)
 
-> **Screenshots:** see [Screenshots](#screenshots) below — image placeholders
-> are ready for you to drop in.
-
 ## What is this?
 
 Browserland is two small programs and a browser:
