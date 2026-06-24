@@ -71,6 +71,7 @@ class WindowEntry:
         kind: str = "terminal",
         agent: str = "",
         cwd: str = "",
+        version: str = "",
     ):
         self.id = int(window_id)
         self.pid = int(pid)
@@ -82,6 +83,9 @@ class WindowEntry:
         self.kind = kind
         self.agent = agent
         self.cwd = cwd
+        # The producer's self-reported build id (#22); "" for a pre-#22 agent
+        # (which is itself a staleness signal).
+        self.version = version
         # Per-window MCP access mode: None = inherit the broker default
         # (mcp_cfg.default_mode), else an explicit "off"/"read"/"readwrite"
         # override. In-memory only — resets to the default on broker restart
@@ -116,6 +120,7 @@ class WindowEntry:
             "kind": self.kind,
             "agent": self.agent,
             "cwd": self.cwd,
+            "version": self.version,
             "mcp": self.mcp_mode or mcp_default,
         }
 
@@ -226,9 +231,13 @@ class BrokerRegistry:
         kind = str(hello.get("kind", "") or "").strip() or "terminal"
         agent = _whitelist_agent(hello.get("agent"))
         cwd = str(hello.get("cwd", "") or "")
+        # Self-reported + untrusted: cap length (a producer can send anything,
+        # incl. a value matching the broker — it is a hint, not an attestation).
+        version = str(hello.get("version", "") or "")[:64]
 
         entry = WindowEntry(window_id, pid, title, cols, rows, ws,
-                            host=host, kind=kind, agent=agent, cwd=cwd)
+                            host=host, kind=kind, agent=agent, cwd=cwd,
+                            version=version)
         async with self._lock:
             old = self._entries.get(window_id)
             if old is not None:

@@ -26,12 +26,47 @@ def test_hello_minimal_shape():
 
 def test_hello_optional_fields():
     frame = json.loads(protocol.hello_frame(
-        1, 2, "t", 80, 24, host="box1", kind="agent"))
+        1, 2, "t", 80, 24, host="box1", kind="agent", version="0.1.0+abc"))
     assert frame["host"] == "box1"
     assert frame["kind"] == "agent"
+    assert frame["version"] == "0.1.0+abc"   # build id for stale detection (#22)
     # Absent when not supplied — non-agent producers omit them.
     bare = json.loads(protocol.hello_frame(1, 2, "t", 80, 24))
-    assert "host" not in bare and "kind" not in bare
+    assert ("host" not in bare and "kind" not in bare
+            and "version" not in bare)
+
+
+def test_build_version_starts_with_package_version():
+    import webterm
+    v = webterm.build_version()
+    assert isinstance(v, str) and v.startswith(webterm.__version__)
+
+
+def test_build_version_falls_back_when_git_unavailable(monkeypatch):
+    import subprocess
+
+    import webterm
+    monkeypatch.setattr(webterm, "_BUILD_VERSION", None)
+
+    def boom(*a, **k):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert webterm.build_version() == webterm.__version__   # bare version, no raise
+
+
+def test_build_version_is_cached(monkeypatch):
+    import subprocess
+
+    import webterm
+    monkeypatch.setattr(webterm, "_BUILD_VERSION", None)
+    first = webterm.build_version()
+    calls = []
+    real = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    # Second call must serve the cache and NOT re-shell-out to git.
+    assert webterm.build_version() == first and calls == []
 
 
 def test_title_frame():

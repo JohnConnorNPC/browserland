@@ -47,6 +47,29 @@ def test_info_get():
     assert seen["auth"] == "Bearer secret"
 
 
+def test_info_surfaces_broker_version():
+    """#22: mcp_info carries the broker build id; the client returns it verbatim."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "allow_launch": False,
+                                         "default_mode": "off",
+                                         "version": "0.1.0+abc"})
+    with _client(handler) as c:
+        out = c.info()
+    assert out["version"] == "0.1.0+abc"
+
+
+def test_list_terminals_surfaces_version_and_stale():
+    """#22: per-window build id + stale flag flow through list_terminals."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"id": 1, "mode": "read", "version": "0.1.0+new", "stale": False},
+            {"id": 2, "mode": "read", "version": "", "stale": True}])
+    with _client(handler) as c:
+        out = c.list_terminals()
+    assert out[0]["version"] == "0.1.0+new" and out[0]["stale"] is False
+    assert out[1]["version"] == "" and out[1]["stale"] is True
+
+
 def test_list_terminals_and_profiles_paths():
     paths = []
 

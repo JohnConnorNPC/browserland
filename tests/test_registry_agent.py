@@ -110,6 +110,26 @@ def test_hello_agent_field_seeds_and_whitelists():
     asyncio.run(scenario())
 
 
+def test_hello_version_field_seeds_summary():
+    """The hello's optional 'version' (build id) seeds entry.version + summary,
+    and is absent ('') for a pre-#22 agent — itself a staleness signal (#22)."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 7, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "version": "0.1.0+abc"})
+        assert entry.version == "0.1.0+abc"
+        assert entry.summary()["version"] == "0.1.0+abc"
+        entry2 = await reg.register(ws, {
+            "type": "hello", "window_id": 8, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24})
+        assert entry2.version == ""
+        assert entry2.summary()["version"] == ""
+
+    asyncio.run(scenario())
+
+
 def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"

@@ -44,7 +44,7 @@ from sanic import Request, Sanic, Websocket
 from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json
 
-from .. import protocol
+from .. import build_version, protocol
 from . import auth, relay
 from .launcher import LaunchError, Launcher
 from .registry import BrokerRegistry, run_producer_session
@@ -328,6 +328,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.config.AUTO_EXTEND = False
     app.ctx.config = config
     app.ctx.auth_token = auth.resolve_token(config)
+    # This broker's build id (#22): surfaced in /mcp/info and used as the
+    # baseline to flag a producer whose reported version differs as stale.
+    app.ctx.version = build_version()
     app.ctx.registry = BrokerRegistry()
     app.ctx.launcher = Launcher(
         app.ctx.registry,
@@ -1024,21 +1027,34 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         cfg = app.ctx.mcp_cfg
         return sanic_json({"ok": True,
                            "allow_launch": bool(cfg["allow_launch"]),
-                           "default_mode": cfg["default_mode"]})
+                           "default_mode": cfg["default_mode"],
+                           "version": app.ctx.version})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
         if err is not None:
             return err
         default_mode = app.ctx.mcp_cfg["default_mode"]
+        broker_version = app.ctx.version
         out = []
         for s in app.ctx.registry.session_summaries(default_mode):
             mode = s.get("mcp", "off")
             if mode == "off":
                 continue
-            out.append({"id": s["id"], "title": s["title"], "host": s["host"],
-                        "cwd": s["cwd"], "agent": s["agent"], "kind": s["kind"],
-                        "cols": s["cols"], "rows": s["rows"], "mode": mode})
+            version = s.get("version", "") or ""
+            entry_out = {"id": s["id"], "title": s["title"], "host": s["host"],
+                         "cwd": s["cwd"], "agent": s["agent"], "kind": s["kind"],
+                         "cols": s["cols"], "rows": s["rows"], "mode": mode,
+                         "version": version}
+            # ``stale`` = this producer's build differs from the broker's (incl. a
+            # pre-#22 agent reporting no version) → a deploy predating a fix, so a
+            # client can warn without comparing strings (#22). Only meaningful for
+            # webterm AGENT producers (a non-agent terminal legitimately reports
+            # no version — flagging it stale would be noise), and reliable only
+            # when builds carry a git hash (see build_version()).
+            if s["kind"] == "agent":
+                entry_out["stale"] = version != broker_version
+            out.append(entry_out)
         return sanic_json(out)
 
     async def _mcp_read(request: Request):

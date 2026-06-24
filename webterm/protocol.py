@@ -8,7 +8,7 @@ https://github.com/JohnConnorNPC/xterm-py.
 
 Producer -> broker (text JSON):
     {"type": "hello",   "window_id": <int>, "pid": <int>, "title": "...",
-     "cols": N, "rows": M}            # + optional "host", "kind", "agent", "cwd"
+     "cols": N, "rows": M}    # + optional "host", "kind", "agent", "cwd", "version"
     {"type": "title",   "data": "..."}
     {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir of the shell
@@ -54,6 +54,7 @@ def hello_frame(
     kind: Optional[str] = None,
     agent: Optional[str] = None,
     cwd: Optional[str] = None,
+    version: Optional[str] = None,
 ) -> str:
     """First frame on /browserland. Ints MUST be JSON numbers (the broker calls
     int() on them; the picker compares ids numerically in JS, so ids must
@@ -78,6 +79,10 @@ def hello_frame(
         frame["agent"] = str(agent)
     if cwd:
         frame["cwd"] = str(cwd)
+    # "version" carries the producer's build id (webterm.build_version()) so the
+    # broker can surface it and flag stale agents (issue #22).
+    if version:
+        frame["version"] = str(version)
     return json.dumps(frame)
 
 

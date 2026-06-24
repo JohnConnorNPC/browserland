@@ -282,16 +282,24 @@ effective mode to permit them.
 | `GET /mcp/profiles` | token | profile names |
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
-**`GET /mcp/info`** → `{"ok":true,"allow_launch":false,"default_mode":"off"}`
+**`GET /mcp/info`** →
+`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.1.0+ba4b62e"}`.
+`version` is this broker's build id (`webterm.build_version()` — package version +
+git short hash, or the bare package version off a checkout) for stale-deploy
+detection (#22).
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
 omitted. `agent` is the detected foreground-agent name (`""` when none), `kind`
 the producer kind (`"agent"` vs a non-agent `"terminal"`), `mode` the effective
-access mode:
+access mode. `version` is the producer's reported build id (`""` for a pre-#22
+agent / a non-agent producer); for **agent** producers a `stale` boolean flags a
+build differing from this broker's (a deploy predating a fix — reliable when
+builds carry a git hash):
 
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
-  "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read"}]
+  "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
+  "version":"0.1.0+ba4b62e","stale":false}]
 ```
 
 **`POST /mcp/read`** — body `{"id": <int>}`:

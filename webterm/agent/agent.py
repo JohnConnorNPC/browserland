@@ -15,7 +15,7 @@ import socket
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .. import protocol
+from .. import build_version, protocol
 from .backends import create_backend
 from .backends.base import PtyBackend
 from .client import BrokerClient
@@ -89,6 +89,9 @@ class SessionState:
     kind: str = "agent"
     agent: str = ""
     cwd: str = ""
+    # This agent's build id (webterm.build_version()), reported in the hello so
+    # the broker can surface it and flag a stale deployment (#22).
+    version: str = field(default_factory=build_version)
 
 
 class Agent:
