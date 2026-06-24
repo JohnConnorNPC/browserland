@@ -52,7 +52,7 @@ Because the PTY lives in the agent, not the browser, terminals survive browser
 reloads and even broker restarts — the agent reconnects with backoff and the
 browser's attach triggers a snapshot redraw from the ring buffer.
 
-## Screenshots
+## Screenshots 
 
 The desktop with tiled and floating terminals
 
@@ -247,3 +247,6 @@ The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.m
 ## License
 
 Released under the MIT License — see [LICENSE](LICENSE).
+
+
+not theprimeagen@gmail.com but hi :) 
