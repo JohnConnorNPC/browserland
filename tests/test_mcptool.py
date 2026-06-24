@@ -140,6 +140,87 @@ def test_tool_normalizes_but_client_is_verbatim():
     ]
 
 
+# ---- #14: send_keys translates key tokens to terminal byte sequences -------
+
+@pytest.mark.parametrize("keys,expected", [
+    (["C-c"], "\x03"),                       # Ctrl-C — the issue's target
+    (["C-C"], "\x03"),                       # case-insensitive chord
+    (["C-a"], "\x01"), (["C-z"], "\x1a"),    # control letter bounds
+    (["C-@"], "\x00"), (["C-Space"], "\x00"),  # NUL
+    (["C-["], "\x1b"),                       # ESC via chord
+    (["C-\\"], "\x1c"), (["C-]"], "\x1d"),
+    (["C-^"], "\x1e"), (["C-_"], "\x1f"),
+    (["C-?"], "\x7f"),                       # DEL
+    (["C-h"], "\x08"),                       # BS (distinct from Backspace->DEL)
+    (["Enter"], "\r"), (["return"], "\r"),
+    (["Tab"], "\t"), (["Esc"], "\x1b"), (["escape"], "\x1b"),
+    (["Space"], " "),
+    (["Backspace"], "\x7f"), (["BS"], "\x7f"),
+    (["Delete"], "\x1b[3~"),
+    (["Up"], "\x1b[A"), (["Down"], "\x1b[B"),
+    (["Right"], "\x1b[C"), (["Left"], "\x1b[D"),
+    (["Home"], "\x1b[H"), (["End"], "\x1b[F"),
+    (["PageUp"], "\x1b[5~"), (["PageDown"], "\x1b[6~"), (["Insert"], "\x1b[2~"),
+    (["F1"], "\x1bOP"), (["F5"], "\x1b[15~"), (["F12"], "\x1b[24~"),
+    (["M-x"], "\x1bx"),                       # Alt-x = ESC prefix
+    (["a"], "a"), (["^"], "^"), (["é"], "é"),  # single literal chars (UTF-8)
+    (["C-c", "Enter"], "\x03\r"),            # sequence
+    (["Up", "Up", "Enter"], "\x1b[A\x1b[A\r"),
+])
+def test_keys_to_text(keys, expected):
+    from webterm.mcptool import server
+    assert server._keys_to_text(keys) == expected
+
+
+@pytest.mark.parametrize("bad", [
+    [], "C-c", ["Retun"], ["Ctrl-C"], ["C-"], ["M-Enter"], ["Up arrow"],
+])
+def test_keys_to_text_rejects(bad):
+    from webterm.mcptool import server
+    with pytest.raises(ValueError):
+        server._keys_to_text(bad)
+
+
+def test_send_keys_posts_translated_bytes_verbatim():
+    from webterm.mcptool import server
+
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True})
+
+    server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
+    try:
+        # Ctrl-C then Enter: a real 0x03 (not the literal "^C" that left a stray
+        # 'c' in #14), sent verbatim — NOT through the newline->CR text policy.
+        assert server.send_keys(9, ["C-c", "Enter"]) == {"ok": True}
+    finally:
+        server._client = None
+    assert seen["path"] == "/mcp/input"
+    assert seen["body"] == {"id": 9, "data": "\x03\r"}
+
+
+def test_send_keys_invalid_token_sends_nothing():
+    """A bad token must raise before any HTTP call — no half-typed line."""
+    from webterm.mcptool import server
+
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url.path)
+        return httpx.Response(200, json={"ok": True})
+
+    server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ValueError):
+            server.send_keys(9, ["C-c", "Bogus", "Enter"])
+    finally:
+        server._client = None
+    assert calls == []   # atomic: nothing was sent
+
+
 def test_launch_omits_none_fields():
     seen = {}
 
@@ -293,7 +374,7 @@ async def test_tools_registered():
     tools = await server.mcp.list_tools()
     names = sorted(t.name for t in tools)
     assert names == ["launch_terminal", "list_profiles", "list_terminals",
-                     "mcp_info", "read_screen", "send_input"]
+                     "mcp_info", "read_screen", "send_input", "send_keys"]
 
 
 def test_tools_round_trip_through_http():

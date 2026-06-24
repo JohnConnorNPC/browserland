@@ -75,6 +75,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
+| `send_keys(id, keys)` | `POST /mcp/input` | control/escape keys plain text can't express |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
@@ -90,6 +91,18 @@ collapses to one Enter, an explicit `\r` is untouched, and control/escape bytes
 `BrowserlandClient.send_input` method and the broker's `POST /mcp/input` endpoint
 forward bytes **verbatim**, so a caller needing a literal LF or raw-mode input
 drives the endpoint (or the client) directly.
+
+**`send_keys` — control/escape keys.** `send_input` types literal text;
+`send_keys(id, keys)` sends the byte sequences for keys that text can't express.
+`keys` is a list of tokens: a named key (`Enter`, `Tab`, `Esc`, `Space`,
+`Backspace`, `Delete`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `PageUp`,
+`PageDown`, `Insert`, `F1`–`F12`), a Ctrl chord `C-<char>` (`C-c` → `0x03`,
+`C-Space` → NUL, `C-h` → `0x08`), an Alt chord `M-<char>` (ESC + char), or a
+single literal character — e.g. `["C-c"]`, `["Esc"]`, `["Up","Up","Enter"]`. It
+**emits the byte sequences** a keyboard would send; it does not synthesise OS
+key events. Tokens go out verbatim (no newline→Enter rewrite). Arrows/Home/End
+use normal-cursor-mode sequences and may differ inside an application-cursor-mode
+TUI. Whether `C-c` interrupts depends on the target's PTY backend/mode.
 
 ## Layout
 

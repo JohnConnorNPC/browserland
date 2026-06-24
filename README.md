@@ -122,6 +122,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
+| `send_keys(id, keys)` | `POST /mcp/input` | send control/escape **keys** — `["C-c"]`, `["Esc"]`, `["Up","Enter"]` — that plain text can't express |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
 
 > The `send_input` **tool** maps newlines in `data` to a carriage return — the
