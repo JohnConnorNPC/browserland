@@ -309,8 +309,13 @@ terminal producer has no handler, so the request times out → **502
 **`POST /mcp/input`** — body `{"id": <int>, "data": "<str>"}` → `{"ok":true}`.
 Requires effective mode `readwrite` (else **403 `read_only`**); `data` must be a
 string (else **400 `bad_data`**) and ≤ **256 KiB** UTF-8 (else **413
-`too_large`**). Forwarded straight to the PTY and **deliberately bypasses the
-single-active-browser lease** — MCP is its own authorized channel.
+`too_large`**). Forwarded **verbatim** straight to the PTY and **deliberately
+bypasses the single-active-browser lease** — MCP is its own authorized channel.
+The high-level MCP `send_input` *tool* maps newlines in `data` to a carriage
+return before calling this endpoint, so a command submits on PowerShell/PSReadLine
+(which treats a bare `\n` as a soft continuation) and on a Unix shell alike (#13);
+the endpoint itself is byte-exact, so drive it directly for a literal LF or
+raw-mode bytes.
 
 **`GET /mcp/profiles`** → `{"default":"cmd","profiles":["cmd","powershell"]}`
 (the broker's configured `agent.profiles`; `bash`/`sh` on Linux).

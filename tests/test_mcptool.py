@@ -86,11 +86,58 @@ def test_send_input_posts_id_and_data():
         seen["body"] = json.loads(req.content)
         return httpx.Response(200, json={"ok": True})
 
+    # The client is the thin 1:1 endpoint wrapper: it forwards `data` VERBATIM.
+    # Mapping a logical Enter to CR is the tool's job, not the client's (#13).
     with _client(handler) as c:
         out = c.send_input(42, "ls\n")
     assert seen["path"] == "/mcp/input"
     assert seen["body"] == {"id": 42, "data": "ls\n"}
     assert out == {"ok": True}
+
+
+# ---- #13: MCP tool maps newlines -> Enter (CR); client stays verbatim -----
+
+@pytest.mark.parametrize("data,expected", [
+    ("ls\n", "ls\r"),                 # lone LF -> CR (the bug: LF doesn't submit)
+    ("ls\r\n", "ls\r"),               # CRLF collapses to a single Enter
+    ("ls\r", "ls\r"),                 # explicit CR untouched
+    ("a\nb\r\nc\n", "a\rb\rc\r"),     # mixed newlines, each an Enter
+    ("ls", "ls"),                     # no newline -> no submit (partial line)
+    ("", ""),                         # empty stays empty
+    ("\x03", "\x03"),                 # Ctrl-C control byte passes through
+    ("\x1b[C", "\x1b[C"),             # ESC arrow sequence passes through
+    ("git commit -m \"x\ny\"\n", "git commit -m \"x\ry\"\r"),  # newlines in args too
+])
+def test_newlines_to_enter(data, expected):
+    from webterm.mcptool import server
+    assert server._newlines_to_enter(data) == expected
+
+
+def test_tool_normalizes_but_client_is_verbatim():
+    """The same "\\n" submits via the tool (-> "\\r") but is forwarded raw by the
+    low-level client — the layer split that keeps POST /mcp/input verbatim."""
+    from webterm.mcptool import server
+
+    bodies = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"ok": True})
+
+    # Low-level client: verbatim.
+    with _client(handler) as c:
+        c.send_input(1, "echo hi\n")
+    # High-level tool: maps the trailing LF to CR so PowerShell actually runs it.
+    server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
+    try:
+        server.send_input(1, "echo hi\n")
+    finally:
+        server._client = None
+
+    assert bodies == [
+        {"id": 1, "data": "echo hi\n"},   # client path: unchanged
+        {"id": 1, "data": "echo hi\r"},   # tool path: Enter -> CR
+    ]
 
 
 def test_launch_omits_none_fields():
@@ -265,11 +312,13 @@ def test_tools_round_trip_through_http():
     server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
     try:
         assert server.read_screen(5)["text"] == "screen"
+        # The tool maps the logical Enter ("\n") to a carriage return so it
+        # submits on PowerShell (#13); the wire payload is therefore "ls\r".
         assert server.send_input(5, "ls\n") == {"ok": True}
     finally:
         server._client = None
 
     assert calls == [
         ("/mcp/read", {"id": 5}),
-        ("/mcp/input", {"id": 5, "data": "ls\n"}),
+        ("/mcp/input", {"id": 5, "data": "ls\r"}),
     ]

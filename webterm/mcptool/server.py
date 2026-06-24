@@ -45,6 +45,26 @@ def get_client() -> BrowserlandClient:
     return _client
 
 
+def _newlines_to_enter(data: str) -> str:
+    r"""Map logical newlines in tool input to a carriage return — the byte a
+    real Enter key sends.
+
+    PowerShell/PSReadLine submits a command on CR (``\r``); a line-feed
+    (``\n``) is taken as a *soft line-continuation* and parks the line under a
+    ``>>`` prompt, so a naive ``"cmd\n"`` never runs (issue #13). CR also
+    submits on a default cooked-mode Unix shell (the line discipline maps it to
+    NL), so sending ``\r`` works for both. ``\r\n`` collapses to a single
+    ``\r`` (one Enter) and an explicit ``\r`` is left untouched. Control and
+    escape bytes (Ctrl-C ``0x03``, ESC sequences) are not newlines and pass
+    through unchanged.
+
+    This is **MCP-tool policy**, not a transport change: the raw
+    ``POST /mcp/input`` endpoint and :meth:`BrowserlandClient.send_input` stay
+    byte-for-byte verbatim, so a caller needing a literal LF or raw-mode bytes
+    drives the endpoint directly."""
+    return data.replace("\r\n", "\r").replace("\n", "\r")
+
+
 @mcp.tool()
 def mcp_info() -> Dict[str, Any]:
     """Get Browserland broker MCP feature flags (allow_launch, default_mode)."""
@@ -71,8 +91,14 @@ def read_screen(id: int) -> Dict[str, Any]:
 
 @mcp.tool()
 def send_input(id: int, data: str) -> Dict[str, Any]:
-    """Type text into a terminal. The target window must be in 'readwrite' mode."""
-    return get_client().send_input(id, data)
+    r"""Type text into a terminal. The target window must be in 'readwrite' mode.
+
+    Newlines in `data` are sent as Enter (carriage return) so commands actually
+    run — including on PowerShell, where a line-feed is only a soft
+    continuation. To send raw bytes verbatim (a literal `\n`, or hand-crafted
+    control/escape sequences), drive the broker's `POST /mcp/input` endpoint
+    directly."""
+    return get_client().send_input(id, _newlines_to_enter(data))
 
 
 @mcp.tool()

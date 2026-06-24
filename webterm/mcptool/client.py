@@ -145,7 +145,12 @@ class BrowserlandClient:
         return self._post("/mcp/read", {"id": id}, timeout=self._read_timeout)
 
     def send_input(self, id: int, data: str) -> Dict[str, Any]:
-        """Type into a terminal. Requires the window be in ``readwrite`` mode."""
+        r"""Type into a terminal. Requires the window be in ``readwrite`` mode.
+
+        ``data`` is sent **verbatim** — this is the thin 1:1 endpoint wrapper.
+        Mapping a logical Enter to a carriage return is the *tool's* job
+        (:func:`server._newlines_to_enter`); a caller here that wants Enter to
+        submit on PowerShell must pass ``\r`` itself (see issue #13)."""
         return self._post("/mcp/input", {"id": id, "data": data})
 
     def launch_terminal(self, profile: Optional[str] = None, cols: int = 80,

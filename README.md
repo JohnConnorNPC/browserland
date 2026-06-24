@@ -120,8 +120,14 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `list_terminals` | `GET /mcp/terminals` | visible terminals (windows in `off` mode are hidden) |
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as plain text (pyte; `degraded` raw fallback) |
-| `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
+| `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
+
+> The `send_input` **tool** maps newlines in `data` to a carriage return — the
+> byte a real Enter key sends — so a line submits on PowerShell/PSReadLine (which
+> treats a bare line-feed as a soft continuation) and on a Unix shell alike. The
+> raw `POST /mcp/input` endpoint stays **verbatim**: drive it directly to send a
+> literal LF or hand-crafted control/escape bytes.
 
 ### Safety / enabling
 

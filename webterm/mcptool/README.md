@@ -80,6 +80,17 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
 …) surface as a readable tool error (a `BrowserlandError`), not a raw stack trace.
 
+**`send_input` newline handling.** The tool maps newlines in `data` to a
+carriage return (`\r`) — the byte a real Enter key sends — so a command actually
+runs. This matters on PowerShell/PSReadLine, where a line-feed (`\n`) is only a
+*soft line-continuation* and parks the line under a `>>` prompt instead of
+submitting (issue #13); `\r` submits there and on a Unix shell alike. `\r\n`
+collapses to one Enter, an explicit `\r` is untouched, and control/escape bytes
+(Ctrl-C, ESC sequences) pass through. The mapping is **tool policy only**: the
+`BrowserlandClient.send_input` method and the broker's `POST /mcp/input` endpoint
+forward bytes **verbatim**, so a caller needing a literal LF or raw-mode input
+drives the endpoint (or the client) directly.
+
 ## Layout
 
 | File | What |
