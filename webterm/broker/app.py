@@ -1045,7 +1045,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             entry_out = {"id": s["id"], "title": s["title"], "host": s["host"],
                          "cwd": s["cwd"], "agent": s["agent"], "kind": s["kind"],
                          "cols": s["cols"], "rows": s["rows"], "mode": mode,
-                         "version": version}
+                         "version": version,
+                         # DECCKM, cached from the agent's `mode` pushes (#23);
+                         # send_keys reads it to pick CSI vs SS3 arrows.
+                         "app_cursor": bool(s.get("app_cursor", False))}
             # ``stale`` = this producer's build differs from the broker's (incl. a
             # pre-#22 agent reporting no version) → a deploy predating a fix, so a
             # client can warn without comparing strings (#22). Only meaningful for
@@ -1088,8 +1091,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                "cols": payload.get("cols", entry.cols),
                "rows": payload.get("rows", entry.rows),
                "text": payload.get("text", ""),
-               # New fields (#21); older agents omit them -> these defaults.
+               # New fields (#21/#23); older agents omit them -> these defaults.
                "alt_screen": bool(payload.get("alt_screen", False)),
+               "app_cursor": bool(payload.get("app_cursor", False)),
                "view": payload.get("view", "screen"),
                "history_lines": int(payload.get("history_lines", 0) or 0),
                "cursor": payload.get("cursor")}

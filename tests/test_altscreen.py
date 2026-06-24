@@ -1,70 +1,105 @@
-"""Live alternate-screen tracking off the PTY stream (issue #21)."""
+"""Live DEC private-mode tracking off the PTY stream (#21 alt_screen, #23 DECCKM)."""
 
 from __future__ import annotations
 
-from webterm.agent.altscreen import AltScreenSniffer
+from webterm.agent.altscreen import DecModeSniffer
 
 
-def test_enter_and_exit():
-    s = AltScreenSniffer()
-    assert s.feed(b"plain output") is False
-    assert s.feed(b"\x1b[?1049h") is True       # enter alt
+def _feed(*chunks):
+    s = DecModeSniffer()
+    for c in chunks:
+        s.feed(c)
+    return s
+
+
+def test_alt_enter_and_exit():
+    s = DecModeSniffer()
+    s.feed(b"plain output")
+    assert s.alt_screen is False
+    s.feed(b"\x1b[?1049h")
     assert s.alt_screen is True
-    assert s.feed(b"\x1b[?1049l") is False      # leave alt
+    s.feed(b"\x1b[?1049l")
     assert s.alt_screen is False
 
 
-def test_1047_and_47_variants():
-    assert AltScreenSniffer().feed(b"\x1b[?1047h") is True
-    assert AltScreenSniffer().feed(b"\x1b[?47h") is True
-    s = AltScreenSniffer()
-    s.feed(b"\x1b[?47h")
-    assert s.feed(b"\x1b[?47l") is False
+def test_alt_1047_and_47_variants():
+    assert _feed(b"\x1b[?1047h").alt_screen is True
+    assert _feed(b"\x1b[?47h").alt_screen is True
+    assert _feed(b"\x1b[?47h", b"\x1b[?47l").alt_screen is False
+
+
+def test_app_cursor_decckm():
+    s = DecModeSniffer()
+    assert s.app_cursor is False
+    s.feed(b"\x1b[?1h")                 # DECCKM set
+    assert s.app_cursor is True
+    s.feed(b"\x1b[?1l")                 # DECCKM reset
+    assert s.app_cursor is False
+
+
+def test_alt_and_app_cursor_independent():
+    # A TUI commonly toggles both in one combined sequence.
+    s = _feed(b"\x1b[?1049;1h")
+    assert s.alt_screen is True and s.app_cursor is True
+    s.feed(b"\x1b[?1049;1l")
+    assert s.alt_screen is False and s.app_cursor is False
 
 
 def test_split_across_chunks():
-    s = AltScreenSniffer()
-    assert s.feed(b"\x1b[?10") is False         # marker split mid-sequence
-    assert s.feed(b"49h") is True               # completes -> enter alt
+    assert _feed(b"\x1b[?10", b"49h").alt_screen is True
+    assert _feed(b"\x1b[?", b"1h").app_cursor is True
 
 
 def test_state_survives_later_output():
-    # The whole point of live tracking: once in alt, it stays alt through later
-    # output (the enter would have scrolled out of a re-scanned ring).
-    s = AltScreenSniffer()
-    s.feed(b"\x1b[?1049h")
+    # Once set, a mode stays set through later output (its set-sequence would
+    # have scrolled out of a re-scanned ring).
+    s = _feed(b"\x1b[?1049h")
     for _ in range(50):
-        assert s.feed(b"\xe2\x94\x80" * 200) is True   # box-drawing churn
+        s.feed(b"\xe2\x94\x80" * 200)
     assert s.alt_screen is True
 
 
 def test_last_toggle_wins_within_chunk():
+    assert _feed(b"\x1b[?1049h..\x1b[?1049l").alt_screen is False
+    assert _feed(b"\x1b[?1049l..\x1b[?1049h").alt_screen is True
+
+
+def test_alt_last_toggle_wins_across_modes():
+    # 1049h then 47l: alt-screen is ONE concept; the latest toggle of any alt
+    # mode wins, so this is not-alt (not any()-stuck-true — #23 review).
+    assert _feed(b"\x1b[?1049h", b"\x1b[?47l").alt_screen is False
+    assert _feed(b"\x1b[?47h", b"\x1b[?1049l").alt_screen is False
+
+
+def test_app_cursor_leading_zeros():
+    # ?01h / ?0001h are numerically DECCKM (mode 1).
+    assert _feed(b"\x1b[?01h").app_cursor is True
+    assert _feed(b"\x1b[?0001h").app_cursor is True
+
+
+def test_altscreen_alias_back_compat():
+    # #21's AltScreenSniffer name still imports; its feed() returns the alt flag.
+    from webterm.agent.altscreen import AltScreenSniffer
     s = AltScreenSniffer()
-    # enter then exit in one chunk -> ends not-alt
-    assert s.feed(b"\x1b[?1049h...stuff...\x1b[?1049l") is False
-    # exit then enter -> ends alt
-    assert s.feed(b"\x1b[?1049l...\x1b[?1049h") is True
+    assert s.feed(b"\x1b[?1049h") is True
+    assert s.feed(b"plain") is True
+    assert s.feed(b"\x1b[?1049l") is False
 
 
-def test_empty_chunk_keeps_state():
-    s = AltScreenSniffer()
-    s.feed(b"\x1b[?1049h")
-    assert s.feed(b"") is True
-
-
-def test_multi_param_dec_sequence():
-    # combined toggle (alt-buffer + cursor) must still register as alt entry
-    s = AltScreenSniffer()
-    assert s.feed(b"\x1b[?1049;25h") is True
-    # a non-alt private mode leaves alt state untouched
-    assert s.feed(b"\x1b[?25l") is True
-    assert s.feed(b"\x1b[?2004h") is True
-    # combined alt exit
-    assert s.feed(b"\x1b[?1049;25l") is False
+def test_non_alt_mode_leaves_state_untouched():
+    s = _feed(b"\x1b[?1049h")
+    s.feed(b"\x1b[?25l")               # cursor visibility — not alt, not DECCKM
+    assert s.alt_screen is True and s.app_cursor is False
 
 
 def test_substring_mode_is_not_a_false_positive():
-    # "470" / "11049" contain alt-mode digits as a substring but are NOT alt.
-    s = AltScreenSniffer()
-    assert s.feed(b"\x1b[?470h") is False
-    assert s.feed(b"\x1b[?11049h") is False
+    # "470"/"11049"/"10" contain mode digits as a substring but aren't the mode.
+    assert _feed(b"\x1b[?470h").alt_screen is False
+    assert _feed(b"\x1b[?11049h").alt_screen is False
+    assert _feed(b"\x1b[?10h").app_cursor is False   # mode 10, not DECCKM 1
+
+
+def test_empty_chunk_keeps_state():
+    s = _feed(b"\x1b[?1049h")
+    s.feed(b"")
+    assert s.alt_screen is True

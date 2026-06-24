@@ -1,57 +1,88 @@
-"""Live alternate-screen tracker for the PTY output stream (issue #21).
+"""Live DEC private-mode tracker for the PTY output stream (#21, #23).
 
-read_screen needs to tell a caller whether the terminal is showing a
-full-screen alternate buffer (mc/btop/vim — the grid is the whole story) or the
-primary screen (where scrollback is real history). The authoritative signal is
-the running stream of DEC private mode toggles, NOT a scan of the ring buffer:
-a long-running TUI's alt-enter scrolls out of the bounded ring, so a ring scan
-would wrongly report it as non-alt. So the Agent feeds every PTY chunk here and
-keeps the latest state, which survives ring eviction.
+read_screen / send_keys need to know two things about the terminal that only
+the running output stream can tell them:
 
-Tracks the three alt-screen private modes — 1049 (the modern save-cursor +
-alt-buffer + clear), 1047, and 47 — set (``h`` = enter) or reset (``l`` =
-exit). The most recent toggle wins. A small carry buffer stitches a sequence
-split across two chunks."""
+- **alt_screen** — is a full-screen alternate buffer showing (mc/btop/vim)?
+  Then the grid is the whole story and scrollback is meaningless (#21).
+- **app_cursor** (DECCKM) — is application-cursor-key mode on? Then arrow /
+  Home / End keys must be sent as SS3 (``ESC O x``), not CSI (``ESC [ x``), or
+  the TUI ignores them (#23).
+
+Both are DEC private modes toggled by ``CSI ? <modes> h`` (set) / ``l`` (reset),
+so one sniffer tracks them. The authoritative signal is the live stream, NOT a
+scan of the bounded ring: a long-running TUI's mode-set scrolls out of the ring,
+so a re-scan would wrongly report the mode off. The Agent feeds every PTY chunk
+here and keeps the latest state, which survives ring eviction.
+
+Heuristic limits (it is a sniffer, not a full VT parser): a ``CSI ?...h/l`` that
+appears INSIDE an OSC/DCS string payload would be counted (rare in practice),
+and 8-bit CSI (0x9b) is not matched."""
 
 from __future__ import annotations
 
 import re
+from typing import Iterator
 
 # Any DEC private mode set/reset: CSI ? <params> (h|l). We match the whole
-# private sequence and test its ;-separated params, so a combined toggle like
-# ``CSI ?1049;25h`` (alt-screen + cursor) is recognised — an exact 1049/1047/47
-# match would miss it (#21 review).
-_ALT_RE = re.compile(rb"\x1b\[\?([0-9;]*)([hl])")
-_ALT_MODES = {b"1049", b"1047", b"47"}
+# private sequence and test its ;-separated params numerically, so a combined
+# ``CSI ?1049;1h`` sets both, leading zeros (``?01h`` == mode 1) are honoured,
+# and ``?470h`` / ``?10h`` are NOT mistaken for 47 / 1 via substring.
+_MODE_RE = re.compile(rb"\x1b\[\?([0-9;]*)([hl])")
+_ALT_MODES = frozenset((47, 1047, 1049))   # alt-screen
+_DECCKM = 1                                 # application cursor keys
 # Stitch a sequence split across feeds by carrying any trailing partial escape
 # (from the last ESC to the end), capped so a lone ESC can't grow the carry.
 _MAX_CARRY = 64
 
 
-class AltScreenSniffer:
-    """Feed raw PTY bytes; ``alt_screen`` reflects the latest alt-enter/exit."""
+def _mode_ints(params: bytes) -> Iterator[int]:
+    """Yield int mode numbers from a ``;``-separated param byte-string; empty or
+    non-numeric fields are skipped, leading zeros tolerated."""
+    for tok in params.split(b";"):
+        if tok.isdigit():
+            yield int(tok)
+
+
+class DecModeSniffer:
+    """Feed raw PTY bytes; query the latest alt-screen / DECCKM state. The last
+    toggle of a mode wins (matching real terminal behaviour), tracked per
+    concept so alt-screen and DECCKM stay independent. Never raises."""
 
     def __init__(self) -> None:
         self._alt = False
+        self._app_cursor = False
         self._tail = b""
 
-    def feed(self, chunk: bytes) -> bool:
-        """Update state from a PTY chunk; return the current alt-screen flag.
-        The last alt toggle in the buffer wins; private modes that aren't an
-        alt-screen mode leave the state untouched. Re-matching a carried,
-        already-complete sequence is harmless (same h/l → same state)."""
+    def feed(self, chunk: bytes) -> None:
         if not chunk:
-            return self._alt
+            return
         buf = self._tail + chunk
-        for m in _ALT_RE.finditer(buf):
-            if _ALT_MODES.intersection(m.group(1).split(b";")):
-                self._alt = m.group(2) == b"h"
+        for m in _MODE_RE.finditer(buf):
+            on = m.group(2) == b"h"
+            modes = set(_mode_ints(m.group(1)))
+            if modes & _ALT_MODES:
+                self._alt = on            # last alt toggle wins (any alt mode)
+            if _DECCKM in modes:
+                self._app_cursor = on     # last DECCKM toggle wins
         # Carry a trailing, possibly-incomplete escape so it completes next feed.
         esc = buf.rfind(b"\x1b")
         self._tail = (buf[esc:] if esc != -1 and len(buf) - esc <= _MAX_CARRY
                       else b"")
-        return self._alt
 
     @property
     def alt_screen(self) -> bool:
+        return self._alt
+
+    @property
+    def app_cursor(self) -> bool:
+        """DECCKM (application cursor keys) — arrows go out as SS3 when set."""
+        return self._app_cursor
+
+
+class AltScreenSniffer(DecModeSniffer):
+    """Back-compat alias for #21's name; ``feed`` returns the alt-screen flag."""
+
+    def feed(self, chunk: bytes) -> bool:   # type: ignore[override]
+        super().feed(chunk)
         return self._alt

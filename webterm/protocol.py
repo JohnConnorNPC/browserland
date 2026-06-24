@@ -103,6 +103,13 @@ def cwd_frame(path: str) -> str:
     return json.dumps({"type": "cwd", "data": str(path)})
 
 
+def mode_frame(app_cursor: bool) -> str:
+    """Live DEC-mode push: DECCKM / application-cursor-key state, sent by the
+    agent on change so the broker can cache it (cheaply readable by send_keys to
+    pick CSI vs SS3 arrows — #23) without an on-demand screen render."""
+    return json.dumps({"type": "mode", "app_cursor": bool(app_cursor)})
+
+
 def resized_frame(cols: int, rows: int) -> str:
     return json.dumps({"type": "resized", "cols": int(cols), "rows": int(rows)})
 
@@ -192,16 +199,18 @@ def git_status_frame(req: int, status: Dict[str, Any]) -> str:
 def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       degraded: bool = False, alt_screen: bool = False,
                       cursor: Optional[Dict[str, int]] = None,
-                      view: str = "screen", history_lines: int = 0) -> str:
+                      view: str = "screen", history_lines: int = 0,
+                      app_cursor: bool = False) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
     dependency-free in-house emulator. ``alt_screen`` (#21) is whether the
     terminal is showing a full-screen alternate buffer — when true, scrollback
-    is meaningless and ``view`` comes back ``"screen"``. ``cursor`` is
-    ``{row, col}`` 0-based within the grid (``None`` when degraded). ``degraded``
-    is the rare last-ditch raw decode (``view="raw"``), so the caller knows the
-    text is not a clean grid render."""
+    is meaningless and ``view`` comes back ``"screen"``. ``app_cursor`` (#23) is
+    DECCKM (application cursor keys) — when true, send_keys must emit SS3 arrows.
+    ``cursor`` is ``{row, col}`` 0-based within the grid (``None`` when degraded).
+    ``degraded`` is the rare last-ditch raw decode (``view="raw"``), so the
+    caller knows the text is not a clean grid render."""
     frame: Dict[str, Any] = {
         "type": "screen_text",
         "req": int(req),
@@ -210,6 +219,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         "rows": int(rows),
         "degraded": bool(degraded),
         "alt_screen": bool(alt_screen),
+        "app_cursor": bool(app_cursor),
         "view": str(view),
         "history_lines": int(history_lines),
     }

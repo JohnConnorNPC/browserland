@@ -87,6 +87,38 @@ def test_agent_frame_updates_entry_summary_and_broadcasts():
     asyncio.run(scenario())
 
 
+def test_mode_frame_caches_app_cursor_without_broadcast():
+    """A 'mode' frame caches DECCKM on the entry (for send_keys, via
+    /mcp/terminals) without broadcasting — browsers track their own DECCKM (#23)."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 1, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24,
+                            "kind": "agent"}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+        assert entry.app_cursor is False
+        assert entry.summary()["app_cursor"] is False
+
+        sub = CaptureWS()
+        entry.add_subscriber(sub)
+
+        ws.feed(json.dumps({"type": "mode", "app_cursor": True}))
+        assert await _wait(lambda: entry.app_cursor is True)
+        assert entry.summary()["app_cursor"] is True
+        assert sub.sent == []                  # not pushed to browsers
+
+        ws.feed(json.dumps({"type": "mode", "app_cursor": False}))
+        assert await _wait(lambda: entry.app_cursor is False)
+
+        ws.feed(None)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
 def test_hello_agent_field_seeds_and_whitelists():
     async def scenario():
         reg = BrokerRegistry()

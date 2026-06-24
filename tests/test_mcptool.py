@@ -109,13 +109,14 @@ def test_read_screen_scrollback_params_and_fields():
         seen["body"] = json.loads(req.content)
         return httpx.Response(200, json={
             "ok": True, "id": 4, "cols": 80, "rows": 24, "text": "g",
-            "alt_screen": False, "view": "scrollback", "history_lines": 7,
-            "cursor": {"row": 2, "col": 5}})
+            "alt_screen": False, "app_cursor": True, "view": "scrollback",
+            "history_lines": 7, "cursor": {"row": 2, "col": 5}})
 
     with _client(handler) as c:
         out = c.read_screen(4, view="scrollback", lines=200)
     assert seen["body"] == {"id": 4, "view": "scrollback", "lines": 200}
     assert out["alt_screen"] is False and out["view"] == "scrollback"
+    assert out["app_cursor"] is True            # #23 DECCKM surfaces
     assert out["history_lines"] == 7 and out["cursor"] == {"row": 2, "col": 5}
 
 
@@ -260,6 +261,87 @@ def test_send_keys_invalid_token_sends_nothing():
     finally:
         server._client = None
     assert calls == []   # atomic: nothing was sent
+
+
+# ---- #23: DECCKM-aware cursor keys ----------------------------------------
+
+def test_token_to_text_cursor_mode():
+    from webterm.mcptool import server
+    assert server._token_to_text("up") == "\x1b[A"          # default CSI
+    assert server._token_to_text("up", True) == "\x1bOA"    # SS3 under DECCKM
+    assert server._token_to_text("home", True) == "\x1bOH"
+    assert server._token_to_text("end", False) == "\x1b[F"
+
+
+def test_keys_have_cursor():
+    from webterm.mcptool import server
+    assert server._keys_have_cursor(["Down"]) is True
+    assert server._keys_have_cursor(["x", "Up"]) is True
+    assert server._keys_have_cursor(["C-c", "Enter"]) is False
+
+
+def _send_keys_capturing(app_cursor, keys, list_status=200):
+    """Drive send_keys with a mock that answers /mcp/terminals (the cheap DECCKM
+    cache) and captures the /mcp/input body. Returns (input_body_or_None, paths)."""
+    from webterm.mcptool import server
+    seen = {"body": None, "paths": []}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["paths"].append(req.url.path)
+        if req.url.path == "/mcp/terminals":
+            if list_status != 200:
+                return httpx.Response(list_status, json={"error": "boom"})
+            return httpx.Response(200, json=[{"id": 9, "app_cursor": app_cursor}])
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True})
+
+    server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
+    try:
+        server.send_keys(9, keys)
+    finally:
+        server._client = None
+    return seen["body"], seen["paths"]
+
+
+def test_send_keys_arrows_csi_in_normal_mode():
+    body, paths = _send_keys_capturing(False, ["Down", "Down"])
+    assert body == {"id": 9, "data": "\x1b[B\x1b[B"}
+    assert "/mcp/terminals" in paths      # consulted the DECCKM cache
+
+
+def test_send_keys_arrows_ss3_under_decckm():
+    body, _ = _send_keys_capturing(True, ["Up", "Home"])
+    assert body == {"id": 9, "data": "\x1bOA\x1bOH"}
+
+
+def test_send_keys_no_cursor_keys_skips_lookup():
+    body, paths = _send_keys_capturing(True, ["C-c", "Enter"])
+    assert body == {"id": 9, "data": "\x03\r"}
+    assert "/mcp/terminals" not in paths  # no DECCKM lookup without cursor keys
+
+
+def test_send_keys_arrows_fall_back_to_csi_on_lookup_error():
+    # A non-agent producer (or any lookup failure) -> CSI form, still sent.
+    body, _ = _send_keys_capturing(True, ["Left"], list_status=502)
+    assert body == {"id": 9, "data": "\x1b[D"}
+
+
+def test_send_keys_invalid_token_raises_before_lookup():
+    # A bad token raises before any /mcp/terminals lookup or /mcp/input send.
+    from webterm.mcptool import server
+    paths = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        paths.append(req.url.path)
+        return httpx.Response(200, json=[])
+
+    server._client = BrowserlandClient(token="t", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ValueError):
+            server.send_keys(9, ["Down", "Bogus"])
+    finally:
+        server._client = None
+    assert paths == []                    # validated before any external call
 
 
 def test_launch_omits_none_fields():

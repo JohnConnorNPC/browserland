@@ -65,10 +65,9 @@ def _newlines_to_enter(data: str) -> str:
     return data.replace("\r\n", "\r").replace("\n", "\r")
 
 
-# Named keys -> the byte sequence a NORMAL-cursor-mode xterm sends. Arrows and
-# Home/End use the normal CSI form; an application-cursor-mode TUI may instead
-# expect SS3 (``ESC O ...``) — a stateless translator can't know which, so this
-# is documented as a known limit (works in shells; may differ inside some TUIs).
+# Named keys -> the byte sequence a terminal sends. The cursor keys (arrows,
+# Home, End) are mode-dependent and live in _CURSOR_KEYS instead: their form
+# depends on DECCKM (see send_keys), which a stateless map can't encode.
 _NAMED_KEYS = {
     "enter": "\r", "return": "\r",
     "tab": "\t",
@@ -77,8 +76,6 @@ _NAMED_KEYS = {
     # Backspace is DEL (0x7f), the common default; use ``C-h`` for BS (0x08).
     "backspace": "\x7f", "bs": "\x7f",
     "delete": "\x1b[3~", "del": "\x1b[3~",
-    "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
-    "home": "\x1b[H", "end": "\x1b[F",
     "pageup": "\x1b[5~", "pgup": "\x1b[5~",
     "pagedown": "\x1b[6~", "pgdn": "\x1b[6~",
     "insert": "\x1b[2~", "ins": "\x1b[2~",
@@ -86,6 +83,13 @@ _NAMED_KEYS = {
     "f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~", "f8": "\x1b[19~",
     "f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
 }
+
+# Cursor keys: the final byte after the CSI/SS3 introducer. In NORMAL cursor
+# mode they go out as CSI (``ESC [ x``); under DECCKM (application cursor keys,
+# set by mc/vim/less) as SS3 (``ESC O x``) — send_keys picks the form from the
+# terminal's live DECCKM state (#23).
+_CURSOR_KEYS = {"up": "A", "down": "B", "right": "C", "left": "D",
+                "home": "H", "end": "F"}
 
 # C-<symbol> beyond the letters: ``ord & 0x1f`` folds @ [ \ ] ^ _ to 0x00 and
 # 0x1b-0x1f. ``?`` is the lone exception (DEL, 0x7f).
@@ -108,10 +112,36 @@ def _ctrl_byte(ch: str) -> str:
     raise ValueError(f"unsupported Ctrl chord 'C-{ch}'")
 
 
-def _token_to_text(tok: str) -> str:
+def _keys_have_cursor(keys: List[str]) -> bool:
+    """True if any token is a cursor key (so send_keys must learn DECCKM).
+    Tolerates a non-list/None ``keys`` (returns False; _keys_to_text validates)."""
+    if not isinstance(keys, list):
+        return False
+    return any(isinstance(t, str) and t.lower() in _CURSOR_KEYS for t in keys)
+
+
+def _terminal_app_cursor(client, id: int) -> bool:
+    """The terminal's cached DECCKM (application cursor keys), read cheaply from
+    list_terminals (registry metadata — no screen render). Best-effort: any
+    failure, or a producer that doesn't report it, reads as False (CSI form)."""
+    try:
+        for t in client.list_terminals():
+            if t.get("id") == id:
+                return bool(t.get("app_cursor"))
+    except Exception:
+        pass
+    return False
+
+
+def _token_to_text(tok: str, app_cursor: bool = False) -> str:
     r"""Translate ONE key token to the bytes (as a str; encoded UTF-8 on the
-    wire) a terminal sends for it. Raises ``ValueError`` on an unrecognized
-    token so the caller learns rather than silently typing it as text."""
+    wire) a terminal sends for it. Cursor keys use SS3 (``ESC O x``) when
+    ``app_cursor`` (DECCKM) is set, else CSI (``ESC [ x``). Raises ``ValueError``
+    on an unrecognized token so the caller learns rather than silently typing
+    it as text."""
+    final = _CURSOR_KEYS.get(tok.lower())
+    if final is not None:
+        return ("\x1bO" if app_cursor else "\x1b[") + final
     named = _NAMED_KEYS.get(tok.lower())
     if named is not None:
         return named
@@ -132,13 +162,13 @@ def _token_to_text(tok: str) -> str:
     raise ValueError(f"unrecognized key {tok!r}; {_KEY_HELP}")
 
 
-def _keys_to_text(keys: List[str]) -> str:
+def _keys_to_text(keys: List[str], app_cursor: bool = False) -> str:
     """Translate a list of key tokens into one string of terminal input bytes.
     **Atomic**: an unrecognized token raises before any byte is sent, so a bad
     token never leaves a half-typed line behind."""
     if not isinstance(keys, list) or not keys:
         raise ValueError("keys must be a non-empty list of key tokens")
-    return "".join(_token_to_text(str(t)) for t in keys)
+    return "".join(_token_to_text(str(t), app_cursor) for t in keys)
 
 
 @mcp.tool()
@@ -202,10 +232,19 @@ def send_keys(id: int, keys: List[str]) -> Dict[str, Any]:
     This **emits the byte sequences** a keyboard would send (Ctrl-C -> 0x03); it
     does not synthesize OS key events. Whether 0x03 actually interrupts depends
     on the target's PTY/mode (Browserland's headless agents use a backend where
-    it does). Arrows/Home/End use normal-cursor-mode sequences and may differ
-    inside an application-cursor-mode TUI. Tokens are sent verbatim (no
+    it does). Arrows/Home/End are sent as SS3 (`ESC O x`) when the terminal has
+    DECCKM / application-cursor-key mode on (mc, vim, less), else CSI (`ESC [ x`)
+    — best-effort from the agent's cached DECCKM, so arrows work in those TUIs
+    without hand-assembling escapes (#23); it falls back to CSI for a non-agent
+    producer or if the state can't be read. Tokens are sent verbatim (no
     newline->Enter rewrite); use `send_input` for ordinary text."""
-    return get_client().send_input(id, _keys_to_text(keys))
+    client = get_client()
+    # Validate + translate up front (atomic, CSI form): a bad token raises here,
+    # before any DECCKM lookup or send.
+    text = _keys_to_text(keys)
+    if _keys_have_cursor(keys) and _terminal_app_cursor(client, id):
+        text = _keys_to_text(keys, app_cursor=True)   # re-encode arrows as SS3
+    return client.send_input(id, text)
 
 
 @mcp.tool()

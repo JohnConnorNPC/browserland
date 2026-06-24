@@ -86,6 +86,10 @@ class WindowEntry:
         # The producer's self-reported build id (#22); "" for a pre-#22 agent
         # (which is itself a staleness signal).
         self.version = version
+        # Live DECCKM / application-cursor-key state (#23), pushed by the agent
+        # via `mode` frames; lets send_keys pick CSI vs SS3 arrows cheaply (no
+        # screen render). False until the agent reports otherwise.
+        self.app_cursor = False
         # Per-window MCP access mode: None = inherit the broker default
         # (mcp_cfg.default_mode), else an explicit "off"/"read"/"readwrite"
         # override. In-memory only — resets to the default on broker restart
@@ -121,6 +125,7 @@ class WindowEntry:
             "agent": self.agent,
             "cwd": self.cwd,
             "version": self.version,
+            "app_cursor": self.app_cursor,
             "mcp": self.mcp_mode or mcp_default,
         }
 
@@ -383,6 +388,11 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 # the AGENTS.md button tracks a `cd` immediately.
                 entry.cwd = str(data.get("data", entry.cwd) or "")
                 await entry.broadcast_text(protocol.cwd_frame(entry.cwd))
+            elif mtype == "mode":
+                # DECCKM cache (#23): consumed only by send_keys via /mcp/
+                # terminals. Browsers track their own DECCKM from the byte
+                # stream, so there's nothing to broadcast.
+                entry.app_cursor = bool(data.get("app_cursor", entry.app_cursor))
             elif mtype == "resized":
                 entry.cols = int(data.get("cols", entry.cols))
                 entry.rows = int(data.get("rows", entry.rows))

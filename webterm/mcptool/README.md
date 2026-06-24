@@ -71,7 +71,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | Tool | Endpoint | Notes |
 |---|---|---|
 | `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version` |
-| `list_terminals` | `GET /mcp/terminals` | visible terminals (`off`-mode hidden); each carries a build `version`, agents also a `stale` flag |
+| `list_terminals` | `GET /mcp/terminals` | visible terminals (`off`-mode hidden); each carries a build `version` (agents also a `stale` flag) and `app_cursor` (cached DECCKM) |
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
 | `read_screen(id, view?, lines?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`; `view="scrollback"` adds history |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
@@ -100,20 +100,32 @@ drives the endpoint (or the client) directly.
 `C-Space` → NUL, `C-h` → `0x08`), an Alt chord `M-<char>` (ESC + char), or a
 single literal character — e.g. `["C-c"]`, `["Esc"]`, `["Up","Up","Enter"]`. It
 **emits the byte sequences** a keyboard would send; it does not synthesise OS
-key events. Tokens go out verbatim (no newline→Enter rewrite). Arrows/Home/End
-use normal-cursor-mode sequences and may differ inside an application-cursor-mode
-TUI. Whether `C-c` interrupts depends on the target's PTY backend/mode.
+key events. Tokens go out verbatim (no newline→Enter rewrite). Whether `C-c`
+interrupts depends on the target's PTY backend/mode.
+
+**`send_keys` cursor keys (#23).** Arrows / Home / End are sent as SS3
+(`ESC O x`) when the terminal has DECCKM (application-cursor-key mode) on — which
+mc, vim, less and most full-screen TUIs enable — else as CSI (`ESC [ x`). When
+the token list contains a cursor key, send_keys reads the terminal's **cached**
+DECCKM from `list_terminals` (the agent pushes mode changes; no screen render),
+and falls back to the CSI form if it can't read it (e.g. a non-agent producer).
+Best-effort: a mode change racing the cache, or a producer that never reports
+DECCKM, can still pick CSI. So `["Down"]` just moves the selection in mc without
+the caller hand-assembling `ESC O B`.
 
 **`read_screen` — screen vs scrollback (#21).** The result carries, besides
 `text`/`cols`/`rows`: `alt_screen` (true for a full-screen TUI like mc/btop/vim —
 the grid is the whole story, so there's no scrollback to chase), `cursor`
 `{row, col}` 0-based within the grid (`null` on the rare `degraded` raw read),
-`view` (the view actually produced), and `history_lines`. For a shell, pass
+`view` (the view actually produced), `history_lines`, and `app_cursor` (DECCKM,
+informational here; send_keys reads the cached copy from list_terminals). For a
+shell, pass
 `view="scrollback"` with `lines=N` to prepend up to N lines of history above the
 grid; `history_lines` reports how many were included (bounded by line count *and*
-total cells). `alt_screen` is tracked live off the PTY stream, so it stays
-correct even after a long-running TUI's alt-enter has scrolled out of the ring;
-when it's true, a scrollback request is answered with the screen view.
+total cells). `alt_screen`/`app_cursor` are tracked live off the PTY stream, so
+they stay correct even after a long-running TUI's mode-set has scrolled out of
+the ring; when `alt_screen` is true, a scrollback request is answered with the
+screen view.
 
 > Best-effort note: the renderers don't model the alternate-screen buffer's
 > save/restore, so in the brief moment *after* a TUI exits but *before* the shell

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .. import build_version, protocol
-from .altscreen import AltScreenSniffer
+from .altscreen import DecModeSniffer
 from .backends import create_backend
 from .backends.base import PtyBackend
 from .client import BrokerClient
@@ -116,10 +116,11 @@ class SessionState:
     # This agent's build id (webterm.build_version()), reported in the hello so
     # the broker can surface it and flag a stale deployment (#22).
     version: str = field(default_factory=build_version)
-    # Live alternate-screen state (#21), tracked off the PTY stream so a
-    # read_screen knows screen-vs-scrollback even after the alt-enter has
-    # scrolled out of the ring.
+    # Live DEC private-mode state, tracked off the PTY stream so it survives ring
+    # eviction. alt_screen (#21): screen-vs-scrollback for read_screen.
+    # app_cursor / DECCKM (#23): whether send_keys must send SS3 arrows.
     alt_screen: bool = False
+    app_cursor: bool = False
 
 
 class Agent:
@@ -137,7 +138,7 @@ class Agent:
         )
         self.ring = ByteRing(config.ring_bytes)
         self.sniffer = OscTitleSniffer()
-        self._alt_sniffer = AltScreenSniffer()   # live alt-screen state (#21)
+        self._mode_sniffer = DecModeSniffer()    # live alt-screen + DECCKM (#21/#23)
         self.out_q: "asyncio.Queue" = asyncio.Queue()
         self.client = BrokerClient(
             config.broker_url,
@@ -204,8 +205,15 @@ class Agent:
 
     def _on_pty_data(self, chunk: bytes) -> None:
         self.ring.append(chunk)
-        # Track alt-screen live (#21): survives ring eviction, unlike a re-scan.
-        self.state.alt_screen = self._alt_sniffer.feed(chunk)
+        # Track DEC modes live (#21/#23): survives ring eviction, unlike a re-scan.
+        self._mode_sniffer.feed(chunk)
+        self.state.alt_screen = self._mode_sniffer.alt_screen
+        app_cursor = self._mode_sniffer.app_cursor
+        if app_cursor != self.state.app_cursor:
+            # Push DECCKM changes so the broker caches them (#23): send_keys
+            # reads the cache to pick CSI vs SS3 arrows without a screen render.
+            self.state.app_cursor = app_cursor
+            self._enqueue("txt", protocol.mode_frame(app_cursor))
         new_title = self.sniffer.feed(chunk)
         if new_title is not None and new_title != self.state.title:
             # State updates before the frame is enqueued, so a hello built
@@ -371,6 +379,7 @@ class Agent:
         data = self.ring.get()
         cols, rows = self.state.cols, self.state.rows
         alt = self.state.alt_screen
+        app_cursor = self.state.app_cursor       # DECCKM (#23)
 
         async def _run() -> None:
             try:
@@ -380,7 +389,8 @@ class Agent:
                 self._enqueue("txt", protocol.screen_text_frame(
                     req, r["text"], cols, rows, degraded=r["degraded"],
                     alt_screen=r["alt_screen"], cursor=r["cursor"],
-                    view=r["view"], history_lines=r["history_lines"]))
+                    view=r["view"], history_lines=r["history_lines"],
+                    app_cursor=app_cursor))
             except Exception as exc:
                 # Always answer the RPC — an unhandled failure here would leave
                 # the broker waiting until it times out (no_producer_rpc).
@@ -388,7 +398,8 @@ class Agent:
                                exc)
                 self._enqueue("txt", protocol.screen_text_frame(
                     req, "", cols, rows, degraded=True, alt_screen=alt,
-                    cursor=None, view="raw", history_lines=0))
+                    cursor=None, view="raw", history_lines=0,
+                    app_cursor=app_cursor))
 
         loop.create_task(_run())
 
