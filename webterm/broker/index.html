@@ -249,14 +249,46 @@
             cursor: text; text-overflow: clip; overflow: visible;
             background: rgba(0,0,0,0.25); border-radius: 2px; outline: none;
         }
-        .term-window .color-picker {
-            width: 22px;
-            height: 18px;
+        /* Unified window-color control (issue 5): one picker for every window
+           type — a colored button (a bordered dot of the current accent, kept
+           visible even when the title bar is that same color) that opens a
+           dropdown of preset swatches. Replaces both the native
+           <input type=color> (terminals) and the inline swatch row (notes). */
+        .term-window .color-btn { padding: 0; }
+        .term-window .color-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent, var(--accent-default));
+            border: 1px solid rgba(0,0,0,0.55);
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.55);
+            box-sizing: border-box;
+        }
+        .term-window .swatch-popover {
+            position: absolute;
+            z-index: 50;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            width: 124px;
+            box-sizing: border-box;
+            padding: 7px;
+            background: var(--bg-2, #2a2a2a);
+            border: 1px solid var(--bg-3, #555);
+            border-radius: 4px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .term-window .swatch-cell {
+            width: 20px;
+            height: 20px;
             padding: 0;
-            border: 1px solid rgba(0,0,0,0.4);
-            background: transparent;
+            border-radius: 50%;
+            border: 1px solid rgba(0,0,0,0.45);
+            box-sizing: border-box;
             cursor: pointer;
         }
+        .term-window .swatch-cell:hover { transform: scale(1.12); }
+        .term-window .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
         .term-window .tb-btn {
             width: 22px;
             height: 18px;
@@ -282,7 +314,10 @@
             border-color: rgba(255,255,255,0.5);
         }
         .term-window.dark-accent .tb-btn:hover { background: rgba(255,255,255,0.32); }
-        .term-window.dark-accent .color-picker { border-color: rgba(255,255,255,0.5); }
+        .term-window.dark-accent .color-dot {
+            border-color: rgba(255,255,255,0.7);
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.45);
+        }
         /* Git status (task 6): muted button when not-a-repo / unknown; the
            branch label rides to its right, turning amber when dirty. */
         .term-window .btn-git.muted { opacity: 0.4; }
@@ -380,19 +415,6 @@
         .term-window.app-editor .app-textarea.wrap { white-space: pre-wrap; }
         .term-window.app-editor .app-textarea::selection { background: #2d4a6a; }
 
-        /* preset color swatches in app-window title bars (replace the generic
-           <input type=color>): a compact row of round buttons. */
-        .term-window .app-swatches { display: inline-flex; gap: 3px; align-items: center; }
-        .term-window .app-swatch {
-            width: 14px; height: 14px; padding: 0;
-            border: 1px solid rgba(0,0,0,0.45);
-            border-radius: 50%;
-            cursor: pointer;
-            box-sizing: border-box;
-        }
-        .term-window .app-swatch.sel { box-shadow: 0 0 0 2px rgba(0,0,0,0.55); }
-        .term-window.dark-accent .app-swatch { border-color: rgba(255,255,255,0.55); }
-        .term-window.dark-accent .app-swatch.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.75); }
 
         /* text-editor toolbar (between the title bar and the textarea) */
         .term-window .app-toolbar {
@@ -6370,6 +6392,84 @@
             return PALETTE[0];
         }
 
+        // Unified window-color picker (issue 5). Builds the title-bar control
+        // shared by terminals AND app windows: a colored button whose dot
+        // tracks --accent, opening a dropdown of preset swatches. `swatches` is
+        // an array of { color, paper?, fg? }; `applyPick(sw)` does the
+        // window-type-specific recolor + persistence (prefs for terminals,
+        // appStore via saveAppWindow for app windows). Returns the button so the
+        // caller can place it in the title bar; outside-click / Escape dismissal
+        // and teardown are registered on win.cleanups (mirrors the git popover).
+        function attachColorPicker(win, titleBar, swatches, applyPick) {
+            const stopProp = (e) => e.stopPropagation();
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tb-btn color-btn';
+            btn.title = 'window color';
+            const dot = document.createElement('span');
+            dot.className = 'color-dot';   // background:var(--accent) via CSS
+            btn.appendChild(dot);
+
+            let pop = null;
+            const closePop = () => {
+                if (!pop) return;
+                document.removeEventListener('mousedown', onOutside, true);
+                document.removeEventListener('keydown', onKey, true);
+                try { pop.remove(); } catch (_) {}
+                pop = null;
+            };
+            const onOutside = (e) => {
+                if (pop && !pop.contains(e.target)
+                    && e.target !== btn && e.target !== dot) closePop();
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault(); e.stopPropagation(); closePop();
+                }
+            };
+            const openPop = () => {
+                if (pop) { closePop(); return; }   // toggle
+                pop = document.createElement('div');
+                pop.className = 'swatch-popover';
+                const cur = normalizeHex(win.color);
+                swatches.forEach((sw) => {
+                    const cell = document.createElement('button');
+                    cell.type = 'button';
+                    cell.className = 'swatch-cell';
+                    cell.style.background = sw.color;
+                    cell.title = sw.color;
+                    if (normalizeHex(sw.color) === cur) cell.classList.add('sel');
+                    cell.addEventListener('mousedown', stopProp);
+                    cell.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        applyPick(sw);     // recolor + persist (dot follows --accent)
+                        closePop();
+                    });
+                    pop.appendChild(cell);
+                });
+                titleBar.appendChild(pop);
+                // Right-align under the button and clamp inside the title bar so
+                // a button near the window's right edge never overflows.
+                const popW = pop.offsetWidth;
+                const tbW = titleBar.clientWidth;
+                let left = btn.offsetLeft + btn.offsetWidth - popW;
+                left = Math.max(2, Math.min(left, Math.max(2, tbW - popW - 2)));
+                pop.style.top = (btn.offsetTop + btn.offsetHeight + 2) + 'px';
+                pop.style.left = left + 'px';
+                document.addEventListener('mousedown', onOutside, true);
+                document.addEventListener('keydown', onKey, true);
+            };
+            const onClick = (e) => { e.stopPropagation(); openPop(); };
+            btn.addEventListener('mousedown', stopProp);
+            btn.addEventListener('click', onClick);
+            win.cleanups.push(() => {
+                btn.removeEventListener('mousedown', stopProp);
+                btn.removeEventListener('click', onClick);
+                closePop();
+            });
+            return btn;
+        }
+
         // ---- notices ------------------------------------------------------
         function showNotice(text, ms) {
             const host = document.getElementById('notice-host');
@@ -6534,12 +6634,6 @@
             titleText.className = 'title-text';
             titleText.textContent = name;
 
-            const colorPicker = document.createElement('input');
-            colorPicker.type = 'color';
-            colorPicker.className = 'color-picker';
-            colorPicker.value = color;
-            colorPicker.title = 'window color';
-
             // Open this folder's AGENTS.md in a dedicated editor (Task 12).
             const agentsMdBtn = document.createElement('button');
             agentsMdBtn.type = 'button';
@@ -6577,7 +6671,6 @@
             titleBar.appendChild(agentsMdBtn);
             titleBar.appendChild(gitBtn);
             titleBar.appendChild(gitLabel);
-            titleBar.appendChild(colorPicker);
             titleBar.appendChild(minBtn);
             titleBar.appendChild(closeBtn);
 
@@ -6611,7 +6704,7 @@
 
             const win = {
                 id, sid, hostId, dom, body, term, fitAddon,
-                titleText, colorPicker,
+                titleText,
                 // Git status (task 6): gitBtn/gitLabel are the title-bar UI;
                 // gitStatus the last successful {ok:true,...} payload (or null);
                 // gitState one of 'unknown'|'repo'|'norepo'|'unavailable' so the
@@ -6659,23 +6752,23 @@
             dom.addEventListener('mousedown', onMouseDown);
             win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
-            // color picker
+            // Window-color control (issue 5): the shared swatch-dropdown,
+            // wired after `win` exists (like the git popover). Terminal swatches
+            // are the window PALETTE; a pick recolors the title bar and persists
+            // to prefs. stopProp is reused by the min/close handlers below.
             const stopProp = (e) => e.stopPropagation();
-            const onColor = (e) => {
-                const c = normalizeHex(e.target.value);
-                win.color = c;
-                dom.style.setProperty('--accent', c);
-                dom.classList.toggle('dark-accent', isDarkAccent(c));
-                getPref(id).color = c;
-                savePrefs();
-                updateTaskbarColor(id);
-            };
-            colorPicker.addEventListener('input', onColor);
-            colorPicker.addEventListener('mousedown', stopProp);
-            win.cleanups.push(() => {
-                colorPicker.removeEventListener('input', onColor);
-                colorPicker.removeEventListener('mousedown', stopProp);
-            });
+            const colorBtn = attachColorPicker(
+                win, titleBar, PALETTE.map((c) => ({ color: c })),
+                (sw) => {
+                    const c = normalizeHex(sw.color);
+                    win.color = c;
+                    dom.style.setProperty('--accent', c);
+                    dom.classList.toggle('dark-accent', isDarkAccent(c));
+                    getPref(id).color = c;
+                    savePrefs();
+                    updateTaskbarColor(id);
+                });
+            titleBar.insertBefore(colorBtn, minBtn);
 
             // min / close
             const onMinDown = stopProp;
@@ -7536,21 +7629,6 @@
             titleText.textContent = title;
             titleText.title = 'double-click to rename';
 
-            // Preset color swatches replace the generic <input type=color>:
-            // one round button per NOTE_SWATCHES entry.
-            const swatchRow = document.createElement('div');
-            swatchRow.className = 'app-swatches';
-            const swatchEls = [];
-            NOTE_SWATCHES.forEach((sw) => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                b.className = 'app-swatch';
-                b.style.background = sw.accent;
-                b.title = 'recolor';
-                swatchRow.appendChild(b);
-                swatchEls.push(b);
-            });
-
             const minBtn = document.createElement('button');
             minBtn.type = 'button';
             minBtn.className = 'tb-btn btn-min';
@@ -7565,7 +7643,6 @@
 
             titleBar.appendChild(idBadge);
             titleBar.appendChild(titleText);
-            titleBar.appendChild(swatchRow);
             titleBar.appendChild(minBtn);
             titleBar.appendChild(closeBtn);
 
@@ -7918,41 +7995,25 @@
             dom.addEventListener('mousedown', onMouseDown);
             win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
-            // Swatches: highlight the one matching the current accent; clicking
-            // one recolors the title bar (and a sticky note's paper/fg),
-            // persists to the store, and retints the taskbar chip.
-            const updateSwatchSel = () => {
-                const cur = normalizeHex(win.color);
-                swatchEls.forEach((el, i) => {
-                    el.classList.toggle('sel',
-                        normalizeHex(NOTE_SWATCHES[i].accent) === cur);
+            // Window-color control (issue 5): the shared swatch-dropdown. App
+            // swatches are the NOTE_SWATCHES presets; a pick recolors the title
+            // bar (and a sticky note's paper/fg) and persists via saveAppWindow.
+            const colorBtn = attachColorPicker(
+                win, titleBar,
+                NOTE_SWATCHES.map((s) => ({ color: s.accent, paper: s.paper,
+                                            fg: s.fg })),
+                (sw) => {
+                    win.color = normalizeHex(sw.color);
+                    dom.style.setProperty('--accent', win.color);
+                    dom.classList.toggle('dark-accent', isDarkAccent(win.color));
+                    if (isNote) {
+                        dom.style.setProperty('--note-paper', sw.paper);
+                        dom.style.setProperty('--note-fg', sw.fg);
+                    }
+                    saveAppWindow(win);
+                    updateTaskbarColor(id);
                 });
-            };
-            const applySwatch = (sw) => {
-                win.color = normalizeHex(sw.accent);
-                dom.style.setProperty('--accent', win.color);
-                dom.classList.toggle('dark-accent', isDarkAccent(win.color));
-                if (isNote) {
-                    dom.style.setProperty('--note-paper', sw.paper);
-                    dom.style.setProperty('--note-fg', sw.fg);
-                }
-                updateSwatchSel();
-                saveAppWindow(win);
-                updateTaskbarColor(id);
-            };
-            swatchEls.forEach((el, i) => {
-                const onClick = (e) => {
-                    e.stopPropagation();
-                    applySwatch(NOTE_SWATCHES[i]);
-                };
-                el.addEventListener('mousedown', stopProp);
-                el.addEventListener('click', onClick);
-                win.cleanups.push(() => {
-                    el.removeEventListener('mousedown', stopProp);
-                    el.removeEventListener('click', onClick);
-                });
-            });
-            updateSwatchSel();
+            titleBar.insertBefore(colorBtn, minBtn);
 
             // Inline rename (notes + editors): double-click the title text to
             // edit it in place. commitRename trims/caps the text, falls back to
@@ -10708,8 +10769,8 @@
                 // drop). The floating absolute-move below would be a no-op on a
                 // static box, so hand off and return.
                 if (win.tiled) { startTiledDrag(win, e); return; }
-                // Interactive children (color-picker, tb-btn) stopPropagation
-                // in their own mousedown handlers; title-text has
+                // Interactive children (tb-btn, incl. the color button)
+                // stopPropagation in their own mousedown handlers; title-text has
                 // pointer-events:none. So we only get here for the bar itself,
                 // the id badge, or the title text area.
                 e.preventDefault();
