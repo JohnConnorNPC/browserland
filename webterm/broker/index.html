@@ -289,6 +289,36 @@
         }
         .term-window .swatch-cell:hover { transform: scale(1.12); }
         .term-window .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
+        /* MCP access control (#20): a robot button by the color swatch whose
+           dropdown sets this terminal's per-window MCP mode. It lights up (the
+           shared .tb-btn.on accent) when access is read/readwrite and dims when
+           off, so a window's MCP exposure is visible at a glance. */
+        .term-window .mcp-btn svg { width: 13px; height: 13px; display: block; }
+        .term-window .mcp-btn.mcp-off { opacity: 0.5; }
+        .term-window .mcp-popover {
+            position: absolute;
+            z-index: 50;
+            min-width: 118px;
+            box-sizing: border-box;
+            padding: 4px;
+            background: var(--bg-2, #2a2a2a);
+            border: 1px solid var(--bg-3, #555);
+            border-radius: 4px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .term-window .mcp-popover .mcp-head {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+            color: #999; padding: 3px 8px 4px;
+        }
+        .term-window .mcp-popover .mcp-opt {
+            display: block; width: 100%; text-align: left;
+            padding: 5px 8px; border: 0; border-radius: 3px;
+            background: transparent; color: #ddd;
+            font-family: inherit; font-size: 12px; cursor: pointer;
+            white-space: nowrap;
+        }
+        .term-window .mcp-popover .mcp-opt:hover { background: rgba(255,255,255,0.12); }
+        .term-window .mcp-popover .mcp-opt.sel { color: var(--accent-default); font-weight: 600; }
         .term-window .tb-btn {
             width: 22px;
             height: 18px;
@@ -6572,6 +6602,119 @@
             return btn;
         }
 
+        // MCP access button (#20): a robot icon next to the color swatch whose
+        // dropdown sets THIS terminal's per-window MCP access mode (off / read /
+        // read-write) — the same per-window pin as the title-bar context menu,
+        // surfaced as a visible, at-a-glance control. The robot lights up (.on)
+        // when access is read/readwrite and dims when off. Terminals only (app
+        // docs aren't server sessions); mirrors attachColorPicker's popover.
+        const MCP_MODES = [['off', 'Off'], ['read', 'Read'],
+                           ['readwrite', 'Read-write']];
+        const MCP_ROBOT_SVG =
+            '<svg viewBox="0 0 24 24" aria-hidden="true">'
+            + '<line x1="12" y1="2" x2="12" y2="5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
+            + '<circle cx="12" cy="2" r="1.5" fill="currentColor"/>'
+            + '<rect x="4" y="6" width="16" height="13" rx="3" fill="none" stroke="currentColor" stroke-width="2"/>'
+            + '<circle cx="9" cy="12" r="1.6" fill="currentColor"/>'
+            + '<circle cx="15" cy="12" r="1.6" fill="currentColor"/>'
+            + '<line x1="9.5" y1="16" x2="14.5" y2="16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>'
+            + '</svg>';
+
+        function attachMcpButton(win, titleBar) {
+            const stopProp = (e) => e.stopPropagation();
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tb-btn mcp-btn';
+            btn.innerHTML = MCP_ROBOT_SVG;
+
+            // This is a SECURITY indicator, so the highlight must reflect the
+            // broker's ACTUAL effective mode (sess.mcp), never the desired pin —
+            // a pin that the broker rejected/hasn't yet applied must not show a
+            // safer state than reality. Fall back to the pin only before the
+            // first poll (sess absent), and to 'off' otherwise.
+            const curMode = () => {
+                const s = sessions.get(win.id);
+                if (s) return (s.mcp || 'off');
+                return getMcpMode(win.id) || 'off';
+            };
+            const refresh = () => {
+                const s = sessions.get(win.id);
+                // A pre-MCP broker can't honour MCP at all (the re-assert pass
+                // skips it too) — hide the control rather than offer a no-op.
+                if (s && s.mcpKnown === false) { btn.style.display = 'none'; return; }
+                btn.style.display = '';
+                const m = curMode();
+                btn.classList.toggle('on', m !== 'off');
+                btn.classList.toggle('mcp-off', m === 'off');
+                const lab = (MCP_MODES.find(([v]) => v === m) || [, 'Off'])[1];
+                btn.title = 'MCP access: ' + lab;
+            };
+            win.refreshMcpBtn = refresh;   // kept live by refreshTaskbarInner
+
+            let pop = null;
+            const closePop = () => {
+                if (!pop) return;
+                document.removeEventListener('mousedown', onOutside, true);
+                document.removeEventListener('keydown', onKey, true);
+                try { pop.remove(); } catch (_) {}
+                pop = null;
+            };
+            const onOutside = (e) => {
+                if (pop && !pop.contains(e.target) && !btn.contains(e.target))
+                    closePop();
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault(); e.stopPropagation(); closePop();
+                }
+            };
+            const openPop = () => {
+                if (pop) { closePop(); return; }   // toggle
+                pop = document.createElement('div');
+                pop.className = 'mcp-popover';
+                const head = document.createElement('div');
+                head.className = 'mcp-head';
+                head.textContent = 'MCP access';
+                pop.appendChild(head);
+                const cur = curMode();
+                MCP_MODES.forEach(([val, lab]) => {
+                    const opt = document.createElement('button');
+                    opt.type = 'button';
+                    opt.className = 'mcp-opt' + (val === cur ? ' sel' : '');
+                    opt.textContent = (val === cur ? '✓ ' : ' ') + lab;
+                    opt.addEventListener('mousedown', stopProp);
+                    opt.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        setWindowMcpMode(win, val);   // persist + POST + re-assert
+                        refresh();
+                        closePop();
+                    });
+                    pop.appendChild(opt);
+                });
+                titleBar.appendChild(pop);
+                // Right-align under the button, clamped inside the title bar.
+                const popW = pop.offsetWidth;
+                const tbW = titleBar.clientWidth;
+                let left = btn.offsetLeft + btn.offsetWidth - popW;
+                left = Math.max(2, Math.min(left, Math.max(2, tbW - popW - 2)));
+                pop.style.top = (btn.offsetTop + btn.offsetHeight + 2) + 'px';
+                pop.style.left = left + 'px';
+                document.addEventListener('mousedown', onOutside, true);
+                document.addEventListener('keydown', onKey, true);
+            };
+            const onClick = (e) => { e.stopPropagation(); openPop(); };
+            btn.addEventListener('mousedown', stopProp);
+            btn.addEventListener('click', onClick);
+            win.cleanups.push(() => {
+                btn.removeEventListener('mousedown', stopProp);
+                btn.removeEventListener('click', onClick);
+                closePop();
+                win.refreshMcpBtn = null;
+            });
+            refresh();
+            return btn;
+        }
+
         // ---- notices ------------------------------------------------------
         function showNotice(text, ms) {
             const host = document.getElementById('notice-host');
@@ -6871,6 +7014,11 @@
                     updateTaskbarColor(id);
                 });
             titleBar.insertBefore(colorBtn, minBtn);
+
+            // MCP access control (#20): robot button + dropdown, right next to
+            // the color swatch (terminals only — app docs aren't MCP sessions).
+            const mcpBtn = attachMcpButton(win, titleBar);
+            titleBar.insertBefore(mcpBtn, colorBtn);
 
             // min / close
             const onMinDown = stopProp;
@@ -11566,6 +11714,9 @@
                         win.name = display;
                         win.titleText.textContent = display;
                     }
+                    // Keep the MCP robot's highlight in sync with the effective
+                    // mode (broker-default change, re-assert, etc. — #20).
+                    if (win.refreshMcpBtn) win.refreshMcpBtn();
                 }
                 let el = itemsHost.querySelector(
                     '.taskbar-item[data-session-id="' + key + '"]');
@@ -12636,6 +12787,7 @@
                 if (j && j.ok) {
                     const sess = sessions.get(win.id);
                     if (sess) sess.mcp = mode;
+                    if (win.refreshMcpBtn) win.refreshMcpBtn();  // honest sync (#20)
                     refreshTaskbar();
                 }
             }).catch(() => {}).finally(() => {
