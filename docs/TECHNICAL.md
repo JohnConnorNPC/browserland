@@ -70,6 +70,17 @@ the PTY keeps running; the client reconnects with exponential backoff
 *current* title/dims. Missed bytes are not replayed — the browser's attach
 triggers `snapshot_please`, which heals from the ring.
 
+**`psutil` is an optional, best-effort dependency** (`pip install -e ".[procs]"`),
+not declared in core deps. It powers the task-manager process list
+(`enumerate_procs`), the foreground-agent badge (`foreground_command`), and
+live-cwd tracking (`cwd`) — each degrades to empty/None without it. Destroying
+a window also prefers the psutil path (identity-checked `create_time` guard),
+but the Linux backend's `kill_proc_fallback` kills the shell's whole POSIX
+session by SID (the shell is its own session leader via `start_new_session`,
+disjoint from the agent's session) when psutil is absent, so "destroy window"
+works either way. Windows without psutil still returns `psutil_unavailable`
+for destroy (no fallback yet).
+
 ## Broker
 
 ```

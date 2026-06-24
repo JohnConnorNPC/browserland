@@ -187,6 +187,12 @@ class PtyBackend(ABC):
             info["create_time"] = None
         return info
 
+    def kill_proc_fallback(self, pid: int) -> Tuple[bool, Optional[str]]:
+        """Best-effort scoped kill when psutil is unavailable. Default:
+        unsupported (preserves today's behavior on backends without a
+        psutil-free path). Platform backends override. Never raises."""
+        return False, "psutil_unavailable"
+
     def kill_proc(self, pid: int) -> Tuple[bool, Optional[str]]:
         """Terminate ``pid`` (and its descendants) — but ONLY if it is the
         session's own shell or one of its descendants. Returns ``(ok, error)``.
@@ -205,7 +211,10 @@ class PtyBackend(ABC):
         try:
             import psutil
         except Exception:
-            return False, "psutil_unavailable"
+            # No psutil: defer to the backend's best-effort fallback (the
+            # default still returns "psutil_unavailable"). The pid validation
+            # above stays primary so the fallback only sees a sane pid.
+            return self.kill_proc_fallback(pid)
         # Identity-checked session root (rejects a recycled shell pid).
         shell = self._session_root()
         if shell is None:

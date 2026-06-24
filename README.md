@@ -215,9 +215,15 @@ first run. Then open `http://127.0.0.1:4445/`.
 pip install -e .                       # core: broker + agent
 pip install -e ".[windows]"            # + pywinpty (Windows PTY backend)
 pip install -e ".[pyte]"               # + pyte (tier-2 snapshot rendering)
+pip install -e ".[procs]"              # + psutil (task manager, agent badge, live cwd)
 pip install -e ".[mcp]"                # + the stdio MCP server (Python ≥ 3.10)
 pip install -e ".[dev]"                # + pytest for the test suite
 ```
+
+`psutil` (the `procs` extra) is best-effort: it powers the **task-manager
+process list**, the **foreground-agent badge**, and **live-cwd tracking**.
+Without it the agent still runs and still destroys windows — those three views
+just degrade (empty list / no badge / no cwd).
 
 Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. The `mcp` extra requires
 **Python ≥ 3.10** (the MCP SDK), while everything else runs on **Python ≥ 3.9**.

@@ -263,3 +263,9 @@ class WinConPtyBackend(PtyBackend):
             return psutil.Process(self.pid).cwd()
         except Exception:
             return None
+
+    # NOTE: no ``kill_proc_fallback`` override here -> inherits the base hook,
+    # so destroying a window without psutil still returns "psutil_unavailable"
+    # on Windows (the bug being fixed is Linux-only). A future Windows-parity
+    # fallback would shell out to ``taskkill /PID <self.pid> /T /F`` (kill the
+    # shell's whole child tree), guarded on ``PtyBackend.pid`` being live.

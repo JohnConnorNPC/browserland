@@ -14,10 +14,12 @@ import errno
 import fcntl
 import os
 import pty
+import signal
 import struct
 import subprocess
 import termios
-from typing import Callable, Mapping, Optional, Sequence
+import time
+from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from ..detect import classify_proc
 from .base import PtyBackend
@@ -31,6 +33,45 @@ def _safe_exe(proc) -> Optional[str]:
         return proc.exe()
     except Exception:
         return None
+
+
+def _proc_state(pid: int) -> Optional[str]:
+    """The single-char state field from ``/proc/<pid>/stat`` ('R'/'S'/'Z'/...),
+    or None if the pid is gone/unreadable. Robust to comm strings containing
+    ')'. Used to treat zombies as already-dead when waiting for a session to
+    drain. Never raises."""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    try:
+        rest = data[data.rindex(b")") + 2:]
+    except ValueError:
+        return None
+    return rest[:1].decode("ascii", "replace") if rest else None
+
+
+def _pin_proc(pid: int):
+    """A pidfd pinning ``pid`` (reuse-proof signal target, Linux 5.3+), as
+    ``(fd_or_None, already_reaped)``. ``already_reaped`` is True only when the
+    pid is provably gone; a None fd with ``already_reaped`` False means pidfd
+    is unusable here, so the caller must fall back to numeric pid signalling.
+    Requires BOTH ``os.pidfd_open`` and ``os.pidfd_send_signal`` — some builds
+    expose one without the other (observed on Ubuntu 24.04: open present,
+    send_signal absent), and a fd we can't signal through is useless. A pidfd
+    pins the process that occupied ``pid`` at open time, so a later
+    ``pidfd_send_signal`` either reaches that exact process or fails with ESRCH
+    once it's reaped — it can never hit a recycled pid. Never raises."""
+    open_fn = getattr(os, "pidfd_open", None)
+    if open_fn is None or not hasattr(os, "pidfd_send_signal"):
+        return None, False
+    try:
+        return open_fn(pid), False
+    except ProcessLookupError:
+        return None, True
+    except OSError:
+        return None, False
 
 
 class LinuxPtyBackend(PtyBackend):
@@ -276,3 +317,208 @@ class LinuxPtyBackend(PtyBackend):
             return psutil.Process(self.pid).cwd()
         except Exception:
             return None
+
+    # -- psutil-free destroy-window fallback -----------------------------
+
+    def kill_proc_fallback(self, pid: int) -> Tuple[bool, Optional[str]]:
+        """Tear down the window without psutil by killing the shell's whole
+        POSIX session. Scoped to ``pid == self.pid`` (the spawned shell); any
+        other pid is refused — without psutil there is no descendant list to
+        validate an arbitrary pid against, and the task-manager list is empty
+        anyway, so the only pid the UI can send for "destroy" is the shell's.
+
+        Why a session-scope kill is correct AND safe here:
+        * The shell is spawned with ``start_new_session=True``, so ``self.pid``
+          is its own session + process-group leader (``sid == self.pid``). The
+          agent itself is in a DIFFERENT session (also ``start_new_session`` at
+          launch), so a ``/proc`` scan filtered by the shell's SID can never
+          match the agent, the broker, or PID 1.
+        * A plain ``killpg(getpgid(self.pid))`` would miss a foreground app
+          (e.g. ``claude``) that job control placed in its OWN process group;
+          session scope catches the shell AND its job-control children.
+
+        PID-reuse safety without psutil's ``create_time`` guard. This runs in
+        an executor thread WHILE the event loop may concurrently reap the shell
+        (killing it triggers PTY EOF -> reap), so a stale ``self.pid`` (or any
+        member pid) could in principle be recycled mid-operation. Layered
+        defenses:
+        * ``self._proc.poll() is None`` gates entry (live, unreaped child), and
+          the numeric ``sid`` (== ``pid_root``) cannot be recycled while the
+          session has any member — the kernel reserves a pid used as a SID
+          (verified against ``kernel/pid.c``).
+        * Every signal is routed through a **pidfd** (:meth:`_signal_pid`): the
+          leader via a handle pinned BEFORE its SID is read, each member via a
+          handle pinned at signal time. A pidfd targets the pinned process or
+          fails with ESRCH once reaped, so no member is ever signalled by a
+          recycled pid — closing the enumerate-then-``os.kill`` TOCTOU.
+        On kernels/Python builds without ``pidfd_send_signal`` (e.g. Ubuntu
+        24.04, or Linux < 5.3) signalling degrades to numeric ``os.kill`` with a
+        ``getsid`` recheck; the residual reuse window then matches the primary
+        psutil path's own enumerate-then-kill window.
+
+        Accepted limitations: a descendant that calls ``setsid()`` (daemons,
+        double-forkers, a tmux/screen server) gets a NEW session and escapes
+        the SID scan — a parity gap vs psutil's ppid tree walk, acceptable for
+        a fallback (shell + foreground app + jobs is fully covered). Non-Linux
+        POSIX without ``/proc`` (macOS) degrades to a process-group kill. Never
+        raises."""
+        if pid != self.pid:
+            return False, "psutil_unavailable"
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            # No live, unreaped child -> self.pid may be recycled; refuse.
+            return False, "session_gone"
+        pid_root = self.pid
+        # macOS et al.: no /proc to enumerate the session -> process-group kill.
+        if not os.path.isdir("/proc/self"):
+            return self._killpg_fallback(pid_root)
+        # Pin the leader with a reuse-proof handle BEFORE reading its session
+        # id, so a concurrent reap+recycle can't make getsid() resolve a
+        # different process's session.
+        leader_fd, leader_gone = _pin_proc(pid_root)
+        if leader_gone:
+            return False, "session_gone"
+        try:
+            try:
+                sid = os.getsid(pid_root)
+            except OSError:
+                return False, "session_gone"
+            return self._kill_session_via_proc(sid, pid_root, leader_fd)
+        finally:
+            if leader_fd is not None:
+                try:
+                    os.close(leader_fd)
+                except OSError:
+                    pass
+
+    def _session_members(self, sid: int):
+        """``(pids, scanned_ok)`` — pids whose session id is ``sid`` (including
+        zombies), via ``/proc``. ``scanned_ok`` is False only when ``/proc``
+        itself could not be listed, so the caller can distinguish "session is
+        empty" from "enumeration failed". Never raises."""
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return [], False
+        out = []
+        for name in entries:
+            if not name.isdigit():
+                continue
+            p = int(name)
+            try:
+                if os.getsid(p) == sid:
+                    out.append(p)
+            except OSError:
+                continue
+        return out, True
+
+    def _signal_pid(self, pid: int, sid: int, sig: int, fd=None) -> None:
+        """Reuse-safely send ``sig`` to ``pid``, which must still be a member of
+        session ``sid``. When a pidfd is usable the signal goes THROUGH it (the
+        provided ``fd`` for the leader, or a freshly pinned one for a member),
+        so a pid recycled between the ``getsid`` check and the signal is never
+        hit — the pidfd targets the pinned process or fails with ESRCH. Only
+        when pidfd is unsupported does it degrade to numeric ``os.kill`` with a
+        ``getsid`` recheck (a tiny TOCTOU window, on par with the primary psutil
+        path's enumerate-then-kill). Never raises."""
+        if fd is not None:
+            try:
+                if os.getsid(pid) == sid:
+                    os.pidfd_send_signal(fd, sig)
+            except OSError:
+                pass
+            return
+        own_fd, gone = _pin_proc(pid)
+        if own_fd is not None:
+            try:
+                if os.getsid(pid) == sid:
+                    os.pidfd_send_signal(own_fd, sig)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(own_fd)
+                except OSError:
+                    pass
+            return
+        if gone:
+            # pidfd IS supported and reports the pid already reaped -> nothing
+            # to signal (and no recycled pid to risk hitting).
+            return
+        # No pidfd here: numeric recheck-then-kill (documented residual).
+        try:
+            if os.getsid(pid) == sid:
+                os.kill(pid, sig)
+        except OSError:
+            pass
+
+    def _kill_session_via_proc(
+        self, sid: int, pid_root: int, leader_fd,
+    ) -> Tuple[bool, Optional[str]]:
+        """SIGTERM, then (after a grace) SIGKILL every member of session
+        ``sid``, each via :meth:`_signal_pid` (pidfd-routed when available, so
+        no member is ever signalled by a recycled pid). Never signals the
+        agent's own pid. Never raises."""
+        my_pid = os.getpid()
+        _, scanned_ok = self._session_members(sid)
+        if not scanned_ok:
+            # /proc unusable -> can't enumerate the session; fall back to the
+            # leader's process group rather than silently signalling nothing.
+            return self._killpg_fallback(pid_root)
+
+        def _broadcast(sig: int) -> None:
+            members, _ = self._session_members(sid)
+            for p in members:
+                if p == my_pid:
+                    continue
+                # The leader reuses the handle pinned before getsid(); members
+                # are pinned per-signal inside _signal_pid.
+                self._signal_pid(p, sid, sig, fd=leader_fd if p == pid_root else None)
+
+        _broadcast(signal.SIGTERM)
+        # Poll ~50ms up to ~1.5s for the session's LIVE members to drain
+        # (matches the psutil path's wait_procs(timeout=1.5) feel) before
+        # escalating. Zombies don't count — they're already dead. Break ONLY on
+        # a successful scan that shows no live members, so a transient /proc
+        # read failure can't be mistaken for "drained".
+        for _ in range(30):
+            members, ok = self._session_members(sid)
+            if ok and not any(
+                _proc_state(p) not in (None, "Z", "X", "x") for p in members
+            ):
+                break
+            time.sleep(0.05)
+        _broadcast(signal.SIGKILL)
+        return True, None
+
+    def _killpg_fallback(self, pid_root: int) -> Tuple[bool, Optional[str]]:
+        """No ``/proc`` (non-Linux POSIX) or unusable ``/proc``: kill the
+        shell's process group. Misses job-control children in their own groups,
+        but is the best we can do without enumeration. SIGKILL only escalates
+        while the group LEADER (our shell) is still alive — a live leader keeps
+        the numeric pgid reserved, so it can't have been recycled by an
+        unrelated group. (The initial SIGTERM is sent immediately after
+        ``getpgid`` with the leader just confirmed live at the call site, so its
+        reuse window is negligible and on par with the primary path.) Never
+        raises."""
+        try:
+            pgid = os.getpgid(pid_root)
+        except OSError:
+            return False, "session_gone"
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            pass
+        proc = self._proc
+        leader_alive = True
+        for _ in range(30):
+            if proc is None or proc.poll() is not None:
+                leader_alive = False
+                break
+            time.sleep(0.05)
+        if leader_alive:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        return True, None

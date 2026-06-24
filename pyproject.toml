@@ -15,6 +15,10 @@ dependencies = [
 [project.optional-dependencies]
 windows = ["pywinpty>=2"]
 pyte = ["pyte>=0.8"]
+# psutil powers the task-manager process list, the foreground-agent badge, and
+# live-cwd tracking. It is best-effort everywhere: without it the agent still
+# destroys windows, but those views degrade (empty list / no badge / no cwd).
+procs = ["psutil>=5"]
 # The Browserland MCP server (webterm/mcptool/). `mcp` pulls in httpx. NOTE: the
 # `mcp` SDK requires Python >=3.10, while webterm core stays >=3.9 — so this is
 # an optional extra, not a core dependency.
