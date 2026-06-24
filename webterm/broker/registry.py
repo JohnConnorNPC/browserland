@@ -275,6 +275,14 @@ class BrokerRegistry:
     def session_summaries(self, mcp_default: str = "off") -> List[Dict[str, Any]]:
         return [e.summary(mcp_default) for e in self._entries.values()]
 
+    def live_cwds(self) -> List[str]:
+        """Non-empty working dirs of all registered windows. Backs the editor's
+        agent-doc scoping (#16): AGENTS.md/CLAUDE.md are editable at a terminal's
+        own cwd even when it lies outside editor_root. Sync + no ``await``, so it
+        runs non-interleaved on the event loop (registry mutations are all on the
+        loop too); it is not otherwise thread-safe."""
+        return [e.cwd for e in self._entries.values() if e.cwd]
+
     async def close_clients_terminals(self, client_id: str, code: int) -> None:
         """Close every terminal subscriber WS that belongs to ``client_id``
         (the browser just lost the single-active lease) with ``code`` (4409 =

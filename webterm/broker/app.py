@@ -186,6 +186,85 @@ def _resolve_in_root(root: Path, rel: str) -> Path:
     return p
 
 
+# The editor sandbox (editor_root) is narrower than where terminals run: a
+# terminal's cwd can be anywhere (a parent of the root, another drive, …), so its
+# AGENTS.md/CLAUDE.md may sit outside the root. These two docs — and only these
+# two — are editable at a LIVE terminal's cwd even outside editor_root (#16).
+# Compared case-folded: a case-insensitive FS (Windows/macOS) resolves the real
+# on-disk casing, so an existing ``agents.md`` must still match.
+_AGENT_DOC_NAMES = frozenset({"agents.md", "claude.md"})
+
+
+def _agent_doc_at_live_cwd(rel: str, ctx) -> Optional[Path]:
+    """If ``rel`` is an absolute ``AGENTS.md``/``CLAUDE.md`` (any case) whose
+    parent dir is the cwd of a currently-registered terminal, return its
+    resolved path; else ``None``.
+
+    SECURITY MODEL (deliberate, per the issue-#16 decision): this is a *scoping*
+    heuristic, NOT a hard sandbox. It keeps the normal AGENTS-button flow and
+    honest clients within terminal working dirs, but the cwd is self-reported by
+    the producer, so it is not a boundary against a hostile authenticated client
+    (which could register a producer advertising any cwd). That is an accepted,
+    bounded widening of the editor for exactly two filenames: an authenticated
+    client already has full filesystem access through its terminal shells, so it
+    grants no new privilege. The real gates are the browser auth token and the
+    two-filename allowlist; a true boundary would need server-established
+    producer/cwd identity (out of scope here).
+
+    ``resolve()`` collapses ``..`` and follows symlinks, so the post-resolve
+    basename/parent are real — a symlink/traversal can't smuggle in another file.
+    A TOCTOU swap of a path component between this check and the open/write is
+    possible, but it is the same pre-existing race as the in-root ``/file``
+    endpoints and immaterial under this single-user threat model."""
+    base = Path(rel or "")
+    # Reject NTFS alternate-data-stream spellings (``AGENTS.md::$DATA``) outright
+    # rather than relying on resolve() folding them back to the base file.
+    if ":" in base.name:
+        return None
+    try:
+        if not base.is_absolute():
+            return None
+        p = base.resolve()
+    except (OSError, ValueError):
+        return None
+    if p.name.lower() not in _AGENT_DOC_NAMES:
+        return None
+    parent = p.parent
+    for cwd in ctx.registry.live_cwds():
+        try:
+            if Path(cwd).resolve() == parent:
+                return p
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _resolve_editor_path(root: Path, rel: str, ctx):
+    """Resolve a client file path for the editor API. Returns ``(path, in_root)``.
+
+    Normally the path is sandboxed to ``editor_root`` (``in_root=True``). As a
+    narrow exception, an ``AGENTS.md``/``CLAUDE.md`` at a live terminal's cwd is
+    allowed outside the root (``in_root=False``) — see :data:`_AGENT_DOC_NAMES`.
+    Raises ``ValueError`` when neither applies (caller maps to
+    ``path_outside_root``)."""
+    try:
+        return _resolve_in_root(root, rel), True
+    except ValueError:
+        pass
+    p = _agent_doc_at_live_cwd(rel, ctx)
+    if p is not None:
+        return p, False
+    raise ValueError("path outside editor_root")
+
+
+def _editor_resp_path(p: Path, root: Path, in_root: bool) -> str:
+    """The ``path`` echoed back to the client: root-relative for in-root files
+    (so the editor keeps using relative paths), absolute for the out-of-root
+    agent-doc exception (``relative_to(root)`` would raise, and the next save
+    must round-trip the same absolute path back through the exception)."""
+    return p.relative_to(root).as_posix() if in_root else str(p)
+
+
 def _json_object_body(request: "Request") -> Optional[Dict[str, Any]]:
     """Parsed JSON object body, or None on malformed / non-object JSON. An
     empty body is treated as ``{}`` (mirrors the /launch handler)."""
@@ -625,7 +704,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         root = app.ctx.editor_root
         try:
-            p = _resolve_in_root(root, rel)
+            p, in_root = _resolve_editor_path(root, rel, app.ctx)
         except ValueError:
             return sanic_json({"ok": False, "error": "path_outside_root"},
                               status=400)
@@ -650,7 +729,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         except UnicodeDecodeError:
             return sanic_json({"ok": False, "error": "not_utf8"}, status=400)
         return sanic_json({"ok": True,
-                           "path": p.relative_to(root).as_posix(),
+                           "path": _editor_resp_path(p, root, in_root),
                            "content": content})
 
     async def _file_write(request: Request):
@@ -672,7 +751,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
         root = app.ctx.editor_root
         try:
-            p = _resolve_in_root(root, rel)
+            p, in_root = _resolve_editor_path(root, rel, app.ctx)
         except ValueError:
             return sanic_json({"ok": False, "error": "path_outside_root"},
                               status=400)
@@ -708,7 +787,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 except OSError:
                     pass
         return sanic_json({"ok": True,
-                           "path": p.relative_to(root).as_posix()})
+                           "path": _editor_resp_path(p, root, in_root)})
 
     async def _file_upload(request: Request):
         # Binary-safe drop target (base64 content) — /file/write is UTF-8-text

@@ -751,6 +751,75 @@ def test_file_upload_roundtrip(broker_proc):
             pass
 
 
+def test_agent_doc_outside_editor_root(broker_proc, tmp_path):
+    """#16: AGENTS.md/CLAUDE.md at a LIVE terminal's cwd read/write even outside
+    editor_root (the broker's cwd = REPO here); other files there, and those
+    docs at a NON-live cwd, stay sandboxed out."""
+    _, port, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+
+    cwd_dir = tmp_path / "termcwd"          # acts as a terminal's cwd
+    cwd_dir.mkdir()
+    (cwd_dir / "AGENTS.md").write_text("hello agents", encoding="utf-8")
+    (cwd_dir / "secret.txt").write_text("nope", encoding="utf-8")
+    other_dir = tmp_path / "elsewhere"      # a dir with no live terminal
+    other_dir.mkdir()
+    (other_dir / "AGENTS.md").write_text("not live", encoding="utf-8")
+
+    def _read(path):
+        return _http("POST", f"{base}/file/read",
+                     body=json.dumps({"path": path}).encode(), headers=auth)
+
+    async def scenario():
+        producer = await websockets.connect(
+            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+        try:
+            await producer.send(json.dumps({
+                "type": "hello", "window_id": 556021, "pid": 7, "title": "doc",
+                "cols": 80, "rows": 24, "cwd": str(cwd_dir)}))
+            for _ in range(50):
+                _, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
+                if any(s["id"] == 556021 for s in sessions):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError("producer did not register")
+
+            # AGENTS.md at the live cwd reads even though it is outside the root.
+            st, r = _read(str(cwd_dir / "AGENTS.md"))
+            assert st == 200 and r["ok"] and r["content"] == "hello agents", r
+
+            # ...and writes (the response echoes the absolute path back).
+            st, r = _http("POST", f"{base}/file/write",
+                          body=json.dumps({"path": str(cwd_dir / "AGENTS.md"),
+                                           "content": "edited"}).encode(),
+                          headers=auth)
+            assert st == 200 and r["ok"], r
+            assert (cwd_dir / "AGENTS.md").read_text(encoding="utf-8") == "edited"
+
+            # CLAUDE.md at the live cwd: exception applies (NOT path_outside_root),
+            # the file just doesn't exist yet -> 404 not_found (opens empty).
+            st, r = _read(str(cwd_dir / "CLAUDE.md"))
+            assert st == 404 and r["error"] == "not_found", r
+
+            # A non-agent file at the live cwd is still sandboxed out.
+            st, r = _read(str(cwd_dir / "secret.txt"))
+            assert st == 400 and r["error"] == "path_outside_root", r
+
+            # AGENTS.md at a dir with no live terminal is rejected.
+            st, r = _read(str(other_dir / "AGENTS.md"))
+            assert st == 400 and r["error"] == "path_outside_root", r
+
+            # NTFS alternate-data-stream spelling is rejected outright.
+            st, r = _read(str(cwd_dir / "AGENTS.md") + "::$DATA")
+            assert st == 400 and r["error"] == "path_outside_root", r
+        finally:
+            await producer.close()
+
+    asyncio.run(scenario())
+
+
 def test_file_upload_requires_token(broker_proc):
     _, _, base = broker_proc
     status, _ = _http("POST", f"{base}/file/upload", body=b"{}")
