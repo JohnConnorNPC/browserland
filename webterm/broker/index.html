@@ -305,6 +305,12 @@
             padding: 0;
         }
         .term-window .tb-btn:hover { background: rgba(0,0,0,0.3); }
+        /* Active toggle (e.g. a sticky note's word-wrap button, #19) — a clear
+           accent that reads on both light and dark title bars. */
+        .term-window .tb-btn.on,
+        .term-window.dark-accent .tb-btn.on {
+            background: #2f5d7d; border-color: #4aa3ff; color: #fff;
+        }
         /* Dark accents flip the title-bar foreground to white so the title,
            id badge, and min/close buttons stay readable. */
         .term-window.dark-accent .title-bar { color: #fff; }
@@ -7638,8 +7644,12 @@
                 : (appData.wrap !== undefined ? !!appData.wrap : true);
             // Per-note text size (#19): clamped, default 13px (the CSS base).
             const NOTE_FONT_MIN = 9, NOTE_FONT_MAX = 28, NOTE_FONT_DEFAULT = 13;
-            const noteFontSize = Math.max(NOTE_FONT_MIN, Math.min(NOTE_FONT_MAX,
-                parseInt(appData.fontSize, 10) || NOTE_FONT_DEFAULT));
+            // Explicit finite check so a corrupt 0/"0"/NaN clamps sensibly
+            // (`parseInt(...) || default` would turn a finite 0 into the default).
+            const _fsRaw = parseInt(appData.fontSize, 10);
+            const noteFontSize = Number.isFinite(_fsRaw)
+                ? Math.max(NOTE_FONT_MIN, Math.min(NOTE_FONT_MAX, _fsRaw))
+                : NOTE_FONT_DEFAULT;
 
             const dom = document.createElement('div');
             dom.className = 'term-window app-window '
@@ -7694,9 +7704,10 @@
                     b.className = 'tb-btn';
                     b.textContent = label;
                     b.title = ttl;
+                    b.setAttribute('aria-label', ttl);
                     return b;
                 };
-                noteFontDownBtn = mkNoteBtn('A−', 'smaller text');
+                noteFontDownBtn = mkNoteBtn('A-', 'smaller text');
                 noteFontUpBtn = mkNoteBtn('A+', 'larger text');
                 noteWrapBtn = mkNoteBtn('↩', 'toggle word wrap');
             }
@@ -7888,8 +7899,9 @@
                 dirty: docs ? !!initialDoc.dirty : false,
                 wrap,
                 lineNums,
-                // Per-note text size (#19); unused by editors.
-                fontSize: noteFontSize,
+                // Per-note text size (#19); undefined (→ omitted on save) for
+                // editors so it never pollutes their records.
+                fontSize: isNote ? noteFontSize : undefined,
                 // AGENTS.md editors: the folder whose AGENTS.md this edits. Set
                 // from appData so it survives reload (saveAppWindow persists it),
                 // and drives the CLAUDE.md save hook + template checklist below.
@@ -7954,6 +7966,12 @@
                     applyNoteWrap();
                     saveAppWindow(win);
                 });
+                // A title-bar mousedown otherwise starts a window drag (wireDrag
+                // listens on the title bar; tiled notes drag immediately) — stop
+                // it on these buttons, like min/close do.
+                for (const b of [noteFontDownBtn, noteFontUpBtn, noteWrapBtn]) {
+                    b.addEventListener('mousedown', (e) => e.stopPropagation());
+                }
             }
 
             // ---- multi-tab doc model (agent-docs windows only) -------------
