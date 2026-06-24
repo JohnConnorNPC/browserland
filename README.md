@@ -249,4 +249,4 @@ The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.m
 Released under the MIT License — see [LICENSE](LICENSE).
 
 
-not theprimeagen@gmail.com but hi :) 
+not the.primeagen@gmail.com but hi :) 
