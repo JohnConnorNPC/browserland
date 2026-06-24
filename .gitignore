@@ -22,6 +22,9 @@ webterm_state.json
 .codex_*.txt
 .webterm_upload_test.bin
 
+
+webterm_mcp.json
+
 # Agent Files
 CLAUDE.md
 AGENTS.md
