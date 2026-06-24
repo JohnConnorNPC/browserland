@@ -1068,15 +1068,31 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # (terminal) producer has no screen handler -> the RPC times out ->
         # 502 no_producer_rpc. busy/gone collapse to the same: there is no
         # producer that can answer right now.
+        # #21: optional view/lines for scrollback. Hard-cap lines here; the
+        # agent budgets history further (lines AND total cells).
+        body = _json_object_body(request) or {}
+        view = "scrollback" if body.get("view") == "scrollback" else "screen"
+        try:
+            lines = int(body.get("lines", 0) or 0)
+        except (TypeError, ValueError):
+            lines = 0
+        lines = max(0, min(lines, 1000))
         payload, error = await _session_rpc(
-            entry, protocol.screen_text_please_frame, "screen_text")
+            entry,
+            lambda req: protocol.screen_text_please_frame(req, view, lines),
+            "screen_text")
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
         payload = payload or {}
         out = {"ok": True, "id": entry.id,
                "cols": payload.get("cols", entry.cols),
                "rows": payload.get("rows", entry.rows),
-               "text": payload.get("text", "")}
+               "text": payload.get("text", ""),
+               # New fields (#21); older agents omit them -> these defaults.
+               "alt_screen": bool(payload.get("alt_screen", False)),
+               "view": payload.get("view", "screen"),
+               "history_lines": int(payload.get("history_lines", 0) or 0),
+               "cursor": payload.get("cursor")}
         if payload.get("degraded"):
             out["degraded"] = True
         return sanic_json(out)

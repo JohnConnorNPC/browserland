@@ -73,7 +73,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version` |
 | `list_terminals` | `GET /mcp/terminals` | visible terminals (`off`-mode hidden); each carries a build `version`, agents also a `stale` flag |
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
-| `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
+| `read_screen(id, view?, lines?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`; `view="scrollback"` adds history |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
 | `send_keys(id, keys)` | `POST /mcp/input` | control/escape keys plain text can't express |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
@@ -103,6 +103,23 @@ single literal character — e.g. `["C-c"]`, `["Esc"]`, `["Up","Up","Enter"]`. I
 key events. Tokens go out verbatim (no newline→Enter rewrite). Arrows/Home/End
 use normal-cursor-mode sequences and may differ inside an application-cursor-mode
 TUI. Whether `C-c` interrupts depends on the target's PTY backend/mode.
+
+**`read_screen` — screen vs scrollback (#21).** The result carries, besides
+`text`/`cols`/`rows`: `alt_screen` (true for a full-screen TUI like mc/btop/vim —
+the grid is the whole story, so there's no scrollback to chase), `cursor`
+`{row, col}` 0-based within the grid (`null` on the rare `degraded` raw read),
+`view` (the view actually produced), and `history_lines`. For a shell, pass
+`view="scrollback"` with `lines=N` to prepend up to N lines of history above the
+grid; `history_lines` reports how many were included (bounded by line count *and*
+total cells). `alt_screen` is tracked live off the PTY stream, so it stays
+correct even after a long-running TUI's alt-enter has scrolled out of the ring;
+when it's true, a scrollback request is answered with the screen view.
+
+> Best-effort note: the renderers don't model the alternate-screen buffer's
+> save/restore, so in the brief moment *after* a TUI exits but *before* the shell
+> repaints, the `screen` view may be blank/stale (the `alt_screen` flag is
+> already correct). Scrollback returns lines that scrolled off the primary
+> screen — it never includes a TUI's internal scrolling.
 
 ## Layout
 

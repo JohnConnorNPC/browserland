@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .. import build_version, protocol
+from .altscreen import AltScreenSniffer
 from .backends import create_backend
 from .backends.base import PtyBackend
 from .client import BrokerClient
@@ -32,36 +33,59 @@ LOGGER = logging.getLogger(__name__)
 _DETECT_INTERVAL = 1.5
 
 
-def _render_screen_text(data: bytes, cols: int, rows: int):
-    """Render the ring and return ``(text, degraded)``: the settled grid as
-    ``rows`` plain-text lines. Runs in a worker thread; never raises.
+def _render_screen_text(data: bytes, cols: int, rows: int,
+                        view: str = "screen", lines: int = 0,
+                        alt_screen: bool = False):
+    """Render the ring for an MCP read; return a dict
+    ``{text, degraded, alt_screen, cursor, view, history_lines}``. Runs in a
+    worker thread; never raises (#15, #21).
 
-    pyte is the high-fidelity path (full grid + SGR). When it is unavailable or
-    raises, fall back to the dependency-free :mod:`textgrid` emulator, which
-    still returns a clean, BOUNDED grid (so a full-screen TUI reads as a grid,
-    not a 300 KB raw dump — issue #15). Both are real grid renders, so
-    ``degraded=False``. ``degraded=True`` is now reserved for the last-ditch
-    raw decode if even the built-in renderer somehow fails — which it is built
-    not to."""
-    cols = max(1, cols)
-    rows = max(1, rows)
+    pyte is the high-fidelity renderer for the CURRENT screen (trimmed to the
+    last restart so it's bounded — #21 B). The dependency-free :mod:`textgrid`
+    owns scrollback (it captures primary-screen history) and is the no-pyte
+    fallback. ``alt_screen`` (the agent's live-tracked state) overrides
+    ``view="scrollback"`` — the grid is the whole story for a full-screen TUI,
+    so scrollback is meaningless; the returned ``view`` reflects what was
+    actually produced. ``degraded=True`` (``view="raw"``, ``cursor=None``) is
+    the last-ditch raw decode when no grid could be produced (#15 symptom)."""
     try:
-        import pyte  # type: ignore
-        screen = pyte.Screen(cols, rows)
-        stream = pyte.ByteStream(screen)
-        stream.feed(data)
-        return "\n".join(screen.display), False
-    except Exception as exc:  # ImportError or any pyte parse error
-        LOGGER.debug("screen_text pyte render failed (%s); built-in grid", exc)
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+    except (TypeError, ValueError):    # never-raises: bad dims -> a sane default
+        cols, rows = 80, 24
+    want_scrollback = view == "scrollback" and not alt_screen
+    eff_view = "scrollback" if want_scrollback else "screen"
+    if not want_scrollback:
+        # Current screen only: pyte (high fidelity), trimmed like textgrid.
+        try:
+            import pyte  # type: ignore
+            from .snapshot.textgrid import _trim_to_last_restart
+            screen = pyte.Screen(cols, rows)
+            stream = pyte.ByteStream(screen)
+            stream.feed(_trim_to_last_restart(data))
+            cur = {"row": min(max(screen.cursor.y, 0), rows - 1),
+                   "col": min(max(screen.cursor.x, 0), cols - 1)}
+            return {"text": "\n".join(screen.display), "degraded": False,
+                    "alt_screen": alt_screen, "cursor": cur,
+                    "view": "screen", "history_lines": 0}
+        except Exception as exc:  # ImportError or any pyte parse error
+            LOGGER.debug("screen_text pyte render failed (%s); built-in grid",
+                         exc)
+    # textgrid: scrollback (it owns history) OR the no-pyte screen fallback.
     try:
         from .snapshot import textgrid
-        return textgrid.render(data, cols, rows), False
+        r = textgrid.render_screen(data, cols, rows, eff_view, lines)
+        return {"text": r["text"], "degraded": False, "alt_screen": alt_screen,
+                "cursor": r["cursor"], "view": eff_view,
+                "history_lines": r["history_lines"]}
     except Exception as exc:  # defensive: textgrid is built never to raise
         LOGGER.warning("screen_text grid render failed (%s); raw decode", exc)
         # Bounded raw decode: cap to the tail so a degraded read can never blow
         # the MCP token budget (the original #15 symptom).
         cap = max(cols * rows * 4, 4096)
-        return data.decode("utf-8", "replace")[-cap:], True
+        return {"text": data.decode("utf-8", "replace")[-cap:],
+                "degraded": True, "alt_screen": alt_screen, "cursor": None,
+                "view": "raw", "history_lines": 0}
 
 
 def _safe_cwd(configured: Optional[str]) -> str:
@@ -92,6 +116,10 @@ class SessionState:
     # This agent's build id (webterm.build_version()), reported in the hello so
     # the broker can surface it and flag a stale deployment (#22).
     version: str = field(default_factory=build_version)
+    # Live alternate-screen state (#21), tracked off the PTY stream so a
+    # read_screen knows screen-vs-scrollback even after the alt-enter has
+    # scrolled out of the ring.
+    alt_screen: bool = False
 
 
 class Agent:
@@ -109,6 +137,7 @@ class Agent:
         )
         self.ring = ByteRing(config.ring_bytes)
         self.sniffer = OscTitleSniffer()
+        self._alt_sniffer = AltScreenSniffer()   # live alt-screen state (#21)
         self.out_q: "asyncio.Queue" = asyncio.Queue()
         self.client = BrokerClient(
             config.broker_url,
@@ -175,6 +204,8 @@ class Agent:
 
     def _on_pty_data(self, chunk: bytes) -> None:
         self.ring.append(chunk)
+        # Track alt-screen live (#21): survives ring eviction, unlike a re-scan.
+        self.state.alt_screen = self._alt_sniffer.feed(chunk)
         new_title = self.sniffer.feed(chunk)
         if new_title is not None and new_title != self.state.title:
             # State updates before the frame is enqueued, so a hello built
@@ -330,21 +361,34 @@ class Agent:
 
         loop.create_task(_run())
 
-    def _on_screen_request(self, req: int) -> None:
+    def _on_screen_request(self, req: int, view: str = "screen",
+                           lines: int = 0) -> None:
         # MCP /mcp/read: render the live screen as plain text. Snapshot the
-        # ring + dims synchronously on the loop (consistent view), then render
-        # off-loop (pyte can be CPU-heavy on a large ring) and enqueue the
-        # reply on the SAME ordered out-queue as live output.
+        # ring + dims + live alt-screen state synchronously on the loop
+        # (consistent view), then render off-loop (pyte can be CPU-heavy on a
+        # large ring) and enqueue the reply on the SAME ordered out-queue.
         loop = asyncio.get_running_loop()
         data = self.ring.get()
         cols, rows = self.state.cols, self.state.rows
+        alt = self.state.alt_screen
 
         async def _run() -> None:
-            text, degraded = await loop.run_in_executor(
-                None, _render_screen_text, data, cols, rows)
-            self._enqueue(
-                "txt", protocol.screen_text_frame(req, text, cols, rows,
-                                                  degraded))
+            try:
+                r = await loop.run_in_executor(
+                    None, _render_screen_text, data, cols, rows, view, lines,
+                    alt)
+                self._enqueue("txt", protocol.screen_text_frame(
+                    req, r["text"], cols, rows, degraded=r["degraded"],
+                    alt_screen=r["alt_screen"], cursor=r["cursor"],
+                    view=r["view"], history_lines=r["history_lines"]))
+            except Exception as exc:
+                # Always answer the RPC — an unhandled failure here would leave
+                # the broker waiting until it times out (no_producer_rpc).
+                LOGGER.warning("screen_text request failed (%s); degraded reply",
+                               exc)
+                self._enqueue("txt", protocol.screen_text_frame(
+                    req, "", cols, rows, degraded=True, alt_screen=alt,
+                    cursor=None, view="raw", history_lines=0))
 
         loop.create_task(_run())
 

@@ -142,3 +142,23 @@ def test_hello_id_within_js_safe_range():
     for _ in range(100):
         wid = launcher._allocate_window_id()
         assert (1 << 52) <= wid < (1 << 53)
+
+
+def test_screen_text_please_frame_view_lines():
+    f = json.loads(protocol.screen_text_please_frame(5, "scrollback", 200))
+    assert f == {"type": "screen_text_please", "req": 5,
+                 "view": "scrollback", "lines": 200}
+    d = json.loads(protocol.screen_text_please_frame(5))
+    assert d["view"] == "screen" and d["lines"] == 0
+
+
+def test_screen_text_frame_alt_cursor_view_fields():
+    f = json.loads(protocol.screen_text_frame(
+        7, "grid", 80, 24, alt_screen=True,
+        cursor={"row": 3, "col": 9}, view="screen", history_lines=0))
+    assert f["alt_screen"] is True and f["view"] == "screen"
+    assert f["cursor"] == {"row": 3, "col": 9} and f["history_lines"] == 0
+    # degraded -> cursor null, view raw
+    d = json.loads(protocol.screen_text_frame(
+        7, "raw", 80, 24, degraded=True, cursor=None, view="raw"))
+    assert d["degraded"] is True and d["cursor"] is None and d["view"] == "raw"

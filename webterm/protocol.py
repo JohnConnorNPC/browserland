@@ -148,11 +148,15 @@ def procs_please_frame(req: int) -> str:
     return json.dumps({"type": "procs_please", "req": int(req)})
 
 
-def screen_text_please_frame(req: int) -> str:
+def screen_text_please_frame(req: int, view: str = "screen",
+                             lines: int = 0) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
-    producers have no handler, so the request times out -> 502)."""
-    return json.dumps({"type": "screen_text_please", "req": int(req)})
+    producers have no handler, so the request times out -> 502). ``view``
+    (``"screen"`` default / ``"scrollback"``) + ``lines`` request scrollback
+    history above the current grid (#21); older agents ignore the extra keys."""
+    return json.dumps({"type": "screen_text_please", "req": int(req),
+                       "view": str(view), "lines": int(lines)})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -186,20 +190,35 @@ def git_status_frame(req: int, status: Dict[str, Any]) -> str:
 
 
 def screen_text_frame(req: int, text: str, cols: int, rows: int,
-                      degraded: bool = False) -> str:
+                      degraded: bool = False, alt_screen: bool = False,
+                      cursor: Optional[Dict[str, int]] = None,
+                      view: str = "screen", history_lines: int = 0) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
-    request. ``text`` is a bounded ``rows``x``cols`` grid — rendered via pyte,
-    or, without pyte, the dependency-free in-house emulator. ``degraded`` is
-    reserved for the rare last-ditch raw decode (neither renderer produced a
-    grid), so the MCP caller knows the text is not a clean grid render."""
-    return json.dumps({
+    request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
+    of scrollback above it when ``view="scrollback"``), rendered via pyte or the
+    dependency-free in-house emulator. ``alt_screen`` (#21) is whether the
+    terminal is showing a full-screen alternate buffer — when true, scrollback
+    is meaningless and ``view`` comes back ``"screen"``. ``cursor`` is
+    ``{row, col}`` 0-based within the grid (``None`` when degraded). ``degraded``
+    is the rare last-ditch raw decode (``view="raw"``), so the caller knows the
+    text is not a clean grid render."""
+    frame: Dict[str, Any] = {
         "type": "screen_text",
         "req": int(req),
         "text": str(text),
         "cols": int(cols),
         "rows": int(rows),
         "degraded": bool(degraded),
-    })
+        "alt_screen": bool(alt_screen),
+        "view": str(view),
+        "history_lines": int(history_lines),
+    }
+    # cursor is null on the degraded raw path (no grid to locate it in) — the
+    # helper enforces the invariant regardless of what the caller passed.
+    frame["cursor"] = (None if bool(degraded) or not isinstance(cursor, dict)
+                       else {"row": int(cursor.get("row", 0)),
+                             "col": int(cursor.get("col", 0))})
+    return json.dumps(frame)
 
 
 # ---------------------------------------------------------------------------

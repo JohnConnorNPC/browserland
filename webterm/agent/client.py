@@ -57,7 +57,7 @@ class BrokerClient:
         on_procs_request: Optional[Callable[[int], None]] = None,
         on_kill_request: Optional[Callable[[int, int], None]] = None,
         on_git_request: Optional[Callable[[int], None]] = None,
-        on_screen_request: Optional[Callable[[int], None]] = None,
+        on_screen_request: Optional[Callable[..., None]] = None,
     ) -> None:
         self._url = url
         self._token = token
@@ -210,7 +210,11 @@ class BrokerClient:
                     self._on_git_request(_int(data.get("req"), -1))
             elif mtype == "screen_text_please":
                 if self._on_screen_request is not None:
-                    self._on_screen_request(_int(data.get("req"), -1))
+                    # view/lines drive scrollback (#21); absent for older brokers.
+                    self._on_screen_request(
+                        _int(data.get("req"), -1),
+                        str(data.get("view", "screen") or "screen"),
+                        _int(data.get("lines"), 0))
             else:
                 LOGGER.debug("unknown broker frame type %r", mtype)
 

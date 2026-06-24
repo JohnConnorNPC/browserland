@@ -229,16 +229,104 @@ def test_agent_uses_bounded_grid_without_pyte(monkeypatch):
     # Force `import pyte` to fail so _render_screen_text takes the textgrid path.
     monkeypatch.setitem(sys.modules, "pyte", None)
     data = _tui_stream()
-    text, degraded = agent_mod._render_screen_text(data, 60, 8)
-    assert degraded is False                  # a real grid render, not a dump
-    assert len(text) == 60 * 8 + 7            # bounded to the window
-    assert "49%" in text and "⣿" in text  # settled frame + braille survive
+    r = agent_mod._render_screen_text(data, 60, 8)
+    assert r["degraded"] is False             # a real grid render, not a dump
+    assert len(r["text"]) == 60 * 8 + 7       # bounded to the window
+    assert "49%" in r["text"] and "⣿" in r["text"]
+    assert r["view"] == "screen" and r["cursor"] is not None
 
 
 def test_agent_pyte_path_renders_grid():
     pytest.importorskip("pyte")
     from webterm.agent import agent as agent_mod
 
-    text, degraded = agent_mod._render_screen_text(_tui_stream(), 60, 8)
-    assert degraded is False
-    assert "49%" in text
+    r = agent_mod._render_screen_text(_tui_stream(), 60, 8)
+    assert r["degraded"] is False
+    assert "49%" in r["text"]
+    assert r["cursor"] is not None
+
+
+def test_render_screen_text_alt_forces_screen_view():
+    from webterm.agent import agent as agent_mod
+    # alt_screen=True must override view=scrollback (the grid is the whole story).
+    r = agent_mod._render_screen_text(b"a\r\nb\r\n", 20, 3,
+                                      view="scrollback", lines=50,
+                                      alt_screen=True)
+    assert r["alt_screen"] is True
+    assert r["view"] == "screen" and r["history_lines"] == 0
+
+
+def test_render_screen_text_degraded_cursor_null(monkeypatch):
+    from webterm.agent import agent as agent_mod
+    from webterm.agent.snapshot import textgrid as tg
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(sys.modules, "pyte", None)   # skip the pyte path
+    monkeypatch.setattr(tg, "render_screen", _boom)  # force the raw fallback
+    r = agent_mod._render_screen_text(b"\x1b[31mhi", 10, 3)
+    assert r["degraded"] is True
+    assert r["view"] == "raw" and r["cursor"] is None
+
+
+# ---- #21: render_screen (cursor + scrollback + alt-aware history) ----------
+
+def test_render_screen_basic_cursor():
+    # CUP to row2 col3 (1-based), write Hi -> cursor ends at row1, col5 (0-based).
+    r = textgrid.render_screen(b"\x1b[2;3HHi", 10, 3)
+    assert r["history_lines"] == 0
+    assert r["cursor"] == {"row": 1, "col": 4}   # after 'i' at col3 -> col4
+    assert _grid(r["text"])[1] == "  Hi      "
+
+
+def test_render_screen_scrollback_captures_primary_history():
+    data = b"".join(f"line{i}\r\n".encode() for i in range(20))
+    r = textgrid.render_screen(data, 12, 5, view="scrollback", lines=10)
+    assert r["history_lines"] > 0
+    # early lines that scrolled off the top are now in the prepended history
+    assert "line0" in r["text"] or "line1" in r["text"]
+    # screen-only view does NOT include the old lines
+    s = textgrid.render_screen(data, 12, 5)
+    assert s["history_lines"] == 0 and "line0" not in s["text"]
+
+
+def test_render_screen_scrollback_excludes_alt_but_keeps_primary_history():
+    # Real primary history scrolls off, THEN a TUI session, THEN primary again.
+    data = (b"".join(f"sh{i}\r\n".encode() for i in range(12))   # scroll off
+            + b"\x1b[?1049h"
+            + b"".join(f"tui{i}\r\n".encode() for i in range(30))
+            + b"\x1b[?1049l"
+            + b"DONE\r\n")
+    r = textgrid.render_screen(data, 14, 4, view="scrollback", lines=50)
+    # TUI scroll must NOT pollute shell scrollback...
+    assert "tui0" not in r["text"] and "tui20" not in r["text"]
+    # ...but pre-TUI scrolled history survives (#21 review P1: scrollback must
+    # NOT use the screen-only trim, which would discard it).
+    assert "sh0" in r["text"]
+
+
+def test_render_screen_scrollback_survives_clear():
+    # history -> CSI 2J -> new output: scrolled-off history survives the clear
+    # for scrollback, but the screen-only (trimmed) view starts after the 2J.
+    data = (b"".join(f"old{i}\r\n".encode() for i in range(12))
+            + b"\x1b[2J\x1b[H"
+            + b"".join(f"new{i}\r\n".encode() for i in range(6)))
+    r = textgrid.render_screen(data, 14, 4, view="scrollback", lines=50)
+    assert "old0" in r["text"]                       # scrollback keeps it
+    s = textgrid.render_screen(data, 14, 4)          # screen view trims at 2J
+    assert "old0" not in s["text"]
+
+
+def test_render_screen_scrollback_bounded():
+    # 5000 lines -> history capped (deque maxlen + cell budget), not unbounded.
+    data = b"".join(f"L{i}\r\n".encode() for i in range(5000))
+    r = textgrid.render_screen(data, 80, 24, view="scrollback", lines=100000)
+    assert r["history_lines"] <= 1000
+
+
+def test_render_screen_history_cell_bounded_for_wide_grid():
+    # Wide grid: retained history is bounded by CELLS, not 1000 full rows.
+    data = b"".join(f"W{i}\r\n".encode() for i in range(3000))
+    r = textgrid.render_screen(data, 500, 4, view="scrollback", lines=100000)
+    assert r["history_lines"] <= 100_000 // 500   # == 200

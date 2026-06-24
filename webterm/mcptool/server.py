@@ -160,9 +160,16 @@ def list_profiles() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def read_screen(id: int) -> Dict[str, Any]:
-    """Render a terminal's current screen as plain text. Pass a window id from list_terminals."""
-    return get_client().read_screen(id)
+def read_screen(id: int, view: str = "screen", lines: int = 0) -> Dict[str, Any]:
+    """Render a terminal's current screen as plain text. Pass a window id from
+    list_terminals.
+
+    The result includes `alt_screen` (true for a full-screen TUI like mc/btop/
+    vim — the grid is the whole story, so scrollback is meaningless) and
+    `cursor` {row, col}. For a shell, pass `view="scrollback"` with `lines=N` to
+    get up to N lines of history above the current grid (`history_lines` reports
+    how many were included; ignored when `alt_screen` is true)."""
+    return get_client().read_screen(id, view=view, lines=lines)
 
 
 @mcp.tool()

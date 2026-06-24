@@ -97,8 +97,26 @@ def test_read_screen_posts_id():
     with _client(handler) as c:
         out = c.read_screen(42)
     assert seen["path"] == "/mcp/read"
-    assert seen["body"] == {"id": 42}
+    assert seen["body"] == {"id": 42}        # back-compat: no view/lines
     assert out["text"] == "hi"
+
+
+def test_read_screen_scrollback_params_and_fields():
+    """#21: view/lines go in the body; alt_screen/cursor/history_lines surface."""
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={
+            "ok": True, "id": 4, "cols": 80, "rows": 24, "text": "g",
+            "alt_screen": False, "view": "scrollback", "history_lines": 7,
+            "cursor": {"row": 2, "col": 5}})
+
+    with _client(handler) as c:
+        out = c.read_screen(4, view="scrollback", lines=200)
+    assert seen["body"] == {"id": 4, "view": "scrollback", "lines": 200}
+    assert out["alt_screen"] is False and out["view"] == "scrollback"
+    assert out["history_lines"] == 7 and out["cursor"] == {"row": 2, "col": 5}
 
 
 def test_send_input_posts_id_and_data():

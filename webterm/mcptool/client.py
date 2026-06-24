@@ -140,9 +140,16 @@ class BrowserlandClient:
         """Launchable profile names + the broker default."""
         return self._get("/mcp/profiles")
 
-    def read_screen(self, id: int) -> Dict[str, Any]:
-        """Render a terminal's screen as plain text."""
-        return self._post("/mcp/read", {"id": id}, timeout=self._read_timeout)
+    def read_screen(self, id: int, view: str = "screen",
+                    lines: int = 0) -> Dict[str, Any]:
+        """Render a terminal's screen as plain text. ``view="scrollback"`` with
+        ``lines>0`` prepends that many lines of history above the grid (#21)."""
+        body: Dict[str, Any] = {"id": id}
+        if view and view != "screen":
+            body["view"] = view
+        if lines:
+            body["lines"] = lines
+        return self._post("/mcp/read", body, timeout=self._read_timeout)
 
     def send_input(self, id: int, data: str) -> Dict[str, Any]:
         r"""Type into a terminal. Requires the window be in ``readwrite`` mode.
