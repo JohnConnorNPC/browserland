@@ -183,8 +183,10 @@ def git_status_frame(req: int, status: Dict[str, Any]) -> str:
 def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       degraded: bool = False) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
-    request. ``degraded`` flags a best-effort raw decode (pyte unavailable),
-    so the MCP caller knows the text is not a clean grid render."""
+    request. ``text`` is a bounded ``rows``x``cols`` grid — rendered via pyte,
+    or, without pyte, the dependency-free in-house emulator. ``degraded`` is
+    reserved for the rare last-ditch raw decode (neither renderer produced a
+    grid), so the MCP caller knows the text is not a clean grid render."""
     return json.dumps({
         "type": "screen_text",
         "req": int(req),

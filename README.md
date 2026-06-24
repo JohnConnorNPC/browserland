@@ -102,8 +102,9 @@ is gated by the same per-window access modes and the master enable switch.
   screen of a live terminal by replaying its PTY ring buffer through
   [pyte](https://github.com/selectel/pyte), so a harness can read full-screen
   apps (btop, htop, vim, less) — not just line-oriented scrollback — and
-  `send_input` types into them. When pyte is unavailable the read falls back to a
-  raw UTF-8 dump flagged `degraded: true`.
+  `send_input` types into them. Without pyte the read falls back to a
+  dependency-free in-house renderer that still returns a **bounded** rendered
+  grid (`degraded: true` is now reserved for a rare last-ditch raw decode).
 - **The live session you're working in** — `list_terminals` enumerates running
   sessions (id, title, cwd, agent, kind, cols/rows, mode), so a harness can
   attach to the exact console a person is using right now, read its state, and
@@ -119,7 +120,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) |
 | `list_terminals` | `GET /mcp/terminals` | visible terminals (windows in `off` mode are hidden) |
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
-| `read_screen(id)` | `POST /mcp/read` | screen rendered as plain text (pyte; `degraded` raw fallback) |
+| `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
 

@@ -33,20 +33,35 @@ _DETECT_INTERVAL = 1.5
 
 
 def _render_screen_text(data: bytes, cols: int, rows: int):
-    """Render the ring through pyte and return ``(text, degraded)``: the
-    settled grid as ``rows`` plain-text lines (pyte's ``screen.display``).
-    Runs in a worker thread. If pyte is unavailable or rendering fails, fall
-    back to a best-effort UTF-8 decode of the raw ring with ``degraded=True``
-    so the MCP caller knows it is not a clean grid render. Never raises."""
+    """Render the ring and return ``(text, degraded)``: the settled grid as
+    ``rows`` plain-text lines. Runs in a worker thread; never raises.
+
+    pyte is the high-fidelity path (full grid + SGR). When it is unavailable or
+    raises, fall back to the dependency-free :mod:`textgrid` emulator, which
+    still returns a clean, BOUNDED grid (so a full-screen TUI reads as a grid,
+    not a 300 KB raw dump — issue #15). Both are real grid renders, so
+    ``degraded=False``. ``degraded=True`` is now reserved for the last-ditch
+    raw decode if even the built-in renderer somehow fails — which it is built
+    not to."""
+    cols = max(1, cols)
+    rows = max(1, rows)
     try:
         import pyte  # type: ignore
-        screen = pyte.Screen(max(1, cols), max(1, rows))
+        screen = pyte.Screen(cols, rows)
         stream = pyte.ByteStream(screen)
         stream.feed(data)
         return "\n".join(screen.display), False
     except Exception as exc:  # ImportError or any pyte parse error
-        LOGGER.debug("screen_text pyte render failed (%s); raw fallback", exc)
-        return data.decode("utf-8", "replace"), True
+        LOGGER.debug("screen_text pyte render failed (%s); built-in grid", exc)
+    try:
+        from .snapshot import textgrid
+        return textgrid.render(data, cols, rows), False
+    except Exception as exc:  # defensive: textgrid is built never to raise
+        LOGGER.warning("screen_text grid render failed (%s); raw decode", exc)
+        # Bounded raw decode: cap to the tail so a degraded read can never blow
+        # the MCP token budget (the original #15 symptom).
+        cap = max(cols * rows * 4, 4096)
+        return data.decode("utf-8", "replace")[-cap:], True
 
 
 def _safe_cwd(configured: Optional[str]) -> str:

@@ -300,10 +300,14 @@ access mode:
 {"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n..."}
 ```
 
-The agent renders the screen through pyte off its event loop. If pyte is
-unavailable on the agent the text is a best-effort raw decode and the response
-adds **`"degraded": true`**. Only **agent** producers answer; a non-agent
-terminal producer has no handler, so the request times out → **502
+The agent renders the screen off its event loop. With pyte it returns the full
+grid; without pyte it falls back to a dependency-free in-house emulator
+(`agent/snapshot/textgrid.py`) that still produces a **bounded** `rows`×`cols`
+grid — so a full-screen TUI reads as a clean grid (box-drawing/braille intact),
+not an unbounded raw-ANSI dump (#15). Both paths are real grid renders, so
+**`"degraded": true`** is now reserved for the rare last-ditch raw decode (it
+no longer appears for ordinary TUIs). Only **agent** producers answer; a
+non-agent terminal producer has no handler, so the request times out → **502
 `{"error":"no_producer_rpc"}`**.
 
 **`POST /mcp/input`** — body `{"id": <int>, "data": "<str>"}` → `{"ok":true}`.

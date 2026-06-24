@@ -73,7 +73,7 @@ Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
 | `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) |
 | `list_terminals` | `GET /mcp/terminals` | visible terminals (windows in `off` mode are hidden) |
 | `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
-| `read_screen(id)` | `POST /mcp/read` | screen rendered as plain text |
+| `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
 
