@@ -1386,25 +1386,28 @@
             <div class="set-pane" id="set-pane-host">
                 <div class="set-loading" id="set-host-loading"
                      style="display:none">loading settings&hellip;</div>
-                <!-- Appearance (browser-local, like restore-on-refresh): bound to
-                     the live local getSettings(), shown on every host tab, applied
-                     to this browser immediately. Radios/options injected at init
-                     from THEMES/PATTERNS so they stay in sync. -->
-                <div class="set-section">
+                <!-- Appearance + browser chrome (theme/pattern/clock/start-button/
+                     restore/taskbar-filter) are BROWSER-GLOBAL: one browser renders
+                     one theme regardless of which host's windows it shows. They bind
+                     to the live local getSettings() and apply to this browser
+                     immediately, so renderSettings() shows the `.set-browser-global`
+                     sections ONLY on the local ('this broker') tab — a remote host
+                     tab shows just that host's own settings (#17). -->
+                <div class="set-section set-browser-global">
                     <div class="set-title">Color scheme</div>
                     <div id="set-theme" class="set-row"></div>
                 </div>
-                <div class="set-section">
+                <div class="set-section set-browser-global">
                     <div class="set-title">Background pattern</div>
                     <div class="set-row"><label>pattern</label>
                         <select id="set-pattern"></select></div>
                 </div>
-                <div class="set-section">
+                <div class="set-section set-browser-global">
                     <div class="set-title">Date &amp; time</div>
                     <label class="set-check"><input type="checkbox" id="set-clock" />
                         Show date &amp; time (bottom-right)</label>
                 </div>
-                <div class="set-section">
+                <div class="set-section set-browser-global">
                     <div class="set-title">Start button</div>
                     <div class="set-row"><label>label</label>
                         <input type="text" id="set-start-label" maxlength="24"
@@ -1412,13 +1415,14 @@
                     <div class="set-hint">The launch button still launches /
                         right-click for profiles. Blank = +</div>
                 </div>
+                <!-- Default start path is PER-HOST (#17): editing it on a remote
+                     host's tab persists to THAT host (no .set-browser-global). -->
                 <div class="set-section">
                     <div class="set-title">Default start path</div>
                     <div class="set-row">
                         <input type="text" id="set-start-path"
                                placeholder="e.g. C:\projects or /home/me/projects" /></div>
-                    <div class="set-hint">Where new terminals start on the local
-                        broker's host (and any remote host of the same OS).
+                    <div class="set-hint">Where new terminals start on THIS host.
                         Must be an existing folder. Blank = the agent's
                         default.</div>
                 </div>
@@ -1459,21 +1463,20 @@
                     <div class="set-hint">a slim draggable bar at the bottom of the
                         tiling workspace, shown whenever the strip can scroll right.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section set-browser-global">
                     <div class="set-title">Restore on refresh</div>
                     <label class="set-check"><input type="checkbox" id="set-restore-refresh" />
                         Restore open terminals on refresh</label>
                     <div class="set-hint">when this browser reloads, re-open the
                         terminals you had open and reattach to their running
-                        agents. Governs this browser's startup — shown the same
-                        on every host tab.</div>
+                        agents. Governs this browser's startup.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section set-browser-global">
                     <div class="set-title">Taskbar workspace filter</div>
                     <label class="set-check"><input type="checkbox" id="set-taskbar-hide-other-ws" />
                         Hide windows on other workspaces</label>
                     <div class="set-hint">show only the active workspace's windows in the
-                        taskbar. Governs this browser; shown the same on every host tab.</div>
+                        taskbar. Governs this browser.</div>
                 </div>
                 <div class="set-section">
                     <div class="set-title">Default terminal profile</div>
@@ -1911,10 +1914,15 @@
         // object the settings tab edited is captured up front and PUT directly
         // (NOT re-read from hostStateCache, which a background prefetch may have
         // swapped) so a queued save never drops the user's edit.
-        function putHostState(hostId) {
+        function putHostState(hostId, entry) {
             // Local writes go through the untouched F0 path.
             if (hostId === 'local') { savePrefs(); return Promise.resolve(); }
-            const entry = hostStateCache.get(hostId);
+            // Use the entry the settings tab CAPTURED (makeRemoteTarget passes it)
+            // — never re-read hostStateCache here: an in-flight background prefetch
+            // can replace the cached object after the tab fetched it, and PUTting
+            // that swapped entry would silently drop the user's edit. Fall back to
+            // the cache only for callers that don't hold the entry.
+            if (!entry) entry = hostStateCache.get(hostId);
             if (!entry) return Promise.resolve();
             const prev = hostSaveChains.get(hostId) || Promise.resolve();
             const next = prev.then(() => _putHostStateOnce(hostId, entry))
@@ -11706,47 +11714,57 @@
             return null;
         }
 
-        // Issue #10: resolve the default start path to use as the launch cwd on
-        // `host`. The single startPath belongs to THIS broker's host, so it is
-        // sent on the local host and on any remote host whose reported OS
-        // matches this broker's — never to a different-OS host (the server would
-        // reject a wrong-OS path as cwd_not_dir). Returns '' (=> the agent's own
-        // default cwd) when nothing is configured, the OS is unknown (an older
-        // broker without the field), or a /profiles fetch fails. The legacy
-        // per-OS startPaths map (#2) is honored read-only, keyed by the host's
-        // own OS, so an upgrade keeps working until the path is re-saved. No
-        // /profiles round-trip happens for unconfigured users.
+        // Issue #10/#17: resolve the default start path to use as the launch cwd
+        // on `host`. The path is PER-HOST: the LOCAL host reads the live
+        // getSettings(); a remote host reads its OWN cached settings blob (kept
+        // warm by the background prefetch) — same pattern as hostDefaultProfile.
+        // A host's path is for its own OS, so no cross-host OS matching is needed.
+        // Returns '' (=> the agent's own default cwd) when nothing is configured
+        // for that host. The legacy per-OS startPaths map (#2) is a LOCAL-only
+        // migration artifact, honored read-only keyed by this host's OS, so an
+        // upgrade keeps working until the path is re-saved.
         async function resolveStartPath(host) {
             try {
                 host = host || localHost();
-                const s = getSettings();
+                let s;
+                if (host.id === localHost().id) {
+                    s = getSettings();
+                } else {
+                    // Use the warm prefetch cache; on a cold cache (e.g. a launch
+                    // right after refresh) fetch once so the host's configured
+                    // path is honored deterministically rather than nondeterministically
+                    // falling back to the broker default.
+                    let cached = hostStateCache.get(host.id);
+                    if (!cached) cached = await fetchHostState(host.id);
+                    s = (cached && cached.settings) || null;
+                }
+                if (!s) return '';
                 const p = (typeof s.startPath === 'string') ? s.startPath.trim() : '';
+                if (p) return p;
                 const legacy = (s.startPaths && typeof s.startPaths === 'object'
                     && !Array.isArray(s.startPaths)) ? s.startPaths : null;
-                const legacyWin = (legacy && typeof legacy.windows === 'string')
-                    ? legacy.windows.trim() : '';
-                const legacyPosix = (legacy && typeof legacy.posix === 'string')
-                    ? legacy.posix.trim() : '';
-                if (!p && !legacyWin && !legacyPosix) return '';
+                if (!legacy) return '';
                 const prof = await fetchProfiles(host);
                 const osName = prof && prof.os;
-                if (osName !== 'windows' && osName !== 'posix') return '';
-                if (p) {
-                    // Launching on this broker -> the path always applies. On a
-                    // remote host, only when its OS matches this broker's.
-                    if (host.id === localHost().id) return p;
-                    const localProf = await fetchProfiles(localHost());
-                    return (localProf && localProf.os === osName) ? p : '';
+                if (osName === 'windows') {
+                    return (typeof legacy.windows === 'string')
+                        ? legacy.windows.trim() : '';
                 }
-                return (osName === 'windows') ? legacyWin : legacyPosix;
+                if (osName === 'posix') {
+                    return (typeof legacy.posix === 'string')
+                        ? legacy.posix.trim() : '';
+                }
+                return '';
             } catch (_) { return ''; }
         }
 
-        // Issue #10: the value to show in the single start-path box — the saved
-        // startPath, else the legacy per-OS value for this broker's OS (a host
-        // is one OS, so typically only one legacy field is set). Display only;
-        // resolveStartPath owns what actually gets sent.
-        function startPathForDisplay(s) {
+        // Issue #10/#17: the value to show in the single start-path box — the
+        // saved startPath, else the legacy per-OS value for ``host``'s OS (a host
+        // is one OS, so typically only one legacy field is set). Host-aware: an
+        // upgraded REMOTE broker can carry its own legacy startPaths, so the OS
+        // must come from THAT host's /profiles, not the local broker's. Display
+        // only; resolveStartPath owns what actually gets sent.
+        function startPathForDisplay(s, host) {
             const p = (typeof s.startPath === 'string') ? s.startPath.trim() : '';
             if (p) return p;
             const legacy = s.startPaths;
@@ -11755,7 +11773,7 @@
             }
             const w = (typeof legacy.windows === 'string') ? legacy.windows.trim() : '';
             const px = (typeof legacy.posix === 'string') ? legacy.posix.trim() : '';
-            const prof = profilesCache.get(localHost().id);
+            const prof = profilesCache.get((host || localHost()).id);
             const os = prof && prof.os;
             if (os === 'windows') return w;
             if (os === 'posix') return px;
@@ -12951,8 +12969,10 @@
                      get s() { return getSettings(); } };
         }
         function makeRemoteTarget(hostId, entry) {
+            // Capture `entry` in the save closure so the PUT carries the exact
+            // object the form edited, even if a prefetch swaps hostStateCache.
             return { hostId: hostId, isLocal: false, s: entry.settings,
-                     save: () => putHostState(hostId) };
+                     save: () => putHostState(hostId, entry) };
         }
 
         function openSettings() {
@@ -12969,6 +12989,10 @@
             settingsOverlay.classList.add('open');
         }
         function closeSettings() {
+            // Flush a pending (debounced) start-path edit while settingsTarget is
+            // still valid, so closing via Escape / backdrop / a programmatic close
+            // can't drop it (#17).
+            if (_startPathTimer) commitStartPath();
             settingsOverlay.classList.remove('open');
             settingsOpenHostId = null;   // resume background prefetch for remotes
             _kbRecording = null;         // abandon any in-progress capture
@@ -13005,6 +13029,16 @@
             setPaneBrowser.classList.toggle('active', browser);
             setPaneHost.classList.toggle('active', !browser);
         }
+        // Browser-global sections (theme/pattern/clock/start-button/restore/
+        // taskbar-filter) edit THIS browser, not a host — show them only on the
+        // local tab. Toggled SYNCHRONOUSLY on tab select (not just in
+        // renderSettings) so they can't linger visible-and-editing-local while a
+        // remote /state load is in flight or has failed (#17).
+        function applyBrowserGlobalVisibility(show) {
+            for (const el of document.querySelectorAll('.set-browser-global')) {
+                el.style.display = show ? '' : 'none';
+            }
+        }
         // Switch tabs. Browser + local are synchronous; a remote host awaits a
         // fresh /state GET (with a "loading…" placeholder) before its form is
         // populated and editable.
@@ -13030,6 +13064,7 @@
             // await early-returns instead of writing to the previous tab's blob.
             settingsTarget = null;
             settingsOpenHostId = tabId;     // pause prefetch for this host
+            applyBrowserGlobalVisibility(false);  // hide local-only controls now
             setHostLoadingEl.style.display = '';
             setPaneHost.classList.add('loading');
             const entry = await fetchHostState(tabId);
@@ -13061,6 +13096,7 @@
             const t = settingsTarget;
             if (!t) return;
             const s = t.s;
+            applyBrowserGlobalVisibility(t.isLocal);
             setColsEl.value = s.size ? s.size.cols : '';
             setRowsEl.value = s.size ? s.size.rows : '';
             setShowId.checked = !!s.show.id;
@@ -13076,8 +13112,8 @@
             setRestore.checked = !!getSettings().restoreOnRefresh;
             setHideOtherWs.checked = !!getSettings().hideTaskbarOtherWs;
 
-            // Appearance is browser-local too — reflect the LIVE local settings
-            // on every host tab (not the remote tab's `s`).
+            // Appearance is browser-global — reflect the LIVE local settings
+            // (these controls are hidden on remote tabs, shown only on local).
             const ls = getSettings();
             for (const rb of setThemeEl.querySelectorAll('input[type=radio]')) {
                 rb.checked = (rb.value === ls.theme);
@@ -13085,19 +13121,24 @@
             setPatternEl.value = ls.pattern;
             setClockEl.checked = !!ls.clock;
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
-            setStartPathEl.value = startPathForDisplay(ls);
-            // A mixed-OS legacy startPaths blob can't be resolved to THIS host's
-            // value until the local broker's OS is known. If it isn't cached
-            // yet, refresh the box once /profiles lands (unless the user has
-            // since focused it). Guards against a tab switch mid-await, like
-            // renderDefaultProfile below.
-            if (!(ls.startPath || '').trim() && ls.startPaths
-                    && !profilesCache.get(localHost().id)) {
+            // Default start path is PER-HOST (#17): read the target host's own
+            // settings (local = live getSettings(); remote = its cached blob),
+            // resolving any legacy per-OS map against THAT host's OS.
+            const tgtHost = hostById(t.hostId);
+            setStartPathEl.value = startPathForDisplay(s, tgtHost);
+            // A legacy per-OS startPaths blob (#2 migration artifact, which an
+            // upgraded REMOTE broker can also carry) can't resolve to this host's
+            // OS value until that host's /profiles lands — refresh the box once it
+            // does (unless the user has since focused it). Guards a tab switch /
+            // target swap mid-await, like renderDefaultProfile below.
+            if (!(s.startPath || '').trim() && s.startPaths
+                    && tgtHost && !profilesCache.get(tgtHost.id)) {
                 const wantTab = currentSettingsTab;
-                fetchProfiles(localHost()).then(() => {
-                    if (currentSettingsTab === wantTab
+                const tgt = t;
+                fetchProfiles(tgtHost).then(() => {
+                    if (currentSettingsTab === wantTab && settingsTarget === tgt
                             && document.activeElement !== setStartPathEl) {
-                        setStartPathEl.value = startPathForDisplay(getSettings());
+                        setStartPathEl.value = startPathForDisplay(tgt.s, tgtHost);
                     }
                 }).catch(() => {});
             }
@@ -13375,17 +13416,27 @@
         };
         setStartLabelEl.addEventListener('input', commitStartLabel);
         setStartLabelEl.addEventListener('change', commitStartLabel);
-        // Issue #10: the single default start path. Browser-local like
-        // startLabel — no live effect; it only governs the NEXT launch's cwd
-        // (resolveStartPath sends it to same-OS hosts). Saving the box also
-        // retires the legacy per-OS startPaths map (#2) it supersedes.
+        // Issue #10/#17: the default start path is PER-HOST. Write the target
+        // host's settings blob then t.save() (savePrefs for local; the host
+        // /state PUT for remote) — same pattern as the default-profile control.
+        // No live effect (it only governs the NEXT launch's cwd on that host),
+        // and saving retires the legacy per-OS startPaths map (#2) it supersedes.
+        let _startPathTimer = null;
         const commitStartPath = () => {
-            const s = getSettings();
-            s.startPath = (setStartPathEl.value || '').trim();
-            if (s.startPaths) delete s.startPaths;
-            savePrefs();
+            if (_startPathTimer) { clearTimeout(_startPathTimer); _startPathTimer = null; }
+            const t = settingsTarget;
+            if (!t) return;
+            t.s.startPath = (setStartPathEl.value || '').trim();
+            if (t.s.startPaths) delete t.s.startPaths;
+            t.save();
         };
-        setStartPathEl.addEventListener('input', commitStartPath);
+        // Debounced on 'input' so typing persists without a remote /state PUT per
+        // keystroke; 'change' (blur/Enter) and closeSettings() flush immediately
+        // so an edit is never lost to Escape / a programmatic close.
+        setStartPathEl.addEventListener('input', () => {
+            if (_startPathTimer) clearTimeout(_startPathTimer);
+            _startPathTimer = setTimeout(commitStartPath, 400);
+        });
         setStartPathEl.addEventListener('change', commitStartPath);
 
         // Task 8: default terminal profile. Persists the same way every other
