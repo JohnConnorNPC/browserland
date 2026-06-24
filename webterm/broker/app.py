@@ -459,6 +459,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({
             "default": app.ctx.launcher.default_profile,
             "profiles": sorted(app.ctx.launcher.profiles.keys()),
+            # OS of this broker's host so the UI can pick the matching per-OS
+            # default start path (issue #2). "windows" | "posix" — never a
+            # path or anything host-identifying.
+            "os": "windows" if os.name == "nt" else "posix",
         })
 
     def _parse_launch_body(request: Request):

@@ -1413,6 +1413,18 @@
                         right-click for profiles. Blank = +</div>
                 </div>
                 <div class="set-section">
+                    <div class="set-title">Default start path</div>
+                    <div class="set-row"><label>Windows</label>
+                        <input type="text" id="set-start-path-win"
+                               placeholder="e.g. C:\projects" /></div>
+                    <div class="set-row"><label>Linux / macOS</label>
+                        <input type="text" id="set-start-path-posix"
+                               placeholder="e.g. /home/me/projects" /></div>
+                    <div class="set-hint">Where new terminals start, picked by
+                        the target host's OS. Must be an existing folder on that
+                        host. Blank = the agent's default.</div>
+                </div>
+                <div class="set-section">
                     <div class="set-title">Window size (cols &#215; rows)</div>
                     <div class="set-row">
                         <input type="number" id="set-cols" min="35" max="500"
@@ -2300,6 +2312,17 @@
             } else {
                 s.startLabel = s.startLabel.trim().slice(0, 24) || '+';
             }
+            // Issue #2: per-OS default start path for new terminals. The UI
+            // picks .windows or .posix by the target host's reported OS and
+            // sends it as the launch cwd. '' = the agent's own default cwd.
+            if (!s.startPaths || typeof s.startPaths !== 'object'
+                    || Array.isArray(s.startPaths)) {
+                s.startPaths = {};
+            }
+            s.startPaths.windows = (typeof s.startPaths.windows === 'string')
+                ? s.startPaths.windows.trim() : '';
+            s.startPaths.posix = (typeof s.startPaths.posix === 'string')
+                ? s.startPaths.posix.trim() : '';
             // User-editable AGENTS.md section library (synced via /state like the
             // rest of settings). Seed from DEFAULT_SECTIONS the first time a blob
             // lacks one; otherwise validate in place (drop malformed entries,
@@ -11605,6 +11628,17 @@
         // existing call site at the broker's own default cwd.
         async function launchProfile(host, name, cwd) {
             host = host || localHost();
+            // Issue #2: when no explicit cwd was chosen (e.g. via "Open in
+            // folder…"), fall back to the configured per-OS default start path
+            // for this host. Only resolve when one is actually set, so
+            // unconfigured users keep the broker's default cwd and incur no
+            // extra /profiles round-trip.
+            if (!cwd) {
+                const sp = getSettings().startPaths || {};
+                if (sp.windows || sp.posix) {
+                    cwd = await resolveStartPath(host);
+                }
+            }
             if (launchBtn) launchBtn.disabled = true;
             try {
                 const payload = {};
@@ -11662,6 +11696,22 @@
                 }
             } catch (_) {}
             return null;
+        }
+
+        // Issue #2: the configured default start path for `host`, chosen by the
+        // broker's reported OS (from /profiles). Returns '' when none is set,
+        // the OS is unknown (e.g. an older broker without the field), or the
+        // fetch fails — the caller then launches at the agent's own default
+        // cwd, so a wrong-OS path is never sent to a host.
+        async function resolveStartPath(host) {
+            try {
+                const sp = getSettings().startPaths || {};
+                const prof = await fetchProfiles(host);
+                const osName = prof && prof.os;
+                const p = (osName === 'windows') ? sp.windows
+                        : (osName === 'posix') ? sp.posix : '';
+                return (typeof p === 'string') ? p.trim() : '';
+            } catch (_) { return ''; }
         }
 
         function profileMenuItems(host, d) {
@@ -12808,6 +12858,10 @@
         const setPatternEl = document.getElementById('set-pattern');
         const setClockEl = document.getElementById('set-clock');
         const setStartLabelEl = document.getElementById('set-start-label');
+        const setStartPathWinEl =
+            document.getElementById('set-start-path-win');
+        const setStartPathPosixEl =
+            document.getElementById('set-start-path-posix');
         for (const name of Object.keys(THEMES)) {
             const lab = document.createElement('label');
             const rb = document.createElement('input');
@@ -12992,6 +13046,8 @@
             setPatternEl.value = ls.pattern;
             setClockEl.checked = !!ls.clock;
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
+            setStartPathWinEl.value = (ls.startPaths.windows || '');
+            setStartPathPosixEl.value = (ls.startPaths.posix || '');
             renderDefaultProfile();
             renderMcpConfig();
             renderKeybindings();
@@ -13266,6 +13322,18 @@
         };
         setStartLabelEl.addEventListener('input', commitStartLabel);
         setStartLabelEl.addEventListener('change', commitStartLabel);
+        // Issue #2: per-OS default start path. Browser-local like startLabel;
+        // no live effect — it only governs the NEXT launch's cwd on each host.
+        const commitStartPaths = () => {
+            const sp = getSettings().startPaths;
+            sp.windows = (setStartPathWinEl.value || '').trim();
+            sp.posix = (setStartPathPosixEl.value || '').trim();
+            savePrefs();
+        };
+        for (const el of [setStartPathWinEl, setStartPathPosixEl]) {
+            el.addEventListener('input', commitStartPaths);
+            el.addEventListener('change', commitStartPaths);
+        }
 
         // Task 8: default terminal profile. Persists the same way every other
         // control in this form does — mutate the target's settings blob then

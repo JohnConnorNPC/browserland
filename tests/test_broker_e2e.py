@@ -514,6 +514,8 @@ def test_profiles_endpoint(broker_proc):
     # Names only — command/cwd never leave the broker.
     assert all(isinstance(name, str) for name in payload["profiles"])
     assert payload["default"] in payload["profiles"]
+    # Issue #2: the host OS so the UI can pick a per-OS default start path.
+    assert payload["os"] in ("windows", "posix")
 
 
 def test_title_broadcast(broker_proc):
