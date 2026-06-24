@@ -2289,6 +2289,23 @@
             } else {
                 s.sections = normalizeSectionsArray(s.sections);
             }
+            // Per-window MCP access pins (off/read/readwrite), keyed by the
+            // durable window key `<hostId>:<sid>`. Synced via /state so a
+            // window's chosen mode follows it across refresh, browsers, and
+            // same-id broker reconnects. Self-heal: a non-object becomes {};
+            // any entry whose value is not a valid mode is dropped, so a hand-
+            // edited or stale blob can never inject a bogus mode.
+            if (!s.mcpModes || typeof s.mcpModes !== 'object'
+                || Array.isArray(s.mcpModes)) {
+                s.mcpModes = {};
+            } else {
+                for (const k of Object.keys(s.mcpModes)) {
+                    const v = s.mcpModes[k];
+                    if (v !== 'off' && v !== 'read' && v !== 'readwrite') {
+                        delete s.mcpModes[k];
+                    }
+                }
+            }
             return s;
         }
         function getSettings() {
@@ -2310,6 +2327,21 @@
             s.sections = normalizeSectionsArray(arr);
             savePrefs();                          // localStorage + schedulePush
             refreshOpenSectionUIs(opts && opts.skipPanelFor);
+        }
+        // ---- per-window MCP access pins (synced) ----------------------------
+        // getMcpMode returns the saved DESIRED mode for a window key, or null =
+        // "no pin, inherit this broker's live default". setMcpMode records the
+        // pin and persists it through the SAME savePrefs() the Control Panel
+        // uses (localStorage + debounced /state push). The re-assert pass in
+        // refreshTaskbarInner enforces a pin against the window's OWN broker, so
+        // the choice survives refresh / another browser / a same-id reconnect.
+        function getMcpMode(key) {
+            const v = getSettings().mcpModes[key];
+            return (v === 'off' || v === 'read' || v === 'readwrite') ? v : null;
+        }
+        function setMcpMode(key, mode) {
+            getSettings().mcpModes[key] = mode;
+            savePrefs();                          // localStorage + schedulePush
         }
         // Re-render every open agent-docs window's Sections panel + AGENTS.md
         // checklist from the current library. skipPanelWin is excluded from the
@@ -5886,6 +5918,12 @@
         let cascadeIndex = 0;
         let frontId = null;
         let refreshInFlight = false;
+        // Per-window MCP-pin re-assertions in flight (by window key). The 2s
+        // re-assert pass never fires a duplicate POST for a key it is already
+        // driving, and a user-initiated mode change serialises against it via
+        // the same set. A hung POST is bounded by FETCH_TIMEOUT_MS, which frees
+        // the key so a still-mismatched pin retries on the next tick.
+        const _mcpAsserting = new Set();
         // compound key -> deadline(ms). /launch and ?session= deep links
         // park keys here; refreshTaskbarInner opens each one as it appears
         // in its host's /sessions (id-directed — no snapshot diffing).
@@ -11189,6 +11227,7 @@
                         agent: s.agent || '',   // absent on old brokers
                         cwd: s.cwd || '',       // absent on old brokers
                         mcp: s.mcp || 'off',    // effective MCP mode (old brokers: off)
+                        mcpKnown: ('mcp' in s), // broker reports MCP at all?
                         stale,
                         hostId: host.id,
                         hostLabel: host.label,
@@ -11215,6 +11254,24 @@
                     if (merged.has(k) || windows.has(k)
                         || pendingOpens.has(k)) continue;
                     delete prefs[k];
+                    dropped += 1;
+                }
+                // Prune synced per-window MCP pins for THIS host's now-dead
+                // sessions, on the SAME "first OK non-empty poll" safety (a
+                // just-restarted broker's transient [] never reaches here, so a
+                // live pin is never nuked before its agent re-registers). We
+                // prune ONLY here — for a CONFIGURED host that answered — and
+                // NEVER by "prefix not in hostIds": mcpModes is shared via
+                // /state, but a remote host's id is browser-local random, so
+                // deleting an unknown-prefix key would wipe ANOTHER browser's
+                // pin. (Trade: a removed remote host's pins leak as a few small
+                // strings until that browser reloads — harmless.)
+                const mm = getSettings().mcpModes;
+                for (const k of Object.keys(mm)) {
+                    if (k.slice(0, prefix.length) !== prefix) continue;
+                    if (merged.has(k) || windows.has(k)
+                        || pendingOpens.has(k)) continue;
+                    delete mm[k];
                     dropped += 1;
                 }
             }
@@ -11251,6 +11308,50 @@
                 }
                 el.classList.toggle('stale', !!sess.stale);
                 updateTaskbarLabel(key);
+            }
+
+            // ---- re-assert per-window MCP pins ----
+            // The saved mcpModes[key] is the DESIRED policy; each tick, every
+            // OPEN window whose broker-reported mode differs gets ONE idempotent
+            // POST /session/mcp to its OWN broker (mirrors setWindowMcpMode's
+            // host resolution). Mismatch-gated so it clears the moment the
+            // broker reflects the pin, and so an UNTOUCHED window (no pin) keeps
+            // inheriting the live broker default. This restores the mode after a
+            // refresh, a cross-browser move, or a same-id broker reconnect.
+            // Guards: skip pre-MCP brokers (mcpKnown false) so we never hammer
+            // an old broker that can't honour it; lease-gate (a remote broker
+            // another browser owns is leaseInactive — only its active browser
+            // re-asserts, so two views never fight over it; the HOME host is
+            // never leaseInactive); de-dup in-flight POSTs via _mcpAsserting,
+            // each bounded by FETCH_TIMEOUT_MS so a hung fetch frees its key.
+            // This pass NEVER calls savePrefs(), so it can't feed the /state
+            // push loop.
+            for (const [key, sess] of merged) {
+                if (!windows.has(key)) continue;       // only attached windows
+                if (!sess.mcpKnown) continue;          // pre-MCP broker
+                if (_mcpAsserting.has(key)) continue;  // already driving this key
+                const want = getMcpMode(key);
+                if (!want || want === sess.mcp) continue;
+                if (pollStateFor(sess.hostId).leaseInactive) continue;
+                const host = hostById(sess.hostId);
+                if (!host) continue;
+                _mcpAsserting.add(key);
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+                fetch(hostHttpUrl(host, '/session/mcp'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: sess.sid, mode: want }),
+                    signal: ctrl.signal,
+                }).then(r => r.json().catch(() => null)).then(j => {
+                    // Adopt optimistically ONLY if the user hasn't re-pinned
+                    // this key meanwhile (a stale assert must never clobber a
+                    // newer choice; the next poll reconciles the broker).
+                    if (j && j.ok && getMcpMode(key) === want) sess.mcp = want;
+                }).catch(() => {}).finally(() => {
+                    clearTimeout(timer);
+                    _mcpAsserting.delete(key);
+                });
             }
 
             // Removal: a session drops out of `merged` only when ITS host
@@ -12183,17 +12284,31 @@
         function setWindowMcpMode(win, mode) {
             const host = hostById(win.hostId);
             if (!host) return;
+            // Persist the choice as DESIRED policy up front (durable, synced),
+            // independent of the POST: the re-assert pass enforces it until the
+            // broker reflects it, so a dropped POST or a failed /state PUT can
+            // never leave a broker override with no recorded pin (or vice
+            // versa). Add the key to _mcpAsserting so a concurrent re-assert
+            // tick won't fire a competing POST for the same window.
+            setMcpMode(win.id, mode);
+            _mcpAsserting.add(win.id);
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
             fetch(hostHttpUrl(host, '/session/mcp'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: win.sid, mode }),
+                signal: ctrl.signal,
             }).then(r => r.json().catch(() => null)).then(j => {
                 if (j && j.ok) {
                     const sess = sessions.get(win.id);
                     if (sess) sess.mcp = mode;
                     refreshTaskbar();
                 }
-            }).catch(() => {});
+            }).catch(() => {}).finally(() => {
+                clearTimeout(timer);
+                _mcpAsserting.delete(win.id);
+            });
         }
 
         // Hard-kill a terminal/agent session's shell process tree, then close
@@ -12374,11 +12489,14 @@
                 });
             }
             // MCP access (per-window mode): only for terminal sessions — app
-            // docs (notes/editor/etc.) are not server sessions. The ✓ reflects
-            // the effective mode carried on the 2s /sessions poll.
+            // docs (notes/editor/etc.) are not server sessions. The ✓ prefers
+            // the saved pin (the DESIRED mode) so it is correct on first paint,
+            // before the first /sessions poll; with no pin it falls back to the
+            // effective mode carried on the 2s poll (= the live broker default).
             if (win.type !== 'app') {
                 const sess = sessions.get(win.id);
-                const curMode = (sess && sess.mcp) ? sess.mcp : 'off';
+                const curMode = getMcpMode(win.id)
+                    || ((sess && sess.mcp) ? sess.mcp : 'off');
                 items.push({ sep: true });
                 items.push({ label: 'MCP access', enabled: false });
                 for (const [val, lab] of [['off', 'Off'], ['read', 'Read'],

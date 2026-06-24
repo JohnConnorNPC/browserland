@@ -11,7 +11,7 @@ broker_config.json
 # Shared UI state store (/state) + its atomic-write temp files
 webterm_state.json
 .webterm-state-*.tmp
-webterm_mcp.json
+
 # Playwright verification screenshots (test artifacts)
 /*.png
 

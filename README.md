@@ -3,18 +3,23 @@
 
 # Browserland
 
-**A web-based terminal desktop that launches and recovers a fleet of headless
-shells — and the AI coding agents running inside them.**
+**A web-based terminal desktop that launches, streams, and recovers a fleet of
+headless shells — and the AI coding agents running inside them.**
 
 Point a browser at the broker and you get a full windowed desktop of live
-terminals: tile them, tab them, split them, drag them across virtual desktops.
-Each terminal is a real PTY running on some machine, streamed over a WebSocket.
-The shells keep running even when no browser is attached — close the tab, come
-back tomorrow, and the screen heals from a snapshot.
+terminals: tile them, tab them, split them, and drag them across virtual
+desktops. Each terminal is a real PTY running on some machine, streamed to the
+browser over a WebSocket.
+
+The shells keep running even when no browser is attached. Close the tab, come
+back tomorrow, and the screen heals from a snapshot — exactly where you left it.
 
 The name says it plainly: a whole little desktop — windows, terminals, and your
-fleet of AI coding agents — that lives entirely in a browser tab. (`webterm` is
-the Python package/module name.)
+fleet of AI coding agents — living entirely in a browser tab. (`webterm` is the
+Python package and module name.)
+
+Browserland also exposes an **MCP server**, letting LLM harnesses drive the
+terminals directly — including full-screen TUIs.
 
 ## What is this?
 
@@ -77,12 +82,99 @@ The desktop with tiled and floating terminals
   taskbar.
 - **Single active-browser lease**: exactly one browser drives input at a time,
   so two open tabs never fight over the keyboard.
-- **Opt-in MCP interface**: a token-gated HTTP API plus a shipped stdio
-  [MCP](https://modelcontextprotocol.io/) server, so an AI agent can list, read,
-  drive, and launch terminals — under per-window access modes you control.
+- **Opt-in MCP / AI agent access**: an MCP client or AI harness can list,
+  observe, drive, and launch terminals — including live interactive TUIs and the
+  console you're working in — under per-window access modes you control.
+  See **[MCP & AI agent access](#mcp--ai-agent-access)** below.
 - **Token auth, no open RCE**: one token gates non-loopback access and doubles
   as the UI password; launching is **profiles-only** (the client can never
   supply a raw command), with a loopback exemption for local use.
+
+## MCP & AI agent access
+
+The broker exposes a token-gated `/mcp/*` HTTP API and ships a stdio
+[MCP](https://modelcontextprotocol.io/) server (`webterm.mcptool`), so any MCP
+client or AI harness can **list, observe, drive, and launch** terminals. The
+agents are just producers; the broker stays the sole authority — every MCP call
+is gated by the same per-window access modes and the master enable switch.
+
+- **Interactive TUIs, as plain text** — `read_screen` renders the *current*
+  screen of a live terminal by replaying its PTY ring buffer through
+  [pyte](https://github.com/selectel/pyte), so a harness can read full-screen
+  apps (btop, htop, vim, less) — not just line-oriented scrollback — and
+  `send_input` types into them. When pyte is unavailable the read falls back to a
+  raw UTF-8 dump flagged `degraded: true`.
+- **The live session you're working in** — `list_terminals` enumerates running
+  sessions (id, title, cwd, agent, kind, cols/rows, mode), so a harness can
+  attach to the exact console a person is using right now, read its state, and
+  (in `readwrite`) drive it. Sessions persist across browser reloads and broker
+  restarts, so the handle stays valid.
+
+### Tools
+
+Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
+
+| Tool | Endpoint | Notes |
+|---|---|---|
+| `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) |
+| `list_terminals` | `GET /mcp/terminals` | visible terminals (windows in `off` mode are hidden) |
+| `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
+| `read_screen(id)` | `POST /mcp/read` | screen rendered as plain text (pyte; `degraded` raw fallback) |
+| `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
+| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
+
+### Safety / enabling
+
+Access is layered and opt-in — nothing is reachable until you turn it on:
+
+- **Master enable** is **off by default**; while off, every `/mcp/*` call returns
+  `403 mcp_disabled`.
+- **Per-window mode** is `off` / `read` / `readwrite`, with a global
+  `default_mode` for new windows. `off` hides a window entirely; `read` allows
+  observation; `readwrite` additionally allows `send_input`.
+- **`allow_launch`** is a separate gate for `launch_terminal`.
+- The **MCP token** is a bearer secret distinct from the browser `auth_token`
+  (the UI password): the **broker** pins it with `WEB_TERMINAL_MCP_TOKEN` (or the
+  `webterm_mcp.json` sidecar), and the **MCP client** passes the same secret via
+  `BROWSERLAND_MCP_TOKEN` (as the harness examples below show).
+
+### Register with a harness
+
+```bash
+claude mcp add browserland \
+  --env BROWSERLAND_MCP_TOKEN=… \
+  --env BROWSERLAND_MCP_URL=http://127.0.0.1:4445 \
+  -- python -m webterm.mcptool
+```
+
+Any other **stdio** MCP client (Hermes, your own, …) registers the same way —
+point it at the launch command and pass the two env vars:
+
+```json
+{
+  "mcpServers": {
+    "browserland": {
+      "command": "python",
+      "args": ["-m", "webterm.mcptool"],
+      "env": {
+        "BROWSERLAND_MCP_TOKEN": "…",
+        "BROWSERLAND_MCP_URL": "http://127.0.0.1:4445"
+      }
+    }
+  }
+}
+```
+
+Or run the server directly, talking to the local broker:
+
+```bash
+BROWSERLAND_MCP_TOKEN=… python -m webterm.mcptool
+BROWSERLAND_MCP_TOKEN=… browserland-mcp --broker-url http://127.0.0.1:4445
+```
+
+For the full HTTP contract, error table, and config sidecar, see
+**[`docs/TECHNICAL.md`](docs/TECHNICAL.md)** and
+**[`webterm/mcptool/README.md`](webterm/mcptool/README.md)**.
 
 ## Quick start
 
@@ -129,9 +221,7 @@ pip install -e ".[dev]"                # + pytest for the test suite
 
 Mix and match, e.g. `pip install -e ".[pyte,mcp,dev]"`. The `mcp` extra requires
 **Python ≥ 3.10** (the MCP SDK), while everything else runs on **Python ≥ 3.9**.
-
-The shipped MCP server is launched as a module (`python -m webterm.mcptool`) or
-via the installed `carrier-mcp` console script.
+See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 
 ## Project layout
 

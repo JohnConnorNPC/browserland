@@ -176,8 +176,8 @@ re-register within ~10 s of the broker coming back.
 **Tests on Linux**: `python -m pytest tests -q` → expect
 **126 passed, 2 skipped** (the skips are the Windows-ConPTY e2e). This
 includes a real-POSIX-PTY suite (`tests/test_linux_pty.py`) that was
-written blind on Windows — `LINUX_VERIFICATION.md` is the full
-verification checklist to run before deploying.
+written blind on Windows and verified against a real Linux PTY before
+deploying.
 
 ## Protocol (reference)
 
@@ -445,6 +445,6 @@ the box's LAN IP.
 
 ## Relationship to xterm-py
 
-Read-only reference: `X:\Data\xterm-py` (the relay/registry/UI source this
-broker's relay and registry were adapted from). **Not modified by this
-project.** This broker defaults to port **4445**.
+This broker's relay and registry were adapted from `xterm-py`, a separate
+relay/registry/UI codebase, which is not part of or modified by this
+project. This broker defaults to port **4445**.
