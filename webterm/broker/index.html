@@ -414,6 +414,13 @@
         }
         .term-window.app-editor .app-textarea.wrap { white-space: pre-wrap; }
         .term-window.app-editor .app-textarea::selection { background: #2d4a6a; }
+        /* Sticky-note word wrap (#19): no-wrap base (horizontal scroll) with
+           .wrap flipping to wrapping, mirroring the editor. New notes default to
+           wrap on (the builder adds .wrap), so an un-toggled note still wraps. */
+        .term-window.app-note .app-textarea { white-space: pre; }
+        .term-window.app-note .app-textarea.wrap {
+            white-space: pre-wrap; overflow-wrap: anywhere;
+        }
 
 
         /* text-editor toolbar (between the title bar and the textarea) */
@@ -2079,6 +2086,8 @@
                 filePath: win.filePath || null,
                 wrap: !!win.wrap,
                 lineNums: !!win.lineNums,
+                // Per-sticky-note text size (#19); harmless for other kinds.
+                fontSize: win.fontSize,
                 // For a multi-tab window store the window's cwd (win.agentsMdCwd
                 // is a mirror that's null while the CLAUDE tab is active); the
                 // presence of `docs` routes reopen through the tabbed builder.
@@ -7624,8 +7633,13 @@
             // New notes default to pinned (locked); a restored doc keeps its
             // saved choice. Editors default to word-wrap on.
             const locked = appData.locked !== undefined ? !!appData.locked : true;
-            const wrap = !isNote && (docs ? !!initialDoc.wrap
-                : (appData.wrap !== undefined ? !!appData.wrap : true));
+            // Word wrap applies to BOTH editors and notes (#19); both default on.
+            const wrap = docs ? !!initialDoc.wrap
+                : (appData.wrap !== undefined ? !!appData.wrap : true);
+            // Per-note text size (#19): clamped, default 13px (the CSS base).
+            const NOTE_FONT_MIN = 9, NOTE_FONT_MAX = 28, NOTE_FONT_DEFAULT = 13;
+            const noteFontSize = Math.max(NOTE_FONT_MIN, Math.min(NOTE_FONT_MAX,
+                parseInt(appData.fontSize, 10) || NOTE_FONT_DEFAULT));
 
             const dom = document.createElement('div');
             dom.className = 'term-window app-window '
@@ -7669,8 +7683,31 @@
             closeBtn.textContent = '×';
             closeBtn.title = 'close';
 
+            // Sticky-note controls (#19): smaller / larger text + word-wrap
+            // toggle, in the title bar (notes have no editor toolbar). Wired
+            // below once `win` exists.
+            let noteFontDownBtn = null, noteFontUpBtn = null, noteWrapBtn = null;
+            if (isNote) {
+                const mkNoteBtn = (label, ttl) => {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'tb-btn';
+                    b.textContent = label;
+                    b.title = ttl;
+                    return b;
+                };
+                noteFontDownBtn = mkNoteBtn('A−', 'smaller text');
+                noteFontUpBtn = mkNoteBtn('A+', 'larger text');
+                noteWrapBtn = mkNoteBtn('↩', 'toggle word wrap');
+            }
+
             titleBar.appendChild(idBadge);
             titleBar.appendChild(titleText);
+            if (isNote) {
+                titleBar.appendChild(noteFontDownBtn);
+                titleBar.appendChild(noteFontUpBtn);
+                titleBar.appendChild(noteWrapBtn);
+            }
             titleBar.appendChild(minBtn);
             titleBar.appendChild(closeBtn);
 
@@ -7851,6 +7888,8 @@
                 dirty: docs ? !!initialDoc.dirty : false,
                 wrap,
                 lineNums,
+                // Per-note text size (#19); unused by editors.
+                fontSize: noteFontSize,
                 // AGENTS.md editors: the folder whose AGENTS.md this edits. Set
                 // from appData so it survives reload (saveAppWindow persists it),
                 // and drives the CLAUDE.md save hook + template checklist below.
@@ -7883,6 +7922,39 @@
             win.getContent = () => textarea.value;
             win.setContent = (str) => { textarea.value = str == null ? '' : String(str); };
             win.focusEditor = () => { try { textarea.focus(); } catch (_) {} };
+
+            // ---- sticky-note text size + word-wrap controls (#19) -----------
+            // Apply + persist per-note fontSize/wrap. The title-bar buttons were
+            // built above; wire them now that `win` exists.
+            if (isNote) {
+                const applyNoteFont = () => {
+                    textarea.style.fontSize = win.fontSize + 'px';
+                };
+                const applyNoteWrap = () => {
+                    textarea.classList.toggle('wrap', !!win.wrap);
+                    noteWrapBtn.classList.toggle('on', !!win.wrap);
+                    noteWrapBtn.title = win.wrap
+                        ? 'word wrap: on (click to turn off)'
+                        : 'word wrap: off (click to turn on)';
+                };
+                applyNoteFont();
+                applyNoteWrap();
+                noteFontDownBtn.addEventListener('click', () => {
+                    win.fontSize = Math.max(NOTE_FONT_MIN, win.fontSize - 1);
+                    applyNoteFont();
+                    saveAppWindow(win);
+                });
+                noteFontUpBtn.addEventListener('click', () => {
+                    win.fontSize = Math.min(NOTE_FONT_MAX, win.fontSize + 1);
+                    applyNoteFont();
+                    saveAppWindow(win);
+                });
+                noteWrapBtn.addEventListener('click', () => {
+                    win.wrap = !win.wrap;
+                    applyNoteWrap();
+                    saveAppWindow(win);
+                });
+            }
 
             // ---- multi-tab doc model (agent-docs windows only) -------------
             // The editor surface (textarea OR the mounted CM view) always shows
