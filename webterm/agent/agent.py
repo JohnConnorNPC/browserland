@@ -166,6 +166,14 @@ class Agent:
         self._enqueue("bin", chunk)
 
     def _on_pty_exit(self, code: int) -> None:
+        # Push an explicit exit event so the broker can tear attached browsers
+        # down at once instead of waiting on its /sessions poll grace cycle
+        # (~12 s). This rides the SAME ordered out-queue as live output, so it
+        # lands AFTER the child's final bytes; run()'s finally then flushes the
+        # queue (out_q.join, 2 s) before stopping the client, so the frame is
+        # delivered before the WS closes. Fires on the loop, after the last
+        # _on_pty_data (backend contract) — enqueue order is exit-last.
+        self._enqueue("txt", protocol.exit_frame(code))
         if self._exit_fut is not None and not self._exit_fut.done():
             self._exit_fut.set_result(code)
 

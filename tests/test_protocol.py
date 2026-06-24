@@ -43,6 +43,14 @@ def test_resized_frame():
         "type": "resized", "cols": 120, "rows": 32}
 
 
+def test_exit_frame():
+    frame = json.loads(protocol.exit_frame(0))
+    assert frame == {"type": "exit", "code": 0}
+    # Code must be a JSON number, and non-zero codes pass through.
+    assert isinstance(frame["code"], int)
+    assert json.loads(protocol.exit_frame(137)) == {"type": "exit", "code": 137}
+
+
 def test_broker_to_producer_frames():
     assert json.loads(protocol.input_frame("ls\r")) == {
         "type": "input", "data": "ls\r"}

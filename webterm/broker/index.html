@@ -10307,6 +10307,19 @@
                     win.staleSession = true;
                     return;
                 }
+                if (data.type === 'exit') {
+                    // The session's child process exited (PTY EOF). The broker
+                    // forwards this the instant it happens, so tear the window
+                    // down now instead of waiting out the /sessions poll grace
+                    // cycle (~12 s). Ordered after the child's final output, so
+                    // that output has already been written above. staleSession
+                    // guards the rare case the WS races closed first; closeWindow
+                    // is idempotent and disposes the socket so no reattach fires.
+                    win.staleSession = true;
+                    showNotice('session ' + win.sid + ' exited');
+                    closeWindow(win.id);
+                    return;
+                }
                 if (data.type === 'resized') {
                     const cols = Math.max(1, data.cols | 0);
                     const rows = Math.max(1, data.rows | 0);

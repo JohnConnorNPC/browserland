@@ -12,6 +12,7 @@ Producer -> broker (text JSON):
     {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir of the shell
     {"type": "resized", "cols": <int>, "rows": <int>}
+    {"type": "exit",    "code": <int>}    # child process exited (PTY EOF)
 Producer -> broker (binary): raw PTY bytes AND snapshot bytes (no framing;
 single-WS ordering is the only guarantee).
 
@@ -25,6 +26,7 @@ Broker -> browser (text JSON):
     {"type": "title",   "data": "..."}        # live title push on change
     {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir push
+    {"type": "exit",    "code": <int>}    # session's child exited — tear down now
     {"type": "error", "reason": "unknown_session", "session_id": <int>}
 Broker -> browser (binary): producer bytes, verbatim.
 
@@ -97,6 +99,15 @@ def cwd_frame(path: str) -> str:
 
 def resized_frame(cols: int, rows: int) -> str:
     return json.dumps({"type": "resized", "cols": int(cols), "rows": int(rows)})
+
+
+def exit_frame(code: int) -> str:
+    """Child-process exit (PTY EOF). The agent sends this ONCE on a real child
+    exit — never on a transient broker-WS drop — and the broker re-broadcasts
+    it to attached browsers so they tear the window down immediately instead of
+    waiting out the /sessions poll grace cycle (~12 s). A transient producer
+    disconnect carries no exit frame, so reconnect grace is unaffected."""
+    return json.dumps({"type": "exit", "code": int(code)})
 
 
 # ---------------------------------------------------------------------------

@@ -374,6 +374,17 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 # reconverges them.
                 await entry.broadcast_text(protocol.resized_frame(
                     entry.cols, entry.rows))
+            elif mtype == "exit":
+                # The child process exited (PTY EOF). Push the event to every
+                # attached browser so it tears the window down at once, and
+                # deregister NOW (don't wait for this producer WS to close) so
+                # the next /sessions poll already omits the session — no brief
+                # reappear of a dead chip. Then stop reading: the producer is
+                # shutting down and sends nothing more. A transient WS drop
+                # carries NO exit frame, so reconnect grace is untouched.
+                await entry.broadcast_text(protocol.exit_frame(_code(data)))
+                await registry.deregister(entry.id, entry)
+                break
             elif mtype in ("procs", "killed", "git_status", "screen_text"):
                 # Management-RPC replies: resolve the matching pending request
                 # on THIS entry only. _req() tolerates a missing/garbled id by
@@ -396,3 +407,12 @@ def _req(data: Dict[str, Any]) -> int:
         return int(data.get("req"))
     except (TypeError, ValueError):
         return -1
+
+
+def _code(data: Dict[str, Any]) -> int:
+    """Exit code off an ``exit`` frame; a missing/garbled value maps to 0 (the
+    browser only uses the frame as a teardown signal, not the code)."""
+    try:
+        return int(data.get("code"))
+    except (TypeError, ValueError):
+        return 0

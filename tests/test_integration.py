@@ -207,6 +207,24 @@ async def test_child_exit_code_propagates(broker):
     assert any(b"bye" in frame for frame in broker.binary)
 
 
+async def test_child_exit_pushes_exit_frame(broker):
+    """On real child exit the agent pushes an explicit 'exit' event carrying the
+    code, flushed before shutdown — so the broker can tear browsers down at once
+    instead of waiting on the poll grace cycle. Issue #1."""
+    backend = FakeBackend()
+    agent = Agent(make_config(broker), backend=backend)
+    task = asyncio.create_task(agent.run())
+    await broker.wait_connected()
+    backend.feed(b"bye\r\n")
+    backend.exit_child(7)
+    assert await asyncio.wait_for(task, 5) == 7
+    # Exactly one exit frame, carrying the child's code, and the final output
+    # also made it out (the exit frame rides the same ordered queue, last).
+    assert [t for t in broker.texts if t.get("type") == "exit"] == [
+        {"type": "exit", "code": 7}]
+    assert any(b"bye" in frame for frame in broker.binary)
+
+
 async def test_binary_from_broker_is_raw_input(running_agent, broker):
     _, backend, _ = running_agent
     await broker.producer.send(b"\x03")  # binary fallback = raw input

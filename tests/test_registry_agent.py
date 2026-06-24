@@ -117,3 +117,54 @@ def test_whitelist_agent_helper():
     assert _whitelist_agent("vim") == ""
     assert _whitelist_agent("") == ""
     assert _whitelist_agent(None) == ""
+
+
+def test_exit_frame_broadcasts_and_deregisters_immediately():
+    """A producer 'exit' frame (child PTY EOF) must push an exit event to every
+    attached browser AND deregister the session at once — so the next /sessions
+    poll already omits it, instead of the browser waiting out the poll grace
+    cycle. Issue #1 (slow session-exit detection)."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 1, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24,
+                            "kind": "agent"}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+
+        sub = CaptureWS()
+        entry.add_subscriber(sub)
+
+        # Child exits: the broker forwards the exit event and drops the session.
+        ws.feed(json.dumps({"type": "exit", "code": 0}))
+        assert await _wait(lambda: reg.get(1) is None)
+        assert any(json.loads(s) == {"type": "exit", "code": 0}
+                   for s in sub.sent)
+        # The session loop ends on its own after the exit frame (no None feed).
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_exit_frame_garbled_code_defaults_to_zero():
+    """A missing/garbled exit code never breaks teardown — it maps to 0 and the
+    browser still gets a well-formed exit frame."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 2, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(2) is not None)
+        sub = CaptureWS()
+        reg.get(2).add_subscriber(sub)
+
+        ws.feed(json.dumps({"type": "exit", "code": "boom"}))
+        assert await _wait(lambda: reg.get(2) is None)
+        assert any(json.loads(s) == {"type": "exit", "code": 0}
+                   for s in sub.sent)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
