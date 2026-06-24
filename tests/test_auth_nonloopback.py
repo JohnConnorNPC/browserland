@@ -1,0 +1,223 @@
+"""Auth negatives on a non-loopback listener.
+
+Binds a broker to 0.0.0.0 and dials the box's own LAN IP — the connection
+then arrives on a non-loopback sockname, exactly like a remote client,
+without needing a second machine.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+import websockets
+
+REPO = Path(__file__).resolve().parents[1]
+TOKEN = "nonloopback-sekrit"
+
+
+def _lan_ip():
+    candidates = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            candidates.append(info[4][0])
+    except socket.gaierror:
+        pass
+    # Egress-interface fallback: a UDP connect picks a routable source
+    # address without sending a packet (TEST-NET-3 peer, never routed).
+    # Covers boxes whose hostname doesn't resolve to a local address.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("203.0.113.1", 9))
+            candidates.append(probe.getsockname()[0])
+    except OSError:
+        pass
+    for addr in candidates:
+        if addr.startswith("127."):
+            continue
+        # Bind-verify: WSL propagates the Windows host's /etc/hosts, so the
+        # hostname can resolve to an address (e.g. the host's Tailscale IP)
+        # that doesn't exist in this network namespace — dialing it would be
+        # ECONNREFUSED before any auth surface is reached.
+        try:
+            with socket.socket() as probe:
+                probe.bind((addr, 0))
+        except OSError:
+            continue
+        return addr
+    return None
+
+
+LAN_IP = _lan_ip()
+pytestmark = pytest.mark.skipif(
+    LAN_IP is None, reason="no non-loopback IPv4 address on this box")
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _spawn_broker(port: int, token: str = None) -> subprocess.Popen:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("BROWSERLAND_BROKER_URL", None)
+    if token:
+        env["WEB_TERMINAL_TOKEN"] = token
+    else:
+        env.pop("WEB_TERMINAL_TOKEN", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "webterm.broker",
+         "--host", "0.0.0.0", "--port", str(port)],
+        cwd=str(REPO), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 20
+    while True:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/", timeout=5).read()
+            return proc
+        except OSError:
+            pass
+        if proc.poll() is not None:
+            raise RuntimeError(f"broker exited early: {proc.returncode}")
+        if time.time() > deadline:
+            proc.kill()
+            raise RuntimeError("broker did not come up")
+        time.sleep(0.2)
+
+
+def _post(url: str, body: bytes = b"{}", headers: dict = None):
+    request = urllib.request.Request(url, data=body, method="POST",
+                                     headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read() or b"{}")
+
+
+def _headers(method: str, url: str):
+    """(status, case-insensitive headers) — for the CORS assertions."""
+    request = urllib.request.Request(url, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.headers
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers
+
+
+def test_no_token_configured_remote_launch_403_loopback_ok():
+    port = _free_port()
+    proc = _spawn_broker(port, token=None)
+    try:
+        status, payload = _post(f"http://{LAN_IP}:{port}/launch")
+        assert status == 403
+        assert payload["error"] == "launch_disabled_no_token"
+        # Loopback stays usable without a token (unknown profile -> 400
+        # proves we got past the gate).
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/launch",
+            body=json.dumps({"profile": "nope"}).encode())
+        assert status == 400
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_cors_on_nonloopback():
+    """CORS positives over the LAN IP — the exact surface the multi-host
+    UI uses for its cross-origin fetches against a remote broker. The 401
+    must carry ACAO too, or the login probe reads as a fetch TypeError."""
+    port = _free_port()
+    proc = _spawn_broker(port, token=TOKEN)
+    try:
+        status, headers = _headers("GET", f"http://{LAN_IP}:{port}/sessions")
+        assert status == 401
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+        status, headers = _headers(
+            "GET", f"http://{LAN_IP}:{port}/sessions?token={TOKEN}")
+        assert status == 200
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+        status, headers = _headers(
+            "OPTIONS", f"http://{LAN_IP}:{port}/launch")
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+        assert (headers.get("Access-Control-Allow-Methods")
+                == "GET, POST, PUT, OPTIONS")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_cors_on_nonloopback_without_token():
+    """Task 7's exact bug: a TOKENLESS broker reachable over the LAN/Tailscale
+    must now answer the multi-host UI's cross-origin /sessions fetch — it used
+    to send no ACAO header. /launch stays loopback-gated (403 remote)."""
+    port = _free_port()
+    proc = _spawn_broker(port, token=None)
+    try:
+        status, headers = _headers("GET", f"http://{LAN_IP}:{port}/sessions")
+        assert status == 200
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+        status, headers = _headers("OPTIONS", f"http://{LAN_IP}:{port}/state")
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_producer_ws_token_gate_on_nonloopback():
+    port = _free_port()
+    proc = _spawn_broker(port, token=TOKEN)
+    try:
+        async def scenario():
+            # Without token: post-upgrade close 4401 (not an opaque 1006).
+            ws = await websockets.connect(
+                f"ws://{LAN_IP}:{port}/browserland", max_size=None)
+            try:
+                with pytest.raises(websockets.ConnectionClosed):
+                    await asyncio.wait_for(ws.recv(), 5)
+                assert ws.close_code == 4401
+            finally:
+                await ws.close()
+
+            # With ?token=: hello registers (the remote-agent path).
+            ws = await websockets.connect(
+                f"ws://{LAN_IP}:{port}/browserland?token={TOKEN}",
+                max_size=None)
+            try:
+                await ws.send(json.dumps({
+                    "type": "hello", "window_id": 555002, "pid": 1,
+                    "title": "remote", "cols": 80, "rows": 24,
+                    "kind": "agent"}))
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/sessions?token={TOKEN}")
+                for _ in range(50):
+                    with urllib.request.urlopen(request, timeout=5) as r:
+                        sessions = json.loads(r.read())
+                    if any(s["id"] == 555002 for s in sessions):
+                        break
+                    await asyncio.sleep(0.1)
+                entry = next(s for s in sessions if s["id"] == 555002)
+                assert entry["kind"] == "agent"
+            finally:
+                await ws.close()
+
+        asyncio.run(scenario())
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

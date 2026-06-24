@@ -1,0 +1,22 @@
+# webterm agent unit (one always-on shell registered with the broker;
+# additional terminals come from the broker's POST /launch). Install:
+#   sudo cp launchers/systemd/webterm-agent.service /etc/systemd/system/
+#   edit User/WorkingDirectory/ExecStart paths, broker URL and token, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now webterm-agent
+[Unit]
+Description=webterm agent (headless PTY producer)
+After=network-online.target webterm-broker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webterm
+WorkingDirectory=/opt/web_terminal
+Environment=BROWSERLAND_BROKER_URL=ws://127.0.0.1:4445/browserland
+Environment=WEB_TERMINAL_TOKEN=changeme
+ExecStart=/opt/web_terminal/launchers/run-agent.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

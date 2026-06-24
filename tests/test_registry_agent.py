@@ -1,0 +1,119 @@
+"""Foreground-agent plumbing through the broker registry: a producer 'agent'
+frame must update entry.agent (whitelisted), surface in summary(), and
+re-broadcast to attached browsers. The hello's optional 'agent' field seeds
+it; junk values collapse to ""."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+from webterm.broker.registry import (BrokerRegistry, _whitelist_agent,
+                                      run_producer_session)
+
+
+class FeedWS:
+    """Producer WS whose recv() is fed frames on demand; feeding None ends the
+    session loop."""
+
+    def __init__(self):
+        self._q: asyncio.Queue = asyncio.Queue()
+        self.sent = []
+
+    async def recv(self):
+        return await self._q.get()
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    async def close(self, *a, **k):
+        pass
+
+    def feed(self, frame):
+        self._q.put_nowait(frame)
+
+
+class CaptureWS:
+    """Attached browser that records what the broker broadcasts to it."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    async def close(self, *a, **k):
+        pass
+
+
+async def _wait(pred, tries=200):
+    for _ in range(tries):
+        if pred():
+            return True
+        await asyncio.sleep(0.005)
+    return False
+
+
+def test_agent_frame_updates_entry_summary_and_broadcasts():
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 1, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24,
+                            "kind": "agent"}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+        assert entry.agent == ""               # nothing in hello
+        assert entry.summary()["agent"] == ""
+
+        sub = CaptureWS()
+        entry.add_subscriber(sub)
+
+        # A real 'agent' frame: entry updates + browser gets a live push.
+        ws.feed(json.dumps({"type": "agent", "data": "codex"}))
+        assert await _wait(lambda: entry.agent == "codex")
+        assert entry.summary()["agent"] == "codex"
+        assert any(json.loads(s) == {"type": "agent", "data": "codex"}
+                   for s in sub.sent)
+
+        # Junk collapses to "" (and is broadcast as such).
+        ws.feed(json.dumps({"type": "agent", "data": "pwned; rm -rf"}))
+        assert await _wait(lambda: entry.agent == "")
+
+        ws.feed(None)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_hello_agent_field_seeds_and_whitelists():
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 3, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "agent": "grok"})
+        assert entry.agent == "grok"
+        assert entry.summary()["agent"] == "grok"
+        # Hostile/buggy value never sticks.
+        entry2 = await reg.register(ws, {
+            "type": "hello", "window_id": 4, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "agent": "../../etc/passwd"})
+        assert entry2.agent == ""
+        # Absent field -> "" (non-agent producers / old agents).
+        entry3 = await reg.register(ws, {
+            "type": "hello", "window_id": 5, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24})
+        assert entry3.agent == ""
+
+    asyncio.run(scenario())
+
+
+def test_whitelist_agent_helper():
+    assert _whitelist_agent("claude") == "claude"
+    assert _whitelist_agent("GROK") == "grok"
+    assert _whitelist_agent("  codex  ") == "codex"
+    assert _whitelist_agent("vim") == ""
+    assert _whitelist_agent("") == ""
+    assert _whitelist_agent(None) == ""

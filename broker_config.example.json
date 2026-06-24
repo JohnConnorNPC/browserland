@@ -1,0 +1,30 @@
+{
+    "host": "127.0.0.1",
+    "port": 4445,
+    "auth_token": null,
+    "editor_root": null,
+    "mcp_token": null,
+    "mcp_enabled": false,
+    "mcp_default_mode": "off",
+    "mcp_allow_launch": false,
+    "mcp_state_path": null,
+    "agent": {
+        "python": null,
+        "default_profile": "cmd",
+        "profiles": {
+            "cmd": {
+                "command": ["cmd.exe"],
+                "title": "cmd"
+            },
+            "powershell": {
+                "command": ["powershell.exe", "-NoLogo"],
+                "title": "powershell"
+            },
+            "bash": {
+                "command": ["bash", "-l"],
+                "title": "bash",
+                "cwd": null
+            }
+        }
+    }
+}

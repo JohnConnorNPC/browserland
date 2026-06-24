@@ -1,0 +1,24 @@
+{
+    "host": "127.0.0.1",
+    "port": 4445,
+    "auth_token": null,
+    "mcp_token": null,
+    "mcp_enabled": false,
+    "mcp_default_mode": "off",
+    "mcp_allow_launch": false,
+    "mcp_state_path": null,
+    "agent": {
+        "python": null,
+        "default_profile": "bash",
+        "profiles": {
+            "bash": {
+                "command": ["bash", "-l"],
+                "title": "bash"
+            },
+            "sh": {
+                "command": ["sh"],
+                "title": "sh"
+            }
+        }
+    }
+}

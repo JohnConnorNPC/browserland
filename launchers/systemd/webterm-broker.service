@@ -1,0 +1,20 @@
+# webterm broker unit. Install:
+#   sudo cp launchers/systemd/webterm-broker.service /etc/systemd/system/
+#   edit User/WorkingDirectory/ExecStart paths and the token, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now webterm-broker
+[Unit]
+Description=webterm broker (WebSocket terminal relay on :4445)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webterm
+WorkingDirectory=/opt/web_terminal
+Environment=WEB_TERMINAL_TOKEN=changeme
+ExecStart=/opt/web_terminal/launchers/run-broker.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

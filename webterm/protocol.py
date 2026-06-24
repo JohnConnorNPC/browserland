@@ -1,0 +1,232 @@
+"""Wire-protocol frame builders and parsers.
+
+This is the ONLY module that knows the JSON shapes. Both the agent and the
+broker import from here. These shapes are Browserland's own web-terminal
+producer protocol; the relay/registry framing was adapted from xterm-py
+(``browser/broker.py``).
+
+Producer -> broker (text JSON):
+    {"type": "hello",   "window_id": <int>, "pid": <int>, "title": "...",
+     "cols": N, "rows": M}            # + optional "host", "kind", "agent", "cwd"
+    {"type": "title",   "data": "..."}
+    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
+    {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir of the shell
+    {"type": "resized", "cols": <int>, "rows": <int>}
+Producer -> broker (binary): raw PTY bytes AND snapshot bytes (no framing;
+single-WS ordering is the only guarantee).
+
+Broker -> producer (text JSON):
+    {"type": "input",  "data": "<utf-8 text>"}
+    {"type": "resize", "cols": N, "rows": M}
+    {"type": "snapshot_please"}
+
+Broker -> browser (text JSON):
+    {"type": "resized", "cols": N, "rows": M}
+    {"type": "title",   "data": "..."}        # live title push on change
+    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
+    {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir push
+    {"type": "error", "reason": "unknown_session", "session_id": <int>}
+Broker -> browser (binary): producer bytes, verbatim.
+
+Browser -> broker (text JSON): input / paste / resize (mouse ignored).
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Producer -> broker
+# ---------------------------------------------------------------------------
+
+def hello_frame(
+    window_id: int,
+    pid: int,
+    title: str,
+    cols: int,
+    rows: int,
+    host: Optional[str] = None,
+    kind: Optional[str] = None,
+    agent: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> str:
+    """First frame on /browserland. Ints MUST be JSON numbers (the broker calls
+    int() on them; the picker compares ids numerically in JS, so ids must
+    stay < 2**53)."""
+    frame: Dict[str, Any] = {
+        "type": "hello",
+        "window_id": int(window_id),
+        "pid": int(pid),
+        "title": str(title),
+        "cols": int(cols),
+        "rows": int(rows),
+    }
+    # Additive fields: older parsers ignore unknown keys, so adding one is
+    # backward-compatible. "host" predates the rest. "agent" carries the current
+    # foreground agent so a re-hello after reconnect stays accurate; "cwd"
+    # carries the shell's working dir (the AGENTS.md button targets it).
+    if host:
+        frame["host"] = str(host)
+    if kind:
+        frame["kind"] = str(kind)
+    if agent:
+        frame["agent"] = str(agent)
+    if cwd:
+        frame["cwd"] = str(cwd)
+    return json.dumps(frame)
+
+
+def title_frame(title: str) -> str:
+    return json.dumps({"type": "title", "data": str(title)})
+
+
+def agent_frame(name: str) -> str:
+    """Foreground-agent push: which of claude/grok/codex/opencode is running, or
+    "" for none. Sent by the agent on change and re-broadcast by the broker."""
+    return json.dumps({"type": "agent", "data": str(name)})
+
+
+def cwd_frame(path: str) -> str:
+    """Live working-directory push: the shell's current dir, sent by the agent
+    on change and re-broadcast by the broker so the AGENTS.md button tracks a
+    ``cd`` without waiting for the next /sessions poll."""
+    return json.dumps({"type": "cwd", "data": str(path)})
+
+
+def resized_frame(cols: int, rows: int) -> str:
+    return json.dumps({"type": "resized", "cols": int(cols), "rows": int(rows)})
+
+
+# ---------------------------------------------------------------------------
+# Broker -> producer
+# ---------------------------------------------------------------------------
+
+def input_frame(data: str) -> str:
+    return json.dumps({"type": "input", "data": data})
+
+
+def resize_frame(cols: int, rows: int) -> str:
+    return json.dumps({"type": "resize", "cols": int(cols), "rows": int(rows)})
+
+
+def snapshot_please_frame() -> str:
+    return json.dumps({"type": "snapshot_please"})
+
+
+# ---------------------------------------------------------------------------
+# Management RPCs (broker <-> producer round-trips, correlated by ``req``)
+#
+# Unlike snapshot_please (fire-and-forget), these carry a per-connection
+# request id so the broker can match a reply to the request that asked for it.
+# The broker allocates ``req`` on the specific producer WindowEntry; the agent
+# echoes it back verbatim in the reply. See registry.WindowEntry's pending-RPC
+# map for the correlation/cleanup rules.
+# ---------------------------------------------------------------------------
+
+# Broker -> producer: "list your process tree" / "kill this pid" / "git status"
+# / "render your screen as plain text" (MCP read).
+def procs_please_frame(req: int) -> str:
+    return json.dumps({"type": "procs_please", "req": int(req)})
+
+
+def screen_text_please_frame(req: int) -> str:
+    """Broker -> producer: render the live screen and reply with plain text.
+    Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
+    producers have no handler, so the request times out -> 502)."""
+    return json.dumps({"type": "screen_text_please", "req": int(req)})
+
+
+def kill_frame(req: int, pid: int) -> str:
+    return json.dumps({"type": "kill", "req": int(req), "pid": int(pid)})
+
+
+def git_status_please_frame(req: int) -> str:
+    return json.dumps({"type": "git_status_please", "req": int(req)})
+
+
+# Producer -> broker: the matching replies.
+def procs_frame(req: int, procs) -> str:
+    return json.dumps({"type": "procs", "req": int(req),
+                       "procs": list(procs or [])})
+
+
+def killed_frame(req: int, ok: bool, error: Optional[str] = None,
+                 pid: Optional[int] = None) -> str:
+    frame: Dict[str, Any] = {"type": "killed", "req": int(req), "ok": bool(ok)}
+    if error:
+        frame["error"] = str(error)
+    if pid is not None:
+        frame["pid"] = int(pid)
+    return json.dumps(frame)
+
+
+def git_status_frame(req: int, status: Dict[str, Any]) -> str:
+    frame: Dict[str, Any] = {"type": "git_status", "req": int(req)}
+    frame.update(status or {})
+    return json.dumps(frame)
+
+
+def screen_text_frame(req: int, text: str, cols: int, rows: int,
+                      degraded: bool = False) -> str:
+    """Producer -> broker: the rendered plain-text screen for a screen_text
+    request. ``degraded`` flags a best-effort raw decode (pyte unavailable),
+    so the MCP caller knows the text is not a clean grid render."""
+    return json.dumps({
+        "type": "screen_text",
+        "req": int(req),
+        "text": str(text),
+        "cols": int(cols),
+        "rows": int(rows),
+        "degraded": bool(degraded),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Broker -> browser
+# ---------------------------------------------------------------------------
+
+def error_frame(reason: str, session_id: int) -> str:
+    return json.dumps({
+        "type": "error",
+        "reason": reason,
+        "session_id": session_id,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Control channel (/control) — single-active-browser lease
+#
+# Each browser carries a stable ``clientId``; the broker tracks the one
+# ``active`` client per broker and tears down the others' terminal views.
+#   broker -> client: {"type": "status", "active": <bool>,
+#                      "activeClientId": <id|null>}
+#   client -> broker: {"type": "become_active"}
+# ---------------------------------------------------------------------------
+
+def control_status_frame(active: bool,
+                         active_client_id: Optional[str]) -> str:
+    """Broker -> client on /control: whether THIS client holds the lease, plus
+    who currently does (``None`` when nobody is active)."""
+    return json.dumps({
+        "type": "status",
+        "active": bool(active),
+        "activeClientId": active_client_id,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+def parse(text: str) -> Optional[Dict[str, Any]]:
+    """Parse one text frame. Returns None on malformed JSON or a non-object
+    payload (callers treat that as an ignorable frame)."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webterm"
+version = "0.1.0"
+description = "Self-contained web terminal: headless PTY agents + WebSocket broker (Browserland's web-terminal producer protocol)"
+requires-python = ">=3.9"
+dependencies = [
+    "websockets>=12",
+    "sanic>=23",
+]
+
+[project.optional-dependencies]
+windows = ["pywinpty>=2"]
+pyte = ["pyte>=0.8"]
+# The Browserland MCP server (webterm/mcptool/). `mcp` pulls in httpx. NOTE: the
+# `mcp` SDK requires Python >=3.10, while webterm core stays >=3.9 — so this is
+# an optional extra, not a core dependency.
+mcp = ["mcp>=1.2"]
+dev = ["pytest>=7", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+browserland-mcp = "webterm.mcptool.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["webterm*"]
+
+[tool.setuptools.package-data]
+"webterm.broker" = ["*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
