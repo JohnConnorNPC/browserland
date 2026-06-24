@@ -1112,7 +1112,7 @@
             margin: 3px 0;
         }
 
-        /* Settings modal sits above windows (100000) but below #ctx-menu
+        /* Control Panel modal sits above windows (100000) but below #ctx-menu
            (200000); the re-auth overlay outranks everything. */
         #settings-overlay, #auth-overlay, #become-active-overlay {
             position: fixed;
@@ -2479,7 +2479,7 @@
         // startup — reconcileLayout() always returns a structurally valid
         // object. An absent/invalid/missing mode defaults to TILING (the new
         // default); an existing saved 'floating' is left untouched, so users
-        // already on floating stay there until they flip the Settings toggle.
+        // already on floating stay there until they flip the Control Panel toggle.
         const WIDTH_PRESETS = ['1/3', '1/2', '2/3', 'max'];
         function presetFraction(p) {
             switch (p) {
@@ -2975,7 +2975,7 @@
         function reconcileLayout(L) {
             if (!L || typeof L !== 'object' || Array.isArray(L)) L = {};
             // Default to tiling: only fills an invalid/unset/missing mode, so a
-            // saved 'floating' layout is preserved (the Settings toggle owns it
+            // saved 'floating' layout is preserved (the Control Panel toggle owns it
             // thereafter). New users and malformed/old blobs open tiled.
             if (L.mode !== 'tiling' && L.mode !== 'floating') L.mode = 'tiling';
             if (!Array.isArray(L.workspaces) || L.workspaces.length === 0) {
@@ -5827,7 +5827,7 @@
         }
 
         // ---- default / locked size ------------------------------------------
-        // One size drives both: the Settings cols×rows value (when set) is
+        // One size drives both: the Control Panel cols×rows value (when set) is
         // converted to pixels through the measured cell box plus the
         // .term-window chrome constants (+12 horiz, +38 vert — see the
         // box-model comment in the `resized` handler). With no setting the
@@ -5895,7 +5895,7 @@
         // stays the bare wire id.
         const sessions = new Map();
 
-        // Display label honoring the Settings toggles. The defaults (host
+        // Display label honoring the Control Panel toggles. The defaults (host
         // on, pid off) reproduce the bridge's "host: title" format exactly.
         // Always use textContent at call sites — never inject this string
         // as HTML.
@@ -12625,7 +12625,7 @@
             const hasFloats = floats.length > 0;
             const locked = isSizeLocked();
             const items = [];
-            // The floating<->tiling mode switch now lives in Settings, not
+            // The floating<->tiling mode switch now lives in the Control Panel, not
             // this menu. What remains is mode-appropriate arrangement.
             if (!tiling) {
                 // Floating one-shot arrangements (floating windows only).
@@ -13734,7 +13734,7 @@
         // One-time tiling-by-default migration: the reconcileLayout default
         // only catches an invalid/missing mode, so an existing saved
         // 'floating' layout would not flip. Flip it exactly once here; after
-        // that the Settings toggle is fully in control (a later floating
+        // that the Control Panel toggle is fully in control (a later floating
         // choice sticks because the flag is already set).
         (function applyTilingDefault() {
             const s = getSettings();

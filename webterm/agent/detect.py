@@ -10,7 +10,7 @@ only. We do NOT scan arbitrary arguments, so ``rg codex`` or ``cat claude.md``
 never trip a false positive.
 
 Detection matches **basenames** (``claude.exe`` -> ``claude``); the configurable
-launch *paths* in the front-end Settings affect launching, not detection.
+launch *paths* in the front-end Control Panel affect launching, not detection.
 
 Last-resort fallback: some agents ship a generically-named launcher (the
 reported case is grok installed as ``…\.grok\bin\agent.exe`` — basename

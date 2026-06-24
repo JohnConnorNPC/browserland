@@ -115,7 +115,7 @@ token-gated instead.
 
 ### Multiple hosts
 
-Settings → Hosts lets the UI attach to sessions on additional brokers
+Control Panel → Hosts lets the UI attach to sessions on additional brokers
 (e.g. a WSL box over Tailscale). The **browser connects directly** to each
 host (cross-origin `fetch /sessions` + `ws://host/ws`); hosts and their
 passwords live per-browser in localStorage. Requirements:

@@ -93,7 +93,7 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     enabled}``.
 
     Seeded from config/env defaults, then overlaid by the persisted sidecar
-    (``webterm_mcp.json``) — the sidecar is what the Settings UI writes, so it
+    (``webterm_mcp.json``) — the sidecar is what the Control Panel writes, so it
     is the durable source of truth across restarts. One exception, mirroring
     resolve_token's "env wins so a unit file can override": if the env token
     ``WEB_TERMINAL_MCP_TOKEN`` is set it pins the token even over the sidecar.
@@ -1030,7 +1030,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json(payload, status=status)
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
-    # The Settings UI reads/writes the MCP token + knobs here. Gated by the
+    # The Control Panel reads/writes the MCP token + knobs here. Gated by the
     # BROWSER auth_token (loopback-or-token, same as /file/* and /state) — NOT
     # the MCP token — so the secret only ever travels to an already-
     # authenticated browser and never rides the synced /state blob.

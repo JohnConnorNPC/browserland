@@ -34,7 +34,7 @@ def resolve_mcp_token(config: Optional[dict]) -> Optional[str]:
     """Seed token for the MCP HTTP interface, mirroring resolve_token: env
     (``WEB_TERMINAL_MCP_TOKEN``) wins over ``config["mcp_token"]``. This is
     only the SEED — the live token may be overridden at runtime via the
-    sidecar store (set/generated from the Settings UI). Distinct from the
+    sidecar store (set/generated from the Control Panel). Distinct from the
     browser ``auth_token``: it gates the /mcp/* surface only."""
     return os.environ.get(MCP_TOKEN_ENV) or (config or {}).get("mcp_token") or None
 
