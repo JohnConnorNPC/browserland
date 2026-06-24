@@ -1414,15 +1414,13 @@
                 </div>
                 <div class="set-section">
                     <div class="set-title">Default start path</div>
-                    <div class="set-row"><label>Windows</label>
-                        <input type="text" id="set-start-path-win"
-                               placeholder="e.g. C:\projects" /></div>
-                    <div class="set-row"><label>Linux / macOS</label>
-                        <input type="text" id="set-start-path-posix"
-                               placeholder="e.g. /home/me/projects" /></div>
-                    <div class="set-hint">Where new terminals start, picked by
-                        the target host's OS. Must be an existing folder on that
-                        host. Blank = the agent's default.</div>
+                    <div class="set-row">
+                        <input type="text" id="set-start-path"
+                               placeholder="e.g. C:\projects or /home/me/projects" /></div>
+                    <div class="set-hint">Where new terminals start on the local
+                        broker's host (and any remote host of the same OS).
+                        Must be an existing folder. Blank = the agent's
+                        default.</div>
                 </div>
                 <div class="set-section">
                     <div class="set-title">Window size (cols &#215; rows)</div>
@@ -2312,17 +2310,16 @@
             } else {
                 s.startLabel = s.startLabel.trim().slice(0, 24) || '+';
             }
-            // Issue #2: per-OS default start path for new terminals. The UI
-            // picks .windows or .posix by the target host's reported OS and
-            // sends it as the launch cwd. '' = the agent's own default cwd.
-            if (!s.startPaths || typeof s.startPaths !== 'object'
-                    || Array.isArray(s.startPaths)) {
-                s.startPaths = {};
-            }
-            s.startPaths.windows = (typeof s.startPaths.windows === 'string')
-                ? s.startPaths.windows.trim() : '';
-            s.startPaths.posix = (typeof s.startPaths.posix === 'string')
-                ? s.startPaths.posix.trim() : '';
+            // Issue #10: single default start path for new terminals (collapses
+            // the per-OS pair from #2). Browser-local (like startLabel) and
+            // belongs to THIS broker's host; resolveStartPath only sends it to a
+            // host whose OS matches this broker's, so a wrong-OS cwd is never
+            // sent. '' = the agent's own default cwd. The legacy
+            // startPaths{windows,posix} map is intentionally left untouched here
+            // and honored read-only as a fallback (resolveStartPath) so an
+            // upgrade never loses a saved path; it is retired only when the box
+            // is next saved (commitStartPath).
+            s.startPath = (typeof s.startPath === 'string') ? s.startPath.trim() : '';
             // User-editable AGENTS.md section library (synced via /state like the
             // rest of settings). Seed from DEFAULT_SECTIONS the first time a blob
             // lacks one; otherwise validate in place (drop malformed entries,
@@ -11628,17 +11625,12 @@
         // existing call site at the broker's own default cwd.
         async function launchProfile(host, name, cwd) {
             host = host || localHost();
-            // Issue #2: when no explicit cwd was chosen (e.g. via "Open in
-            // folder…"), fall back to the configured per-OS default start path
-            // for this host. Only resolve when one is actually set, so
-            // unconfigured users keep the broker's default cwd and incur no
-            // extra /profiles round-trip.
-            if (!cwd) {
-                const sp = getSettings().startPaths || {};
-                if (sp.windows || sp.posix) {
-                    cwd = await resolveStartPath(host);
-                }
-            }
+            // Issue #10: when no explicit cwd was chosen (e.g. via "Open in
+            // folder…"), fall back to the configured default start path for this
+            // host. resolveStartPath returns '' (and skips the /profiles
+            // round-trip) when nothing is configured, so unconfigured users keep
+            // the broker's default cwd and are otherwise unaffected.
+            if (!cwd) cwd = await resolveStartPath(host);
             if (launchBtn) launchBtn.disabled = true;
             try {
                 const payload = {};
@@ -11698,20 +11690,66 @@
             return null;
         }
 
-        // Issue #2: the configured default start path for `host`, chosen by the
-        // broker's reported OS (from /profiles). Returns '' when none is set,
-        // the OS is unknown (e.g. an older broker without the field), or the
-        // fetch fails — the caller then launches at the agent's own default
-        // cwd, so a wrong-OS path is never sent to a host.
+        // Issue #10: resolve the default start path to use as the launch cwd on
+        // `host`. The single startPath belongs to THIS broker's host, so it is
+        // sent on the local host and on any remote host whose reported OS
+        // matches this broker's — never to a different-OS host (the server would
+        // reject a wrong-OS path as cwd_not_dir). Returns '' (=> the agent's own
+        // default cwd) when nothing is configured, the OS is unknown (an older
+        // broker without the field), or a /profiles fetch fails. The legacy
+        // per-OS startPaths map (#2) is honored read-only, keyed by the host's
+        // own OS, so an upgrade keeps working until the path is re-saved. No
+        // /profiles round-trip happens for unconfigured users.
         async function resolveStartPath(host) {
             try {
-                const sp = getSettings().startPaths || {};
+                host = host || localHost();
+                const s = getSettings();
+                const p = (typeof s.startPath === 'string') ? s.startPath.trim() : '';
+                const legacy = (s.startPaths && typeof s.startPaths === 'object'
+                    && !Array.isArray(s.startPaths)) ? s.startPaths : null;
+                const legacyWin = (legacy && typeof legacy.windows === 'string')
+                    ? legacy.windows.trim() : '';
+                const legacyPosix = (legacy && typeof legacy.posix === 'string')
+                    ? legacy.posix.trim() : '';
+                if (!p && !legacyWin && !legacyPosix) return '';
                 const prof = await fetchProfiles(host);
                 const osName = prof && prof.os;
-                const p = (osName === 'windows') ? sp.windows
-                        : (osName === 'posix') ? sp.posix : '';
-                return (typeof p === 'string') ? p.trim() : '';
+                if (osName !== 'windows' && osName !== 'posix') return '';
+                if (p) {
+                    // Launching on this broker -> the path always applies. On a
+                    // remote host, only when its OS matches this broker's.
+                    if (host.id === localHost().id) return p;
+                    const localProf = await fetchProfiles(localHost());
+                    return (localProf && localProf.os === osName) ? p : '';
+                }
+                return (osName === 'windows') ? legacyWin : legacyPosix;
             } catch (_) { return ''; }
+        }
+
+        // Issue #10: the value to show in the single start-path box — the saved
+        // startPath, else the legacy per-OS value for this broker's OS (a host
+        // is one OS, so typically only one legacy field is set). Display only;
+        // resolveStartPath owns what actually gets sent.
+        function startPathForDisplay(s) {
+            const p = (typeof s.startPath === 'string') ? s.startPath.trim() : '';
+            if (p) return p;
+            const legacy = s.startPaths;
+            if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) {
+                return '';
+            }
+            const w = (typeof legacy.windows === 'string') ? legacy.windows.trim() : '';
+            const px = (typeof legacy.posix === 'string') ? legacy.posix.trim() : '';
+            const prof = profilesCache.get(localHost().id);
+            const os = prof && prof.os;
+            if (os === 'windows') return w;
+            if (os === 'posix') return px;
+            // Local OS not known yet: show an UNAMBIGUOUS legacy value (exactly
+            // one OS set), but never guess between two — picking the wrong OS
+            // would persist a wrong-OS path on the first edit (and drop the
+            // right one). renderSettings refreshes the box once /profiles lands.
+            if (w && !px) return w;
+            if (px && !w) return px;
+            return '';
         }
 
         function profileMenuItems(host, d) {
@@ -12858,10 +12896,7 @@
         const setPatternEl = document.getElementById('set-pattern');
         const setClockEl = document.getElementById('set-clock');
         const setStartLabelEl = document.getElementById('set-start-label');
-        const setStartPathWinEl =
-            document.getElementById('set-start-path-win');
-        const setStartPathPosixEl =
-            document.getElementById('set-start-path-posix');
+        const setStartPathEl = document.getElementById('set-start-path');
         for (const name of Object.keys(THEMES)) {
             const lab = document.createElement('label');
             const rb = document.createElement('input');
@@ -13046,8 +13081,22 @@
             setPatternEl.value = ls.pattern;
             setClockEl.checked = !!ls.clock;
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
-            setStartPathWinEl.value = (ls.startPaths.windows || '');
-            setStartPathPosixEl.value = (ls.startPaths.posix || '');
+            setStartPathEl.value = startPathForDisplay(ls);
+            // A mixed-OS legacy startPaths blob can't be resolved to THIS host's
+            // value until the local broker's OS is known. If it isn't cached
+            // yet, refresh the box once /profiles lands (unless the user has
+            // since focused it). Guards against a tab switch mid-await, like
+            // renderDefaultProfile below.
+            if (!(ls.startPath || '').trim() && ls.startPaths
+                    && !profilesCache.get(localHost().id)) {
+                const wantTab = currentSettingsTab;
+                fetchProfiles(localHost()).then(() => {
+                    if (currentSettingsTab === wantTab
+                            && document.activeElement !== setStartPathEl) {
+                        setStartPathEl.value = startPathForDisplay(getSettings());
+                    }
+                }).catch(() => {});
+            }
             renderDefaultProfile();
             renderMcpConfig();
             renderKeybindings();
@@ -13322,18 +13371,18 @@
         };
         setStartLabelEl.addEventListener('input', commitStartLabel);
         setStartLabelEl.addEventListener('change', commitStartLabel);
-        // Issue #2: per-OS default start path. Browser-local like startLabel;
-        // no live effect — it only governs the NEXT launch's cwd on each host.
-        const commitStartPaths = () => {
-            const sp = getSettings().startPaths;
-            sp.windows = (setStartPathWinEl.value || '').trim();
-            sp.posix = (setStartPathPosixEl.value || '').trim();
+        // Issue #10: the single default start path. Browser-local like
+        // startLabel — no live effect; it only governs the NEXT launch's cwd
+        // (resolveStartPath sends it to same-OS hosts). Saving the box also
+        // retires the legacy per-OS startPaths map (#2) it supersedes.
+        const commitStartPath = () => {
+            const s = getSettings();
+            s.startPath = (setStartPathEl.value || '').trim();
+            if (s.startPaths) delete s.startPaths;
             savePrefs();
         };
-        for (const el of [setStartPathWinEl, setStartPathPosixEl]) {
-            el.addEventListener('input', commitStartPaths);
-            el.addEventListener('change', commitStartPaths);
-        }
+        setStartPathEl.addEventListener('input', commitStartPath);
+        setStartPathEl.addEventListener('change', commitStartPath);
 
         // Task 8: default terminal profile. Persists the same way every other
         // control in this form does — mutate the target's settings blob then
