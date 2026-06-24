@@ -21,3 +21,7 @@ webterm_state.json
 # Scratch (Codex review prompts/output, test upload artifact)
 .codex_*.txt
 .webterm_upload_test.bin
+
+# Agent Files
+CLAUDE.md
+AGENTS.md

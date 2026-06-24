@@ -445,6 +445,7 @@ the box's LAN IP.
 
 ## Relationship to xterm-py
 
-This broker's relay and registry were adapted from `xterm-py`, a separate
+This broker's relay and registry were adapted from `xterm-py`
+(<https://github.com/JohnConnorNPC/xterm-py>), a separate
 relay/registry/UI codebase, which is not part of or modified by this
 project. This broker defaults to port **4445**.

@@ -1,6 +1,7 @@
 """In-memory registry of live producer sessions (agents + terminal windows).
 
-Adapted from xterm-py ``browser/broker.py`` (the relay origin), plus a
+Adapted from xterm-py ``browser/broker.py`` (the relay origin; a separate
+codebase at https://github.com/JohnConnorNPC/xterm-py), plus a
 ``host`` hello field, with two additions:
 
 * ``kind`` — additive hello field; agents send ``"kind": "agent"``, a

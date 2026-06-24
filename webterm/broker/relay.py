@@ -1,6 +1,7 @@
 """Browser-WS relay: ``/ws?session=<id>`` <-> the producer entry.
 
-Adapted from the relay half of xterm-py ``browser/websocket_handler.py``;
+Adapted from the relay half of xterm-py ``browser/websocket_handler.py``
+(a separate codebase at https://github.com/JohnConnorNPC/xterm-py);
 the legacy no-session local-PTY path is dropped — this broker only relays.
 
 Attach order invariant (from the reference): send the authoritative

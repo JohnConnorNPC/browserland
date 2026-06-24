@@ -3,7 +3,8 @@
 This is the ONLY module that knows the JSON shapes. Both the agent and the
 broker import from here. These shapes are Browserland's own web-terminal
 producer protocol; the relay/registry framing was adapted from xterm-py
-(``browser/broker.py``).
+(``browser/broker.py``), a separate codebase at
+https://github.com/JohnConnorNPC/xterm-py.
 
 Producer -> broker (text JSON):
     {"type": "hello",   "window_id": <int>, "pid": <int>, "title": "...",

@@ -1,5 +1,6 @@
 """Frame shapes must match the literal JSON the broker parses
-(relay origin: xterm-py browser/broker.py + websocket_handler.py)."""
+(relay origin: xterm-py browser/broker.py + websocket_handler.py,
+a separate codebase at https://github.com/JohnConnorNPC/xterm-py)."""
 
 import json
 
