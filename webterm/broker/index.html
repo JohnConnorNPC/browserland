@@ -1416,6 +1416,14 @@
                         <select id="set-pattern"></select></div>
                 </div>
                 <div class="set-section set-browser-global">
+                    <div class="set-title">Terminal font</div>
+                    <div class="set-row"><label>font</label>
+                        <select id="set-term-font"></select></div>
+                    <div class="set-hint">applies to your terminals (an appearance
+                        setting, like the color scheme); an uninstalled font falls
+                        back to Consolas / monospace.</div>
+                </div>
+                <div class="set-section set-browser-global">
                     <div class="set-title">Date &amp; time</div>
                     <label class="set-check"><input type="checkbox" id="set-clock" />
                         Show date &amp; time (bottom-right)</label>
@@ -2323,6 +2331,13 @@
             }
             if (typeof s.pattern !== 'string' || PATTERNS.indexOf(s.pattern) < 0) {
                 s.pattern = 'none';
+            }
+            // Issue #18: terminal font. Whitelist to the offered TERM_FONTS
+            // values ('' = built-in default) so an unknown/hand-edited value
+            // can't leave the picker blank while a stray font silently applies.
+            if (typeof s.termFont !== 'string'
+                || !TERM_FONTS.some(f => f.value === s.termFont)) {
+                s.termFont = '';
             }
             if (typeof s.clock !== 'boolean') s.clock = false;
             // Task 8: per-host default terminal profile. '' = use the broker's
@@ -6213,6 +6228,25 @@
         // strip + floating windows (they are positioned children, so the
         // element background sits under them). `none` clears it. Never throws.
         const PATTERNS = ['none', 'weave', 'dither', 'dots', 'hatch', 'tiles'];
+        // Issue #18: selectable terminal font. Each entry's `value` is the full
+        // CSS font-family stack (so an uninstalled choice falls back to Consolas/
+        // monospace); '' = the built-in default. Browser-global (xterm renders
+        // client-side), persisted as getSettings().termFont and synced via /state
+        // like theme/pattern. TERM_FONT_DEFAULT mirrors the Terminal() default.
+        const TERM_FONT_DEFAULT = 'Consolas, "Liberation Mono", monospace';
+        const TERM_FONTS = [
+            { label: 'Default (Consolas)', value: '' },
+            { label: 'Cascadia Code', value: '"Cascadia Code", "Cascadia Mono", Consolas, monospace' },
+            { label: 'Fira Code', value: '"Fira Code", Consolas, monospace' },
+            { label: 'JetBrains Mono', value: '"JetBrains Mono", Consolas, monospace' },
+            { label: 'Source Code Pro', value: '"Source Code Pro", Consolas, monospace' },
+            { label: 'Courier New', value: '"Courier New", Courier, monospace' },
+            { label: 'System monospace', value: 'monospace' },
+        ];
+        function terminalFontFamily() {
+            const f = (getSettings().termFont || '').trim();
+            return f || TERM_FONT_DEFAULT;
+        }
         const PATTERN_LABELS = {
             none: 'None', weave: 'Weave', dither: 'Dither',
             dots: 'Dots', hatch: 'Hatch', tiles: 'Tiles',
@@ -6304,7 +6338,32 @@
                 applyPattern(s.pattern);    // after theme: reads the live vars
                 applyClock(s.clock);
                 applyStartButton();
+                applyTerminalFont();        // #18: configurable terminal font
             } catch (_) {}
+        }
+
+        // Issue #18: push the configured terminal font onto every live terminal
+        // (no-op for app windows, which have no xterm). Idempotent — only the
+        // terminals whose family actually differs are re-fit (local xterm resize
+        // + an agent resize), so the convergence call in applyThemeSettings (run
+        // on every settings change / /state pull) is cheap when nothing changed.
+        function applyTerminalFont() {
+            const fam = terminalFontFamily();
+            for (const [, win] of windows) {
+                if (!win || win.disposed || !win.term) continue;
+                if (win.term.options.fontFamily === fam) continue;
+                try {
+                    win.term.options.fontFamily = fam;
+                } catch (_) { continue; }   // assign failed -> don't refit
+                // Re-fit only a ready, VISIBLE terminal: fitAddon.fit() on a
+                // hidden/zero-size element (minimized, parked, other-workspace)
+                // clamps it to 2x1 and corrupts the buffer until it's restored —
+                // and restoring already re-fits it, so the new font lands then.
+                if (win.termReady && isResizable(win)) {
+                    try { if (win.fitAddon) win.fitAddon.fit(); } catch (_) {}
+                    refitSoon(win);                          // tell the agent
+                }
+            }
         }
 
         function applyDisplaySettings() {
@@ -6737,7 +6796,7 @@
                 cursorBlink: true,
                 cols: 80,
                 rows: 24,
-                fontFamily: 'Consolas, "Liberation Mono", monospace',
+                fontFamily: terminalFontFamily(),   // #18: configurable
                 fontSize: 14,
                 theme: { background: '#000000' }
             });
@@ -13009,6 +13068,7 @@
         const setClockEl = document.getElementById('set-clock');
         const setStartLabelEl = document.getElementById('set-start-label');
         const setStartPathEl = document.getElementById('set-start-path');
+        const setTermFontEl = document.getElementById('set-term-font');   // #18
         for (const name of Object.keys(THEMES)) {
             const lab = document.createElement('label');
             const rb = document.createElement('input');
@@ -13026,6 +13086,12 @@
             opt.value = p;
             opt.textContent = PATTERN_LABELS[p] || p;
             setPatternEl.appendChild(opt);
+        }
+        for (const f of TERM_FONTS) {           // #18: terminal font choices
+            const opt = document.createElement('option');
+            opt.value = f.value;
+            opt.textContent = f.label;
+            setTermFontEl.appendChild(opt);
         }
         // MCP access section (per-broker; NOT part of the synced /state blob —
         // fetched/saved via /mcp/config on the settings-target host, mirroring
@@ -13209,6 +13275,7 @@
                 rb.checked = (rb.value === ls.theme);
             }
             setPatternEl.value = ls.pattern;
+            setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
             setClockEl.checked = !!ls.clock;
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
             // Default start path is PER-HOST (#17): read the target host's own
@@ -13492,6 +13559,11 @@
             getSettings().pattern = setPatternEl.value;
             savePrefs();
             applyPattern(setPatternEl.value);
+        });
+        setTermFontEl.addEventListener('change', () => {   // #18: terminal font
+            getSettings().termFont = setTermFontEl.value;
+            savePrefs();
+            applyTerminalFont();
         });
         setClockEl.addEventListener('change', () => {
             getSettings().clock = !!setClockEl.checked;
