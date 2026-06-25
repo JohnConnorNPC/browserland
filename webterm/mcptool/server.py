@@ -12,37 +12,123 @@ startup never blocks on a network probe. The first tool call surfaces a clean
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import BrowserlandClient
+from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
 
-# Resolved config + lazily-built client. Set by configure(); the client is not
-# constructed until the first tool call.
-_base: str = "http://127.0.0.1:4445"
-_token: str = ""
-_client: Optional[BrowserlandClient] = None
+# Multi-host config (#24). configure() stores an ordered ``name -> (base, token)``
+# map; the per-host BrowserlandClient is built lazily on first use, so importing
+# this module has no side effects and stdio startup never blocks on a probe.
+# Window ids in every tool are namespaced ``"<host>:<int>"`` and :func:`_route`
+# splits one back to a ``(client, int_id)`` pair. A plain ``--broker-url``/
+# ``--token`` config is just a single host named ``"default"``.
+_host_configs: Dict[str, Tuple[str, str]] = {}   # name -> (base, token), ordered
+_clients: Dict[str, BrowserlandClient] = {}       # name -> client (lazy)
+# Guards the lazy build in _get_client: FastMCP dispatches sync tools on a thread
+# pool, so two concurrent first-calls for one host could otherwise each construct
+# (and leak) an httpx.Client.
+_clients_lock = threading.Lock()
 
 
-def configure(base: str, token: str) -> None:
-    """Set the broker URL + MCP token for the lazily-built client."""
-    global _base, _token, _client
-    _base = base
-    _token = token
-    if _client is not None:  # close any prior client so its socket isn't leaked
-        _client.close()
-        _client = None
+def configure(hosts) -> None:
+    """Install the host map from an ordered iterable of ``(name, base, token)``
+    descriptors. Closes any previously-built clients so their sockets aren't
+    leaked; the new clients are built lazily on first use."""
+    global _host_configs, _clients
+    with _clients_lock:
+        for client in _clients.values():
+            try:
+                client.close()
+            except Exception:  # a flaky close must not abort reconfiguration
+                pass
+        _clients = {}
+        _host_configs = {name: (base, token) for name, base, token in hosts}
 
 
-def get_client() -> BrowserlandClient:
-    """Return the shared client, building it on first use."""
-    global _client
-    if _client is None:
-        _client = BrowserlandClient(_base, _token)
-    return _client
+def _get_client(name: str) -> BrowserlandClient:
+    """Return the (lazily-built) client for an already-validated host name.
+    Double-checked locking keeps concurrent first-calls from leaking a client."""
+    client = _clients.get(name)
+    if client is not None:
+        return client
+    with _clients_lock:
+        client = _clients.get(name)
+        if client is None:
+            base, token = _host_configs[name]
+            client = BrowserlandClient(base, token)
+            _clients[name] = client
+        return client
+
+
+def _named_client(name: str) -> BrowserlandClient:
+    """The client for an explicitly-named host, or a :class:`BrowserlandError`
+    if the name isn't configured (never a bare ``KeyError``)."""
+    if name not in _host_configs:
+        raise BrowserlandError(
+            0, "unknown_host",
+            f"unknown host {name!r}; configured hosts: {sorted(_host_configs)}")
+    return _get_client(name)
+
+
+def _route(id: str) -> Tuple[BrowserlandClient, int]:
+    """Split a namespaced ``"<host>:<int>"`` window id into its routed
+    ``(client, int_id)``. Raises a clear :class:`BrowserlandError` (never a bare
+    ``KeyError``/``ValueError``) on a non-string id, a malformed id, or an
+    unknown host."""
+    if not isinstance(id, str):
+        raise BrowserlandError(
+            0, "malformed_id",
+            f"id must be a '<host>:<int>' string, got {id!r}")
+    host, sep, rest = id.partition(":")
+    # `rest` must be plain ASCII decimal digits: this rejects a sign, surrounding
+    # whitespace, underscores ("1_000"), and Unicode digits — all of which int()
+    # would otherwise silently accept and forward as a bogus window id.
+    if not sep or not host or not (rest.isascii() and rest.isdigit()):
+        raise BrowserlandError(
+            0, "malformed_id",
+            f"id {id!r} must be '<host>:<int>' (e.g. 'default:12345'); "
+            "get one from list_terminals")
+    return _named_client(host), int(rest)
+
+
+def _aggregate(method_name: str) -> Dict[str, Any]:
+    """Call the no-arg client ``method_name`` on every configured host and return
+    a dict keyed by host name. A host that fails contributes
+    ``{"ok": False, "error": msg}`` instead of sinking the whole call — used by
+    the host-less mcp_info / list_profiles forms."""
+    out: Dict[str, Any] = {}
+    for name in _host_configs:
+        # Catch broadly: a host returning HTTP 200 with malformed JSON raises
+        # ValueError (not BrowserlandError) — it must still not sink the others.
+        # The error value carries `ok: False` so a caller can tell it apart from
+        # a real broker reply (the broker's own info() always reports ok: True).
+        try:
+            out[name] = getattr(_get_client(name), method_name)()
+        except Exception as exc:
+            out[name] = {"ok": False, "error": str(exc)}
+    return out
+
+
+def _launch_target(host: Optional[str]) -> Tuple[BrowserlandClient, str]:
+    """Resolve which host ``launch_terminal`` targets, returning ``(client,
+    name)``. An explicit ``host`` wins; with exactly one configured host it
+    defaults to that host; otherwise a clear :class:`BrowserlandError` asks the
+    caller to name one. An empty string is treated as *absent* (MCP clients
+    often fill an optional string param with "" rather than null)."""
+    if host:
+        return _named_client(host), host
+    if len(_host_configs) == 1:
+        name = next(iter(_host_configs))
+        return _get_client(name), name
+    raise BrowserlandError(
+        0, "host_required",
+        f"host=... is required to choose a broker; configured hosts: "
+        f"{sorted(_host_configs)}")
 
 
 def _newlines_to_enter(data: str) -> str:
@@ -172,50 +258,95 @@ def _keys_to_text(keys: List[str], app_cursor: bool = False) -> str:
 
 
 @mcp.tool()
-def mcp_info() -> Dict[str, Any]:
-    """Get Browserland broker MCP feature flags (allow_launch, default_mode)."""
-    return get_client().info()
+def mcp_info(host: Optional[str] = None) -> Dict[str, Any]:
+    """Get Browserland broker MCP feature flags (allow_launch, default_mode).
+
+    With `host` set, returns that one host's flags. Omit `host` (or pass "") to
+    get a dict keyed by host name — each value is that host's flags, or
+    `{"ok": false, "error": ...}` if the host is unreachable."""
+    if host:
+        return _named_client(host).info()
+    return _aggregate("info")
 
 
 @mcp.tool()
-def list_terminals() -> List[Dict[str, Any]]:
-    """List the Browserland terminals visible to MCP (windows in 'off' mode are hidden)."""
-    return get_client().list_terminals()
+def list_terminals() -> Dict[str, Any]:
+    """List Browserland terminals across all configured hosts (windows in 'off'
+    mode are hidden).
+
+    Returns `{"terminals": [...], "errors": {host: message}}`. Each terminal's
+    `host` field is set to the configured MCP host name and its `id` is rewritten
+    to the namespaced `"<host>:<int>"` form the other tools expect; the broker's
+    own per-terminal `host` (the producer's machine hostname) is preserved under
+    `machine_host`. A host that can't be reached is reported in `errors` and does
+    not suppress the other hosts' terminals."""
+    terminals: List[Dict[str, Any]] = []
+    errors: Dict[str, str] = {}
+    for name in _host_configs:
+        # Build this host's slice in a local list so a failure partway through
+        # (e.g. malformed JSON -> ValueError, not just BrowserlandError) reports
+        # the host in `errors` without leaving half its terminals merged in.
+        try:
+            host_terms = []
+            for t in _get_client(name).list_terminals():
+                t = dict(t)
+                # The broker already sends `host` = the producer's machine
+                # hostname; the spec wants `host` to be the configured MCP host
+                # name, so move the machine hostname aside rather than lose it.
+                if "host" in t:
+                    t.setdefault("machine_host", t["host"])
+                t["host"] = name
+                if "id" in t:
+                    t["id"] = f"{name}:{t['id']}"
+                host_terms.append(t)
+            terminals.extend(host_terms)
+        except Exception as exc:
+            errors[name] = str(exc)
+    return {"terminals": terminals, "errors": errors}
 
 
 @mcp.tool()
-def list_profiles() -> Dict[str, Any]:
-    """List the launchable terminal profile names and the broker default."""
-    return get_client().list_profiles()
+def list_profiles(host: Optional[str] = None) -> Dict[str, Any]:
+    """List the launchable terminal profile names and the broker default.
+
+    With `host` set, returns that one host's profiles. Omit `host` (or pass "")
+    to get a dict keyed by host name — each value is that host's profiles, or
+    `{"ok": false, "error": ...}` if the host is unreachable."""
+    if host:
+        return _named_client(host).list_profiles()
+    return _aggregate("list_profiles")
 
 
 @mcp.tool()
-def read_screen(id: int, view: str = "screen", lines: int = 0) -> Dict[str, Any]:
-    """Render a terminal's current screen as plain text. Pass a window id from
-    list_terminals.
+def read_screen(id: str, view: str = "screen", lines: int = 0) -> Dict[str, Any]:
+    """Render a terminal's current screen as plain text. Pass a namespaced window
+    id ("<host>:<int>") from list_terminals.
 
     The result includes `alt_screen` (true for a full-screen TUI like mc/btop/
     vim — the grid is the whole story, so scrollback is meaningless) and
     `cursor` {row, col}. For a shell, pass `view="scrollback"` with `lines=N` to
     get up to N lines of history above the current grid (`history_lines` reports
     how many were included; ignored when `alt_screen` is true)."""
-    return get_client().read_screen(id, view=view, lines=lines)
+    client, int_id = _route(id)
+    return client.read_screen(int_id, view=view, lines=lines)
 
 
 @mcp.tool()
-def send_input(id: int, data: str) -> Dict[str, Any]:
-    r"""Type text into a terminal. The target window must be in 'readwrite' mode.
+def send_input(id: str, data: str) -> Dict[str, Any]:
+    r"""Type text into a terminal. Pass a namespaced window id ("<host>:<int>");
+    the target window must be in 'readwrite' mode.
 
     Newlines in `data` are sent as Enter (carriage return) so commands actually
     run — including on PowerShell, where a line-feed is only a soft
     continuation. To send raw bytes verbatim (a literal `\n`, or hand-crafted
     control/escape sequences), drive the broker's `POST /mcp/input` endpoint
     directly."""
-    return get_client().send_input(id, _newlines_to_enter(data))
+    client, int_id = _route(id)
+    return client.send_input(int_id, _newlines_to_enter(data))
 
 
 @mcp.tool()
-def send_keys(id: int, keys: List[str]) -> Dict[str, Any]:
+def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
     r"""Send terminal KEY SEQUENCES (control/escape keys) to a terminal. The
     window must be in 'readwrite' mode.
 
@@ -237,20 +368,30 @@ def send_keys(id: int, keys: List[str]) -> Dict[str, Any]:
     — best-effort from the agent's cached DECCKM, so arrows work in those TUIs
     without hand-assembling escapes (#23); it falls back to CSI for a non-agent
     producer or if the state can't be read. Tokens are sent verbatim (no
-    newline->Enter rewrite); use `send_input` for ordinary text."""
-    client = get_client()
+    newline->Enter rewrite); use `send_input` for ordinary text. Pass a
+    namespaced window id ("<host>:<int>")."""
     # Validate + translate up front (atomic, CSI form): a bad token raises here,
-    # before any DECCKM lookup or send.
+    # before any routing, DECCKM lookup or send.
     text = _keys_to_text(keys)
-    if _keys_have_cursor(keys) and _terminal_app_cursor(client, id):
+    client, int_id = _route(id)
+    if _keys_have_cursor(keys) and _terminal_app_cursor(client, int_id):
         text = _keys_to_text(keys, app_cursor=True)   # re-encode arrows as SS3
-    return client.send_input(id, text)
+    return client.send_input(int_id, text)
 
 
 @mcp.tool()
 def launch_terminal(profile: Optional[str] = None, cols: int = 80,
                     rows: int = 24, title: Optional[str] = None,
-                    cwd: Optional[str] = None) -> Dict[str, Any]:
-    """Spawn a new terminal from a profile. The broker must have 'allow_launch' enabled."""
-    return get_client().launch_terminal(
+                    cwd: Optional[str] = None,
+                    host: Optional[str] = None) -> Dict[str, Any]:
+    """Spawn a new terminal from a profile. The broker must have 'allow_launch'
+    enabled. With multiple hosts configured, `host` is required to choose which
+    broker; with a single host it's optional. The returned `id` is namespaced
+    ("<host>:<int>") so it can be passed straight to the other tools."""
+    client, name = _launch_target(host)
+    result = client.launch_terminal(
         profile=profile, cols=cols, rows=rows, title=title, cwd=cwd)
+    if isinstance(result, dict) and "id" in result:
+        result = dict(result)
+        result["id"] = f"{name}:{result['id']}"
+    return result

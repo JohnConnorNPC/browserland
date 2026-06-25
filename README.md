@@ -113,17 +113,26 @@ is gated by the same per-window access modes and the master enable switch.
 
 ### Tools
 
-Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
+Each tool maps to a broker endpoint and returns its JSON. Window `id`s are
+namespaced `"<host>:<int>"` strings so one server can front several brokers (see
+**Multi-host** below); with a single broker the host is `default`
+(`"default:12345"`).
 
 | Tool | Endpoint | Notes |
 |---|---|---|
-| `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) |
-| `list_terminals` | `GET /mcp/terminals` | visible terminals (windows in `off` mode are hidden) |
-| `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
+| `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`). Omit `host` → dict keyed by host name |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without sinking the rest |
+| `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
 | `send_keys(id, keys)` | `POST /mcp/input` | send control/escape **keys** — `["C-c"]`, `["Esc"]`, `["Up","Enter"]` — that plain text can't express |
-| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
+| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` required when multiple hosts are configured |
+
+**Multi-host.** Pass `--hosts` (or `$BROWSERLAND_MCP_HOSTS`) a JSON array of
+`{name, url, token}` descriptors to serve N brokers from one server process;
+every id-taking tool routes on the `"<host>:…"` prefix. The single
+`--broker-url`/`--token` form is the one-host shorthand (`default`). See
+[`webterm/mcptool/README.md`](webterm/mcptool/README.md) for details.
 
 > The `send_input` **tool** maps newlines in `data` to a carriage return — the
 > byte a real Enter key sends — so a line submits on PowerShell/PSReadLine (which

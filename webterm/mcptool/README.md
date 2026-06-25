@@ -32,11 +32,30 @@ Config resolves **flag > env > default**:
 | Broker base URL | `--broker-url` | `BROWSERLAND_MCP_URL` | `http://127.0.0.1:4445` |
 | MCP token | `--token` | `BROWSERLAND_MCP_TOKEN` (or `WEB_TERMINAL_MCP_TOKEN`) | — (required) |
 | Token from sidecar | `--token-file PATH` | — | — |
+| Multiple brokers | `--hosts JSON` | `BROWSERLAND_MCP_HOSTS` | — (single-host) |
 
 `--token-file` reads the `token` field from a `webterm_mcp.json` sidecar (a local
 convenience; the file holds `null` when the broker pins its token via env, in
 which case pass the token directly). Token precedence is
 `--token` > `$BROWSERLAND_MCP_TOKEN` > `$WEB_TERMINAL_MCP_TOKEN` > `--token-file`.
+
+### Multi-host (#24)
+
+One server process can front **several brokers** at once. Pass `--hosts` (or
+`$BROWSERLAND_MCP_HOSTS`) a JSON array of `{name, url, token}` descriptors:
+
+```bash
+browserland-mcp --hosts '[
+  {"name": "local",  "url": "http://127.0.0.1:4445",      "token": "abc…"},
+  {"name": "remote", "url": "https://host2.ts.net:4445",  "token": "xyz…"}
+]'
+```
+
+When `--hosts` is set it **supersedes** `--broker-url`/`--token`. Each `name`
+must be unique and contain no `:` (it is the id separator). Window ids then
+become **namespaced** strings `"<host>:<int>"` (e.g. `"local:4503601923583086"`),
+and every id-taking tool routes on that prefix. A single `--broker-url`/`--token`
+config is just one host named **`default`** — its ids look like `"default:12345"`.
 
 > `BROWSERLAND_MCP_URL` is an `http://…` base URL and is **distinct** from the
 > producer's `BROWSERLAND_BROKER_URL` (a `ws://…/browserland` URL) — different scheme and
@@ -62,24 +81,28 @@ claude mcp add browserland \
   -- python -m webterm.mcptool
 ```
 
-(`-e` is the short form of `--env`.) Then the six tools below are callable.
+(`-e` is the short form of `--env`.) Then the seven tools below are callable.
 
 ## Tools
 
-Each tool maps 1:1 to a broker endpoint and returns its JSON verbatim:
+Each tool maps to a broker endpoint and returns its JSON. Window `id`s are
+namespaced `"<host>:<int>"` strings (see **Multi-host** above); the tools route
+on the host prefix:
 
 | Tool | Endpoint | Notes |
 |---|---|---|
-| `mcp_info` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version` |
-| `list_terminals` | `GET /mcp/terminals` | visible terminals (`off`-mode hidden); each carries a build `version` (agents also a `stale` flag) and `app_cursor` (cached DECCKM) |
-| `list_profiles` | `GET /mcp/profiles` | launchable profile names + default |
+| `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version`. Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag) and `app_cursor` (cached DECCKM) |
+| `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id, view?, lines?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`; `view="scrollback"` adds history |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
 | `send_keys(id, keys)` | `POST /mcp/input` | control/escape keys plain text can't express |
-| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled |
+| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
-…) surface as a readable tool error (a `BrowserlandError`), not a raw stack trace.
+…) surface as a readable tool error (a `BrowserlandError`), not a raw stack
+trace. Routing errors do too: a malformed id raises `malformed_id`, an id for an
+unconfigured host raises `unknown_host`.
 
 **`send_input` newline handling.** The tool maps newlines in `data` to a
 carriage return (`\r`) — the byte a real Enter key sends — so a command actually
@@ -138,7 +161,7 @@ screen view.
 | File | What |
 |---|---|
 | `client.py` | `BrowserlandClient` + `BrowserlandError` — the httpx client, one method per endpoint |
-| `server.py` | FastMCP server; the six `@mcp.tool()` functions |
+| `server.py` | FastMCP server; the seven `@mcp.tool()` functions + the host-routing helpers (`_route`, `_named_client`, `_aggregate`) |
 | `__main__.py` | `python -m webterm.mcptool` — argparse, config resolution, `mcp.run()` |
 
 Tests: `tests/test_mcptool.py` (skipped when `mcp` is absent).

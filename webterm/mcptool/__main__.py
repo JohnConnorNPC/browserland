@@ -20,6 +20,9 @@ DEFAULT_URL = "http://127.0.0.1:4445"
 URL_ENV = "BROWSERLAND_MCP_URL"
 TOKEN_ENV = "BROWSERLAND_MCP_TOKEN"
 TOKEN_ENV_ALT = "WEB_TERMINAL_MCP_TOKEN"
+# Multi-host (#24): a JSON array of {name,url,token} host descriptors. When set
+# (flag or env) it supersedes the single-host --broker-url/--token shorthand.
+HOSTS_ENV = "BROWSERLAND_MCP_HOSTS"
 
 
 def _token_from_file(path: str) -> Optional[str]:
@@ -52,6 +55,56 @@ def _resolve_token(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
+def _parse_hosts(raw: str) -> list:
+    """Parse the ``--hosts`` / ``$BROWSERLAND_MCP_HOSTS`` JSON into an ordered
+    list of ``(name, url, token)`` host descriptors.
+
+    Raises :class:`ValueError` with a precise message on anything malformed: not
+    a JSON array, an empty array, a non-object entry, a missing/empty field, a
+    name containing ``':'`` (the namespaced-id separator), or a duplicate name."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"--hosts/${HOSTS_ENV} is not valid JSON: {exc}") from exc
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            f"--hosts/${HOSTS_ENV} must be a non-empty JSON array of "
+            '{"name","url","token"} objects')
+    hosts = []
+    seen = set()
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"--hosts[{i}] is not a JSON object")
+        name, url, token = item.get("name"), item.get("url"), item.get("token")
+        for field, val in (("name", name), ("url", url), ("token", token)):
+            if not isinstance(val, str) or not val:
+                raise ValueError(
+                    f"--hosts[{i}] '{field}' must be a non-empty string")
+        if ":" in name:
+            raise ValueError(
+                f"--hosts[{i}] name {name!r} must not contain ':' "
+                "(it is the namespaced-id separator)")
+        if name in seen:
+            raise ValueError(f"--hosts has a duplicate host name {name!r}")
+        seen.add(name)
+        hosts.append((name, url, token))
+    return hosts
+
+
+def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
+    """Resolve the host map. With ``--hosts``/env set, parse it (multi-host).
+    Otherwise fall back to the single-host ``--broker-url``/``--token`` shorthand
+    under the name ``"default"``. Returns ``None`` when single-host mode has no
+    resolvable token (so the caller can print the token help and exit)."""
+    if args.hosts:
+        return _parse_hosts(args.hosts)
+    token = _resolve_token(args)
+    if not token:
+        return None
+    return [("default", args.broker_url, token)]
+
+
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="webterm.mcptool",
@@ -71,21 +124,29 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help="Path to a webterm_mcp.json sidecar; reads its 'token' field "
              "(used only when no flag/env token is set).",
     )
+    p.add_argument(
+        "--hosts", default=os.environ.get(HOSTS_ENV, ""),
+        help='Multi-host: a JSON array of {"name","url","token"} descriptors, '
+             "e.g. "
+             '\'[{"name":"local","url":"http://127.0.0.1:4445","token":"…"}]\' '
+             f"(default ${HOSTS_ENV}). When set, supersedes --broker-url/--token; "
+             "window ids become namespaced '<host>:<int>'.",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: Optional[list] = None) -> int:
     args = _parse_args(argv)
     try:
-        token = _resolve_token(args)
+        hosts = _resolve_hosts(args)
     except (OSError, ValueError) as exc:
-        print(f"browserland-mcp: cannot read token file: {exc}", file=sys.stderr)
+        print(f"browserland-mcp: {exc}", file=sys.stderr)
         return 2
-    if not token:
+    if hosts is None:
         print(
             "browserland-mcp: no MCP token. Set --token, "
-            f"${TOKEN_ENV} (or ${TOKEN_ENV_ALT}), or --token-file "
-            "pointing at a webterm_mcp.json sidecar.",
+            f"${TOKEN_ENV} (or ${TOKEN_ENV_ALT}), --token-file pointing at a "
+            f"webterm_mcp.json sidecar, or --hosts/${HOSTS_ENV} for multi-host.",
             file=sys.stderr,
         )
         return 2
@@ -106,7 +167,7 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 2
 
-    server.configure(args.broker_url, token)
+    server.configure(hosts)
     server.mcp.run()  # stdio transport
     return 0
 
