@@ -8,7 +8,9 @@ grid with box-drawing and braille glyphs intact, instead of the unbounded
 raw-ANSI dump the old fallback produced (issue #15).
 
 Scope: enough of the VT/ECMA-48 model to lay cursor-addressed output onto a grid
-— CUP/CUU/CUD/CUF/CUB/CHA/VPA cursor moves, ED/EL erase, autowrap, the
+— CUP/CUU/CUD/CUF/CUB/CHA/VPA cursor moves, ED/EL erase (incl. private DECSED/
+DECSEL ``?J``/``?K``), ICH/DCH/ECH char insert/delete/erase, IL/DL line
+insert/delete, SU/SD and DECSTBM scroll-region scrolling, autowrap, the
 CR/LF/BS/TAB controls, RIS/RI, cursor save/restore, and alternate-screen entry
 (clears, like a real fresh alt buffer). SGR (color/style), other DEC private
 modes (synchronized update, cursor visibility), and OSC/DCS/SOS/PM/APC control
@@ -20,8 +22,10 @@ output size and (via dimension caps + replay trimming) compute.
 
 Known limits vs pyte (cost fidelity, never boundedness/safety — the primary
 pyte path covers these, and this is a best-effort fallback, not a second full
-emulator): no scroll regions (DECSTBM), no IL/DL/ICH/DCH, no separate
-wrap-pending cell, and wide (CJK)/combining glyphs counted as one column.
+emulator): no DEC origin mode (DECOM ``?6h``, so CUP stays screen-absolute even
+under a scroll region), no separate wrap-pending cell, and wide (CJK)/combining
+glyphs counted as one column. Scroll regions (DECSTBM), IL/DL, ICH/DCH, ECH and
+SU/SD ARE modeled (#28) so a TUI's menu-teardown ops don't leave ghost text.
 """
 
 from __future__ import annotations
@@ -120,15 +124,34 @@ def _skip_string(text: str, k: int, n: int) -> int:
     return n
 
 
-def _trim_to_last_restart(data: bytes) -> bytes:
-    """Drop everything before the last full clear / alt-screen entry — it is
-    not visible on the settled screen — so a 50-frame TUI capture renders only
-    its final frame. No marker → unchanged."""
+def _trim_for_screen(data: bytes, evicted: bool = False) -> bytes:
+    """Trim the ring for a current-screen render. Drop everything before the
+    last full clear / alt-screen entry — invisible on the settled screen — so a
+    50-frame TUI capture renders only its final frame. With no such marker, an
+    **evicted** ring head may begin mid-escape-sequence, so resync to the first
+    LF or ESC; otherwise the head is the true start and is kept. Mirrors
+    :func:`webterm.agent.snapshot.raw._trim` so the MCP screen render can't
+    mis-decode a truncated leading sequence into ghost glyphs near top-left
+    (#28). Dropping a partial leading line is the accepted tradeoff (that
+    fragment would render mis-positioned anyway)."""
     best = max(data.rfind(m) for m in _RESTART_MARKERS)
-    return data[best:] if best > 0 else data
+    if best > 0:
+        return data[best:]
+    if best == 0 or not evicted:
+        return data
+    candidates = [i for i in (data.find(b"\n"), data.find(b"\x1b")) if i >= 0]
+    return data[min(candidates):] if candidates else data
 
 
-def _replay(data: bytes, cols: int, rows: int, trim: bool = True):
+def _trim_to_last_restart(data: bytes) -> bytes:
+    """Marker-only trim (no eviction resync) — equivalent to
+    ``_trim_for_screen(data, evicted=False)``. Kept for callers that don't track
+    ring-eviction state."""
+    return _trim_for_screen(data)
+
+
+def _replay(data: bytes, cols: int, rows: int, trim: bool = True,
+            evicted: bool = False):
     """Replay ``data`` (raw PTY bytes) onto a fresh ``rows``x``cols`` grid.
     Returns ``(grid, cursor_x, cursor_y, history)`` where ``history`` is the
     lines that scrolled off the top of the PRIMARY screen (bounded; never
@@ -149,24 +172,44 @@ def _replay(data: bytes, cols: int, rows: int, trim: bool = True):
     x = y = 0
     saved: Tuple[int, int] = (0, 0)
     in_alt = False
-    text = (_trim_to_last_restart(data) if trim else data).decode(
+    # DECSTBM scroll region [top, bot], inclusive, 0-based (default: whole
+    # screen). Scrolling, IL/DL and SU/SD act within it; rows outside stay put.
+    top, bot = 0, rows - 1
+    text = (_trim_for_screen(data, evicted) if trim else data).decode(
         "utf-8", "replace")
     n = len(text)
     i = 0
 
+    def scroll_up(count: int = 1) -> None:
+        # Scroll the [top, bot] region up by `count`: a row leaves at the top of
+        # the region, a blank appears at the bottom; rows outside are untouched.
+        # pop(top)+insert(bot, blank) keeps the row count and the outside rows
+        # fixed — correct ONLY because `bot` is the post-pop insertion index.
+        for _ in range(max(1, count)):
+            if top == 0 and not in_alt:          # full-screen scroll = history
+                history.append("".join(grid[top]))
+            grid.pop(top)
+            grid.insert(bot, [" "] * cols)
+
+    def scroll_down(count: int = 1) -> None:
+        # Scroll the [top, bot] region down by `count`: a blank at the top, a row
+        # leaves at the bottom; rows outside the region are untouched.
+        for _ in range(max(1, count)):
+            grid.insert(top, [" "] * cols)
+            grid.pop(bot + 1)
+
     def newline() -> None:
         nonlocal y
-        y += 1
-        if y > rows - 1:
-            if not in_alt:                       # primary scroll = real history
-                history.append("".join(grid[0]))
-            grid.pop(0)
-            grid.append([" "] * cols)
-            y = rows - 1
+        if y == bot:                             # at bottom margin -> scroll
+            scroll_up(1)
+        elif y < rows - 1:                       # else move down (clamp at edge)
+            y += 1
 
     def clear() -> None:
+        nonlocal top, bot
         for r in range(rows):
             grid[r] = [" "] * cols
+        top, bot = 0, rows - 1                   # screen switch / RIS resets it
 
     while i < n:
         ch = text[i]
@@ -217,11 +260,47 @@ def _replay(data: bytes, cols: int, rows: int, trim: bool = True):
                 elif final == "F":  # CPL
                     y = max(y - (nums[0] or 1), 0)
                     x = 0
-                elif final == "J" and not priv:  # ED
+                elif final == "J":  # ED (and DECSED ?J: same erase — textgrid
+                    # models no selective-erase protection, so ?J behaves as J)
                     _erase_display(grid, x, y, cols, rows, nums[0] if nums else 0)
-                elif final == "K" and not priv:  # EL
+                elif final == "K":  # EL (and DECSEL ?K, same rationale)
                     _erase_line(grid[y], min(x, cols - 1), cols,
                                 nums[0] if nums else 0)
+                elif final == "r" and not priv:  # DECSTBM: set scroll region
+                    if not params:               # CSI r -> reset to full screen
+                        top, bot = 0, rows - 1    # (no cursor move, matches pyte)
+                    else:
+                        t0 = (nums[0] or 1) - 1
+                        b0 = (nums[1] if len(nums) > 1 and nums[1] > 0
+                              else rows) - 1
+                        if 0 <= t0 < b0 <= rows - 1:   # valid -> set + home
+                            top, bot = t0, b0
+                            x = y = 0
+                        # invalid (top>=bot): region & cursor unchanged (pyte)
+                elif final == "L" and top <= y <= bot:  # IL: insert blank lines
+                    for _ in range(min(nums[0] or 1, bot - y + 1)):
+                        grid.pop(bot)
+                        grid.insert(y, [" "] * cols)
+                    x = 0
+                elif final == "M" and top <= y <= bot:  # DL: delete lines
+                    for _ in range(min(nums[0] or 1, bot - y + 1)):
+                        grid.pop(y)
+                        grid.insert(bot, [" "] * cols)
+                    x = 0
+                elif final == "@":  # ICH: insert blanks, shift right (clip edge)
+                    cnt = min(nums[0] or 1, cols - x)
+                    grid[y][x:cols] = ([" "] * cnt + grid[y][x:cols])[:cols - x]
+                elif final == "P":  # DCH: delete chars, shift left, pad right
+                    cnt = min(nums[0] or 1, cols - x)
+                    grid[y][x:cols] = grid[y][x + cnt:cols] + [" "] * cnt
+                elif final == "X":  # ECH: erase n chars in place (no shift)
+                    cnt = min(nums[0] or 1, cols - x)
+                    for c in range(x, x + cnt):
+                        grid[y][c] = " "
+                elif final == "S":  # SU: scroll region up
+                    scroll_up(nums[0] or 1)
+                elif final == "T":  # SD: scroll region down
+                    scroll_down(nums[0] or 1)
                 # else: SGR ('m'), and anything else we don't model — discarded.
                 i = k + 1
                 continue
@@ -246,12 +325,11 @@ def _replay(data: bytes, cols: int, rows: int, trim: bool = True):
                 y = min(max(saved[1], 0), rows - 1)
                 i = j + 1
                 continue
-            if nxt == "M":  # RI: reverse index (up, scrolling down at the top)
-                if y > 0:
-                    y -= 1
+            if nxt == "M":  # RI: reverse index — up, or scroll region down at top
+                if y == top:
+                    scroll_down(1)
                 else:
-                    grid.pop()
-                    grid.insert(0, [" "] * cols)
+                    y = max(y - 1, 0)
                 i = j + 1
                 continue
             # Other two-byte escapes (= > D E ...): swallow the pair.
@@ -301,7 +379,8 @@ def render(data: bytes, cols: int, rows: int) -> str:
 
 
 def render_screen(data: bytes, cols: int, rows: int,
-                  view: str = "screen", lines: int = 0) -> Dict[str, Any]:
+                  view: str = "screen", lines: int = 0,
+                  evicted: bool = False) -> Dict[str, Any]:
     """Structured render for the MCP read (#21): ``{text, cursor, history_lines}``.
 
     ``view="screen"`` (default) returns just the current grid. ``view=
@@ -314,7 +393,8 @@ def render_screen(data: bytes, cols: int, rows: int,
     scrollback = view == "scrollback"
     # Scrollback replays the FULL ring (trim=False) so history before the last
     # clear/alt-enter survives; screen-only keeps the bounding trim.
-    grid, x, y, history = _replay(data, cols, rows, trim=not scrollback)
+    grid, x, y, history = _replay(data, cols, rows, trim=not scrollback,
+                                  evicted=evicted)
     screen = "\n".join("".join(r) for r in grid)
     cursor = {"row": min(max(int(y), 0), len(grid) - 1),
               "col": min(max(int(x), 0), cols_c - 1)}

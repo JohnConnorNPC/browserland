@@ -35,7 +35,7 @@ _DETECT_INTERVAL = 1.5
 
 def _render_screen_text(data: bytes, cols: int, rows: int,
                         view: str = "screen", lines: int = 0,
-                        alt_screen: bool = False):
+                        alt_screen: bool = False, evicted: bool = False):
     """Render the ring for an MCP read; return a dict
     ``{text, degraded, alt_screen, cursor, view, history_lines}``. Runs in a
     worker thread; never raises (#15, #21).
@@ -46,8 +46,10 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     fallback. ``alt_screen`` (the agent's live-tracked state) overrides
     ``view="scrollback"`` — the grid is the whole story for a full-screen TUI,
     so scrollback is meaningless; the returned ``view`` reflects what was
-    actually produced. ``degraded=True`` (``view="raw"``, ``cursor=None``) is
-    the last-ditch raw decode when no grid could be produced (#15 symptom)."""
+    actually produced. ``evicted`` (the ring dropped its head) lets the
+    head-trim resync a cut leading escape sequence instead of mis-decoding it
+    into ghost glyphs (#28). ``degraded=True`` (``view="raw"``, ``cursor=None``)
+    is the last-ditch raw decode when no grid could be produced (#15 symptom)."""
     try:
         cols = max(1, int(cols))
         rows = max(1, int(rows))
@@ -56,13 +58,15 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     want_scrollback = view == "scrollback" and not alt_screen
     eff_view = "scrollback" if want_scrollback else "screen"
     if not want_scrollback:
-        # Current screen only: pyte (high fidelity), trimmed like textgrid.
+        # Current screen only: pyte (high fidelity), trimmed like textgrid —
+        # with the same evicted-head resync so a cut leading sequence can't
+        # mis-decode into top-left ghost glyphs (#28).
         try:
             import pyte  # type: ignore
-            from .snapshot.textgrid import _trim_to_last_restart
+            from .snapshot.textgrid import _trim_for_screen
             screen = pyte.Screen(cols, rows)
             stream = pyte.ByteStream(screen)
-            stream.feed(_trim_to_last_restart(data))
+            stream.feed(_trim_for_screen(data, evicted))
             cur = {"row": min(max(screen.cursor.y, 0), rows - 1),
                    "col": min(max(screen.cursor.x, 0), cols - 1)}
             return {"text": "\n".join(screen.display), "degraded": False,
@@ -74,7 +78,8 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     # textgrid: scrollback (it owns history) OR the no-pyte screen fallback.
     try:
         from .snapshot import textgrid
-        r = textgrid.render_screen(data, cols, rows, eff_view, lines)
+        r = textgrid.render_screen(data, cols, rows, eff_view, lines,
+                                   evicted=evicted)
         return {"text": r["text"], "degraded": False, "alt_screen": alt_screen,
                 "cursor": r["cursor"], "view": eff_view,
                 "history_lines": r["history_lines"]}
@@ -377,6 +382,7 @@ class Agent:
         # large ring) and enqueue the reply on the SAME ordered out-queue.
         loop = asyncio.get_running_loop()
         data = self.ring.get()
+        evicted = self.ring.evicted              # head may start mid-seq (#28)
         cols, rows = self.state.cols, self.state.rows
         alt = self.state.alt_screen
         app_cursor = self.state.app_cursor       # DECCKM (#23)
@@ -385,7 +391,7 @@ class Agent:
             try:
                 r = await loop.run_in_executor(
                     None, _render_screen_text, data, cols, rows, view, lines,
-                    alt)
+                    alt, evicted)
                 self._enqueue("txt", protocol.screen_text_frame(
                     req, r["text"], cols, rows, degraded=r["degraded"],
                     alt_screen=r["alt_screen"], cursor=r["cursor"],
