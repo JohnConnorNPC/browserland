@@ -330,3 +330,183 @@ def test_render_screen_history_cell_bounded_for_wide_grid():
     data = b"".join(f"W{i}\r\n".encode() for i in range(3000))
     r = textgrid.render_screen(data, 500, 4, view="scrollback", lines=100000)
     assert r["history_lines"] <= 100_000 // 500   # == 200
+
+
+# ---- #28: menu-teardown ops (scroll regions, IL/DL, ICH/DCH/ECH, SU/SD) -----
+#
+# A TUI tears a menu down with line/char insert-delete, scroll-region resets or
+# private erases. The old textgrid dropped all of these, so closed menus left
+# ghost text. These verify the ops are modeled — by PARITY WITH PYTE for every
+# sequence pyte itself dispatches, and by direct assertion for SU/SD (which pyte
+# does not implement, so a parity check there would be meaningless).
+
+def _pyte_grid(data: bytes, cols: int, rows: int) -> str:
+    pyte = pytest.importorskip("pyte")
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    stream.feed(data)
+    return "\n".join(screen.display)
+
+
+def _fill(cols: int, rows: int) -> bytes:
+    # CUP-place AAA, BBB, CCC ... one label per row (no reliance on LF/scroll).
+    return b"".join(b"\x1b[%d;1H%s" % (i + 1, (chr(ord("A") + i) * 3).encode())
+                    for i in range(rows))
+
+
+@pytest.mark.parametrize("seq", [
+    b"\x1b[2;1H\x1b[L",             # IL: insert 1 blank line at row 2
+    b"\x1b[2;1H\x1b[2L",            # IL x2
+    b"\x1b[2;1H\x1b[M",             # DL: delete 1 line at row 2
+    b"\x1b[2;1H\x1b[3M",            # DL x3 (more than rows below)
+    b"\x1b[1;2H\x1b[2@",            # ICH: insert 2 blanks
+    b"\x1b[1;2H\x1b[9@",            # ICH past the right edge (clip)
+    b"\x1b[1;2H\x1b[2P",            # DCH: delete 2 chars
+    b"\x1b[1;2H\x1b[9P",            # DCH past the end (clamp)
+    b"\x1b[1;3H\x1b[3X",            # ECH: erase 3 chars in place
+    b"\x1b[3;1H\x1b[?0J",           # DECSED ?0J (== ED 0)
+    b"\x1b[3;1H\x1b[?J",            # DECSED ?J default
+    b"\x1b[3;1H\x1b[?1J",           # DECSED ?1J (start -> cursor)
+    b"\x1b[1;2H\x1b[?0K",           # DECSEL ?0K (== EL 0)
+    b"\x1b[1;2H\x1b[?2K",           # DECSEL ?2K (whole line)
+    b"\x1b[2;4r",                   # DECSTBM set region (homes cursor)
+    b"\x1b[2;4r\x1b[H",             # DECSTBM + explicit home
+    b"\x1b[r",                      # DECSTBM reset to full screen
+    b"\x1b[4;2r",                   # DECSTBM invalid (top>=bot): no-op
+    b"\x1b[2;4r\x1b[2;1H\x1b[L",    # IL inside a scroll region
+    b"\x1b[2;4r\x1b[4;1H\x1b[M",    # DL at the region's bottom row
+    b"\x1b[2;3r\x1b[5;1H\x1b[L",    # IL with cursor OUTSIDE region -> no-op
+    b"\x1b[2;3r\x1b[5;1H\x1b[M",    # DL with cursor outside region -> no-op
+])
+def test_menu_ops_parity_with_pyte(seq):
+    pytest.importorskip("pyte")
+    cols, rows = 8, 5
+    data = _fill(cols, rows) + seq
+    assert textgrid.render(data, cols, rows) == _pyte_grid(data, cols, rows)
+
+
+def test_decstbm_scroll_within_region_parity():
+    # Set a 3-row region, home, then feed CRLF-separated lines so the region
+    # scrolls while the rows outside it stay fixed. Must match pyte exactly.
+    cols, rows = 8, 5
+    data = _fill(cols, rows) + b"\x1b[2;4r\x1b[2;1H" + b"".join(
+        b"r%d\r\n" % i for i in range(6))
+    assert textgrid.render(data, cols, rows) == _pyte_grid(data, cols, rows)
+
+
+def test_su_scrolls_full_screen_up():
+    # SU 1 with the default region: every row moves up, blank at the bottom.
+    text = textgrid.render(_fill(8, 5) + b"\x1b[S", 8, 5)
+    assert _grid(text) == ["BBB     ", "CCC     ", "DDD     ", "EEE     ",
+                           "        "]
+
+
+def test_sd_scrolls_full_screen_down():
+    text = textgrid.render(_fill(8, 5) + b"\x1b[T", 8, 5)
+    assert _grid(text) == ["        ", "AAA     ", "BBB     ", "CCC     ",
+                           "DDD     "]
+
+
+def test_su_sd_within_scroll_region_keep_outside_rows():
+    # Region = rows 2-4; SU/SD scroll only inside it. Row 1 (AAA) and row 5
+    # (EEE) are sentinels that must never move.
+    up = textgrid.render(_fill(8, 5) + b"\x1b[2;4r\x1b[S", 8, 5)
+    assert _grid(up) == ["AAA     ", "CCC     ", "DDD     ", "        ",
+                         "EEE     "]
+    down = textgrid.render(_fill(8, 5) + b"\x1b[2;4r\x1b[T", 8, 5)
+    assert _grid(down) == ["AAA     ", "        ", "BBB     ", "CCC     ",
+                           "EEE     "]
+
+
+def test_ich_clips_at_right_edge():
+    data = b"\x1b[1;1HABCDEFGH\x1b[1;3H\x1b[2@"   # insert 2 blanks at col 3
+    assert _grid(textgrid.render(data, 8, 1))[0] == "AB  CDEF"   # GH pushed off
+    assert _grid(textgrid.render(data, 8, 1))[0] == _pyte_grid(data, 8, 1)
+
+
+def test_dch_pads_right_with_blanks():
+    data = b"\x1b[1;1HABCDEFGH\x1b[1;3H\x1b[2P"   # delete CD, shift left
+    assert _grid(textgrid.render(data, 8, 1))[0] == "ABEFGH  "
+    assert _grid(textgrid.render(data, 8, 1))[0] == _pyte_grid(data, 8, 1)
+
+
+def test_ech_erases_in_place_without_shifting():
+    data = b"\x1b[1;1HABCDEFGH\x1b[1;3H\x1b[2X"   # blank cols 3-4 only
+    assert _grid(textgrid.render(data, 8, 1))[0] == "AB  EFGH"
+    assert _grid(textgrid.render(data, 8, 1))[0] == _pyte_grid(data, 8, 1)
+
+
+def test_char_ops_at_last_column_dont_overflow():
+    # n far larger than the columns remaining must clamp, never raise/overflow.
+    for op in (b"\x1b[9@", b"\x1b[9P", b"\x1b[9X"):
+        data = b"\x1b[1;1HABCDEFGH\x1b[1;8H" + op
+        out = _grid(textgrid.render(data, 8, 2))
+        assert len(out) == 2 and all(len(ln) == 8 for ln in out)
+
+
+def test_menu_teardown_leaves_no_ghost_text():
+    # The #28 symptom: draw a menu (rows 2-4), then tear it down with DL. The
+    # rows below close up and NO menu glyph survives (the old textgrid kept
+    # them as ghost text because it ignored DL).
+    base = (b"\x1b[1;1Hheader"
+            + b"\x1b[2;1HMENU-AAAA"
+            + b"\x1b[3;1HMENU-BBBB"
+            + b"\x1b[4;1HMENU-CCCC"
+            + b"\x1b[5;1Hfooter")
+    text = textgrid.render(base + b"\x1b[2;1H\x1b[3M", 10, 5)   # DL x3 at row 2
+    assert "MENU" not in text
+    assert "header" in text and "footer" in text
+
+
+def test_scroll_region_does_not_pollute_history_when_top_nonzero():
+    # A partial-region scroll (top>0) is a TUI menu scroll, NOT real shell
+    # scrollback — it must not leak into history (#21/#28 review point).
+    data = _fill(8, 5) + b"\x1b[2;4r\x1b[4;1H" + b"".join(
+        b"x%d\r\n" % i for i in range(10))
+    r = textgrid.render_screen(data, 8, 5, view="scrollback", lines=50)
+    assert r["history_lines"] == 0
+
+
+def test_one_row_grid_scroll_ops_never_raise():
+    # Degenerate 1-row grid: region is a single line; scroll/IL/DL must be safe.
+    for seq in (b"\x1b[S", b"\x1b[T", b"\x1b[L", b"\x1b[M", b"\x1b[1;1r\x1bM"):
+        out = textgrid.render(b"\x1b[1;1HX" + seq, 4, 1)
+        assert len(_grid(out)) == 1 and len(_grid(out)[0]) == 4
+
+
+# ---- #28 part 2: evicted-ring head resync (don't mis-decode a cut sequence) -
+
+def test_trim_for_screen_resyncs_evicted_head():
+    # Head evicted mid-CSI: starts with '2;5HGHOST' (the ESC '[' was dropped).
+    data = b"2;5HGHOST\x1b[1;1Hclean"
+    # evicted + no restart marker -> resync to the first ESC, dropping the cut.
+    assert textgrid._trim_for_screen(data, evicted=True) == b"\x1b[1;1Hclean"
+    # not evicted -> the head is the true start, kept verbatim.
+    assert textgrid._trim_for_screen(data, evicted=False) == data
+    # a restart marker always wins, evicted or not.
+    d2 = b"old stuff\x1b[2Jnew"
+    assert textgrid._trim_for_screen(d2, evicted=True) == b"\x1b[2Jnew"
+    assert textgrid._trim_for_screen(d2, evicted=False) == b"\x1b[2Jnew"
+
+
+def test_trim_for_screen_matches_raw_trim_behaviour():
+    # _trim_for_screen must mirror snapshot/raw._trim for the evicted case.
+    from webterm.agent.snapshot import raw as raw_snap
+    data = b"23;42Hgarbage\x1b[31mred"   # the test_snapshot_raw fixture shape
+    assert textgrid._trim_for_screen(data, evicted=True) == \
+        raw_snap._trim(data, evicted=True)
+
+
+@pytest.mark.parametrize("force_textgrid", [False, True])
+def test_render_screen_text_evicted_resync(monkeypatch, force_textgrid):
+    # Both render paths (pyte and the textgrid fallback) must drop a cut leading
+    # sequence when the ring evicted its head, instead of rendering ghost text.
+    from webterm.agent import agent as agent_mod
+    if force_textgrid:
+        monkeypatch.setitem(sys.modules, "pyte", None)
+    else:
+        pytest.importorskip("pyte")
+    data = b"2;5HGHOST\x1b[1;1Hclean"
+    r = agent_mod._render_screen_text(data, 20, 3, evicted=True)
+    assert "GHOST" not in r["text"]
+    assert "clean" in r["text"]
