@@ -235,3 +235,85 @@ async def test_binary_from_broker_is_raw_input(running_agent, broker):
 async def _poll_until(predicate):
     while not predicate():
         await asyncio.sleep(0.02)
+
+
+# ---- #26: read_screen content_hash + wait-for-change ----------------------
+
+async def _read_screen(broker, req, **kw):
+    """Drive one screen_text_please RPC and return the matching screen_text."""
+    frame = {"type": "screen_text_please", "req": req, "view": "screen",
+             "lines": 0}
+    frame.update(kw)
+    await broker.send(frame)
+    return await broker.wait_text(
+        lambda f: f.get("type") == "screen_text" and f.get("req") == req)
+
+
+def test_content_hash_is_stable_and_sensitive():
+    from webterm.agent.agent import _content_hash
+    assert _content_hash("hello world") == _content_hash("hello world")
+    assert _content_hash("hello world") != _content_hash("hello worle")
+    assert len(_content_hash("x")) == 32          # blake2b digest_size=16
+
+
+async def test_read_screen_returns_content_hash(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"first screen\r\n")
+    await broker.wait_binary(lambda b: b"first screen" in b)
+    r1 = await _read_screen(broker, 1)
+    assert r1["content_hash"]                      # non-empty digest
+    assert "first screen" in r1["text"]
+    backend.feed(b"second screen\r\n")
+    await broker.wait_binary(lambda b: b"second screen" in b)
+    r2 = await _read_screen(broker, 2)
+    assert r2["content_hash"] != r1["content_hash"]   # changed -> new hash
+
+
+async def test_wait_for_change_returns_promptly_on_change(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"baseline\r\n")
+    await broker.wait_binary(lambda b: b"baseline" in b)
+    base = await _read_screen(broker, 1)
+    h0 = base["content_hash"]
+    # Park a wait on the baseline hash, let it settle, then change the screen.
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_change=h0, timeout_ms=5000))
+    await asyncio.sleep(0.15)                       # let the agent render + park
+    assert not waiter.done()                        # still waiting (no change yet)
+    backend.feed(b"CHANGED!\r\n")
+    r = await asyncio.wait_for(waiter, 5)
+    assert r["content_hash"] != h0
+    assert "CHANGED!" in r["text"]
+
+
+async def test_wait_for_change_times_out_returns_current(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"static\r\n")
+    await broker.wait_binary(lambda b: b"static" in b)
+    base = await _read_screen(broker, 1)
+    h0 = base["content_hash"]
+    # No further output: the wait must return the current screen at timeout,
+    # not hang and not error.
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    r = await asyncio.wait_for(
+        _read_screen(broker, 2, wait_for_change=h0, timeout_ms=400), 5)
+    elapsed = loop.time() - t0
+    assert r["content_hash"] == h0                  # unchanged screen
+    assert "static" in r["text"]
+    assert elapsed >= 0.3                           # actually waited ~timeout_ms
+
+
+async def test_wait_for_change_clamps_huge_timeout(running_agent, broker):
+    # timeout_ms beyond the cap must not let the agent hold forever; with a
+    # change fed in, it still returns promptly (sanity that clamping is benign).
+    _, backend, _ = running_agent
+    backend.feed(b"start\r\n")
+    await broker.wait_binary(lambda b: b"start" in b)
+    h0 = (await _read_screen(broker, 1))["content_hash"]
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_change=h0, timeout_ms=10**9))
+    await asyncio.sleep(0.1)
+    backend.feed(b"go\r\n")
+    r = await asyncio.wait_for(waiter, 5)
+    assert "go" in r["text"] and r["content_hash"] != h0

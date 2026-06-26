@@ -140,16 +140,28 @@ class BrowserlandClient:
         """Launchable profile names + the broker default."""
         return self._get("/mcp/profiles")
 
-    def read_screen(self, id: int, view: str = "screen",
-                    lines: int = 0) -> Dict[str, Any]:
+    def read_screen(self, id: int, view: str = "screen", lines: int = 0,
+                    wait_for_change: Optional[str] = None,
+                    timeout_ms: int = 0) -> Dict[str, Any]:
         """Render a terminal's screen as plain text. ``view="scrollback"`` with
-        ``lines>0`` prepends that many lines of history above the grid (#21)."""
+        ``lines>0`` prepends that many lines of history above the grid (#21).
+
+        ``wait_for_change`` (a prior ``content_hash``) + ``timeout_ms`` hold the
+        read until the screen changes or the timeout elapses (#26). The HTTP
+        read timeout is stretched past the broker's wait so the request doesn't
+        give up before the broker answers."""
         body: Dict[str, Any] = {"id": id}
         if view and view != "screen":
             body["view"] = view
         if lines:
             body["lines"] = lines
-        return self._post("/mcp/read", body, timeout=self._read_timeout)
+        req_timeout = self._read_timeout
+        if wait_for_change:
+            body["wait_for_change"] = wait_for_change
+            if timeout_ms:
+                body["timeout_ms"] = int(timeout_ms)
+                req_timeout = self._read_timeout + int(timeout_ms) / 1000.0
+        return self._post("/mcp/read", body, timeout=req_timeout)
 
     def send_input(self, id: int, data: str) -> Dict[str, Any]:
         r"""Type into a terminal. Requires the window be in ``readwrite`` mode.

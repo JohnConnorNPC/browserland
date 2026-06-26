@@ -154,9 +154,27 @@ def test_mode_frame():
 def test_screen_text_please_frame_view_lines():
     f = json.loads(protocol.screen_text_please_frame(5, "scrollback", 200))
     assert f == {"type": "screen_text_please", "req": 5,
-                 "view": "scrollback", "lines": 200}
+                 "view": "scrollback", "lines": 200,
+                 "wait_for_change": None, "timeout_ms": 0}
     d = json.loads(protocol.screen_text_please_frame(5))
     assert d["view"] == "screen" and d["lines"] == 0
+    assert d["wait_for_change"] is None and d["timeout_ms"] == 0
+
+
+def test_screen_text_please_frame_wait_for_change():
+    # #26: a baseline hash + timeout ride the frame to the agent.
+    f = json.loads(protocol.screen_text_please_frame(
+        9, "screen", 0, wait_for_change="abc123", timeout_ms=3000))
+    assert f["wait_for_change"] == "abc123" and f["timeout_ms"] == 3000
+
+
+def test_screen_text_frame_content_hash():
+    # #26: content_hash rides the reply; default is the empty string.
+    f = json.loads(protocol.screen_text_frame(
+        7, "grid", 80, 24, content_hash="deadbeefcafef00d"))
+    assert f["content_hash"] == "deadbeefcafef00d"
+    assert json.loads(protocol.screen_text_frame(7, "g", 80, 24))[
+        "content_hash"] == ""
 
 
 def test_screen_text_frame_alt_cursor_view_fields():

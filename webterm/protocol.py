@@ -156,14 +156,23 @@ def procs_please_frame(req: int) -> str:
 
 
 def screen_text_please_frame(req: int, view: str = "screen",
-                             lines: int = 0) -> str:
+                             lines: int = 0,
+                             wait_for_change: Optional[str] = None,
+                             timeout_ms: int = 0) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
     producers have no handler, so the request times out -> 502). ``view``
     (``"screen"`` default / ``"scrollback"``) + ``lines`` request scrollback
-    history above the current grid (#21); older agents ignore the extra keys."""
+    history above the current grid (#21); older agents ignore the extra keys.
+
+    ``wait_for_change`` (a prior ``content_hash``) + ``timeout_ms`` make the
+    AGENT hold the reply until the freshly-rendered screen hash differs from
+    that baseline, or the timeout elapses — a single round-trip instead of a
+    busy-poll (#26). Older agents ignore both and reply immediately."""
     return json.dumps({"type": "screen_text_please", "req": int(req),
-                       "view": str(view), "lines": int(lines)})
+                       "view": str(view), "lines": int(lines),
+                       "wait_for_change": wait_for_change,
+                       "timeout_ms": int(timeout_ms)})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -200,7 +209,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       degraded: bool = False, alt_screen: bool = False,
                       cursor: Optional[Dict[str, int]] = None,
                       view: str = "screen", history_lines: int = 0,
-                      app_cursor: bool = False) -> str:
+                      app_cursor: bool = False, content_hash: str = "") -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -209,6 +218,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     is meaningless and ``view`` comes back ``"screen"``. ``app_cursor`` (#23) is
     DECCKM (application cursor keys) — when true, send_keys must emit SS3 arrows.
     ``cursor`` is ``{row, col}`` 0-based within the grid (``None`` when degraded).
+    ``content_hash`` (#26) is a stable digest of ``text`` so a caller can detect
+    change across reads (the empty string means the agent didn't compute one).
     ``degraded`` is the rare last-ditch raw decode (``view="raw"``), so the
     caller knows the text is not a clean grid render."""
     frame: Dict[str, Any] = {
@@ -222,6 +233,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         "app_cursor": bool(app_cursor),
         "view": str(view),
         "history_lines": int(history_lines),
+        "content_hash": str(content_hash),
     }
     # cursor is null on the degraded raw path (no grid to locate it in) — the
     # helper enforces the invariant regardless of what the caller passed.

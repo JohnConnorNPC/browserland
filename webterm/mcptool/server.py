@@ -318,17 +318,30 @@ def list_profiles(host: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def read_screen(id: str, view: str = "screen", lines: int = 0) -> Dict[str, Any]:
+def read_screen(id: str, view: str = "screen", lines: int = 0,
+                wait_for_change: str = "", timeout_ms: int = 0) -> Dict[str, Any]:
     """Render a terminal's current screen as plain text. Pass a namespaced window
     id ("<host>:<int>") from list_terminals.
 
-    The result includes `alt_screen` (true for a full-screen TUI like mc/btop/
-    vim — the grid is the whole story, so scrollback is meaningless) and
-    `cursor` {row, col}. For a shell, pass `view="scrollback"` with `lines=N` to
-    get up to N lines of history above the current grid (`history_lines` reports
-    how many were included; ignored when `alt_screen` is true)."""
+    The result includes `content_hash` (a stable digest of the screen text),
+    `alt_screen` (true for a full-screen TUI like mc/btop/vim — the grid is the
+    whole story, so scrollback is meaningless) and `cursor` {row, col}. For a
+    shell, pass `view="scrollback"` with `lines=N` to get up to N lines of
+    history above the current grid (`history_lines` reports how many were
+    included; ignored when `alt_screen` is true).
+
+    To wait for the screen to change after an action in ONE call instead of
+    polling, pass the previous read's `content_hash` as `wait_for_change` plus a
+    `timeout_ms` (capped at 15000): the read blocks until the screen differs from
+    that hash and returns the new screen — or returns the current screen if the
+    timeout elapses first. Typical use:
+        send_keys(id, ["Down"])
+        read_screen(id, wait_for_change=prev_hash, timeout_ms=3000)
+    Omit `wait_for_change` for an immediate read."""
     client, int_id = _route(id)
-    return client.read_screen(int_id, view=view, lines=lines)
+    return client.read_screen(int_id, view=view, lines=lines,
+                              wait_for_change=wait_for_change or None,
+                              timeout_ms=timeout_ms)
 
 
 @mcp.tool()
