@@ -9,11 +9,12 @@ a snapshot enqueued between two PTY chunks is delivered between them.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import socket
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 from .. import build_version, protocol
 from .altscreen import DecModeSniffer
@@ -31,6 +32,19 @@ LOGGER = logging.getLogger(__name__)
 # Foreground-agent detection cadence. A process-tree walk runs in a thread, so
 # this can be brisk without stalling the loop.
 _DETECT_INTERVAL = 1.5
+
+# read_screen wait-for-change cap (#26): the AGENT holds the reply for at most
+# this long, which also bounds how long one wait occupies a broker RPC slot
+# (RPC_MAX_INFLIGHT). The broker clamps the same ceiling.
+MAX_WAIT_MS = 15000
+
+
+def _content_hash(text: str) -> str:
+    """A stable, process-independent digest of the rendered screen text, so a
+    caller can detect change across reads without diffing full text (#26). 128
+    bits — small on the wire, collision-safe for change detection."""
+    return hashlib.blake2b(text.encode("utf-8", "replace"),
+                           digest_size=16).hexdigest()
 
 
 def _render_screen_text(data: bytes, cols: int, rows: int,
@@ -159,6 +173,13 @@ class Agent:
             on_screen_request=self._on_screen_request,
         )
         self._exit_fut: Optional[asyncio.Future] = None
+        # read_screen wait-for-change (#26): a monotonic counter bumped on every
+        # PTY append, plus the futures of reads currently parked waiting for the
+        # next output. The counter is the source of truth (a parked read that
+        # snapshotted before an append sees gen advance and re-renders), so no
+        # shared Event/clear can swallow a wakeup across concurrent waiters.
+        self._output_gen = 0
+        self._output_waiters: List[asyncio.Future] = []
 
     async def run(self) -> int:
         """Run until the child exits; returns the child's exit code."""
@@ -210,6 +231,16 @@ class Agent:
 
     def _on_pty_data(self, chunk: bytes) -> None:
         self.ring.append(chunk)
+        # Wake any read_screen waiting for the screen to change (#26). Bump the
+        # generation first (so a waiter that already snapshotted re-renders even
+        # if it hasn't parked yet), then resolve every parked future. Runs on
+        # the loop, so this is atomic vs a waiter's gen-check-then-park.
+        self._output_gen += 1
+        if self._output_waiters:
+            waiters, self._output_waiters = self._output_waiters, []
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
         # Track DEC modes live (#21/#23): survives ring eviction, unlike a re-scan.
         self._mode_sniffer.feed(chunk)
         self.state.alt_screen = self._mode_sniffer.alt_screen
@@ -375,37 +406,78 @@ class Agent:
         loop.create_task(_run())
 
     def _on_screen_request(self, req: int, view: str = "screen",
-                           lines: int = 0) -> None:
-        # MCP /mcp/read: render the live screen as plain text. Snapshot the
-        # ring + dims + live alt-screen state synchronously on the loop
-        # (consistent view), then render off-loop (pyte can be CPU-heavy on a
-        # large ring) and enqueue the reply on the SAME ordered out-queue.
+                           lines: int = 0,
+                           wait_for_change: Optional[str] = None,
+                           timeout_ms: int = 0) -> None:
+        # MCP /mcp/read: render the live screen as plain text. Each render
+        # snapshots the ring + dims + live alt-screen state synchronously on the
+        # loop (an immutable, consistent view), then renders off-loop (pyte can
+        # be CPU-heavy on a large ring) and enqueues the reply on the SAME
+        # ordered out-queue. With wait_for_change (#26) it re-renders on each
+        # PTY-output nudge until the screen hash differs from the baseline or
+        # timeout_ms elapses — one round-trip instead of an agent busy-poll.
         loop = asyncio.get_running_loop()
-        data = self.ring.get()
-        evicted = self.ring.evicted              # head may start mid-seq (#28)
-        cols, rows = self.state.cols, self.state.rows
-        alt = self.state.alt_screen
-        app_cursor = self.state.app_cursor       # DECCKM (#23)
+
+        async def _render() -> dict:
+            # Snapshot on the loop (ring.get() returns immutable bytes) so the
+            # executor never walks the live deque; re-read dims/alt each pass.
+            data = self.ring.get()
+            evicted = self.ring.evicted          # head may start mid-seq (#28)
+            cols, rows = self.state.cols, self.state.rows
+            r = await loop.run_in_executor(
+                None, _render_screen_text, data, cols, rows, view, lines,
+                self.state.alt_screen, evicted)
+            r["cols"], r["rows"] = cols, rows
+            return r
+
+        def _reply(r: dict, content_hash: str) -> None:
+            self._enqueue("txt", protocol.screen_text_frame(
+                req, r["text"], r["cols"], r["rows"], degraded=r["degraded"],
+                alt_screen=r["alt_screen"], cursor=r["cursor"],
+                view=r["view"], history_lines=r["history_lines"],
+                app_cursor=self.state.app_cursor, content_hash=content_hash))
 
         async def _run() -> None:
             try:
-                r = await loop.run_in_executor(
-                    None, _render_screen_text, data, cols, rows, view, lines,
-                    alt, evicted)
-                self._enqueue("txt", protocol.screen_text_frame(
-                    req, r["text"], cols, rows, degraded=r["degraded"],
-                    alt_screen=r["alt_screen"], cursor=r["cursor"],
-                    view=r["view"], history_lines=r["history_lines"],
-                    app_cursor=app_cursor))
+                wait_ms = max(0, min(int(timeout_ms or 0), MAX_WAIT_MS))
+                deadline = loop.time() + wait_ms / 1000.0
+                while True:
+                    observed = self._output_gen
+                    r = await _render()
+                    h = _content_hash(r["text"])
+                    timed_out = loop.time() >= deadline
+                    if not wait_for_change or h != wait_for_change or timed_out:
+                        _reply(r, h)
+                        return
+                    # New output during the render? Re-render before parking.
+                    if self._output_gen != observed:
+                        continue
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        continue                 # deadline -> reply next pass
+                    # No await between the gen-check above and this append, so
+                    # _on_pty_data can't slip a nudge past us (loop atomicity).
+                    fut = loop.create_future()
+                    self._output_waiters.append(fut)
+                    try:
+                        await asyncio.wait_for(fut, timeout=remaining)
+                    except asyncio.TimeoutError:
+                        pass                     # deadline -> reply next pass
+                    finally:
+                        try:
+                            self._output_waiters.remove(fut)
+                        except ValueError:
+                            pass                 # drained by _on_pty_data
             except Exception as exc:
                 # Always answer the RPC — an unhandled failure here would leave
                 # the broker waiting until it times out (no_producer_rpc).
                 LOGGER.warning("screen_text request failed (%s); degraded reply",
                                exc)
                 self._enqueue("txt", protocol.screen_text_frame(
-                    req, "", cols, rows, degraded=True, alt_screen=alt,
-                    cursor=None, view="raw", history_lines=0,
-                    app_cursor=app_cursor))
+                    req, "", self.state.cols, self.state.rows, degraded=True,
+                    alt_screen=self.state.alt_screen, cursor=None, view="raw",
+                    history_lines=0, app_cursor=self.state.app_cursor,
+                    content_hash=""))
 
         loop.create_task(_run())
 

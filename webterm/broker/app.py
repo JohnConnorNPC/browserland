@@ -77,6 +77,12 @@ MCP_MODES = ("off", "read", "readwrite")
 # enqueueing an unbounded write to the PTY. Generous vs any real input.
 MAX_MCP_INPUT_BYTES = 256 * 1024
 
+# /mcp/read wait-for-change (#26): cap how long the agent may hold a read while
+# waiting for the screen to change. This also bounds how long one waiting read
+# occupies a per-session RPC slot (RPC_MAX_INFLIGHT); the agent clamps to the
+# same ceiling.
+MAX_MCP_WAIT_MS = 15000
+
 
 def _norm_mcp_mode(value: Any, default: str = "off") -> str:
     """Coerce an arbitrary value to a valid MCP mode, else ``default``."""
@@ -864,17 +870,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # gate as /launch — killing processes is privileged. The agent scopes kills
     # to the session's own process tree; the broker never trusts a client pid
     # beyond relaying it.
-    async def _session_rpc(entry, make_frame, expected: str):
+    async def _session_rpc(entry, make_frame, expected: str,
+                           timeout: float = RPC_TIMEOUT):
         """Park a Future on the producer entry, send the request frame, await
         the matching reply. Returns ``(payload, error)`` where error is one of
-        None / "busy" / "timeout" / "gone"."""
+        None / "busy" / "timeout" / "gone". ``timeout`` is extended for a
+        read_screen wait-for-change so the RPC outlives the agent's wait (#26)."""
         allocated = entry.new_rpc(expected)
         if allocated is None:
             return None, "busy"          # too many in flight on this session
         req, future = allocated
         try:
             await entry.send_to_producer(make_frame(req))
-            payload = await asyncio.wait_for(future, timeout=RPC_TIMEOUT)
+            payload = await asyncio.wait_for(future, timeout=timeout)
             return payload, None
         except asyncio.TimeoutError:
             return None, "timeout"
@@ -1080,10 +1088,27 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         except (TypeError, ValueError):
             lines = 0
         lines = max(0, min(lines, 1000))
+        # wait-for-change (#26): a prior content_hash + a timeout. The agent
+        # holds the reply until the screen hash differs or timeout_ms elapses;
+        # extend the RPC timeout to outlive that wait (plus RPC_TIMEOUT of slack
+        # for dispatch + the final render). Without a baseline hash this is a
+        # plain immediate read on the default timeout.
+        wait_for_change = body.get("wait_for_change")
+        if not isinstance(wait_for_change, str) or not wait_for_change:
+            wait_for_change = None
+        try:
+            timeout_ms = int(body.get("timeout_ms", 0) or 0)
+        except (TypeError, ValueError):
+            timeout_ms = 0
+        timeout_ms = max(0, min(timeout_ms, MAX_MCP_WAIT_MS))
+        rpc_timeout = RPC_TIMEOUT
+        if wait_for_change:
+            rpc_timeout = RPC_TIMEOUT + timeout_ms / 1000.0
         payload, error = await _session_rpc(
             entry,
-            lambda req: protocol.screen_text_please_frame(req, view, lines),
-            "screen_text")
+            lambda req: protocol.screen_text_please_frame(
+                req, view, lines, wait_for_change, timeout_ms),
+            "screen_text", timeout=rpc_timeout)
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
         payload = payload or {}
@@ -1091,11 +1116,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                "cols": payload.get("cols", entry.cols),
                "rows": payload.get("rows", entry.rows),
                "text": payload.get("text", ""),
-               # New fields (#21/#23); older agents omit them -> these defaults.
+               # New fields (#21/#23/#26); older agents omit them -> defaults.
                "alt_screen": bool(payload.get("alt_screen", False)),
                "app_cursor": bool(payload.get("app_cursor", False)),
                "view": payload.get("view", "screen"),
                "history_lines": int(payload.get("history_lines", 0) or 0),
+               "content_hash": str(payload.get("content_hash", "") or ""),
                "cursor": payload.get("cursor")}
         if payload.get("degraded"):
             out["degraded"] = True
