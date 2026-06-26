@@ -108,6 +108,8 @@ def test_management_rpc_request_frames():
         "type": "kill", "req": 7, "pid": 4321}
     assert json.loads(protocol.git_status_please_frame(9)) == {
         "type": "git_status_please", "req": 9}
+    assert json.loads(protocol.reset_please_frame(11)) == {
+        "type": "reset_please", "req": 11}
 
 
 def test_management_rpc_reply_frames():
@@ -126,6 +128,11 @@ def test_management_rpc_reply_frames():
         3, {"ok": True, "branch": "main", "dirty": False}))
     assert frame["type"] == "git_status" and frame["req"] == 3
     assert frame["branch"] == "main" and frame["ok"] is True
+    # reset_done (#27): error only present when supplied.
+    assert json.loads(protocol.reset_done_frame(11, True)) == {
+        "type": "reset_done", "req": 11, "ok": True}
+    assert json.loads(protocol.reset_done_frame(11, False, error="boom")) == {
+        "type": "reset_done", "req": 11, "ok": False, "error": "boom"}
 
 
 def test_parse_round_trip():

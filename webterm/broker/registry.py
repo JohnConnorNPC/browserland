@@ -413,7 +413,8 @@ async def run_producer_session(ws, registry: BrokerRegistry) -> None:
                 await entry.broadcast_text(protocol.exit_frame(_code(data)))
                 await registry.deregister(entry.id, entry)
                 break
-            elif mtype in ("procs", "killed", "git_status", "screen_text"):
+            elif mtype in ("procs", "killed", "git_status", "screen_text",
+                           "reset_done"):
                 # Management-RPC replies: resolve the matching pending request
                 # on THIS entry only. _req() tolerates a missing/garbled id by
                 # mapping to -1, which simply never matches a live request.

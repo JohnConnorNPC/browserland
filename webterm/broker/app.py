@@ -1148,6 +1148,31 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         await entry.send_to_producer(protocol.input_frame(data))
         return sanic_json({"ok": True})
 
+    async def _mcp_reset(request: Request):
+        # #27: clear the producer's screen-render buffer (its PTY-output ring)
+        # so the next read_screen renders from a clean slate. A mutating
+        # terminal-management action (it discards observable history for every
+        # viewer), so it needs readwrite — like /mcp/input. Same correlated
+        # round-trip as /mcp/read: only an agent answers, so a non-agent
+        # producer times out -> 502 no_producer_rpc.
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        entry, mode, resp = _mcp_entry(request)
+        if resp is not None:
+            return resp
+        if mode != "readwrite":
+            return sanic_json({"error": "read_only"}, status=403)
+        payload, error = await _session_rpc(
+            entry, lambda req: protocol.reset_please_frame(req), "reset_done")
+        if error is not None:
+            return sanic_json({"error": "no_producer_rpc"}, status=502)
+        payload = payload or {}
+        if not payload.get("ok"):
+            return sanic_json({"error": "reset_failed",
+                               "detail": payload.get("error")}, status=502)
+        return sanic_json({"ok": True, "id": entry.id})
+
     async def _mcp_profiles(request: Request):
         err = _mcp_auth_error(request)
         if err is not None:
@@ -1345,6 +1370,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_terminals, "/mcp/terminals", methods=["GET"])
     app.add_route(_mcp_read, "/mcp/read", methods=["POST"])
     app.add_route(_mcp_input, "/mcp/input", methods=["POST"])
+    app.add_route(_mcp_reset, "/mcp/reset", methods=["POST"])
     app.add_route(_mcp_profiles, "/mcp/profiles", methods=["GET"])
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
@@ -1368,6 +1394,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/terminals", "preflight_mcp_terminals"),
                              ("/mcp/read", "preflight_mcp_read"),
                              ("/mcp/input", "preflight_mcp_input"),
+                             ("/mcp/reset", "preflight_mcp_reset"),
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
                              ("/mcp/config", "preflight_mcp_config")):
