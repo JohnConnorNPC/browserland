@@ -267,10 +267,9 @@
         .term-window .swatch-popover {
             position: absolute;
             z-index: 50;
-            display: flex;
-            flex-wrap: wrap;
+            display: grid;
+            grid-template-columns: repeat(4, 20px);
             gap: 5px;
-            width: 124px;
             box-sizing: border-box;
             padding: 7px;
             background: var(--bg-2, #2a2a2a);
@@ -289,6 +288,24 @@
         }
         .term-window .swatch-cell:hover { transform: scale(1.12); }
         .term-window .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
+        /* Custom-color cell (#29): a 12th slot that opens a native color input.
+           An eyedropper icon on a neutral fill sets it apart from the round
+           preset swatches. */
+        .term-window .swatch-cell.custom {
+            display: flex; align-items: center; justify-content: center;
+            background: var(--bg-3, #555); color: #fff;
+        }
+        .term-window .swatch-cell.custom svg {
+            width: 12px; height: 12px; display: block;
+        }
+        /* Recents row (#29): the last-used colors, separated from the presets by
+           a full-width divider spanning all four grid columns. */
+        .term-window .swatch-divider {
+            grid-column: 1 / -1;
+            height: 1px;
+            margin: 1px 0;
+            background: var(--bg-3, #555);
+        }
         /* MCP access control (#20): a robot button by the color swatch whose
            dropdown sets this terminal's per-window MCP mode. It lights up (the
            shared .tb-btn.on accent) when access is read/readwrite and dims when
@@ -1647,9 +1664,13 @@
             }
         }
         const CLIENT_ID = getClientId();
+        // 11-color preset palette (#29): one shared set for EVERY window type
+        // (terminals, notes, editors). 8 originals + cyan/lime/coral, laid out
+        // as the first three rows of the 4x4 picker (the 12th slot is custom).
         const PALETTE = [
             '#4aa3ff', '#5fbf7f', '#e09b3a', '#b78bf0',
-            '#e96d6d', '#3fb6b6', '#d2c54a', '#d96fb1'
+            '#e96d6d', '#3fb6b6', '#d2c54a', '#d96fb1',
+            '#5cc8e6', '#9bd14f', '#ff8c5a'
         ];
         const DEFAULT_W = 720;
         const DEFAULT_H = 480;
@@ -1705,6 +1726,51 @@
             return prefs[k];
         }
         const prefs = loadPrefs();
+
+        // ---- recent colors (#29) ------------------------------------------
+        // The last 4 colors picked from ANY window's color dropdown, global and
+        // most-recent-first. Stored under a DEDICATED local key — never prefs or
+        // appStore, both of which sync to the broker /state (a per-browser MRU
+        // shouldn't ride the shared blob). Every read/write is best-effort.
+        const RECENT_COLORS_KEY = 'webterm:recentColors:v1';
+        const MAX_RECENT_COLORS = 4;
+        // STRICT hex validator: a normalized #rrggbb, or null for anything else.
+        // (normalizeHex coerces junk to PALETTE[0]; recents must DROP junk, not
+        // silently turn corrupted storage into blue.)
+        function strictHex(c) {
+            if (typeof c !== 'string') return null;
+            if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
+            if (/^#[0-9a-fA-F]{3}$/.test(c)) {
+                const s = c.slice(1);
+                return ('#' + s[0]+s[0]+s[1]+s[1]+s[2]+s[2]).toLowerCase();
+            }
+            return null;
+        }
+        function loadRecentColors() {
+            try {
+                const raw = localStorage.getItem(RECENT_COLORS_KEY);
+                if (!raw) return [];
+                const arr = JSON.parse(raw);
+                if (!Array.isArray(arr)) return [];
+                const out = [];
+                for (const c of arr) {
+                    const h = strictHex(c);
+                    if (h && !out.includes(h)) out.push(h);   // validate + dedupe
+                    if (out.length >= MAX_RECENT_COLORS) break;
+                }
+                return out;
+            } catch (e) { return []; }
+        }
+        function saveRecentColor(color) {
+            const h = strictHex(color);
+            if (!h) return;
+            try {
+                const list = loadRecentColors().filter((c) => c !== h);
+                list.unshift(h);                              // most-recent first
+                localStorage.setItem(RECENT_COLORS_KEY,
+                    JSON.stringify(list.slice(0, MAX_RECENT_COLORS)));
+            } catch (e) { /* quota/security: a missing MRU is harmless */ }
+        }
 
         // ---- shared server state (/state) ---------------------------------
         // The same-origin broker's /state is the source of truth for the two
@@ -6523,6 +6589,23 @@
             }
             return PALETTE[0];
         }
+        // Sticky-note paper/fg derived from ANY accent (#29): paper is the accent
+        // mixed 80% toward white, fg the accent mixed 72% toward black. By
+        // construction paper is always light and fg always dark, so body text is
+        // high-contrast for any color — preset, custom, or recent. (Legacy preset
+        // accents keep their hand-tuned triples via noteSwatchFor.)
+        function deriveNoteColors(accent) {
+            const rgb = hexToRgb(normalizeHex(accent));
+            const mix = (c, t, amt) => Math.round(c + (t - c) * amt);
+            const toHex = (r, g, b) => '#' + [r, g, b].map(
+                (v) => Math.max(0, Math.min(255, v)).toString(16)
+                    .padStart(2, '0')).join('');
+            const paper = toHex(mix(rgb[0], 255, 0.80), mix(rgb[1], 255, 0.80),
+                                mix(rgb[2], 255, 0.80));
+            const fg = toHex(mix(rgb[0], 0, 0.72), mix(rgb[1], 0, 0.72),
+                             mix(rgb[2], 0, 0.72));
+            return { accent: normalizeHex(accent), paper, fg };
+        }
 
         // Unified window-color picker (issue 5). Builds the title-bar control
         // shared by terminals AND app windows: a colored button whose dot
@@ -6559,6 +6642,21 @@
                     e.preventDefault(); e.stopPropagation(); closePop();
                 }
             };
+            // Hidden native color input for the custom-color cell (#29). One per
+            // picker, reused across opens and cleaned up with the window, so it
+            // never accumulates on document.body. Its change fires after the OS
+            // dialog closes — possibly after closePop/window-close, so guard on
+            // win.disposed before mutating anything.
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.style.display = 'none';
+            document.body.appendChild(colorInput);
+            const onColorPick = () => {
+                if (win.disposed) return;
+                applyPick({ color: colorInput.value });
+                closePop();
+            };
+            colorInput.addEventListener('change', onColorPick);
             const openPop = () => {
                 if (pop) { closePop(); return; }   // toggle
                 pop = document.createElement('div');
@@ -6579,6 +6677,49 @@
                     });
                     pop.appendChild(cell);
                 });
+                // Custom-color cell (#29): the 12th slot opens the native input.
+                const customCell = document.createElement('button');
+                customCell.type = 'button';
+                customCell.className = 'swatch-cell custom';
+                customCell.title = 'custom color…';
+                // Eyedropper (color-picker) icon marks the custom-color slot.
+                customCell.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
+                    + 'stroke="currentColor" stroke-width="2.2" '
+                    + 'stroke-linecap="round" stroke-linejoin="round" '
+                    + 'aria-hidden="true"><path d="m2 22 1-1h3l9-9"/>'
+                    + '<path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 '
+                    + '1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 '
+                    + '1 3-3l.4.4Z"/></svg>';
+                customCell.addEventListener('mousedown', stopProp);
+                customCell.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    colorInput.value = normalizeHex(win.color);   // start at current
+                    colorInput.click();    // OS picker; change -> applyPick (above)
+                });
+                pop.appendChild(customCell);
+                // Recents row (#29): a full-width divider then the last-used
+                // colors (global MRU). Omitted entirely when there are none yet.
+                const recents = loadRecentColors();
+                if (recents.length) {
+                    const divider = document.createElement('div');
+                    divider.className = 'swatch-divider';
+                    pop.appendChild(divider);
+                    recents.forEach((rc) => {
+                        const cell = document.createElement('button');
+                        cell.type = 'button';
+                        cell.className = 'swatch-cell';
+                        cell.style.background = rc;
+                        cell.title = rc + ' (recent)';
+                        if (normalizeHex(rc) === cur) cell.classList.add('sel');
+                        cell.addEventListener('mousedown', stopProp);
+                        cell.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            applyPick({ color: rc });
+                            closePop();
+                        });
+                        pop.appendChild(cell);
+                    });
+                }
                 titleBar.appendChild(pop);
                 // Right-align under the button and clamp inside the title bar so
                 // a button near the window's right edge never overflows.
@@ -6597,6 +6738,8 @@
             win.cleanups.push(() => {
                 btn.removeEventListener('mousedown', stopProp);
                 btn.removeEventListener('click', onClick);
+                colorInput.removeEventListener('change', onColorPick);
+                try { colorInput.remove(); } catch (_) {}
                 closePop();
             });
             return btn;
@@ -7005,11 +7148,13 @@
             const colorBtn = attachColorPicker(
                 win, titleBar, PALETTE.map((c) => ({ color: c })),
                 (sw) => {
+                    if (win.disposed) return;        // dialog finished post-close
                     const c = normalizeHex(sw.color);
                     win.color = c;
                     dom.style.setProperty('--accent', c);
                     dom.classList.toggle('dark-accent', isDarkAccent(c));
                     getPref(id).color = c;
+                    saveRecentColor(c);              // global MRU (#29)
                     savePrefs();
                     updateTaskbarColor(id);
                 });
@@ -7427,25 +7572,29 @@
         // (pinned by default) OR tile like a terminal; content/geom/color/lock
         // persist in `appStore`, tiling membership in prefs._layout.
         //
-        // Preset note colors: each swatch sets the title-bar accent AND, for a
-        // sticky note, the paper/fg (the dark editor body ignores paper — its
-        // swatch only re-tints the accent). The first entry is the classic
-        // yellow that matches a fresh note's default --accent.
-        const NOTE_SWATCHES = [
+        // A fresh sticky note opens in the classic yellow (its default --accent).
+        const NOTE_DEFAULT_ACCENT = '#f4d35e';
+        // Legacy hand-tuned paper/fg for the five original note accents (#29).
+        // Kept ONLY so existing saved notes restore with their exact original
+        // look; every other accent (the unified 11-color palette + custom +
+        // recent colors) derives paper/fg via deriveNoteColors.
+        const LEGACY_NOTE_SWATCHES = [
             { accent: '#f4d35e', paper: '#fff7ae', fg: '#3a3000' },  // yellow
             { accent: '#f48fb1', paper: '#ffd9e6', fg: '#4a0d24' },  // pink
             { accent: '#9ccc9c', paper: '#d7f3d8', fg: '#173d1c' },  // green
             { accent: '#90caf9', paper: '#d6ebff', fg: '#0d2a4a' },  // blue
             { accent: '#ffb74d', paper: '#ffe6c2', fg: '#4a2c00' },  // orange
         ];
-        // Recover paper/fg from a saved accent; unknown/old colors fall back to
-        // the first swatch so a restore never lands on a blank paper.
+        // Recover {accent, paper, fg} from a saved/picked accent: the exact
+        // legacy triple for one of the five originals, else derived — so a
+        // restore (or a custom/palette pick) never lands on a blank or yellow
+        // paper for an unknown color.
         function noteSwatchFor(accent) {
             const a = normalizeHex(accent);
-            for (const s of NOTE_SWATCHES) {
+            for (const s of LEGACY_NOTE_SWATCHES) {
                 if (normalizeHex(s.accent) === a) return s;
             }
-            return NOTE_SWATCHES[0];
+            return deriveNoteColors(a);
         }
         function appDefaultGeom(kind) {
             const desktop = document.getElementById('desktop');
@@ -7842,7 +7991,7 @@
             const title = appData.title || (isNote ? 'Sticky Note' : 'Text Editor');
             const geom = clampGeom(appData.geom || appDefaultGeom(appKind));
             const color = normalizeHex(appData.color
-                || (isNote ? NOTE_SWATCHES[0].accent : defaultColor(id)));
+                || (isNote ? NOTE_DEFAULT_ACCENT : defaultColor(id)));
             // New notes default to pinned (locked); a restored doc keeps its
             // saved choice. Editors default to word-wrap on.
             const locked = appData.locked !== undefined ? !!appData.locked : true;
@@ -8321,20 +8470,24 @@
             win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
             // Window-color control (issue 5): the shared swatch-dropdown. App
-            // swatches are the NOTE_SWATCHES presets; a pick recolors the title
-            // bar (and a sticky note's paper/fg) and persists via saveAppWindow.
+            // windows now use the SAME unified 11-color palette as terminals
+            // (#29); a sticky note's paper/fg are DERIVED from the chosen accent
+            // (noteSwatchFor), so any palette/custom/recent color works — not
+            // just the five legacy presets. A pick persists via saveAppWindow.
             const colorBtn = attachColorPicker(
-                win, titleBar,
-                NOTE_SWATCHES.map((s) => ({ color: s.accent, paper: s.paper,
-                                            fg: s.fg })),
+                win, titleBar, PALETTE.map((c) => ({ color: c })),
                 (sw) => {
-                    win.color = normalizeHex(sw.color);
-                    dom.style.setProperty('--accent', win.color);
-                    dom.classList.toggle('dark-accent', isDarkAccent(win.color));
+                    if (win.disposed) return;        // dialog finished post-close
+                    const c = normalizeHex(sw.color);
+                    win.color = c;
+                    dom.style.setProperty('--accent', c);
+                    dom.classList.toggle('dark-accent', isDarkAccent(c));
                     if (isNote) {
-                        dom.style.setProperty('--note-paper', sw.paper);
-                        dom.style.setProperty('--note-fg', sw.fg);
+                        const nc = noteSwatchFor(c);  // legacy triple or derived
+                        dom.style.setProperty('--note-paper', nc.paper);
+                        dom.style.setProperty('--note-fg', nc.fg);
                     }
+                    saveRecentColor(c);              // global MRU (#29)
                     saveAppWindow(win);
                     updateTaskbarColor(id);
                 });
