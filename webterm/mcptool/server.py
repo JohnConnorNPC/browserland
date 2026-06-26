@@ -336,11 +336,16 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
     r"""Type text into a terminal. Pass a namespaced window id ("<host>:<int>");
     the target window must be in 'readwrite' mode.
 
+    For control/escape keys — Esc, Ctrl-C, arrows, Enter, function keys — use
+    `send_keys` (e.g. `send_keys(id, ["Esc"])`); don't hand-assemble escape
+    bytes or POST to the HTTP endpoint yourself.
+
     Newlines in `data` are sent as Enter (carriage return) so commands actually
     run — including on PowerShell, where a line-feed is only a soft
-    continuation. To send raw bytes verbatim (a literal `\n`, or hand-crafted
-    control/escape sequences), drive the broker's `POST /mcp/input` endpoint
-    directly."""
+    continuation. Any control/escape bytes already in `data` pass through
+    unchanged. The single thing this tool can't express is a literal line-feed
+    byte (`\n` is remapped to Enter); for that rare case, drive the broker's
+    `POST /mcp/input` endpoint directly."""
     client, int_id = _route(id)
     return client.send_input(int_id, _newlines_to_enter(data))
 
