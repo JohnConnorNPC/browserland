@@ -172,6 +172,12 @@ class BrowserlandClient:
         submit on PowerShell must pass ``\r`` itself (see issue #13)."""
         return self._post("/mcp/input", {"id": id, "data": data})
 
+    def reset_terminal(self, id: int) -> Dict[str, Any]:
+        """Clear a terminal's screen-render buffer (#27). Requires ``readwrite``
+        mode. Wipes the agent's PTY-output ring so the next ``read_screen``
+        starts from a clean slate; does not touch the running app."""
+        return self._post("/mcp/reset", {"id": id})
+
     def launch_terminal(self, profile: Optional[str] = None, cols: int = 80,
                         rows: int = 24, title: Optional[str] = None,
                         cwd: Optional[str] = None) -> Dict[str, Any]:

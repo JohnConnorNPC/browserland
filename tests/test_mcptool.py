@@ -164,6 +164,23 @@ def test_send_input_posts_id_and_data():
     assert out == {"ok": True}
 
 
+def test_reset_terminal_posts_id():
+    # #27: reset_terminal is a thin POST /mcp/reset {id} that clears the
+    # agent's render buffer; the broker enforces readwrite, not the client.
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True})
+
+    with _client(handler) as c:
+        out = c.reset_terminal(42)
+    assert seen["path"] == "/mcp/reset"
+    assert seen["body"] == {"id": 42}
+    assert out == {"ok": True}
+
+
 # ---- #13: MCP tool maps newlines -> Enter (CR); client stays verbatim -----
 
 @pytest.mark.parametrize("data,expected", [
@@ -995,7 +1012,8 @@ async def test_tools_registered():
     tools = await server.mcp.list_tools()
     names = sorted(t.name for t in tools)
     assert names == ["launch_terminal", "list_profiles", "list_terminals",
-                     "mcp_info", "read_screen", "send_input", "send_keys"]
+                     "mcp_info", "read_screen", "reset_terminal", "send_input",
+                     "send_keys"]
 
 
 def test_tools_round_trip_through_http():

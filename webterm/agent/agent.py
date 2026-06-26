@@ -171,6 +171,7 @@ class Agent:
             on_kill_request=self._on_kill_request,
             on_git_request=self._on_git_request,
             on_screen_request=self._on_screen_request,
+            on_reset_request=self._on_reset_request,
         )
         self._exit_fut: Optional[asyncio.Future] = None
         # read_screen wait-for-change (#26): a monotonic counter bumped on every
@@ -229,18 +230,22 @@ class Agent:
 
     # -- PTY -> broker (called on the loop by the backend) -------------------
 
-    def _on_pty_data(self, chunk: bytes) -> None:
-        self.ring.append(chunk)
-        # Wake any read_screen waiting for the screen to change (#26). Bump the
-        # generation first (so a waiter that already snapshotted re-renders even
-        # if it hasn't parked yet), then resolve every parked future. Runs on
-        # the loop, so this is atomic vs a waiter's gen-check-then-park.
+    def _wake_output_waiters(self) -> None:
+        # A screen-affecting event (new PTY output, or a reset_terminal): bump
+        # the change generation FIRST — so a read that already snapshotted but
+        # hasn't parked re-renders rather than missing it — then resolve every
+        # parked wait_for_change future (#26). Always called on the loop, so it
+        # is atomic vs a waiter's gen-check-then-park.
         self._output_gen += 1
         if self._output_waiters:
             waiters, self._output_waiters = self._output_waiters, []
             for fut in waiters:
                 if not fut.done():
                     fut.set_result(None)
+
+    def _on_pty_data(self, chunk: bytes) -> None:
+        self.ring.append(chunk)
+        self._wake_output_waiters()              # wake read_screen waiters (#26)
         # Track DEC modes live (#21/#23): survives ring eviction, unlike a re-scan.
         self._mode_sniffer.feed(chunk)
         self.state.alt_screen = self._mode_sniffer.alt_screen
@@ -389,6 +394,23 @@ class Agent:
                                                         pid=pid))
 
         loop.create_task(_run())
+
+    def _on_reset_request(self, req: int) -> None:
+        # MCP reset_terminal (#27): wipe Browserland's PTY-output ring so the
+        # next read_screen (and any reconnecting browser's snapshot) renders
+        # from a clean slate — independent of what the app does, since the
+        # renderer reads the ring, not the app's stdin. Clearing also resets the
+        # ring's evicted flag (an empty head can't be a cut escape sequence).
+        # The app's live alt-screen / DECCKM state is sniffed off the byte
+        # stream, not the ring, so it is intentionally left intact. Handled
+        # inline on the loop — ByteRing.clear() is O(1), never blocking.
+        try:
+            self.ring.clear()
+            self._wake_output_waiters()      # a parked wait_for_change re-renders
+            ok, err = True, None
+        except Exception as exc:
+            ok, err = False, str(exc)[:200]
+        self._enqueue("txt", protocol.reset_done_frame(req, ok, error=err))
 
     def _on_git_request(self, req: int) -> None:
         loop = asyncio.get_running_loop()

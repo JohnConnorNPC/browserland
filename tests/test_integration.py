@@ -317,3 +317,53 @@ async def test_wait_for_change_clamps_huge_timeout(running_agent, broker):
     backend.feed(b"go\r\n")
     r = await asyncio.wait_for(waiter, 5)
     assert "go" in r["text"] and r["content_hash"] != h0
+
+
+# ---- #27: reset_terminal clears the agent's render buffer -----------------
+
+async def _reset(broker, req):
+    """Drive one reset_please RPC and return the matching reset_done."""
+    await broker.send({"type": "reset_please", "req": req})
+    return await broker.wait_text(
+        lambda f: f.get("type") == "reset_done" and f.get("req") == req)
+
+
+async def test_reset_clears_ring_and_acks(running_agent, broker):
+    agent, backend, _ = running_agent
+    # Two chunks past the 4096-byte ring force an eviction (evicted=True), so
+    # the reset must also clear that flag for a clean-slate next render.
+    backend.feed(b"A" * 3000)
+    backend.feed(b"some screen content here\r\n" + b"B" * 3000)
+    await broker.wait_binary(lambda b: b"some screen content" in b)
+    await asyncio.wait_for(_poll_until(lambda: agent.ring.evicted), 5)
+    assert len(agent.ring) > 0
+    gen_before = agent._output_gen
+
+    done = await _reset(broker, 2)
+    assert done["ok"] is True
+    assert len(agent.ring) == 0                 # ring emptied
+    assert agent.ring.evicted is False          # evicted flag reset
+    assert agent._output_gen > gen_before       # waiters were woken
+
+    # Next read renders a blank grid — the prior content is gone, but the
+    # reply is still well-formed (bounded grid + a content_hash, #26).
+    r = await _read_screen(broker, 3)
+    assert "some screen content" not in r["text"]
+    assert r["text"].strip() == ""
+    assert r["content_hash"]
+
+
+async def test_reset_wakes_wait_for_change(running_agent, broker):
+    # A parked wait-for-change must wake when the screen is reset to blank.
+    agent, backend, _ = running_agent
+    backend.feed(b"before reset\r\n")
+    await broker.wait_binary(lambda b: b"before reset" in b)
+    h0 = (await _read_screen(broker, 1))["content_hash"]
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_change=h0, timeout_ms=5000))
+    await asyncio.sleep(0.15)
+    assert not waiter.done()
+    await _reset(broker, 3)
+    r = await asyncio.wait_for(waiter, 5)
+    assert r["content_hash"] != h0
+    assert "before reset" not in r["text"]

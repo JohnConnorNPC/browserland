@@ -358,7 +358,11 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
     continuation. Any control/escape bytes already in `data` pass through
     unchanged. The single thing this tool can't express is a literal line-feed
     byte (`\n` is remapped to Enter); for that rare case, drive the broker's
-    `POST /mcp/input` endpoint directly."""
+    `POST /mcp/input` endpoint directly.
+
+    If read_screen looks corrupted, this tool can't fix it — bytes in `data`
+    reach the app, not Browserland's renderer. Send `send_keys(id, ["C-l"])` to
+    redraw a live app, or `reset_terminal(id)` to wipe the screen buffer."""
     client, int_id = _route(id)
     return client.send_input(int_id, _newlines_to_enter(data))
 
@@ -386,8 +390,16 @@ def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
     — best-effort from the agent's cached DECCKM, so arrows work in those TUIs
     without hand-assembling escapes (#23); it falls back to CSI for a non-agent
     producer or if the state can't be read. Tokens are sent verbatim (no
-    newline->Enter rewrite); use `send_input` for ordinary text. Pass a
-    namespaced window id ("<host>:<int>")."""
+    newline->Enter rewrite); use `send_input` for ordinary text.
+
+    Recovery: if read_screen shows ghost text or a corrupted screen but the app
+    is still responding, send `["C-l"]` (Ctrl-L) to make the app repaint — that
+    fresh output is what the renderer reads. A raw reset sequence sent as input
+    is just keystrokes to the app and does NOT reset Browserland's own screen
+    render; to wipe a corrupted buffer regardless of the app, use
+    `reset_terminal`. (Neither un-freezes a hung app — kill it.)
+
+    Pass a namespaced window id ("<host>:<int>")."""
     # Validate + translate up front (atomic, CSI form): a bad token raises here,
     # before any routing, DECCKM lookup or send.
     text = _keys_to_text(keys)
@@ -395,6 +407,24 @@ def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
     if _keys_have_cursor(keys) and _terminal_app_cursor(client, int_id):
         text = _keys_to_text(keys, app_cursor=True)   # re-encode arrows as SS3
     return client.send_input(int_id, text)
+
+
+@mcp.tool()
+def reset_terminal(id: str) -> Dict[str, Any]:
+    """Wipe Browserland's screen buffer for a terminal so read_screen renders
+    from a clean slate. Pass a namespaced window id ("<host>:<int>"); the window
+    must be in 'readwrite' mode.
+
+    Use this when read_screen shows accumulated ghost text / corruption that a
+    redraw won't clear: it empties the agent's PTY-output ring — the buffer the
+    screen renderer actually reads — so the NEXT read_screen starts blank,
+    regardless of what the app does. It does NOT touch the running app (it sends
+    nothing to the app's stdin) and can't un-freeze a hung process — kill that
+    instead. After a reset the screen repopulates as the app emits output, so
+    for a live app prefer `send_keys(id, ["C-l"])` first to force a redraw;
+    reach for reset_terminal when even that won't clear the corruption."""
+    client, int_id = _route(id)
+    return client.reset_terminal(int_id)
 
 
 @mcp.tool()

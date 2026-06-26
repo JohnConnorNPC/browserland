@@ -183,6 +183,13 @@ def git_status_please_frame(req: int) -> str:
     return json.dumps({"type": "git_status_please", "req": int(req)})
 
 
+def reset_please_frame(req: int) -> str:
+    """Broker -> producer: clear the PTY-output ring so the next read_screen /
+    reconnect snapshot renders from a clean slate (#27). Only agents answer it
+    (a non-agent producer has no handler -> the RPC times out -> 502)."""
+    return json.dumps({"type": "reset_please", "req": int(req)})
+
+
 # Producer -> broker: the matching replies.
 def procs_frame(req: int, procs) -> str:
     return json.dumps({"type": "procs", "req": int(req),
@@ -196,6 +203,15 @@ def killed_frame(req: int, ok: bool, error: Optional[str] = None,
         frame["error"] = str(error)
     if pid is not None:
         frame["pid"] = int(pid)
+    return json.dumps(frame)
+
+
+def reset_done_frame(req: int, ok: bool, error: Optional[str] = None) -> str:
+    """Producer -> broker: ack for reset_please (#27)."""
+    frame: Dict[str, Any] = {"type": "reset_done", "req": int(req),
+                             "ok": bool(ok)}
+    if error:
+        frame["error"] = str(error)
     return json.dumps(frame)
 
 
