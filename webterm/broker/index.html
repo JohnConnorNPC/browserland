@@ -7799,20 +7799,31 @@
         // several state instances whose facet identities don't match — which
         // silently breaks language/extension wiring.
         //
-        // esm.sh dedupes a shared dep by URL, but ONLY when every importer
-        // resolves it to the same build. view/language/autocomplete/commands
-        // import @codemirror/state via semver RANGES (^6.5.0, ^6.4.0, ...) that
-        // esm.sh resolves to the LATEST matching build — so CM_VER.state below
-        // MUST stay pinned to that same latest build. Pin it LOWER and the
-        // direct import loads a 2nd state instance, and CM throws "Unrecognized
-        // extension value ... multiple instances of @codemirror/state" -> the
-        // textarea fallback. Keep state (and view/language, imported both
-        // directly and transitively) bumped in lockstep with what the ranges
-        // resolve to. (xterm needs none of this — single self-contained package.)
+        // esm.sh dedupes a shared dep by its RESOLVED concrete-build URL, but
+        // ONLY when every importer lands on that same build. view/language/
+        // autocomplete/commands import @codemirror/state via semver RANGES
+        // (^6.5.0, ^6.4.0, ...) + the same ?target=es2022 the browser uses, and
+        // esm.sh resolves all of them to the LATEST matching build's es2022 URL
+        // (currently /@codemirror/state@6.7.0/es2022/state.mjs).
+        //
+        // So `state` below is imported via the SAME request the transitive
+        // importers make — `@codemirror/state@^6.5.0?target=es2022` (verbatim
+        // what view@6.36.2's build imports) — NOT a manually pinned version.
+        // Two things make this the durable form:
+        //   - the RANGE auto-tracks whatever esm.sh resolves the transitive
+        //     ranges to, so it can't drift behind them (a low exact pin loaded a
+        //     2nd state instance -> CM throws "Unrecognized extension value ...
+        //     multiple instances of @codemirror/state" -> textarea fallback, #36);
+        //   - the explicit ?target=es2022 pins the build target so the direct
+        //     import can't land on a different per-UA build than the transitive
+        //     ?target=es2022 imports (e.g. under a non-es2022 browser default).
+        // DO NOT replace this with a bare exact version — that reintroduces #36
+        // the next time upstream advances the range resolution. (xterm needs none
+        // of this — single self-contained package.)
         const CM_CDN = 'https://esm.sh/';
         const CM_VER = {
             view: '@codemirror/view@6.36.2',
-            state: '@codemirror/state@6.6.0',
+            state: '@codemirror/state@^6.5.0?target=es2022',
             language: '@codemirror/language@6.10.8',
             commands: '@codemirror/commands@6.8.0',
             search: '@codemirror/search@6.5.10',
