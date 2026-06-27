@@ -302,9 +302,11 @@ class Agent:
                 # carries the current agent; then push the live frame.
                 self.state.agent = new
                 self._enqueue("txt", protocol.agent_frame(new))
-            # Live cwd (best-effort): the shell's working dir, so the AGENTS.md
-            # button tracks a `cd`. State updates before the frame (reconnect
-            # hello accuracy), same as agent above. Errors are swallowed by the
+            # Live cwd (best-effort): the foreground agent's working dir (the
+            # shell's as fallback), so the AGENTS.md button tracks where the
+            # agent actually runs even when the shell sits a level up (#47), and
+            # follows a `cd`. State updates before the frame (reconnect hello
+            # accuracy), same as agent above. Errors are swallowed by the
             # backend (returns None), so a denied/dead process never blanks it.
             try:
                 cwd = await loop.run_in_executor(None, self.backend.cwd)

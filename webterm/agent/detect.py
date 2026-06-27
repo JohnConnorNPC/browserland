@@ -41,6 +41,16 @@ _VENDOR_DIRS = {
 }
 
 
+def _safe_exe(proc) -> Optional[str]:
+    """``proc.exe()`` or None — psutil raises AccessDenied/ZombieProcess for it
+    often. A best-effort hint for ``classify_proc``'s exe/vendor-dir rules; the
+    PTY backends pass it when walking the session's process tree."""
+    try:
+        return proc.exe()
+    except Exception:
+        return None
+
+
 def _norm(token: str) -> str:
     """Basename, lowercased, with a single known launcher extension stripped."""
     b = os.path.basename(str(token)).lower()
