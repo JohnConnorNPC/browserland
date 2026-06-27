@@ -228,6 +228,26 @@ def _resolve_host_path(rel: str, default_dir: Path) -> Path:
         raise ValueError("bad_path") from exc
 
 
+def _classify_path(p: Path) -> str:
+    """Classify a resolved path for the file API without letting a *denied* stat
+    escape to a 500. Returns 'file' | 'dir' | 'other' | 'missing' | 'denied'.
+
+    pathlib's ``exists()``/``is_file()``/``is_dir()`` already map the ignorable
+    errnos (ENOENT/ENOTDIR/ELOOP, and their Windows equivalents) to ``False``,
+    but a refused stat (EACCES / Windows ERROR_ACCESS_DENIED) raises — and with
+    no global handler that surfaced as a 500 + traceback instead of the
+    ``{"ok": false, "error": ...}`` contract the rest of these handlers keep
+    (#46 review). Probe once here and report 'denied' so callers map it cleanly."""
+    try:
+        if p.is_file():
+            return "file"
+        if p.is_dir():
+            return "dir"
+        return "other" if p.exists() else "missing"
+    except OSError:
+        return "denied"
+
+
 def _json_object_body(request: "Request") -> Optional[Dict[str, Any]]:
     """Parsed JSON object body, or None on malformed / non-object JSON. An
     empty body is treated as ``{}`` (mirrors the /launch handler)."""
@@ -631,9 +651,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                    app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if not d.exists():
+        kind = _classify_path(d)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if not d.is_dir():
+        if kind != "dir":
             return sanic_json({"ok": False, "error": "not_a_directory"},
                               status=400)
         entries = []
@@ -677,9 +701,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if not p.exists():
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if not p.is_file():
+        if kind != "file":
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         try:
@@ -733,11 +761,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if p.exists() and not p.is_file():
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind not in ("file", "missing"):
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         parent = p.parent
-        if not parent.is_dir():
+        pkind = _classify_path(parent)
+        if pkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if pkind != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
         # Atomic write: temp file in the same dir, fsync-free os.replace swap
@@ -795,15 +831,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if p.exists():
-            if not p.is_file():
-                return sanic_json({"ok": False, "error": "not_a_file"},
-                                  status=400)
-            if not overwrite:
-                return sanic_json({"ok": False, "error": "exists"},
-                                  status=409)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind in ("dir", "other"):
+            return sanic_json({"ok": False, "error": "not_a_file"},
+                              status=400)
+        if kind == "file" and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"},
+                              status=409)
         parent = p.parent
-        if not parent.is_dir():
+        pkind = _classify_path(parent)
+        if pkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if pkind != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
         tmp = None
@@ -850,9 +893,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if not p.exists():
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if not p.is_file():
+        if kind != "file":
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         try:
