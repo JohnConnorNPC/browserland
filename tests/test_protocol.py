@@ -96,6 +96,15 @@ def test_broker_to_producer_frames():
         "type": "snapshot_please"}
 
 
+def test_mcp_activity_frame():
+    # #33: a transient per-window MCP-touch pulse; carries only the kind (the
+    # window id is implicit in the per-session browser WS).
+    assert json.loads(protocol.mcp_activity_frame("read")) == {
+        "type": "mcp_activity", "kind": "read"}
+    assert json.loads(protocol.mcp_activity_frame("write")) == {
+        "type": "mcp_activity", "kind": "write"}
+
+
 def test_error_frame():
     assert json.loads(protocol.error_frame("unknown_session", 7)) == {
         "type": "error", "reason": "unknown_session", "session_id": 7}

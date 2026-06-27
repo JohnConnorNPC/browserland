@@ -323,6 +323,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
+    # a set so they aren't GC'd mid-flight; each self-removes on completion.
+    app.ctx.bg_tasks = set()
     # Single-active-browser lease (in-memory liveness, NOT persisted): the one
     # clientId allowed to drive this broker, the set of live /control sockets
     # per clientId, and the lock serializing every claim/release. Resets to
@@ -1017,6 +1020,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             out.append(entry_out)
         return sanic_json(out)
 
+    def _flash_mcp_activity(entry, kind: str) -> None:
+        # #33: emit a per-window MCP-activity pulse (browser flashes the robot
+        # icon — cool/soft for a read, warm/sharp for a write). Scheduled as a
+        # DETACHED task (not awaited) so the agent's read/write response latency
+        # never couples to a slow/backpressured browser WS send; broadcast_text
+        # swallows per-subscriber errors and no-ops with no subscribers.
+        task = asyncio.ensure_future(
+            entry.broadcast_text(protocol.mcp_activity_frame(kind)))
+        app.ctx.bg_tasks.add(task)
+        task.add_done_callback(app.ctx.bg_tasks.discard)
+
     async def _mcp_read(request: Request):
         err = _mcp_auth_error(request)
         if err is not None:
@@ -1024,6 +1038,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         entry, _mode, resp = _mcp_entry(request)
         if resp is not None:
             return resp
+        _flash_mcp_activity(entry, "read")    # #33 (detached; see helper)
         # Same correlated round-trip as /session/procs. A non-agent
         # (terminal) producer has no screen handler -> the RPC times out ->
         # 502 no_producer_rpc. busy/gone collapse to the same: there is no
@@ -1095,6 +1110,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # authorized channel (gated by the MCP token + readwrite mode), not a
         # browser, so the one-active-browser rule does not apply to it.
         await entry.send_to_producer(protocol.input_frame(data))
+        # #33: pulse the robot icon on the write (warm/sharp flash) — only after
+        # a validated readwrite send, so a rejected/read-only attempt doesn't
+        # flash. Detached task (see _flash_mcp_activity).
+        _flash_mcp_activity(entry, "write")
         return sanic_json({"ok": True})
 
     async def _mcp_reset(request: Request):

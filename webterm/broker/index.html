@@ -312,6 +312,30 @@
            off, so a window's MCP exposure is visible at a glance. */
         .term-window .mcp-btn svg { width: 13px; height: 13px; display: block; }
         .term-window .mcp-btn.mcp-off { opacity: 0.5; }
+        /* #33: transient MCP-activity pulse on the robot icon. Read = cool, soft,
+           slow glow (passive observation); write = warm, sharp, fast brightness
+           hit (active mutation) — unmistakable at a glance. Both animate only
+           box-shadow / filter so they ride on top of the .on (lit) and .mcp-off
+           (dimmed) states instead of fighting their background/opacity. */
+        @keyframes mcpReadPulse {
+            /* outer glow + an INSET half: the title bar's overflow:hidden clips
+               the top of an outward-only glow (the button has ~4px clearance),
+               so the inset keeps the read cue robust by painting in-bounds. */
+            0%   { box-shadow: 0 0 0 0 rgba(74,163,255,0), inset 0 0 0 0 rgba(74,163,255,0); }
+            40%  { box-shadow: 0 0 7px 2px rgba(74,163,255,0.80), inset 0 0 4px rgba(74,163,255,0.60); }
+            100% { box-shadow: 0 0 0 0 rgba(74,163,255,0), inset 0 0 0 0 rgba(74,163,255,0); }
+        }
+        @keyframes mcpWriteFlash {
+            0%   { box-shadow: 0 0 0 0 rgba(224,155,58,0); filter: brightness(1); }
+            18%  { box-shadow: 0 0 9px 3px rgba(224,155,58,0.95); filter: brightness(1.6); }
+            100% { box-shadow: 0 0 0 0 rgba(224,155,58,0); filter: brightness(1); }
+        }
+        .term-window .mcp-btn.mcp-flash-read  { animation: mcpReadPulse 280ms ease-in-out; }
+        .term-window .mcp-btn.mcp-flash-write { animation: mcpWriteFlash 200ms ease-out; }
+        @media (prefers-reduced-motion: reduce) {
+            .term-window .mcp-btn.mcp-flash-read,
+            .term-window .mcp-btn.mcp-flash-write { animation: none; }
+        }
         .term-window .mcp-popover {
             position: absolute;
             z-index: 50;
@@ -6801,6 +6825,7 @@
                 btn.title = 'MCP access: ' + lab;
             };
             win.refreshMcpBtn = refresh;   // kept live by refreshTaskbarInner
+            win.mcpBtn = btn;              // #33: target for the activity flash
 
             let pop = null;
             const closePop = () => {
@@ -6861,9 +6886,31 @@
                 btn.removeEventListener('click', onClick);
                 closePop();
                 win.refreshMcpBtn = null;
+                win.mcpBtn = null;
+                if (win._mcpFlashTimer) { clearTimeout(win._mcpFlashTimer);
+                    win._mcpFlashTimer = null; }
             });
             refresh();
             return btn;
+        }
+        // #33: briefly flash a window's robot icon on an MCP touch — cool/soft
+        // for a read, warm/sharp for a write, so observation vs mutation is
+        // tellable at a glance. No-op for windows without a robot button
+        // (app/non-terminal, or a pre-MCP broker where it's hidden). Re-triggers
+        // cleanly on a rapid burst by dropping the class + forcing a reflow.
+        function flashMcpBtn(win, kind) {
+            const btn = win && win.mcpBtn;
+            if (!btn) return;
+            const cls = kind === 'write' ? 'mcp-flash-write' : 'mcp-flash-read';
+            btn.classList.remove('mcp-flash-read', 'mcp-flash-write');
+            void btn.offsetWidth;                 // reflow -> restart keyframes
+            btn.classList.add(cls);
+            if (win._mcpFlashTimer) clearTimeout(win._mcpFlashTimer);
+            win._mcpFlashTimer = setTimeout(() => {
+                win._mcpFlashTimer = null;
+                if (win.mcpBtn) win.mcpBtn.classList.remove(
+                    'mcp-flash-read', 'mcp-flash-write');
+            }, 320);                              // > the longest keyframe (~300ms)
         }
 
         // ---- notices ------------------------------------------------------
@@ -10977,6 +11024,12 @@
                 }
                 if (data.type === 'output') {
                     try { win.term.write(data.data); } catch (_) {}
+                    return;
+                }
+                if (data.type === 'mcp_activity') {
+                    // #33: an agent just read (kind:'read') or wrote (kind:'write')
+                    // this window over MCP — pulse its robot icon.
+                    flashMcpBtn(win, data.kind === 'write' ? 'write' : 'read');
                     return;
                 }
                 if (data.type === 'title') {
