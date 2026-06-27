@@ -142,25 +142,37 @@ class BrowserlandClient:
 
     def read_screen(self, id: int, view: str = "screen", lines: int = 0,
                     wait_for_change: Optional[str] = None,
-                    timeout_ms: int = 0) -> Dict[str, Any]:
+                    timeout_ms: int = 0,
+                    wait_for_text: Optional[str] = None,
+                    wait_for_regex: Optional[str] = None,
+                    wait_absent: bool = False) -> Dict[str, Any]:
         """Render a terminal's screen as plain text. ``view="scrollback"`` with
         ``lines>0`` prepends that many lines of history above the grid (#21).
 
         ``wait_for_change`` (a prior ``content_hash``) + ``timeout_ms`` hold the
-        read until the screen changes or the timeout elapses (#26). The HTTP
-        read timeout is stretched past the broker's wait so the request doesn't
-        give up before the broker answers."""
+        read until the screen changes or the timeout elapses (#26).
+        ``wait_for_text`` / ``wait_for_regex`` (+ ``wait_absent``) instead hold
+        until the screen contains (or no longer contains) the match (#51), and
+        the reply carries ``matched``. The HTTP read timeout is stretched past
+        the broker's wait so the request doesn't give up before it answers."""
         body: Dict[str, Any] = {"id": id}
         if view and view != "screen":
             body["view"] = view
         if lines:
             body["lines"] = lines
         req_timeout = self._read_timeout
+        waiting = bool(wait_for_change or wait_for_text or wait_for_regex)
         if wait_for_change:
             body["wait_for_change"] = wait_for_change
-            if timeout_ms:
-                body["timeout_ms"] = int(timeout_ms)
-                req_timeout = self._read_timeout + int(timeout_ms) / 1000.0
+        if wait_for_text:
+            body["wait_for_text"] = wait_for_text
+        if wait_for_regex:
+            body["wait_for_regex"] = wait_for_regex
+        if wait_absent:
+            body["wait_absent"] = True
+        if waiting and timeout_ms:
+            body["timeout_ms"] = int(timeout_ms)
+            req_timeout = self._read_timeout + int(timeout_ms) / 1000.0
         return self._post("/mcp/read", body, timeout=req_timeout)
 
     def send_input(self, id: int, data: str) -> Dict[str, Any]:

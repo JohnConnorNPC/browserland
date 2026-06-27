@@ -171,10 +171,33 @@ def test_screen_text_please_frame_view_lines():
     f = json.loads(protocol.screen_text_please_frame(5, "scrollback", 200))
     assert f == {"type": "screen_text_please", "req": 5,
                  "view": "scrollback", "lines": 200,
-                 "wait_for_change": None, "timeout_ms": 0}
+                 "wait_for_change": None, "timeout_ms": 0,
+                 "wait_for_text": None, "wait_for_regex": None,
+                 "wait_absent": False}
     d = json.loads(protocol.screen_text_please_frame(5))
     assert d["view"] == "screen" and d["lines"] == 0
     assert d["wait_for_change"] is None and d["timeout_ms"] == 0
+
+
+def test_screen_text_please_frame_wait_for_content():
+    f = json.loads(protocol.screen_text_please_frame(
+        7, wait_for_text="Ready", timeout_ms=3000, wait_absent=True))
+    assert f["wait_for_text"] == "Ready" and f["wait_absent"] is True
+    assert f["timeout_ms"] == 3000 and f["wait_for_regex"] is None
+    g = json.loads(protocol.screen_text_please_frame(
+        8, wait_for_regex=r"\d+%"))
+    assert g["wait_for_regex"] == r"\d+%" and g["wait_absent"] is False
+
+
+def test_screen_text_frame_matched():
+    # matched is present only when set (content-predicate reads); omitted for
+    # immediate / wait_for_change reads so they stay unambiguous.
+    plain = json.loads(protocol.screen_text_frame(1, "hi", 80, 24))
+    assert "matched" not in plain
+    hit = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, matched=True))
+    assert hit["matched"] is True
+    miss = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, matched=False))
+    assert miss["matched"] is False
 
 
 def test_screen_text_please_frame_wait_for_change():

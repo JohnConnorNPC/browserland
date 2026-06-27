@@ -158,7 +158,10 @@ def procs_please_frame(req: int) -> str:
 def screen_text_please_frame(req: int, view: str = "screen",
                              lines: int = 0,
                              wait_for_change: Optional[str] = None,
-                             timeout_ms: int = 0) -> str:
+                             timeout_ms: int = 0,
+                             wait_for_text: Optional[str] = None,
+                             wait_for_regex: Optional[str] = None,
+                             wait_absent: bool = False) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
     producers have no handler, so the request times out -> 502). ``view``
@@ -168,11 +171,22 @@ def screen_text_please_frame(req: int, view: str = "screen",
     ``wait_for_change`` (a prior ``content_hash``) + ``timeout_ms`` make the
     AGENT hold the reply until the freshly-rendered screen hash differs from
     that baseline, or the timeout elapses — a single round-trip instead of a
-    busy-poll (#26). Older agents ignore both and reply immediately."""
+    busy-poll (#26). Older agents ignore both and reply immediately.
+
+    ``wait_for_text`` (substring) / ``wait_for_regex`` (regex), with the same
+    ``timeout_ms``, are a CONTENT predicate (#51): the agent holds the reply
+    until the rendered screen contains (or, with ``wait_absent``, no longer
+    contains) the match — waking once on the event the caller cares about
+    instead of on every noisy frame. The reply carries ``matched`` (true if the
+    predicate was satisfied, false on timeout). Older agents ignore these keys
+    and reply immediately."""
     return json.dumps({"type": "screen_text_please", "req": int(req),
                        "view": str(view), "lines": int(lines),
                        "wait_for_change": wait_for_change,
-                       "timeout_ms": int(timeout_ms)})
+                       "timeout_ms": int(timeout_ms),
+                       "wait_for_text": wait_for_text,
+                       "wait_for_regex": wait_for_regex,
+                       "wait_absent": bool(wait_absent)})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -225,7 +239,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       degraded: bool = False, alt_screen: bool = False,
                       cursor: Optional[Dict[str, int]] = None,
                       view: str = "screen", history_lines: int = 0,
-                      app_cursor: bool = False, content_hash: str = "") -> str:
+                      app_cursor: bool = False, content_hash: str = "",
+                      matched: Optional[bool] = None) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -256,6 +271,11 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     frame["cursor"] = (None if bool(degraded) or not isinstance(cursor, dict)
                        else {"row": int(cursor.get("row", 0)),
                              "col": int(cursor.get("col", 0))})
+    # matched (#51): present ONLY for a content-predicate (wait_for_text/regex)
+    # read — true if the predicate was satisfied, false if it timed out first.
+    # Omitted for immediate / wait_for_change reads so they stay unambiguous.
+    if matched is not None:
+        frame["matched"] = bool(matched)
     return json.dumps(frame)
 
 

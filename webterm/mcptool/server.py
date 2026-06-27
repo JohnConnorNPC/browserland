@@ -319,7 +319,9 @@ def list_profiles(host: Optional[str] = None) -> Dict[str, Any]:
 
 @mcp.tool()
 def read_screen(id: str, view: str = "screen", lines: int = 0,
-                wait_for_change: str = "", timeout_ms: int = 0) -> Dict[str, Any]:
+                wait_for_change: str = "", timeout_ms: int = 0,
+                wait_for_text: str = "", wait_for_regex: str = "",
+                wait_absent: bool = False) -> Dict[str, Any]:
     """Render a terminal's current screen as plain text. Pass a namespaced window
     id ("<host>:<int>") from list_terminals.
 
@@ -330,18 +332,27 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
     history above the current grid (`history_lines` reports how many were
     included; ignored when `alt_screen` is true).
 
-    To wait for the screen to change after an action in ONE call instead of
-    polling, pass the previous read's `content_hash` as `wait_for_change` plus a
-    `timeout_ms` (capped at 15000): the read blocks until the screen differs from
-    that hash and returns the new screen — or returns the current screen if the
-    timeout elapses first. Typical use:
-        send_keys(id, ["Down"])
-        read_screen(id, wait_for_change=prev_hash, timeout_ms=3000)
-    Omit `wait_for_change` for an immediate read."""
+    WAITING (one call, no polling) — all bounded by `timeout_ms` (capped 15000):
+    - wait for ANY change: pass the previous read's `content_hash` as
+      `wait_for_change`. Blocks until the screen differs, else returns the
+      current screen at timeout. Best for a mostly-static shell.
+    - wait for SPECIFIC content: pass `wait_for_text` (substring) or
+      `wait_for_regex` (regex) to block until that appears — or set
+      `wait_absent=true` to block until it DISAPPEARS. The result adds
+      `matched`: true if the text/regex condition was met, false if it timed
+      out. Prefer this on a busy TUI where every frame changes the hash (a
+      clock, a spinner), so `wait_for_change` would wake on noise. Typical use:
+        send_keys(id, ["Enter"])
+        read_screen(id, wait_for_text="Ready", timeout_ms=5000)   # -> matched
+    Note the search surface is the newline-joined grid, so a value wrapped
+    across two rows won't match. Omit all wait_* params for an immediate read."""
     client, int_id = _route(id)
     return client.read_screen(int_id, view=view, lines=lines,
                               wait_for_change=wait_for_change or None,
-                              timeout_ms=timeout_ms)
+                              timeout_ms=timeout_ms,
+                              wait_for_text=wait_for_text or None,
+                              wait_for_regex=wait_for_regex or None,
+                              wait_absent=wait_absent)
 
 
 @mcp.tool()

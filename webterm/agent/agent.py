@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import socket
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -430,15 +431,40 @@ class Agent:
     def _on_screen_request(self, req: int, view: str = "screen",
                            lines: int = 0,
                            wait_for_change: Optional[str] = None,
-                           timeout_ms: int = 0) -> None:
+                           timeout_ms: int = 0,
+                           wait_for_text: Optional[str] = None,
+                           wait_for_regex: Optional[str] = None,
+                           wait_absent: bool = False) -> None:
         # MCP /mcp/read: render the live screen as plain text. Each render
         # snapshots the ring + dims + live alt-screen state synchronously on the
         # loop (an immutable, consistent view), then renders off-loop (pyte can
         # be CPU-heavy on a large ring) and enqueues the reply on the SAME
         # ordered out-queue. With wait_for_change (#26) it re-renders on each
-        # PTY-output nudge until the screen hash differs from the baseline or
-        # timeout_ms elapses — one round-trip instead of an agent busy-poll.
+        # PTY-output nudge until the screen hash differs from the baseline; with
+        # wait_for_text / wait_for_regex (#51) it instead waits until the screen
+        # CONTAINS (or, with wait_absent, no longer contains) the match — waking
+        # once on the awaited event instead of on every noisy TUI frame. Either
+        # way the hold is bounded by timeout_ms — one round-trip, no busy-poll.
         loop = asyncio.get_running_loop()
+        # Precompile the content predicate once. The broker validates the regex
+        # up front (bad_regex 400), so a compile error here is belt-and-braces:
+        # treat it as "no predicate" rather than waiting out the whole timeout.
+        regex = None
+        if wait_for_regex:
+            try:
+                regex = re.compile(wait_for_regex)
+            except re.error:
+                wait_for_regex = None
+        has_predicate = bool(wait_for_text) or regex is not None
+
+        def _predicate_met(text: str) -> bool:
+            if wait_for_text:
+                present = wait_for_text in text
+            elif regex is not None:
+                present = regex.search(text) is not None
+            else:
+                return False
+            return (not present) if wait_absent else present
 
         async def _render() -> dict:
             # Snapshot on the loop (ring.get() returns immutable bytes) so the
@@ -452,12 +478,14 @@ class Agent:
             r["cols"], r["rows"] = cols, rows
             return r
 
-        def _reply(r: dict, content_hash: str) -> None:
+        def _reply(r: dict, content_hash: str,
+                   matched: Optional[bool] = None) -> None:
             self._enqueue("txt", protocol.screen_text_frame(
                 req, r["text"], r["cols"], r["rows"], degraded=r["degraded"],
                 alt_screen=r["alt_screen"], cursor=r["cursor"],
                 view=r["view"], history_lines=r["history_lines"],
-                app_cursor=self.state.app_cursor, content_hash=content_hash))
+                app_cursor=self.state.app_cursor, content_hash=content_hash,
+                matched=matched))
 
         async def _run() -> None:
             try:
@@ -467,11 +495,30 @@ class Agent:
                     observed = self._output_gen
                     r = await _render()
                     h = _content_hash(r["text"])
+                    # Evaluate the content predicate OFF the event loop: a
+                    # catastrophic-backtracking regex must not block the loop
+                    # (input/output/other RPCs). The gen-recheck below still
+                    # guards the park against a nudge during this await.
+                    pred = bool(await loop.run_in_executor(
+                        None, _predicate_met, r["text"])) if has_predicate else None
                     timed_out = loop.time() >= deadline
-                    if not wait_for_change or h != wait_for_change or timed_out:
-                        _reply(r, h)
+                    # Decide whether this render satisfies the request. An
+                    # immediate read (no wait mode) always replies on pass one.
+                    matched: Optional[bool] = None
+                    done = not wait_for_change and not has_predicate
+                    if pred:
+                        done, matched = True, True
+                    if wait_for_change and h != wait_for_change:
+                        done = True
+                    if timed_out:
+                        done = True
+                        if has_predicate and matched is None:
+                            matched = False        # waited out, never matched
+                    if done:
+                        _reply(r, h, matched)
                         return
-                    # New output during the render? Re-render before parking.
+                    # New output during the render/predicate await? Re-render
+                    # before parking so we never miss a frame.
                     if self._output_gen != observed:
                         continue
                     remaining = deadline - loop.time()
