@@ -789,10 +789,11 @@
         }
         #clock-chip.on { display: inline-flex; align-items: center; }
 
-        /* ---- #40 in-app Help: taskbar "?" chip + searchable overlay ----
-           The chip mirrors #clock-chip (hidden by default, shown via .on);
-           the overlay/modal are self-contained (they don't lean on the
-           #settings-modal id rules) but reuse the shared .set-* classes. */
+        /* ---- #40 in-app Help: taskbar "?" chip + floating Help window ----
+           The chip mirrors #clock-chip (hidden by default, shown via .on) and
+           opens a real floating app window (.app-help) — a reference panel with
+           a fixed header+search, a left category rail, and a scrollable card
+           grid; theme-aware via the shared vars + the window's own --accent. */
         #help-chip {
             display: none;
             flex: 0 0 auto;
@@ -812,89 +813,179 @@
         }
         #help-chip.on { display: inline-flex; align-items: center; justify-content: center; }
         #help-chip:hover { color: var(--fg); border-color: var(--accent-default); }
-        #help-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.55);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 150001;   /* just above #settings-overlay (defense; openHelp also closes it) */
-        }
-        #help-overlay.open { display: flex; }
-        #help-modal {
-            background: var(--bg-2);
-            border: 1px solid #000;
-            border-left: 4px solid var(--accent-default);
-            border-radius: 4px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+        .term-window.app-help .help-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--bg);
             color: var(--fg);
             font-family: Arial, sans-serif;
-            font-size: 13px;
-            padding: 14px 16px;
-            width: 560px;
-            max-width: 92vw;
-            max-height: 84vh;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        #help-search {
-            background: var(--bg);
-            border: 1px solid var(--bg-3);
-            border-radius: 3px;
-            color: var(--fg);
-            font-family: monospace;
-            font-size: 13px;
-            padding: 6px 9px;
-            outline: none;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        #help-search:focus { border-color: var(--accent-default); }
-        #help-results {
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
-            padding-right: 4px;
-        }
-        .help-section { display: flex; flex-direction: column; gap: 7px; }
-        .help-section-title {
-            color: var(--fg-dim);
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            border-bottom: 1px solid var(--bg-3);
-            padding-bottom: 3px;
-        }
-        .help-entry { display: flex; flex-direction: column; gap: 2px; }
-        .help-entry .h-title { font-weight: bold; font-size: 12px; }
-        .help-entry .h-body { font-size: 12px; line-height: 1.45; }
-        .help-entry .h-keys {
-            align-self: flex-start;
-            font-family: monospace;
-            font-size: 11px;
-            color: var(--fg-dim);
-            background: var(--bg);
-            border: 1px solid var(--bg-3);
-            border-radius: 3px;
-            padding: 1px 5px;
-            margin-top: 1px;
-        }
-        #help-empty { color: var(--fg-dim); font-style: italic; font-size: 12px; }
-        #help-modal .set-foot { display: flex; justify-content: flex-end; }
-        #help-modal button {
-            background: var(--bg);
-            border: 1px solid var(--bg-3);
-            border-radius: 3px;
-            color: var(--fg);
-            font-family: monospace;
             font-size: 12px;
-            padding: 5px 10px;
-            cursor: pointer;
         }
-        #help-modal button:hover { background: #262626; border-color: #6a8; }
+        .app-help .help-top {
+            flex: 0 0 auto;
+            padding: 11px 12px;
+            border-bottom: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+            background: linear-gradient(to bottom,
+                color-mix(in srgb, var(--accent) 12%, var(--bg)), var(--bg));
+        }
+        .app-help .help-heading {
+            display: grid;
+            grid-template-columns: 28px 1fr auto;
+            align-items: center;
+            gap: 9px;
+            margin-bottom: 9px;
+        }
+        .app-help .help-icon {
+            width: 28px; height: 28px;
+            display: grid; place-items: center;
+            border-radius: 6px;
+            background: color-mix(in srgb, var(--accent) 24%, var(--bg-2));
+            border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+            color: var(--fg);
+            font-weight: bold;
+        }
+        .app-help .help-title { font-size: 13px; font-weight: bold; line-height: 1.2; }
+        .app-help .help-subtitle { margin-top: 1px; color: var(--fg-dim); font-size: 11px; }
+        .app-help .help-count { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+        .app-help .help-search-wrap { position: relative; }
+        .app-help .help-search {
+            width: 100%; height: 32px; box-sizing: border-box;
+            padding: 0 32px 0 10px;
+            border-radius: 6px;
+            border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent);
+            background: var(--bg-2);
+            color: var(--fg);
+            font-family: monospace; font-size: 12px;
+            outline: none;
+        }
+        .app-help .help-search:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+        }
+        .app-help .help-clear {
+            position: absolute; right: 5px; top: 4px;
+            width: 24px; height: 24px;
+            place-items: center;
+            display: none;
+            border: 0; border-radius: 4px;
+            background: transparent; color: var(--fg-dim);
+            font-size: 15px; line-height: 1; cursor: pointer;
+        }
+        .app-help .help-clear.show { display: grid; }
+        .app-help .help-clear:hover {
+            background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg);
+        }
+        .app-help .help-main {
+            flex: 1 1 auto; min-height: 0;
+            display: grid;
+            grid-template-columns: 168px minmax(0, 1fr);
+        }
+        .app-help .help-rail {
+            overflow: auto;
+            padding: 8px;
+            border-right: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+            background: color-mix(in srgb, var(--bg-2) 50%, var(--bg));
+        }
+        .app-help .help-rail-btn {
+            width: 100%; height: 27px;
+            display: grid; grid-template-columns: 16px 1fr auto;
+            align-items: center; gap: 7px;
+            padding: 0 8px; margin-bottom: 1px;
+            border: 0; border-radius: 5px;
+            background: transparent; color: var(--fg-dim);
+            text-align: left; font: inherit; cursor: pointer;
+        }
+        .app-help .help-rail-btn:hover {
+            background: color-mix(in srgb, var(--fg) 9%, transparent); color: var(--fg);
+        }
+        .app-help .help-rail-btn.active {
+            background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--fg);
+        }
+        .app-help .help-rail-ic { opacity: 0.85; text-align: center; }
+        .app-help .help-rail-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .app-help .help-rail-count { font-size: 10px; color: var(--fg-dim); }
+        .app-help .help-scroll { min-width: 0; overflow: auto; padding: 12px 14px 18px; }
+        .app-help .help-section { margin-bottom: 16px; }
+        .app-help .help-section-header {
+            position: sticky; top: -12px; z-index: 2;
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 0 8px; margin-bottom: 8px;
+            background: linear-gradient(to bottom, var(--bg) 78%, transparent);
+        }
+        .app-help .help-section-icon {
+            width: 21px; height: 21px;
+            display: grid; place-items: center;
+            border-radius: 5px;
+            background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+            color: var(--fg); font-size: 11px;
+        }
+        .app-help .help-section-title {
+            font-size: 11px; font-weight: bold;
+            text-transform: uppercase; letter-spacing: 0.04em;
+            color: var(--fg);
+        }
+        .app-help .help-section-count { margin-left: auto; color: var(--fg-dim); font-size: 10px; }
+        .app-help .help-entry-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+            gap: 8px;
+        }
+        .app-help .help-entry {
+            padding: 9px 11px;
+            border-radius: 7px;
+            background: color-mix(in srgb, var(--bg-2) 72%, var(--bg));
+            border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+        }
+        .app-help .help-entry:hover {
+            border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+            background: color-mix(in srgb, var(--accent) 8%, var(--bg-2));
+        }
+        .app-help .help-entry-head { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+        .app-help .help-entry-title {
+            flex: 1; min-width: 0;
+            font-size: 12px; font-weight: bold; line-height: 1.3; color: var(--fg);
+        }
+        .app-help .help-entry-body { color: var(--fg-dim); line-height: 1.45; font-size: 12px; }
+        .app-help .help-kbd {
+            flex: 0 0 auto;
+            padding: 2px 6px 3px;
+            border-radius: 4px;
+            font-family: monospace; font-size: 11px; line-height: 1.2;
+            color: var(--fg);
+            background: color-mix(in srgb, var(--bg-3) 80%, black);
+            border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+            box-shadow: inset 0 -1px 0 color-mix(in srgb, black 25%, transparent);
+            white-space: nowrap;
+        }
+        .app-help .help-mark {
+            border-radius: 2px;
+            background: color-mix(in srgb, var(--accent) 38%, transparent);
+            color: var(--fg);
+        }
+        .app-help .help-empty {
+            height: 100%;
+            display: grid; place-items: center;
+            text-align: center; color: var(--fg-dim); font-size: 12px;
+            padding: 20px;
+        }
+        .app-help .help-empty strong { display: block; color: var(--fg); margin-bottom: 4px; font-size: 13px; }
+        .app-help .help-scroll::-webkit-scrollbar,
+        .app-help .help-rail::-webkit-scrollbar { width: 10px; height: 10px; }
+        .app-help .help-scroll::-webkit-scrollbar-thumb,
+        .app-help .help-rail::-webkit-scrollbar-thumb {
+            background: color-mix(in srgb, var(--fg) 20%, transparent);
+            border: 2px solid transparent;
+            background-clip: content-box;
+            border-radius: 999px;
+        }
+        .app-help .help-scroll::-webkit-scrollbar-thumb:hover,
+        .app-help .help-rail::-webkit-scrollbar-thumb:hover {
+            background: color-mix(in srgb, var(--fg) 30%, transparent);
+            background-clip: content-box;
+        }
 
         /* edge / corner resize handles */
         .term-window .rh { position: absolute; z-index: 5; }
@@ -1774,18 +1865,6 @@
             </div>
         </div>
     </div>
-    <div id="help-overlay">
-        <div id="help-modal">
-            <div class="set-head">Help &#8212; interface guide</div>
-            <input type="text" id="help-search" autocomplete="off" spellcheck="false"
-                   placeholder="Search&#8230;  (e.g. snap, tab, split, workspace, MCP, pin)" />
-            <div id="help-results"></div>
-            <div id="help-empty" style="display:none">No matches.</div>
-            <div class="set-foot">
-                <button type="button" id="help-close">close</button>
-            </div>
-        </div>
-    </div>
     <div id="auth-overlay">
         <form id="auth-form">
             <div class="set-head">password required</div>
@@ -2335,6 +2414,9 @@
             // The Control Panel is likewise ephemeral (it edits global settings
             // which persist via /state, so the window itself need not be saved).
             if (win.appKind === 'control-panel') return;
+            // Help is a live reference monitor, not a saved document (#40): never
+            // persist it (so it never lands in appStore nor restores on reload).
+            if (win.appKind === 'help') return;
             // Multi-tab agent-docs window: snapshot the live editor back into the
             // active doc first, so the serialized `docs` below are never stale.
             if (win.tabs && win._captureActiveDoc) {
@@ -8270,6 +8352,11 @@
             if (appData.appKind === 'task-manager') {
                 return openTaskManagerWindow(appData);
             }
+            // Help has its own ephemeral factory (#40) — delegate before the
+            // sticky/editor logic below.
+            if (appData.appKind === 'help') {
+                return openHelpWindow(appData);
+            }
             // The floating control-panel window was retired (its controls live in
             // the settings modal now). Fail closed: redirect a stray record to the
             // modal instead of building a bogus sticky note from the generic path.
@@ -12697,6 +12784,7 @@
                 { label: '🗂 File manager', enabled: true, action: launchFileManager },
                 { label: '🧰 Task manager', enabled: true, action: launchTaskManager },
                 { label: '🎛 Control panel', enabled: true, action: launchControlPanel },
+                { label: '❓ Help', enabled: true, action: launchHelp },
                 ...closedAppMenuItems(),
             ];
         }
@@ -13217,8 +13305,7 @@
             // #40: unbound by default (absent from DEFAULT_KEYBINDINGS) — shows in
             // the keybindings editor as 'unset' so users can assign their own combo.
             { id: 'toggle-help',     label: 'Toggle help',
-              run: () => { if (helpOverlay.classList.contains('open')) closeHelp();
-                           else openHelp(); } },
+              run: () => toggleHelpWindow() },
         ];
         const KEY_ACTION_BY_ID = {};
         for (const act of KEY_ACTIONS) KEY_ACTION_BY_ID[act.id] = act;
@@ -13546,8 +13633,14 @@
                         terminateWindow(win.id);
                 }});
             }
-            if (win.type === 'app') {
-                // × Close keeps the doc; this is the only path that discards it.
+            // Persisted docs only: × Close keeps them, Delete is the one path that
+            // discards them. Ephemeral monitors (task manager, control panel, help)
+            // have nothing saved — Close already fully tears them down — so a
+            // "Delete" there would be a misleading no-op.
+            if (win.type === 'app'
+                && win.appKind !== 'task-manager'
+                && win.appKind !== 'control-panel'
+                && win.appKind !== 'help') {
                 const what = win.appKind === 'text-editor' ? 'file' : 'note';
                 items.push({ sep: true });
                 items.push({
@@ -13706,7 +13799,8 @@
             if (e.key === 'Escape') {
                 hideCtxMenu();
                 closeSettings();
-                closeHelp();        // #40
+                // The Help window handles its own Escape (scoped to its body):
+                // clear the query if any, else close — see buildHelpBody.
             }
         });
         window.addEventListener('blur', hideCtxMenu);
@@ -13847,19 +13941,12 @@
         document.getElementById('settings-close')
             .addEventListener('click', closeSettings);
 
-        // ---- #40 in-app Help: searchable interface guide --------------------
-        // A small modal that documents every interface feature. The corpus is
-        // mostly static prose; a few entries are GENERATED from live state
-        // (keybindings, launch profiles, MCP status) so they never go stale.
-        // Search is a case-insensitive substring over title+body+section+keys.
-        const helpOverlay = document.getElementById('help-overlay');
-        const helpSearchEl = document.getElementById('help-search');
-        const helpResultsEl = document.getElementById('help-results');
-        const helpEmptyEl = document.getElementById('help-empty');
-        // The corpus is rebuilt once per open (and once more when a cold
-        // generated source warms), NOT per keystroke — live state can't change
-        // between keystrokes within one open, so filtering reuses this snapshot.
-        let _helpCorpus = [];
+        // ---- #40 in-app Help: a floating, searchable reference window -------
+        // The "?" taskbar chip / the toggle-help hotkey / the (+) menu open a
+        // single floating Help app window (appKind 'help', ephemeral like the
+        // task manager). Its corpus is mostly static prose plus a few entries
+        // GENERATED from live state (keybindings, launch profiles, MCP status);
+        // search is a case-insensitive substring over title+body+section+keys.
         const HELP_ENTRIES_STATIC = [
             { section: 'Getting started', title: 'Open this guide',
               body: 'Click the "?" chip at the bottom-right of the taskbar, or bind a key to it under Control Panel -> Keyboard shortcuts (the "Toggle help" action). Type in the box above to filter every entry live.' },
@@ -13977,50 +14064,37 @@
             }
             return entries;
         }
-        // Render (filtered) entries grouped by section, in first-seen order, with
-        // textContent only (no innerHTML) like renderKeybindings.
-        function renderHelp(query) {
-            const q = (query || '').trim().toLowerCase();
-            const entries = _helpCorpus.filter(e => !q || (e._hay || '').indexOf(q) !== -1);
-            helpResultsEl.textContent = '';
-            if (!entries.length) { helpEmptyEl.style.display = ''; return; }
-            helpEmptyEl.style.display = 'none';
-            const order = [];
-            const bySection = new Map();
-            for (const e of entries) {
-                if (!bySection.has(e.section)) { bySection.set(e.section, []); order.push(e.section); }
-                bySection.get(e.section).push(e);
+        // Per-section rail/header glyph — a quick visual anchor, not decoration.
+        // Unknown sections fall back to a neutral dot.
+        const HELP_SECTION_ICONS = {
+            'Getting started': '★', 'Layout modes': '▦', 'Snapping & pop-out': '⤢',
+            'Tabs': '❐', 'Splits': '◧', 'Stacks & rows': '☰', 'Columns & widths': '▥',
+            'Drag-to-merge drop zones': '⊕', 'Workspaces': '⊞', 'Taskbar': '▭',
+            'Floating window controls': '❖', 'Window types & launching': '＋',
+            'Hosts & multi-browser': '⌂', 'MCP access': '◆', 'Context menus': '☰',
+            'Arrange & size (floating)': '▦', 'Keyboard shortcuts': '⌨', 'Launching': '＋',
+        };
+        function helpSectionIcon(name) {
+            return Object.prototype.hasOwnProperty.call(HELP_SECTION_ICONS, name)
+                ? HELP_SECTION_ICONS[name] : '•';
+        }
+        // Append `text` to `el`, wrapping case-insensitive matches of `q` in a
+        // <mark> so the user sees WHY a result matched. Text nodes only (never
+        // innerHTML) so help prose can't inject markup.
+        function helpAppendHighlighted(el, text, q) {
+            text = text == null ? '' : String(text);
+            if (!q) { el.appendChild(document.createTextNode(text)); return; }
+            const hay = text.toLowerCase();
+            let pos = 0, idx;
+            while ((idx = hay.indexOf(q, pos)) !== -1) {
+                if (idx > pos) el.appendChild(document.createTextNode(text.slice(pos, idx)));
+                const mark = document.createElement('mark');
+                mark.className = 'help-mark';
+                mark.textContent = text.slice(idx, idx + q.length);
+                el.appendChild(mark);
+                pos = idx + q.length;
             }
-            for (const sec of order) {
-                const secDiv = document.createElement('div');
-                secDiv.className = 'help-section';
-                const title = document.createElement('div');
-                title.className = 'help-section-title';
-                title.textContent = sec;
-                secDiv.appendChild(title);
-                for (const e of bySection.get(sec)) {
-                    const ent = document.createElement('div');
-                    ent.className = 'help-entry';
-                    const t = document.createElement('div');
-                    t.className = 'h-title';
-                    t.textContent = e.title;
-                    ent.appendChild(t);
-                    if (e.body) {
-                        const b = document.createElement('div');
-                        b.className = 'h-body';
-                        b.textContent = e.body;
-                        ent.appendChild(b);
-                    }
-                    if (e.keys) {
-                        const k = document.createElement('div');
-                        k.className = 'h-keys';
-                        k.textContent = e.keys;
-                        ent.appendChild(k);
-                    }
-                    secDiv.appendChild(ent);
-                }
-                helpResultsEl.appendChild(secDiv);
-            }
+            if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
         }
         function markHelpSeen() {
             try {
@@ -14028,39 +14102,417 @@
                 if (!s.helpHintSeen) { s.helpHintSeen = true; savePrefs(); }
             } catch (_) {}
         }
-        function openHelp() {
-            closeSettings();   // one modal at a time (avoid a settings+help stack)
-            helpSearchEl.value = '';
-            _helpCorpus = buildHelpEntries();     // snapshot live state once per open
-            renderHelp('');
-            helpOverlay.classList.add('open');
-            markHelpSeen();   // opening Help is the strongest "seen" signal
-            // Warm the generated entries that may be cold, then rebuild + re-render
-            // (preserving the current query) if still open.
-            const refresh = () => {
-                if (!helpOverlay.classList.contains('open')) return;
-                _helpCorpus = buildHelpEntries();
-                renderHelp(helpSearchEl.value);
-            };
-            try { fetchProfiles(localHost()).then(refresh).catch(() => {}); } catch (_) {}
-            try { fetchMcpConfig(localHost()).then(refresh).catch(() => {}); } catch (_) {}
-            setTimeout(() => { try { helpSearchEl.focus(); } catch (_) {} }, 0);
-        }
-        function closeHelp() {
-            if (helpOverlay) helpOverlay.classList.remove('open');
-        }
-        (function wireHelp() {
-            const chip = document.getElementById('help-chip');
-            if (chip) {
-                chip.addEventListener('click', openHelp);
-                chip.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHelp(); }
-                });
+        // Scroll-spy: highlight the rail button for whichever section currently
+        // sits at the top of the scroll viewport.
+        function updateHelpActiveSection(win) {
+            const h = win._help;
+            if (!h || !h.sectionEls || !h.sectionEls.length) return;
+            const top = h.scrollEl.scrollTop;
+            let activeId = h.sectionEls[0].id;
+            for (const s of h.sectionEls) {
+                if (s.offsetTop - 16 <= top) activeId = s.id; else break;
             }
-            helpSearchEl.addEventListener('input', () => renderHelp(helpSearchEl.value));
-            document.getElementById('help-close').addEventListener('click', closeHelp);
-            helpOverlay.addEventListener('mousedown', (e) => {
-                if (e.target === helpOverlay) closeHelp();
+            for (const btn of h.railEl.querySelectorAll('.help-rail-btn')) {
+                btn.classList.toggle('active', btn.dataset.target === activeId);
+            }
+        }
+        // Render the filtered corpus into a Help window: left rail (one button per
+        // section, click-to-jump + scroll-spy), the scrollable card grid (sticky
+        // section headers), and the result count. Reads win._helpCorpus (snapshotted
+        // on open) so a keystroke filters the snapshot, never rebuilds live state.
+        function renderHelpInto(win, query) {
+            const h = win._help; if (!h) return;
+            const raw = query || '';
+            const q = raw.trim().toLowerCase();
+            const entries = (win._helpCorpus || []).filter(
+                e => !q || (e._hay || '').indexOf(q) !== -1);
+            h.clearBtn.classList.toggle('show', !!raw.length);
+            const order = []; const bySection = new Map();
+            for (const e of entries) {
+                if (!bySection.has(e.section)) { bySection.set(e.section, []); order.push(e.section); }
+                bySection.get(e.section).push(e);
+            }
+            const n = entries.length;
+            h.countEl.textContent = q
+                ? (n === 0 ? 'No results' : n === 1 ? '1 result' : n + ' results')
+                : (n + ' topics');
+            h.railEl.textContent = '';
+            h.scrollEl.textContent = '';
+            h.sectionEls = [];
+            if (!order.length) {
+                const empty = document.createElement('div');
+                empty.className = 'help-empty';
+                const strong = document.createElement('strong');
+                strong.textContent = 'No matches';
+                empty.appendChild(strong);
+                empty.appendChild(document.createTextNode(
+                    'Try a feature, command, profile, or key name.'));
+                h.scrollEl.appendChild(empty);
+                return;
+            }
+            order.forEach((sec, i) => {
+                const secId = 'hsec-' + i;
+                const rb = document.createElement('button');
+                rb.type = 'button';
+                rb.className = 'help-rail-btn';
+                rb.dataset.target = secId;
+                const ric = document.createElement('span');
+                ric.className = 'help-rail-ic'; ric.textContent = helpSectionIcon(sec);
+                const rlab = document.createElement('span');
+                rlab.className = 'help-rail-label'; rlab.textContent = sec;
+                const rcnt = document.createElement('span');
+                rcnt.className = 'help-rail-count';
+                rcnt.textContent = String(bySection.get(sec).length);
+                rb.appendChild(ric); rb.appendChild(rlab); rb.appendChild(rcnt);
+                rb.addEventListener('click', () => {
+                    const target = h.scrollEl.querySelector('#' + secId);
+                    if (target) h.scrollEl.scrollTo({ top: Math.max(0, target.offsetTop - 6) });
+                });
+                h.railEl.appendChild(rb);
+
+                const secDiv = document.createElement('div');
+                secDiv.className = 'help-section';
+                secDiv.id = secId;
+                const head = document.createElement('div');
+                head.className = 'help-section-header';
+                const sic = document.createElement('div');
+                sic.className = 'help-section-icon'; sic.textContent = helpSectionIcon(sec);
+                const stitle = document.createElement('div');
+                stitle.className = 'help-section-title'; stitle.textContent = sec;
+                const scount = document.createElement('div');
+                scount.className = 'help-section-count';
+                scount.textContent = String(bySection.get(sec).length);
+                head.appendChild(sic); head.appendChild(stitle); head.appendChild(scount);
+                secDiv.appendChild(head);
+
+                const grid = document.createElement('div');
+                grid.className = 'help-entry-grid';
+                for (const e of bySection.get(sec)) {
+                    const card = document.createElement('div');
+                    card.className = 'help-entry';
+                    const headRow = document.createElement('div');
+                    headRow.className = 'help-entry-head';
+                    const t = document.createElement('div');
+                    t.className = 'help-entry-title';
+                    helpAppendHighlighted(t, e.title, q);
+                    headRow.appendChild(t);
+                    if (e.keys) {
+                        const kbd = document.createElement('span');
+                        kbd.className = 'help-kbd';
+                        kbd.textContent = e.keys;
+                        headRow.appendChild(kbd);
+                    }
+                    card.appendChild(headRow);
+                    if (e.body) {
+                        const b = document.createElement('div');
+                        b.className = 'help-entry-body';
+                        helpAppendHighlighted(b, e.body, q);
+                        card.appendChild(b);
+                    }
+                    grid.appendChild(card);
+                }
+                secDiv.appendChild(grid);
+                h.scrollEl.appendChild(secDiv);
+                h.sectionEls.push(secDiv);
+            });
+            updateHelpActiveSection(win);
+        }
+        // Build the Help window body (header + search + rail + scroll grid). Stashes
+        // element refs on win._help and registers listeners in win.cleanups. Returns
+        // the .help-body root for the caller to append.
+        function buildHelpBody(win) {
+            const body = document.createElement('div');
+            body.className = 'help-body';
+
+            const top = document.createElement('div');
+            top.className = 'help-top';
+            const heading = document.createElement('div');
+            heading.className = 'help-heading';
+            const icon = document.createElement('div');
+            icon.className = 'help-icon'; icon.textContent = '?';
+            const titleWrap = document.createElement('div');
+            const title = document.createElement('div');
+            title.className = 'help-title'; title.textContent = 'Help';
+            const subtitle = document.createElement('div');
+            subtitle.className = 'help-subtitle'; subtitle.textContent = 'Interface guide';
+            titleWrap.appendChild(title); titleWrap.appendChild(subtitle);
+            const count = document.createElement('div');
+            count.className = 'help-count';
+            heading.appendChild(icon); heading.appendChild(titleWrap); heading.appendChild(count);
+
+            const searchWrap = document.createElement('div');
+            searchWrap.className = 'help-search-wrap';
+            const search = document.createElement('input');
+            search.type = 'text';
+            search.className = 'help-search';
+            search.autocomplete = 'off'; search.spellcheck = false;
+            search.placeholder = 'Search help…  (snap, tab, split, workspace, MCP, …)';
+            const clear = document.createElement('button');
+            clear.type = 'button'; clear.className = 'help-clear';
+            clear.title = 'Clear search'; clear.textContent = '×';
+            searchWrap.appendChild(search); searchWrap.appendChild(clear);
+
+            top.appendChild(heading); top.appendChild(searchWrap);
+
+            const main = document.createElement('div');
+            main.className = 'help-main';
+            const rail = document.createElement('nav');
+            rail.className = 'help-rail';
+            const scroll = document.createElement('div');
+            scroll.className = 'help-scroll';
+            main.appendChild(rail); main.appendChild(scroll);
+
+            body.appendChild(top); body.appendChild(main);
+
+            win._help = { searchEl: search, clearBtn: clear, countEl: count,
+                          railEl: rail, scrollEl: scroll, sectionEls: [] };
+
+            const onInput = () => renderHelpInto(win, search.value);
+            search.addEventListener('input', onInput);
+            const onClear = () => { search.value = ''; renderHelpInto(win, ''); search.focus(); };
+            clear.addEventListener('click', onClear);
+            const onScroll = () => updateHelpActiveSection(win);
+            scroll.addEventListener('scroll', onScroll, { passive: true });
+            // Scoped Escape (bound to the body, so it fires only when focus is
+            // inside Help): clear the query if any, else close the window. stopProp
+            // keeps the global Escape (which closes the settings modal) from firing.
+            const onKey = (e) => {
+                if (e.key !== 'Escape') return;
+                e.stopPropagation();
+                if (search.value) { search.value = ''; renderHelpInto(win, ''); search.focus(); }
+                else closeWindow(win.id);
+            };
+            body.addEventListener('keydown', onKey);
+            win.cleanups.push(() => {
+                search.removeEventListener('input', onInput);
+                clear.removeEventListener('click', onClear);
+                scroll.removeEventListener('scroll', onScroll);
+                body.removeEventListener('keydown', onKey);
+            });
+            return body;
+        }
+        // The single live Help window (or null) — Help is single-instance.
+        function findHelpWindow() {
+            for (const w of windows.values()) {
+                if (w && !w.disposed && w.appKind === 'help') return w;
+            }
+            return null;
+        }
+        // Re-snapshot win._helpCorpus from live state and re-render, preserving the
+        // current query — used when a cold profiles/MCP cache warms after open.
+        function refreshHelpCorpus(win) {
+            if (!win || win.disposed || !win._help) return;
+            win._helpCorpus = buildHelpEntries();
+            renderHelpInto(win, win._help.searchEl.value);
+        }
+        // Centered ~860×600 default, biased slightly up; clampGeom fits it to the
+        // desktop on small viewports.
+        function helpDefaultGeom() {
+            const d = document.getElementById('desktop').getBoundingClientRect();
+            const width = Math.min(880, Math.max(440, Math.round(d.width - 48)));
+            const height = Math.min(620, Math.max(360, Math.round(d.height - 64)));
+            const left = Math.max(12, Math.round((d.width - width) / 2));
+            const top = Math.max(12, Math.round((d.height - height) / 2 - 20));
+            return { left, top, width, height };
+        }
+        // The floating Help app window (appKind 'help'). Ephemeral like the task
+        // manager: never persisted, single-instance (see focusOrOpenHelp). Mirrors
+        // the openTaskManagerWindow chrome wiring exactly.
+        function openHelpWindow(appData) {
+            appData = appData || {};
+            const id = String(appData.id || newAppId('help'));
+            const existing = windows.get(id);
+            if (existing) {
+                if (existing.minimized) restoreWindow(id); else bringToFront(id);
+                return existing;
+            }
+            // Single-instance invariant enforced HERE, not only in focusOrOpenHelp:
+            // openAppWindow delegates appKind 'help' to this factory, so any other
+            // caller (now or later) focuses the live Help window instead of
+            // spawning a second one.
+            const liveHelp = findHelpWindow();
+            if (liveHelp) {
+                if (liveHelp.minimized) restoreWindow(liveHelp.id);
+                bringToFront(liveHelp.id);
+                return liveHelp;
+            }
+            const title = appData.title || 'Help';
+            const geom = clampGeom(appData.geom || helpDefaultGeom());
+            const color = normalizeHex(appData.color || defaultColor(id));
+
+            const dom = document.createElement('div');
+            dom.className = 'term-window app-window app-help';
+            dom.dataset.sessionId = id;
+            dom.style.left = geom.left + 'px';
+            dom.style.top = geom.top + 'px';
+            dom.style.width = (geom.width - 4) + 'px';
+            dom.style.height = (geom.height - 4) + 'px';
+            dom.style.setProperty('--accent', color);
+            dom.classList.toggle('dark-accent', isDarkAccent(color));
+
+            const titleBar = document.createElement('div');
+            titleBar.className = 'title-bar';
+            const idBadge = document.createElement('span');
+            idBadge.className = 'ti-id-badge';
+            idBadge.textContent = '#help';
+            const titleText = document.createElement('span');
+            titleText.className = 'title-text';
+            titleText.textContent = title;
+            const minBtn = document.createElement('button');
+            minBtn.type = 'button';
+            minBtn.className = 'tb-btn btn-min';
+            minBtn.textContent = '_';
+            minBtn.title = 'minimize';
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'tb-btn btn-close';
+            closeBtn.textContent = '×';
+            closeBtn.title = 'close';
+            titleBar.appendChild(idBadge);
+            titleBar.appendChild(titleText);
+            titleBar.appendChild(minBtn);
+            titleBar.appendChild(closeBtn);
+            dom.appendChild(titleBar);
+
+            const win = {
+                id, sid: 'help', hostId: 'app',
+                type: 'app', appKind: 'help',
+                dom, body: null, titleText,
+                term: null, fitAddon: null,
+                ws: null, wsOpen: false, termReady: false,
+                minimized: false, disposed: false,
+                geom, name: title, color,
+                resizeTimer: null, lastSentDims: null,
+                cleanups: [],
+                tiled: false,
+                floatGeom: appData.floatGeom
+                    ? Object.assign({}, appData.floatGeom) : null,
+                locked: false,
+                dirty: false,
+                _helpCorpus: [],
+            };
+
+            const helpBody = buildHelpBody(win);
+            win.body = win._help.scrollEl;
+            // Raising Help from OUTSIDE (taskbar click / programmatic bringToFront)
+            // routes focus to the search so the body-scoped Escape can close a
+            // taskbar-raised window. focusWin runs focusEditor on every mousedown
+            // too, so guard on "focus is currently outside this window": a click on
+            // a card (reading/selecting help text) must NOT yank the caret into the
+            // search box. (The scroll body is a non-focusable div, so the default
+            // focusWin fallback is a no-op — hence focusEditor.)
+            win.focusEditor = () => {
+                try {
+                    if (!win.dom.contains(document.activeElement)) win._help.searchEl.focus();
+                } catch (_) {}
+            };
+            // Ephemeral: if the user tiled/pinned Help, the shared tiling helpers
+            // wrote prefs['app:help:...'] (saveAppWindow refuses to persist Help, so
+            // nothing else cleans it). Drop it on close so it never lingers in
+            // localStorage / synced /state. No-op for the common never-tiled case.
+            win.cleanups.push(() => {
+                if (prefs[id]) { delete prefs[id]; savePrefs(); }
+            });
+            dom.appendChild(helpBody);
+
+            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
+                const hnd = document.createElement('div');
+                hnd.className = 'rh rh-' + dir;
+                hnd.dataset.dir = dir;
+                dom.appendChild(hnd);
+            }
+
+            document.getElementById('desktop').appendChild(dom);
+            document.getElementById('desktop').classList.remove('empty');
+            windows.set(id, win);
+
+            const stopProp = (e) => e.stopPropagation();
+            const onMouseDown = () => bringToFront(id);
+            dom.addEventListener('mousedown', onMouseDown);
+            win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
+
+            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
+            const onCloseClick = (e) => { e.stopPropagation(); closeWindow(id); };
+            minBtn.addEventListener('mousedown', stopProp);
+            minBtn.addEventListener('click', onMinClick);
+            closeBtn.addEventListener('mousedown', stopProp);
+            closeBtn.addEventListener('click', onCloseClick);
+            win.cleanups.push(() => {
+                minBtn.removeEventListener('mousedown', stopProp);
+                minBtn.removeEventListener('click', onMinClick);
+                closeBtn.removeEventListener('mousedown', stopProp);
+                closeBtn.removeEventListener('click', onCloseClick);
+            });
+
+            wireDrag(win, titleBar);
+            const onTitleCtx = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                bringToFront(win.id);
+                buildWindowMenu(win, e.clientX, e.clientY);
+            };
+            titleBar.addEventListener('contextmenu', onTitleCtx);
+            win.cleanups.push(() =>
+                titleBar.removeEventListener('contextmenu', onTitleCtx));
+            for (const handle of dom.querySelectorAll('.rh')) {
+                wireResize(win, handle, handle.dataset.dir);
+            }
+
+            const appSess = { key: id, sid: 'help', id, title, stale: false,
+                              kind: 'app', hostId: 'app' };
+            sessions.set(id, appSess);
+            const itemsHost = document.getElementById('taskbar-items');
+            if (!itemsHost.querySelector(
+                    '.taskbar-item[data-session-id="' + cssEscape(id) + '"]')) {
+                itemsHost.appendChild(buildTaskbarItem(appSess));
+            }
+            updateTaskbarColor(id);
+            updateTaskbarLabel(id);
+            const emptyMsg = document.getElementById('taskbar-empty');
+            if (emptyMsg) emptyMsg.remove();
+
+            win._helpCorpus = buildHelpEntries();   // snapshot live state once
+            renderHelpInto(win, '');
+            // Warm any cold generated sources (profiles / MCP), then re-render.
+            try { fetchProfiles(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
+            try { fetchMcpConfig(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
+
+            if (findKeyInLayout(id)) placeWindowTiled(win);
+            else bringToFront(id);
+            setTimeout(() => { try { win._help.searchEl.focus(); } catch (_) {} }, 0);
+            return win;
+        }
+        // Open Help, or focus/restore the existing one (single-instance). Shared by
+        // the "?" chip, the (+) menu, and the toggle hotkey.
+        function focusOrOpenHelp() {
+            markHelpSeen();   // any deliberate open is the strongest "seen" signal
+            // The Control Panel is a full-screen modal at a z-index above normal
+            // windows; close it so a just-opened/raised Help isn't buried behind it
+            // (restores the old modal's "one at a time" behavior).
+            closeSettings();
+            const ex = findHelpWindow();
+            if (ex) {
+                if (ex.minimized) restoreWindow(ex.id);
+                bringToFront(ex.id);
+                setTimeout(() => { try { ex._help.searchEl.focus(); } catch (_) {} }, 0);
+                return ex;
+            }
+            return openHelpWindow({});
+        }
+        function launchHelp() { return focusOrOpenHelp(); }
+        // The hotkey toggles: if Help is the focused, non-minimized front window,
+        // close it; otherwise open/focus it.
+        function toggleHelpWindow() {
+            const ex = findHelpWindow();
+            if (ex && !ex.minimized && frontId === ex.id) { closeWindow(ex.id); return; }
+            focusOrOpenHelp();
+        }
+        (function wireHelpChip() {
+            const chip = document.getElementById('help-chip');
+            if (!chip) return;
+            chip.addEventListener('click', focusOrOpenHelp);
+            chip.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusOrOpenHelp(); }
             });
         })();
         // First-run nudge: once, point new users at the "?" chip (only if it's
@@ -14863,7 +15315,8 @@
                 // persisted by saveAppWindow, but a hand-edited/corrupt store
                 // could carry a stale record — never auto-recreate those.
                 const ak = appStore[appId] && appStore[appId].appKind;
-                if (ak === 'task-manager' || ak === 'control-panel') continue;
+                if (ak === 'task-manager' || ak === 'control-panel'
+                    || ak === 'help') continue;
                 try { openAppWindow(appStore[appId]); }
                 catch (e) { console.warn('app window restore failed', appId, e); }
             }
