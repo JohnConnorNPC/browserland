@@ -8564,7 +8564,8 @@
             // numbers + a right-aligned filename + dirty dot). Built here; wired
             // below once the window object exists.
             let toolbar = null, newBtn, openBtn, saveBtn, saveAsBtn, wrapBtn,
-                lineNumBtn, fileNameEl, dirtyEl, hostBtn = null;
+                lineNumBtn, fileNameEl, dirtyEl, hostBtn = null,
+                folderBtn = null;
             if (!isNote) {
                 toolbar = document.createElement('div');
                 toolbar.className = 'app-toolbar';
@@ -8592,6 +8593,15 @@
                         + 'reads and writes');
                     hostBtn.className = 'app-host-btn';
                 }
+                // Re-home / choose-folder (#46 follow-up): point THIS window at a
+                // chosen folder (file tools only — does NOT move the terminal or
+                // the agent). On an agent-docs (tabbed) window it re-reads
+                // AGENTS.md/CLAUDE.md from the new folder; on a generic editor it
+                // re-roots where Open/Save browse. Present for both.
+                folderBtn = mkBtn('', docs
+                    ? 'edit a different folder’s AGENTS.md / CLAUDE.md'
+                    : 'choose the folder this editor opens and saves in');
+                folderBtn.className = 'app-host-btn';
                 fileNameEl = document.createElement('span');
                 fileNameEl.className = 'app-file-name';
                 dirtyEl = document.createElement('span');
@@ -8603,6 +8613,7 @@
                 toolbar.appendChild(wrapBtn);
                 toolbar.appendChild(lineNumBtn);
                 if (hostBtn) toolbar.appendChild(hostBtn);
+                if (folderBtn) toolbar.appendChild(folderBtn);
                 toolbar.appendChild(fileNameEl);
                 toolbar.appendChild(dirtyEl);
                 // Agent-docs windows edit a FIXED pair of files (AGENTS.md +
@@ -8949,6 +8960,88 @@
                 }
                 if (win._refreshTabBar) win._refreshTabBar();
                 saveAppWindow(win);
+            };
+
+            // Re-home (#46 follow-up): re-point a tabbed agent-docs window at a
+            // NEW folder on the SAME host — re-read AGENTS.md + CLAUDE.md there
+            // and replace the two file tabs IN PLACE, preserving the window, its
+            // placement and tab group. UI-only: the terminal/agent is untouched.
+            win._reHomeDocs = async (newCwd) => {
+                if (!win.tabs) return;
+                newCwd = String(newCwd || '');
+                if (!newCwd || newCwd === win.docsCwd) return;
+                // Don't silently discard unsaved edits in the file tabs.
+                win._captureActiveDoc();
+                const fileDocs = win.tabs.filter(d => d.kind === 'file');
+                if (fileDocs.some(d => d.dirty)) {
+                    if (!confirm('Re-home this window to:\n' + newCwd
+                        + '\n\nUnsaved changes in the AGENTS.md / CLAUDE.md tabs '
+                        + 'will be discarded.')) return;
+                }
+                const hid = win.fileHostId || 'local';
+                const host = hostById(hid) || localHost();
+                const agentsPath = joinNative(newCwd, 'AGENTS.md');
+                const claudePath = joinNative(newCwd, 'CLAUDE.md');
+                // Generation guard: if a SECOND re-home starts while these reads
+                // are in flight, the later one wins — an out-of-order completion
+                // of this (now stale) call must not clobber the newer folder.
+                const seq = (win._reHomeSeq = (win._reHomeSeq || 0) + 1);
+                const [aRes, cRes] = await Promise.all([
+                    fileApiPost('/file/read', { path: agentsPath }, host),
+                    fileApiPost('/file/read', { path: claudePath }, host),
+                ]);
+                if (win.disposed || seq !== win._reHomeSeq) return;
+                if ((aRes && aRes.error === 'auth_required')
+                    || (cRes && cRes.error === 'auth_required')) {
+                    promptFileHostAuth(host); return;
+                }
+                // A real read error (not "doesn't exist yet") aborts, leaving the
+                // window on its old folder.
+                if (aRes && !aRes.ok && aRes.error !== 'not_found') {
+                    showNotice('re-home failed: ' + ((aRes && aRes.error) || '?'));
+                    return;
+                }
+                win.docsCwd = newCwd;
+                for (const d of fileDocs) {
+                    const res = d.isAgents ? aRes : cRes;
+                    d.content = (res && res.ok) ? (res.content || '') : '';
+                    d.filePath = d.isAgents ? agentsPath : claudePath;
+                    d.dirty = false;
+                    d.cmState = null;       // force a rebuild from the new content
+                    d.scrollTop = 0; d.scrollLeft = 0;
+                }
+                // Rebuild the live editor from the now-updated bound doc WITHOUT
+                // capturing first (a capture would write the stale editor text
+                // back over the content we just replaced).
+                const bd = win._boundDoc;
+                if (bd && bd.kind === 'file') {
+                    refreshDocGlobalsFrom(bd);
+                    if (win.cmView) {
+                        win._suppressCmChange = true;
+                        try { win.cmView.setState(win._makeEditorState(bd)); }
+                        finally { win._suppressCmChange = false; }
+                        if (win._setCmLanguage) win._setCmLanguage();
+                        if (win._applyCmWrap) win._applyCmWrap();
+                        if (win._applyCmLineNums) win._applyCmLineNums();
+                    } else if (textarea) {
+                        textarea.value = bd.content || '';
+                    }
+                }
+                const title = (hid === 'local')
+                    ? ('Agent docs — ' + newCwd)
+                    : ('Agent docs — ' + (host.label || hid) + ':' + newCwd);
+                win.name = title;
+                if (titleText) titleText.textContent = title;
+                updateTaskbarLabel(id);
+                if (win._refreshTabBar) win._refreshTabBar();
+                if (win._updateFileUi) win._updateFileUi();
+                const activeDoc = win.tabs[win.activeTab];
+                if (activeDoc && activeDoc.kind === 'sections'
+                    && win._renderSectionsPanel) win._renderSectionsPanel();
+                if (win._renderTplPanel) win._renderTplPanel();
+                if (win._updateFolderBtn) win._updateFolderBtn();
+                saveAppWindow(win);
+                showNotice('re-homed to ' + newCwd);
             };
 
             const stopProp = (e) => e.stopPropagation();
@@ -9587,10 +9680,17 @@
                     // BUFFER text as an untitled doc on the new host; the user
                     // re-Saves there. Blank editors just switch.
                     if (win.filePath) {
-                        const oldH = hostById(win.fileHostId) || localHost();
+                        // Be honest about a since-removed old host (mirror
+                        // updateHostBtn): don't relabel it "this broker" / local
+                        // (#46 review).
+                        const oid = win.fileHostId;
+                        const oldH = hostById(oid)
+                            || ((!oid || oid === 'local') ? localHost() : null);
+                        const oldLbl = oldH ? hostPickerLabel(oldH)
+                            : (oid + ' (removed)');
                         const ok = confirm('Switch this editor to "'
                             + hostPickerLabel(host) + '"?\n\nIt will detach from '
-                            + hostPickerLabel(oldH) + ':' + win.filePath
+                            + oldLbl + ':' + win.filePath
                             + '\nThe text stays here as an unsaved document; '
                             + 'Save will write to "' + hostPickerLabel(host)
                             + '".');
@@ -9603,6 +9703,7 @@
                     win.fileHostId = host.id;
                     win.startDir = '';        // new host -> its default dir
                     updateHostBtn();
+                    if (win._updateFolderBtn) win._updateFolderBtn();
                     updateFileUi();
                     saveAppWindow(win);
                     // Re-prompt the new host's login if it isn't authed yet.
@@ -9620,6 +9721,53 @@
                                        switchEditorHost);
                     });
                     updateHostBtn();
+                }
+                // ---- folder picker / re-home (#46 follow-up) ----
+                // A 📁 control to point this window at a chosen folder on its
+                // host. Agent-docs windows re-read AGENTS.md/CLAUDE.md there;
+                // generic editors re-root where Open/Save browse. UI-only.
+                const folderBase = (p) => {
+                    const s = String(p || '').replace(/[\\/]+$/, '');
+                    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+                    return i >= 0 ? s.slice(i + 1) : s;
+                };
+                const updateFolderBtn = () => {
+                    if (!folderBtn) return;
+                    const cwd = win.docsCwd || win.startDir || '';
+                    const lbl = cwd ? folderBase(cwd)
+                        : (win.tabs ? '(folder)' : '(default)');
+                    folderBtn.textContent = '📁 ' + lbl + ' ▾';
+                    folderBtn.title = (win.tabs
+                        ? 'editing AGENTS.md / CLAUDE.md in: '
+                        : 'Open/Save browse: ')
+                        + (cwd || '(host default)')
+                        + ' — click to choose a folder';
+                };
+                win._updateFolderBtn = updateFolderBtn;
+                const doChooseFolder = async () => {
+                    const h = fileHost();
+                    if (!h) {
+                        showNotice('this window’s host was removed — '
+                            + 'pick a host first');
+                        return;
+                    }
+                    const start = win.docsCwd || win.startDir
+                        || dirOf(win.filePath) || '';
+                    const picked = await openFileDialog(
+                        { mode: 'dir', host: h, startDir: start });
+                    if (!picked || win.disposed) return;
+                    if (win.tabs) {
+                        await win._reHomeDocs(picked);
+                    } else {
+                        win.startDir = picked;
+                        saveAppWindow(win);
+                        updateFolderBtn();
+                        showNotice('this editor now opens/saves in ' + picked);
+                    }
+                };
+                if (folderBtn) {
+                    wireBtn(folderBtn, doChooseFolder);
+                    updateFolderBtn();
                 }
                 // An app window's hostId is 'app', so the auth-form healing loop
                 // (which keys on win.hostId) never touches the editor. Expose a
@@ -10320,16 +10468,24 @@
                 const hostBtn = document.createElement('button');
                 hostBtn.type = 'button';
                 hostBtn.className = 'app-fm-hostbtn';
+                // Re-home / choose-folder (#46 follow-up): jump THIS pane to a
+                // folder picked from a dialog (in addition to click-navigation).
+                const folderBtn = document.createElement('button');
+                folderBtn.type = 'button';
+                folderBtn.className = 'app-fm-hostbtn';
+                folderBtn.textContent = '📁';
+                folderBtn.title = 'choose this pane’s folder';
                 const path = document.createElement('div');
                 path.className = 'app-fm-path';
                 path.textContent = '/';
                 head.appendChild(hostBtn);
+                head.appendChild(folderBtn);
                 head.appendChild(path);
                 const list = document.createElement('div');
                 list.className = 'app-fm-list';
                 pane.appendChild(head);
                 pane.appendChild(list);
-                return { pane, head, path, list, hostBtn };
+                return { pane, head, path, list, hostBtn, folderBtn };
             };
             const left = mkPane('left');
             const right = mkPane('right');
@@ -10884,6 +11040,36 @@
                         hb.removeEventListener('click', onHostClick);
                     });
                     updatePaneHostBtn(side);
+                }
+                // Per-pane folder picker / re-home (#46 follow-up): jump this
+                // pane to a chosen folder on its own host.
+                const fb = ui.folderBtn;
+                if (fb) {
+                    const onFolderDown = (e) => e.stopPropagation();
+                    const onFolderClick = async (e) => {
+                        e.stopPropagation();
+                        setActive(side);
+                        const host = paneHost(side);
+                        if (!host) {
+                            showNotice('this pane’s host was removed — '
+                                + 'pick a host first');
+                            return;
+                        }
+                        const picked = await openFileDialog({ mode: 'dir',
+                            host, startDir: win[dirKey(side)] || '' });
+                        if (!picked || win.disposed) return;
+                        if (win[hostKey(side)] === host.id) {
+                            win[dirKey(side)] = picked;
+                            saveAppWindow(win);
+                            renderPane(side);
+                        }
+                    };
+                    fb.addEventListener('mousedown', onFolderDown);
+                    fb.addEventListener('click', onFolderClick);
+                    win.cleanups.push(() => {
+                        fb.removeEventListener('mousedown', onFolderDown);
+                        fb.removeEventListener('click', onFolderClick);
+                    });
                 }
             }
 
