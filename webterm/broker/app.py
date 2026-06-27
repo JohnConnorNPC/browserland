@@ -693,6 +693,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         if len(raw) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
+        # Binary-safe mode (#46): cross-host file transfer reads the SOURCE
+        # broker's bytes as base64 (encoded HERE, server-side — the browser
+        # never sees the raw bytes) and writes them to the DEST broker via
+        # /file/upload. Gated on `b64 is True` (identity, not truthiness) so an
+        # existing text caller that happens to carry a stray field can never
+        # flip into binary mode and break its {content} contract.
+        if body.get("b64") is True:
+            return sanic_json({"ok": True,
+                               "path": str(p),   # absolute, host-wide (#35)
+                               "content_b64": base64.b64encode(raw)
+                               .decode("ascii")})
         try:
             content = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -814,6 +825,40 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True,
                            "path": str(p),       # absolute, host-wide (#35)
                            "size": len(data)})
+
+    async def _file_delete(request: Request):
+        # Destructive sibling of /file/write (#46): same host-wide resolution,
+        # gate, and absolute-path echo. SINGLE FILE ONLY — is_file() refuses a
+        # directory (and a symlink-to-dir, which is_file() reports False), so
+        # this can never recurse a tree; os.unlink removes the directory entry
+        # the user is looking at (a symlink is unlinked, not its target). Used
+        # by the file manager's cross-pane MOVE (copy-to-dest, then delete-
+        # source). No NEW privilege: /file/write already grants full host-wide
+        # overwrite under this exact auth gate — delete stays within it.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not p.exists():
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if not p.is_file():
+            return sanic_json({"ok": False, "error": "not_a_file"},
+                              status=400)
+        try:
+            os.unlink(str(p))
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True,
+                           "path": str(p)})      # absolute, host-wide (#35)
 
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
@@ -1327,6 +1372,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_read, "/file/read", methods=["POST"])
     app.add_route(_file_write, "/file/write", methods=["POST"])
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
+    app.add_route(_file_delete, "/file/delete", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -1353,6 +1399,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/read", "preflight_file_read"),
                              ("/file/write", "preflight_file_write"),
                              ("/file/upload", "preflight_file_upload"),
+                             ("/file/delete", "preflight_file_delete"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
