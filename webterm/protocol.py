@@ -271,6 +271,16 @@ def error_frame(reason: str, session_id: int) -> str:
     })
 
 
+def mcp_activity_frame(kind: str) -> str:
+    """Transient per-window MCP-touch pulse (#33): the broker emits this on an
+    MCP read/write so the browser can briefly flash that window's robot icon
+    (cool/soft for a read, warm/sharp for a write). ``kind`` is ``"read"`` or
+    ``"write"``. The window id is intentionally omitted — every browser WS is
+    bound to one window via ``?session=<id>``, so a broadcast on that entry
+    already targets exactly the right window. Fire-and-forget; no reply."""
+    return json.dumps({"type": "mcp_activity", "kind": str(kind)})
+
+
 # ---------------------------------------------------------------------------
 # Control channel (/control) — single-active-browser lease
 #
