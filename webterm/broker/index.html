@@ -2227,8 +2227,12 @@
                 // reopened remote-host editor still targets the right broker
                 // (a since-removed host falls back to local via fileHost()).
                 fileHostId: win.fileHostId || 'local',
-                // File-manager-only: the two panes' current root-relative dirs,
-                // so a reopened FM lands back where it was. Harmless empty
+                // Editor-only: the terminal cwd a blank editor was opened at, so
+                // its Open/Save dialogs keep opening "where I am" after a reload
+                // (#35 review — a saved editor uses filePath's dir instead).
+                startDir: win.startDir || '',
+                // File-manager-only: the two panes' current dirs (absolute since
+                // #35), so a reopened FM lands back where it was. Harmless empty
                 // strings for notes/editors (which never read them back).
                 fmLeft: win.fmLeft || '',
                 fmRight: win.fmRight || '',
@@ -6093,6 +6097,10 @@
         }
         let cascadeIndex = 0;
         let frontId = null;
+        // The most-recently-fronted TERMINAL window id (NOT an app window), so
+        // the file tools can open "where I am" — at the active terminal's cwd
+        // and on its host (#35). bringToFront keeps it current.
+        let lastTermId = null;
         let refreshInFlight = false;
         // Per-window MCP-pin re-assertions in flight (by window key). The 2s
         // re-assert pass never fires a duplicate POST for a key it is already
@@ -6886,6 +6894,9 @@
             // A floating window masked off the active workspace (task 8) can't
             // take focus — its taskbar click switches workspace first.
             if (!win.tiled && win.dom.classList.contains('ws-hidden')) return;
+            // Remember the active TERMINAL (not an app window) so the file tools
+            // can open "where I am" — at its cwd, on its host (#35).
+            if (win.type !== 'app') lastTermId = id;
             if (win.tiled) {
                 // Tiled windows live in normal flow (z-index is inert on a
                 // static box): "front" means make their column the focused one
@@ -7627,16 +7638,47 @@
                 () => ({ ok: false, error: 'HTTP ' + r.status })
             )).catch(e => ({ ok: false, error: String(e) }));
         }
+        // Host-wide file tools (#35) work in ABSOLUTE native paths: the server
+        // returns the host's own separators (C:\a\b on Windows, /a/b on POSIX).
+        // The file API only ever deals in ABSOLUTE paths, so a leading
+        // drive-letter (C:\) or UNC (\\srv) prefix unambiguously marks Windows —
+        // we must NOT sniff for any stray backslash, because '\' is a legal
+        // filename char on POSIX (a dir named `we\b` would otherwise corrupt
+        // joins + basenames; #35 review).
+        function pathSepOf(p) {
+            return /^([A-Za-z]:[\\/]|\\\\)/.test(p || '') ? '\\' : '/';
+        }
+        function joinNative(dir, name) {
+            if (!dir) return name;                 // empty -> server default dir
+            const sep = pathSepOf(dir);
+            return dir.charAt(dir.length - 1) === sep
+                ? dir + name : dir + sep + name;   // don't double a trailing sep
+        }
+        function baseName(p) {
+            if (!p) return '';
+            const i = p.lastIndexOf(pathSepOf(p));   // sep-aware (not both seps)
+            return i === -1 ? p : p.slice(i + 1);
+        }
+        // The cwd + host ID of the most-recently-active terminal, so the file
+        // tools open "where I am" (#35). `host` is a host ID (not an object) to
+        // match win.fileHostId. Empty -> broker default dir + local host.
+        function activeTerminalStart() {
+            const t = lastTermId && sessions.get(lastTermId);
+            if (t && t.cwd) {
+                return { cwd: String(t.cwd), host: t.hostId || homeHostId() };
+            }
+            return { cwd: '', host: homeHostId() };
+        }
         function fmtSize(n) {
             if (!(n > 0)) return '';
             if (n < 1024) return n + ' B';
             if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' K';
             return (n / (1024 * 1024)).toFixed(1) + ' M';
         }
-        // Reusable file-browser dialog over the server's editor_root. Resolves
-        // to a chosen root-relative (forward-slash) path, or null on cancel.
-        // mode:'open' selects an existing file; mode:'save' navigates dirs and
-        // types a filename. Reuses the static #file-overlay panel.
+        // Reusable host-wide file-browser dialog (#35). Resolves to a chosen
+        // ABSOLUTE path (the host's own separators), or null on cancel. mode:
+        // 'open' selects an existing file; 'save' navigates dirs and types a
+        // filename; 'dir' picks a folder. Reuses the static #file-overlay panel.
         // The overlay is a singleton, so a second open() while one is live
         // would orphan the first promise + its keydown listener — _fileDlgFinish
         // lets a new call cleanly cancel (resolve null) the previous one first.
@@ -7688,31 +7730,23 @@
                     if (mode === 'save') {
                         const name = (nameEl.value || '').trim();
                         if (!name) { showErr('enter a filename'); return; }
-                        finish(state.cwd ? (state.cwd + '/' + name) : name);
+                        // cwd is ABSOLUTE now (#35); join the typed name onto it.
+                        finish(state.cwd ? joinNative(state.cwd, name) : name);
                     } else if (mode === 'dir') {
-                        // Return the ABSOLUTE path of the folder currently shown:
-                        // editor_root joined with the relative cwd. /launch's
-                        // realpath+isdir accepts an absolute path, not the
-                        // root-relative cwd open/save modes return.
-                        if (!state.root) { showErr('folder not loaded'); return; }
-                        const root = state.root.replace(/[\\/]+$/, '');
-                        // Windows iff a drive (C:\) or UNC (\\srv) root — NOT
-                        // merely "contains a backslash" (a POSIX dir name may).
-                        const sep = (/^[A-Za-z]:[\\/]/.test(root)
-                                     || /^\\\\/.test(root)) ? '\\' : '/';
-                        const rel = (state.cwd || '').replace(/[\\/]+/g, sep);
-                        finish(rel ? (root + sep + rel) : root);
+                        // The shown folder's cwd IS the absolute path to return
+                        // (host-wide #35 — no root+relative reconstruction).
+                        if (!state.cwd) { showErr('folder not loaded'); return; }
+                        finish(state.cwd);
                     } else {
                         if (!state.selected) { showErr('select a file'); return; }
                         finish(state.selected);
                     }
                 };
                 const render = (data) => {
-                    state.cwd = data.cwd || '';
-                    state.root = data.root || '';
+                    state.cwd = data.cwd || '';        // absolute path (#35)
+                    state.root = data.root || '';      // FS anchor (informational)
                     state.selected = null;
-                    pathEl.textContent = data.root
-                        + (state.cwd ? ('  ›  ' + state.cwd) : '');
+                    pathEl.textContent = state.cwd || state.root || '';
                     listEl.innerHTML = '';
                     if (data.parent !== null && data.parent !== undefined) {
                         const up = document.createElement('div');
@@ -7733,8 +7767,7 @@
                             + (ent.type === 'dir' ? '' : fmtSize(ent.size))
                             + '</span>';
                         row.querySelector('.fe-name').textContent = ent.name;
-                        const child = state.cwd
-                            ? (state.cwd + '/' + ent.name) : ent.name;
+                        const child = joinNative(state.cwd, ent.name);
                         if (ent.type === 'dir') {
                             row.addEventListener('click', () => navigate(child));
                         } else if (mode === 'dir') {
@@ -8285,6 +8318,10 @@
                 // terminal's hostId so reads/writes hit the remote broker. A
                 // removed host falls back to local via fileHost() below.
                 fileHostId: appData.fileHostId || 'local',
+                // Initial dir for a NEW editor's Open/Save dialogs (#35): the
+                // active terminal's cwd, so a blank editor saves "where I am"
+                // instead of the broker's default dir. Ignored once filePath set.
+                startDir: appData.startDir ? String(appData.startDir) : '',
                 _saveTimer: null,
                 // CodeMirror handle (null until/unless CM mounts for an editor).
                 cmView: null,
@@ -8785,16 +8822,16 @@
                     }
                     return null;
                 };
+                // filePath is an ABSOLUTE host path now (#35), so split on EITHER
+                // separator (C:\a\b.txt as well as /a/b.txt). dirOf('') and a new
+                // editor's null filePath fall back to win.startDir (the terminal
+                // cwd the editor was opened at) so Open/Save start "where I am".
                 const dirOf = (p) => {
-                    if (!p) return '';
-                    const i = p.lastIndexOf('/');
-                    return i === -1 ? '' : p.slice(0, i);
+                    if (!p) return win.startDir || '';
+                    const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+                    return i === -1 ? (win.startDir || '') : p.slice(0, i);
                 };
-                const baseOf = (p) => {
-                    if (!p) return '';
-                    const i = p.lastIndexOf('/');
-                    return i === -1 ? p : p.slice(i + 1);
-                };
+                const baseOf = (p) => baseName(p);
                 // AGENTS.md guarantee: after a successful save of an AGENTS.md
                 // editor, ensure <cwd>/CLAUDE.md exists and references it with a
                 // bare `@AGENTS.md` line (Claude Code's include directive). Only
@@ -8836,7 +8873,8 @@
                         } else {
                             // Clean buffer: write through so buffer == disk.
                             const w = await fileApiPost('/file/write',
-                                { path: cwd + '/CLAUDE.md', content: next }, h);
+                                { path: joinNative(cwd, 'CLAUDE.md'),
+                                  content: next }, h);
                             if (w && w.ok) {
                                 // Only mark clean if the user didn't edit CLAUDE
                                 // during the write (overwrite-behind, Codex review).
@@ -8858,7 +8896,7 @@
                         }
                         return;
                     }
-                    const path = cwd + '/CLAUDE.md';
+                    const path = joinNative(cwd, 'CLAUDE.md');
                     const res = await fileApiPost('/file/read', { path }, h);
                     let text = '';
                     if (res && res.ok) text = res.content || '';
@@ -9672,7 +9710,7 @@
 
         // Midnight-Commander-style dual-pane file manager — a SEPARATE factory
         // from openAppWindow (which builds the delicate notes/editor body). It
-        // browses the broker's editor sandbox via /file/list, opens files into
+        // browses the host filesystem (#35) via /file/list, opens files into
         // the text editor (/file/read -> openAppWindow), and accepts file drops
         // (/file/upload). Same window shape + chrome + teardown contract as
         // openAppWindow so it tiles/drags/persists/reopens like any app window.
@@ -9798,7 +9836,14 @@
                     ? Object.assign({}, appData.floatGeom) : null,
                 locked,
                 dirty: false,
-                // The two panes' current root-relative dirs ('' = sandbox root).
+                // Which broker's filesystem this manager browses (#35): the host
+                // ID of the terminal it was opened from, else local. All /file/*
+                // calls below route through it (via hostById).
+                fileHostId: appData.fileHostId || 'local',
+                // The two panes' current ABSOLUTE dirs ('' = the broker's default
+                // dir on first render, then adopted as the server's absolute cwd).
+                // A legacy root-relative value still resolves under the default
+                // dir, so old windows upgrade themselves to absolute on first list.
                 fmLeft: appData.fmLeft != null ? String(appData.fmLeft) : '',
                 fmRight: appData.fmRight != null ? String(appData.fmRight) : '',
             };
@@ -9822,15 +9867,18 @@
                 left.pane.classList.toggle('active', s === 'left');
                 right.pane.classList.toggle('active', s === 'right');
             };
-            // Compose a child path relative to a pane's cwd (root stays bare,
-            // never '/name' — the API uses '' for root + relative paths).
-            const joinPath = (cwd, name) => (cwd ? cwd + '/' + name : name);
+            // Compose an ABSOLUTE child path under a pane's cwd, in the host's
+            // own separator (#35). Empty cwd -> bare name (server default dir).
+            const joinPath = (cwd, name) => joinNative(cwd, name);
+            // All /file/* calls route to the browsed host (#35), not always local.
+            const fmHost = () => hostById(win.fileHostId);
 
             const renderPane = async (side, _retried) => {
                 const ui = sideOf(side);
                 const seq = ++paneSeq[side];
                 const reqDir = win[dirKey(side)];
-                const res = await fileApiPost('/file/list', { path: reqDir });
+                const res = await fileApiPost('/file/list', { path: reqDir },
+                                              fmHost());
                 // Drop a stale render: the window closed, a newer render started,
                 // or the pane navigated elsewhere while we awaited.
                 if (win.disposed || seq !== paneSeq[side]
@@ -9857,8 +9905,9 @@
                     win[dirKey(side)] = cwd;
                     saveAppWindow(win);
                 }
-                ui.path.textContent = '/' + cwd;
-                ui.path.title = '/' + cwd;
+                // Absolute path now (#35) — show it as-is, not '/'-prefixed.
+                ui.path.textContent = cwd;
+                ui.path.title = cwd;
                 ui.list.innerHTML = '';
                 // Selecting a row (single-click) marks it for Open/Enter; only
                 // file rows carry a path. Tracked per render via the .sel class.
@@ -9868,19 +9917,20 @@
                     row.classList.add('sel');
                 };
                 const openFile = async (path) => {
-                    const r = await fileApiPost('/file/read', { path });
+                    const r = await fileApiPost('/file/read', { path }, fmHost());
                     if (!r || !r.ok) {
                         showNotice('open failed: ' + ((r && r.error) || '?'));
                         return;
                     }
-                    const base = path.indexOf('/') === -1
-                        ? path : path.slice(path.lastIndexOf('/') + 1);
+                    // Open the file on the SAME host the manager is browsing (#35),
+                    // and at the dir it lives in, so its Save lands back there.
                     openAppWindow({
                         id: newAppId('editor'),
                         appKind: 'text-editor',
                         filePath: r.path || path,
                         content: r.content || '',
-                        title: base,
+                        title: baseName(r.path || path),
+                        fileHostId: win.fileHostId,
                     });
                 };
                 // '..' row (not at root): navigates to the parent dir.
@@ -9945,7 +9995,7 @@
             // A tiny upload helper that reads the 409/exists status (fileApiPost
             // hides it) so a drop onto an existing file can prompt + overwrite.
             const uploadFile = (path, b64, overwrite) =>
-                fetch(hostHttpUrl(localHost(), '/file/upload'), {
+                fetch(hostHttpUrl(fmHost() || localHost(), '/file/upload'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path, content_b64: b64,
@@ -10707,26 +10757,21 @@
         // openAppWindow (which passes stored geom/color/tiling to preserve them).
         //   opts: { id, cwd, fileHostId, geom?, color?, locked?, floatGeom?,
         //           activeTab? }
-        // The /file API is sandboxed to the broker's editor_root; an AGENTS.md
-        // path_outside_root aborts with a notice, not_found opens an empty
-        // buffer (saving creates it). CLAUDE.md errors fall back to an empty
-        // buffer (best-effort — the AGENTS save later ensures it references
-        // @AGENTS.md).
+        // The /file API is host-wide (#35), so an AGENTS.md at any cwd opens;
+        // not_found opens an empty buffer (saving creates it). CLAUDE.md errors
+        // fall back to an empty buffer (best-effort — the AGENTS save later
+        // ensures it references @AGENTS.md).
         async function openAgentDocsWindow(opts) {
             const cwd = String(opts.cwd || '');
             const fileHostId = opts.fileHostId || 'local';
             const host = hostById(fileHostId) || localHost();
-            const agentsPath = cwd + '/AGENTS.md';
-            const claudePath = cwd + '/CLAUDE.md';
+            const agentsPath = joinNative(cwd, 'AGENTS.md');
+            const claudePath = joinNative(cwd, 'CLAUDE.md');
             const [aRes, cRes] = await Promise.all([
                 fileApiPost('/file/read', { path: agentsPath }, host),
                 fileApiPost('/file/read', { path: claudePath }, host),
             ]);
-            // AGENTS.md governs whether the folder is in the sandbox at all.
-            if (aRes && aRes.error === 'path_outside_root') {
-                showNotice('AGENTS.md is outside the editor sandbox (' + cwd + ')');
-                return;
-            }
+            // A real read error (not just "doesn't exist yet") aborts.
             if (aRes && !aRes.ok && aRes.error !== 'not_found') {
                 showNotice('open AGENTS.md failed: ' + ((aRes && aRes.error) || '?'));
                 return;
@@ -12258,14 +12303,17 @@
             }));
             // Task 7: pick a starting folder, then launch this host's default
             // profile (per-host defaultProfile, else broker default) there.
-            // Folders browse under the broker's editor_root; cancel = no-op.
+            // Folder picker browses the whole host now (#35); cancel = no-op.
+            // Browse on the SAME (possibly remote) host we'll launch on, so the
+            // chosen absolute path exists there — not the local FS (#35 review).
             items.push({
                 label: 'Open in folder…',
                 enabled: true,
                 action: async () => {
                     try {
                         const dir = await openFileDialog({ mode: 'dir',
-                                                           startDir: '' });
+                                                           startDir: '',
+                                                           host: host });
                         if (dir) launchProfile(host, hostDefaultProfile(host),
                                                dir);
                     } catch (_) {}
@@ -12281,11 +12329,17 @@
                             appKind: 'sticky-note', content: '' });
         }
         function launchTextEditor() {
+            // Open the Open/Save dialogs at the active terminal's cwd+host (#35).
+            const s = activeTerminalStart();
             openAppWindow({ id: newAppId('editor'),
-                            appKind: 'text-editor', content: '' });
+                            appKind: 'text-editor', content: '',
+                            startDir: s.cwd, fileHostId: s.host });
         }
         function launchFileManager() {
-            openAppWindow({ id: newAppId('fm'), appKind: 'file-manager' });
+            // Both panes start at the active terminal's cwd, on its host (#35).
+            const s = activeTerminalStart();
+            openAppWindow({ id: newAppId('fm'), appKind: 'file-manager',
+                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host });
         }
         function launchTaskManager() {
             openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });

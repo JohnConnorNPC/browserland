@@ -18,8 +18,14 @@ broker reachable over the LAN/Tailscale unable to answer the UI's cross-origin
 /sessions fetch (the reported bug) even though any non-browser client could
 already read it; CORS only ever governs *browser* reads, and the real gate is
 network reachability plus the token on every mutation/data endpoint (/launch,
-/file/*, /state stay token-or-loopback gated, so a cross-origin page still
-cannot drive them). The header must ride on error responses too or a
+/file/*, /state are token-or-loopback gated). With a token configured a
+cross-origin page cannot drive them (it carries no token). With NO token the
+gate is loopback-only: a same-machine cross-origin page CAN reach them over
+loopback and, because ACAO is ``*``, read the response — the accepted
+single-user-loopback exposure (same as /launch). NOTE since #35 that exposure
+is host-wide for /file/* (full host read/write, the same trust /launch already
+grants by spawning shells), so a tokenless broker must not run while the same
+browser visits untrusted sites. The header must ride on error responses too or a
 cross-origin login probe surfaces as a fetch TypeError ("wrong password"
 indistinguishable from "host down"). Preflights are explicit OPTIONS routes
 (route resolution happens before request middleware, so middleware can't answer
@@ -174,101 +180,52 @@ def _write_state_atomic(path: Path, state: Dict[str, Any]) -> None:
                 pass
 
 
-def _resolve_in_root(root: Path, rel: str) -> Path:
-    """Resolve a client-supplied path under ``root``, rejecting any escape via
-    ``..`` or a symlink.
+def _resolve_host_path(rel: str, default_dir: Path) -> Path:
+    """Resolve a client-supplied file path **host-wide** — anywhere on this box,
+    with NO ``editor_root`` confinement (#35).
 
-    ``Path.resolve()`` (strict=False) collapses ``..`` and follows symlinks for
-    the segments that DO exist, so a not-yet-created leaf (Save As of a new
-    file) is still resolved against its real, symlink-followed parent — the
-    containment check therefore covers both existing and new paths. An absolute
-    client path bypasses the join but is still containment-checked, so it can
-    only ever resolve to something already inside ``root``."""
-    base = Path(rel or "")
-    p = (root / base) if not base.is_absolute() else base
-    p = p.resolve()
-    if p != root and root not in p.parents:
-        raise ValueError("path outside editor_root")
-    return p
+    The file API shares the EXACT auth gate as ``/launch`` (token when
+    configured, else loopback-only), and an authenticated client already has
+    full filesystem access through its terminal shells — so sandboxing the file
+    tools adds friction without adding security. Browsing is therefore host-wide,
+    gated only by that auth + per-host routing (the same single-user threat model
+    the AGENTS.md carve-out, #16, already accepted for two filenames; this just
+    generalises it to every file).
 
-
-# The editor sandbox (editor_root) is narrower than where terminals run: a
-# terminal's cwd can be anywhere (a parent of the root, another drive, …), so its
-# AGENTS.md/CLAUDE.md may sit outside the root. These two docs — and only these
-# two — are editable at a LIVE terminal's cwd even outside editor_root (#16).
-# Compared case-folded: a case-insensitive FS (Windows/macOS) resolves the real
-# on-disk casing, so an existing ``agents.md`` must still match.
-_AGENT_DOC_NAMES = frozenset({"agents.md", "claude.md"})
-
-
-def _agent_doc_at_live_cwd(rel: str, ctx) -> Optional[Path]:
-    """If ``rel`` is an absolute ``AGENTS.md``/``CLAUDE.md`` (any case) whose
-    parent dir is the cwd of a currently-registered terminal, return its
-    resolved path; else ``None``.
-
-    SECURITY MODEL (deliberate, per the issue-#16 decision): this is a *scoping*
-    heuristic, NOT a hard sandbox. It keeps the normal AGENTS-button flow and
-    honest clients within terminal working dirs, but the cwd is self-reported by
-    the producer, so it is not a boundary against a hostile authenticated client
-    (which could register a producer advertising any cwd). That is an accepted,
-    bounded widening of the editor for exactly two filenames: an authenticated
-    client already has full filesystem access through its terminal shells, so it
-    grants no new privilege. The real gates are the browser auth token and the
-    two-filename allowlist; a true boundary would need server-established
-    producer/cwd identity (out of scope here).
-
-    ``resolve()`` collapses ``..`` and follows symlinks, so the post-resolve
-    basename/parent are real — a symlink/traversal can't smuggle in another file.
-    A TOCTOU swap of a path component between this check and the open/write is
-    possible, but it is the same pre-existing race as the in-root ``/file``
-    endpoints and immaterial under this single-user threat model."""
-    base = Path(rel or "")
-    # Reject NTFS alternate-data-stream spellings (``AGENTS.md::$DATA``) outright
-    # rather than relying on resolve() folding them back to the base file.
-    if ":" in base.name:
-        return None
+    Resolution rules (cross-platform; deliberately strict about the half-absolute
+    Windows spellings pathlib would otherwise join surprisingly — codex review):
+      - empty ``rel`` -> ``default_dir`` (the initial dir, e.g. a terminal cwd).
+      - a fully-absolute path (POSIX ``/x``; Windows ``C:\\x`` or
+        ``\\\\srv\\share``) is taken as-is.
+      - a *drive-relative* (``C:foo``) or *rooted-relative* (``\\foo``) path —
+        ``drive`` or ``root`` set but not BOTH, i.e. not ``is_absolute()`` — is
+        rejected, because joining it onto ``default_dir`` would jump to a drive
+        root instead of staying under it.
+      - any other relative path joins onto ``default_dir``.
+    ``resolve()`` then collapses ``..`` and follows symlinks (escaping the start
+    dir is the POINT here, not a bypass to defend against). A colon in any
+    non-anchor component (``file:ads``, ``dir:x\\f``) is an NTFS
+    alternate-data-stream spelling and is rejected. Resolver failures (symlink
+    loop, bad drive) raise ``ValueError`` -> the caller maps to ``bad_path``."""
+    raw = rel or ""
+    base = Path(raw)
+    # ADS guard (Windows only — ':' is a legal filename char on POSIX): drop the
+    # drive/anchor (``C:`` / ``\\\\srv\\share``); any ':' left in the remainder is
+    # an NTFS alternate-data-stream marker, never a path separator.
+    if os.name == "nt" and ":" in raw[len(base.drive):]:
+        raise ValueError("bad_path")
+    if not raw:
+        p = default_dir
+    elif base.is_absolute():
+        p = base
+    elif base.drive or base.root:
+        raise ValueError("bad_path")        # half-absolute: C:foo / \foo
+    else:
+        p = default_dir / base
     try:
-        if not base.is_absolute():
-            return None
-        p = base.resolve()
-    except (OSError, ValueError):
-        return None
-    if p.name.lower() not in _AGENT_DOC_NAMES:
-        return None
-    parent = p.parent
-    for cwd in ctx.registry.live_cwds():
-        try:
-            if Path(cwd).resolve() == parent:
-                return p
-        except (OSError, ValueError):
-            continue
-    return None
-
-
-def _resolve_editor_path(root: Path, rel: str, ctx):
-    """Resolve a client file path for the editor API. Returns ``(path, in_root)``.
-
-    Normally the path is sandboxed to ``editor_root`` (``in_root=True``). As a
-    narrow exception, an ``AGENTS.md``/``CLAUDE.md`` at a live terminal's cwd is
-    allowed outside the root (``in_root=False``) — see :data:`_AGENT_DOC_NAMES`.
-    Raises ``ValueError`` when neither applies (caller maps to
-    ``path_outside_root``)."""
-    try:
-        return _resolve_in_root(root, rel), True
-    except ValueError:
-        pass
-    p = _agent_doc_at_live_cwd(rel, ctx)
-    if p is not None:
-        return p, False
-    raise ValueError("path outside editor_root")
-
-
-def _editor_resp_path(p: Path, root: Path, in_root: bool) -> str:
-    """The ``path`` echoed back to the client: root-relative for in-root files
-    (so the editor keeps using relative paths), absolute for the out-of-root
-    agent-doc exception (``relative_to(root)`` would raise, and the next save
-    must round-trip the same absolute path back through the exception)."""
-    return p.relative_to(root).as_posix() if in_root else str(p)
+        return p.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("bad_path") from exc
 
 
 def _json_object_body(request: "Request") -> Optional[Dict[str, Any]]:
@@ -344,13 +301,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         broker_port=port,
         token=app.ctx.auth_token,
     )
-    # Editor file-API sandbox root. Default = the broker's CWD (the box it runs
-    # on — this is a single-user loopback tool); set "editor_root" in the config
-    # to confine Open/Save elsewhere. Resolved once so every request compares
-    # against a stable, symlink-collapsed absolute path.
+    # Editor file-API DEFAULT directory (NOT a sandbox, #35). The file tools
+    # browse the whole host (same auth gate as /launch, which already grants
+    # shell-level filesystem access — see _resolve_host_path); this is only the
+    # dir an empty path resolves to, i.e. where Open/Save lands when no terminal
+    # cwd was supplied. Default = the broker's CWD (the box it runs on — a
+    # single-user loopback tool); override with "editor_root" in the config.
+    # Resolved once into a stable, symlink-collapsed absolute path.
     app.ctx.editor_root = Path(
         config.get("editor_root") or os.getcwd()).resolve()
-    LOGGER.info("editor file-API root: %s", app.ctx.editor_root)
+    LOGGER.info("editor file-API default dir: %s", app.ctx.editor_root)
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -663,12 +623,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
-        root = app.ctx.editor_root
         try:
-            d = _resolve_in_root(root, str(body.get("path") or ""))
+            d = _resolve_host_path(str(body.get("path") or ""),
+                                   app.ctx.editor_root)
         except ValueError:
-            return sanic_json({"ok": False, "error": "path_outside_root"},
-                              status=400)
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         if not d.exists():
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
         if not d.is_dir():
@@ -689,14 +648,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         # Dirs first, then case-insensitive by name.
         entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
-        parent = None
-        if d != root:
-            parent = ("" if d.parent == root
-                      else d.parent.relative_to(root).as_posix())
+        # Host-wide (#35): cwd/parent are ABSOLUTE. parent is null only at a
+        # filesystem anchor (``/``, ``C:\`` or ``\\srv\share``), where
+        # ``d.parent == d`` — Up is inert there (no drive-list nav by design).
+        parent = None if d.parent == d else str(d.parent)
         return sanic_json({
             "ok": True,
-            "root": str(root),
-            "cwd": "" if d == root else d.relative_to(root).as_posix(),
+            "root": str(d.anchor),             # the FS anchor (informational)
+            "cwd": str(d),
             "parent": parent,
             "entries": entries,
         })
@@ -711,13 +670,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         rel = body.get("path")
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        root = app.ctx.editor_root
         try:
-            p, in_root = _resolve_editor_path(root, rel, app.ctx)
+            p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
-            return sanic_json({"ok": False, "error": "path_outside_root"},
-                              status=400)
-        if p == root or not p.exists():
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not p.exists():
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
         if not p.is_file():
             return sanic_json({"ok": False, "error": "not_a_file"},
@@ -738,7 +695,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         except UnicodeDecodeError:
             return sanic_json({"ok": False, "error": "not_utf8"}, status=400)
         return sanic_json({"ok": True,
-                           "path": _editor_resp_path(p, root, in_root),
+                           "path": str(p),       # absolute, host-wide (#35)
                            "content": content})
 
     async def _file_write(request: Request):
@@ -758,13 +715,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
-        root = app.ctx.editor_root
         try:
-            p, in_root = _resolve_editor_path(root, rel, app.ctx)
+            p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
-            return sanic_json({"ok": False, "error": "path_outside_root"},
-                              status=400)
-        if p == root:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         if p.exists() and not p.is_file():
             return sanic_json({"ok": False, "error": "not_a_file"},
@@ -796,11 +749,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 except OSError:
                     pass
         return sanic_json({"ok": True,
-                           "path": _editor_resp_path(p, root, in_root)})
+                           "path": str(p)})      # absolute, host-wide (#35)
 
     async def _file_upload(request: Request):
         # Binary-safe drop target (base64 content) — /file/write is UTF-8-text
-        # only. Same containment, atomic write, gate and cap as /file/write,
+        # only. Same host-wide resolution, atomic write, gate and cap as /file/write,
         # plus an `overwrite` flag (default false) so a drop never silently
         # clobbers an existing file (409 instead).
         err = _file_auth_error(request)
@@ -824,13 +777,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                               status=400)
         if len(data) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
-        root = app.ctx.editor_root
         try:
-            p = _resolve_in_root(root, rel)
+            p = _resolve_host_path(rel, app.ctx.editor_root)
         except ValueError:
-            return sanic_json({"ok": False, "error": "path_outside_root"},
-                              status=400)
-        if p == root:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         if p.exists():
             if not p.is_file():
@@ -860,7 +809,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 except OSError:
                     pass
         return sanic_json({"ok": True,
-                           "path": p.relative_to(root).as_posix(),
+                           "path": str(p),       # absolute, host-wide (#35)
                            "size": len(data)})
 
     # ---- task manager + git button (/session/*) --------------------------
