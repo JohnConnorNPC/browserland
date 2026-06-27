@@ -1183,6 +1183,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                  "detail": "use only one of wait_for_change / wait_for_text / "
                            "wait_for_regex"}, status=400)
         wait_absent = bool(body.get("wait_absent", False))
+        # delta (#52): a prior content_hash; the agent returns only changed rows
+        # since that frame when it can, else a full grid. Orthogonal to the wait
+        # modes (it shapes the reply, not when it fires), so it does not count
+        # toward the conflicting_wait check above.
+        since = body.get("since")
+        if not isinstance(since, str) or not since:
+            since = None
         try:
             timeout_ms = int(body.get("timeout_ms", 0) or 0)
         except (TypeError, ValueError):
@@ -1196,7 +1203,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             lambda req: protocol.screen_text_please_frame(
                 req, view, lines, wait_for_change, timeout_ms,
                 wait_for_text=wait_for_text, wait_for_regex=wait_for_regex,
-                wait_absent=wait_absent),
+                wait_absent=wait_absent, since=since),
             "screen_text", timeout=rpc_timeout)
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
@@ -1216,6 +1223,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # text/regex matched, false if the wait timed out first.
         if payload.get("matched") is not None:
             out["matched"] = bool(payload.get("matched"))
+        # delta (#52): always report the shape so the caller can branch on it;
+        # changed_rows is present only for a real delta (the caller then patches
+        # its grid model instead of re-reading the whole screen). A full read
+        # (or an older agent) reports delta=false.
+        out["delta"] = bool(payload.get("delta", False))
+        if out["delta"]:
+            out["changed_rows"] = payload.get("changed_rows") or []
         if payload.get("degraded"):
             out["degraded"] = True
         return sanic_json(out)

@@ -173,7 +173,7 @@ def test_screen_text_please_frame_view_lines():
                  "view": "scrollback", "lines": 200,
                  "wait_for_change": None, "timeout_ms": 0,
                  "wait_for_text": None, "wait_for_regex": None,
-                 "wait_absent": False}
+                 "wait_absent": False, "since": None}
     d = json.loads(protocol.screen_text_please_frame(5))
     assert d["view"] == "screen" and d["lines"] == 0
     assert d["wait_for_change"] is None and d["timeout_ms"] == 0
@@ -198,6 +198,19 @@ def test_screen_text_frame_matched():
     assert hit["matched"] is True
     miss = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, matched=False))
     assert miss["matched"] is False
+
+
+def test_screen_text_frame_delta():
+    # delta is always present; changed_rows only when given, and each entry is
+    # normalized to {row:int, text:str}.
+    full = json.loads(protocol.screen_text_frame(1, "grid", 80, 24))
+    assert full["delta"] is False and "changed_rows" not in full
+    d = json.loads(protocol.screen_text_frame(
+        1, "", 80, 24, delta=True,
+        changed_rows=[{"row": 3, "text": "new line"}]))
+    assert d["delta"] is True
+    assert d["changed_rows"] == [{"row": 3, "text": "new line"}]
+    assert d["text"] == ""
 
 
 def test_screen_text_please_frame_wait_for_change():

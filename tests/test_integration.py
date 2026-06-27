@@ -407,6 +407,61 @@ async def test_wait_for_regex_invalid_is_safe(running_agent, broker):
     assert "matched" not in r                # no predicate was in effect
 
 
+# ---- #52: read_screen delta mode (changed rows since a prior hash) ----------
+
+async def test_delta_returns_only_changed_rows(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[2J\x1b[H")                 # clear + home
+    backend.feed(b"line one\r\nline two\r\nline three\r\n")
+    await broker.wait_binary(lambda b: b"line three" in b)
+    r1 = await _read_screen(broker, 1)             # baseline (full grid)
+    h1 = r1["content_hash"]
+    assert not r1.get("delta")                     # first read is never a delta
+    assert "line two" in r1["text"]
+    # Overwrite exactly ONE row (row 2, 1-based) in place.
+    backend.feed(b"\x1b[2;1Hline TWO changed\x1b[K")
+    await broker.wait_binary(lambda b: b"TWO changed" in b)
+    r2 = await _read_screen(broker, 2, since=h1)
+    assert r2.get("delta") is True
+    assert r2["text"] == ""                        # full grid omitted
+    texts = [c["text"] for c in r2["changed_rows"]]
+    assert any("TWO changed" in t for t in texts)
+    assert all("line one" not in t for t in texts)  # unchanged rows not resent
+    assert r2["content_hash"] != h1
+    # Reconstruction: patching changed_rows onto the baseline MUST reproduce the
+    # exact screen a full read returns (proves the diff is complete + correct).
+    full = await _read_screen(broker, 3)
+    patched = r1["text"].split("\n")
+    for c in r2["changed_rows"]:
+        patched[c["row"]] = c["text"]
+    assert "\n".join(patched) == full["text"]
+    assert full["content_hash"] == r2["content_hash"]
+
+
+async def test_delta_full_fallback_on_unknown_since(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"hello world\r\n")
+    await broker.wait_binary(lambda b: b"hello world" in b)
+    # `since` references a frame the agent never produced -> full grid fallback.
+    r = await _read_screen(broker, 2, since="deadbeef" * 4)
+    assert not r.get("delta")
+    assert "hello world" in r["text"]
+    assert r["content_hash"]
+
+
+async def test_delta_unchanged_screen_is_empty_diff(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[2J\x1b[Hstatic content\r\n")
+    await broker.wait_binary(lambda b: b"static content" in b)
+    h1 = (await _read_screen(broker, 1))["content_hash"]
+    # No change between reads -> a delta with zero changed rows (still cheaper
+    # than re-sending the whole grid).
+    r2 = await _read_screen(broker, 2, since=h1)
+    assert r2.get("delta") is True
+    assert r2["changed_rows"] == []
+    assert r2["content_hash"] == h1
+
+
 # ---- #27: reset_terminal clears the agent's render buffer -----------------
 
 async def _reset(broker, req):

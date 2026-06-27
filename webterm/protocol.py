@@ -161,7 +161,8 @@ def screen_text_please_frame(req: int, view: str = "screen",
                              timeout_ms: int = 0,
                              wait_for_text: Optional[str] = None,
                              wait_for_regex: Optional[str] = None,
-                             wait_absent: bool = False) -> str:
+                             wait_absent: bool = False,
+                             since: Optional[str] = None) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
     producers have no handler, so the request times out -> 502). ``view``
@@ -179,14 +180,20 @@ def screen_text_please_frame(req: int, view: str = "screen",
     contains) the match — waking once on the event the caller cares about
     instead of on every noisy frame. The reply carries ``matched`` (true if the
     predicate was satisfied, false on timeout). Older agents ignore these keys
-    and reply immediately."""
+    and reply immediately.
+
+    ``since`` (a prior ``content_hash``, #52) asks for a DELTA: if the agent
+    still holds that frame and this is a clean same-size current-screen render,
+    the reply carries ``changed_rows`` (only the rows that differ) + ``delta``:
+    true, instead of the full grid. Misses fall back to a full read."""
     return json.dumps({"type": "screen_text_please", "req": int(req),
                        "view": str(view), "lines": int(lines),
                        "wait_for_change": wait_for_change,
                        "timeout_ms": int(timeout_ms),
                        "wait_for_text": wait_for_text,
                        "wait_for_regex": wait_for_regex,
-                       "wait_absent": bool(wait_absent)})
+                       "wait_absent": bool(wait_absent),
+                       "since": since})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -240,7 +247,9 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       cursor: Optional[Dict[str, int]] = None,
                       view: str = "screen", history_lines: int = 0,
                       app_cursor: bool = False, content_hash: str = "",
-                      matched: Optional[bool] = None) -> str:
+                      matched: Optional[bool] = None,
+                      delta: bool = False,
+                      changed_rows: Optional[list] = None) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -276,6 +285,15 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     # Omitted for immediate / wait_for_change reads so they stay unambiguous.
     if matched is not None:
         frame["matched"] = bool(matched)
+    # delta (#52): when true, ``text`` is empty and ``changed_rows`` carries only
+    # the rows that differ from the caller's ``since`` baseline ({row, text});
+    # the caller patches its own grid model. ``delta`` is always present so the
+    # caller knows which shape it got (a full read reports false).
+    frame["delta"] = bool(delta)
+    if changed_rows is not None:
+        frame["changed_rows"] = [
+            {"row": int(c.get("row", 0)), "text": str(c.get("text", ""))}
+            for c in changed_rows]
     return json.dumps(frame)
 
 
