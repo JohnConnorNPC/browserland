@@ -712,6 +712,9 @@
         }
         .term-window.app-fm .app-fm-row:hover { background: #2a2a2a; }
         .term-window.app-fm .app-fm-row.sel { background: #2f5d7d; color: #fff; }
+        /* Cross-pane transfer (#46): a file row can be dragged to the other pane. */
+        .term-window.app-fm .app-fm-row[draggable="true"] { cursor: grab; }
+        .term-window.app-fm .app-fm-row.dragging { opacity: 0.45; }
         .term-window.app-fm .app-fm-row .fm-name {
             flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
         }
@@ -10213,6 +10216,10 @@
         // openAppWindow so it tiles/drags/persists/reopens like any app window.
         // openAppWindow delegates here for appKind 'file-manager' (it guards the
         // existing-window case first, so we never get a live duplicate).
+        // Custom drag MIME for cross-pane file transfer (#46): present ONLY on
+        // an internal row drag, so a pane drop tells our drag apart from an OS
+        // file drop (which carries dataTransfer.files and always wins).
+        const FM_DRAG_MIME = 'application/x-webterm-file';
         function openFileManagerWindow(appData) {
             const id = String(appData.id);
             const title = appData.title || 'Files';
@@ -10563,6 +10570,41 @@
                             setActive(side); selectRow(row);
                         });
                         row.addEventListener('dblclick', () => openFile(child));
+                        // Drag a file to the OTHER pane to COPY it (#46) — works
+                        // across hosts. effectAllowed='copy' (drag is copy-only;
+                        // move is the explicit context-menu action, since a drag
+                        // modifier can't be read reliably during dragover).
+                        row.draggable = true;
+                        row.addEventListener('dragstart', (e) => {
+                            setActive(side); selectRow(row);
+                            if (!e.dataTransfer) return;
+                            e.dataTransfer.effectAllowed = 'copy';
+                            e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
+                                side, hostId: win[hostKey(side)],
+                                path: child, name: ent.name }));
+                            row.classList.add('dragging');
+                        });
+                        row.addEventListener('dragend',
+                            () => row.classList.remove('dragging'));
+                        // Right-click a file: copy / move it to the other pane.
+                        row.addEventListener('contextmenu', (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setActive(side); selectRow(row);
+                            const other = side === 'left' ? 'right' : 'left';
+                            renderMenu([
+                                { label: 'Copy → ' + other + ' pane',
+                                  enabled: true,
+                                  action: () => transferTo(other,
+                                      win[hostKey(side)], child, ent.name,
+                                      false) },
+                                { label: 'Move → ' + other + ' pane',
+                                  enabled: true,
+                                  action: () => transferTo(other,
+                                      win[hostKey(side)], child, ent.name,
+                                      true) },
+                            ], e.clientX, e.clientY);
+                        });
                     }
                     ui.list.appendChild(row);
                 }
@@ -10638,6 +10680,105 @@
                 if (done) showNotice('uploaded ' + done + ' file(s)');
                 renderPane(side);
             };
+
+            // ---- cross-pane copy / move (#46) ----
+            // Copy (or move) ONE file between panes — works ACROSS hosts: read
+            // the source broker's bytes as base64 (binary-safe, server-side
+            // encode), write them to the dest broker via /file/upload, and for
+            // a move delete the source afterwards. Each side is gated by its
+            // OWN per-host auth. The descriptor is captured at call time and
+            // never recomputed after a prompt/await, so navigating a pane
+            // mid-transfer can't redirect the write (codex review).
+            const transferTo = async (destSide, srcHostId, srcPath, srcName,
+                                      move) => {
+                const srcHost = hostById(srcHostId)
+                    || ((!srcHostId || srcHostId === 'local')
+                        ? localHost() : null);
+                const destHost = paneHost(destSide);
+                if (!srcHost) {
+                    showNotice('transfer failed: source host unavailable');
+                    return;
+                }
+                if (!destHost) {
+                    showNotice('transfer failed: destination host unavailable');
+                    return;
+                }
+                const destPath = joinNative(win[dirKey(destSide)], srcName);
+                // Refuse a copy/move onto the SAME file (same host + same
+                // absolute path): the copy would be a pointless self-overwrite,
+                // and a self-MOVE would then delete the file it just wrote.
+                if (srcHost.id === destHost.id && destPath === srcPath) {
+                    showNotice('source and destination are the same file');
+                    return;
+                }
+                const r = await fileApiPost('/file/read',
+                    { path: srcPath, b64: true }, srcHost);
+                if (win.disposed) return;
+                if (!r || !r.ok) {
+                    if (r && r.error === 'auth_required') {
+                        promptFileHostAuth(srcHost);
+                    }
+                    const err = (r && r.error) || '?';
+                    if (err === 'too_large') {
+                        showNotice(srcName + ': too large (>5 MiB)');
+                    } else {
+                        showNotice('transfer failed (read ' + srcName + '): '
+                            + err);
+                    }
+                    return;
+                }
+                const b64 = r.content_b64 || '';
+                let up = await uploadTo(destHost, destPath, b64, false);
+                if (win.disposed) return;
+                // Existing dest file -> confirm + retry as an overwrite.
+                if (up.status === 409 || (up.json && up.json.error === 'exists')) {
+                    if (!confirm('Overwrite ' + srcName + ' on "'
+                            + hostPickerLabel(destHost) + '"?')) return;
+                    up = await uploadTo(destHost, destPath, b64, true);
+                    if (win.disposed) return;
+                }
+                if (!(up.json && up.json.ok)) {
+                    const err = (up.json && up.json.error) || ('HTTP ' + up.status);
+                    if (err === 'auth_required') promptFileHostAuth(destHost);
+                    if (err === 'too_large') {
+                        showNotice(srcName + ': too large (>5 MiB)');
+                    } else {
+                        showNotice('transfer failed (write ' + srcName + '): '
+                            + err);
+                    }
+                    return;
+                }
+                // Move = copy succeeded, now delete the source. Best-effort and
+                // HONEST: the copy already landed, so a failed delete leaves the
+                // file on BOTH hosts — say so rather than claim a move (codex).
+                if (move) {
+                    const d = await fileApiPost('/file/delete',
+                        { path: srcPath }, srcHost);
+                    if (win.disposed) return;
+                    if (!(d && d.ok)) {
+                        if (d && d.error === 'auth_required') {
+                            promptFileHostAuth(srcHost);
+                        }
+                        showNotice('copied ' + srcName + ', but could not remove '
+                            + 'the source: ' + ((d && d.error) || '?'));
+                        renderPane('left');
+                        renderPane('right');
+                        return;
+                    }
+                }
+                showNotice((move ? 'moved ' : 'copied ') + srcName + ' to "'
+                    + hostPickerLabel(destHost) + '"');
+                // Re-list both panes: the dest gained a file, a move's source
+                // lost one. Cheap, and side-agnostic (either pane may be source).
+                renderPane('left');
+                renderPane('right');
+            };
+            const transferFromPayload = (payload, destSide, move) => {
+                if (!payload || !payload.path) return;
+                transferTo(destSide, payload.hostId, payload.path,
+                    payload.name || baseName(payload.path), move);
+            };
+
             for (const side of ['left', 'right']) {
                 const ui = sideOf(side);
                 // Activate + focus the FM root so the Tab/Enter shortcuts fire
@@ -10653,7 +10794,23 @@
                     e.preventDefault();
                     ui.pane.classList.remove('drop-hover');
                     setActive(side);
-                    dropFiles(side, e.dataTransfer && e.dataTransfer.files);
+                    const dt = e.dataTransfer;
+                    // Precedence (#46 / codex): an OS-file drop ALWAYS uploads,
+                    // no matter what other types ride along. Only an internal
+                    // row drag (our MIME, which JSON-parses) is a cross-pane
+                    // copy. A drop back onto the SOURCE pane is a no-op below.
+                    if (dt && dt.files && dt.files.length) {
+                        dropFiles(side, dt.files);
+                        return;
+                    }
+                    let payload = null;
+                    try {
+                        payload = JSON.parse(
+                            (dt && dt.getData(FM_DRAG_MIME)) || 'null');
+                    } catch (_) {}
+                    if (payload && payload.path && payload.side !== side) {
+                        transferFromPayload(payload, side, false);  // drag = copy
+                    }
                 };
                 ui.pane.addEventListener('mousedown', onClick);
                 ui.pane.addEventListener('dragover', onOver);
