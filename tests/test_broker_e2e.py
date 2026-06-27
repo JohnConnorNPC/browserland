@@ -696,13 +696,13 @@ def test_state_validation(broker_proc):
     assert status == 400 and payload["error"] == "bad_state"
 
 
-def test_file_upload_roundtrip(broker_proc):
+def test_file_upload_roundtrip(broker_proc, tmp_path):
     _, _, base = broker_proc
     auth = {"Authorization": f"Bearer {TOKEN}",
             "Content-Type": "application/json"}
     import base64 as _b64
     name = ".webterm_upload_test.bin"
-    target = REPO / name                       # editor_root defaults to cwd
+    target = REPO / name                       # default dir = broker cwd
     payload_bytes = bytes(range(256)) * 4       # non-UTF-8 binary
     b64 = _b64.b64encode(payload_bytes).decode("ascii")
     try:
@@ -737,13 +737,18 @@ def test_file_upload_roundtrip(broker_proc):
             headers=auth)
         assert status == 400 and resp["error"] == "bad_base64"
 
-        # Escape attempt -> contained.
+        # Host-wide (#35): an ABSOLUTE path outside the default dir is now
+        # ALLOWED (no editor_root containment) — it writes and echoes the
+        # absolute path back. (pytest's tmp_path is auto-cleaned.)
+        outside = (tmp_path / "uploaded_outside.bin").resolve()
         status, resp = _http(
             "POST", f"{base}/file/upload",
-            body=json.dumps({"path": "../escape.bin",
+            body=json.dumps({"path": str(outside),
                              "content_b64": b64}).encode(),
             headers=auth)
-        assert status == 400 and resp["error"] == "path_outside_root"
+        assert status == 200 and resp["ok"] is True, resp
+        assert outside.read_bytes() == payload_bytes
+        assert resp["path"] == str(outside), resp
     finally:
         try:
             target.unlink()
@@ -751,73 +756,67 @@ def test_file_upload_roundtrip(broker_proc):
             pass
 
 
-def test_agent_doc_outside_editor_root(broker_proc, tmp_path):
-    """#16: AGENTS.md/CLAUDE.md at a LIVE terminal's cwd read/write even outside
-    editor_root (the broker's cwd = REPO here); other files there, and those
-    docs at a NON-live cwd, stay sandboxed out."""
-    _, port, base = broker_proc
+def test_file_api_is_host_wide(broker_proc, tmp_path):
+    """#35: the file API browses the WHOLE host (same auth gate as /launch, which
+    already grants shell-level filesystem access). ANY absolute path reads/writes
+    — not just AGENTS.md/CLAUDE.md, and with NO live terminal required. cwd/parent
+    are absolute; only malformed paths (Windows NTFS ADS) are rejected."""
+    _, _, base = broker_proc
     auth = {"Authorization": f"Bearer {TOKEN}",
             "Content-Type": "application/json"}
 
-    cwd_dir = tmp_path / "termcwd"          # acts as a terminal's cwd
-    cwd_dir.mkdir()
-    (cwd_dir / "AGENTS.md").write_text("hello agents", encoding="utf-8")
-    (cwd_dir / "secret.txt").write_text("nope", encoding="utf-8")
-    other_dir = tmp_path / "elsewhere"      # a dir with no live terminal
-    other_dir.mkdir()
-    (other_dir / "AGENTS.md").write_text("not live", encoding="utf-8")
+    d = tmp_path / "anywhere"               # far outside the broker's default dir
+    d.mkdir()
+    (d / "AGENTS.md").write_text("hello agents", encoding="utf-8")
+    (d / "secret.txt").write_text("a secret", encoding="utf-8")
 
-    def _read(path):
-        return _http("POST", f"{base}/file/read",
-                     body=json.dumps({"path": path}).encode(), headers=auth)
+    def _post(path, body):
+        return _http("POST", f"{base}{path}",
+                     body=json.dumps(body).encode(), headers=auth)
 
-    async def scenario():
-        producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
-        try:
-            await producer.send(json.dumps({
-                "type": "hello", "window_id": 556021, "pid": 7, "title": "doc",
-                "cols": 80, "rows": 24, "cwd": str(cwd_dir)}))
-            for _ in range(50):
-                _, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
-                if any(s["id"] == 556021 for s in sessions):
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise AssertionError("producer did not register")
+    # An ORDINARY file far outside the default dir reads (was path_outside_root)
+    # and the echoed path is absolute.
+    st, r = _post("/file/read", {"path": str(d / "secret.txt")})
+    assert st == 200 and r["ok"] and r["content"] == "a secret", r
+    assert r["path"] == str((d / "secret.txt").resolve()), r
 
-            # AGENTS.md at the live cwd reads even though it is outside the root.
-            st, r = _read(str(cwd_dir / "AGENTS.md"))
-            assert st == 200 and r["ok"] and r["content"] == "hello agents", r
+    # AGENTS.md likewise — no carve-out, no live terminal needed.
+    st, r = _post("/file/read", {"path": str(d / "AGENTS.md")})
+    assert st == 200 and r["content"] == "hello agents", r
 
-            # ...and writes (the response echoes the absolute path back).
-            st, r = _http("POST", f"{base}/file/write",
-                          body=json.dumps({"path": str(cwd_dir / "AGENTS.md"),
-                                           "content": "edited"}).encode(),
-                          headers=auth)
-            assert st == 200 and r["ok"], r
-            assert (cwd_dir / "AGENTS.md").read_text(encoding="utf-8") == "edited"
+    # Write to an absolute path outside the default dir; echoes absolute path.
+    st, r = _post("/file/write", {"path": str(d / "new.txt"),
+                                  "content": "written"})
+    assert st == 200 and r["ok"], r
+    assert (d / "new.txt").read_text(encoding="utf-8") == "written"
+    assert r["path"] == str((d / "new.txt").resolve()), r
 
-            # CLAUDE.md at the live cwd: exception applies (NOT path_outside_root),
-            # the file just doesn't exist yet -> 404 not_found (opens empty).
-            st, r = _read(str(cwd_dir / "CLAUDE.md"))
-            assert st == 404 and r["error"] == "not_found", r
+    # /file/list at an absolute dir: absolute cwd + absolute parent + entries.
+    st, r = _post("/file/list", {"path": str(d)})
+    assert st == 200 and r["ok"], r
+    assert r["cwd"] == str(d.resolve()), r
+    assert r["parent"] == str(d.parent.resolve()), r
+    names = {e["name"] for e in r["entries"]}
+    assert {"AGENTS.md", "secret.txt", "new.txt"} <= names, names
 
-            # A non-agent file at the live cwd is still sandboxed out.
-            st, r = _read(str(cwd_dir / "secret.txt"))
-            assert st == 400 and r["error"] == "path_outside_root", r
+    # A missing dir -> not_found; a file path -> not_a_directory.
+    st, r = _post("/file/list", {"path": str(d / "nope")})
+    assert st == 404 and r["error"] == "not_found", r
+    st, r = _post("/file/list", {"path": str(d / "secret.txt")})
+    assert st == 400 and r["error"] == "not_a_directory", r
 
-            # AGENTS.md at a dir with no live terminal is rejected.
-            st, r = _read(str(other_dir / "AGENTS.md"))
-            assert st == 400 and r["error"] == "path_outside_root", r
+    # At a filesystem ANCHOR (drive root / POSIX '/') parent is null so Up is
+    # inert — the only non-trivial branch of the host-wide parent logic.
+    anchor = Path(str(d.resolve())).anchor if sys.platform == "win32" else "/"
+    st, r = _post("/file/list", {"path": anchor})
+    assert st == 200 and r["ok"], r
+    assert r["cwd"] == anchor, r
+    assert r["parent"] is None, r
 
-            # NTFS alternate-data-stream spelling is rejected outright.
-            st, r = _read(str(cwd_dir / "AGENTS.md") + "::$DATA")
-            assert st == 400 and r["error"] == "path_outside_root", r
-        finally:
-            await producer.close()
-
-    asyncio.run(scenario())
+    # Windows NTFS alternate-data-stream spelling is still rejected.
+    if sys.platform == "win32":
+        st, r = _post("/file/read", {"path": str(d / "AGENTS.md") + "::$DATA"})
+        assert st == 400 and r["error"] == "bad_path", r
 
 
 def test_file_upload_requires_token(broker_proc):
