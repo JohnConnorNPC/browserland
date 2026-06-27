@@ -515,6 +515,14 @@
         }
         .term-window .app-toolbar button:hover { background: #333; border-color: #6a8; }
         .term-window .app-toolbar button.on { background: #2f5d7d; border-color: #4aa3ff; color: #fff; }
+        /* Host picker (#46): a mode control — distinct from the action buttons,
+           and a long host label ellipsizes instead of blowing out the toolbar. */
+        .term-window .app-toolbar .app-host-btn {
+            font-family: monospace; max-width: 40%;
+            background: #242b33; border-color: #555;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .term-window .app-toolbar .app-host-btn:hover { border-color: #4aa3ff; }
         .term-window .app-toolbar .app-file-name {
             margin-left: auto; color: #aaa; font-family: monospace;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 48%;
@@ -6295,6 +6303,15 @@
             // it may have died on a 4401 before the token was entered. For the
             // HOME broker this is what un-blocks the deferred boot / overlay.
             try { openControlWs(host); } catch (_) {}
+            // App windows (text editor / file manager) carry hostId 'app', so
+            // the terminal-healing loop below never reaches them. Notify any
+            // file tool bound to the host that just authenticated so it can
+            // refresh its view in place rather than wait for a manual retry
+            // (#46). Wrapped per-window so one bad hook can't break the rest.
+            for (const win of windows.values()) {
+                if (win.disposed || !win._onHostAuth) continue;
+                try { win._onHostAuth(host.id); } catch (_) {}
+            }
             // Heal in place: re-dial THIS host's windows that died on auth
             // (or are just dead) — the relay re-snapshots on attach.
             for (const win of windows.values()) {
@@ -8524,7 +8541,7 @@
             // numbers + a right-aligned filename + dirty dot). Built here; wired
             // below once the window object exists.
             let toolbar = null, newBtn, openBtn, saveBtn, saveAsBtn, wrapBtn,
-                lineNumBtn, fileNameEl, dirtyEl;
+                lineNumBtn, fileNameEl, dirtyEl, hostBtn = null;
             if (!isNote) {
                 toolbar = document.createElement('div');
                 toolbar.className = 'app-toolbar';
@@ -8541,6 +8558,17 @@
                 saveAsBtn = mkBtn('Save As', 'save to a new path');
                 wrapBtn = mkBtn('Wrap', 'toggle word wrap');
                 lineNumBtn = mkBtn('#', 'toggle line numbers');
+                // Host picker (#46): which broker this editor's Open/Save dial.
+                // Generic single-doc editors only — an agent-docs (tabbed)
+                // window is bound to one folder's docs on one host, so a
+                // window-level host switch makes no sense there (it would have
+                // to detach every tab). `docs` gates that exactly as New/Open/
+                // Save As are hidden for tabbed windows just below.
+                if (!docs) {
+                    hostBtn = mkBtn('', 'switch which host this editor '
+                        + 'reads and writes');
+                    hostBtn.className = 'app-host-btn';
+                }
                 fileNameEl = document.createElement('span');
                 fileNameEl.className = 'app-file-name';
                 dirtyEl = document.createElement('span');
@@ -8551,6 +8579,7 @@
                 toolbar.appendChild(saveAsBtn);
                 toolbar.appendChild(wrapBtn);
                 toolbar.appendChild(lineNumBtn);
+                if (hostBtn) toolbar.appendChild(hostBtn);
                 toolbar.appendChild(fileNameEl);
                 toolbar.appendChild(dirtyEl);
                 // Agent-docs windows edit a FIXED pair of files (AGENTS.md +
@@ -9497,6 +9526,67 @@
                 wireBtn(saveAsBtn, doSaveAs);
                 wireBtn(wrapBtn, doWrap);
                 wireBtn(lineNumBtn, doLineNums);
+
+                // ---- host picker (#46) ----
+                // Reflect the editor's current broker on the toolbar button.
+                const updateHostBtn = () => {
+                    if (!hostBtn) return;
+                    const h = hostById(win.fileHostId) || localHost();
+                    hostBtn.textContent = '🖥 ' + hostPickerLabel(h) + ' ▾';
+                    hostBtn.title = 'reads/writes on: ' + hostPickerLabel(h)
+                        + ' — click to switch host';
+                };
+                win._updateHostBtn = updateHostBtn;
+                const switchEditorHost = (host) => {
+                    if (!host || host.id === win.fileHostId) return;
+                    // Detach an OPEN file: its absolute path belongs to the OLD
+                    // host, and silently re-pointing Save at a same-spelled path
+                    // on the NEW host could clobber an unrelated file (the
+                    // editor's fail-closed invariant, see fileHost()). Keep the
+                    // BUFFER text as an untitled doc on the new host; the user
+                    // re-Saves there. Blank editors just switch.
+                    if (win.filePath) {
+                        const oldH = hostById(win.fileHostId) || localHost();
+                        const ok = confirm('Switch this editor to "'
+                            + hostPickerLabel(host) + '"?\n\nIt will detach from '
+                            + hostPickerLabel(oldH) + ':' + win.filePath
+                            + '\nThe text stays here as an unsaved document; '
+                            + 'Save will write to "' + hostPickerLabel(host)
+                            + '".');
+                        if (!ok) return;
+                        win.filePath = null;
+                        if (win.agentsMdCwd) clearAgentsMd();
+                        win.dirty = !!win.getContent();
+                        if (win._setCmLanguage) win._setCmLanguage();
+                    }
+                    win.fileHostId = host.id;
+                    win.startDir = '';        // new host -> its default dir
+                    updateHostBtn();
+                    updateFileUi();
+                    saveAppWindow(win);
+                    // Re-prompt the new host's login if it isn't authed yet.
+                    fileApiPost('/file/list', {}, host).then(r => {
+                        if (win.disposed || win.fileHostId !== host.id) return;
+                        if (r && r.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                    });
+                };
+                if (hostBtn) {
+                    wireBtn(hostBtn, () => {
+                        const r = hostBtn.getBoundingClientRect();
+                        showHostPicker(win.fileHostId, r.left, r.bottom,
+                                       switchEditorHost);
+                    });
+                    updateHostBtn();
+                }
+                // An app window's hostId is 'app', so the auth-form healing loop
+                // (which keys on win.hostId) never touches the editor. Expose a
+                // hook the form calls after ANY host authenticates, so a switch
+                // to a not-yet-authed host recovers without a manual retry.
+                win._onHostAuth = (hid) => {
+                    if (hid === win.fileHostId) updateHostBtn();
+                };
                 updateFileUi();
 
                 // ---- AGENTS.md tab: section checklist ----
@@ -13157,6 +13247,36 @@
             const top = Math.min(y, vh - rect.height - 4);
             ctxMenu.style.left = Math.max(0, left) + 'px';
             ctxMenu.style.top = Math.max(0, top) + 'px';
+        }
+
+        // ---- host pickers for the file tools (#46) ------------------------
+        // One reusable menu of every configured host, shared by the text
+        // editor's window-level picker and each file-manager pane's picker.
+        // Labels are user input — textContent only (renderMenu already does),
+        // never innerHTML (codex review).
+        function hostPickerLabel(h) {
+            if (!h) return 'host';
+            return h.id === 'local' ? 'this broker'
+                : (h.label || h.url || h.id);
+        }
+        // currentId is marked (●) + disabled; picking another calls onPick(h).
+        function showHostPicker(currentId, x, y, onPick) {
+            const items = getHosts().map(h => ({
+                label: (h.id === currentId ? '● ' : '    ')
+                    + hostPickerLabel(h),
+                enabled: h.id !== currentId,
+                action: () => onPick(h),
+            }));
+            renderMenu(items, x, y);
+        }
+        // Prompt a host's login WITHOUT stealing one already in progress for a
+        // DIFFERENT host. force=true bypasses "auto-pop once per host", but a
+        // closed overlay is the only thing it's safe to force open — if some
+        // other host's form is live, fall back to the non-forcing path (which
+        // showAuthOverlay no-ops while that form is open). (#46 / codex review.)
+        function promptFileHostAuth(host) {
+            if (!host) return;
+            showAuthOverlay(host, !authOverlay.classList.contains('open'));
         }
         // ---- WM actions (P2: presets / float<->tile / mode switch) --------
         const PRESET_LABELS = { '1/3': '⅓', '1/2': '½',
