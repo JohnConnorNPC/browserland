@@ -830,11 +830,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # Destructive sibling of /file/write (#46): same host-wide resolution,
         # gate, and absolute-path echo. SINGLE FILE ONLY — is_file() refuses a
         # directory (and a symlink-to-dir, which is_file() reports False), so
-        # this can never recurse a tree; os.unlink removes the directory entry
-        # the user is looking at (a symlink is unlinked, not its target). Used
-        # by the file manager's cross-pane MOVE (copy-to-dest, then delete-
-        # source). No NEW privilege: /file/write already grants full host-wide
-        # overwrite under this exact auth gate — delete stays within it.
+        # this can never recurse a tree. Like read/write/upload, the path is
+        # fully resolved first (_resolve_host_path ends in .resolve()), so a
+        # symlink-to-file deletes its TARGET — the same link-following semantics
+        # those endpoints already use. Used by the file manager's cross-pane
+        # MOVE (copy-to-dest, then delete-source). No NEW privilege: /file/write
+        # already grants full host-wide overwrite under this exact auth gate —
+        # delete stays within it.
         err = _file_auth_error(request)
         if err is not None:
             return err

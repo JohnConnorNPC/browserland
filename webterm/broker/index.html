@@ -9364,6 +9364,12 @@
                     const doc = activeFileDoc();          // null for single-doc
                     const content = win.getContent();
                     const isAgentsSave = doc ? doc.isAgents : !!win.agentsMdCwd;
+                    // Capture the target broker: if the editor's host is SWITCHED
+                    // mid-write (switchEditorHost), the bytes still land on `h`,
+                    // but we must NOT re-attach this host-`h` path to the now-
+                    // different window — that would point Save at a foreign-host
+                    // path (#46 review). Compared after the await below.
+                    const tgtHostId = h.id;
                     const res = await fileApiPost('/file/write',
                         { path, content }, h);
                     if (!res || !res.ok) {
@@ -9371,6 +9377,13 @@
                         return false;
                     }
                     const savedPath = res.path || path;
+                    // Host switched (or window closed) during the write: the save
+                    // to `h` succeeded — report it, but leave the window's
+                    // filePath/dirty/host alone (re-attaching would cross hosts).
+                    if (win.disposed || win.fileHostId !== tgtHostId) {
+                        showNotice('saved ' + savedPath);
+                        return true;
+                    }
                     if (doc) {
                         doc.filePath = savedPath;
                         // Don't clobber edits typed DURING the in-flight write:
@@ -9554,12 +9567,17 @@
                 // Reflect the editor's current broker on the toolbar button.
                 const updateHostBtn = () => {
                     if (!hostBtn) return;
-                    const h = hostById(win.fileHostId) || localHost();
-                    hostBtn.textContent = '🖥 ' + hostPickerLabel(h) + ' ▾';
-                    hostBtn.title = 'reads/writes on: ' + hostPickerLabel(h)
+                    // Be honest about a since-removed remote: fileHost() is
+                    // fail-closed (null), so don't relabel it "this broker"
+                    // (#46 review) — show it as removed, mirroring the FM.
+                    const id = win.fileHostId;
+                    const h = hostById(id)
+                        || ((!id || id === 'local') ? localHost() : null);
+                    const lbl = h ? hostPickerLabel(h) : (id + ' (removed)');
+                    hostBtn.textContent = '🖥 ' + lbl + ' ▾';
+                    hostBtn.title = 'reads/writes on: ' + lbl
                         + ' — click to switch host';
                 };
-                win._updateHostBtn = updateHostBtn;
                 const switchEditorHost = (host) => {
                     if (!host || host.id === win.fileHostId) return;
                     // Detach an OPEN file: its absolute path belongs to the OLD
@@ -10464,10 +10482,20 @@
                     || win[hostKey(side)] !== reqHostId) return;
                 if (!res || !res.ok) {
                     // Not authenticated on this host yet: pop its login (without
-                    // stealing an in-progress different-host form). _onHostAuth
-                    // re-renders the pane once that host authenticates.
+                    // stealing an in-progress different-host form) and show a
+                    // neutral placeholder — not a scary ⚠ toast + row. _onHostAuth
+                    // re-lists the pane once that host authenticates.
                     if (res && res.error === 'auth_required') {
                         promptFileHostAuth(host);
+                        ui.path.textContent = hostPickerLabel(host);
+                        ui.path.title = hostPickerLabel(host);
+                        ui.list.innerHTML = '';
+                        const signin = document.createElement('div');
+                        signin.className = 'app-fm-row';
+                        signin.textContent = '🔒 sign in to '
+                            + hostPickerLabel(host) + '…';
+                        ui.list.appendChild(signin);
+                        return;
                     }
                     // A vanished dir (deleted/renamed) resets the pane to root and
                     // re-renders once — the guard above stops an infinite retry.
@@ -10580,7 +10608,7 @@
                             if (!e.dataTransfer) return;
                             e.dataTransfer.effectAllowed = 'copy';
                             e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
-                                side, hostId: win[hostKey(side)],
+                                winId: id, side, hostId: win[hostKey(side)],
                                 path: child, name: ent.name }));
                             row.classList.add('dragging');
                         });
@@ -10727,7 +10755,18 @@
                     }
                     return;
                 }
-                const b64 = r.content_b64 || '';
+                // The source broker accepted the read but returned no
+                // content_b64: it predates the binary-safe read (#46 review).
+                // Abort BEFORE any write/delete — an empty upload followed by a
+                // move's delete-source would silently lose the file. '' is a
+                // valid empty file (still a string), so check the TYPE, not
+                // truthiness.
+                if (typeof r.content_b64 !== 'string') {
+                    showNotice('transfer failed: ' + srcName + ' — source broker '
+                        + 'lacks binary read (upgrade it)');
+                    return;
+                }
+                const b64 = r.content_b64;
                 let up = await uploadTo(destHost, destPath, b64, false);
                 if (win.disposed) return;
                 // Existing dest file -> confirm + retry as an overwrite.
@@ -10808,7 +10847,11 @@
                         payload = JSON.parse(
                             (dt && dt.getData(FM_DRAG_MIME)) || 'null');
                     } catch (_) {}
-                    if (payload && payload.path && payload.side !== side) {
+                    // A true self-drop is the SAME window AND the SAME pane;
+                    // dropping into the other pane — or another FM window's pane
+                    // of the same side name — is a real transfer (#46 review).
+                    if (payload && payload.path
+                        && !(payload.winId === id && payload.side === side)) {
                         transferFromPayload(payload, side, false);  // drag = copy
                     }
                 };
