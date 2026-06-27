@@ -1071,6 +1071,14 @@
            none so they never intercept the drag) ----------------------- */
         body.tiled-dragging { cursor: grabbing; }
         body.tiled-dragging .term-window.tiled.drag-source { opacity: 0.45; }
+        /* #38: a tiled drag held still long enough to pop OUT to a float — a
+           distinct "release to float" affordance layered over .drag-source. */
+        body.tiled-dragging .term-window.tiled.pop-out-arm {
+            opacity: 0.7;
+            outline: 2px dashed var(--accent-default);
+            outline-offset: -2px;
+            box-shadow: 0 0 14px 3px var(--accent-default);
+        }
         #drop-vbar {
             position: fixed;
             z-index: 199990;
@@ -1547,6 +1555,18 @@
                         Tiling mode</label>
                     <div class="set-hint">tiling arranges windows in a niri-style
                         scrolling strip; unchecked = free-floating windows.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Drag hold delay</div>
+                    <div class="set-row">
+                        <input type="number" id="set-snap-hold" min="0" max="20000"
+                               step="50" placeholder="3000" />
+                        <span class="set-x">ms</span>
+                    </div>
+                    <div class="set-hint">hold a drag still this long before a
+                        floating window snaps into the grid, or a tiled window pops
+                        out to a float. <b>0</b> disables both; otherwise
+                        250&#8211;20000ms (default 3000).</div>
                 </div>
                 <div class="set-section">
                     <div class="set-title">Workspace scrollbar</div>
@@ -2433,6 +2453,19 @@
             // at the bottom of the tiling strip, shown whenever it can scroll
             // right. Shared setting (syncs via /state like theme/show.*).
             if (typeof s.stripScrollbar !== 'boolean') s.stripScrollbar = true;
+            // #38: dwell delay (ms) before a still drag offers snap (float->tile)
+            // or pop-out (tile->float). Per-host, syncs via /state like the
+            // toggles above. 0 disables BOTH dwell gestures; otherwise clamp to a
+            // sane [250, 20000] so a hand-edited blob can't make the gesture
+            // impossible to fire or never time out. Missing/invalid -> the
+            // 3000ms default (= HOLD_MS).
+            if (s.snapHoldMs !== 0) {
+                if (typeof s.snapHoldMs !== 'number' || !isFinite(s.snapHoldMs)) {
+                    s.snapHoldMs = 3000;
+                } else {
+                    s.snapHoldMs = Math.max(250, Math.min(20000, Math.round(s.snapHoldMs)));
+                }
+            }
             // Hide (vs. dim) taskbar items for windows on other workspaces.
             // Browser-global UI-chrome preference; default off (today's behavior).
             if (typeof s.hideTaskbarOtherWs !== 'boolean') s.hideTaskbarOtherWs = false;
@@ -3811,12 +3844,38 @@
         const EDGE_SCROLL_PX = 26;    // px per tick
         const TAB_BAND = 36;          // top band of a WINDOW -> tab into its tile
         // Hold-to-snap (dwell a FLOATING window into the tiling grid): while
-        // dragging a floating window, parking it still for HOLD_MS switches the
-        // drag into snap mode (same drop overlays the tiled drag uses); release
-        // commits, the top-left zone / Escape cancels back to the pre-drag box.
-        const HOLD_MS = 3000;         // dwell time before a floating drag offers snap
+        // dragging a floating window, parking it still for the dwell delay
+        // switches the drag into snap mode (same drop overlays the tiled drag
+        // uses); release commits, the top-left zone / Escape cancels back to the
+        // pre-drag box. The MIRROR gesture (tile -> float pop-out) reuses the
+        // same dwell in startTiledDrag. HOLD_MS is only the DEFAULT — the live
+        // delay is per-host and resolved by snapHoldMsFor(win) (0 disables).
+        const HOLD_MS = 3000;         // default dwell before a drag offers snap / pop-out
         const DWELL_MOVE = 6;         // px; moving more than this resets the dwell timer
         const SNAP_CANCEL = 96;       // px; top-left "return to floating" safe zone
+        // #38: the dwell delay (ms) a still hold must hold before a drag offers
+        // to snap (float -> tile) or pop out (tile -> float), resolved per WINDOW
+        // so a remote window honors ITS broker's configured delay:
+        //   - window.__HOLD_MS__ (a positive test override) always wins;
+        //   - a local window reads the live local settings;
+        //   - a remote window reads its host's cached settings blob;
+        //   - 0 disables the gesture; anything missing/invalid falls to HOLD_MS.
+        // normalizeSettings clamps stored values, so this only re-guards the
+        // remote/override paths.
+        function snapHoldMsFor(win) {
+            const ov = (window.__HOLD_MS__ | 0);
+            if (ov > 0) return ov;
+            let ms;
+            const hid = win && win.hostId;
+            if (!hid || hid === 'local') {
+                ms = getSettings().snapHoldMs;
+            } else {
+                const entry = hostStateCache.get(hid);
+                ms = entry && entry.settings && entry.settings.snapHoldMs;
+            }
+            if (ms === 0) return 0;                       // explicit disable
+            return (typeof ms === 'number' && ms > 0) ? ms : HOLD_MS;
+        }
         function dropEls() {
             return {
                 vbar: document.getElementById('drop-vbar'),
@@ -4072,9 +4131,48 @@
             const startX = e.clientX, startY = e.clientY;
             let dragging = false, lastX = startX, lastY = startY;
             let target = null, rafId = 0, scrollTimer = 0;
+            // #38: tile -> float pop-out (the mirror of the floating-window snap
+            // dwell), SINGLE-window only. Holding a tiled drag STILL for the
+            // per-host dwell arms a "release to float" mode; moving on again
+            // disarms it (so an accidental pause is fully recoverable) and
+            // re-arms the clock, so float engages only on a deliberate park.
+            // Escape cancels. Skipped for a GROUP drag (a group still floats only
+            // via the explicit bottom float-band drop, unchanged) and when the
+            // delay is 0 (disabled). The delay is captured ONCE at grab so a
+            // mid-drag settings/prefetch change can't make the gesture
+            // nondeterministic (codex).
+            const holdMs = snapHoldMsFor(win);
+            let dwellX = startX, dwellY = startY, holdTimer = 0, floatMode = false;
+            const clearHold = () => {
+                if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; }
+            };
+            const setFloatMode = (on) => {
+                if (floatMode === on) return;
+                floatMode = on;
+                win.dom.classList.toggle('pop-out-arm', on);   // "release to float" cue
+            };
+            const enterFloat = () => {
+                holdTimer = 0;
+                if (win.disposed) { finish(false, null); return; }
+                if (!dragging) return;          // only after a real drag started
+                setFloatMode(true);
+                target = { kind: 'float' };
+                showDrop(target);
+            };
+            const armDwell = () => {
+                clearHold();
+                setFloatMode(false);            // moving on un-floats; re-decide on park
+                dwellX = lastX; dwellY = lastY;
+                if (groupCtx || holdMs <= 0) return;   // single-window only; 0 disables
+                holdTimer = setTimeout(enterFloat, holdMs);
+            };
             const frame = () => {
                 rafId = 0;
                 if (win.disposed) { finish(false, null); return; }
+                // While popped out (parked still past the dwell), show the float
+                // overlay; a meaningful move re-arms and clears floatMode, so the
+                // next frame falls through to normal grid targeting again.
+                if (floatMode) { target = { kind: 'float' }; showDrop(target); return; }
                 target = computeDropTarget(lastX, lastY);
                 showDrop(target);
             };
@@ -4087,6 +4185,13 @@
                     ev.preventDefault();   // suppress native selection now, not on click
                     document.body.classList.add('tiled-dragging');
                     win.dom.classList.add('drag-source');
+                    armDwell();            // start the pop-out dwell clock
+                } else if (Math.hypot(ev.clientX - dwellX, ev.clientY - dwellY) > DWELL_MOVE) {
+                    // Meaningful movement re-arms the dwell so pop-out engages
+                    // only on a deliberate park — and disarms an already-engaged
+                    // floatMode (armDwell -> setFloatMode(false)) so a paused-by-
+                    // accident drag recovers by simply moving on.
+                    armDwell();
                 }
                 if (!rafId) rafId = requestAnimationFrame(frame);
             };
@@ -4107,6 +4212,7 @@
             // listeners, the interval, or body.tiled-dragging stuck.
             const onBlur = () => finish(false, null);
             function finish(commit, ev) {
+                clearHold();
                 document.removeEventListener('mousemove', onMove);
                 document.removeEventListener('mouseup', onUp);
                 document.removeEventListener('contextmenu', onCtx, true);
@@ -4116,6 +4222,7 @@
                 if (scrollTimer) { clearInterval(scrollTimer); scrollTimer = 0; }
                 document.body.classList.remove('tiled-dragging');
                 win.dom.classList.remove('drag-source');
+                win.dom.classList.remove('pop-out-arm');
                 hideDropEls();
                 if (commit && dragging && !win.disposed) {
                     // Recompute on drop: a fast drag-and-release can fire
@@ -11411,6 +11518,10 @@
                 let dwellX = startX, dwellY = startY;
                 let snapMode = false, snapTarget = null, holdTimer = 0;
                 let modHeld = !!(e.shiftKey || e.altKey);
+                // #38: dwell delay captured ONCE at grab (deterministic for the
+                // whole gesture even if a settings edit / remote prefetch lands
+                // mid-drag); 0 disables the snap dwell.
+                const holdMs = snapHoldMsFor(win);
                 const clearHold = () => {
                     if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; }
                 };
@@ -11435,8 +11546,8 @@
                 const armDwell = () => {
                     clearHold();
                     dwellX = lastX; dwellY = lastY;
-                    const ms = (window.__HOLD_MS__ | 0) || HOLD_MS;
-                    holdTimer = setTimeout(enterSnap, ms);
+                    if (holdMs <= 0) return;      // 0 = snap dwell disabled
+                    holdTimer = setTimeout(enterSnap, holdMs);
                 };
                 const teardown = () => {
                     clearHold();
@@ -13478,6 +13589,7 @@
         const setShowHost = document.getElementById('set-show-host');
         const setTiling = document.getElementById('set-tiling');
         const setStripScrollbar = document.getElementById('set-strip-scrollbar');
+        const setSnapHold = document.getElementById('set-snap-hold');   // #38 dwell delay (ms)
         const setRestore = document.getElementById('set-restore-refresh');
         const setHideOtherWs = document.getElementById('set-taskbar-hide-other-ws');
         const setDefaultProfile = document.getElementById('set-default-profile');
@@ -13685,6 +13797,9 @@
                 ? isTilingMode()
                 : (remoteTilingMode(t) === 'tiling');
             setStripScrollbar.checked = !!s.stripScrollbar;
+            // #38: per-host dwell delay. s is already normalized (0 or a clamped
+            // number), so reflect it verbatim; 0 shows as "0" (= disabled).
+            setSnapHold.value = (typeof s.snapHoldMs === 'number') ? s.snapHoldMs : 3000;
 
             // Restore-on-refresh governs THIS browser's startup (not a remote
             // host), so it always reflects the LOCAL setting on every host tab.
@@ -13921,6 +14036,29 @@
             t.s.stripScrollbar = setStripScrollbar.checked;
             t.save();
             if (t.isLocal) applyDisplaySettings();
+        });
+
+        // #38: per-host dwell delay (ms) for the snap / pop-out gestures. There's
+        // no live side effect — snapHoldMsFor reads it fresh on each drag — so we
+        // just normalize (0/negative disables; else clamp [250,20000]; blank/NaN
+        // -> the 3000 default), persist to the target's blob, and echo the
+        // clamped value back so the field shows what was actually stored.
+        setSnapHold.addEventListener('change', () => {
+            const t = settingsTarget;
+            if (!t) return;
+            const raw = setSnapHold.value.trim();
+            let v;
+            if (raw === '') {
+                v = 3000;
+            } else {
+                v = Math.round(Number(raw));
+                if (!isFinite(v)) v = 3000;
+                else if (v <= 0) v = 0;                     // explicit disable
+                else v = Math.max(250, Math.min(20000, v));
+            }
+            t.s.snapHoldMs = v;
+            setSnapHold.value = v;                          // reflect normalization
+            t.save();
         });
 
         // Window mode. LOCAL: enter/leave functions re-tile/re-float live
