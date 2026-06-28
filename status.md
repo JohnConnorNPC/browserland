@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F002 — Linux PTY backend → **done**. `webterm/agent/backends/linux_pty.py` matches the contract (pty.openpty + Popen with start_new_session + loop.add_reader + TIOCSCTTY ioctl via preexec_fn; fd-safe error path) and implements base.py's `PtyBackend`; POSIX-only import is lazily guarded in `__init__.py` (`os.name != "nt"`) so Windows never imports termios/pty. No code change. Verification (Windows host): `python -m py_compile …backends/{linux_pty,base,__init__}.py` PASS; `python -m pytest -q -k "pty or backend"` → 23 passed, 10 skipped, 0 failed (Linux PTY tests skip on Windows as designed).
+**Just handled:** F003 — Windows PTY backend + auto-select → **done**. `win_conpty.py`'s `WinConPtyBackend(PtyBackend)` implements all six base methods, uses `winpty.PTY`, daemon reader thread pumps output via `loop.call_soon_threadsafe` (on_exit after last on_data), resize/kill present; `__init__.py` routes `os.name=="nt"`→WinConPty, `_auto_backend()` picks ConPTY when GetConsoleWindow()!=0 else WinPTY, conpty/winpty force it. No code change. Verification (Windows, pywinpty 3.0.3): py_compile PASS; import PASS; `pytest -k "conpty or winpty or backend or windows"` → 19 passed/6 skipped/0 failed; real smoke spawn (`cmd /c echo BROWSERLAND_OK` via auto→WinPTY) delivered output, exit 0, kill joined thread, no stray proc.
 
-**Next to pick:** F003 — Windows PTY backend + auto-select (webterm/agent/backends/win_conpty.py, __init__.py). First unchecked, no unmet deps. This IS the native host (Windows) — winpty/ConPTY is runtime-verifiable here.
+**Next to pick:** F004 — Output ring buffer (webterm/agent/ringbuf.py): bounded recent-output ring (default 262144 bytes) with eviction, the source for snapshots. First unchecked, no unmet deps. Pure-Python, fully runtime-verifiable here.
 
 **In-progress / failed-attempt markers:** none.
 

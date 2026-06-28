@@ -4,7 +4,7 @@
 
 - [x] [F001] Wire protocol frames — single source of truth for hello/title/resized/input/resize/snapshot_please JSON frames + binary ANSI/snapshot bytes (webterm/protocol.py)
 - [x] [F002] Linux PTY backend — pty.openpty + Popen + loop.add_reader, TIOCSCTTY so Ctrl-C works (webterm/agent/backends/linux_pty.py, base.py)
-- [ ] [F003] Windows PTY backend + auto-select — winpty.PTY reader thread; `auto` picks ConPTY when a console window exists else WinPTY; conpty/winpty force it (webterm/agent/backends/win_conpty.py, __init__.py)
+- [x] [F003] Windows PTY backend + auto-select — winpty.PTY reader thread; `auto` picks ConPTY when a console window exists else WinPTY; conpty/winpty force it (webterm/agent/backends/win_conpty.py, __init__.py)
 - [ ] [F004] Output ring buffer — bounded recent-output ring (default 262144 bytes) with eviction, the source for snapshots (webterm/agent/ringbuf.py)
 - [ ] [F005] Reconnecting WS producer client — exponential backoff 0.5s→10s, re-hello with current title/dims, survives broker restarts (webterm/agent/client.py, agent.py)
 - [ ] [F006] Snapshot rendering (raw + pyte) — tier-1 `ESC[0m ESC[2J ESC[H` + ring replay; optional tier-2 pyte settled-grid render via --snapshot-mode (webterm/agent/snapshot/raw.py, pyte_snap.py)
