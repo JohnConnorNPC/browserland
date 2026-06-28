@@ -43,7 +43,7 @@
 - [x] [F034] Drop-zone overlay cheat sheet — live highlighted preview of new-column / tab / split / split-rows / float landing zones while dragging (index.html)
 - [x] [F035] Snap floating into grid — hold-to-snap dwell gesture arms drop zones; Escape/return-zone cancels; "Tile this window" menu skip (index.html)
 - [x] [F036] Pop tiled out to float — hold-to-arm "release to float"; move-again or Escape cancels; "Float this window" menu skip (index.html)
-- [ ] [F037] Drag hold delay setting — per-host dwell in ms (0 disables both gestures; 250–20000, default 3000) (index.html)
+- [x] [F037] Drag hold delay setting — per-host dwell in ms (0 disables both gestures; 250–20000, default 3000) (index.html)
 - [ ] [F038] Minimize / restore / close — soft close with type-specific semantics; minimize-to-taskbar and restore (Ctrl+Alt+m / Ctrl+Alt+w) (index.html)
 - [ ] [F039] Terminate / delete — Terminate hard-kills a terminal's shell tree (confirm); Delete note/file discards an app window + its document (confirm) (index.html)
 - [ ] [F040] Pin / lock to screen — "Lock to screen (pin)" keeps a floating window from scrolling with the strip; unlock reverses (index.html)
