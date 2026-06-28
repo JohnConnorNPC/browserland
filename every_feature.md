@@ -63,7 +63,7 @@
 
 - [x] [F049] Taskbar window buttons — one button per window (notes excluded); click focus/raise/minimize-toggle; right-click Focus/Minimize/Close/Terminate (index.html)
 - [x] [F050] Launch (+) menu — left-click local default terminal; right-click profiles (per-host grouped) + app windows + Control panel + Help (index.html)
-- [ ] [F051] Open in folder… — per-host directory picker that starts the host's default profile rooted at the chosen folder (index.html)
+- [x] [F051] Open in folder… — per-host directory picker that starts the host's default profile rooted at the chosen folder (index.html)
 - [ ] [F052] Start button label — configurable + button label (blank → `+`); behavior unchanged (index.html)
 - [ ] [F053] Workspaces + pager — virtual desktops; pager dots switch; prev/next + Go-to-1–5 shortcuts; add via + dot (index.html)
 - [ ] [F054] Send to workspace / on all workspaces — title-bar "Send to <ws>" / "Send to new workspace"; "On all workspaces" for floating windows (index.html)
