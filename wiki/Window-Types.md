@@ -1,4 +1,4 @@
-Browserland's desktop holds five kinds of windows, all opened from the launch (**+**) button on the taskbar: a **terminal**, a **sticky note**, a **CodeMirror text editor**, a **file manager**, and a **task manager**. This page explains what each one is for and how it behaves.
+Browserland's desktop holds several kinds of windows, all opened from the launch (**+**) button on the taskbar: a **terminal**, a **sticky note**, a **CodeMirror text editor**, a **file manager**, a **task manager**, and the **Control Panel**. (The in-app **help** guide opens the same way — see [[Getting-Started]].) This page explains what each one is for and how it behaves.
 
 ## Opening windows from the + menu
 
@@ -13,6 +13,8 @@ The **+** button at the left of the taskbar is how you create windows:
 | `📄 Text editor` | A CodeMirror text editor |
 | `🗂 File manager` | A file manager |
 | `🧰 Task manager` | A task manager |
+| `🎛 Control panel` | The Control Panel (settings) |
+| `❓ Help` | The in-app help guide |
 
 You can also open a terminal with the **New terminal** shortcut (`Ctrl+Alt+Enter` — see [[Keyboard-Shortcuts]]). See [[Taskbar]] for the rest of the + menu, including "Open in folder…" and the configurable Start button label.
 
@@ -45,6 +47,12 @@ The file manager is a dual-pane file browser for moving around the filesystem an
 The task manager is a live monitor — not a saved document. It lists every running terminal / agent session across all hosts, and each entry expands to its child-process tree. From there you can **End** an individual process, or **destroy** the whole session — which kills its shell and closes the window.
 
 Because it is a live monitor, the task manager is never saved: closing it just dismisses it.
+
+## Control Panel
+
+The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **🎛 Control panel** item, the desktop / taskbar right-click menu, or the **Open control panel** shortcut (`Ctrl+Alt+p`).
+
+Like the file manager and the task manager, the Control Panel is **ephemeral**: it edits settings that persist on their own (per-browser, or per-host via the broker), so the window itself has nothing to save — closing it just dismisses it, and it has no *Delete*. See [[Getting-Started]] for what the settings cover.
 
 ## Closing, terminating, and deleting
 

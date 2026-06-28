@@ -1504,6 +1504,16 @@
             flex-direction: column;
             gap: 12px;
         }
+        /* #59: the Control Panel is a floating window. It borrows #settings-modal
+           as its body; cp-windowed strips the modal-box chrome so the panel fills
+           the window and scrolls with it (the .term-window provides the frame). */
+        .app-control-panel #settings-modal.cp-windowed {
+            min-width: 0; max-width: none; max-height: none;
+            width: auto; flex: 1 1 auto; min-height: 0;
+            border: none; border-radius: 0; box-shadow: none;
+        }
+        .app-control-panel #settings-modal.cp-windowed .set-head,
+        .app-control-panel #settings-modal.cp-windowed .set-foot { display: none; }
         .set-head { font-family: monospace; font-weight: bold; font-size: 14px; }
         .set-section { display: flex; flex-direction: column; gap: 6px; }
         .set-title {
@@ -2455,8 +2465,10 @@
             // persist it (so it never lands in appStore nor the "Closed notes /
             // files" menu). It still keeps a live taskbar chip while open.
             if (win.appKind === 'task-manager') return;
-            // The Control Panel is likewise ephemeral (it edits global settings
-            // which persist via /state, so the window itself need not be saved).
+            // The Control Panel is a floating window (#59) but ephemeral: it edits
+            // global / per-host settings that persist via /state, so the window
+            // itself has nothing of its own to save (geometry stays unpersisted,
+            // like Help / the task manager).
             if (win.appKind === 'control-panel') return;
             // Help is a live reference monitor, not a saved document (#40): never
             // persist it (so it never lands in appStore nor restores on reload).
@@ -8416,12 +8428,10 @@
             if (appData.appKind === 'help') {
                 return openHelpWindow(appData);
             }
-            // The floating control-panel window was retired (its controls live in
-            // the settings modal now). Fail closed: redirect a stray record to the
-            // modal instead of building a bogus sticky note from the generic path.
+            // The Control Panel is a floating window again (#59) with its own
+            // ephemeral factory — delegate like the other app kinds.
             if (appData.appKind === 'control-panel') {
-                openSettings();
-                return null;
+                return openControlPanelWindow(appData);
             }
             // Legacy single-doc AGENTS.md record (agentsMdCwd, no docs): a build
             // before the tabbed agent-docs window. Upgrade it on reopen by reading
@@ -13408,10 +13418,9 @@
             openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });
         }
         function launchControlPanel() {
-            // The floating Control Panel window was retired; its appearance
-            // controls now live in the (rebranded) settings modal. Keep the name
-            // so the launch-menu item and its callers stay wired.
-            openSettings();
+            // The Control Panel is a moveable floating window (#59); open or focus
+            // it. Kept as the named entry point for the launch-menu item.
+            return openControlPanelWindow({});
         }
         // Closed app docs (open:false, no live window) — the way to get a
         // closed sticky note / editor back without it squatting on the taskbar.
@@ -13995,9 +14004,7 @@
             { id: 'toggle-fullscreen', label: 'Toggle fullscreen',
               run: () => toggleFullscreen() },
             { id: 'open-control-panel', label: 'Open control panel',
-              run: () => { if (settingsOverlay.classList.contains('open'))
-                               closeSettings();
-                           else openSettings(); } },
+              run: () => toggleControlPanelWindow() },
             // #40: unbound by default (absent from DEFAULT_KEYBINDINGS) — shows in
             // the keybindings editor as 'unset' so users can assign their own combo.
             { id: 'toggle-help',     label: 'Toggle help',
@@ -14392,7 +14399,7 @@
                              action: addWorkspace });
             }
             items.push({ sep: true });
-            items.push({ label: '🎛 Control panel', enabled: true, action: openSettings });
+            items.push({ label: '🎛 Control panel', enabled: true, action: launchControlPanel });
             if (lastLayoutSnapshot && !tiling) {
                 items.push({ sep: true });
                 items.push({
@@ -14611,32 +14618,35 @@
         }
 
         function openSettings() {
-            // Default to the local host's tab (its settings are the live ones).
-            // Opening always lands on local, so no remote prefetch should stay
-            // paused — clear settingsOpenHostId (it may be stale if the modal was
-            // re-opened while a remote tab had been active).
-            currentSettingsTab = 'local';
-            settingsOpenHostId = null;
-            settingsTarget = makeLocalTarget();
-            renderSettingsTabs();
-            showSettingsPane('local');
-            renderSettings();
-            settingsOverlay.classList.add('open');
+            // The Control Panel is a moveable floating window now (#59); open or
+            // focus it. Kept as the shared "open settings" entry point.
+            return openControlPanelWindow({});
         }
-        function closeSettings() {
-            // Flush a pending (debounced) start-path edit while settingsTarget is
-            // still valid, so closing via Escape / backdrop / a programmatic close
-            // can't drop it (#17).
+        // Flush in-progress settings edits: a debounced start-path edit (#17), the
+        // remote-prefetch pause, and any keybinding capture. Shared by the global
+        // Escape handler and the Control Panel window's teardown.
+        function flushSettingsEdits() {
             if (_startPathTimer) commitStartPath();
-            settingsOverlay.classList.remove('open');
             settingsOpenHostId = null;   // resume background prefetch for remotes
             _kbRecording = null;         // abandon any in-progress capture
         }
+        function closeSettings() {
+            // The modal presentation was replaced by a floating window (#59). This
+            // is now just the shared edit-flush invoked by the global Escape key
+            // and any legacy caller — it does NOT close the window itself (that is
+            // closeControlPanelWindow). Removing a (never-set) .open class is a
+            // harmless no-op kept so the overlay can't get stuck visible.
+            flushSettingsEdits();
+            settingsOverlay.classList.remove('open');
+        }
         settingsOverlay.addEventListener('mousedown', (e) => {
-            if (e.target === settingsOverlay) closeSettings();
+            // The overlay is no longer shown as a modal; guard the legacy
+            // click-outside-to-close so a stray event can't act while it's hidden.
+            if (settingsOverlay.classList.contains('open')
+                && e.target === settingsOverlay) closeSettings();
         });
         document.getElementById('settings-close')
-            .addEventListener('click', closeSettings);
+            .addEventListener('click', () => closeControlPanelWindow());
 
         // ---- #40 in-app Help: a floating, searchable reference window -------
         // The "?" taskbar chip / the toggle-help hotkey / the (+) menu open a
@@ -15213,12 +15223,202 @@
         }
         // Open Help, or focus/restore the existing one (single-instance). Shared by
         // the "?" chip, the (+) menu, and the toggle hotkey.
+        // ---- #59: the Control Panel as a moveable floating window -----------
+        // Was a centered modal (#settings-overlay / #settings-modal); now a normal
+        // floating app window (appKind 'control-panel'), ephemeral like Help (it
+        // edits global / per-host settings that persist via /state, so the window
+        // has nothing of its own to save). To reuse every settings renderer and the
+        // careful local-vs-remote routing UNCHANGED, the window BORROWS the existing
+        // #settings-modal node (moving it out of the hidden overlay into the window
+        // body) and hands it back on close. Single-instance: there is only one
+        // #settings-modal to host.
+        function findControlPanelWindow() {
+            for (const w of windows.values()) {
+                if (w && !w.disposed && w.appKind === 'control-panel') return w;
+            }
+            return null;
+        }
+        function isControlPanelOpen() { return !!findControlPanelWindow(); }
+        function closeControlPanelWindow() {
+            const ex = findControlPanelWindow();
+            if (ex) closeWindow(ex.id);   // teardown returns #settings-modal to the overlay
+        }
+        function controlPanelDefaultGeom() {
+            const d = document.getElementById('desktop').getBoundingClientRect();
+            const width = Math.min(560, Math.max(340, Math.round(d.width - 48)));
+            const height = Math.min(620, Math.max(360, Math.round(d.height - 64)));
+            const left = Math.max(12, Math.round((d.width - width) / 2));
+            const top = Math.max(12, Math.round((d.height - height) / 2 - 20));
+            return { left, top, width, height };
+        }
+        function openControlPanelWindow(appData) {
+            appData = appData || {};
+            const id = String(appData.id || newAppId('cp'));
+            const existing = windows.get(id);
+            if (existing) {
+                if (existing.minimized) restoreWindow(id); else bringToFront(id);
+                return existing;
+            }
+            // Single-instance: focus the live Control Panel rather than spawn a
+            // second (there is only one #settings-modal node to host).
+            const live = findControlPanelWindow();
+            if (live) {
+                if (live.minimized) restoreWindow(live.id);
+                bringToFront(live.id);
+                return live;
+            }
+            const modal = document.getElementById('settings-modal');
+            if (!modal) return null;   // markup missing — nothing to host
+
+            const title = appData.title || 'Control Panel';
+            const geom = clampGeom(appData.geom || controlPanelDefaultGeom());
+            const color = normalizeHex(appData.color || defaultColor(id));
+
+            const dom = document.createElement('div');
+            dom.className = 'term-window app-window app-control-panel';
+            dom.dataset.sessionId = id;
+            dom.style.left = geom.left + 'px';
+            dom.style.top = geom.top + 'px';
+            dom.style.width = (geom.width - 4) + 'px';
+            dom.style.height = (geom.height - 4) + 'px';
+            dom.style.setProperty('--accent', color);
+            dom.classList.toggle('dark-accent', isDarkAccent(color));
+
+            const titleBar = document.createElement('div');
+            titleBar.className = 'title-bar';
+            const idBadge = document.createElement('span');
+            idBadge.className = 'ti-id-badge';
+            idBadge.textContent = '#cp';
+            const titleText = document.createElement('span');
+            titleText.className = 'title-text';
+            titleText.textContent = title;
+            const minBtn = document.createElement('button');
+            minBtn.type = 'button';
+            minBtn.className = 'tb-btn btn-min';
+            minBtn.textContent = '_';
+            minBtn.title = 'minimize';
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'tb-btn btn-close';
+            closeBtn.textContent = '×';
+            closeBtn.title = 'close';
+            titleBar.appendChild(idBadge);
+            titleBar.appendChild(titleText);
+            titleBar.appendChild(minBtn);
+            titleBar.appendChild(closeBtn);
+            dom.appendChild(titleBar);
+
+            const win = {
+                id, sid: 'control-panel', hostId: 'app',
+                type: 'app', appKind: 'control-panel',
+                dom, body: null, titleText,
+                term: null, fitAddon: null,
+                ws: null, wsOpen: false, termReady: false,
+                minimized: false, disposed: false,
+                geom, name: title, color,
+                resizeTimer: null, lastSentDims: null,
+                cleanups: [],
+                tiled: false,
+                floatGeom: appData.floatGeom
+                    ? Object.assign({}, appData.floatGeom) : null,
+                locked: false,
+                dirty: false,
+            };
+
+            // Borrow the settings panel: move #settings-modal out of the hidden
+            // overlay into the window body and neutralize its modal-box chrome.
+            // The cleanup hands it back BEFORE closeWindow removes the window DOM,
+            // so getElementById('settings-modal') keeps working after close.
+            modal.classList.add('cp-windowed');
+            dom.appendChild(modal);
+            win.body = modal;
+            win.cleanups.push(() => {
+                flushSettingsEdits();
+                modal.classList.remove('cp-windowed');
+                const overlay = document.getElementById('settings-overlay');
+                if (overlay) overlay.appendChild(modal);
+                if (prefs[id]) { delete prefs[id]; savePrefs(); }
+            });
+
+            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
+                const hnd = document.createElement('div');
+                hnd.className = 'rh rh-' + dir;
+                hnd.dataset.dir = dir;
+                dom.appendChild(hnd);
+            }
+
+            document.getElementById('desktop').appendChild(dom);
+            document.getElementById('desktop').classList.remove('empty');
+            windows.set(id, win);
+
+            const stopProp = (e) => e.stopPropagation();
+            const onMouseDown = () => bringToFront(id);
+            dom.addEventListener('mousedown', onMouseDown);
+            win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
+
+            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
+            const onCloseClick = (e) => { e.stopPropagation(); closeWindow(id); };
+            minBtn.addEventListener('mousedown', stopProp);
+            minBtn.addEventListener('click', onMinClick);
+            closeBtn.addEventListener('mousedown', stopProp);
+            closeBtn.addEventListener('click', onCloseClick);
+            win.cleanups.push(() => {
+                minBtn.removeEventListener('mousedown', stopProp);
+                minBtn.removeEventListener('click', onMinClick);
+                closeBtn.removeEventListener('mousedown', stopProp);
+                closeBtn.removeEventListener('click', onCloseClick);
+            });
+
+            wireDrag(win, titleBar);
+            const onTitleCtx = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                bringToFront(win.id);
+                buildWindowMenu(win, e.clientX, e.clientY);
+            };
+            titleBar.addEventListener('contextmenu', onTitleCtx);
+            win.cleanups.push(() =>
+                titleBar.removeEventListener('contextmenu', onTitleCtx));
+            for (const handle of dom.querySelectorAll('.rh')) {
+                wireResize(win, handle, handle.dataset.dir);
+            }
+
+            const appSess = { key: id, sid: 'control-panel', id, title, stale: false,
+                              kind: 'app', hostId: 'app' };
+            sessions.set(id, appSess);
+            const itemsHost = document.getElementById('taskbar-items');
+            if (!itemsHost.querySelector(
+                    '.taskbar-item[data-session-id="' + cssEscape(id) + '"]')) {
+                itemsHost.appendChild(buildTaskbarItem(appSess));
+            }
+            updateTaskbarColor(id);
+            updateTaskbarLabel(id);
+            const emptyMsg = document.getElementById('taskbar-empty');
+            if (emptyMsg) emptyMsg.remove();
+
+            // Render the form into the borrowed panel — always land on the local
+            // tab (its settings are the live ones), exactly as the modal
+            // openSettings() did. renderSettings owns local-vs-remote routing, so
+            // appearance edits still target THIS browser even after visiting a
+            // remote host tab.
+            currentSettingsTab = 'local';
+            settingsOpenHostId = null;
+            settingsTarget = makeLocalTarget();
+            renderSettingsTabs();
+            showSettingsPane('local');
+            renderSettings();
+
+            if (findKeyInLayout(id)) placeWindowTiled(win);
+            else bringToFront(id);
+            return win;
+        }
+        function toggleControlPanelWindow() {
+            const ex = findControlPanelWindow();
+            if (ex && !ex.minimized && frontId === ex.id) { closeWindow(ex.id); return; }
+            openControlPanelWindow({});
+        }
         function focusOrOpenHelp() {
             markHelpSeen();   // any deliberate open is the strongest "seen" signal
-            // The Control Panel is a full-screen modal at a z-index above normal
-            // windows; close it so a just-opened/raised Help isn't buried behind it
-            // (restores the old modal's "one at a time" behavior).
-            closeSettings();
             const ex = findHelpWindow();
             if (ex) {
                 if (ex.minimized) restoreWindow(ex.id);
@@ -15679,7 +15879,8 @@
         // Appearance (theme / pattern / clock / start label): browser-local like
         // restore-on-refresh — write the LIVE local getSettings() directly (NOT
         // settingsTarget, which may point at a remote host), persist, then apply
-        // to this browser immediately. Mirrors the retired floating Control Panel.
+        // to this browser immediately. This is why the Control Panel window (#59)
+        // can host a remote host's tab without appearance edits leaking to it.
         setThemeEl.addEventListener('change', (e) => {
             const rb = e.target;
             if (!rb || rb.type !== 'radio' || !rb.checked) return;

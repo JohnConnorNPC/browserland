@@ -49,7 +49,7 @@ New here? Read [[Getting-Started]] first. Once you are in the desktop, click the
 
 | Page | What it covers |
 |---|---|
-| [[Window-Types]] | Terminal, sticky note, text editor, file manager, task manager |
+| [[Window-Types]] | Terminal, sticky note, text editor, file manager, task manager, Control Panel |
 
 ### Multi-host & AI
 

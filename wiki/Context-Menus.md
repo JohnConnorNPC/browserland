@@ -19,7 +19,7 @@ A few rules apply everywhere:
 
 ## Window title bar
 
-Right-click a window's title bar. The menu adapts to whether the window is **tiled** or **floating**, and to whether it's a terminal or an app window (note, editor, file manager, task manager).
+Right-click a window's title bar. The menu adapts to whether the window is **tiled** or **floating**, and to whether it's a terminal or an app window (note, editor, file manager, task manager, Control Panel, help).
 
 **When the window is tiled:**
 

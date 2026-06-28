@@ -39,7 +39,7 @@ The **Control Panel** is where you configure the desktop. Open it any of these w
 - **Right-click the empty desktop or the taskbar** and choose **🎛 Control panel**.
 - Press the **Open control panel** shortcut, `Ctrl+Alt+p`.
 
-It opens as a full-screen panel with a tab per connected broker. Among the settings it covers (not an exhaustive list):
+It opens as a moveable floating window — drag its title bar, resize it, or minimize it like any other window — with a tab per connected broker. Among the settings it covers (not an exhaustive list):
 
 | Setting | What it controls |
 |---|---|
