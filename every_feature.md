@@ -16,7 +16,7 @@
 - [x] [F012] Per-window git status — surface git state of the window's cwd (webterm/agent/git_status.py)
 - [x] [F013] Task-manager backend contract — enumerate_procs child tree, End a process, destroy a session (identity-checked psutil path + Linux SID kill fallback); the enumerate/destroy contract F048's UI drives (webterm/agent/agent.py)
 - [x] [F014] Broker producer registration — `WS /browserland` accepts producers, requires hello first, same window_id replaces (webterm/broker/app.py, registry.py)
-- [ ] [F015] Broker browser relay + snapshot heal — `WS /ws?session=<id>` byte relay both ways; on attach send `resized` then `snapshot_please` redraw (webterm/broker/relay.py, app.py)
+- [x] [F015] Broker browser relay + snapshot heal — `WS /ws?session=<id>` byte relay both ways; on attach send `resized` then `snapshot_please` redraw (webterm/broker/relay.py, app.py)
 - [ ] [F016] Session list endpoint — `GET /sessions` enumerates live sessions (id, title, cwd, agent, dims) (webterm/broker/app.py, registry.py)
 - [ ] [F017] Auth model + token gating — env>config token, hmac.compare_digest, per-surface rules (producer loopback-exempt, /launch, /ws, /sessions); WS reject is close 4401 (webterm/broker/auth.py, app.py)
 - [ ] [F018] Token-gated CORS — emit CORS headers (incl. on errors + OPTIONS preflights) only when a token is configured; AUTO_EXTEND=False neutralizes sanic-ext (webterm/broker/app.py)
