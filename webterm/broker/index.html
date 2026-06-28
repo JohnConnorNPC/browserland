@@ -66,9 +66,11 @@
             min-width: 0;
             overflow: hidden;
         }
-        /* Per-host status chips. Empty (display:none via :empty) in the
-           single-healthy-host case so the pre-multi-host taskbar stays
-           pixel-identical. */
+        /* Per-host status chips. renderHostStatus() draws one chip per broker,
+           always (even a single healthy local), so the per-broker hide toggle is
+           always reachable. The :empty rule below mainly matters before the first
+           render — there's always at least the local host, so the bar isn't empty
+           once chips exist. */
         #host-status {
             display: flex;
             gap: 4px;
@@ -12776,10 +12778,10 @@
         }
 
         // ---- host status chips ----------------------------------------------
-        // One chip per host, ok/down/auth. Rendered only when >1 host is
-        // configured or some host is bad, so the single-healthy-host UI
-        // stays exactly as before. The auth chip is the click-to-login
-        // fallback once the overlay's one auto-pop was cancelled.
+        // One chip per host, ok/down/auth/lease. renderHostStatus() draws a chip
+        // for every broker, always (even a single healthy local), so the
+        // per-broker hide toggle is always reachable. The auth chip is the
+        // click-to-login fallback once the overlay's one auto-pop was cancelled.
         function hostChipState(st) {
             if (st.authNeeded) return 'auth';
             // Unreachable outranks the lease state (a down host's lease is
@@ -14311,13 +14313,14 @@
                 }});
             }
             // Persisted docs only: × Close keeps them, Delete is the one path that
-            // discards them. Ephemeral monitors (task manager, control panel, help)
-            // have nothing saved — Close already fully tears them down — so a
-            // "Delete" there would be a misleading no-op.
+            // discards them. Ephemeral windows (file manager, task manager, control
+            // panel, help) have nothing saved — Close already fully tears them down
+            // — so a "Delete" there would be a misleading no-op.
             if (win.type === 'app'
                 && win.appKind !== 'task-manager'
                 && win.appKind !== 'control-panel'
-                && win.appKind !== 'help') {
+                && win.appKind !== 'help'
+                && win.appKind !== 'file-manager') {
                 const what = win.appKind === 'text-editor' ? 'file' : 'note';
                 items.push({ sep: true });
                 items.push({
@@ -14628,7 +14631,7 @@
             { section: 'Getting started', title: 'Open this guide',
               body: 'Click the "?" chip at the bottom-right of the taskbar, or bind a key to it under Control Panel -> Keyboard shortcuts (the "Toggle help" action). Type in the box above to filter every entry live.' },
             { section: 'Getting started', title: 'Control Panel',
-              body: 'The gear opens the Control Panel: appearance, window mode, drag hold delay, hosts, MCP, and keyboard shortcuts. Appearance is per-browser; most other settings are per-host (a tab per broker).' },
+              body: 'Open the Control Panel from the + (launch) button\'s right-click menu ("🎛 Control panel"), the desktop / taskbar right-click menu, or the "Open control panel" keyboard shortcut (Ctrl+Alt+p by default). It holds appearance, window mode, drag hold delay, hosts, MCP, and keyboard shortcuts. Appearance is per-browser; most other settings are per-host (a tab per broker).' },
             { section: 'Layout modes', title: 'Floating vs. tiling',
               body: 'Two window modes. Floating = free-moving, overlapping windows you place anywhere. Tiling = a niri-style horizontal strip of non-overlapping columns. Switch in Control Panel -> Window mode, or with the "Toggle tiling mode" shortcut.' },
             { section: 'Layout modes', title: 'The tiling strip',
@@ -14658,7 +14661,7 @@
             { section: 'Workspaces', title: 'Switch workspaces',
               body: 'Click a pager dot at the bottom of the taskbar, or use the previous/next and "go to workspace 1-5" shortcuts. In tiling mode, right-clicking the empty strip or desktop also lists every workspace (with its column count) to jump to, plus a "New workspace" item. Each workspace is its own virtual desktop of windows.' },
             { section: 'Workspaces', title: 'Send a window to a workspace',
-              body: 'Right-click a window or its taskbar item to send it to another workspace (or a new one). "On all workspaces" keeps a floating window visible on every workspace.' },
+              body: 'Right-click a window\'s title bar to send it to another workspace (or a new one). "On all workspaces" keeps a floating window visible on every workspace.' },
             { section: 'Workspaces', title: 'Rename / remove a workspace',
               body: 'Right-click a pager dot to rename or remove that workspace. The same menu toggles whether the dots show workspace names or numbers ("Show names" / "Show numbers"), and its "New workspace" item appends a fresh empty workspace (also on the empty-desktop menu in tiling mode).' },
             { section: 'Taskbar', title: 'Taskbar items',
@@ -14670,7 +14673,7 @@
             { section: 'Floating window controls', title: 'Move & resize',
               body: 'Drag a floating window\'s title bar to move it; drag its edges or corners to resize.' },
             { section: 'Floating window controls', title: 'Minimize, close, terminate',
-              body: 'Minimize hides a window to the taskbar (Restore brings it back). Close is SOFT: closing a terminal leaves its shell running so you can reattach later; closing an app window (note/editor/file manager) keeps its saved document. Terminate (terminals only) hard-kills the shell process tree; Delete (app windows) discards the document for good. These are on the title-bar right-click menu. A non-empty sticky note you close is also listed under a "Closed notes" section at the bottom of the + (launch) menu — click it there to reopen it.' },
+              body: 'Minimize hides a window to the taskbar (Restore brings it back). Close is SOFT: closing a terminal leaves its shell running so you can reattach later. For app windows Close depends on the type — a sticky note is kept only if it isn\'t empty (whitespace-only counts as empty; reopen kept notes from the "Closed notes" section at the bottom of the + launch menu); closing a text editor prompts to save any unsaved changes, then leaves your file on the host; a file manager, task manager, Control Panel, or help window is just dismissed. Terminate (terminals only) hard-kills the shell process tree. Delete (sticky notes and text editors only) skips Close\'s keep/save step and discards the window outright — a deleted sticky note is gone for good, while deleting an editor drops its in-browser buffer (including unsaved changes) but does NOT remove the file on the host. These actions are on the title-bar right-click menu; a window\'s taskbar-item menu has its own Minimize/Close/Terminate but no Delete.' },
             { section: 'Floating window controls', title: 'Pin a window (lock to screen)',
               body: 'A floating window\'s right-click menu has "Lock to screen (pin)": a pinned window stays put and does NOT scroll away with the tiling strip. (It pins position, not always-on-top.) "Unlock (scroll with strip)" reverses it.' },
             { section: 'Floating window controls', title: 'Color & rename',
