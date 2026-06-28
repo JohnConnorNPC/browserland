@@ -88,7 +88,7 @@
 - [x] [F066] Access modes — effective per-window mode off/read/readwrite over global default_mode; off hides, read observes, readwrite types (webterm/broker/app.py)
 - [x] [F067] Per-window MCP override + robot button — title-bar/right-click robot sets off/read/read-write via `POST /session/mcp` (in-memory); icon flashes on read/type (index.html, app.py)
 - [x] [F068] allow_launch + /mcp/launch — separate `allow_launch` gate; `POST /mcp/launch` reuses the same server-validated launch shape as F019 (profile/cols/rows/title + a validated cwd), 200/202, error cases (webterm/broker/app.py, launcher.py)
-- [ ] [F069] MCP admin + sidecar — `GET/POST /mcp/config` (enabled/default_mode/allow_launch/token/generate), token precedence env>sidecar>config, durable webterm_mcp.json self-heal (webterm/broker/app.py)
+- [x] [F069] MCP admin + sidecar — `GET/POST /mcp/config` (enabled/default_mode/allow_launch/token/generate), token precedence env>sidecar>config, durable webterm_mcp.json self-heal (webterm/broker/app.py)
 - [ ] [F070] read_screen rendering — `POST /mcp/read` bounded grid (pyte or fallback) + alt_screen/cursor/content_hash/view; degraded reserved for raw decode (app.py, webterm/agent/snapshot/*)
 - [ ] [F071] read_screen scrollback view — `view="scrollback"` with `lines=N` prepends history above the grid, reports history_lines; alt-screen forces screen view (app.py, agent)
 - [ ] [F072] read_screen wait modes — exclusive wait_for_change (hash) / wait_for_text / wait_for_regex (+wait_absent), bounded by timeout_ms ≤15000, returns matched (app.py, mcptool/server.py)
