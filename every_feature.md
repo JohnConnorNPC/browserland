@@ -12,7 +12,7 @@
 - [x] [F008] OSC title sniffer — parse OSC title sequences split at any byte boundary, push live `title` frames (webterm/agent/titles.py)
 - [x] [F009] Alt-screen + DECCKM tracking — track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys (webterm/agent/altscreen.py)
 - [x] [F010] Foreground coding-agent detection — detect claude/codex/grok/opencode as the foreground command for the agent badge (webterm/agent/detect.py)
-- [ ] [F011] Live cwd tracking (psutil, best-effort) — report the shell's current working directory; degrades to None without psutil (webterm/agent/agent.py, config.py)
+- [x] [F011] Live cwd tracking (psutil, best-effort) — report the shell's current working directory; degrades to None without psutil (webterm/agent/agent.py, config.py)
 - [ ] [F012] Per-window git status — surface git state of the window's cwd (webterm/agent/git_status.py)
 - [ ] [F013] Task-manager backend contract — enumerate_procs child tree, End a process, destroy a session (identity-checked psutil path + Linux SID kill fallback); the enumerate/destroy contract F048's UI drives (webterm/agent/agent.py)
 - [ ] [F014] Broker producer registration — `WS /browserland` accepts producers, requires hello first, same window_id replaces (webterm/broker/app.py, registry.py)
