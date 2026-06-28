@@ -45,7 +45,7 @@
 - [x] [F036] Pop tiled out to float — hold-to-arm "release to float"; move-again or Escape cancels; "Float this window" menu skip (index.html)
 - [x] [F037] Drag hold delay setting — per-host dwell in ms (0 disables both gestures; 250–20000, default 3000) (index.html)
 - [x] [F038] Minimize / restore / close — soft close with type-specific semantics; minimize-to-taskbar and restore (Ctrl+Alt+m / Ctrl+Alt+w) (index.html)
-- [ ] [F039] Terminate / delete — Terminate hard-kills a terminal's shell tree (confirm); Delete note/file discards an app window + its document (confirm) (index.html)
+- [x] [F039] Terminate / delete — Terminate hard-kills a terminal's shell tree (confirm); Delete note/file discards an app window + its document (confirm) (index.html)
 - [ ] [F040] Pin / lock to screen — "Lock to screen (pin)" keeps a floating window from scrolling with the strip; unlock reverses (index.html)
 - [ ] [F041] Color & rename — title-bar color button (palette/custom/recents); double-click an app window's title to rename (index.html)
 - [ ] [F042] Arrange-all + undo — empty-desktop Cascade / Tile H / Tile V / Tile H+V / Minimize All with single-level Undo (index.html)
