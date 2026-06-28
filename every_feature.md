@@ -74,7 +74,7 @@
 - [x] [F059] Keyboard shortcuts + rebinding — full default bindings table, per-host rebinding in Control Panel, Toggle help unbound by default (index.html)
 - [x] [F060] Control Panel — tabbed settings panel (`#settings-modal` over full-screen `#settings-overlay`), a tab per connected broker (`renderSettingsTabs`/`selectSettingsTab`, local+remotes+Browser), all settings sections present, per-host vs `.set-browser-global` routing via `settingsTarget` (local savePrefs / remote putHostState→/state). NOTE: panel is a centered modal (≤480×80vh), not literally full-screen — that wiki-vs-code discrepancy is split off to F083 (Blocked) (index.html)
 - [x] [F061] Appearance settings — theme, background pattern, terminal font, clock/help toggles (index.html)
-- [ ] [F062] Settings persistence — browser-global vs per-host settings split, restore-on-refresh, taskbar workspace filter; settings+layout synced server-side via the /state store (F077), not localStorage-only (index.html)
+- [x] [F062] Settings persistence — browser-global vs per-host settings split, restore-on-refresh, taskbar workspace filter; settings+layout synced server-side via the /state store (F077), not localStorage-only (index.html)
 - [ ] [F079] Per-host default profile + start path — per-host "Default terminal profile" (feeds the + button / Open-in-folder) and "Default start path" (roots new shells' cwd via resolveStartPath); persisted per-host and synced via /state (#17/#10) (index.html)
 
 ## Multi-host
