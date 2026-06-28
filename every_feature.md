@@ -47,7 +47,7 @@
 - [x] [F038] Minimize / restore / close — soft close with type-specific semantics; minimize-to-taskbar and restore (Ctrl+Alt+m / Ctrl+Alt+w) (index.html)
 - [x] [F039] Terminate / delete — Terminate hard-kills a terminal's shell tree (confirm); Delete note/file discards an app window + its document (confirm) (index.html)
 - [x] [F040] Pin / lock to screen — "Lock to screen (pin)" keeps a floating window from scrolling with the strip; unlock reverses (index.html)
-- [ ] [F041] Color & rename — title-bar color button (palette/custom/recents); double-click an app window's title to rename (index.html)
+- [x] [F041] Color & rename — title-bar color button (palette/custom/recents); double-click an app window's title to rename (index.html)
 - [ ] [F042] Arrange-all + undo — empty-desktop Cascade / Tile H / Tile V / Tile H+V / Minimize All with single-level Undo (index.html)
 - [ ] [F043] Lock Size (global) — snap all floating windows to default size and hide resize handles; unlock restores (index.html)
 
