@@ -92,7 +92,7 @@
 - [x] [F070] read_screen rendering — `POST /mcp/read` bounded grid (pyte or fallback) + alt_screen/cursor/content_hash/view; degraded reserved for raw decode (app.py, webterm/agent/snapshot/*)
 - [x] [F071] read_screen scrollback view — `view="scrollback"` with `lines=N` prepends history above the grid, reports history_lines; alt-screen forces screen view (app.py, agent)
 - [x] [F072] read_screen wait modes — exclusive wait_for_change (hash) / wait_for_text / wait_for_regex (+wait_absent), bounded by timeout_ms ≤15000, returns matched (app.py, mcptool/server.py)
-- [ ] [F073] read_screen delta mode — `since=<prior content_hash>` returns delta=true + changed_rows (only differing rows) or a full grid with delta=false (app.py, agent)
+- [x] [F073] read_screen delta mode — `since=<prior content_hash>` returns delta=true + changed_rows (only differing rows) or a full grid with delta=false (app.py, agent)
 - [ ] [F074] send_input + newline→CR mapping — `POST /mcp/input` verbatim (readwrite only, ≤256KiB, bypasses lease); tool maps \n/\r\n → CR so commands submit (PowerShell) (app.py, mcptool/server.py)
 - [ ] [F075] send_keys control/escape + cursor keys — named keys, C-/M- chords; arrows as SS3 vs CSI from cached DECCKM in list_terminals (app.py, mcptool/server.py)
 - [ ] [F076] Shipped MCP server + multi-host routing — webterm.mcptool stdio FastMCP: 7 tools, config (flag>env), `--hosts` namespaced `<host>:<int>` ids, BrowserlandError surfacing (webterm/mcptool/client.py, server.py, __main__.py)
