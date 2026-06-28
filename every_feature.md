@@ -18,7 +18,7 @@
 - [x] [F014] Broker producer registration — `WS /browserland` accepts producers, requires hello first, same window_id replaces (webterm/broker/app.py, registry.py)
 - [x] [F015] Broker browser relay + snapshot heal — `WS /ws?session=<id>` byte relay both ways; on attach send `resized` then `snapshot_please` redraw (webterm/broker/relay.py, app.py)
 - [x] [F016] Session list endpoint — `GET /sessions` enumerates live sessions (id, title, cwd, agent, dims) (webterm/broker/app.py, registry.py)
-- [ ] [F017] Auth model + token gating — env>config token, hmac.compare_digest, per-surface rules (producer loopback-exempt, /launch, /ws, /sessions); WS reject is close 4401 (webterm/broker/auth.py, app.py)
+- [x] [F017] Auth model + token gating — env>config token, hmac.compare_digest, per-surface rules (producer loopback-exempt, /launch, /ws, /sessions); WS reject is close 4401 (webterm/broker/auth.py, app.py)
 - [ ] [F018] Token-gated CORS — emit CORS headers (incl. on errors + OPTIONS preflights) only when a token is configured; AUTO_EXTEND=False neutralizes sanic-ext (webterm/broker/app.py)
 - [ ] [F019] Profiles-only launch — browser `POST /launch` spawns from pre-approved profiles only (client can never supply a raw command/env); a client `cwd` is honored only after server validation (realpath + must be an existing dir, else 400 bad_cwd/cwd_not_dir) to back "Open in folder"; 200/202/400/401/403/429/500 (non-loopback with no token → 403 launch_disabled_no_token) (webterm/broker/launcher.py, app.py)
 - [ ] [F020] Serve desktop UI + login overlay — serve index.html ungated; login overlay probes /sessions, stores token in localStorage, `?token=` deep-link adopted then scrubbed via replaceState (webterm/broker/ui.py, app.py, index.html)
