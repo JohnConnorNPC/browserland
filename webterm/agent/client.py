@@ -216,15 +216,21 @@ class BrokerClient:
             elif mtype == "screen_text_please":
                 if self._on_screen_request is not None:
                     # view/lines drive scrollback (#21); wait_for_change/
-                    # timeout_ms drive wait-for-change (#26). All absent for
-                    # older brokers -> defaults give an immediate single read.
+                    # timeout_ms drive wait-for-change (#26); wait_for_text/
+                    # wait_for_regex/wait_absent drive wait-for-content (#51).
+                    # All absent for older brokers -> an immediate single read.
                     wfc = data.get("wait_for_change")
+                    wft = data.get("wait_for_text")
+                    wfr = data.get("wait_for_regex")
                     self._on_screen_request(
                         _int(data.get("req"), -1),
                         str(data.get("view", "screen") or "screen"),
                         _int(data.get("lines"), 0),
                         wfc if isinstance(wfc, str) and wfc else None,
-                        _int(data.get("timeout_ms"), 0))
+                        _int(data.get("timeout_ms"), 0),
+                        wait_for_text=wft if isinstance(wft, str) and wft else None,
+                        wait_for_regex=wfr if isinstance(wfr, str) and wfr else None,
+                        wait_absent=bool(data.get("wait_absent", False)))
             else:
                 LOGGER.debug("unknown broker frame type %r", mtype)
 

@@ -41,6 +41,7 @@ import base64
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 from pathlib import Path
@@ -1154,18 +1155,48 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         wait_for_change = body.get("wait_for_change")
         if not isinstance(wait_for_change, str) or not wait_for_change:
             wait_for_change = None
+        # wait-for-content (#51): a substring or regex predicate, same timeout.
+        # Validate the regex HERE so a bad pattern fails fast with a clean 400
+        # instead of the agent waiting out the whole timeout and returning
+        # matched=false.
+        wait_for_text = body.get("wait_for_text")
+        if not isinstance(wait_for_text, str) or not wait_for_text:
+            wait_for_text = None
+        wait_for_regex = body.get("wait_for_regex")
+        if not isinstance(wait_for_regex, str) or not wait_for_regex:
+            wait_for_regex = None
+        if wait_for_regex is not None:
+            try:
+                re.compile(wait_for_regex)
+            except re.error as exc:
+                return sanic_json({"error": "bad_regex", "detail": str(exc)},
+                                  status=400)
+        # The wait modes are exclusive (#51): wait_for_change, wait_for_text and
+        # wait_for_regex each pick a different signal, and combining them has no
+        # well-defined meaning (which one decides `matched`?). Reject up front so
+        # a caller never gets a silently-wrong wait.
+        n_wait = sum(bool(x) for x in
+                     (wait_for_change, wait_for_text, wait_for_regex))
+        if n_wait > 1:
+            return sanic_json(
+                {"error": "conflicting_wait",
+                 "detail": "use only one of wait_for_change / wait_for_text / "
+                           "wait_for_regex"}, status=400)
+        wait_absent = bool(body.get("wait_absent", False))
         try:
             timeout_ms = int(body.get("timeout_ms", 0) or 0)
         except (TypeError, ValueError):
             timeout_ms = 0
         timeout_ms = max(0, min(timeout_ms, MAX_MCP_WAIT_MS))
         rpc_timeout = RPC_TIMEOUT
-        if wait_for_change:
+        if wait_for_change or wait_for_text or wait_for_regex:
             rpc_timeout = RPC_TIMEOUT + timeout_ms / 1000.0
         payload, error = await _session_rpc(
             entry,
             lambda req: protocol.screen_text_please_frame(
-                req, view, lines, wait_for_change, timeout_ms),
+                req, view, lines, wait_for_change, timeout_ms,
+                wait_for_text=wait_for_text, wait_for_regex=wait_for_regex,
+                wait_absent=wait_absent),
             "screen_text", timeout=rpc_timeout)
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
@@ -1181,6 +1212,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                "history_lines": int(payload.get("history_lines", 0) or 0),
                "content_hash": str(payload.get("content_hash", "") or ""),
                "cursor": payload.get("cursor")}
+        # matched (#51): present only for a content-predicate read — true if the
+        # text/regex matched, false if the wait timed out first.
+        if payload.get("matched") is not None:
+            out["matched"] = bool(payload.get("matched"))
         if payload.get("degraded"):
             out["degraded"] = True
         return sanic_json(out)

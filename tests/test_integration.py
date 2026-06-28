@@ -319,6 +319,94 @@ async def test_wait_for_change_clamps_huge_timeout(running_agent, broker):
     assert "go" in r["text"] and r["content_hash"] != h0
 
 
+# ---- #51: read_screen wait-for-content (text / regex predicate) ------------
+
+async def test_wait_for_text_returns_on_appear(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"booting\r\n")
+    await broker.wait_binary(lambda b: b"booting" in b)
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_text="Ready", timeout_ms=5000))
+    await asyncio.sleep(0.15)
+    assert not waiter.done()                 # awaited text not on screen yet
+    backend.feed(b"status: Ready\r\n")
+    r = await asyncio.wait_for(waiter, 5)
+    assert r.get("matched") is True
+    assert "Ready" in r["text"]
+
+
+async def test_wait_for_text_times_out_matched_false(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"idle\r\n")
+    await broker.wait_binary(lambda b: b"idle" in b)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    # The text never appears: the wait returns the CURRENT screen at timeout
+    # with matched=false (not a hang, not an error).
+    r = await asyncio.wait_for(
+        _read_screen(broker, 2, wait_for_text="NEVER", timeout_ms=400), 5)
+    assert r.get("matched") is False
+    assert loop.time() - t0 >= 0.3           # actually waited ~timeout_ms
+    assert "idle" in r["text"]
+
+
+async def test_wait_for_text_already_present_is_immediate(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"DONE here\r\n")
+    await broker.wait_binary(lambda b: b"DONE" in b)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    r = await asyncio.wait_for(
+        _read_screen(broker, 2, wait_for_text="DONE", timeout_ms=5000), 5)
+    assert r.get("matched") is True
+    assert loop.time() - t0 < 1.0            # matched on pass one, didn't wait out
+
+
+async def test_wait_for_regex_returns_on_match(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"progress 5\r\n")
+    await broker.wait_binary(lambda b: b"progress 5" in b)
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_regex=r"\d+%", timeout_ms=5000))
+    await asyncio.sleep(0.15)
+    assert not waiter.done()
+    backend.feed(b"progress 100%\r\n")
+    r = await asyncio.wait_for(waiter, 5)
+    assert r.get("matched") is True
+    assert "100%" in r["text"]
+
+
+async def test_wait_absent_returns_when_text_disappears(running_agent, broker):
+    _, backend, _ = running_agent
+    backend.feed(b"loading spinner\r\n")
+    await broker.wait_binary(lambda b: b"spinner" in b)
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_text="spinner",
+                     wait_absent=True, timeout_ms=5000))
+    await asyncio.sleep(0.15)
+    assert not waiter.done()                 # still present -> keep waiting
+    backend.feed(b"\x1b[2J\x1b[H")           # clear screen -> the text is gone
+    r = await asyncio.wait_for(waiter, 5)
+    assert r.get("matched") is True
+    assert "spinner" not in r["text"]
+
+
+async def test_wait_for_regex_invalid_is_safe(running_agent, broker):
+    # The broker validates the regex (bad_regex 400), but if a bad pattern ever
+    # reaches the agent (e.g. an older broker), it must NOT hang or error —
+    # treat it as no predicate and reply immediately.
+    _, backend, _ = running_agent
+    backend.feed(b"hello\r\n")
+    await broker.wait_binary(lambda b: b"hello" in b)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    r = await asyncio.wait_for(
+        _read_screen(broker, 2, wait_for_regex="(unclosed", timeout_ms=5000), 5)
+    assert loop.time() - t0 < 1.0            # didn't wait out the timeout
+    assert "hello" in r["text"]
+    assert "matched" not in r                # no predicate was in effect
+
+
 # ---- #27: reset_terminal clears the agent's render buffer -----------------
 
 async def _reset(broker, req):
