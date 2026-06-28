@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F003 — Windows PTY backend + auto-select → **done**. `win_conpty.py`'s `WinConPtyBackend(PtyBackend)` implements all six base methods, uses `winpty.PTY`, daemon reader thread pumps output via `loop.call_soon_threadsafe` (on_exit after last on_data), resize/kill present; `__init__.py` routes `os.name=="nt"`→WinConPty, `_auto_backend()` picks ConPTY when GetConsoleWindow()!=0 else WinPTY, conpty/winpty force it. No code change. Verification (Windows, pywinpty 3.0.3): py_compile PASS; import PASS; `pytest -k "conpty or winpty or backend or windows"` → 19 passed/6 skipped/0 failed; real smoke spawn (`cmd /c echo BROWSERLAND_OK` via auto→WinPTY) delivered output, exit 0, kill joined thread, no stray proc.
+**Just handled:** F004 — Output ring buffer → **done**. `ByteRing` in `webterm/agent/ringbuf.py`: default cap 256*1024=262144 bytes, deque of chunks, FIFO chunk-granular eviction with an `evicted` flag, `get()` joins retained bytes; consumed by `agent.py` (`ring.get()`/`ring.evicted`) to build tier-1 snapshots via `snapshot/raw.py`. Intentional exception: a single append larger than cap is kept intact (avoid blank snapshot) — test-codified (`test_never_evicts_newest_chunk`), so NOT rewritten. No code change. Verification: py_compile PASS; `pytest -k "ring or buffer or ringbuf"` → 9 passed/0 failed; behavioral asserts a(default cap)/b(<cap retained in order)/c(>cap→tail==last cap bytes, evicted)/d(boundary-crossing chunks) all PASS.
 
-**Next to pick:** F004 — Output ring buffer (webterm/agent/ringbuf.py): bounded recent-output ring (default 262144 bytes) with eviction, the source for snapshots. First unchecked, no unmet deps. Pure-Python, fully runtime-verifiable here.
+**Next to pick:** F005 — Reconnecting WS producer client (webterm/agent/client.py, agent.py): exponential backoff 0.5s→10s, re-hello with current title/dims, survives broker restarts. First unchecked, no unmet deps.
 
 **In-progress / failed-attempt markers:** none.
 
