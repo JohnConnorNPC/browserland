@@ -90,7 +90,7 @@
 - [x] [F068] allow_launch + /mcp/launch — separate `allow_launch` gate; `POST /mcp/launch` reuses the same server-validated launch shape as F019 (profile/cols/rows/title + a validated cwd), 200/202, error cases (webterm/broker/app.py, launcher.py)
 - [x] [F069] MCP admin + sidecar — `GET/POST /mcp/config` (enabled/default_mode/allow_launch/token/generate), token precedence env>sidecar>config, durable webterm_mcp.json self-heal (webterm/broker/app.py)
 - [x] [F070] read_screen rendering — `POST /mcp/read` bounded grid (pyte or fallback) + alt_screen/cursor/content_hash/view; degraded reserved for raw decode (app.py, webterm/agent/snapshot/*)
-- [ ] [F071] read_screen scrollback view — `view="scrollback"` with `lines=N` prepends history above the grid, reports history_lines; alt-screen forces screen view (app.py, agent)
+- [x] [F071] read_screen scrollback view — `view="scrollback"` with `lines=N` prepends history above the grid, reports history_lines; alt-screen forces screen view (app.py, agent)
 - [ ] [F072] read_screen wait modes — exclusive wait_for_change (hash) / wait_for_text / wait_for_regex (+wait_absent), bounded by timeout_ms ≤15000, returns matched (app.py, mcptool/server.py)
 - [ ] [F073] read_screen delta mode — `since=<prior content_hash>` returns delta=true + changed_rows (only differing rows) or a full grid with delta=false (app.py, agent)
 - [ ] [F074] send_input + newline→CR mapping — `POST /mcp/input` verbatim (readwrite only, ≤256KiB, bypasses lease); tool maps \n/\r\n → CR so commands submit (PowerShell) (app.py, mcptool/server.py)
