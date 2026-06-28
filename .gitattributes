@@ -1,0 +1,5 @@
+# The in-app Help corpus is a tooling-generated artifact written with LF by
+# webterm/broker/help_corpus.py. Pin it to LF so its regenerate-and-diff test
+# (byte-equality vs a fresh parse of wiki/) holds on every platform regardless
+# of core.autocrlf. Never hand-edit it; run `python -m webterm.broker.help_corpus`.
+webterm/broker/help_corpus.json text eol=lf
