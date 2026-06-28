@@ -53,7 +53,7 @@
 
 ## Window Types
 
-- [ ] [F044] Terminal window — xterm.js render + keystroke input over /ws (snapshot-heal on attach is the broker's job, F015) (index.html)
+- [x] [F044] Terminal window — xterm.js render + keystroke input over /ws (snapshot-heal on attach is the broker's job, F015) (index.html)
 - [ ] [F045] Sticky note + Closed notes — off-taskbar scratch pad; non-empty closed notes reopen from the + menu's "Closed notes" (depends on F050's + menu) (index.html)
 - [ ] [F046] CodeMirror text editor — syntax-highlighted file editor opened at active terminal's cwd/host; save-prompt on close; backed by /file/* (index.html)
 - [ ] [F047] File manager — dual-pane browser at active cwd/host; open files into the editor; backed by /file/* (index.html)
