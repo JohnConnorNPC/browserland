@@ -8,7 +8,7 @@
 - [x] [F004] Output ring buffer — bounded recent-output ring (default 262144 bytes) with eviction, the source for snapshots (webterm/agent/ringbuf.py)
 - [x] [F005] Reconnecting WS producer client — exponential backoff 0.5s→10s, re-hello with current title/dims, survives broker restarts (webterm/agent/client.py, agent.py)
 - [x] [F006] Snapshot rendering (raw + pyte) — tier-1 `ESC[0m ESC[2J ESC[H` + ring replay; optional tier-2 pyte settled-grid render via --snapshot-mode (webterm/agent/snapshot/raw.py, pyte_snap.py)
-- [ ] [F007] Dependency-free bounded text-grid renderer — in-house emulator producing a bounded rows×cols grid for MCP read when pyte is absent (webterm/agent/snapshot/textgrid.py)
+- [x] [F007] Dependency-free bounded text-grid renderer — in-house emulator producing a bounded rows×cols grid for MCP read when pyte is absent (webterm/agent/snapshot/textgrid.py)
 - [ ] [F008] OSC title sniffer — parse OSC title sequences split at any byte boundary, push live `title` frames (webterm/agent/titles.py)
 - [ ] [F009] Alt-screen + DECCKM tracking — track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys (webterm/agent/altscreen.py)
 - [ ] [F010] Foreground coding-agent detection — detect claude/codex/grok/opencode as the foreground command for the agent badge (webterm/agent/detect.py)
