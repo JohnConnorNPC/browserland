@@ -34,7 +34,7 @@
 - [x] [F025] Toggle tiling mode — per-host floating↔tiling toggle (Ctrl+Alt+t and Control Panel) (index.html)
 - [x] [F026] Column width presets — ⅓ / ½ / ⅔ / max from title-bar menu, current marked with ✓ (index.html)
 - [x] [F027] Column gutter drag-resize — drag the seam between columns for a custom width (index.html)
-- [ ] [F028] Move & focus columns (keyboard) — focus/move column left/right, bringing off-screen columns into view (index.html)
+- [x] [F028] Move & focus columns (keyboard) — focus/move column left/right, bringing off-screen columns into view (index.html)
 - [ ] [F029] Eject column — "Move to own column" (un-share a stacked column) and "Move to new column" (spawn column to the right) (index.html)
 - [ ] [F030] Tabs — Alt-drag to stack windows as tabs in one tile; tab strip switches; "Tab into left/right column" / "Tab this window" (index.html)
 - [ ] [F031] Untab — "Untab tile (split to rows)" and "Untab cell (side by side)"; tab-strip ⊟ button equivalents; drag a tab out (index.html)
