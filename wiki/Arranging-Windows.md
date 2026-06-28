@@ -19,10 +19,7 @@ The title-bar menu offers the same thing without dragging:
 
 ### Untabbing
 
-To pull a window back out of a tab strip:
-
-- **Drag a tab out** of the tab strip to give it its own tile again, or
-- Use the title-bar / tab context menu:
+To pull a window back out of a tab strip, use the title-bar / tab context menu:
 
 | Menu item | What it does |
 |---|---|

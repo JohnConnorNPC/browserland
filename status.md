@@ -4,8 +4,8 @@
 
 ## Tally
 - **81 / 81 actionable features done** (F001–F081, all `[x]`).
-- **2 blocked** (await a human decision; never auto-picked):
-  - **F082 — Untab: drag a tab out of the strip.** DOC/BEHAVIOR gap split from F031. In-app help (index.html:14647-48) promises "Drag a tab out of the tab strip to give it its own tile again", but no per-tab drag-out detach is implemented (the other 3 untab mechanisms — menu split-to-rows, side-by-side, ⊟ button — DO work, verified under F031). Resolve by EITHER implementing single-tab drag-out detach OR removing the stale help line. Needs an index.html edit (deferred by the pre-existing uncommitted index.html change) + an owner call on direction.
+- **1 blocked** (await a human decision; never auto-picked):
+  - **F082 — Untab: drag a tab out of the strip.** ✅ RESOLVED by #61 (no longer blocked). The owner chose the doc fix: the stale "Drag a tab out of the tab strip to give it its own tile again" claim was removed from `wiki/Arranging-Windows.md` and `help_corpus.json` was regenerated. The gesture was never implemented; the other 3 untab mechanisms — menu split-to-rows, side-by-side, ⊟ button — DO work (verified under F031). Docs now match behavior.
   - **F083 — Control Panel full-screen presentation.** DOC/BEHAVIOR gap split from F060. Wiki `Getting-Started.md:42` says the panel "opens as a full-screen panel", but the code renders `#settings-modal` capped ≤480×80vh (centered dialog; only the dimmed backdrop is full-screen). Functional panel (per-broker tabs + all sections + per-host/global routing) verified done under F060. Resolve by EITHER enlarging `#settings-modal` toward full-screen (index.html edit, deferred) OR correcting the wiki wording. Owner call on intended UX.
 
 ## Final full-suite run (FINISH step)
