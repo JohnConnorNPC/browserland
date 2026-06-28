@@ -37,18 +37,10 @@ from typing import Callable, Mapping, Optional, Sequence
 from winpty import PTY  # type: ignore
 from winpty.enums import Backend  # type: ignore
 
-from ..detect import classify_proc
+from ..detect import _safe_exe, classify_proc
 from .base import PtyBackend
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _safe_exe(proc) -> Optional[str]:
-    """``proc.exe()`` or None — it raises AccessDenied/ZombieProcess often."""
-    try:
-        return proc.exe()
-    except Exception:
-        return None
 
 
 def _auto_backend() -> int:
@@ -253,16 +245,10 @@ class WinConPtyBackend(PtyBackend):
                 return agent
         return None
 
-    def cwd(self) -> Optional[str]:
-        """The spawned shell's current working directory via psutil. ``PTY.pid``
-        is the shell itself, so its cwd tracks the user's ``cd``. Never raises."""
-        if self.pid is None:
-            return None
-        try:
-            import psutil
-            return psutil.Process(self.pid).cwd()
-        except Exception:
-            return None
+    # ``cwd()`` is inherited from PtyBackend: it reports the foreground agent's
+    # own working dir (falling back to the shell), so the AGENTS.md button opens
+    # the dir Claude Code actually runs in even when the shell sits a level up
+    # (issue #47).
 
     # NOTE: no ``kill_proc_fallback`` override here -> inherits the base hook,
     # so destroying a window without psutil still returns "psutil_unavailable"

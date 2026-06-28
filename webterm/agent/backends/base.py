@@ -17,6 +17,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..detect import _safe_exe, classify_proc
+
 LOGGER = logging.getLogger(__name__)
 
 # Caps for the task-manager process list (DoS / privacy bounds): never report
@@ -82,9 +84,71 @@ class PtyBackend(ABC):
         return None
 
     def cwd(self) -> Optional[str]:
-        """Best-effort: the shell's current working directory, or None. Like
-        ``foreground_command`` this runs on a periodic timer and must NEVER
-        raise. The default knows nothing; platform backends override it."""
+        """Best-effort working directory for this session's file tools, or None.
+
+        Prefer the AGENT'S own cwd (Claude Code / codex / grok / opencode) over
+        the shell's: the agent can run in a *subdir* of where the session shell
+        sits, in which case the shell's cwd points a level too high and the
+        "edit AGENTS.md for this folder" button opens the wrong place (issue
+        #47). We BFS the session tree and pick the agent CLOSEST to the shell
+        (the session's primary, so a deeper/nested agent can't win), and report
+        its cwd.
+
+        Fallback rules matter: if an agent IS detected but its cwd can't be read
+        (denied / mid-exit race), we return None — NOT the shell's cwd — so the
+        caller keeps the last-known agent dir instead of flapping to the
+        known-wrong parent. Only a session with NO agent at all falls back to
+        the shell's own cwd (a plain shell, where that IS the right answer).
+
+        Unlike ``foreground_command`` this is deliberately NOT foreground-group
+        filtered — the agent's working dir should stay stable even while it runs
+        a foreground child (a build, a Bash tool call). Runs on a periodic
+        timer; like ``foreground_command`` it must NEVER raise."""
+        shell = self._session_root()
+        if shell is None:
+            return None
+        agent = self._find_session_agent(shell)
+        if agent is not None:
+            # Agent known: its cwd, or None to preserve the last-known dir. We
+            # never fall through to the shell here -- in the #47 case the shell
+            # sits a level up, so reporting it would re-introduce the bug.
+            # (A descendant PID could in theory be recycled between classify and
+            # this read; the window is sub-tick and self-corrects next tick.)
+            try:
+                cwd = agent.cwd()
+            except Exception:
+                cwd = None
+            return cwd or None
+        # No agent in the tree -> a plain shell session; the shell's own cwd is
+        # the right answer (and tracks the user's `cd`).
+        try:
+            return shell.cwd() or None
+        except Exception:
+            return None
+
+    def _find_session_agent(self, shell):
+        """The ``psutil.Process`` of the agent CLOSEST to the session ``shell``
+        (breadth-first, so the session's primary agent wins over a deeper nested
+        one), or None. Bounded by ``_MAX_PROCS`` against a fork-bomb; a denied or
+        vanished process is skipped, never fatal. Never raises."""
+        seen: set = set()
+        level = [shell]
+        while level and len(seen) < _MAX_PROCS:
+            nxt = []
+            for proc in level:
+                if proc.pid in seen:
+                    continue
+                seen.add(proc.pid)
+                try:
+                    if classify_proc(proc.name(), proc.cmdline(), _safe_exe(proc)):
+                        return proc
+                except Exception:
+                    pass
+                try:
+                    nxt.extend(proc.children())
+                except Exception:
+                    pass
+            level = nxt
         return None
 
     # -- task manager: process tree + scoped kill ---------------------------

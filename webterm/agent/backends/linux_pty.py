@@ -21,18 +21,10 @@ import termios
 import time
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
-from ..detect import classify_proc
+from ..detect import _safe_exe, classify_proc
 from .base import PtyBackend
 
 _READ_SIZE = 64 * 1024
-
-
-def _safe_exe(proc) -> Optional[str]:
-    """``proc.exe()`` or None — it raises AccessDenied/ZombieProcess often."""
-    try:
-        return proc.exe()
-    except Exception:
-        return None
 
 
 def _proc_state(pid: int) -> Optional[str]:
@@ -307,16 +299,10 @@ class LinuxPtyBackend(PtyBackend):
                 return agent
         return None
 
-    def cwd(self) -> Optional[str]:
-        """The shell's current working directory via psutil, tracking the
-        user's ``cd``. Never raises."""
-        if self.pid is None:
-            return None
-        try:
-            import psutil
-            return psutil.Process(self.pid).cwd()
-        except Exception:
-            return None
+    # ``cwd()`` is inherited from PtyBackend: it reports the foreground agent's
+    # own working dir (falling back to the shell), so the AGENTS.md button opens
+    # the dir the agent actually runs in even when the shell sits a level up
+    # (issue #47).
 
     # -- psutil-free destroy-window fallback -----------------------------
 
