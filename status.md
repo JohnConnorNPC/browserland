@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F025 — Toggle tiling mode → **done** (FRONTEND inspection-verified, index.html not edited). `enterTilingMode()` (idx:13862-13868: set `mode='tiling'`+`savePrefs()`+`attachToStrip` floats→strip+`renderWorkspaces`+`requestRelayout`); `enterFloatingMode()` (13872-13880: `detachToFloat`). `toggle-tiling` action (13971-13973: isTilingMode()?float:tile). Ctrl+Alt+t: `DEFAULT_KEYBINDINGS['toggle-tiling']='Ctrl+Alt+t'` (2577) → capture keydown dispatcher (14044-14058) comboFromEvent→KEY_ACTION_BY_ID→act.run(). `#set-tiling` checkbox (1789), getElementById 14516, change handler 15590-15614 (local→enter*; remote→`entry.layout.mode` 15611), synced on panel open 15318-15320. Per-host: local `prefs._layout.mode` (getLayout 3608-3610, synced slice 2098/2177); remote `hostStateCache.get(hostId).layout.mode` via `remoteTilingMode` (15500-15504) — not browser-global. No gap, no code change.
+**Just handled:** F026 — Column width presets → **done** (FRONTEND inspection-verified, index.html not edited). `WIDTH_PRESETS=['1/3','1/2','2/3','max']` (idx:2947); `presetFraction()` maps 1/3→.333,1/2→.5,2/3→.667,max→1 (2948-2956); `PRESET_LABELS` ⅓/½/⅔/max (13841-13842); applied via `presetFraction(col.widthPreset)` (5097,5305). `setColumnPreset(win,preset)` (13843-13852): validate, set `loc.col.widthPreset`, delete custom `widthFrac` drag override, `savePrefs()`+`requestRelayout()`. Menu: `buildWindowMenu` (14151, gated `win.tiled` 14153) "Column width" header (14161) + per-preset items (14162-14168)→`setColumnPreset`. ✓ marker: `cur=loc.col.widthPreset` (14155), label prefix `(cur===p?'✓ ':' ')` (14164). No gap, no code change.
 
-**Next to pick:** F026 — Column width presets (index.html): ⅓ / ½ / ⅔ / max from title-bar menu, current marked with ✓. FRONTEND inspect-only.
+**Next to pick:** F027 — Column gutter drag-resize (index.html): drag the seam between columns for a custom width. FRONTEND inspect-only.
 
 **In-progress / failed-attempt markers:** none.
 
