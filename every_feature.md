@@ -49,7 +49,7 @@
 - [x] [F040] Pin / lock to screen — "Lock to screen (pin)" keeps a floating window from scrolling with the strip; unlock reverses (index.html)
 - [x] [F041] Color & rename — title-bar color button (palette/custom/recents); double-click an app window's title to rename (index.html)
 - [x] [F042] Arrange-all + undo — empty-desktop Cascade / Tile H / Tile V / Tile H+V / Minimize All with single-level Undo (index.html)
-- [ ] [F043] Lock Size (global) — snap all floating windows to default size and hide resize handles; unlock restores (index.html)
+- [x] [F043] Lock Size (global) — snap all floating windows to default size and hide resize handles; unlock restores (index.html)
 
 ## Window Types
 
