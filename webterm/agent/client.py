@@ -222,6 +222,7 @@ class BrokerClient:
                     wfc = data.get("wait_for_change")
                     wft = data.get("wait_for_text")
                     wfr = data.get("wait_for_regex")
+                    since = data.get("since")
                     self._on_screen_request(
                         _int(data.get("req"), -1),
                         str(data.get("view", "screen") or "screen"),
@@ -230,7 +231,8 @@ class BrokerClient:
                         _int(data.get("timeout_ms"), 0),
                         wait_for_text=wft if isinstance(wft, str) and wft else None,
                         wait_for_regex=wfr if isinstance(wfr, str) and wfr else None,
-                        wait_absent=bool(data.get("wait_absent", False)))
+                        wait_absent=bool(data.get("wait_absent", False)),
+                        since=since if isinstance(since, str) and since else None)
             else:
                 LOGGER.debug("unknown broker frame type %r", mtype)
 

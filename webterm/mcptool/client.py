@@ -145,7 +145,8 @@ class BrowserlandClient:
                     timeout_ms: int = 0,
                     wait_for_text: Optional[str] = None,
                     wait_for_regex: Optional[str] = None,
-                    wait_absent: bool = False) -> Dict[str, Any]:
+                    wait_absent: bool = False,
+                    since: Optional[str] = None) -> Dict[str, Any]:
         """Render a terminal's screen as plain text. ``view="scrollback"`` with
         ``lines>0`` prepends that many lines of history above the grid (#21).
 
@@ -153,8 +154,10 @@ class BrowserlandClient:
         read until the screen changes or the timeout elapses (#26).
         ``wait_for_text`` / ``wait_for_regex`` (+ ``wait_absent``) instead hold
         until the screen contains (or no longer contains) the match (#51), and
-        the reply carries ``matched``. The HTTP read timeout is stretched past
-        the broker's wait so the request doesn't give up before it answers."""
+        the reply carries ``matched``. ``since`` (a prior ``content_hash``)
+        requests a delta: the reply carries ``changed_rows`` + ``delta`` instead
+        of the full grid when the agent can diff it (#52). The HTTP read timeout
+        is stretched past the broker's wait so it doesn't give up early."""
         body: Dict[str, Any] = {"id": id}
         if view and view != "screen":
             body["view"] = view
@@ -170,6 +173,8 @@ class BrowserlandClient:
             body["wait_for_regex"] = wait_for_regex
         if wait_absent:
             body["wait_absent"] = True
+        if since:
+            body["since"] = since
         if waiting and timeout_ms:
             body["timeout_ms"] = int(timeout_ms)
             req_timeout = self._read_timeout + int(timeout_ms) / 1000.0

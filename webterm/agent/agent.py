@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import socket
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -38,6 +39,11 @@ _DETECT_INTERVAL = 1.5
 # this long, which also bounds how long one wait occupies a broker RPC slot
 # (RPC_MAX_INFLIGHT). The broker clamps the same ceiling.
 MAX_WAIT_MS = 15000
+# Delta read_screen (#52): how many recent frames to retain for row-diffing, and
+# the change ratio above which a delta is NOT worth it (mostly-changed grid ->
+# the row indices would cost more than they save, so return the full grid).
+_FRAME_CACHE_MAX = 16
+_DELTA_MAX_CHANGED_RATIO = 0.6
 
 
 def _content_hash(text: str) -> str:
@@ -182,6 +188,11 @@ class Agent:
         # shared Event/clear can swallow a wakeup across concurrent waiters.
         self._output_gen = 0
         self._output_waiters: List[asyncio.Future] = []
+        # Delta read_screen (#52): a small LRU of recently-returned frames,
+        # content_hash -> list[str] rows, so a follow-up read can ask for only
+        # the rows that changed since a prior hash (`since`) instead of the
+        # whole grid. Bounded against memory; misses fall back to a full grid.
+        self._frame_cache: "OrderedDict[str, List[str]]" = OrderedDict()
 
     async def run(self) -> int:
         """Run until the child exits; returns the child's exit code."""
@@ -436,7 +447,8 @@ class Agent:
                            timeout_ms: int = 0,
                            wait_for_text: Optional[str] = None,
                            wait_for_regex: Optional[str] = None,
-                           wait_absent: bool = False) -> None:
+                           wait_absent: bool = False,
+                           since: Optional[str] = None) -> None:
         # MCP /mcp/read: render the live screen as plain text. Each render
         # snapshots the ring + dims + live alt-screen state synchronously on the
         # loop (an immutable, consistent view), then renders off-loop (pyte can
@@ -482,12 +494,38 @@ class Agent:
 
         def _reply(r: dict, content_hash: str,
                    matched: Optional[bool] = None) -> None:
+            rows_list = r["text"].split("\n")
+            changed_rows = None
+            delta = False
+            # Delta mode (#52): if the caller passed a `since` hash we still
+            # hold a frame for, and this is a clean same-size CURRENT-screen
+            # render, return only the rows that changed. The change-ratio guard
+            # falls back to the full grid when most rows changed (a scrolled
+            # shell), so a delta is never bigger than the full read.
+            if (since and not r["degraded"] and r["view"] == "screen"):
+                base = self._frame_cache.get(since)
+                if base is not None and len(base) == len(rows_list):
+                    diff = [{"row": i, "text": rows_list[i]}
+                            for i in range(len(rows_list))
+                            if rows_list[i] != base[i]]
+                    # Worth it only when a minority of rows changed. The empty
+                    # diff (unchanged screen) is always worth it; otherwise the
+                    # ratio guard (no max(1,...), so a 1-row 100%-changed screen
+                    # is excluded) keeps a delta from ever exceeding the full
+                    # grid it replaces.
+                    if (not diff or len(diff)
+                            <= int(len(rows_list) * _DELTA_MAX_CHANGED_RATIO)):
+                        changed_rows = diff
+                        delta = True
+            # Remember this frame so a later `since=content_hash` can diff it.
+            self._remember_frame(content_hash, rows_list)
             self._enqueue("txt", protocol.screen_text_frame(
-                req, r["text"], r["cols"], r["rows"], degraded=r["degraded"],
-                alt_screen=r["alt_screen"], cursor=r["cursor"],
-                view=r["view"], history_lines=r["history_lines"],
+                req, ("" if delta else r["text"]), r["cols"], r["rows"],
+                degraded=r["degraded"], alt_screen=r["alt_screen"],
+                cursor=r["cursor"], view=r["view"],
+                history_lines=r["history_lines"],
                 app_cursor=self.state.app_cursor, content_hash=content_hash,
-                matched=matched))
+                matched=matched, delta=delta, changed_rows=changed_rows))
 
         async def _run() -> None:
             try:
@@ -553,6 +591,20 @@ class Agent:
         loop.create_task(_run())
 
     # -- internal -------------------------------------------------------------
+
+    def _remember_frame(self, content_hash: str, rows: List[str]) -> None:
+        """Cache a rendered frame's rows under its content_hash for a later
+        delta read (#52), as a bounded LRU. Empty hashes (degraded renders that
+        didn't compute one) are not cached — there's nothing to diff against."""
+        if not content_hash:
+            return
+        fc = self._frame_cache
+        if content_hash in fc:
+            fc.move_to_end(content_hash)
+        else:
+            fc[content_hash] = rows
+        while len(fc) > _FRAME_CACHE_MAX:
+            fc.popitem(last=False)
 
     def _enqueue(self, kind: str, payload) -> None:
         # While disconnected nothing is queued: the ring keeps history and

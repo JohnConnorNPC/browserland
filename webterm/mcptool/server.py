@@ -321,7 +321,7 @@ def list_profiles(host: Optional[str] = None) -> Dict[str, Any]:
 def read_screen(id: str, view: str = "screen", lines: int = 0,
                 wait_for_change: str = "", timeout_ms: int = 0,
                 wait_for_text: str = "", wait_for_regex: str = "",
-                wait_absent: bool = False) -> Dict[str, Any]:
+                wait_absent: bool = False, since: str = "") -> Dict[str, Any]:
     """Render a terminal's current screen as plain text. Pass a namespaced window
     id ("<host>:<int>") from list_terminals.
 
@@ -345,14 +345,25 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
         send_keys(id, ["Enter"])
         read_screen(id, wait_for_text="Ready", timeout_ms=5000)   # -> matched
     Note the search surface is the newline-joined grid, so a value wrapped
-    across two rows won't match. Omit all wait_* params for an immediate read."""
+    across two rows won't match. Omit all wait_* params for an immediate read.
+
+    DELTA (less to read) — to avoid re-reading the whole grid every call when
+    driving a TUI, pass the previous read's `content_hash` as `since`: if the
+    agent still holds that frame the result drops `text` and instead returns
+    `delta=true` + `changed_rows` ([{row, text}, ...] — only the rows that
+    differ), which you apply to your own copy of the screen. On a miss (frame
+    evicted, resized, or mostly changed) it returns the full grid with
+    `delta=false`, so always check `delta`. `content_hash` is always the full
+    screen's hash — feed it back as the next `since`. Combine with a wait mode
+    to wake on an event AND get only the delta in one call."""
     client, int_id = _route(id)
     return client.read_screen(int_id, view=view, lines=lines,
                               wait_for_change=wait_for_change or None,
                               timeout_ms=timeout_ms,
                               wait_for_text=wait_for_text or None,
                               wait_for_regex=wait_for_regex or None,
-                              wait_absent=wait_absent)
+                              wait_absent=wait_absent,
+                              since=since or None)
 
 
 @mcp.tool()
