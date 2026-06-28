@@ -2,7 +2,7 @@
 
 ## Core / Infrastructure (protocol, agent, broker)
 
-- [ ] [F001] Wire protocol frames — single source of truth for hello/title/resized/input/resize/snapshot_please JSON frames + binary ANSI/snapshot bytes (webterm/protocol.py)
+- [x] [F001] Wire protocol frames — single source of truth for hello/title/resized/input/resize/snapshot_please JSON frames + binary ANSI/snapshot bytes (webterm/protocol.py)
 - [ ] [F002] Linux PTY backend — pty.openpty + Popen + loop.add_reader, TIOCSCTTY so Ctrl-C works (webterm/agent/backends/linux_pty.py, base.py)
 - [ ] [F003] Windows PTY backend + auto-select — winpty.PTY reader thread; `auto` picks ConPTY when a console window exists else WinPTY; conpty/winpty force it (webterm/agent/backends/win_conpty.py, __init__.py)
 - [ ] [F004] Output ring buffer — bounded recent-output ring (default 262144 bytes) with eviction, the source for snapshots (webterm/agent/ringbuf.py)
