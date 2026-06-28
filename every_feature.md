@@ -10,7 +10,7 @@
 - [x] [F006] Snapshot rendering (raw + pyte) — tier-1 `ESC[0m ESC[2J ESC[H` + ring replay; optional tier-2 pyte settled-grid render via --snapshot-mode (webterm/agent/snapshot/raw.py, pyte_snap.py)
 - [x] [F007] Dependency-free bounded text-grid renderer — in-house emulator producing a bounded rows×cols grid for MCP read when pyte is absent (webterm/agent/snapshot/textgrid.py)
 - [x] [F008] OSC title sniffer — parse OSC title sequences split at any byte boundary, push live `title` frames (webterm/agent/titles.py)
-- [ ] [F009] Alt-screen + DECCKM tracking — track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys (webterm/agent/altscreen.py)
+- [x] [F009] Alt-screen + DECCKM tracking — track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys (webterm/agent/altscreen.py)
 - [ ] [F010] Foreground coding-agent detection — detect claude/codex/grok/opencode as the foreground command for the agent badge (webterm/agent/detect.py)
 - [ ] [F011] Live cwd tracking (psutil, best-effort) — report the shell's current working directory; degrades to None without psutil (webterm/agent/agent.py, config.py)
 - [ ] [F012] Per-window git status — surface git state of the window's cwd (webterm/agent/git_status.py)

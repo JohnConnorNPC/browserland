@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F008 — OSC title sniffer → **done**. `webterm/agent/titles.py` `OscTitleSniffer` is a byte-at-a-time stateful parser (partial `_param`/`_payload` buffers across feeds), recognizes OSC 0/2 with BOTH BEL (`\x07`) and ST (`\x1b\\`) terminators, ignores non-title OSC (param != 0/2), caps payload at 4 KiB (`_MAX_PAYLOAD`) abandoning to GROUND on overflow. Wired in `agent.py:270-275` → `protocol.title_frame` → `SessionState.title`. No code change. Verification: py_compile PASS; `pytest -k "title or osc or sniff"` → 69 passed/0 failed; behavioral a–f all PASS (a whole; b split across feeds; c introducer split mid-ESC; d ST terminator; e OSC 8 ignored; f 100k never-terminated → bounded at 4096, no emit).
+**Just handled:** F009 — Alt-screen + DECCKM tracking → **done**. `webterm/agent/altscreen.py` `DecModeSniffer` exposes `.alt_screen` (DECSET/RST 47/1047/1049) and `.app_cursor` (DECCKM mode 1) booleans updated by `feed(bytes)`; regex parses `;`-separated params numerically (combined params + leading-zeros safe; no `?470h`/`?10h` false positives); split introducers reassembled via 64-byte `_tail` carry. `agent.py` feeds every PTY chunk (L262), uses `.alt_screen` for snapshot screen-vs-scrollback, emits `mode_frame` + stores `state.app_cursor` on change (surfaced in read_screen + list_terminals/F080). No code change. Verification: py_compile PASS; `pytest -k "alt or altscreen or deckm or decckm or cursor or mode"` → 38 passed/0 failed; behavioral a–f all PASS (incl. legacy 47 & 1047, split reassembly, combined `?1049;1h`→both).
 
-**Next to pick:** F009 — Alt-screen + DECCKM tracking (webterm/agent/altscreen.py): track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys. First unchecked, no unmet deps.
+**Next to pick:** F010 — Foreground coding-agent detection (webterm/agent/detect.py): detect claude/codex/grok/opencode as the foreground command for the agent badge. First unchecked, no unmet deps.
 
 **In-progress / failed-attempt markers:** none.
 
