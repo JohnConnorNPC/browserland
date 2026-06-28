@@ -1,6 +1,22 @@
 Floating windows are free-moving, overlapping windows you can place anywhere on the desktop. This page covers how to move, resize, minimize, close, pin, recolor, and arrange them. For the snap-to-tile and pop-out gestures, see [[Snapping-and-Pop-out]].
 
+## Floating vs. snapped: what carries over
+
+Most of the controls on this page live on a window's **title-bar right-click menu** (or its color button / a keyboard shortcut), so they work the same whether the window is floating or **snapped into the tiling strip** — see [[Snapping-and-Pop-out]]. The exceptions are the ones that only make sense for a free-floating window: dragging to move or resize, pinning, and the whole-desktop arrange and size-lock actions.
+
+| Control | Works on a snapped (tiled) window? |
+|---|---|
+| **Minimize** / **Restore** | Yes |
+| **Close** / **Terminate** / **Delete** | Yes |
+| **Recolor** (color button) | Yes |
+| Minimize / close shortcuts (`Ctrl+Alt+m` / `Ctrl+Alt+w`) | Yes — they act on the focused window in either mode |
+| Move / resize by dragging | Floating only — a snapped window is sized by its column width and arranged in the strip (see [[Columns-and-Widths]]) |
+| **Lock to screen (pin)** | Floating only — snapped windows don't scroll with the strip, so there's nothing to pin |
+| Cascade / Tile / Minimize All / Lock Size | Floating only — these arrange the floating layer |
+
 ## Move and resize
+
+**Floating only.** Dragging applies to free-floating windows. A window that's **snapped into the tiling strip** is moved and sized through the strip instead — set its width with the column presets ([[Columns-and-Widths]]) and rearrange it with the strip actions ([[Arranging-Windows]]).
 
 - **Move** — Drag a floating window's title bar.
 - **Resize** — Drag its edges or corners.
@@ -9,7 +25,9 @@ Most of the remaining controls live on the **title-bar right-click menu** — ri
 
 ## Minimize, close, terminate, and delete
 
-A floating window's title-bar menu lets you get a window out of the way or close it. It's important to know that **closing is soft** — what actually happens depends on the window type.
+These actions are on **every** window's title-bar right-click menu, so they work the same whether the window is floating or **snapped into the tiling strip** — see [[Snapping-and-Pop-out]].
+
+A window's title-bar menu lets you get a window out of the way or close it. It's important to know that **closing is soft** — what actually happens depends on the window type.
 
 | Action | What it does |
 |---|---|
@@ -28,7 +46,7 @@ You can also minimize or close the focused window from the keyboard:
 | Minimize focused window | `Ctrl+Alt+m` |
 | Close focused window | `Ctrl+Alt+w` |
 
-These are rebindable — see [[Keyboard-Shortcuts]].
+These act on the focused window in either mode (floating or snapped), and they're rebindable — see [[Keyboard-Shortcuts]].
 
 ### Reopening a closed note
 
@@ -36,12 +54,16 @@ If you close a sticky note that has content, it isn't lost: a non-empty closed n
 
 ## Pin a window (lock to screen)
 
+**Floating only.** Pinning applies to floating windows. A window that's snapped into the tiling strip doesn't scroll with the strip in the first place, so there's nothing to pin — the **Lock to screen** item only appears on a floating window's menu.
+
 By default a floating window scrolls away with the tiling strip. To keep it put, use the title-bar right-click menu:
 
 - **Lock to screen (pin)** — The window stays in place and does **not** scroll away with the strip. This pins its *position*, not always-on-top.
 - **Unlock (scroll with strip)** — Reverses it, so the window scrolls with the strip again.
 
 ## Color and rename
+
+The **color button** is on every window's title bar, so **recolor works the same whether the window is floating or snapped** into the tiling strip.
 
 - **Recolor** — Use the **color button** in the window's title bar. You can pick from the palette, choose a custom color, or reuse a recent one.
 - **Rename** — Double-click an **app window's** title to rename it.
