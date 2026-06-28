@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F004 — Output ring buffer → **done**. `ByteRing` in `webterm/agent/ringbuf.py`: default cap 256*1024=262144 bytes, deque of chunks, FIFO chunk-granular eviction with an `evicted` flag, `get()` joins retained bytes; consumed by `agent.py` (`ring.get()`/`ring.evicted`) to build tier-1 snapshots via `snapshot/raw.py`. Intentional exception: a single append larger than cap is kept intact (avoid blank snapshot) — test-codified (`test_never_evicts_newest_chunk`), so NOT rewritten. No code change. Verification: py_compile PASS; `pytest -k "ring or buffer or ringbuf"` → 9 passed/0 failed; behavioral asserts a(default cap)/b(<cap retained in order)/c(>cap→tail==last cap bytes, evicted)/d(boundary-crossing chunks) all PASS.
+**Just handled:** F005 — Reconnecting WS producer client → **done**. `webterm/agent/client.py` reconnect loop `while not self._stopping` catches connect-failure + session-end so it survives broker restarts; backoff `_BACKOFF_INITIAL=0.5`/`_BACKOFF_CAP=10.0` via `min(b*2, cap)` → series [0.5,1,2,4,8,10,10], reset to 0.5 on successful connect; `_serve` re-sends hello every connect via `protocol.hello_frame(window_id,pid,title,cols,rows,…)` reading live `SessionState` (title from `_on_pty_data`, dims from `_on_resize`) — not captured-once; uses F001 builder. No code change. Verification: py_compile PASS; `pytest -k "client or reconnect or backoff or producer or agent"` → 21 passed/1 skipped/0 failed; backoff series helper-driven from real constants PASS.
 
-**Next to pick:** F005 — Reconnecting WS producer client (webterm/agent/client.py, agent.py): exponential backoff 0.5s→10s, re-hello with current title/dims, survives broker restarts. First unchecked, no unmet deps.
+**Next to pick:** F006 — Snapshot rendering (raw + pyte) (webterm/agent/snapshot/raw.py, pyte_snap.py): tier-1 `ESC[0m ESC[2J ESC[H` + ring replay; optional tier-2 pyte settled-grid render via --snapshot-mode. First unchecked, no unmet deps (builds on F004 ring, done).
 
 **In-progress / failed-attempt markers:** none.
 
