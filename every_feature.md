@@ -97,7 +97,7 @@
 - [x] [F075] send_keys control/escape + cursor keys — named keys, C-/M- chords; arrows as SS3 vs CSI from cached DECCKM in list_terminals (app.py, mcptool/server.py)
 - [x] [F076] Shipped MCP server + multi-host routing — webterm.mcptool stdio FastMCP: 8 tools (the 7 + `reset_terminal` #27 — mcp_info/list_terminals/list_profiles/read_screen/send_input/send_keys/reset_terminal/launch_terminal, test-pinned `test_tools_registered`), config (flag>env), `--hosts` namespaced `<host>:<int>` ids, BrowserlandError surfacing (webterm/mcptool/client.py, server.py, __main__.py)
 - [x] [F080] Build-version / stale-deploy reporting — `/mcp/info` returns the broker `version` (build_version()); each `/mcp/terminals` entry carries `version`, `app_cursor` (cached DECCKM read by send_keys F075), and `machine_host`; agent entries add a `stale` flag when their build differs from the broker's (webterm/broker/app.py, webterm/__init__.py)
-- [ ] [F081] mcptool token-file + routing errors — `--token-file` sidecar adds a 4th token tier (precedence --token > $BROWSERLAND_MCP_TOKEN > $WEB_TERMINAL_MCP_TOKEN > --token-file); `malformed_id`/`unknown_host` routing errors; per-host error aggregation so a down/failing host lands in `errors` without sinking the rest (webterm/mcptool/__main__.py, server.py)
+- [x] [F081] mcptool token-file + routing errors — `--token-file` sidecar adds a 4th token tier (precedence --token > $BROWSERLAND_MCP_TOKEN > $WEB_TERMINAL_MCP_TOKEN > --token-file); `malformed_id`/`unknown_host` routing errors; per-host error aggregation so a down/failing host lands in `errors` without sinking the rest (webterm/mcptool/__main__.py, server.py)
 
 ## Blocked
 
