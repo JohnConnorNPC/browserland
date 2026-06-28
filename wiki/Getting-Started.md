@@ -56,9 +56,13 @@ It opens as a full-screen panel with a tab per connected broker. Among the setti
 - **Browser-global settings** follow the browser you are sitting at — theme and background, terminal font, the clock and help-button toggles, the start-button label, restore-on-refresh, and the taskbar workspace filter.
 - **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own.
 
+<!-- help:ignore-start -->
+<!-- Cross-nav to other wiki pages — in-app Help navigates via its section rail,
+     not page links, so this is excluded from the in-app guide (GitHub-only). -->
 ## Next steps
 
 - [[Window-Modes]] — floating vs. tiling, the tiling strip, and switching between them.
 - [[Arranging-Windows]] — tab, split, and stack windows; the drag-to-merge drop-zone cheat sheet.
 - [[Taskbar]] — taskbar items, the launch (+) menu, fullscreen, and the clock.
 - [[Keyboard-Shortcuts]] — the full shortcut table and how to rebind keys (including **Toggle help**).
+<!-- help:ignore-end -->

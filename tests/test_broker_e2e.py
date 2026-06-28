@@ -400,6 +400,29 @@ def test_index_serves_windowed_page(broker_proc):
     assert "searchParams.set('token'" not in body
 
 
+def test_help_corpus_endpoint(broker_proc):
+    """The in-app Help guide fetches /help-corpus.json (issue #60): public
+    (no token), CORS-enabled, and shaped as typed sections/cards."""
+    _, _, base = broker_proc
+    status, headers, raw = _request("GET", f"{base}/help-corpus.json")
+    assert status == 200                              # public, no auth gate
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+    import json as _json
+    payload = _json.loads(raw)
+    sections = payload["sections"]
+    assert isinstance(sections, list) and sections
+    sec = sections[0]
+    assert set(sec) >= {"slug", "label", "order", "cards"}
+    card = sec["cards"][0]
+    assert set(card) >= {"title", "body", "search"}
+    # Body is typed plain data (blocks of typed spans), never an HTML string.
+    for block in card["body"]:
+        assert block["t"] in {"p", "bullet", "sub"}
+        for span in block["spans"]:
+            assert span["t"] in {"text", "strong", "code", "kbd"}
+            assert isinstance(span["v"], str)
+
+
 def test_cors_with_token(broker_proc):
     """With a token configured, ACAO * must ride on success AND on the
     401: without it a cross-origin login probe surfaces as a fetch

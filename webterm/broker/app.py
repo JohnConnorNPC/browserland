@@ -55,6 +55,7 @@ from .. import build_version, protocol
 from . import auth, relay
 from .launcher import LaunchError, Launcher
 from .registry import BrokerRegistry, run_producer_session
+from .help_corpus import HELP_CORPUS
 from .ui import INDEX_HTML
 
 LOGGER = logging.getLogger(__name__)
@@ -288,6 +289,13 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
 async def _index(request: Request):
     return html(INDEX_HTML)
+
+
+async def _help_corpus(request: Request):
+    # The in-app Help guide's static cards, parsed from wiki/*.md (issue #60).
+    # Public like "/" (help content is non-sensitive); built once at import in
+    # help_corpus.py, so a wiki edit needs a broker restart to show up.
+    return sanic_json(HELP_CORPUS)
 
 
 async def _handle_404(request: Request, exception):
@@ -1460,6 +1468,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "rev": new_state["rev"]})
 
     app.add_route(_index, "/", methods=["GET"])
+    app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")
     app.add_websocket_route(_control_ws, "/control")
     app.add_websocket_route(_producer_ws, "/browserland")

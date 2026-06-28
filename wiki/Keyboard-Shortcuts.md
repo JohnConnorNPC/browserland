@@ -11,6 +11,11 @@ The in-app guide (the "?" chip at the bottom-right of the taskbar) also injects 
 
 > **Toggle help is unbound by default.** The "Toggle help" action has no default key. Assign your own combo under **Control Panel → Keyboard shortcuts** if you want to open the in-app guide from the keyboard. (You can always open it by clicking the "?" chip at the bottom-right of the taskbar.)
 
+<!-- help:ignore-start -->
+<!-- The in-app Help guide already injects one live "Keyboard shortcuts" entry
+     per bindable action showing the user's CURRENT combo (or "Unbound"); a
+     static default table would duplicate and could contradict it. Excluded
+     from in-app Help only — still rendered on the GitHub wiki. -->
 ## Default bindings
 
 The table below lists every bindable action and its **default** binding. Rebind any of them as described above.
@@ -35,6 +40,7 @@ The table below lists every bindable action and its **default** binding. Rebind 
 | Toggle fullscreen | `Ctrl+Alt+f` |
 | Open control panel | `Ctrl+Alt+p` |
 | Toggle help | *(unbound by default)* |
+<!-- help:ignore-end -->
 
 ## What the actions do
 

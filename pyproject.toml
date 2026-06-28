@@ -32,7 +32,9 @@ browserland-mcp = "webterm.mcptool.__main__:main"
 include = ["webterm*"]
 
 [tool.setuptools.package-data]
-"webterm.broker" = ["*.html"]
+# index.html is the UI; help_corpus.json is the packaged fallback for the
+# in-app Help guide when wiki/ isn't shipped alongside the code (issue #60).
+"webterm.broker" = ["*.html", "*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

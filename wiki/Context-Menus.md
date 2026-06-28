@@ -17,9 +17,7 @@ A few rules apply everywhere:
 | Empty desktop / strip | Right-click the background (or empty taskbar) | [[Floating-Window-Controls]], [[Workspaces]] |
 | Launch (+) button | Right-click the `+` button | [[Taskbar]], [[Window-Types]] |
 
-## Surfaces
-
-### Window title bar
+## Window title bar
 
 Right-click a window's title bar. The menu adapts to whether the window is **tiled** or **floating**, and to whether it's a terminal or an app window (note, editor, file manager, task manager).
 
@@ -58,7 +56,7 @@ Close, terminate, delete, and pinning are detailed on [[Floating-Window-Controls
 
 > **Color and rename** aren't on this right-click menu. Recolor a window from the **color button** in its title bar (palette, custom, and recents), and **double-click** an app window's title to rename it — both covered on [[Floating-Window-Controls]].
 
-### Tab strip
+## Tab strip
 
 When windows are stacked as tabs in one tile, the tile shows a tab strip. The strip's `⊟` button untabs it:
 
@@ -67,7 +65,7 @@ When windows are stacked as tabs in one tile, the tile shows a tab strip. The st
 
 Click any tab to switch to that window. Tabs and untabbing are explained on [[Arranging-Windows]].
 
-### Taskbar item
+## Taskbar item
 
 Each open window has a taskbar button. Left-click focuses and raises it (or restores it if minimized). Right-click for per-window actions:
 
@@ -78,7 +76,7 @@ Each open window has a taskbar button. Left-click focuses and raises it (or rest
 
 To send a window to another workspace, use its **title-bar** menu (above). The taskbar is covered on [[Taskbar]].
 
-### Pager dot
+## Pager dot
 
 Right-click a workspace dot at the bottom of the taskbar:
 
@@ -89,7 +87,7 @@ Right-click a workspace dot at the bottom of the taskbar:
 
 Workspaces and the pager are covered on [[Workspaces]].
 
-### Empty desktop / strip
+## Empty desktop / strip
 
 Right-click the desktop background (or an empty part of the taskbar). The menu depends on the window mode.
 
@@ -110,7 +108,7 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 
 Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace list on [[Workspaces]].
 
-### Launch (+) button
+## Launch (+) button
 
 Left-click the `+` to launch the local broker's default terminal. Right-click it for the full launch menu:
 

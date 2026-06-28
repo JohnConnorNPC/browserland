@@ -976,6 +976,23 @@
             font-size: 12px; font-weight: bold; line-height: 1.3; color: var(--fg);
         }
         .app-help .help-entry-body { color: var(--fg-dim); line-height: 1.45; font-size: 12px; }
+        /* Wiki-sourced card body: typed blocks (paragraph / bullet / sub-heading)
+           rendered by helpRenderFrags (#60). */
+        .app-help .help-b { margin: 0 0 5px; }
+        .app-help .help-b:last-child { margin-bottom: 0; }
+        .app-help .help-b-li { padding-left: 12px; text-indent: -10px; }
+        .app-help .help-b-sub { font-weight: bold; color: var(--fg); margin-top: 8px; }
+        .app-help .help-b-dot { color: var(--accent); }
+        .app-help .help-code {
+            font-family: monospace; font-size: 11px;
+            padding: 1px 4px; border-radius: 3px;
+            background: color-mix(in srgb, var(--bg-3) 70%, black);
+            border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+            white-space: nowrap;
+        }
+        .app-help .help-entry-body .help-kbd {
+            display: inline-block; vertical-align: baseline; margin: 0 1px;
+        }
         .app-help .help-kbd {
             flex: 0 0 auto;
             padding: 2px 6px 3px;
@@ -14624,94 +14641,69 @@
         // ---- #40 in-app Help: a floating, searchable reference window -------
         // The "?" taskbar chip / the toggle-help hotkey / the (+) menu open a
         // single floating Help app window (appKind 'help', ephemeral like the
-        // task manager). Its corpus is mostly static prose plus a few entries
-        // GENERATED from live state (keybindings, launch profiles, MCP status);
-        // search is a case-insensitive substring over title+body+section+keys.
-        const HELP_ENTRIES_STATIC = [
-            { section: 'Getting started', title: 'Open this guide',
-              body: 'Click the "?" chip at the bottom-right of the taskbar, or bind a key to it under Control Panel -> Keyboard shortcuts (the "Toggle help" action). Type in the box above to filter every entry live.' },
-            { section: 'Getting started', title: 'Control Panel',
-              body: 'Open the Control Panel from the + (launch) button\'s right-click menu ("🎛 Control panel"), the desktop / taskbar right-click menu, or the "Open control panel" keyboard shortcut (Ctrl+Alt+p by default). It holds appearance, window mode, drag hold delay, hosts, MCP, and keyboard shortcuts. Appearance is per-browser; most other settings are per-host (a tab per broker).' },
-            { section: 'Layout modes', title: 'Floating vs. tiling',
-              body: 'Two window modes. Floating = free-moving, overlapping windows you place anywhere. Tiling = a niri-style horizontal strip of non-overlapping columns. Switch in Control Panel -> Window mode, or with the "Toggle tiling mode" shortcut.' },
-            { section: 'Layout modes', title: 'The tiling strip',
-              body: 'In tiling mode, windows live in columns along a strip that scrolls left/right. Scroll with the workspace scrollbar, by dragging near the strip edge, or with the focus/move-column shortcuts.' },
-            { section: 'Snapping & pop-out', title: 'Snap a floating window into the grid (hold-to-snap)',
-              body: 'While dragging a FLOATING window, hold it still for the dwell (default ~3s) to enter snap mode; drop zones light up; release to tile it. The top-left "return to floating" zone, or Escape, cancels. No drag needed if you just want it tiled: right-click the title bar and choose "Tile this window" to drop it straight into the strip.' },
-            { section: 'Snapping & pop-out', title: 'Pop a tiled window out to a float',
-              body: 'While dragging a TILED window, hold it still for the dwell to arm a "release to float" mode (a dashed outline + the bottom band appear); release to detach it as a floating window. Move on again to cancel and keep tiling; Escape aborts the drag. To skip the gesture, right-click the title bar and choose "Float this window" to detach it directly.' },
-            { section: 'Snapping & pop-out', title: 'Hold delay (configurable)',
-              body: 'The hold time for both gestures is set per host in Control Panel -> Drag hold delay. Set it to 0 to disable both the snap and the pop-out gestures entirely.' },
-            { section: 'Tabs', title: 'Tab windows together',
-              body: 'Alt-drag one window onto another to stack them as tabs sharing one tile. The title-bar menu also offers "Tab into left column" / "Tab into right column" (tab into the neighbor column\'s live tile) and "Tab this window" (seed or keep a tab strip in place). Click a tab in the tile\'s tab strip to switch between them.' },
-            { section: 'Tabs', title: 'Untab a window',
-              body: 'Drag a tab out of the tab strip to give it its own tile again, or use the title-bar / tab context menu: "Untab tile (split to rows)" breaks the tab strip into stacked rows, while "Untab cell (side by side)" drops a nested split-group\'s tabs out as adjacent side-by-side cells.' },
-            { section: 'Splits', title: 'Split side-by-side',
-              body: 'Drag a window onto the LEFT or RIGHT interior of another window to split that tile horizontally, placing the two side-by-side. Drag the gutter between panes to resize them.' },
-            { section: 'Splits', title: 'Un-split',
-              body: 'Use the window context menu to merge a split back together, or just drag a pane somewhere else. "Un-split row (split to rows)" instead explodes a split row into stacked rows.' },
-            { section: 'Stacks & rows', title: 'Stack windows as rows',
-              body: 'Drag a window onto another window\'s TOP or BOTTOM edge to stack them as rows within the same column. Drag the horizontal gutter to resize the rows.' },
-            { section: 'Columns & widths', title: 'Column width presets',
-              body: 'A tiled column can be sized to 1/3, 1/2, 2/3, or max width from the window context menu or width controls.' },
-            { section: 'Columns & widths', title: 'Move & focus columns',
-              body: 'Move the focused column left/right, and jump focus between columns, with the move-column / focus-column shortcuts. Drag a column\'s side gutter to resize it. The window context menu\'s "Move to own column" ejects a window that shares a column into its own, and "Move to new column" spawns a fresh column to its right — the click equivalent of dragging to a column edge.' },
-            { section: 'Drag-to-merge drop zones', title: 'Drop-zone cheat sheet',
-              body: 'While dragging, a highlighted overlay previews where the window will land: a column\'s far left/right edge = a NEW column; a window\'s top band = TAB into that tile; its interior left/right/top/bottom quadrants = a SPLIT; the bottom band of the desktop = FLOAT.' },
-            { section: 'Workspaces', title: 'Switch workspaces',
-              body: 'Click a pager dot at the bottom of the taskbar, or use the previous/next and "go to workspace 1-5" shortcuts. In tiling mode, right-clicking the empty strip or desktop also lists every workspace (with its column count) to jump to, plus a "New workspace" item. Each workspace is its own virtual desktop of windows.' },
-            { section: 'Workspaces', title: 'Send a window to a workspace',
-              body: 'Right-click a window\'s title bar to send it to another workspace (or a new one). "On all workspaces" keeps a floating window visible on every workspace.' },
-            { section: 'Workspaces', title: 'Rename / remove a workspace',
-              body: 'Right-click a pager dot to rename or remove that workspace. The same menu toggles whether the dots show workspace names or numbers ("Show names" / "Show numbers"), and its "New workspace" item appends a fresh empty workspace (also on the empty-desktop menu in tiling mode).' },
-            { section: 'Taskbar', title: 'Taskbar items',
-              body: 'Each open window has a taskbar button: click to focus and raise it (or restore it if minimized); right-click for per-window actions. Items for windows on other workspaces dim or hide (a Control Panel toggle).' },
-            { section: 'Taskbar', title: 'Launch button (+)',
-              body: 'Left-click the + to launch the default terminal; right-click it for the full profile / app menu, which includes "Open in folder…" — a directory picker (per host) that starts the host\'s default profile rooted at the chosen folder. Its label is configurable under Control Panel -> Start button.' },
-            { section: 'Taskbar', title: 'Fullscreen & clock',
-              body: 'The fullscreen button toggles the browser into fullscreen. The optional clock chip shows the date & time (Control Panel -> Date & time).' },
-            { section: 'Floating window controls', title: 'Move & resize',
-              body: 'Drag a floating window\'s title bar to move it; drag its edges or corners to resize.' },
-            { section: 'Floating window controls', title: 'Minimize, close, terminate',
-              body: 'Minimize hides a window to the taskbar (Restore brings it back). Close is SOFT: closing a terminal leaves its shell running so you can reattach later. For app windows Close depends on the type — a sticky note is kept only if it isn\'t empty (whitespace-only counts as empty; reopen kept notes from the "Closed notes" section at the bottom of the + launch menu); closing a text editor prompts to save any unsaved changes, then leaves your file on the host; a file manager, task manager, Control Panel, or help window is just dismissed. Terminate (terminals only) hard-kills the shell process tree. Delete (sticky notes and text editors only) skips Close\'s keep/save step and discards the window outright — a deleted sticky note is gone for good, while deleting an editor drops its in-browser buffer (including unsaved changes) but does NOT remove the file on the host. These actions are on the title-bar right-click menu; a window\'s taskbar-item menu has its own Minimize/Close/Terminate but no Delete.' },
-            { section: 'Floating window controls', title: 'Pin a window (lock to screen)',
-              body: 'A floating window\'s right-click menu has "Lock to screen (pin)": a pinned window stays put and does NOT scroll away with the tiling strip. (It pins position, not always-on-top.) "Unlock (scroll with strip)" reverses it.' },
-            { section: 'Floating window controls', title: 'Color & rename',
-              body: 'Recolor a window from the color button in its title bar (palette, custom, and recents). Double-click an app window\'s title to rename it.' },
-            { section: 'Window types & launching', title: 'Window types',
-              body: 'From the + menu you can open a terminal, a sticky note, a CodeMirror text editor, a file manager, and a task manager.' },
-            { section: 'Window types & launching', title: 'Terminals & working directory',
-              body: 'A terminal runs a shell on its broker host. The file manager and text editor open at the ACTIVE terminal\'s working directory and host, so they follow where you are.' },
-            { section: 'Hosts & multi-browser', title: 'Add a remote host',
-              body: 'Control Panel -> Hosts: enter a label, the broker URL, and its password (the broker\'s configured auth/MCP token). Each added host gets its own settings tab.' },
-            { section: 'Hosts & multi-browser', title: 'Host status chips',
-              body: 'A host\'s status chip shows ok / down / auth-needed / lease state. If it needs auth, re-enter the password to reconnect.' },
-            { section: 'Hosts & multi-browser', title: 'Single active browser (lease)',
-              body: 'Only one browser at a time is the active writer of a broker\'s layout (a lease). Another browser can take over with the "become active" prompt.' },
-            { section: 'MCP access', title: 'Per-window MCP access',
-              body: 'Each terminal\'s robot button sets that window\'s MCP access for agents: off, read, or read-write. The robot icon briefly flashes when an agent reads the screen or types into the terminal.' },
-            { section: 'MCP access', title: 'Enable MCP for a host',
-              body: 'Turn MCP on (and optionally allow launching terminals via MCP) per host in Control Panel -> MCP. A token authenticates the agent.' },
-            { section: 'Context menus', title: 'Right-click menus',
-              body: 'Right-click a window title bar, a taskbar item, a pager dot, the empty desktop, or the launch button to reach context actions: float/tile, tab/untab/un-split, stack & move columns, width presets, send-to-workspace, MCP access, arrange & lock-size, and more.' },
-            { section: 'Arrange & size (floating)', title: 'Arrange all floating windows',
-              body: 'Right-click the empty desktop in floating mode for one-shot arrangements: Cascade, Tile Horizontally, Tile Vertically, Tile H + V, and Minimize All Windows. The most recent arrange can be reversed with the "Undo <action>" item that appears afterward (single-level).' },
-            { section: 'Arrange & size (floating)', title: 'Lock window size',
-              body: 'The desktop right-click menu has a global "Lock Size" toggle: it snaps every floating window to the default size and hides the resize handles so windows can\'t be resized. "Unlock Size" restores free resizing.' },
-        ];
-        // Assemble the live corpus: static prose + generated entries, then cache
-        // a lower-cased haystack on each for the substring filter.
+        // task manager). The static cards come from the SINGLE-SOURCE wiki
+        // (wiki/*.md, parsed by webterm/broker/help_corpus.py and served at
+        // /help-corpus.json - issue #60); a few entries are still GENERATED from
+        // live state (keybindings, launch profiles, MCP status). Card bodies are
+        // typed plain-data blocks rendered by helpRenderFrags with DOM APIs only
+        // (createElement + textContent), never markup. Search is a
+        // case-insensitive substring over each card's precomputed search text
+        // plus its section label + keys.
+        let helpCorpusData = null;       // the {sections:[...]} payload, once fetched
+        let helpCorpusEntries = null;    // flattened wiki cards -> help entries
+        let helpCorpusPromise = null;    // in-flight fetch (dedupes fast re-opens)
+        // Flatten the wiki corpus into the flat per-card entry shape the renderer
+        // groups by slug: {slug, section(label), title, bodyFrags, search}.
+        function flattenHelpCorpus(data) {
+            const out = [];
+            if (!data || !Array.isArray(data.sections)) return out;
+            for (const sec of data.sections) {
+                for (const card of (sec.cards || [])) {
+                    out.push({
+                        slug: sec.slug, section: sec.label, title: card.title,
+                        bodyFrags: Array.isArray(card.body) ? card.body : [],
+                        search: card.search || '',
+                    });
+                }
+            }
+            return out;
+        }
+        // Fetch /help-corpus.json once and cache it. Resolves to the flattened
+        // entries (or [] on failure, so Help still shows its live entries and
+        // never goes blank). A single shared promise dedupes concurrent opens; a
+        // failure clears it so a later open retries.
+        function fetchHelpCorpus() {
+            if (helpCorpusEntries) return Promise.resolve(helpCorpusEntries);
+            if (helpCorpusPromise) return helpCorpusPromise;
+            helpCorpusPromise = fetch(hostHttpUrl(localHost(), '/help-corpus.json'))
+                .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+                .then(data => {
+                    helpCorpusData = data;
+                    helpCorpusEntries = flattenHelpCorpus(data);
+                    return helpCorpusEntries;
+                })
+                .catch(() => { helpCorpusPromise = null; return []; });
+            return helpCorpusPromise;
+        }
+        // A single-paragraph typed body block for the generated (non-wiki) entries.
+        function helpTextBlock(text) {
+            return { t: 'p', spans: [{ t: 'text', v: text == null ? '' : String(text) }] };
+        }
+        // Assemble the live corpus: wiki cards (once fetched) + generated entries,
+        // then cache a lower-cased haystack on each for the substring filter.
         function buildHelpEntries() {
-            const entries = HELP_ENTRIES_STATIC.slice();
+            const entries = (helpCorpusEntries || []).slice();
             try {
                 const map = (getSettings().keybindings) || {};
                 for (const act of KEY_ACTIONS) {
                     const combo = map[act.id] || '';
+                    const body = combo ? ('Bound to ' + combo + '.')
+                        : 'Unbound - assign a key in Control Panel -> Keyboard shortcuts.';
                     entries.push({
-                        section: 'Keyboard shortcuts', title: act.label,
-                        body: combo ? ('Bound to ' + combo + '.')
-                            : 'Unbound - assign a key in Control Panel -> Keyboard shortcuts.',
+                        slug: 'live-keyboard-shortcuts', section: 'Keyboard shortcuts',
+                        title: act.label, bodyFrags: [helpTextBlock(body)],
                         keys: combo || '',
+                        search: (act.label + ' ' + body).toLowerCase(),
                     });
                 }
             } catch (_) {}
@@ -14721,42 +14713,54 @@
                     const names = pc.profiles
                         .map(p => (typeof p === 'string' ? p : (p && (p.name || p.id))))
                         .filter(Boolean);
-                    if (names.length) entries.push({
-                        section: 'Launching', title: 'Terminal profiles (this host)',
-                        body: 'The + menu can launch: ' + names.join(', ') + '.'
-                            + (pc.default ? ' Default profile: ' + pc.default + '.' : ''),
-                    });
+                    if (names.length) {
+                        const body = 'The + menu can launch: ' + names.join(', ') + '.'
+                            + (pc.default ? ' Default profile: ' + pc.default + '.' : '');
+                        entries.push({
+                            slug: 'launching', section: 'Launching',
+                            title: 'Terminal profiles (this host)',
+                            bodyFrags: [helpTextBlock(body)],
+                            search: ('Terminal profiles (this host) ' + body).toLowerCase(),
+                        });
+                    }
                 }
             } catch (_) {}
             try {
                 const m = mcpConfigCache.get(localHost().id);
-                if (m) entries.push({
-                    section: 'MCP access', title: 'MCP status (this host)',
-                    body: 'MCP is currently ' + (m.enabled ? 'ENABLED' : 'disabled')
+                if (m) {
+                    const body = 'MCP is currently ' + (m.enabled ? 'ENABLED' : 'disabled')
                         + '; default mode for new windows: ' + (m.default_mode || 'off')
                         + '; launching via MCP is ' + (m.allow_launch ? 'allowed' : 'blocked')
-                        + '. Change these in Control Panel -> MCP.',
-                });
+                        + '. Change these in Control Panel -> MCP.';
+                    entries.push({
+                        slug: 'mcp-and-ai-agents', section: 'MCP & AI Agents',
+                        title: 'MCP status (this host)',
+                        bodyFrags: [helpTextBlock(body)],
+                        search: ('MCP status (this host) ' + body).toLowerCase(),
+                    });
+                }
             } catch (_) {}
             for (const e of entries) {
-                e._hay = ((e.title || '') + ' ' + (e.body || '') + ' '
-                    + (e.section || '') + ' ' + (e.keys || '')).toLowerCase();
+                e._hay = ((e.search || '') + ' ' + (e.section || '') + ' '
+                    + (e.keys || '')).toLowerCase();
             }
             return entries;
         }
-        // Per-section rail/header glyph — a quick visual anchor, not decoration.
-        // Unknown sections fall back to a neutral dot.
+        // Per-section rail/header glyph, keyed by section SLUG (the stable id),
+        // never the display label. Unknown sections fall back to a neutral dot.
         const HELP_SECTION_ICONS = {
-            'Getting started': '★', 'Layout modes': '▦', 'Snapping & pop-out': '⤢',
-            'Tabs': '❐', 'Splits': '◧', 'Stacks & rows': '☰', 'Columns & widths': '▥',
-            'Drag-to-merge drop zones': '⊕', 'Workspaces': '⊞', 'Taskbar': '▭',
-            'Floating window controls': '❖', 'Window types & launching': '＋',
-            'Hosts & multi-browser': '⌂', 'MCP access': '◆', 'Context menus': '☰',
-            'Arrange & size (floating)': '▦', 'Keyboard shortcuts': '⌨', 'Launching': '＋',
+            'getting-started': '★', 'keyboard-shortcuts': '⌨',
+            'window-modes': '▦', 'arranging-windows': '❐',
+            'columns-and-widths': '▥', 'snapping-and-pop-out': '⤢',
+            'floating-window-controls': '❖', 'workspaces': '⊞',
+            'taskbar': '▭', 'context-menus': '☰', 'window-types': '＋',
+            'hosts-and-multi-browser': '⌂', 'mcp-and-ai-agents': '◆',
+            // Generated (non-wiki) sections:
+            'live-keyboard-shortcuts': '⌨', 'launching': '＋',
         };
-        function helpSectionIcon(name) {
-            return Object.prototype.hasOwnProperty.call(HELP_SECTION_ICONS, name)
-                ? HELP_SECTION_ICONS[name] : '•';
+        function helpSectionIcon(slug) {
+            return Object.prototype.hasOwnProperty.call(HELP_SECTION_ICONS, slug)
+                ? HELP_SECTION_ICONS[slug] : '•';
         }
         // Append `text` to `el`, wrapping case-insensitive matches of `q` in a
         // <mark> so the user sees WHY a result matched. Text nodes only (never
@@ -14775,6 +14779,42 @@
                 pos = idx + q.length;
             }
             if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
+        }
+        // Render a typed-fragment card body (from the wiki corpus) into `el`
+        // using DOM APIs only: each block is a paragraph / bullet / sub-heading
+        // of typed inline spans (text / strong / code / kbd). Matches of `q` are
+        // wrapped via helpAppendHighlighted. This is the XSS-safety boundary —
+        // wiki text is only ever added as text nodes, never parsed as markup.
+        function helpRenderFrags(el, blocks, q) {
+            if (!Array.isArray(blocks)) return;
+            for (const blk of blocks) {
+                const line = document.createElement('div');
+                line.className = 'help-b help-b-' +
+                    (blk.t === 'bullet' ? 'li' : blk.t === 'sub' ? 'sub' : 'p');
+                if (blk.t === 'bullet') {
+                    const dot = document.createElement('span');
+                    dot.className = 'help-b-dot'; dot.textContent = '• ';
+                    line.appendChild(dot);
+                }
+                for (const sp of (blk.spans || [])) {
+                    if (sp.t === 'strong') {
+                        const node = document.createElement('strong');
+                        helpAppendHighlighted(node, sp.v, q); line.appendChild(node);
+                    } else if (sp.t === 'code') {
+                        const node = document.createElement('code');
+                        node.className = 'help-code';
+                        helpAppendHighlighted(node, sp.v, q); line.appendChild(node);
+                    } else if (sp.t === 'kbd') {
+                        const node = document.createElement('span');
+                        node.className = 'help-kbd';
+                        node.textContent = sp.v == null ? '' : String(sp.v);
+                        line.appendChild(node);
+                    } else {
+                        helpAppendHighlighted(line, sp.v, q);
+                    }
+                }
+                el.appendChild(line);
+            }
         }
         function markHelpSeen() {
             try {
@@ -14807,10 +14847,15 @@
             const entries = (win._helpCorpus || []).filter(
                 e => !q || (e._hay || '').indexOf(q) !== -1);
             h.clearBtn.classList.toggle('show', !!raw.length);
-            const order = []; const bySection = new Map();
+            // Group by section SLUG (stable id), remembering each slug's display
+            // label, preserving first-seen order.
+            const order = []; const bySlug = new Map(); const labelOf = new Map();
             for (const e of entries) {
-                if (!bySection.has(e.section)) { bySection.set(e.section, []); order.push(e.section); }
-                bySection.get(e.section).push(e);
+                if (!bySlug.has(e.slug)) {
+                    bySlug.set(e.slug, []); labelOf.set(e.slug, e.section || e.slug);
+                    order.push(e.slug);
+                }
+                bySlug.get(e.slug).push(e);
             }
             const n = entries.length;
             h.countEl.textContent = q
@@ -14830,19 +14875,20 @@
                 h.scrollEl.appendChild(empty);
                 return;
             }
-            order.forEach((sec, i) => {
+            order.forEach((slug, i) => {
                 const secId = 'hsec-' + i;
+                const label = labelOf.get(slug);
                 const rb = document.createElement('button');
                 rb.type = 'button';
                 rb.className = 'help-rail-btn';
                 rb.dataset.target = secId;
                 const ric = document.createElement('span');
-                ric.className = 'help-rail-ic'; ric.textContent = helpSectionIcon(sec);
+                ric.className = 'help-rail-ic'; ric.textContent = helpSectionIcon(slug);
                 const rlab = document.createElement('span');
-                rlab.className = 'help-rail-label'; rlab.textContent = sec;
+                rlab.className = 'help-rail-label'; rlab.textContent = label;
                 const rcnt = document.createElement('span');
                 rcnt.className = 'help-rail-count';
-                rcnt.textContent = String(bySection.get(sec).length);
+                rcnt.textContent = String(bySlug.get(slug).length);
                 rb.appendChild(ric); rb.appendChild(rlab); rb.appendChild(rcnt);
                 rb.addEventListener('click', () => {
                     const target = h.scrollEl.querySelector('#' + secId);
@@ -14856,18 +14902,18 @@
                 const head = document.createElement('div');
                 head.className = 'help-section-header';
                 const sic = document.createElement('div');
-                sic.className = 'help-section-icon'; sic.textContent = helpSectionIcon(sec);
+                sic.className = 'help-section-icon'; sic.textContent = helpSectionIcon(slug);
                 const stitle = document.createElement('div');
-                stitle.className = 'help-section-title'; stitle.textContent = sec;
+                stitle.className = 'help-section-title'; stitle.textContent = label;
                 const scount = document.createElement('div');
                 scount.className = 'help-section-count';
-                scount.textContent = String(bySection.get(sec).length);
+                scount.textContent = String(bySlug.get(slug).length);
                 head.appendChild(sic); head.appendChild(stitle); head.appendChild(scount);
                 secDiv.appendChild(head);
 
                 const grid = document.createElement('div');
                 grid.className = 'help-entry-grid';
-                for (const e of bySection.get(sec)) {
+                for (const e of bySlug.get(slug)) {
                     const card = document.createElement('div');
                     card.className = 'help-entry';
                     const headRow = document.createElement('div');
@@ -14883,10 +14929,10 @@
                         headRow.appendChild(kbd);
                     }
                     card.appendChild(headRow);
-                    if (e.body) {
+                    if (e.bodyFrags && e.bodyFrags.length) {
                         const b = document.createElement('div');
                         b.className = 'help-entry-body';
-                        helpAppendHighlighted(b, e.body, q);
+                        helpRenderFrags(b, e.bodyFrags, q);
                         card.appendChild(b);
                     }
                     grid.appendChild(card);
@@ -15151,9 +15197,12 @@
             const emptyMsg = document.getElementById('taskbar-empty');
             if (emptyMsg) emptyMsg.remove();
 
-            win._helpCorpus = buildHelpEntries();   // snapshot live state once
+            win._helpCorpus = buildHelpEntries();   // live entries render immediately
             renderHelpInto(win, '');
-            // Warm any cold generated sources (profiles / MCP), then re-render.
+            // Fetch the wiki-sourced static cards (#60) + warm cold generated
+            // sources (profiles / MCP); re-render as each resolves. The live
+            // entries above mean Help is never blank while these load.
+            try { fetchHelpCorpus().then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchProfiles(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchMcpConfig(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
 

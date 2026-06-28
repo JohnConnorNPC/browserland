@@ -70,6 +70,9 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 
 Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`. The host part matches the name of the host the terminal belongs to, so one MCP server can front several brokers at once. See [[Hosts-and-Multi-Browser]] for how hosts are named.
 
+<!-- help:ignore-start -->
+<!-- External-link cross-nav (README / TECHNICAL / mcptool) — not useful inside
+     the in-app guide, which is the desktop's own help. GitHub-only. -->
 ## Reference
 
 This page is the user-facing summary; it does not duplicate the full HTTP contract, error table, or config sidecar. For those, see:
@@ -77,3 +80,4 @@ This page is the user-facing summary; it does not duplicate the full HTTP contra
 - README → **MCP & AI agent access**: <https://github.com/JohnConnorNPC/browserland/blob/main/README.md#mcp--ai-agent-access>
 - Technical reference: <https://github.com/JohnConnorNPC/browserland/blob/main/docs/TECHNICAL.md>
 - The shipped stdio MCP server (`webterm.mcptool`): <https://github.com/JohnConnorNPC/browserland/blob/main/webterm/mcptool/README.md>
+<!-- help:ignore-end -->
