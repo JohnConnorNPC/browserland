@@ -80,7 +80,7 @@
 ## Multi-host
 
 - [x] [F063] Add remote host — Control Panel → Hosts: label/URL/password; browser connects directly cross-origin; per-host settings tab (index.html, app.py)
-- [ ] [F064] Host status chips — per-host taskbar chips ok / down / auth-needed (click to log in) / lease (click to take over); toggle host windows (index.html)
+- [x] [F064] Host status chips — per-host taskbar chips ok / down / auth-needed (click to log in) / lease (click to take over); toggle host windows (index.html)
 
 ## MCP / AI Agents
 
