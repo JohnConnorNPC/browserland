@@ -84,7 +84,7 @@
 
 ## MCP / AI Agents
 
-- [ ] [F065] MCP HTTP core + token gating — `GET /mcp/info` `/mcp/terminals` `/mcp/profiles`, master enable + bearer/query MCP token (distinct from auth_token), error table (webterm/broker/app.py)
+- [x] [F065] MCP HTTP core + token gating — `GET /mcp/info` `/mcp/terminals` `/mcp/profiles`, master enable + bearer/query MCP token (distinct from auth_token), error table (webterm/broker/app.py)
 - [ ] [F066] Access modes — effective per-window mode off/read/readwrite over global default_mode; off hides, read observes, readwrite types (webterm/broker/app.py)
 - [ ] [F067] Per-window MCP override + robot button — title-bar/right-click robot sets off/read/read-write via `POST /session/mcp` (in-memory); icon flashes on read/type (index.html, app.py)
 - [ ] [F068] allow_launch + /mcp/launch — separate `allow_launch` gate; `POST /mcp/launch` reuses the same server-validated launch shape as F019 (profile/cols/rows/title + a validated cwd), 200/202, error cases (webterm/broker/app.py, launcher.py)
