@@ -37,7 +37,7 @@
 - [x] [F028] Move & focus columns (keyboard) — focus/move column left/right, bringing off-screen columns into view (index.html)
 - [x] [F029] Eject column — "Move to own column" (un-share a stacked column) and "Move to new column" (spawn column to the right) (index.html)
 - [x] [F030] Tabs — Alt-drag to stack windows as tabs in one tile; tab strip switches; "Tab into left/right column" / "Tab this window" (index.html)
-- [ ] [F031] Untab — "Untab tile (split to rows)" and "Untab cell (side by side)"; tab-strip ⊟ button equivalents; drag a tab out (index.html)
+- [x] [F031] Untab (menu + ⊟ button) — "Untab tile (split to rows)" `untabTile`, "Untab cell (side by side)" `nestedUntabCell`, and the tab-strip ⊟ button — all persist+relayout. NOTE: the "drag a tab out" gesture is split off to F082 (Blocked) — NOT implemented though in-app help (idx:14647) advertises it (index.html)
 - [ ] [F032] Splits — drop on a window's left/right interior for side-by-side panes; drag the gutter to resize; un-split/merge (index.html)
 - [ ] [F033] Stacks (rows) — drop on top/bottom edge to stack as rows in a column; horizontal gutter resize (index.html)
 - [ ] [F034] Drop-zone overlay cheat sheet — live highlighted preview of new-column / tab / split / split-rows / float landing zones while dragging (index.html)
@@ -98,3 +98,7 @@
 - [ ] [F076] Shipped MCP server + multi-host routing — webterm.mcptool stdio FastMCP: 7 tools, config (flag>env), `--hosts` namespaced `<host>:<int>` ids, BrowserlandError surfacing (webterm/mcptool/client.py, server.py, __main__.py)
 - [ ] [F080] Build-version / stale-deploy reporting — `/mcp/info` returns the broker `version` (build_version()); each `/mcp/terminals` entry carries `version`, `app_cursor` (cached DECCKM read by send_keys F075), and `machine_host`; agent entries add a `stale` flag when their build differs from the broker's (webterm/broker/app.py, webterm/__init__.py)
 - [ ] [F081] mcptool token-file + routing errors — `--token-file` sidecar adds a 4th token tier (precedence --token > $BROWSERLAND_MCP_TOKEN > $WEB_TERMINAL_MCP_TOKEN > --token-file); `malformed_id`/`unknown_host` routing errors; per-host error aggregation so a down/failing host lands in `errors` without sinking the rest (webterm/mcptool/__main__.py, server.py)
+
+## Blocked
+
+- [ ] [F082] Untab: drag a tab out of the strip — DOC/BEHAVIOR GAP (split from F031): in-app help (index.html:14647-14648) promises "Drag a tab out of the tab strip to give it its own tile again", but no per-tab drag-out is implemented (`.strip-tab` mousedown only stopPropagation, click switches activeTab; `dataset.tabKey` set but never read by a drag consumer; strip-background drag moves the whole group; `startTiledDrag` has no single-tab detach mode). BLOCKED: resolving needs an index.html edit (either implement single-tab drag-out detach, OR remove the stale help claim), deferred because a pre-existing uncommitted index.html change blocks clean per-feature frontend commits — needs a human decision on which way to resolve (index.html)
