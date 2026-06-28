@@ -71,7 +71,7 @@
 - [x] [F056] Fullscreen toggle — taskbar ⛶ button and Ctrl+Alt+f (index.html)
 - [x] [F057] Clock chip — optional bottom-right date & time readout (off by default) (index.html)
 - [x] [F058] In-app help guide — "?" chip opens a live-search interface guide injecting one entry per shortcut + MCP status (MCP-status row depends on F065) (index.html)
-- [ ] [F059] Keyboard shortcuts + rebinding — full default bindings table, per-host rebinding in Control Panel, Toggle help unbound by default (index.html)
+- [x] [F059] Keyboard shortcuts + rebinding — full default bindings table, per-host rebinding in Control Panel, Toggle help unbound by default (index.html)
 - [ ] [F060] Control Panel — full-screen panel, a tab per connected broker, all settings sections (index.html)
 - [ ] [F061] Appearance settings — theme, background pattern, terminal font, clock/help toggles (index.html)
 - [ ] [F062] Settings persistence — browser-global vs per-host settings split, restore-on-refresh, taskbar workspace filter; settings+layout synced server-side via the /state store (F077), not localStorage-only (index.html)
