@@ -30,7 +30,7 @@
 ## Window Management (frontend, index.html)
 
 - [x] [F023] Floating windows — free move via title-bar drag and resize via edges/corners; overlapping z-order (index.html)
-- [ ] [F024] Tiling mode + scrolling strip — niri-style horizontal strip of non-overlapping columns; strip scrolls (scrollbar, drag-to-edge) (index.html)
+- [x] [F024] Tiling mode + scrolling strip — niri-style horizontal strip of non-overlapping columns; strip scrolls (scrollbar, drag-to-edge) (index.html)
 - [ ] [F025] Toggle tiling mode — per-host floating↔tiling toggle (Ctrl+Alt+t and Control Panel) (index.html)
 - [ ] [F026] Column width presets — ⅓ / ½ / ⅔ / max from title-bar menu, current marked with ✓ (index.html)
 - [ ] [F027] Column gutter drag-resize — drag the seam between columns for a custom width (index.html)
