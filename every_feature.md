@@ -36,7 +36,7 @@
 - [x] [F027] Column gutter drag-resize — drag the seam between columns for a custom width (index.html)
 - [x] [F028] Move & focus columns (keyboard) — focus/move column left/right, bringing off-screen columns into view (index.html)
 - [x] [F029] Eject column — "Move to own column" (un-share a stacked column) and "Move to new column" (spawn column to the right) (index.html)
-- [ ] [F030] Tabs — Alt-drag to stack windows as tabs in one tile; tab strip switches; "Tab into left/right column" / "Tab this window" (index.html)
+- [x] [F030] Tabs — Alt-drag to stack windows as tabs in one tile; tab strip switches; "Tab into left/right column" / "Tab this window" (index.html)
 - [ ] [F031] Untab — "Untab tile (split to rows)" and "Untab cell (side by side)"; tab-strip ⊟ button equivalents; drag a tab out (index.html)
 - [ ] [F032] Splits — drop on a window's left/right interior for side-by-side panes; drag the gutter to resize; un-split/merge (index.html)
 - [ ] [F033] Stacks (rows) — drop on top/bottom edge to stack as rows in a column; horizontal gutter resize (index.html)
