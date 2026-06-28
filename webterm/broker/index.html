@@ -515,6 +515,14 @@
         }
         .term-window .app-toolbar button:hover { background: #333; border-color: #6a8; }
         .term-window .app-toolbar button.on { background: #2f5d7d; border-color: #4aa3ff; color: #fff; }
+        /* Host picker (#46): a mode control — distinct from the action buttons,
+           and a long host label ellipsizes instead of blowing out the toolbar. */
+        .term-window .app-toolbar .app-host-btn {
+            font-family: monospace; max-width: 40%;
+            background: #242b33; border-color: #555;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .term-window .app-toolbar .app-host-btn:hover { border-color: #4aa3ff; }
         .term-window .app-toolbar .app-file-name {
             margin-left: auto; color: #aaa; font-family: monospace;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 48%;
@@ -676,9 +684,23 @@
         .term-window.app-fm .app-fm-pane.drop-hover {
             background: rgba(74,163,255,0.12);
         }
+        /* Pane header (#46): per-pane host picker + the absolute cwd. */
+        .term-window.app-fm .app-fm-head {
+            display: flex; align-items: stretch; gap: 4px;
+            background: rgba(0,0,0,0.25);
+            border-bottom: 1px solid var(--bg-3);
+        }
+        .term-window.app-fm .app-fm-hostbtn {
+            flex: 0 0 auto; max-width: 50%; margin: 2px;
+            background: #242b33; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #cfe3ff; font: 11px monospace; padding: 1px 6px;
+            cursor: pointer; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .term-window.app-fm .app-fm-hostbtn:hover { border-color: #4aa3ff; }
         .term-window.app-fm .app-fm-path {
-            font: 11px monospace; padding: 3px 6px;
-            background: rgba(0,0,0,0.25); color: var(--fg-dim);
+            flex: 1 1 auto; align-self: center;
+            font: 11px monospace; padding: 3px 6px; color: var(--fg-dim);
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .term-window.app-fm .app-fm-list {
@@ -690,6 +712,9 @@
         }
         .term-window.app-fm .app-fm-row:hover { background: #2a2a2a; }
         .term-window.app-fm .app-fm-row.sel { background: #2f5d7d; color: #fff; }
+        /* Cross-pane transfer (#46): a file row can be dragged to the other pane. */
+        .term-window.app-fm .app-fm-row[draggable="true"] { cursor: grab; }
+        .term-window.app-fm .app-fm-row.dragging { opacity: 0.45; }
         .term-window.app-fm .app-fm-row .fm-name {
             flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
         }
@@ -2491,6 +2516,12 @@
                 // strings for notes/editors (which never read them back).
                 fmLeft: win.fmLeft || '',
                 fmRight: win.fmRight || '',
+                // File-manager-only per-pane host (#46): split view can straddle
+                // two brokers, so each pane persists its OWN host. Empty for
+                // notes/editors; an old FM record without these back-fills both
+                // panes from fileHostId on restore (openFileManagerWindow).
+                fmLeftHostId: win.fmLeftHostId || '',
+                fmRightHostId: win.fmRightHostId || '',
             };
             saveAppStore();
         }
@@ -6295,6 +6326,15 @@
             // it may have died on a 4401 before the token was entered. For the
             // HOME broker this is what un-blocks the deferred boot / overlay.
             try { openControlWs(host); } catch (_) {}
+            // App windows (text editor / file manager) carry hostId 'app', so
+            // the terminal-healing loop below never reaches them. Notify any
+            // file tool bound to the host that just authenticated so it can
+            // refresh its view in place rather than wait for a manual retry
+            // (#46). Wrapped per-window so one bad hook can't break the rest.
+            for (const win of windows.values()) {
+                if (win.disposed || !win._onHostAuth) continue;
+                try { win._onHostAuth(host.id); } catch (_) {}
+            }
             // Heal in place: re-dial THIS host's windows that died on auth
             // (or are just dead) — the relay re-snapshots on attach.
             for (const win of windows.values()) {
@@ -8524,7 +8564,8 @@
             // numbers + a right-aligned filename + dirty dot). Built here; wired
             // below once the window object exists.
             let toolbar = null, newBtn, openBtn, saveBtn, saveAsBtn, wrapBtn,
-                lineNumBtn, fileNameEl, dirtyEl;
+                lineNumBtn, fileNameEl, dirtyEl, hostBtn = null,
+                folderBtn = null;
             if (!isNote) {
                 toolbar = document.createElement('div');
                 toolbar.className = 'app-toolbar';
@@ -8541,6 +8582,26 @@
                 saveAsBtn = mkBtn('Save As', 'save to a new path');
                 wrapBtn = mkBtn('Wrap', 'toggle word wrap');
                 lineNumBtn = mkBtn('#', 'toggle line numbers');
+                // Host picker (#46): which broker this editor's Open/Save dial.
+                // Generic single-doc editors only — an agent-docs (tabbed)
+                // window is bound to one folder's docs on one host, so a
+                // window-level host switch makes no sense there (it would have
+                // to detach every tab). `docs` gates that exactly as New/Open/
+                // Save As are hidden for tabbed windows just below.
+                if (!docs) {
+                    hostBtn = mkBtn('', 'switch which host this editor '
+                        + 'reads and writes');
+                    hostBtn.className = 'app-host-btn';
+                }
+                // Re-home / choose-folder (#46 follow-up): point THIS window at a
+                // chosen folder (file tools only — does NOT move the terminal or
+                // the agent). On an agent-docs (tabbed) window it re-reads
+                // AGENTS.md/CLAUDE.md from the new folder; on a generic editor it
+                // re-roots where Open/Save browse. Present for both.
+                folderBtn = mkBtn('', docs
+                    ? 'edit a different folder’s AGENTS.md / CLAUDE.md'
+                    : 'choose the folder this editor opens and saves in');
+                folderBtn.className = 'app-host-btn';
                 fileNameEl = document.createElement('span');
                 fileNameEl.className = 'app-file-name';
                 dirtyEl = document.createElement('span');
@@ -8551,6 +8612,8 @@
                 toolbar.appendChild(saveAsBtn);
                 toolbar.appendChild(wrapBtn);
                 toolbar.appendChild(lineNumBtn);
+                if (hostBtn) toolbar.appendChild(hostBtn);
+                if (folderBtn) toolbar.appendChild(folderBtn);
                 toolbar.appendChild(fileNameEl);
                 toolbar.appendChild(dirtyEl);
                 // Agent-docs windows edit a FIXED pair of files (AGENTS.md +
@@ -8897,6 +8960,88 @@
                 }
                 if (win._refreshTabBar) win._refreshTabBar();
                 saveAppWindow(win);
+            };
+
+            // Re-home (#46 follow-up): re-point a tabbed agent-docs window at a
+            // NEW folder on the SAME host — re-read AGENTS.md + CLAUDE.md there
+            // and replace the two file tabs IN PLACE, preserving the window, its
+            // placement and tab group. UI-only: the terminal/agent is untouched.
+            win._reHomeDocs = async (newCwd) => {
+                if (!win.tabs) return;
+                newCwd = String(newCwd || '');
+                if (!newCwd || newCwd === win.docsCwd) return;
+                // Don't silently discard unsaved edits in the file tabs.
+                win._captureActiveDoc();
+                const fileDocs = win.tabs.filter(d => d.kind === 'file');
+                if (fileDocs.some(d => d.dirty)) {
+                    if (!confirm('Re-home this window to:\n' + newCwd
+                        + '\n\nUnsaved changes in the AGENTS.md / CLAUDE.md tabs '
+                        + 'will be discarded.')) return;
+                }
+                const hid = win.fileHostId || 'local';
+                const host = hostById(hid) || localHost();
+                const agentsPath = joinNative(newCwd, 'AGENTS.md');
+                const claudePath = joinNative(newCwd, 'CLAUDE.md');
+                // Generation guard: if a SECOND re-home starts while these reads
+                // are in flight, the later one wins — an out-of-order completion
+                // of this (now stale) call must not clobber the newer folder.
+                const seq = (win._reHomeSeq = (win._reHomeSeq || 0) + 1);
+                const [aRes, cRes] = await Promise.all([
+                    fileApiPost('/file/read', { path: agentsPath }, host),
+                    fileApiPost('/file/read', { path: claudePath }, host),
+                ]);
+                if (win.disposed || seq !== win._reHomeSeq) return;
+                if ((aRes && aRes.error === 'auth_required')
+                    || (cRes && cRes.error === 'auth_required')) {
+                    promptFileHostAuth(host); return;
+                }
+                // A real read error (not "doesn't exist yet") aborts, leaving the
+                // window on its old folder.
+                if (aRes && !aRes.ok && aRes.error !== 'not_found') {
+                    showNotice('re-home failed: ' + ((aRes && aRes.error) || '?'));
+                    return;
+                }
+                win.docsCwd = newCwd;
+                for (const d of fileDocs) {
+                    const res = d.isAgents ? aRes : cRes;
+                    d.content = (res && res.ok) ? (res.content || '') : '';
+                    d.filePath = d.isAgents ? agentsPath : claudePath;
+                    d.dirty = false;
+                    d.cmState = null;       // force a rebuild from the new content
+                    d.scrollTop = 0; d.scrollLeft = 0;
+                }
+                // Rebuild the live editor from the now-updated bound doc WITHOUT
+                // capturing first (a capture would write the stale editor text
+                // back over the content we just replaced).
+                const bd = win._boundDoc;
+                if (bd && bd.kind === 'file') {
+                    refreshDocGlobalsFrom(bd);
+                    if (win.cmView) {
+                        win._suppressCmChange = true;
+                        try { win.cmView.setState(win._makeEditorState(bd)); }
+                        finally { win._suppressCmChange = false; }
+                        if (win._setCmLanguage) win._setCmLanguage();
+                        if (win._applyCmWrap) win._applyCmWrap();
+                        if (win._applyCmLineNums) win._applyCmLineNums();
+                    } else if (textarea) {
+                        textarea.value = bd.content || '';
+                    }
+                }
+                const title = (hid === 'local')
+                    ? ('Agent docs — ' + newCwd)
+                    : ('Agent docs — ' + (host.label || hid) + ':' + newCwd);
+                win.name = title;
+                if (titleText) titleText.textContent = title;
+                updateTaskbarLabel(id);
+                if (win._refreshTabBar) win._refreshTabBar();
+                if (win._updateFileUi) win._updateFileUi();
+                const activeDoc = win.tabs[win.activeTab];
+                if (activeDoc && activeDoc.kind === 'sections'
+                    && win._renderSectionsPanel) win._renderSectionsPanel();
+                if (win._renderTplPanel) win._renderTplPanel();
+                if (win._updateFolderBtn) win._updateFolderBtn();
+                saveAppWindow(win);
+                showNotice('re-homed to ' + newCwd);
             };
 
             const stopProp = (e) => e.stopPropagation();
@@ -9312,6 +9457,12 @@
                     const doc = activeFileDoc();          // null for single-doc
                     const content = win.getContent();
                     const isAgentsSave = doc ? doc.isAgents : !!win.agentsMdCwd;
+                    // Capture the target broker: if the editor's host is SWITCHED
+                    // mid-write (switchEditorHost), the bytes still land on `h`,
+                    // but we must NOT re-attach this host-`h` path to the now-
+                    // different window — that would point Save at a foreign-host
+                    // path (#46 review). Compared after the await below.
+                    const tgtHostId = h.id;
                     const res = await fileApiPost('/file/write',
                         { path, content }, h);
                     if (!res || !res.ok) {
@@ -9319,6 +9470,13 @@
                         return false;
                     }
                     const savedPath = res.path || path;
+                    // Host switched (or window closed) during the write: the save
+                    // to `h` succeeded — report it, but leave the window's
+                    // filePath/dirty/host alone (re-attaching would cross hosts).
+                    if (win.disposed || win.fileHostId !== tgtHostId) {
+                        showNotice('saved ' + savedPath);
+                        return true;
+                    }
                     if (doc) {
                         doc.filePath = savedPath;
                         // Don't clobber edits typed DURING the in-flight write:
@@ -9497,6 +9655,127 @@
                 wireBtn(saveAsBtn, doSaveAs);
                 wireBtn(wrapBtn, doWrap);
                 wireBtn(lineNumBtn, doLineNums);
+
+                // ---- host picker (#46) ----
+                // Reflect the editor's current broker on the toolbar button.
+                const updateHostBtn = () => {
+                    if (!hostBtn) return;
+                    // Be honest about a since-removed remote: fileHost() is
+                    // fail-closed (null), so don't relabel it "this broker"
+                    // (#46 review) — show it as removed, mirroring the FM.
+                    const id = win.fileHostId;
+                    const h = hostById(id)
+                        || ((!id || id === 'local') ? localHost() : null);
+                    const lbl = h ? hostPickerLabel(h) : (id + ' (removed)');
+                    hostBtn.textContent = '🖥 ' + lbl + ' ▾';
+                    hostBtn.title = 'reads/writes on: ' + lbl
+                        + ' — click to switch host';
+                };
+                const switchEditorHost = (host) => {
+                    if (!host || host.id === win.fileHostId) return;
+                    // Detach an OPEN file: its absolute path belongs to the OLD
+                    // host, and silently re-pointing Save at a same-spelled path
+                    // on the NEW host could clobber an unrelated file (the
+                    // editor's fail-closed invariant, see fileHost()). Keep the
+                    // BUFFER text as an untitled doc on the new host; the user
+                    // re-Saves there. Blank editors just switch.
+                    if (win.filePath) {
+                        // Be honest about a since-removed old host (mirror
+                        // updateHostBtn): don't relabel it "this broker" / local
+                        // (#46 review).
+                        const oid = win.fileHostId;
+                        const oldH = hostById(oid)
+                            || ((!oid || oid === 'local') ? localHost() : null);
+                        const oldLbl = oldH ? hostPickerLabel(oldH)
+                            : (oid + ' (removed)');
+                        const ok = confirm('Switch this editor to "'
+                            + hostPickerLabel(host) + '"?\n\nIt will detach from '
+                            + oldLbl + ':' + win.filePath
+                            + '\nThe text stays here as an unsaved document; '
+                            + 'Save will write to "' + hostPickerLabel(host)
+                            + '".');
+                        if (!ok) return;
+                        win.filePath = null;
+                        if (win.agentsMdCwd) clearAgentsMd();
+                        win.dirty = !!win.getContent();
+                        if (win._setCmLanguage) win._setCmLanguage();
+                    }
+                    win.fileHostId = host.id;
+                    win.startDir = '';        // new host -> its default dir
+                    updateHostBtn();
+                    if (win._updateFolderBtn) win._updateFolderBtn();
+                    updateFileUi();
+                    saveAppWindow(win);
+                    // Re-prompt the new host's login if it isn't authed yet.
+                    fileApiPost('/file/list', {}, host).then(r => {
+                        if (win.disposed || win.fileHostId !== host.id) return;
+                        if (r && r.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                    });
+                };
+                if (hostBtn) {
+                    wireBtn(hostBtn, () => {
+                        const r = hostBtn.getBoundingClientRect();
+                        showHostPicker(win.fileHostId, r.left, r.bottom,
+                                       switchEditorHost);
+                    });
+                    updateHostBtn();
+                }
+                // ---- folder picker / re-home (#46 follow-up) ----
+                // A 📁 control to point this window at a chosen folder on its
+                // host. Agent-docs windows re-read AGENTS.md/CLAUDE.md there;
+                // generic editors re-root where Open/Save browse. UI-only.
+                const folderBase = (p) => {
+                    const s = String(p || '').replace(/[\\/]+$/, '');
+                    const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+                    return i >= 0 ? s.slice(i + 1) : s;
+                };
+                const updateFolderBtn = () => {
+                    if (!folderBtn) return;
+                    const cwd = win.docsCwd || win.startDir || '';
+                    const lbl = cwd ? folderBase(cwd)
+                        : (win.tabs ? '(folder)' : '(default)');
+                    folderBtn.textContent = '📁 ' + lbl + ' ▾';
+                    folderBtn.title = (win.tabs
+                        ? 'editing AGENTS.md / CLAUDE.md in: '
+                        : 'Open/Save browse: ')
+                        + (cwd || '(host default)')
+                        + ' — click to choose a folder';
+                };
+                win._updateFolderBtn = updateFolderBtn;
+                const doChooseFolder = async () => {
+                    const h = fileHost();
+                    if (!h) {
+                        showNotice('this window’s host was removed — '
+                            + 'pick a host first');
+                        return;
+                    }
+                    const start = win.docsCwd || win.startDir
+                        || dirOf(win.filePath) || '';
+                    const picked = await openFileDialog(
+                        { mode: 'dir', host: h, startDir: start });
+                    if (!picked || win.disposed) return;
+                    if (win.tabs) {
+                        await win._reHomeDocs(picked);
+                    } else {
+                        win.startDir = picked;
+                        saveAppWindow(win);
+                        updateFolderBtn();
+                        showNotice('this editor now opens/saves in ' + picked);
+                    }
+                };
+                if (folderBtn) {
+                    wireBtn(folderBtn, doChooseFolder);
+                    updateFolderBtn();
+                }
+                // An app window's hostId is 'app', so the auth-form healing loop
+                // (which keys on win.hostId) never touches the editor. Expose a
+                // hook the form calls after ANY host authenticates, so a switch
+                // to a not-yet-authed host recovers without a manual retry.
+                win._onHostAuth = (hid) => {
+                    if (hid === win.fileHostId) updateHostBtn();
+                };
                 updateFileUi();
 
                 // ---- AGENTS.md tab: section checklist ----
@@ -10103,6 +10382,10 @@
         // openAppWindow so it tiles/drags/persists/reopens like any app window.
         // openAppWindow delegates here for appKind 'file-manager' (it guards the
         // existing-window case first, so we never get a live duplicate).
+        // Custom drag MIME for cross-pane file transfer (#46): present ONLY on
+        // an internal row drag, so a pane drop tells our drag apart from an OS
+        // file drop (which carries dataTransfer.files and always wins).
+        const FM_DRAG_MIME = 'application/x-webterm-file';
         function openFileManagerWindow(appData) {
             const id = String(appData.id);
             const title = appData.title || 'Files';
@@ -10177,14 +10460,32 @@
                 const pane = document.createElement('div');
                 pane.className = 'app-fm-pane';
                 pane.dataset.side = side;
+                // Header (#46): a per-pane host picker + the absolute cwd. Split
+                // view can straddle two hosts, so the host control lives on each
+                // PANE, not the window.
+                const head = document.createElement('div');
+                head.className = 'app-fm-head';
+                const hostBtn = document.createElement('button');
+                hostBtn.type = 'button';
+                hostBtn.className = 'app-fm-hostbtn';
+                // Re-home / choose-folder (#46 follow-up): jump THIS pane to a
+                // folder picked from a dialog (in addition to click-navigation).
+                const folderBtn = document.createElement('button');
+                folderBtn.type = 'button';
+                folderBtn.className = 'app-fm-hostbtn';
+                folderBtn.textContent = '📁';
+                folderBtn.title = 'choose this pane’s folder';
                 const path = document.createElement('div');
                 path.className = 'app-fm-path';
                 path.textContent = '/';
+                head.appendChild(hostBtn);
+                head.appendChild(folderBtn);
+                head.appendChild(path);
                 const list = document.createElement('div');
                 list.className = 'app-fm-list';
-                pane.appendChild(path);
+                pane.appendChild(head);
                 pane.appendChild(list);
-                return { pane, path, list };
+                return { pane, head, path, list, hostBtn, folderBtn };
             };
             const left = mkPane('left');
             const right = mkPane('right');
@@ -10223,10 +10524,21 @@
                     ? Object.assign({}, appData.floatGeom) : null,
                 locked,
                 dirty: false,
-                // Which broker's filesystem this manager browses (#35): the host
-                // ID of the terminal it was opened from, else local. All /file/*
-                // calls below route through it (via hostById).
+                // Legacy single-window host (#35). Kept ONLY so an old record
+                // (written before per-pane host) restores faithfully: each pane
+                // back-fills from it just below. Pane file ops use fmLeftHostId/
+                // fmRightHostId now, and removeHost keys the FM on appKind — so
+                // this is never again consulted for routing or cleanup.
                 fileHostId: appData.fileHostId || 'local',
+                // Per-pane host (#46): split view can straddle two brokers, so
+                // the host is a property of each PANE. An old single-host record
+                // (no fmLeftHostId/fmRightHostId) seeds both panes from the
+                // legacy fileHostId; a brand-new FM seeds both from the launch
+                // host (see launchFileManager).
+                fmLeftHostId: appData.fmLeftHostId
+                    || appData.fileHostId || 'local',
+                fmRightHostId: appData.fmRightHostId
+                    || appData.fileHostId || 'local',
                 // The two panes' current ABSOLUTE dirs ('' = the broker's default
                 // dir on first render, then adopted as the server's absolute cwd).
                 // A legacy root-relative value still resolves under the default
@@ -10257,20 +10569,90 @@
             // Compose an ABSOLUTE child path under a pane's cwd, in the host's
             // own separator (#35). Empty cwd -> bare name (server default dir).
             const joinPath = (cwd, name) => joinNative(cwd, name);
-            // All /file/* calls route to the browsed host (#35), not always local.
-            const fmHost = () => hostById(win.fileHostId);
+            const hostKey = (s) => (s === 'left' ? 'fmLeftHostId'
+                                                 : 'fmRightHostId');
+            // Resolve a pane's broker (#46). MIRRORS the editor's fileHost():
+            // a known-remote host that no longer resolves returns null (the op
+            // aborts + the pane shows an error) rather than falling back to
+            // local — a remote absolute path can also exist INSIDE the local
+            // root, so a silent local fallback could read or clobber the wrong
+            // file. Only an empty/'local' id ever resolves to localHost().
+            const paneHost = (s) => {
+                const id = win[hostKey(s)];
+                const h = hostById(id);
+                if (h) return h;
+                if (!id || id === 'local') return localHost();
+                return null;
+            };
+            // Reflect a pane's current host on its header button.
+            const updatePaneHostBtn = (s) => {
+                const ui = sideOf(s);
+                if (!ui.hostBtn) return;
+                const id = win[hostKey(s)];
+                const h = hostById(id)
+                    || ((!id || id === 'local') ? localHost() : null);
+                const lbl = h ? hostPickerLabel(h) : (id + ' (removed)');
+                ui.hostBtn.textContent = '🖥 ' + lbl + ' ▾';
+                ui.hostBtn.title = s + ' pane on: ' + lbl
+                    + ' — click to switch host';
+            };
+            // Switch a pane to another broker: reset its dir ('' = the new
+            // host's default dir, since the old ABSOLUTE path belonged to the
+            // old host) and re-list (which pops the new host's login if needed).
+            const switchPaneHost = (s, host) => {
+                if (!host || host.id === win[hostKey(s)]) return;
+                win[hostKey(s)] = host.id;
+                win[dirKey(s)] = '';
+                saveAppWindow(win);
+                updatePaneHostBtn(s);
+                renderPane(s);
+            };
 
             const renderPane = async (side, _retried) => {
                 const ui = sideOf(side);
                 const seq = ++paneSeq[side];
                 const reqDir = win[dirKey(side)];
+                const reqHostId = win[hostKey(side)];
+                if (ui.hostBtn) updatePaneHostBtn(side);
+                const host = paneHost(side);
+                if (!host) {
+                    // Known-remote host removed: NEVER let fileApiPost fall back
+                    // to its `host || localHost()` default — that would silently
+                    // list LOCAL files in a pane that was showing a remote.
+                    ui.path.textContent = '(no host)';
+                    ui.path.title = '';
+                    ui.list.innerHTML = '';
+                    const errRow = document.createElement('div');
+                    errRow.className = 'app-fm-row';
+                    errRow.textContent = '⚠ host unavailable — pick a host';
+                    ui.list.appendChild(errRow);
+                    return;
+                }
                 const res = await fileApiPost('/file/list', { path: reqDir },
-                                              fmHost());
-                // Drop a stale render: the window closed, a newer render started,
-                // or the pane navigated elsewhere while we awaited.
+                                              host);
+                // Drop a stale render: window closed, a newer render started, or
+                // the pane navigated / switched HOST while we awaited — a stale
+                // reply must not paint, nor pop the wrong host's login.
                 if (win.disposed || seq !== paneSeq[side]
-                    || win[dirKey(side)] !== reqDir) return;
+                    || win[dirKey(side)] !== reqDir
+                    || win[hostKey(side)] !== reqHostId) return;
                 if (!res || !res.ok) {
+                    // Not authenticated on this host yet: pop its login (without
+                    // stealing an in-progress different-host form) and show a
+                    // neutral placeholder — not a scary ⚠ toast + row. _onHostAuth
+                    // re-lists the pane once that host authenticates.
+                    if (res && res.error === 'auth_required') {
+                        promptFileHostAuth(host);
+                        ui.path.textContent = hostPickerLabel(host);
+                        ui.path.title = hostPickerLabel(host);
+                        ui.list.innerHTML = '';
+                        const signin = document.createElement('div');
+                        signin.className = 'app-fm-row';
+                        signin.textContent = '🔒 sign in to '
+                            + hostPickerLabel(host) + '…';
+                        ui.list.appendChild(signin);
+                        return;
+                    }
                     // A vanished dir (deleted/renamed) resets the pane to root and
                     // re-renders once — the guard above stops an infinite retry.
                     if (res && res.error === 'not_found' && !_retried && reqDir) {
@@ -10304,20 +10686,28 @@
                     row.classList.add('sel');
                 };
                 const openFile = async (path) => {
-                    const r = await fileApiPost('/file/read', { path }, fmHost());
+                    const h = paneHost(side);
+                    if (!h) {
+                        showNotice('open failed: host unavailable');
+                        return;
+                    }
+                    const r = await fileApiPost('/file/read', { path }, h);
                     if (!r || !r.ok) {
+                        if (r && r.error === 'auth_required') {
+                            promptFileHostAuth(h);
+                        }
                         showNotice('open failed: ' + ((r && r.error) || '?'));
                         return;
                     }
-                    // Open the file on the SAME host the manager is browsing (#35),
-                    // and at the dir it lives in, so its Save lands back there.
+                    // Open the file on the SAME host THIS PANE is browsing (#46),
+                    // at the dir it lives in, so its editor Save lands back there.
                     openAppWindow({
                         id: newAppId('editor'),
                         appKind: 'text-editor',
                         filePath: r.path || path,
                         content: r.content || '',
                         title: baseName(r.path || path),
-                        fileHostId: win.fileHostId,
+                        fileHostId: win[hostKey(side)],
                     });
                 };
                 // '..' row (not at root): navigates to the parent dir.
@@ -10364,6 +10754,41 @@
                             setActive(side); selectRow(row);
                         });
                         row.addEventListener('dblclick', () => openFile(child));
+                        // Drag a file to the OTHER pane to COPY it (#46) — works
+                        // across hosts. effectAllowed='copy' (drag is copy-only;
+                        // move is the explicit context-menu action, since a drag
+                        // modifier can't be read reliably during dragover).
+                        row.draggable = true;
+                        row.addEventListener('dragstart', (e) => {
+                            setActive(side); selectRow(row);
+                            if (!e.dataTransfer) return;
+                            e.dataTransfer.effectAllowed = 'copy';
+                            e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
+                                winId: id, side, hostId: win[hostKey(side)],
+                                path: child, name: ent.name }));
+                            row.classList.add('dragging');
+                        });
+                        row.addEventListener('dragend',
+                            () => row.classList.remove('dragging'));
+                        // Right-click a file: copy / move it to the other pane.
+                        row.addEventListener('contextmenu', (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setActive(side); selectRow(row);
+                            const other = side === 'left' ? 'right' : 'left';
+                            renderMenu([
+                                { label: 'Copy → ' + other + ' pane',
+                                  enabled: true,
+                                  action: () => transferTo(other,
+                                      win[hostKey(side)], child, ent.name,
+                                      false) },
+                                { label: 'Move → ' + other + ' pane',
+                                  enabled: true,
+                                  action: () => transferTo(other,
+                                      win[hostKey(side)], child, ent.name,
+                                      true) },
+                            ], e.clientX, e.clientY);
+                        });
                     }
                     ui.list.appendChild(row);
                 }
@@ -10379,10 +10804,12 @@
             };
 
             // ---- per-pane click-to-activate + drop-to-upload ----
-            // A tiny upload helper that reads the 409/exists status (fileApiPost
-            // hides it) so a drop onto an existing file can prompt + overwrite.
-            const uploadFile = (path, b64, overwrite) =>
-                fetch(hostHttpUrl(fmHost() || localHost(), '/file/upload'), {
+            // POST a base64 upload to a SPECIFIC host (#46), reading the raw
+            // 200/409 status (fileApiPost hides it) so a drop onto an existing
+            // file can prompt + overwrite. Shared by OS-file drops (per-pane
+            // host) and the cross-pane transfer (dest pane's host).
+            const uploadTo = (host, path, b64, overwrite) =>
+                fetch(hostHttpUrl(host || localHost(), '/file/upload'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path, content_b64: b64,
@@ -10405,6 +10832,13 @@
             const dropFiles = async (side, fileList) => {
                 const files = Array.from(fileList || []);
                 if (!files.length) return;
+                // Upload to THIS pane's host (#46), captured once so the whole
+                // drop lands on one broker even if the pane switches mid-upload.
+                const host = paneHost(side);
+                if (!host) {
+                    showNotice('upload failed: host unavailable');
+                    return;
+                }
                 const cwd = win[dirKey(side)];
                 let done = 0;
                 for (const file of files) {
@@ -10413,12 +10847,12 @@
                     catch (_) { showNotice('could not read ' + file.name); continue; }
                     if (win.disposed) return;         // closed mid-upload
                     const path = joinPath(cwd, file.name);
-                    let res = await uploadFile(path, b64, false);
+                    let res = await uploadTo(host, path, b64, false);
                     if (win.disposed) return;         // closed before the prompt
                     // Existing file -> confirm + retry as an overwrite.
                     if (res.status === 409 || (res.json && res.json.error === 'exists')) {
                         if (!confirm('Overwrite ' + file.name + '?')) continue;
-                        res = await uploadFile(path, b64, true);
+                        res = await uploadTo(host, path, b64, true);
                     }
                     if (win.disposed) return;
                     if (res.json && res.json.ok) { done++; continue; }
@@ -10430,6 +10864,116 @@
                 if (done) showNotice('uploaded ' + done + ' file(s)');
                 renderPane(side);
             };
+
+            // ---- cross-pane copy / move (#46) ----
+            // Copy (or move) ONE file between panes — works ACROSS hosts: read
+            // the source broker's bytes as base64 (binary-safe, server-side
+            // encode), write them to the dest broker via /file/upload, and for
+            // a move delete the source afterwards. Each side is gated by its
+            // OWN per-host auth. The descriptor is captured at call time and
+            // never recomputed after a prompt/await, so navigating a pane
+            // mid-transfer can't redirect the write (codex review).
+            const transferTo = async (destSide, srcHostId, srcPath, srcName,
+                                      move) => {
+                const srcHost = hostById(srcHostId)
+                    || ((!srcHostId || srcHostId === 'local')
+                        ? localHost() : null);
+                const destHost = paneHost(destSide);
+                if (!srcHost) {
+                    showNotice('transfer failed: source host unavailable');
+                    return;
+                }
+                if (!destHost) {
+                    showNotice('transfer failed: destination host unavailable');
+                    return;
+                }
+                const destPath = joinNative(win[dirKey(destSide)], srcName);
+                // Refuse a copy/move onto the SAME file (same host + same
+                // absolute path): the copy would be a pointless self-overwrite,
+                // and a self-MOVE would then delete the file it just wrote.
+                if (srcHost.id === destHost.id && destPath === srcPath) {
+                    showNotice('source and destination are the same file');
+                    return;
+                }
+                const r = await fileApiPost('/file/read',
+                    { path: srcPath, b64: true }, srcHost);
+                if (win.disposed) return;
+                if (!r || !r.ok) {
+                    if (r && r.error === 'auth_required') {
+                        promptFileHostAuth(srcHost);
+                    }
+                    const err = (r && r.error) || '?';
+                    if (err === 'too_large') {
+                        showNotice(srcName + ': too large (>5 MiB)');
+                    } else {
+                        showNotice('transfer failed (read ' + srcName + '): '
+                            + err);
+                    }
+                    return;
+                }
+                // The source broker accepted the read but returned no
+                // content_b64: it predates the binary-safe read (#46 review).
+                // Abort BEFORE any write/delete — an empty upload followed by a
+                // move's delete-source would silently lose the file. '' is a
+                // valid empty file (still a string), so check the TYPE, not
+                // truthiness.
+                if (typeof r.content_b64 !== 'string') {
+                    showNotice('transfer failed: ' + srcName + ' — source broker '
+                        + 'lacks binary read (upgrade it)');
+                    return;
+                }
+                const b64 = r.content_b64;
+                let up = await uploadTo(destHost, destPath, b64, false);
+                if (win.disposed) return;
+                // Existing dest file -> confirm + retry as an overwrite.
+                if (up.status === 409 || (up.json && up.json.error === 'exists')) {
+                    if (!confirm('Overwrite ' + srcName + ' on "'
+                            + hostPickerLabel(destHost) + '"?')) return;
+                    up = await uploadTo(destHost, destPath, b64, true);
+                    if (win.disposed) return;
+                }
+                if (!(up.json && up.json.ok)) {
+                    const err = (up.json && up.json.error) || ('HTTP ' + up.status);
+                    if (err === 'auth_required') promptFileHostAuth(destHost);
+                    if (err === 'too_large') {
+                        showNotice(srcName + ': too large (>5 MiB)');
+                    } else {
+                        showNotice('transfer failed (write ' + srcName + '): '
+                            + err);
+                    }
+                    return;
+                }
+                // Move = copy succeeded, now delete the source. Best-effort and
+                // HONEST: the copy already landed, so a failed delete leaves the
+                // file on BOTH hosts — say so rather than claim a move (codex).
+                if (move) {
+                    const d = await fileApiPost('/file/delete',
+                        { path: srcPath }, srcHost);
+                    if (win.disposed) return;
+                    if (!(d && d.ok)) {
+                        if (d && d.error === 'auth_required') {
+                            promptFileHostAuth(srcHost);
+                        }
+                        showNotice('copied ' + srcName + ', but could not remove '
+                            + 'the source: ' + ((d && d.error) || '?'));
+                        renderPane('left');
+                        renderPane('right');
+                        return;
+                    }
+                }
+                showNotice((move ? 'moved ' : 'copied ') + srcName + ' to "'
+                    + hostPickerLabel(destHost) + '"');
+                // Re-list both panes: the dest gained a file, a move's source
+                // lost one. Cheap, and side-agnostic (either pane may be source).
+                renderPane('left');
+                renderPane('right');
+            };
+            const transferFromPayload = (payload, destSide, move) => {
+                if (!payload || !payload.path) return;
+                transferTo(destSide, payload.hostId, payload.path,
+                    payload.name || baseName(payload.path), move);
+            };
+
             for (const side of ['left', 'right']) {
                 const ui = sideOf(side);
                 // Activate + focus the FM root so the Tab/Enter shortcuts fire
@@ -10445,7 +10989,27 @@
                     e.preventDefault();
                     ui.pane.classList.remove('drop-hover');
                     setActive(side);
-                    dropFiles(side, e.dataTransfer && e.dataTransfer.files);
+                    const dt = e.dataTransfer;
+                    // Precedence (#46 / codex): an OS-file drop ALWAYS uploads,
+                    // no matter what other types ride along. Only an internal
+                    // row drag (our MIME, which JSON-parses) is a cross-pane
+                    // copy. A drop back onto the SOURCE pane is a no-op below.
+                    if (dt && dt.files && dt.files.length) {
+                        dropFiles(side, dt.files);
+                        return;
+                    }
+                    let payload = null;
+                    try {
+                        payload = JSON.parse(
+                            (dt && dt.getData(FM_DRAG_MIME)) || 'null');
+                    } catch (_) {}
+                    // A true self-drop is the SAME window AND the SAME pane;
+                    // dropping into the other pane — or another FM window's pane
+                    // of the same side name — is a real transfer (#46 review).
+                    if (payload && payload.path
+                        && !(payload.winId === id && payload.side === side)) {
+                        transferFromPayload(payload, side, false);  // drag = copy
+                    }
                 };
                 ui.pane.addEventListener('mousedown', onClick);
                 ui.pane.addEventListener('dragover', onOver);
@@ -10457,6 +11021,56 @@
                     ui.pane.removeEventListener('dragleave', onLeave);
                     ui.pane.removeEventListener('drop', onDrop);
                 });
+                // Per-pane host picker (#46): the header button opens the host
+                // menu under itself; choosing another host re-roots this pane.
+                const hb = ui.hostBtn;
+                if (hb) {
+                    const onHostDown = (e) => e.stopPropagation();
+                    const onHostClick = (e) => {
+                        e.stopPropagation();
+                        setActive(side);
+                        const r = hb.getBoundingClientRect();
+                        showHostPicker(win[hostKey(side)], r.left, r.bottom,
+                                       (host) => switchPaneHost(side, host));
+                    };
+                    hb.addEventListener('mousedown', onHostDown);
+                    hb.addEventListener('click', onHostClick);
+                    win.cleanups.push(() => {
+                        hb.removeEventListener('mousedown', onHostDown);
+                        hb.removeEventListener('click', onHostClick);
+                    });
+                    updatePaneHostBtn(side);
+                }
+                // Per-pane folder picker / re-home (#46 follow-up): jump this
+                // pane to a chosen folder on its own host.
+                const fb = ui.folderBtn;
+                if (fb) {
+                    const onFolderDown = (e) => e.stopPropagation();
+                    const onFolderClick = async (e) => {
+                        e.stopPropagation();
+                        setActive(side);
+                        const host = paneHost(side);
+                        if (!host) {
+                            showNotice('this pane’s host was removed — '
+                                + 'pick a host first');
+                            return;
+                        }
+                        const picked = await openFileDialog({ mode: 'dir',
+                            host, startDir: win[dirKey(side)] || '' });
+                        if (!picked || win.disposed) return;
+                        if (win[hostKey(side)] === host.id) {
+                            win[dirKey(side)] = picked;
+                            saveAppWindow(win);
+                            renderPane(side);
+                        }
+                    };
+                    fb.addEventListener('mousedown', onFolderDown);
+                    fb.addEventListener('click', onFolderClick);
+                    win.cleanups.push(() => {
+                        fb.removeEventListener('mousedown', onFolderDown);
+                        fb.removeEventListener('click', onFolderClick);
+                    });
+                }
             }
 
             // Tab toggles the active pane, scoped to this window: only when the
@@ -10553,6 +11167,37 @@
             updateTaskbarLabel(id);
             const emptyMsg = document.getElementById('taskbar-empty');
             if (emptyMsg) emptyMsg.remove();
+
+            // ---- host lifecycle hooks (#46) ----
+            // A removed host resets only the affected pane(s) to local (dir
+            // cleared, since the old ABSOLUTE path belonged to the old host)
+            // and re-lists — the FM is NEVER force-closed by host removal (it
+            // can still browse its other, surviving pane). Returns true so
+            // removeHost stops there for this window.
+            win._hostRemoved = (rid) => {
+                let touched = false;
+                for (const s of ['left', 'right']) {
+                    if (win[hostKey(s)] === rid) {
+                        win[hostKey(s)] = 'local';
+                        win[dirKey(s)] = '';
+                        touched = true;
+                    }
+                }
+                if (touched) {
+                    saveAppWindow(win);
+                    showNotice('host removed — pane reset to this broker');
+                    renderPane('left');
+                    renderPane('right');
+                }
+                return true;
+            };
+            // Re-list any pane on the host that just authenticated (the auth
+            // form keys terminal-healing on win.hostId, which is 'app' here).
+            win._onHostAuth = (hid) => {
+                for (const s of ['left', 'right']) {
+                    if (win[hostKey(s)] === hid) renderPane(s);
+                }
+            };
 
             saveAppWindow(win);
             setActive('left');
@@ -12733,10 +13378,12 @@
                             startDir: s.cwd, fileHostId: s.host });
         }
         function launchFileManager() {
-            // Both panes start at the active terminal's cwd, on its host (#35).
+            // Both panes start at the active terminal's cwd, on its host (#35) —
+            // and on its host PER PANE (#46), so each pane can be re-homed later.
             const s = activeTerminalStart();
             openAppWindow({ id: newAppId('fm'), appKind: 'file-manager',
-                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host });
+                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host,
+                            fmLeftHostId: s.host, fmRightHostId: s.host });
         }
         function launchTaskManager() {
             openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });
@@ -13157,6 +13804,36 @@
             const top = Math.min(y, vh - rect.height - 4);
             ctxMenu.style.left = Math.max(0, left) + 'px';
             ctxMenu.style.top = Math.max(0, top) + 'px';
+        }
+
+        // ---- host pickers for the file tools (#46) ------------------------
+        // One reusable menu of every configured host, shared by the text
+        // editor's window-level picker and each file-manager pane's picker.
+        // Labels are user input — textContent only (renderMenu already does),
+        // never innerHTML (codex review).
+        function hostPickerLabel(h) {
+            if (!h) return 'host';
+            return h.id === 'local' ? 'this broker'
+                : (h.label || h.url || h.id);
+        }
+        // currentId is marked (●) + disabled; picking another calls onPick(h).
+        function showHostPicker(currentId, x, y, onPick) {
+            const items = getHosts().map(h => ({
+                label: (h.id === currentId ? '● ' : '    ')
+                    + hostPickerLabel(h),
+                enabled: h.id !== currentId,
+                action: () => onPick(h),
+            }));
+            renderMenu(items, x, y);
+        }
+        // Prompt a host's login WITHOUT stealing one already in progress for a
+        // DIFFERENT host. force=true bypasses "auto-pop once per host", but a
+        // closed overlay is the only thing it's safe to force open — if some
+        // other host's form is live, fall back to the non-forcing path (which
+        // showAuthOverlay no-ops while that form is open). (#46 / codex review.)
+        function promptFileHostAuth(host) {
+            if (!host) return;
+            showAuthOverlay(host, !authOverlay.classList.contains('open'));
         }
         // ---- WM actions (P2: presets / float<->tile / mode switch) --------
         const PRESET_LABELS = { '1/3': '⅓', '1/2': '½',
@@ -15191,12 +15868,22 @@
             if (idx === -1) return;
             hosts.splice(idx, 1);
             // Close its windows now; drop its sessions, taskbar entries,
-            // poll/profile state, and every '<id>:*' pref key. App editors are
-            // hostId:'app' (not the removed host), but an AGENTS.md editor
-            // bound to this broker via fileHostId must close too — otherwise it
-            // lingers as a fail-closed editor that can no longer save anywhere.
+            // poll/profile state, and every '<id>:*' pref key. App windows are
+            // hostId:'app' (not the removed host), so they're matched by their
+            // file host instead:
+            //  - a file manager handles removal IN PLACE, per pane (#46) — a
+            //    split FM stays open on its surviving pane — and is matched by
+            //    appKind, never the legacy win.fileHostId (which it no longer
+            //    keeps current);
+            //  - an editor / AGENTS-docs window bound to the removed broker via
+            //    fileHostId must close — it's fail-closed and can save nowhere.
             for (const [key, win] of Array.from(windows)) {
-                if (win.hostId === id || win.fileHostId === id) closeWindow(key);
+                if (win.hostId === id) { closeWindow(key); continue; }
+                if (win.appKind === 'file-manager') {
+                    if (win._hostRemoved) win._hostRemoved(id);
+                    continue;
+                }
+                if (win.fileHostId === id) closeWindow(key);
             }
             const prefix = id + ':';
             for (const key of Array.from(sessions.keys())) {

@@ -819,6 +819,87 @@ def test_file_api_is_host_wide(broker_proc, tmp_path):
         assert st == 400 and r["error"] == "bad_path", r
 
 
+def test_file_read_b64_binary(broker_proc, tmp_path):
+    """#46: /file/read with b64:True returns the server-side base64 of the RAW
+    bytes (binary-safe — the read side of cross-host transfer). The plain text
+    read of the same binary still 400s not_utf8, and b64 is IDENTITY-true so a
+    stray truthy value never silently flips an existing caller into binary."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    import base64 as _b64
+    blob = bytes(range(256)) * 3                # non-UTF-8 binary
+    f = tmp_path / "bin.dat"
+    f.write_bytes(blob)
+
+    def _post(path, body):
+        return _http("POST", f"{base}{path}",
+                     body=json.dumps(body).encode(), headers=auth)
+
+    st, r = _post("/file/read", {"path": str(f), "b64": True})
+    assert st == 200 and r["ok"], r
+    assert _b64.b64decode(r["content_b64"]) == blob, r
+    assert r["path"] == str(f.resolve()), r
+    assert "content" not in r, r
+
+    # b64 must be IDENTITY True: a truthy non-bool stays in text mode, so a
+    # binary file still 400s not_utf8 (existing {content} contract untouched).
+    st, r = _post("/file/read", {"path": str(f), "b64": 1})
+    assert st == 400 and r["error"] == "not_utf8", r
+    st, r = _post("/file/read", {"path": str(f)})
+    assert st == 400 and r["error"] == "not_utf8", r
+
+    # A UTF-8 file still reads as text by default AND round-trips through b64.
+    t = tmp_path / "note.txt"
+    t.write_text("héllo", encoding="utf-8")
+    st, r = _post("/file/read", {"path": str(t)})
+    assert st == 200 and r["content"] == "héllo", r
+    st, r = _post("/file/read", {"path": str(t), "b64": True})
+    assert st == 200 and _b64.b64decode(r["content_b64"]).decode("utf-8") \
+        == "héllo", r
+
+
+def test_file_delete(broker_proc, tmp_path):
+    """#46: /file/delete removes a single FILE (the delete-source step of a
+    cross-pane Move); refuses a directory so it can never recurse a tree;
+    404s a missing path; bad_path on a blank path."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+
+    def _post(path, body):
+        return _http("POST", f"{base}{path}",
+                     body=json.dumps(body).encode(), headers=auth)
+
+    f = tmp_path / "doomed.txt"
+    f.write_text("bye", encoding="utf-8")
+    st, r = _post("/file/delete", {"path": str(f)})
+    assert st == 200 and r["ok"], r
+    assert r["path"] == str(f.resolve()), r
+    assert not f.exists()
+
+    # Already gone -> 404 not_found (idempotent-ish; the UI treats it as done).
+    st, r = _post("/file/delete", {"path": str(f)})
+    assert st == 404 and r["error"] == "not_found", r
+
+    # A directory is refused outright — delete is FILE-only by design.
+    d = tmp_path / "adir"
+    d.mkdir()
+    st, r = _post("/file/delete", {"path": str(d)})
+    assert st == 400 and r["error"] == "not_a_file", r
+    assert d.exists()
+
+    # A blank path -> bad_path (mirrors the other /file/* handlers).
+    st, r = _post("/file/delete", {"path": ""})
+    assert st == 400 and r["error"] == "bad_path", r
+
+
+def test_file_delete_requires_token(broker_proc):
+    _, _, base = broker_proc
+    status, _ = _http("POST", f"{base}/file/delete", body=b"{}")
+    assert status == 401
+
+
 def test_file_upload_requires_token(broker_proc):
     _, _, base = broker_proc
     status, _ = _http("POST", f"{base}/file/upload", body=b"{}")
