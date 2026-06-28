@@ -57,7 +57,7 @@
 - [x] [F045] Sticky note + Closed notes — off-taskbar scratch pad; non-empty closed notes reopen from the + menu's "Closed notes" (verified fully incl. reopen; F050 menu code present) (index.html)
 - [x] [F046] CodeMirror text editor — syntax-highlighted file editor opened at active terminal's cwd/host; save-prompt on close; backed by /file/* (index.html)
 - [x] [F047] File manager — dual-pane browser at active cwd/host; open files into the editor; backed by /file/* (index.html)
-- [ ] [F048] Task manager UI — live cross-host session list + expandable child-process tree; End process / destroy session buttons driving F013's backend contract (index.html)
+- [x] [F048] Task manager UI — live cross-host session list + expandable child-process tree; End process / destroy session buttons driving F013's backend contract (index.html)
 
 ## Desktop Shell
 
