@@ -39,7 +39,7 @@
 - [x] [F030] Tabs — Alt-drag to stack windows as tabs in one tile; tab strip switches; "Tab into left/right column" / "Tab this window" (index.html)
 - [x] [F031] Untab (menu + ⊟ button) — "Untab tile (split to rows)" `untabTile`, "Untab cell (side by side)" `nestedUntabCell`, and the tab-strip ⊟ button — all persist+relayout. NOTE: the "drag a tab out" gesture is split off to F082 (Blocked) — NOT implemented though in-app help (idx:14647) advertises it (index.html)
 - [x] [F032] Splits — drop on a window's left/right interior for side-by-side panes; drag the gutter to resize; un-split/merge (index.html)
-- [ ] [F033] Stacks (rows) — drop on top/bottom edge to stack as rows in a column; horizontal gutter resize (index.html)
+- [x] [F033] Stacks (rows) — drop on top/bottom edge to stack as rows in a column; horizontal gutter resize (index.html)
 - [ ] [F034] Drop-zone overlay cheat sheet — live highlighted preview of new-column / tab / split / split-rows / float landing zones while dragging (index.html)
 - [ ] [F035] Snap floating into grid — hold-to-snap dwell gesture arms drop zones; Escape/return-zone cancels; "Tile this window" menu skip (index.html)
 - [ ] [F036] Pop tiled out to float — hold-to-arm "release to float"; move-again or Escape cancels; "Float this window" menu skip (index.html)
