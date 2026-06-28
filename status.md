@@ -1,8 +1,8 @@
 # Loop status — handoff to next iteration
 
-**Just handled:** F007 — Dependency-free bounded text-grid renderer → **done**. `webterm/agent/snapshot/textgrid.py` is a complete VT/ECMA-48 emulator (imports only __future__/deque/typing — no pyte) producing bounded rows×cols grids via `render`/`render_screen` (handles CR/LF/BS/TAB, CUP/CUU/CUD, ED/EL, scroll regions, autowrap, SGR/OSC stripping). Consumed as the pyte-absent fallback in `agent.py:_render_screen_text` (tries pyte then textgrid). No code change. Verification: py_compile PASS; `pytest -k "textgrid or grid or emulator or snapshot"` → 87 passed/0 failed; behavioral a–e all PASS (a 24×80 exact bound; b LONG line WRAPS not truncates; c SGR stripped no `\x1b` leak; d cursor-home overwrite at row0col0; e malformed escapes don't raise); `render_screen`→{text,cursor,history_lines}.
+**Just handled:** F008 — OSC title sniffer → **done**. `webterm/agent/titles.py` `OscTitleSniffer` is a byte-at-a-time stateful parser (partial `_param`/`_payload` buffers across feeds), recognizes OSC 0/2 with BOTH BEL (`\x07`) and ST (`\x1b\\`) terminators, ignores non-title OSC (param != 0/2), caps payload at 4 KiB (`_MAX_PAYLOAD`) abandoning to GROUND on overflow. Wired in `agent.py:270-275` → `protocol.title_frame` → `SessionState.title`. No code change. Verification: py_compile PASS; `pytest -k "title or osc or sniff"` → 69 passed/0 failed; behavioral a–f all PASS (a whole; b split across feeds; c introducer split mid-ESC; d ST terminator; e OSC 8 ignored; f 100k never-terminated → bounded at 4096, no emit).
 
-**Next to pick:** F008 — OSC title sniffer (webterm/agent/titles.py): parse OSC title sequences split at any byte boundary, push live `title` frames. First unchecked, no unmet deps.
+**Next to pick:** F009 — Alt-screen + DECCKM tracking (webterm/agent/altscreen.py): track alternate-screen and application-cursor-key mode live off the PTY stream for read/send_keys. First unchecked, no unmet deps.
 
 **In-progress / failed-attempt markers:** none.
 
