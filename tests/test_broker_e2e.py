@@ -883,8 +883,8 @@ def test_file_read_b64_binary(broker_proc, tmp_path):
 
 
 def test_file_delete(broker_proc, tmp_path):
-    """#46: /file/delete removes a single FILE (the delete-source step of a
-    cross-pane Move); refuses a directory so it can never recurse a tree;
+    """#46/#72: /file/delete removes a single FILE; a directory needs
+    recursive=true (else is_a_directory, so a mis-click can't wipe a tree);
     404s a missing path; bad_path on a blank path."""
     _, _, base = broker_proc
     auth = {"Authorization": f"Bearer {TOKEN}",
@@ -905,12 +905,18 @@ def test_file_delete(broker_proc, tmp_path):
     st, r = _post("/file/delete", {"path": str(f)})
     assert st == 404 and r["error"] == "not_found", r
 
-    # A directory is refused outright — delete is FILE-only by design.
+    # A directory without recursive is refused (#72) — no accidental tree wipe.
     d = tmp_path / "adir"
     d.mkdir()
+    (d / "child.txt").write_text("x", encoding="utf-8")
     st, r = _post("/file/delete", {"path": str(d)})
-    assert st == 400 and r["error"] == "not_a_file", r
+    assert st == 400 and r["error"] == "is_a_directory", r
     assert d.exists()
+
+    # ...but recursive=true removes the whole tree (#72).
+    st, r = _post("/file/delete", {"path": str(d), "recursive": True})
+    assert st == 200 and r["ok"], r
+    assert not d.exists()
 
     # A blank path -> bad_path (mirrors the other /file/* handlers).
     st, r = _post("/file/delete", {"path": ""})

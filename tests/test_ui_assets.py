@@ -920,6 +920,79 @@ def test_file_capability_present():
         assert sym in INDEX_HTML, f"ctx.file missing from served page: {sym!r}"
 
 
+def test_dialog_component_present():
+    # #72 (Part A): the reusable styled dialog primitive + wrappers ship as the
+    # new 69_js_dialog.js fragment, registered right after the file-dialog
+    # fragment, and reach the served page; its CSS rides the shared dialogs
+    # fragment by folding .app-dialog into the existing selector groups.
+    assert "69_js_dialog.js" in ui._ORDERED
+    assert ui._ORDERED.index("69_js_dialog.js") == \
+        ui._ORDERED.index("68_js_app_windows_files.js") + 1
+    assert (BROKER_DIR / "69_js_dialog.js").is_file()
+    src = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    for sym in ("function openDialog", "function openTextPrompt",
+                "function openConfirmDialog", "function openInfoModal"):
+        assert sym in src, f"dialog fragment missing {sym!r}"
+        assert sym in INDEX_HTML, f"dialog symbol missing from served page: {sym!r}"
+    css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
+    for sel in (".app-dialog-overlay", ".app-dialog button.danger",
+                ".app-dialog-rows"):
+        assert sel in css, f"dialog CSS missing {sel!r}"
+    assert ".app-dialog" in INDEX_HTML
+
+
+def test_file_capability_richer_ops_present():
+    # #72: ctx.file gains mkdir/copy/move/zip/unzip/stat and a recursive flag on
+    # delete; ctxVersion stays 1 (additive). The SAME methods are mirrored in the
+    # file-manager's fmFile() fallback so its I/O is identical mods on or off.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
+        for sym in ("mkdir: function", "copy: function", "move: function",
+                    "zip: function", "unzip: function", "stat: function"):
+            assert sym in src, f"{label} missing #72 method: {sym!r}"
+        for route in ("'/file/mkdir'", "'/file/copy'", "'/file/move'",
+                      "'/file/zip'", "'/file/unzip'", "'/file/stat'"):
+            assert route in src, f"{label} does not wrap route {route!r}"
+        # delete carries the recursive flag.
+        assert "recursive: !!(opts && opts.recursive)" in src, \
+            f"{label} delete missing recursive flag"
+    # ctxVersion unchanged (additive capability).
+    assert "ctxVersion: 1" in loader
+    # And the new routes reach the served page.
+    for route in ("'/file/copy'", "'/file/zip'", "'/file/stat'"):
+        assert route in INDEX_HTML, f"#72 route missing from served page: {route!r}"
+
+
+def test_filemanager_richer_menu_present():
+    # #72: the file manager grows a full right-click menu set + clipboard + drag.
+    # These symbol sentinels lock the wiring (the Playwright flow exercises the
+    # behavior). The FM routes every confirm/prompt through the styled dialog
+    # component — NO native confirm()/prompt() survives in the mod.
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for sym in ("const doTransfer", "const buildRowMenu", "const buildEmptyMenu",
+                "const setClipboard", "const pasteInto", "const validateName",
+                "const newFolder", "const renameRow", "const deleteRow",
+                "const downloadRow", "const zipRow", "const unzipRow",
+                "const showProperties", "const makeDraggable",
+                "win.fmClipboard"):
+        assert sym in fm, f"file manager missing #72 symbol: {sym!r}"
+    # Uses the styled dialog component, not native modals.
+    for sym in ("openConfirmDialog(", "openTextPrompt(", "openInfoModal("):
+        assert sym in fm, f"file manager should use styled dialog: {sym!r}"
+    import re
+    assert not re.search(r"(?<![A-Za-z])confirm\(", fm), \
+        "native confirm() must be gone from the file manager (use openConfirmDialog)"
+    assert not re.search(r"(?<![A-Za-z])prompt\(", fm), \
+        "native prompt() must be gone from the file manager (use openTextPrompt)"
+    # The drag payload now carries the entry type (cross-host dir refusal).
+    assert "type: ent.type" in fm
+    # And the menu wiring reaches the served page.
+    assert "buildRowMenu" in INDEX_HTML and "buildEmptyMenu" in INDEX_HTML
+
+
 def test_file_capability_trust_doc_present():
     # The trust-tier doc ships in-code WITH the capability: ctx.file is operator-
     # granted REVIEW HYGIENE, not enforcement (a same-origin mod can already POST

@@ -38,13 +38,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
 import os
 import re
 import secrets
+import shutil
+import stat
 import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -67,6 +71,13 @@ DEFAULT_PORT = 4445
 # Editor file-API: a single read/write is capped at this many bytes (the cap
 # is enforced on the UTF-8 encoded payload, not the character count).
 MAX_FILE_BYTES = 5 * 2**20  # 5 MiB
+
+# /file/zip + /file/unzip caps (#72). Bound the work a single archive op will do
+# so a hostile (or accidental) huge source tree or zip-bomb can't exhaust disk
+# or memory: cumulative UNCOMPRESSED size and member/entry count are both
+# pre-scanned and rejected BEFORE any write or extract. Tunable.
+MAX_ARCHIVE_BYTES = 1 * 2**30      # 1 GiB cumulative uncompressed
+MAX_ARCHIVE_ENTRIES = 50000        # member/entry count
 
 # /state: the shared per-broker UI settings+layout blob is small (a layout
 # tree + a settings object); cap the serialized JSON so a hostile PUT can't
@@ -214,7 +225,8 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
-def _resolve_host_path(rel: str, default_dir: Path) -> Path:
+def _resolve_host_path(rel: str, default_dir: Path,
+                       follow_leaf: bool = True) -> Path:
     """Resolve a client-supplied file path **host-wide** — anywhere on this box,
     with NO ``editor_root`` confinement (#35).
 
@@ -240,7 +252,17 @@ def _resolve_host_path(rel: str, default_dir: Path) -> Path:
     dir is the POINT here, not a bypass to defend against). A colon in any
     non-anchor component (``file:ads``, ``dir:x\\f``) is an NTFS
     alternate-data-stream spelling and is rejected. Resolver failures (symlink
-    loop, bad drive) raise ``ValueError`` -> the caller maps to ``bad_path``."""
+    loop, bad drive) raise ``ValueError`` -> the caller maps to ``bad_path``.
+
+    ``follow_leaf`` (#72, default ``True``) keeps the full ``resolve()`` — i.e.
+    every existing caller is byte-identical. With ``follow_leaf=False`` the
+    PARENT is resolved (symlinks higher in the path still collapse) and the raw
+    leaf name is re-attached, so a symlink or junction AT the leaf is *preserved*
+    for the caller to handle rather than dereferenced. This is load-bearing for
+    the destructive ops: a naive ``rmtree``/``rename``/``move`` of a fully
+    resolved symlink-to-dir would operate on the link's TARGET tree (host-wide
+    data loss); link-safe resolution hands the caller the link itself. The ADS
+    and half-absolute rejections apply identically in both modes."""
     raw = rel or ""
     base = Path(raw)
     # ADS guard (Windows only — ':' is a legal filename char on POSIX): drop the
@@ -257,9 +279,106 @@ def _resolve_host_path(rel: str, default_dir: Path) -> Path:
     else:
         p = default_dir / base
     try:
-        return p.resolve()
+        if follow_leaf:
+            return p.resolve()
+        # Link-safe leaf: resolve the parent, re-attach the raw leaf name. A path
+        # that is its own anchor (no leaf name, e.g. ``C:\``) has nothing to
+        # preserve, so fall back to a full resolve.
+        name = p.name
+        if not name:
+            return p.resolve()
+        return p.parent.resolve() / name
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError("bad_path") from exc
+
+
+def _is_reparse_point(path_str: str) -> bool:
+    """True if the leaf at ``path_str`` is a symlink OR (Windows) a junction /
+    other reparse point. ``os.path.islink`` alone misses junctions on Python
+    < 3.12, so the reparse-point attribute bit is checked too — a destructive op
+    must treat a junction-to-dir like a link (remove the entry, never recurse
+    into its target). Best-effort: any stat failure returns False and the
+    caller's normal classification handles it."""
+    try:
+        if os.path.islink(path_str):
+            return True
+    except OSError:
+        return False
+    if os.name == "nt":
+        try:
+            attrs = os.lstat(path_str).st_file_attributes
+        except (OSError, AttributeError):
+            return False
+        return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _remove_link(path_str: str) -> None:
+    """Remove a symlink / junction ENTRY without touching its target. A
+    directory-type link (dir symlink or junction) needs ``os.rmdir`` on Windows
+    — ``os.unlink`` raises on it — while a file symlink (and a broken link) need
+    ``os.unlink``. ``os.path.isdir`` follows the link to choose; a broken link
+    (isdir False) takes the unlink path."""
+    if os.path.isdir(path_str):
+        os.rmdir(path_str)
+    else:
+        os.unlink(path_str)
+
+
+def _force_remove(path_str: str) -> None:
+    """Remove any leaf — a symlink/junction (entry only, never the target), a
+    real file, or a real directory tree. Used by move-overwrite and recursive
+    delete. The reparse-point check comes first so a link is never dereferenced
+    into an rmtree of its target."""
+    if _is_reparse_point(path_str):
+        _remove_link(path_str)
+    elif os.path.isdir(path_str):
+        shutil.rmtree(path_str)
+    else:
+        os.unlink(path_str)
+
+
+def _rename_or_move(src_str: str, dst_str: str) -> None:
+    """Move ``src`` onto a NON-EXISTENT ``dst``: ``os.replace`` (atomic on one
+    volume; moves a symlink/junction as the entry, not the target), falling back
+    to ``shutil.move`` only on a cross-device error (EXDEV)."""
+    try:
+        os.replace(src_str, dst_str)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.EXDEV:
+            shutil.move(src_str, dst_str)
+        else:
+            raise
+
+
+def _resolve_two(body: Dict[str, Any], default_dir: Path,
+                 src_follow_leaf: bool = True,
+                 dst_follow_leaf: bool = True):
+    """Resolve the ``src`` and ``dst`` string fields of a copy/move body
+    host-wide. Returns ``(src, dst)`` Paths, or raises ``ValueError`` (mapped to
+    ``bad_path`` by the caller) on a missing / non-string field or a resolver
+    failure. ``*_follow_leaf`` pick link-safe leaf resolution per side: move
+    resolves both link-safe (so it relocates a link entry, not its target); copy
+    follows (it is non-destructive to the source)."""
+    src_rel = body.get("src")
+    dst_rel = body.get("dst")
+    if not isinstance(src_rel, str) or not src_rel:
+        raise ValueError("bad_path")
+    if not isinstance(dst_rel, str) or not dst_rel:
+        raise ValueError("bad_path")
+    src = _resolve_host_path(src_rel, default_dir, follow_leaf=src_follow_leaf)
+    dst = _resolve_host_path(dst_rel, default_dir, follow_leaf=dst_follow_leaf)
+    return src, dst
+
+
+def _is_within(child: Path, ancestor: Path) -> bool:
+    """True if ``child`` is ``ancestor`` or lives under it (case-insensitive on
+    Windows via the pure-path compare). Refuses copying/moving a tree into
+    itself — which would recurse infinitely and litter a partial copy."""
+    try:
+        return child.is_relative_to(ancestor)
+    except (ValueError, TypeError):
+        return False
 
 
 def _classify_path(p: Path) -> str:
@@ -923,16 +1042,469 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "size": len(data)})
 
     async def _file_delete(request: Request):
-        # Destructive sibling of /file/write (#46): same host-wide resolution,
-        # gate, and absolute-path echo. SINGLE FILE ONLY — is_file() refuses a
-        # directory (and a symlink-to-dir, which is_file() reports False), so
-        # this can never recurse a tree. Like read/write/upload, the path is
-        # fully resolved first (_resolve_host_path ends in .resolve()), so a
-        # symlink-to-file deletes its TARGET — the same link-following semantics
-        # those endpoints already use. Used by the file manager's cross-pane
-        # MOVE (copy-to-dest, then delete-source). No NEW privilege: /file/write
-        # already grants full host-wide overwrite under this exact auth gate —
-        # delete stays within it.
+        # Destructive sibling of /file/write (#46), extended for the file manager
+        # context menu (#72): a real directory is removed too, but only when the
+        # caller passes recursive=true (a plain delete of a non-empty dir is a
+        # 400 is_a_directory, so a mis-click can't wipe a tree).
+        #
+        # The headline correctness change (#72): the leaf is resolved BOTH ways.
+        # p_leaf (link-safe) is checked for being a symlink/junction FIRST — if
+        # so only the link ENTRY is removed, NEVER the target it points at. Only
+        # a genuinely real path falls through to unlink (file) / rmtree (dir),
+        # acting on the fully-resolved p. This closes the data-loss hole the old
+        # ".resolve() then operate" path had (deleting a symlink-to-dir would
+        # have rmtree'd the link's target tree, host-wide). No NEW privilege:
+        # /file/write already grants full host-wide overwrite under this gate.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        recursive = bool(body.get("recursive", False))
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+            p_leaf = _resolve_host_path(rel, app.ctx.editor_root,
+                                        follow_leaf=False)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        leaf_str = str(p_leaf)
+        # lexists, not exists: a broken symlink (target gone) still has a link
+        # entry that should be deletable, and a real link must be detected here
+        # before any classification follows it.
+        if not os.path.lexists(leaf_str):
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if _is_reparse_point(leaf_str):
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _remove_link, leaf_str)
+            except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+            return sanic_json({"ok": True, "path": leaf_str})
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if kind == "dir":
+            if not recursive:
+                return sanic_json({"ok": False, "error": "is_a_directory"},
+                                  status=400)
+            fn, arg = shutil.rmtree, str(p)
+        elif kind == "file":
+            fn, arg = os.unlink, str(p)
+        else:
+            return sanic_json({"ok": False, "error": "not_a_file"},
+                              status=400)
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, fn, arg)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True,
+                           "path": str(p)})      # absolute, host-wide (#35)
+
+    # ---- richer file operations (#72) ------------------------------------
+    # mkdir / copy / move / zip / unzip / stat round out the file manager's
+    # context menu. Same token-or-loopback gate, host-wide resolution
+    # (_resolve_host_path) and absolute-path echo as the read/write/delete
+    # endpoints above; they add NO new privilege (an authenticated client
+    # already has shell-level filesystem access). Heavy IO (copytree / rmtree /
+    # zip / unzip) runs OFF the event loop via run_in_executor, and the catch is
+    # broadened past OSError (shutil.Error, RecursionError, ValueError) so a
+    # non-OSError failure still keeps the {ok:false,error} contract instead of
+    # surfacing as a 500 + traceback.
+    async def _file_mkdir(request: Request):
+        # Create ONE directory. os.mkdir (NOT makedirs) — the parent must
+        # already be a dir (parent_missing else), so a typo can't silently
+        # build a chain of dirs. An existing path is a 409 conflict.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind != "missing":
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        parent = p.parent
+        pkind = _classify_path(parent)
+        if pkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if pkind != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, os.mkdir, str(p))
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True,
+                           "path": str(p)})      # absolute, host-wide (#35)
+
+    async def _file_copy(request: Request):
+        # Copy a file or directory tree. src is followed (copy is non-destructive
+        # to the source); dst is the FULL target path (not a container). A dir
+        # uses copytree(symlinks=True) so INNER links are copied as links, not
+        # materialised; a file uses copy2 (metadata preserved). Refuses src==dst
+        # and dst-inside-src (the latter would recurse / litter — P0-2).
+        #
+        # NOTE: an overwrite is NOT atomic — copy2 / copytree(dirs_exist_ok=True)
+        # write over the destination in place, so a mid-copy failure can leave a
+        # damaged dst the caller asked to replace. Partial-dst cleanup therefore
+        # runs only when !overwrite (where dst was freshly created and is ours to
+        # remove); an overwrite failure is reported, not rolled back.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        try:
+            src, dst = _resolve_two(body, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if src == dst:
+            return sanic_json({"ok": False, "error": "same"}, status=400)
+        if _is_within(dst, src):
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_kind = _classify_path(src)
+        if src_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if src_kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if src_kind not in ("file", "dir"):
+            return sanic_json({"ok": False, "error": "not_supported"},
+                              status=400)
+        dst_kind = _classify_path(dst)
+        if dst_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        dparent = _classify_path(dst.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        if dst_kind != "missing":
+            if not overwrite:
+                return sanic_json({"ok": False, "error": "exists"}, status=409)
+            if dst_kind != src_kind:
+                return sanic_json({"ok": False, "error": "type_mismatch"},
+                                  status=400)
+        src_str, dst_str = str(src), str(dst)
+
+        def _do_copy():
+            if src_kind == "dir":
+                shutil.copytree(src_str, dst_str, symlinks=True,
+                                dirs_exist_ok=overwrite)
+            else:
+                shutil.copy2(src_str, dst_str)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_copy)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            if not overwrite:
+                # dst was freshly created by this op — remove the partial litter.
+                try:
+                    if os.path.isdir(dst_str) and not _is_reparse_point(dst_str):
+                        shutil.rmtree(dst_str, ignore_errors=True)
+                    elif os.path.lexists(dst_str):
+                        os.unlink(dst_str)
+                except OSError:
+                    pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dst_str})
+
+    async def _file_move(request: Request):
+        # Move/rename a file or directory. Both paths resolve LINK-SAFE (#72): a
+        # symlink/junction src relocates the LINK entry, never its target tree.
+        # dst is the FULL target path. An existing dst needs overwrite=true (409
+        # otherwise). Overwrite never loses the old dst: two real files use the
+        # atomic os.replace; anything else (dir, symlink/junction, type change)
+        # renames the existing dst to a sibling backup, moves src into place, and
+        # only then drops the backup — restoring it if the move fails.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        try:
+            src, dst = _resolve_two(body, app.ctx.editor_root,
+                                    src_follow_leaf=False, dst_follow_leaf=False)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if src == dst:
+            return sanic_json({"ok": False, "error": "same"}, status=400)
+        if _is_within(dst, src):
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_str, dst_str = str(src), str(dst)
+        # lexists (not exists): a broken symlink leaf still exists and must be
+        # movable; a real symlink/junction must not be dereferenced here.
+        if not os.path.lexists(src_str):
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        dparent = _classify_path(dst.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        dst_exists = os.path.lexists(dst_str)
+        if dst_exists and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+
+        def _do_move():
+            if not (dst_exists and overwrite):
+                _rename_or_move(src_str, dst_str)
+                return
+            both_real_files = (
+                os.path.isfile(src_str) and not _is_reparse_point(src_str)
+                and os.path.isfile(dst_str) and not _is_reparse_point(dst_str))
+            if both_real_files:
+                _rename_or_move(src_str, dst_str)   # atomic file replace
+                return
+            # No atomic replace for these (no dir-over-dir replace on Windows);
+            # back up the existing dst, move, restore on ANY failure so dst is
+            # never lost.
+            backup = dst_str + ".webterm-bak-" + uuid.uuid4().hex
+            os.rename(dst_str, backup)
+            try:
+                _rename_or_move(src_str, dst_str)
+            except BaseException:
+                try:
+                    if os.path.lexists(dst_str):
+                        _force_remove(dst_str)
+                except OSError:
+                    pass
+                try:
+                    os.rename(backup, dst_str)
+                except OSError:
+                    pass
+                raise
+            _force_remove(backup)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_move)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dst_str})
+
+    async def _file_zip(request: Request):
+        # Create a .zip from a file or directory tree. dest is the output archive
+        # path (its parent must be a dir). A pre-scan rejects a source that
+        # exceeds the caps BEFORE writing; the archive is built into a tempfile
+        # in dest's parent and os.replace'd into place, so dest is never left
+        # partial and an overwrite keeps the old archive until the new one is
+        # complete. Reparse-point subdirectories (symlinks AND junctions) are NOT
+        # followed (filtered out of the walk, so they're omitted); symlinked
+        # FILES are archived as their target content (zf.write follows them, and
+        # the pre-scan counts the same target size via getsize). The caps are
+        # pre-scan advisory — single-user, the source is the caller's own tree.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        src_rel = body.get("src")
+        dest_rel = body.get("dest")
+        if not isinstance(src_rel, str) or not src_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not isinstance(dest_rel, str) or not dest_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            src = _resolve_host_path(src_rel, app.ctx.editor_root)
+            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        src_kind = _classify_path(src)
+        if src_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if src_kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if src_kind not in ("file", "dir"):
+            return sanic_json({"ok": False, "error": "not_supported"},
+                              status=400)
+        dest_kind = _classify_path(dest)
+        if dest_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dest_kind == "dir":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        if dest_kind != "missing" and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        dparent = _classify_path(dest.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        if src_kind == "dir" and _is_within(dest, src):
+            # The growing archive must not live inside the tree being zipped.
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_str, dest_str = str(src), str(dest)
+
+        def _do_zip():
+            total = 0
+            count = 0
+            if src_kind == "file":
+                total = os.path.getsize(src_str)
+                count = 1
+            else:
+                for root, dirs, files in os.walk(src_str):
+                    dirs[:] = [d for d in dirs
+                               if not _is_reparse_point(os.path.join(root, d))]
+                    count += 1 + len(files)        # this dir entry + its files
+                    if count > MAX_ARCHIVE_ENTRIES:
+                        raise ValueError("too_many_entries")
+                    for name in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, name))
+                        except OSError:
+                            pass
+                    if total > MAX_ARCHIVE_BYTES:
+                        raise ValueError("archive_too_large")
+            parent = os.path.dirname(dest_str) or "."
+            fd, tmp = tempfile.mkstemp(dir=parent, prefix=".webterm-zip-",
+                                       suffix=".tmp")
+            os.close(fd)
+            try:
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                    if src_kind == "file":
+                        zf.write(src_str, arcname=os.path.basename(src_str))
+                    else:
+                        # arcnames relative to src's PARENT so the archive holds
+                        # the top folder; write each walked dir (preserves empty
+                        # dirs) then each file.
+                        base = os.path.dirname(src_str)
+                        for root, dirs, files in os.walk(src_str):
+                            dirs[:] = [d for d in dirs
+                                       if not _is_reparse_point(
+                                           os.path.join(root, d))]
+                            zf.write(root, arcname=os.path.relpath(root, base))
+                            for name in files:
+                                fp = os.path.join(root, name)
+                                zf.write(fp, arcname=os.path.relpath(fp, base))
+                os.replace(tmp, dest_str)
+                tmp = None
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_zip)
+        except (OSError, ValueError, shutil.Error, RecursionError,
+                zipfile.BadZipFile) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dest_str})
+
+    async def _file_unzip(request: Request):
+        # Extract a .zip into a FRESH dest directory (dest must not exist). A
+        # zip-bomb / oversize guard rejects an archive whose entry count or
+        # cumulative declared uncompressed size exceeds the caps BEFORE any
+        # extraction. CPython's extractall already neutralises path traversal
+        # (absolute / drive-letter / '..' members are sanitised to land UNDER
+        # dest), so there is deliberately no hand-rolled commonpath loop; a
+        # malformed member fails extraction cleanly and the freshly-created dest
+        # is removed. The size guard trusts the central-directory sizes
+        # (single-user threat model).
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        path_rel = body.get("path")
+        dest_rel = body.get("dest")
+        if not isinstance(path_rel, str) or not path_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not isinstance(dest_rel, str) or not dest_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            zpath = _resolve_host_path(path_rel, app.ctx.editor_root)
+            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        zkind = _classify_path(zpath)
+        if zkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if zkind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if zkind != "file":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        dest_kind = _classify_path(dest)
+        if dest_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dest_kind != "missing":
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        dparent = _classify_path(dest.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        zpath_str, dest_str = str(zpath), str(dest)
+
+        def _do_unzip():
+            with zipfile.ZipFile(zpath_str) as zf:
+                infos = zf.infolist()
+                if len(infos) > MAX_ARCHIVE_ENTRIES:
+                    raise ValueError("too_many_entries")
+                if sum(zi.file_size for zi in infos) > MAX_ARCHIVE_BYTES:
+                    raise ValueError("archive_too_large")
+                os.mkdir(dest_str)
+                try:
+                    zf.extractall(dest_str)
+                except BaseException:
+                    shutil.rmtree(dest_str, ignore_errors=True)
+                    raise
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_unzip)
+        except zipfile.BadZipFile:
+            return sanic_json({"ok": False, "error": "bad_zip"}, status=400)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dest_str})
+
+    async def _file_stat(request: Request):
+        # Properties (#72): type/size/mtime/mode for one path, plus a shallow
+        # child count for a directory. Read-only and chosen over extending
+        # /file/list (which only describes a dir's CHILDREN and is the hot path
+        # behind openFileDialog/renderPane). mtime is epoch seconds; mode is the
+        # raw st_mode int (the UI formats both).
         err = _file_auth_error(request)
         if err is not None:
             return err
@@ -952,15 +1524,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                               status=400)
         if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if kind != "file":
-            return sanic_json({"ok": False, "error": "not_a_file"},
-                              status=400)
         try:
-            os.unlink(str(p))
+            st = p.stat()
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        return sanic_json({"ok": True,
-                           "path": str(p)})      # absolute, host-wide (#35)
+        out = {"ok": True, "path": str(p), "type": kind,
+               "size": st.st_size, "mtime": st.st_mtime, "mode": st.st_mode}
+        if kind == "dir":
+            try:
+                out["children"] = sum(1 for _ in p.iterdir())
+            except OSError:
+                pass                               # unreadable dir — omit count
+        return sanic_json(out)
 
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
@@ -1539,6 +2114,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_write, "/file/write", methods=["POST"])
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
     app.add_route(_file_delete, "/file/delete", methods=["POST"])
+    app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
+    app.add_route(_file_copy, "/file/copy", methods=["POST"])
+    app.add_route(_file_move, "/file/move", methods=["POST"])
+    app.add_route(_file_zip, "/file/zip", methods=["POST"])
+    app.add_route(_file_unzip, "/file/unzip", methods=["POST"])
+    app.add_route(_file_stat, "/file/stat", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -1567,6 +2148,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/write", "preflight_file_write"),
                              ("/file/upload", "preflight_file_upload"),
                              ("/file/delete", "preflight_file_delete"),
+                             ("/file/mkdir", "preflight_file_mkdir"),
+                             ("/file/copy", "preflight_file_copy"),
+                             ("/file/move", "preflight_file_move"),
+                             ("/file/zip", "preflight_file_zip"),
+                             ("/file/unzip", "preflight_file_unzip"),
+                             ("/file/stat", "preflight_file_stat"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),

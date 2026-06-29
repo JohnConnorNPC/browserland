@@ -79,6 +79,9 @@ _ORDERED = [
     "66_js_notices_zorder.js",
     "67_js_window_lifecycle.js",
     "68_js_app_windows_files.js",
+    # Reusable styled dialog primitive (#72, Part A): openDialog + openTextPrompt
+    # / openConfirmDialog / openInfoModal, hoisted globals for core + mods.
+    "69_js_dialog.js",
     # 69_js_codemirror.js + 70_js_editor_app.js were EXTRACTED to mods/editor/
     # (#83/S10); 71_js_file_manager.js to mods/file-manager/ (#84/S11);
     # 72_js_task_manager.js to mods/task-manager/ (#85/S12); the dispatcher

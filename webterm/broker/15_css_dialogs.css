@@ -1,6 +1,7 @@
         /* Control Panel modal sits above windows (100000) but below #ctx-menu
            (200000); the re-auth overlay outranks everything. */
-        #settings-overlay, #auth-overlay, #become-active-overlay {
+        #settings-overlay, #auth-overlay, #become-active-overlay,
+        .app-dialog-overlay {
             position: fixed;
             inset: 0;
             background: rgba(0, 0, 0, 0.55);
@@ -10,11 +11,14 @@
         }
         #settings-overlay { z-index: 150000; }
         #auth-overlay { z-index: 250000; }
+        /* #72 (Part A): the reusable styled dialog sits above the file dialog
+           (180000) but below #ctx-menu (200000) / #auth-overlay (250000). */
+        .app-dialog-overlay { z-index: 185000; }
         /* The deactivated full-page takeover prompt sits just below the auth
            overlay so a password prompt still wins. */
         #become-active-overlay { z-index: 240000; background: rgba(0,0,0,0.82); }
         #settings-overlay.open, #auth-overlay.open,
-        #become-active-overlay.open { display: flex; }
+        #become-active-overlay.open, .app-dialog-overlay.open { display: flex; }
         #become-active-box {
             background: var(--bg-2);
             border: 1px solid #000;
@@ -38,7 +42,7 @@
             padding: 8px 20px;
             cursor: pointer;
         }
-        #settings-modal, #auth-form {
+        #settings-modal, #auth-form, .app-dialog {
             background: var(--bg-2);
             border: 1px solid #000;
             border-left: 4px solid var(--accent-default);
@@ -110,7 +114,8 @@
         #settings-modal input[type=number],
         #settings-modal input[type=text],
         #settings-modal input[type=password],
-        #auth-form input[type=password] {
+        #auth-form input[type=password],
+        .app-dialog input[type=text] {
             background: var(--bg);
             border: 1px solid var(--bg-3);
             border-radius: 3px;
@@ -121,11 +126,12 @@
             outline: none;
         }
         #settings-modal input:focus,
-        #auth-form input:focus { border-color: var(--accent-default); }
+        #auth-form input:focus,
+        .app-dialog input:focus { border-color: var(--accent-default); }
         #settings-modal input[type=number] { width: 64px; }
         #settings-modal input[type=text],
         #settings-modal input[type=password] { flex: 1 1 auto; min-width: 0; }
-        #settings-modal button, #auth-form button {
+        #settings-modal button, #auth-form button, .app-dialog button {
             background: var(--bg);
             border: 1px solid var(--bg-3);
             border-radius: 3px;
@@ -137,8 +143,27 @@
             flex: 0 0 auto;
         }
         #settings-modal button:hover,
-        #auth-form button:hover { background: #262626; border-color: #6a8; }
+        #auth-form button:hover,
+        .app-dialog button:hover { background: #262626; border-color: #6a8; }
         .set-foot { display: flex; justify-content: flex-end; }
+        /* #72 (Part A): dialog-specific bits; box/input/button styling is
+           inherited from the shared #settings-modal groups above. */
+        .app-dialog .set-foot { gap: 8px; }
+        .app-dialog button.primary { border-color: var(--accent-default); }
+        .app-dialog button.danger { color: #e96d6d; border-color: #e96d6d; }
+        .app-dialog button.danger:hover {
+            background: #3a2020; border-color: #e96d6d;
+        }
+        .app-dialog-field label { color: var(--fg-dim); flex: 0 0 auto; }
+        .app-dialog-msg { white-space: pre-wrap; line-height: 1.4; }
+        .app-dialog-rows { display: flex; flex-direction: column; gap: 4px; }
+        .app-dialog-row {
+            display: flex; gap: 10px; font-family: monospace; font-size: 12px;
+        }
+        .app-dialog-row .app-dialog-k { color: var(--fg-dim); flex: 0 0 38%; }
+        .app-dialog-row .app-dialog-v {
+            flex: 1 1 auto; min-width: 0; word-break: break-all;
+        }
         /* Tabbed settings (tasks 13/14): a flex row of small tab buttons, the
            active one highlighted with the accent. Wraps when many hosts. */
         .set-tabs {

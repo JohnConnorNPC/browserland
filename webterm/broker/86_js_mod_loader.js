@@ -150,11 +150,14 @@
                     list: function (path, opts) {
                         return _modFileApi('/file/list', { path: path || '' }, opts);
                     },
-                    // Single-file delete (refuses a directory). -> {ok,path}.
-                    // Quoted key so the reserved word can never trip a minifier;
+                    // Delete a file, a symlink/junction (entry only), or — with
+                    // opts.recursive — a directory tree. -> {ok,path}. Quoted key
+                    // so the reserved word can never trip a minifier;
                     // ctx.file.delete(...) still calls it.
                     'delete': function (path, opts) {
-                        return _modFileApi('/file/delete', { path: path }, opts);
+                        return _modFileApi('/file/delete',
+                            { path: path,
+                              recursive: !!(opts && opts.recursive) }, opts);
                     },
                     // Binary-safe write via base64; opts.overwrite (default false)
                     // -> {ok,path,size} (or {ok:false,error:'exists'} on a clash).
@@ -162,6 +165,39 @@
                         return _modFileApi('/file/upload',
                             { path: path, content_b64: contentB64,
                               overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                    // #72 richer ops (additive — ctxVersion stays 1). Paths are
+                    // host-wide native absolutes, same per-host routing.
+                    // Create ONE directory (parent must exist). -> {ok,path}.
+                    mkdir: function (path, opts) {
+                        return _modFileApi('/file/mkdir', { path: path }, opts);
+                    },
+                    // Server-side copy of a file or tree; opts.overwrite. ->{ok,path}
+                    copy: function (src, dst, opts) {
+                        return _modFileApi('/file/copy',
+                            { src: src, dst: dst,
+                              overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                    // Server-side move/rename of a file or tree; opts.overwrite.
+                    move: function (src, dst, opts) {
+                        return _modFileApi('/file/move',
+                            { src: src, dst: dst,
+                              overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                    // Zip a file/tree into dest archive; opts.overwrite. ->{ok,path}
+                    zip: function (src, dest, opts) {
+                        return _modFileApi('/file/zip',
+                            { src: src, dest: dest,
+                              overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                    // Extract a .zip into a FRESH dest dir. -> {ok,path}.
+                    unzip: function (path, dest, opts) {
+                        return _modFileApi('/file/unzip',
+                            { path: path, dest: dest }, opts);
+                    },
+                    // Properties: type/size/mtime/mode (+children for a dir).
+                    stat: function (path, opts) {
+                        return _modFileApi('/file/stat', { path: path }, opts);
                     },
                 },
                 // #85 (S12): host session RPC — ONE reviewed wrapper over the
