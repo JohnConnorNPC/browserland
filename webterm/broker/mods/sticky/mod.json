@@ -1,0 +1,9 @@
+{
+  "id": "sticky",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Sticky note",
+  "description": "Sticky-note app window kind via ctx.registerWindowKind (extracted from core, #81). Persists to webterm:appwindows:v1 byte-identical, incl. retain-on-close + the Closed notes menu.",
+  "entry": "sticky.js",
+  "author": "JohnConnorNPC"
+}

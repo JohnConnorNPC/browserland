@@ -164,10 +164,15 @@
         //   { appKind, factory(appData)->win, serialize(win)->record|null,
         //     restore?(record), retainOnClose?(record)->bool, menu? }
         //   menu = { label, launch(), closedItems?()->[menuItem] }
-        // The six built-ins (sticky-note, text-editor, file-manager, task-manager,
-        // control-panel, help) are registered as CORE defaults (NOT through a mod)
-        // so they behave with mods_enabled=false exactly as the old hardcoded
-        // branches did; a mod adds a brand-new kind through ctx.registerWindowKind.
+        // The five CORE built-ins (text-editor, file-manager, task-manager,
+        // control-panel, help) are registered as defaults (NOT through a mod) so
+        // they behave with mods_enabled=false exactly as the old hardcoded branches
+        // did; a mod adds a brand-new kind through ctx.registerWindowKind. The
+        // historical sixth kind, sticky-note, is now exactly that — the S8 (#81)
+        // mods/sticky/ mod registers it through ctx, so it is present only with
+        // mods enabled (a pre-existing note still RESTORES mods-off via the
+        // unknown-kind openAppWindow fallback; only retain-on-close + its Closed-
+        // notes menu + the launcher ride the mod).
         //
         // Held as a memo on the registry getter (NOT a top-level const) so it is
         // free of the TDZ a `const` carries before this fragment executes — the
@@ -243,38 +248,21 @@
         function windowKindMenuList() {
             return Array.from(_windowKindRegistry().values());
         }
-        // Pre-populate the six built-ins. sticky-note + text-editor share the
-        // notes/editor builder + record shape; only a non-empty sticky note is
-        // retained on close and it contributes the "Closed notes" submenu.
-        // file-manager is persisted too. task-manager / control-panel / help are
-        // EPHEMERAL (no serialize => never written to appStore, never restored),
-        // matching their old early returns. help's open/launch live in
-        // mods/help/help.js but are top-level (hoisted) functions present even when
-        // mods_enabled=false, so help is a CORE built-in here (NOT a ctx
-        // registration) — registering it through the mod would break Help whenever
-        // mods are disabled. Every factory/launch is reached through a deferred
-        // wrapper so registration never depends on declaration order and a missing
-        // help mod degrades to "Help doesn't open", never a registry-wide throw.
+        // Pre-populate the core built-ins. text-editor uses the notes/editor
+        // builder + record shape; file-manager is persisted too. task-manager /
+        // control-panel / help are EPHEMERAL (no serialize => never written to
+        // appStore, never restored), matching their old early returns. help's
+        // open/launch live in mods/help/help.js but are top-level (hoisted)
+        // functions present even when mods_enabled=false, so help is a CORE
+        // built-in here (NOT a ctx registration) — registering it through the mod
+        // would break Help whenever mods are disabled. The SIXTH historical kind,
+        // sticky-note, was extracted to mods/sticky/ (#81/S8): it is the first kind
+        // a mod adds through ctx.registerWindowKind, so it is registered at
+        // loadMods time (appended after these built-ins) rather than here. Every
+        // factory/launch is reached through a deferred wrapper so registration
+        // never depends on declaration order and a missing help mod degrades to
+        // "Help doesn't open", never a registry-wide throw.
         function registerBuiltinWindowKinds() {
-            registerWindowKind({
-                appKind: 'sticky-note',
-                factory: function (d) { return openNoteOrEditorWindow(d); },
-                serialize: serializeAppWindow,
-                retainOnClose: function (rec) {
-                    // Issue #11: keep ONLY a non-empty sticky note, content
-                    // trimmed; an empty note is discarded. Mutates the record in
-                    // place (closeWindow saves the store right after).
-                    const content = String(rec.content == null ? '' : rec.content).trim();
-                    if (!content) return false;
-                    rec.content = content;
-                    return true;
-                },
-                menu: {
-                    label: '📝 Sticky note',
-                    launch: function () { return launchStickyNote(); },
-                    closedItems: function () { return closedAppMenuItems(); },
-                },
-            });
             registerWindowKind({
                 appKind: 'text-editor',
                 factory: function (d) { return openNoteOrEditorWindow(d); },

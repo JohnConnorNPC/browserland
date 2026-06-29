@@ -1,13 +1,14 @@
         // Open (or focus) an app window by kind. The single dedup-by-id check lives
         // here; each kind then dispatches through the window-kind registry (#80/S7)
-        // — the six built-ins (sticky-note, text-editor, file-manager, task-manager,
+        // — the five core built-ins (text-editor, file-manager, task-manager,
         // control-panel, help) are registered as core defaults and a mod adds its
-        // own via ctx.registerWindowKind. The sticky/editor builder
-        // (openNoteOrEditorWindow) is the factory for those two kinds AND the
-        // default for an unknown/missing appKind (a hand-edited/corrupt store
-        // record), preserving the pre-registry fall-through exactly. The delegating
-        // factories self-guard the existing-window case, so the dedup below stays
-        // the one authoritative check.
+        // own via ctx.registerWindowKind (sticky-note is now exactly that, the S8
+        // mods/sticky/ mod). The sticky/editor builder (openNoteOrEditorWindow) is
+        // the factory for the note + editor kinds AND the default for an unknown/
+        // missing appKind (a hand-edited/corrupt store record, or a sticky note
+        // restored with mods disabled), preserving the pre-registry fall-through
+        // exactly. The delegating factories self-guard the existing-window case, so
+        // the dedup below stays the one authoritative check.
         function openAppWindow(appData) {
             const id = String(appData.id);
             const existing = windows.get(id);

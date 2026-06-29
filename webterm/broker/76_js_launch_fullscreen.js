@@ -195,11 +195,9 @@
         }
 
         // Client-only apps offered below the terminal profiles in the launch
-        // menu (separator + the two entries).
-        function launchStickyNote() {
-            openAppWindow({ id: newAppId('note'),
-                            appKind: 'sticky-note', content: '' });
-        }
+        // menu. The sticky-note launcher moved to mods/sticky/ (#81/S8); these are
+        // the remaining core kinds (registered as built-ins, 54_js_app_windows_
+        // store.js's registerBuiltinWindowKinds).
         function launchTextEditor() {
             // Open the Open/Save dialogs at the active terminal's cwd+host (#35).
             const s = activeTerminalStart();
@@ -222,35 +220,6 @@
             // The Control Panel is a moveable floating window (#59); open or focus
             // it. Kept as the named entry point for the launch-menu item.
             return openControlPanelWindow({});
-        }
-        // Closed app docs (open:false, no live window) — the way to get a
-        // closed sticky note / editor back without it squatting on the taskbar.
-        // Each entry reopens straight from its stored record.
-        function closedAppMenuItems() {
-            // Issue #11: the closed-docs list holds ONLY non-empty sticky notes.
-            // closeWindow discards every other kind on close, so this filter is
-            // also the defensive guard that hides any stale legacy records
-            // (closed editors/file-managers/empty notes left in the store from
-            // before this change) without a destructive one-time purge.
-            const closed = Object.keys(appStore)
-                .map(k => appStore[k])
-                .filter(a => a && a.open === false && !windows.has(String(a.id))
-                    && a.appKind === 'sticky-note'
-                    && String(a.content == null ? '' : a.content).trim());
-            if (!closed.length) return [];
-            const items = [{ sep: true },
-                           { label: 'Closed notes', enabled: false }];
-            for (const a of closed) {
-                // Prefer a content preview so identical default titles stay
-                // distinguishable; fall back to the title.
-                const preview = String(a.content == null ? '' : a.content)
-                    .replace(/\s+/g, ' ').trim();
-                const name = a.title || 'Sticky Note';
-                const label = '📝 ' + (preview ? preview.slice(0, 28) : name);
-                items.push({ label, enabled: true,
-                             action: () => openAppWindow(a) });
-            }
-            return items;
         }
         // The "client apps" block of the (+) launch menu, now driven by the window-
         // kind registry (#80/S7): a leading separator, one launcher per registered
