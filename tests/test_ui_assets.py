@@ -588,11 +588,12 @@ def test_register_window_kind_capability_present():
 
 
 def test_window_kind_builtins_registered_in_menu_order():
-    # registerBuiltinWindowKinds registers all six kinds, and their registration
-    # order is the historical (+) launch-menu order (Map iteration order drives the
-    # menu), so the built-ins reproduce the old menu byte-for-byte.
+    # registerBuiltinWindowKinds registers the FIVE core kinds (sticky-note left
+    # for the S8 mod, #81), and their registration order is the historical (+)
+    # launch-menu order (Map iteration order drives the menu), so the built-ins
+    # reproduce the old menu byte-for-byte.
     src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
-    order = ["sticky-note", "text-editor", "file-manager", "task-manager",
+    order = ["text-editor", "file-manager", "task-manager",
              "control-panel", "help"]
     positions = []
     for kind in order:
@@ -601,11 +602,67 @@ def test_window_kind_builtins_registered_in_menu_order():
         positions.append(src.index(needle))
     assert positions == sorted(positions), \
         "built-in kinds must register in the historical menu order"
-    # The persisted kinds share serializeAppWindow; only the sticky note retains.
-    assert src.count("serialize: serializeAppWindow") == 3   # sticky/editor/file-mgr
-    assert "retainOnClose: function (rec)" in src
+    # sticky-note is now a mod, never a core built-in (it appends through ctx at
+    # loadMods time). Its retain-on-close registration rode with it (the registry
+    # plumbing still NAMES retainOnClose as a spec field — scope to the block).
+    assert "appKind: 'sticky-note'" not in src
+    assert "retainOnClose: function (rec)" not in src
+    # The persisted core kinds share serializeAppWindow; the sticky note's
+    # serializeAppWindow reference moved to the mod, so core is down to two.
+    assert src.count("serialize: serializeAppWindow") == 2   # editor/file-mgr
     # help is a CORE built-in (mods-off safe), reached through deferred wrappers.
     assert "return openHelpWindow(d)" in src and "return launchHelp()" in src
+
+
+def test_sticky_symbols_removed_from_core_fragments():
+    # The sticky note is now a mod (#81/S8): its registry registration is gone from
+    # core 54, and its launcher + Closed-notes builder are gone from core 76 (both
+    # moved verbatim into mods/sticky/sticky.js). The shared builder
+    # (openNoteOrEditorWindow) + serializer (serializeAppWindow) deliberately STAY
+    # in core (the text editor shares them and they are the unknown-kind fallback).
+    core = {
+        "54_js_app_windows_store.js": ("appKind: 'sticky-note'",
+                                       "retainOnClose: function (rec)"),
+        "76_js_launch_fullscreen.js": ("function launchStickyNote",
+                                       "function closedAppMenuItems"),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+    # The kept core helpers the mod calls back into are still present + reachable.
+    for sym in ("function openNoteOrEditorWindow", "function serializeAppWindow"):
+        assert sym in INDEX_HTML, f"{sym!r} must stay in core"
+
+
+def test_sticky_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "sticky"
+    js = mod_dir / "sticky.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "sticky"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "sticky.js"
+    # The script registers the sticky mod and contributes the sticky-note window
+    # kind through ctx.registerWindowKind, reusing the core serializer + builder so
+    # persistence (webterm:appwindows:v1) stays byte-identical.
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'sticky'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'sticky-note'" in src
+    assert "serialize: serializeAppWindow" in src
+    assert "return openNoteOrEditorWindow(d)" in src
+    # The retain trim + Closed-notes menu rode along with the kind.
+    assert "retainOnClose: function (rec)" in src
+    assert "Closed notes" in src
+    # And the mod ships in the served page (present in the mod / gone from core),
+    # registered AFTER the help mod (its position in _MODS).
+    assert "id: 'sticky'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'sticky'")
 
 
 def test_window_kind_sites_use_registry():
