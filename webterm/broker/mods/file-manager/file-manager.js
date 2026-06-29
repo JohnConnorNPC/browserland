@@ -444,6 +444,141 @@
                     showNotice('renamed to ' + trimmed);
                     renderPane(side);
                 };
+                // Delete with a styled confirm; a directory deletes recursively.
+                const deleteRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('delete failed: host unavailable');
+                        return;
+                    }
+                    const isDir = ent.type === 'dir';
+                    const ok = await openConfirmDialog({
+                        title: 'Delete',
+                        message: 'Delete ' + (isDir ? 'folder ' : '') + ent.name
+                            + (isDir ? ' and everything inside it?' : '?'),
+                        okLabel: 'Delete', danger: true });
+                    if (!ok || win.disposed) return;
+                    const res = await fmFile().delete(child,
+                        { host: host.id, recursive: isDir });
+                    if (win.disposed) return;
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('delete failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('deleted ' + ent.name);
+                    renderPane(side);
+                };
+                // Download a file to the local machine: read base64, decode to
+                // bytes, save via an anchor. Bounded by /file/read's 5 MiB cap —
+                // a larger file surfaces a clear notice (a streaming download GET
+                // is a future enhancement, #72 risks).
+                const downloadRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('download failed: host unavailable');
+                        return;
+                    }
+                    const r = await fmFile().read(child,
+                        { b64: true, host: host.id });
+                    if (win.disposed) return;
+                    if (!(r && r.ok) || typeof r.content_b64 !== 'string') {
+                        const err = (r && r.error) || '?';
+                        if (err === 'auth_required') promptFileHostAuth(host);
+                        if (err === 'too_large') {
+                            showNotice(ent.name
+                                + ': too large to download (>5 MiB)');
+                        } else {
+                            showNotice('download failed: ' + err);
+                        }
+                        return;
+                    }
+                    try {
+                        const bin = atob(r.content_b64);
+                        const arr = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) {
+                            arr[i] = bin.charCodeAt(i);
+                        }
+                        const url = URL.createObjectURL(
+                            new Blob([arr], { type: 'application/octet-stream' }));
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = ent.name;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        setTimeout(() => URL.revokeObjectURL(url), 10000);
+                    } catch (_) {
+                        showNotice('download failed: could not decode '
+                            + ent.name);
+                    }
+                };
+                // Zip a file/folder into a .zip in this dir (prompt for the name).
+                const zipRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('zip failed: host unavailable');
+                        return;
+                    }
+                    const name = await openTextPrompt({
+                        title: 'Zip', label: 'Archive name',
+                        value: ent.name + '.zip', okLabel: 'Zip',
+                        validate: validateName });
+                    if (name == null || win.disposed) return;
+                    const dest = joinNative(cwd, name.trim());
+                    let res = await fmFile().zip(child, dest, { host: host.id });
+                    if (win.disposed) return;
+                    if (res && res.error === 'exists') {
+                        const ok = await openConfirmDialog({
+                            title: 'Zip',
+                            message: 'Overwrite ' + name.trim() + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) return;
+                        res = await fmFile().zip(child, dest,
+                            { host: host.id, overwrite: true });
+                        if (win.disposed) return;
+                    }
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('zip failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('created ' + name.trim());
+                    renderPane(side);
+                };
+                // Unzip a .zip into a fresh archive-stem sibling dir.
+                const unzipRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('unzip failed: host unavailable');
+                        return;
+                    }
+                    const stem = ent.name.replace(/\.zip$/i, '')
+                        || (ent.name + '_extracted');
+                    const dest = joinNative(cwd, stem);
+                    const res = await fmFile().unzip(child, dest,
+                        { host: host.id });
+                    if (win.disposed) return;
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        const err = (res && res.error) || '?';
+                        if (err === 'exists') {
+                            showNotice('unzip failed: "' + stem
+                                + '" already exists');
+                        } else {
+                            showNotice('unzip failed: ' + err);
+                        }
+                        return;
+                    }
+                    showNotice('extracted to ' + stem);
+                    renderPane(side);
+                };
                 const buildRowMenu = (row, ent, child) => {
                     const other = side === 'left' ? 'right' : 'left';
                     const desc = { hostId: win[hostKey(side)], path: child,
@@ -463,6 +598,18 @@
                                  action: () => pasteInto(side, pasteDir) });
                     items.push({ label: 'Rename…', enabled: true,
                                  action: () => renameRow(ent, child) });
+                    if (ent.type !== 'dir') {
+                        items.push({ label: 'Download', enabled: true,
+                                     action: () => downloadRow(ent, child) });
+                    }
+                    items.push({ label: 'Zip', enabled: true,
+                                 action: () => zipRow(ent, child) });
+                    if (ent.type !== 'dir' && /\.zip$/i.test(ent.name)) {
+                        items.push({ label: 'Unzip', enabled: true,
+                                     action: () => unzipRow(ent, child) });
+                    }
+                    items.push({ label: 'Delete', enabled: true,
+                                 action: () => deleteRow(ent, child) });
                     items.push({ sep: true });
                     items.push({ label: 'Copy → ' + other + ' pane',
                                  enabled: true,
