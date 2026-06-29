@@ -10,8 +10,9 @@
         <div id="ws-pager"></div>
         <div id="host-status"></div>
         <button type="button" id="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen">⛶</button>
-        <div id="help-chip" title="Help &#8212; interface guide" role="button"
-             tabindex="0" aria-label="Help">?</div>
+        <!-- #78: the taskbar "?" Help chip moved to mods/help/help.js, which
+             creates #help-chip at init (appended last) and owns its visibility
+             via ctx.settings.boolean('showHelpButton'). -->
     </div>
     <div id="notice-host"></div>
     <div id="drop-vbar"></div>
@@ -74,15 +75,10 @@
                      the mod's isBrowserGlobal opt (default on), so this host div
                      is NOT itself browser-global — a non-global mod control can
                      stay visible on a remote host tab. -->
+                <!-- #78: the "Help button" show/hide toggle moved to
+                     mods/help/help.js (ctx.settings.boolean -> #set-mods above),
+                     like the clock's checkbox. -->
                 <div class="set-section" id="set-mods"></div>
-                <div class="set-section set-browser-global">
-                    <div class="set-title">Help button</div>
-                    <label class="set-check"><input type="checkbox" id="set-help-button" />
-                        Show help (?) button (bottom-right)</label>
-                    <div class="set-hint">a searchable guide to every interface
-                        feature; opens from the &ldquo;?&rdquo; chip on the taskbar.
-                        You can also bind a key to it under Keyboard shortcuts.</div>
-                </div>
                 <div class="set-section set-browser-global">
                     <div class="set-title">Start button</div>
                     <div class="set-row"><label>label</label>

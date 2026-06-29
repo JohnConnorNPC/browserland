@@ -472,3 +472,90 @@ def test_pattern_mod_packaged_and_manifest_agrees():
     assert "id: 'pattern'" in INDEX_HTML
     assert "function applyPattern" in INDEX_HTML
     assert INDEX_HTML.index("id: 'theme'") < INDEX_HTML.index("id: 'pattern'")
+
+
+# --------------------------------------------------------------------------- #
+# help mod (#78 / S5)
+# --------------------------------------------------------------------------- #
+
+def test_help_symbols_removed_from_core_fragments():
+    # The Help WINDOW, the taskbar "?" chip, the show/hide toggle, the chip
+    # wiring and the render machinery are now a mod (#78): their core markup /
+    # handlers / CSS are gone. Scope the check to the CORE fragments they were
+    # extracted from. The corpus DATA pipeline (fetchHelpCorpus / buildHelpEntries
+    # / /help-corpus.json) deliberately STAYS in core 80 (it reads core state), so
+    # the sentinels target only the moved window/chip/toggle, never the kept
+    # corpus (see test_help_corpus_pipeline_kept_in_core).
+    core = {
+        "65_js_display_theming.js": ("applyHelpButton",),
+        "40_body.html": ('id="help-chip"', 'id="set-help-button"'),
+        "12_css_help.css": ("#help-chip", ".app-help"),
+        "79_js_settings_modal.js": ("setHelpButtonEl",),
+        "81_js_control_panel.js": ("setHelpButtonEl", "function focusOrOpenHelp",
+                                   "wireHelpChip", "maybeShowHelpHint",
+                                   "applyHelpButton"),
+        "80_js_help_window.js": ("function openHelpWindow", "function buildHelpBody",
+                                 "function renderHelpInto", "function findHelpWindow"),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+
+
+def test_help_corpus_pipeline_kept_in_core():
+    # Issue #78 keeps the corpus + the buildHelpEntries merge in core (they read
+    # core state: KEY_ACTIONS / profilesCache / mcpConfigCache); the help mod
+    # calls these hoisted functions. They must NOT have been swept into the mod.
+    src = (BROKER_DIR / "80_js_help_window.js").read_text(encoding="utf-8")
+    for sym in ("function buildHelpEntries", "function fetchHelpCorpus",
+                "function flattenHelpCorpus", "function helpTextBlock"):
+        assert sym in src, f"{sym!r} must stay in core 80_js_help_window.js"
+    # And they remain reachable in the served page for the mod to call.
+    assert "function buildHelpEntries" in INDEX_HTML
+
+
+def test_help_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "help"
+    js = mod_dir / "help.js"
+    css = mod_dir / "help.css"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and css.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "help"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "help.js"
+    # First mod to ship a packaged stylesheet via the S4 route (#77).
+    assert meta["styles"] == ["help.css"]
+    # The script registers the help mod, owns the synced showHelpButton key
+    # through the #74 boolean API, and carries the moved window factory + chip.
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'help'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.settings.boolean('showHelpButton'" in src
+    assert "function openHelpWindow" in src
+    assert "function applyHelpButton" in src
+    # XSS render-order invariant: helpAppendHighlighted must precede
+    # findHelpWindow with no innerHTML between them (test_help_corpus.py's
+    # test_help_render_path_has_no_innerhtml slices INDEX_HTML between the two).
+    assert src.index("function helpAppendHighlighted(") \
+        < src.index("function findHelpWindow(")
+    # And the mod ships in the served page (present in the mod / gone from core),
+    # registered AFTER the clock so the clock's "addStatusItem before #help-chip"
+    # slot is preserved.
+    assert "function openHelpWindow" in INDEX_HTML
+    assert "id: 'help'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'clock'") < INDEX_HTML.index("id: 'help'")
+
+
+def test_register_help_cards_capability_present():
+    # #78 (S5): ctx.registerHelpCards + the loader-side sanitizer (DOM-safe typed
+    # block/span schema, never raw HTML) + the window.__mods.helpCards registry
+    # ride in the served loader. The Playwright acceptance (a fixture mod's cards
+    # appear in Help) depends on these.
+    for sym in ("registerHelpCards: function", "function _modRegisterHelpCards",
+                "function _sanitizeHelpCard", "function _sanitizeHelpBlocks",
+                "helpCards:"):
+        assert sym in INDEX_HTML, f"missing registerHelpCards symbol: {sym!r}"

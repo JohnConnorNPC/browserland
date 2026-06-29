@@ -42,16 +42,12 @@
         // ctx.settings.boolean. Core no longer renders it; convergence reaches
         // the mod via notifyModSettings() at the end of applyThemeSettings.
 
-        // ---- #40 help chip visibility --------------------------------------
-        // The taskbar "?" chip; same show/hide-on-an-`.on`-class pattern as the
-        // clock, driven by getSettings().showHelpButton. Reads only — converges
-        // on boot and on every /state pull via applyThemeSettings.
-        function applyHelpButton(on) {
-            try {
-                const el = document.getElementById('help-chip');
-                if (el) el.classList.toggle('on', !!on);
-            } catch (_) {}
-        }
+        // ---- #40 help chip visibility: EXTRACTED to a mod (#78) ------------
+        // The taskbar "?" Help chip, its show/hide toggle, and the whole Help
+        // window moved to mods/help/. The mod creates #help-chip, owns the synced
+        // showHelpButton key via ctx.settings.boolean, and applies visibility on
+        // its own convergence (notifyModSettings, fired at the end of
+        // applyThemeSettings below). Core no longer reads showHelpButton here.
 
         // ---- start button label --------------------------------------------
         // The `+` launch button doubles as the Win-style Start button. Only the
@@ -72,14 +68,14 @@
         // Reads settings only; never calls savePrefs, so it can't echo-loop.
         function applyThemeSettings() {
             try {
-                const s = getSettings();
                 // #75/#76: `theme` and `pattern` are mod-owned now
                 // (mods/theme/, mods/pattern/). They converge via
                 // notifyModSettings() below — the pattern select repaints on a
                 // `pattern` change, and the theme mod repaints the (theme-var-
                 // aware) pattern after it writes the chrome vars on a `theme`
                 // change. Core no longer paints either directly.
-                applyHelpButton(s.showHelpButton);   // #40
+                // #78: the Help chip's showHelpButton visibility is mod-owned too
+                // (mods/help/) — it also converges via notifyModSettings() below.
                 applyStartButton();
                 applyTerminalFont();        // #18: configurable terminal font
                 // #71: fire mod-owned settings (the clock, etc.) LAST so every

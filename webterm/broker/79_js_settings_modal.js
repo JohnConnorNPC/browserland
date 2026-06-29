@@ -29,7 +29,8 @@
         // ctx.settings.select (like the clock checkbox below).
         // #71: the clock's "Show date & time" checkbox is no longer a fixed core
         // control — the clock mod mounts it into #set-mods via ctx.settings.
-        const setHelpButtonEl = document.getElementById('set-help-button');   // #40
+        // #78: the Help button "show ? chip" checkbox moved the same way (the help
+        // mod mounts it into #set-mods via ctx.settings.boolean).
         const setStartLabelEl = document.getElementById('set-start-label');
         const setStartPathEl = document.getElementById('set-start-path');
         const setTermFontEl = document.getElementById('set-term-font');   // #18

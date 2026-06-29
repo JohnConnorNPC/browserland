@@ -116,6 +116,7 @@ _MODS = [
     "mods/theme/theme.js",     # S2 (#75) color-scheme radio + the six chrome vars
     "mods/pattern/pattern.js", # S3 (#76) background-pattern select (theme-var-aware)
     "mods/clock/clock.js",     # F057 clock, extracted as the reference mod
+    "mods/help/help.js",       # S5 (#78) Help window + ? chip + ctx.registerHelpCards; ships help.css
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

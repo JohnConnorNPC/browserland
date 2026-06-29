@@ -1,0 +1,10 @@
+{
+  "id": "help",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Help",
+  "description": "In-app Help window + the taskbar ? chip + ctx.registerHelpCards (extracted from core, #78). Ships help.css.",
+  "entry": "help.js",
+  "styles": ["help.css"],
+  "author": "JohnConnorNPC"
+}

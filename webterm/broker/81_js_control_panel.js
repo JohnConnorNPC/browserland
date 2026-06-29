@@ -192,53 +192,11 @@
             if (ex && !ex.minimized && frontId === ex.id) { closeWindow(ex.id); return; }
             openControlPanelWindow({});
         }
-        function focusOrOpenHelp() {
-            markHelpSeen();   // any deliberate open is the strongest "seen" signal
-            const ex = findHelpWindow();
-            if (ex) {
-                if (ex.minimized) restoreWindow(ex.id);
-                bringToFront(ex.id);
-                setTimeout(() => { try { ex._help.searchEl.focus(); } catch (_) {} }, 0);
-                return ex;
-            }
-            return openHelpWindow({});
-        }
-        function launchHelp() { return focusOrOpenHelp(); }
-        // The hotkey toggles: if Help is the focused, non-minimized front window,
-        // close it; otherwise open/focus it.
-        function toggleHelpWindow() {
-            const ex = findHelpWindow();
-            if (ex && !ex.minimized && frontId === ex.id) { closeWindow(ex.id); return; }
-            focusOrOpenHelp();
-        }
-        (function wireHelpChip() {
-            const chip = document.getElementById('help-chip');
-            if (!chip) return;
-            chip.addEventListener('click', focusOrOpenHelp);
-            chip.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusOrOpenHelp(); }
-            });
-        })();
-        // First-run nudge: once, point new users at the "?" chip (only if it's
-        // visible). Deferred until the initial /state has been ADOPTED so it
-        // reflects the synced helpHintSeen/showHelpButton rather than pre-pull
-        // defaults (codex); capped (~10s) so an offline/auth-blocked broker
-        // still nudges from local prefs instead of hanging forever.
-        let _helpHintTries = 0;
-        function maybeShowHelpHint() {
-            try {
-                if (!_stateReady && _helpHintTries++ < 20) {
-                    setTimeout(maybeShowHelpHint, 500);
-                    return;
-                }
-                const s = getSettings();
-                if (s.helpHintSeen || !s.showHelpButton) return;
-                showNotice('Tip: click the "?" on the taskbar for the interface guide.', 7000);
-                s.helpHintSeen = true;
-                savePrefs();
-            } catch (_) {}
-        }
-        setTimeout(maybeShowHelpHint, 1800);
+        // #78: focusOrOpenHelp / launchHelp / toggleHelpWindow, the "?" chip
+        // wiring, and the first-run Help nudge moved to mods/help/help.js. They
+        // stay top-level hoisted functions in that mod script, so the core call
+        // sites (the (+) menu launchHelp in 76, the toggle-help keybinding in 78)
+        // still resolve them across the one concatenated <script>.
 
         // Build the tab bar: a "Browser" tab (connection list) + one tab per
         // configured host. Active tab highlighted.
@@ -359,8 +317,7 @@
             // below); core only reflects the terminal font.
             const ls = getSettings();
             setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
-            renderModSettingsToggles(t.isLocal);   // #71: reflect mod toggles (clock, …)
-            setHelpButtonEl.checked = !!ls.showHelpButton;   // #40 (browser-global)
+            renderModSettingsToggles(t.isLocal);   // #71/#78: reflect mod toggles (clock, help, …)
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
             // Default start path is PER-HOST (#17): read the target host's own
             // settings (local = live getSettings(); remote = its cached blob),
@@ -664,14 +621,10 @@
             savePrefs();
             applyTerminalFont();
         });
-        // #71: the clock toggle's change handler now lives in the clock mod
-        // (ctx.settings.boolean wires the #set-mods checkbox to savePrefs +
-        // re-apply). Core only reflects it on render (renderModSettingsToggles).
-        setHelpButtonEl.addEventListener('change', () => {   // #40
-            getSettings().showHelpButton = !!setHelpButtonEl.checked;
-            savePrefs();
-            applyHelpButton(setHelpButtonEl.checked);
-        });
+        // #71/#78: the clock and Help-button toggle change handlers now live in
+        // their mods (ctx.settings.boolean wires each #set-mods checkbox to
+        // savePrefs + re-apply). Core only reflects them on render
+        // (renderModSettingsToggles).
         const commitStartLabel = () => {
             const v = (setStartLabelEl.value || '').trim().slice(0, 24) || '+';
             getSettings().startLabel = v;
