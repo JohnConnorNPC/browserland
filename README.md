@@ -251,7 +251,7 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 | Path | What |
 |---|---|
 | `webterm/agent/` | Headless producer: PTY backends, output ring buffer, OSC-title sniffer, reconnecting WebSocket client |
-| `webterm/broker/` | Web server: desktop UI (`index.html`), `/ws` relay, producer WS, session list, profiles-only launch |
+| `webterm/broker/` | Web server: desktop UI (`ui.py` assembles the served page from ordered `*.html`/`*.css`/`*.js` fragments), `/ws` relay, producer WS, session list, profiles-only launch |
 | `webterm/mcptool/` | The shipped stdio MCP server wrapping the broker's `/mcp/*` API |
 | `webterm/protocol.py` | The single source of truth for the JSON frame shapes |
 | `launchers/` | venv-bootstrapping run scripts (and systemd units) for both OSes |

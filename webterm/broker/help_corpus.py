@@ -1,7 +1,7 @@
 """Parse the end-user wiki (``wiki/*.md``) into the in-app Help corpus.
 
 The in-app Help guide (the taskbar "?" chip) used to carry a hand-written
-``HELP_ENTRIES_STATIC`` array inside ``index.html`` that duplicated the
+``HELP_ENTRIES_STATIC`` array inside the desktop UI page that duplicated the
 ``wiki/`` pages — two copies that drifted apart (see issue #57). This module
 makes ``wiki/*.md`` the SINGLE SOURCE OF TRUTH: it parses the markdown into a
 typed, plain-data corpus that the broker serves at ``GET /help-corpus.json``
