@@ -588,13 +588,13 @@ def test_register_window_kind_capability_present():
 
 
 def test_window_kind_builtins_registered_in_menu_order():
-    # registerBuiltinWindowKinds registers the THREE remaining core kinds
+    # registerBuiltinWindowKinds registers the TWO remaining core kinds
     # (sticky-note left for the S8 mod #81, text-editor for the S10 mod #83,
-    # file-manager for the S11 mod #84), and their registration order is the
-    # historical (+) launch-menu order (Map iteration order drives the menu), so
-    # the built-ins reproduce the old relative menu order.
+    # file-manager for the S11 mod #84, task-manager for the S12 mod #85), and their
+    # registration order is the historical (+) launch-menu order (Map iteration
+    # order drives the menu), so the built-ins reproduce the old relative menu order.
     src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
-    order = ["task-manager", "control-panel", "help"]
+    order = ["control-panel", "help"]
     positions = []
     for kind in order:
         needle = f"appKind: '{kind}'"
@@ -602,12 +602,14 @@ def test_window_kind_builtins_registered_in_menu_order():
         positions.append(src.index(needle))
     assert positions == sorted(positions), \
         "built-in kinds must register in the historical menu order"
-    # sticky-note, text-editor + file-manager are now mods, never core built-ins
-    # (each appends through ctx at loadMods time). The sticky note's retain-on-close
-    # rode with it; the text editor's + file manager's specs rode with them too.
+    # sticky-note, text-editor, file-manager + task-manager are now mods, never core
+    # built-ins (each appends through ctx at loadMods time). The sticky note's
+    # retain-on-close rode with it; the editor / file-manager / task-manager specs
+    # rode with them too.
     assert "appKind: 'sticky-note'" not in src
     assert "appKind: 'text-editor'" not in src
     assert "appKind: 'file-manager'" not in src
+    assert "appKind: 'task-manager'" not in src
     assert "retainOnClose: function (rec)" not in src
     # No persisted CORE built-in remains: the file-manager's serializeAppWindow
     # reference moved to mods/file-manager/ (text-editor's to mods/editor/,
@@ -927,3 +929,125 @@ def test_file_capability_trust_doc_present():
     assert "permission boundary" in loader
     assert "POST to /file/* directly" in loader
     assert "editor_root confinement" in loader
+
+
+# --------------------------------------------------------------------------- #
+# task-manager mod (#85 / S12)
+# --------------------------------------------------------------------------- #
+
+def test_taskmanager_symbols_removed_from_core_fragments():
+    # The task manager is now a mod (#85/S12): its built-in registration is gone
+    # from core 54 and its launcher from core 76 — both moved into
+    # mods/task-manager/. The core fragment 72_js_task_manager.js is DELETED.
+    assert not (BROKER_DIR / "72_js_task_manager.js").exists()
+    assert "72_js_task_manager.js" not in ui._ORDERED
+    gone = {
+        "54_js_app_windows_store.js": ("appKind: 'task-manager'",
+                                       "return openTaskManagerWindow(d)"),
+        "76_js_launch_fullscreen.js": ("function launchTaskManager",),
+    }
+    for name, symbols in gone.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+    # The moved builder + launcher are present + reachable in the served page (they
+    # ship in mods/task-manager/ as hoisted functions).
+    for sym in ("function openTaskManagerWindow", "function launchTaskManager"):
+        assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
+
+
+def test_taskmanager_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "task-manager"
+    tm_js = mod_dir / "task-manager.js"
+    manifest = mod_dir / "mod.json"
+    assert tm_js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "task-manager"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "task-manager.js"
+    assert "mods/task-manager/task-manager.js" in ui._MODS
+    src = tm_js.read_text(encoding="utf-8")
+    # Registers the task-manager mod + contributes the task-manager window kind
+    # through ctx.registerWindowKind.
+    assert "registerMod(" in src
+    assert "id: 'task-manager'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'task-manager'" in src
+    assert "return openTaskManagerWindow(d)" in src
+    assert "return launchTaskManager()" in src
+    # EPHEMERAL: the kind is registered with NO serialize (never persisted), so
+    # there is no `serialize:` key in the spec.
+    assert "serialize:" not in src, "task-manager is ephemeral — no serialize key"
+    # Session RPC (incl. the DESTRUCTIVE kill / session destroy) rides ctx.session
+    # (#85): the mod stashes ctx.session and EVERY /session/* call flows through
+    # tmSession() carrying the session's own host id — NO raw inline fetch
+    # (hostHttpUrl) and NO surviving inline sessionPost in the mod.
+    assert "tmSession.cap = ctx.session;" in src
+    assert "tmSession().procs(sess.id, { host: sess.hostId })" in src
+    assert "tmSession().kill(sess.id, sess.pid, { host: sess.hostId })" in src
+    assert "tmSession().kill(sess.id, pid, { host: sess.hostId })" in src
+    assert "hostHttpUrl(" not in src, "the raw inline session fetch must be gone"
+    assert "sessionPost(" not in src, "the old inline sessionPost must be gone"
+    # Teardown closes any live task-manager window WHILE the kind is still
+    # registered (so saveAppWindow early-returns — no junk record persists), then
+    # drops the cap. The close-on-unload is registered AFTER registerWindowKind so
+    # LIFO teardown runs it BEFORE deleteWindowKind.
+    assert "closeWindow(w.id)" in src
+    assert "tmSession.cap = null;" in src
+    # Ships in the served page, AFTER the help mod and BEFORE the file-manager mod
+    # (so the (+) menu lists Task manager right after the core built-ins, ahead of
+    # the file-manager / editor / sticky mods).
+    assert "id: 'task-manager'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'task-manager'")
+    assert INDEX_HTML.index("id: 'task-manager'") < INDEX_HTML.index("id: 'file-manager'")
+
+
+# --------------------------------------------------------------------------- #
+# ctx.session capability (#85 / S12)
+# --------------------------------------------------------------------------- #
+
+def test_session_capability_present():
+    # #85 (S12): the ctx.session wrapper over /session/procs + the DESTRUCTIVE
+    # /session/kill, plus its host-routing helpers, ride in the served loader. The
+    # task-manager mod (and the Playwright acceptance) depend on these. ctxVersion
+    # stays 1 (additive capability).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    # The capability object + its two methods, on the per-mod ctx.
+    for sym in ("session: {",
+                "procs: function (id, opts)",
+                "kill: function (id, pid, opts)"):
+        assert sym in loader, f"missing ctx.session method: {sym!r}"
+    # Each method targets the matching /session/* route, wrapped here.
+    for route in ("'/session/procs'", "'/session/kill'"):
+        assert route in loader, f"ctx.session does not wrap route {route!r}"
+    # The host-routing helpers: fail-closed resolution + the task-manager's OWN
+    # synthetic no_host error (NOT ctx.file's host_not_found), so rendered errors
+    # stay byte-identical to the old inline sessionPost.
+    for sym in ("function _modSessionHost", "function _modSessionApi",
+                "error: 'no_host'"):
+        assert sym in loader, f"missing ctx.session host-routing symbol: {sym!r}"
+    # Routing reuses the EXISTING core host helpers (no parallel host logic).
+    for sym in ("hostById(hostId)", "return localHost();",
+                "hostHttpUrl(host, route)"):
+        assert sym in loader, f"ctx.session must reuse core host helper: {sym!r}"
+    # The {status,json} contract PRESERVES the HTTP status (so a 409 + session_gone
+    # stays a 409 — the session-destroy success path) and never rejects.
+    assert "{ status: r.status, json: j }" in loader
+    # ctxVersion is unchanged — ctx.session is additive.
+    assert "ctxVersion: 1" in loader
+    # And it all reaches the served page.
+    for sym in ("function _modSessionApi", "session: {", "error: 'no_host'"):
+        assert sym in INDEX_HTML, f"ctx.session missing from served page: {sym!r}"
+
+
+def test_session_capability_trust_doc_present():
+    # The trust-tier doc ships in-code WITH the capability: ctx.session is operator-
+    # granted REVIEW HYGIENE for a HIGH-trust (destructive) RPC, not enforcement (a
+    # same-origin mod can already POST /session/* directly). The 409 session_gone
+    # destroy-success path is documented in-code.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "REVIEW HYGIENE" in loader
+    assert "POST to /session/*" in loader
+    assert "session_gone" in loader

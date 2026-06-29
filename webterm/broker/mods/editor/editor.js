@@ -1985,6 +1985,18 @@
             return win;
         }
 
+        // Build (or restore) the tabbed "Agent docs" window for a folder: reads
+        // <cwd>/AGENTS.md AND <cwd>/CLAUDE.md in parallel on the resolved host,
+        // builds the per-tab `docs` array (+ a synthetic Sections tab is added in
+        // openAppWindow), and opens the window. Shared by the titlebar opener
+        // (openAgentsMdEditor) AND the legacy-record upgrade path in
+        // openAppWindow (which passes stored geom/color/tiling to preserve them).
+        //   opts: { id, cwd, fileHostId, geom?, color?, locked?, floatGeom?,
+        //           activeTab? }
+        // The /file API is host-wide (#35), so an AGENTS.md at any cwd opens;
+        // not_found opens an empty buffer (saving creates it). CLAUDE.md errors
+        // fall back to an empty buffer (best-effort — the AGENTS save later
+        // ensures it references @AGENTS.md).
         async function openAgentDocsWindow(opts) {
             const cwd = String(opts.cwd || '');
             const fileHostId = opts.fileHostId || 'local';

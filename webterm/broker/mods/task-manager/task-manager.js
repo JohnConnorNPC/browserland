@@ -1,3 +1,60 @@
+        // ---- mod: task manager (S12 / #85) --------------------------------
+        // The live "Task manager" app window, extracted from core (fragment
+        // 72_js_task_manager.js) as a ctx.registerWindowKind mod (#85). It was a
+        // core built-in in #80's window-kind registry; the same { factory, menu }
+        // spec now ships here and registers through the mod's ctx, so a task
+        // manager is a first-class window everywhere the registry is consulted
+        // (open / the (+) launch menu). Only its OWNER moved from core to a mod.
+        // HIGHEST review tier — it performs DESTRUCTIVE process kills and session
+        // destroys (kill the shell pid tears the session down).
+        //
+        // EPHEMERAL — registered with NO serialize, exactly like the old core
+        // built-in, so saveAppWindow never writes it to webterm:appwindows:v1 and
+        // it never restores across reloads. Persistence is OUT OF SCOPE per the
+        // issue (the task manager stays a live monitor).
+        //
+        // SESSION RPC rides ctx.session (#85): every /session/procs +
+        // /session/kill call goes through the tmSession() accessor (below) — the
+        // reviewed, host-aware capability — instead of the old inline fetch, so the
+        // DESTRUCTIVE kill / session destroy is funneled through one choke point.
+        // The wire contract is byte-identical: each call returns { status, json }
+        // and the window keeps the exact status branching (401 auth, 409
+        // session_gone = SUCCESS, 200 ok:true). Host routing is byte-identical too —
+        // every call passes the session's own host id ({ host: sess.hostId }),
+        // which ctx.session / _modSessionApi re-resolve to the SAME host object the
+        // old inline sessionPost used (hostById(sess.hostId)).
+        //
+        // mods_enabled=false posture (same as every extracted mod): the task-
+        // manager kind is simply not REGISTERED, so the (+) "Task manager" launcher
+        // disappears. Nothing persisted to coerce on restore (it's ephemeral), and
+        // openAppWindow returns null for the unregistered 'task-manager' kind. The
+        // builder + launcher stay hoisted top-level `function`s (reachable), and
+        // tmSession() degrades to a literal mirror of ctx.session over the hoisted
+        // core _modSessionApi, so the RPC is identical mods on or off.
+
+        // ---- ctx.session accessor -----------------------------------------
+        // The single choke point every task-manager /session/* call flows through.
+        // init() stashes the per-mod ctx.session on tmSession.cap (a function
+        // property — no TDZ, the window.__mods / fmFile.cap pattern), which the
+        // hoisted builder closures read via tmSession(). With mods off (init never
+        // ran) it degrades to a literal mirror of ctx.session's procs/kill over the
+        // hoisted core _modSessionApi (the SAME plumbing ctx.session wraps,
+        // identical request bodies + fail-closed host-id routing), so the session
+        // RPC is identical mods on or off. opts.host is a host-id (sess.hostId
+        // semantics): '' / 'local' / omitted -> local broker, a known id -> that
+        // broker, an UNKNOWN remote id -> a synthetic no_host result (no request).
+        function tmSession() {
+            return tmSession.cap || {
+                procs: function (id, opts) {
+                    return _modSessionApi('/session/procs', { id: id }, opts);
+                },
+                kill: function (id, pid, opts) {
+                    return _modSessionApi('/session/kill',
+                        { id: id, pid: pid }, opts);
+                },
+            };
+        }
+
         // Live "Task manager" app window: lists every real terminal/agent
         // session (sessions with kind !== 'app') across all hosts, each
         // expandable to its child-process tree, with End-process + Destroy-
@@ -80,25 +137,13 @@
             const liveSessions = () => Array.from(sessions.values())
                 .filter(s => s && s.kind !== 'app' && !destroyed.has(s.key));
 
-            // Host-aware POST to a /session/* endpoint for one session. Returns
-            // { status, json } and never rejects. A removed host yields a
-            // synthetic no-host result so callers can render "unavailable".
-            const sessionPost = (sess, path, extra) => {
-                const host = hostById(sess.hostId);
-                if (!host) {
-                    return Promise.resolve(
-                        { status: 0, json: { ok: false, error: 'no_host' } });
-                }
-                return fetch(hostHttpUrl(host, path), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(Object.assign({ id: sess.id }, extra || {})),
-                }).then(r => r.json()
-                    .then(j => ({ status: r.status, json: j }))
-                    .catch(() => ({ status: r.status,
-                                    json: { ok: false, error: 'HTTP ' + r.status } })))
-                 .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
-            };
+            // Every /session/* RPC below flows through tmSession() — the reviewed,
+            // host-aware ctx.session capability (#85) — instead of a raw inline
+            // fetch. Each call passes the session's OWN host id ({ host:
+            // sess.hostId }) and returns { status, json } (never rejects), so the
+            // status branching downstream (401 auth / 409 session_gone = SUCCESS /
+            // 200 ok:true) and the per-host routing stay byte-identical to the old
+            // inline sessionPost (which did hostById(sess.hostId) directly).
 
             // Fetch procs for one expanded session. Sequence-guarded per key so a
             // slow reply can't paint over a newer collapse/expand or a closed
@@ -111,7 +156,7 @@
                 procSeq.set(key, seq);
                 let res;
                 try {
-                    res = await sessionPost(sess, '/session/procs');
+                    res = await tmSession().procs(sess.id, { host: sess.hostId });
                 } catch (_) {
                     res = { status: 0, json: { ok: false, error: 'error' } };
                 } finally {
@@ -149,7 +194,7 @@
                 render();
                 let res;
                 try {
-                    res = await sessionPost(sess, '/session/kill', { pid: sess.pid });
+                    res = await tmSession().kill(sess.id, sess.pid, { host: sess.hostId });
                 } finally {
                     busyOps.delete(opKey);
                 }
@@ -187,7 +232,7 @@
                 render();
                 let res;
                 try {
-                    res = await sessionPost(sess, '/session/kill', { pid });
+                    res = await tmSession().kill(sess.id, pid, { host: sess.hostId });
                 } finally {
                     busyOps.delete(opKey);
                 }
@@ -513,15 +558,53 @@
             return win;
         }
 
-        // Build (or restore) the tabbed "Agent docs" window for a folder: reads
-        // <cwd>/AGENTS.md AND <cwd>/CLAUDE.md in parallel on the resolved host,
-        // builds the per-tab `docs` array (+ a synthetic Sections tab is added in
-        // openAppWindow), and opens the window. Shared by the titlebar opener
-        // (openAgentsMdEditor) AND the legacy-record upgrade path in
-        // openAppWindow (which passes stored geom/color/tiling to preserve them).
-        //   opts: { id, cwd, fileHostId, geom?, color?, locked?, floatGeom?,
-        //           activeTab? }
-        // The /file API is host-wide (#35), so an AGENTS.md at any cwd opens;
-        // not_found opens an empty buffer (saving creates it). CLAUDE.md errors
-        // fall back to an empty buffer (best-effort — the AGENTS save later
-        // ensures it references @AGENTS.md).
+        // The (+) launcher — moved verbatim from core 76_js_launch_fullscreen.js.
+        function launchTaskManager() {
+            openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });
+        }
+
+        // ---- mod registration: the task-manager window kind ----------------
+        registerMod({
+            id: 'task-manager',
+            version: '1.0.0',
+            ctxVersion: 1,
+            init: function (ctx) {
+                // Route every task-manager /session/* op (incl. the DESTRUCTIVE
+                // kill / session destroy) through the reviewed ctx.session
+                // capability (#85); cleared on teardown (below) so a disabled
+                // task-manager mod falls back to the hoisted _modSessionApi the
+                // tmSession() accessor mirrors.
+                tmSession.cap = ctx.session;
+                // Register the task-manager kind (the #80 built-in spec, moved
+                // here) with NO serialize — it is EPHEMERAL, never written to the
+                // app store, exactly like the old core built-in. A duplicate
+                // appKind throws -> initMod rolls the mod back.
+                ctx.registerWindowKind({
+                    appKind: 'task-manager',
+                    factory: function (d) { return openTaskManagerWindow(d); },
+                    menu: {
+                        label: '🧰 Task manager',
+                        launch: function () { return launchTaskManager(); },
+                    },
+                });
+                // Teardown — registered AFTER registerWindowKind so it runs FIRST
+                // (LIFO), i.e. BEFORE the registry's deleteWindowKind. Close any
+                // live task-manager window WHILE the kind is still registered:
+                // closeWindow -> saveAppWindow then sees the registered no-serialize
+                // kind and early-returns, so the ephemeral window leaves NO record.
+                // If we tore down after deleteWindowKind, a later saveAppWindow
+                // (e.g. the active-view rebuild on a lease loss, 84) would fall back
+                // to the shared serializer and persist a junk 'task-manager' record
+                // (codex review). Then drop the cap so a stray direct call degrades
+                // to the core fallback.
+                ctx.onUnload(function () {
+                    for (const w of Array.from(windows.values())) {
+                        if (w && w.type === 'app'
+                            && w.appKind === 'task-manager') {
+                            closeWindow(w.id);
+                        }
+                    }
+                    tmSession.cap = null;
+                });
+            },
+        });

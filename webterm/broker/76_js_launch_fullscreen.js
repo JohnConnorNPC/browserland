@@ -195,13 +195,11 @@
         }
 
         // Client-only apps offered below the terminal profiles in the launch
-        // menu. The sticky-note (#81/S8), text-editor (#83/S10) and file-manager
-        // (#84/S11) launchers moved to mods/sticky/, mods/editor/ and
-        // mods/file-manager/; these are the remaining core kinds (registered as
-        // built-ins, 54_js_app_windows_store.js's registerBuiltinWindowKinds).
-        function launchTaskManager() {
-            openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });
-        }
+        // menu. The sticky-note (#81/S8), text-editor (#83/S10), file-manager
+        // (#84/S11) and task-manager (#85/S12) launchers moved to mods/sticky/,
+        // mods/editor/, mods/file-manager/ and mods/task-manager/; control-panel
+        // (below) is the remaining core kind (registered as a built-in,
+        // 54_js_app_windows_store.js's registerBuiltinWindowKinds).
         function launchControlPanel() {
             // The Control Panel is a moveable floating window (#59); open or focus
             // it. Kept as the named entry point for the launch-menu item.
