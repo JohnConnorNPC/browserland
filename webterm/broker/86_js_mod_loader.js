@@ -98,6 +98,61 @@
                         try { localStorage.removeItem(ns + key); } catch (_) {}
                     },
                 },
+                // #82 (S9): host filesystem access — ONE reviewed wrapper over
+                // the existing /file/* API (read/write/list/delete/upload) with
+                // the same per-host routing core uses (fileApiPost + the editor's
+                // fileHostId resolution).
+                //
+                // TRUST TIER — this is operator-granted REVIEW HYGIENE, NOT a
+                // permission boundary or sandbox. A same-origin mod already holds
+                // the page's auth token and can POST to /file/* directly, exactly
+                // like core does; ctx.file grants NO new privilege and confines
+                // nothing. Its only job is to route every mod's filesystem access
+                // through one reviewed, host-aware choke point, so "don't merge a
+                // mod that reads ~/.ssh" stays a code-review decision (the only
+                // real control). Paths are host-wide ABSOLUTE native paths (or a
+                // relative path / '' resolved against the broker's default dir);
+                // there is NO editor_root confinement (app.py:_resolve_host_path,
+                // #35). Every call resolves to a parsed result object — never a
+                // rejected promise — {ok:true,...} or {ok:false,error}. opts.host
+                // is a host *id* string (win.fileHostId semantics), NOT a host
+                // object: a known id routes to that broker, ''/'local'/omitted ->
+                // the local broker, and an UNKNOWN remote id FAILS CLOSED with
+                // {ok:false,error:'host_not_found'} (no request made) rather than
+                // silently writing to local. Feature-detect with `if (ctx.file)`
+                // (ctxVersion stays 1 — this is an additive capability).
+                file: {
+                    // Read text, or {b64:true} for base64. -> {ok,path,content}
+                    // (or {ok,path,content_b64} in b64 mode).
+                    read: function (path, opts) {
+                        const body = { path: path };
+                        if (opts && opts.b64 === true) body.b64 = true;
+                        return _modFileApi('/file/read', body, opts);
+                    },
+                    // UTF-8 text write (atomic, host-wide). -> {ok,path}
+                    write: function (path, content, opts) {
+                        return _modFileApi('/file/write',
+                            { path: path, content: content }, opts);
+                    },
+                    // Directory listing (''/relative -> the broker default dir).
+                    // -> {ok,root,cwd,parent,entries:[{name,type,size}]}
+                    list: function (path, opts) {
+                        return _modFileApi('/file/list', { path: path || '' }, opts);
+                    },
+                    // Single-file delete (refuses a directory). -> {ok,path}.
+                    // Quoted key so the reserved word can never trip a minifier;
+                    // ctx.file.delete(...) still calls it.
+                    'delete': function (path, opts) {
+                        return _modFileApi('/file/delete', { path: path }, opts);
+                    },
+                    // Binary-safe write via base64; opts.overwrite (default false)
+                    // -> {ok,path,size} (or {ok:false,error:'exists'} on a clash).
+                    upload: function (path, contentB64, opts) {
+                        return _modFileApi('/file/upload',
+                            { path: path, content_b64: contentB64,
+                              overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                },
                 taskbar: {
                     // Mount a status node in the taskbar (before #help-chip, so a
                     // mod keeps the old clock slot). Auto-removed on teardown.
@@ -539,6 +594,32 @@
                 deleteWindowKind(entry.appKind, entry);
             });
             return entry;
+        }
+
+        // ---- ctx.file host routing (#82 / S9) -------------------------------
+        // Resolve a mod-supplied host *id* (win.fileHostId semantics) to the host
+        // OBJECT fileApiPost wants, FAIL CLOSED — identical to the editor's
+        // fileHost() (70_js_editor_app.js): a known id -> that host; ''/'local'/
+        // undefined -> the local broker; an UNKNOWN remote id -> null so the op
+        // aborts rather than silently hitting local (a remote absolute path can
+        // also exist under the local root, so a fallback could clobber a LOCAL
+        // file).
+        function _modFileHost(hostId) {
+            const h = hostById(hostId);
+            if (h) return h;
+            if (!hostId || hostId === 'local') return localHost();
+            return null;
+        }
+        // POST a /file/* route through the resolved host. fileApiPost already
+        // resolves to a parsed object on every transport/HTTP error (never
+        // rejects), so the only synthetic result is the fail-closed host: a
+        // resolved {ok:false,error:'host_not_found'} with NO request sent.
+        function _modFileApi(route, body, opts) {
+            const host = _modFileHost(opts && opts.host);
+            if (!host) {
+                return Promise.resolve({ ok: false, error: 'host_not_found' });
+            }
+            return fileApiPost(route, body, host);
         }
 
         // Fire mod controls on convergence (boot + every /state pull, via
