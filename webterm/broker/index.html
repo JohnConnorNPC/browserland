@@ -1547,6 +1547,13 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .host-row .host-dup {
+            flex: 0 0 auto;
+            color: #e0a040;
+            font-size: 11px;
+            white-space: nowrap;
+            cursor: help;
+        }
         #settings-modal input[type=number],
         #settings-modal input[type=text],
         #settings-modal input[type=password],
@@ -16066,7 +16073,93 @@
             return url.replace(/^https?:\/\//, '');
         }
 
-        function commitHostForm() {
+        // ---- broker identity (#64) ----------------------------------------
+        // The same broker reached via several URLs (127.0.0.1 / localhost /
+        // Tailscale 100.x) used to be added as multiple host records, spawning
+        // duplicate taskbar chips and making Terminate fail against a stale
+        // twin. /info exposes a stable broker_id so we can flag those. The id
+        // is stored on the host record under `brokerId` (browser-local — never
+        // pushed to /state, see _stateBlob) and is best-effort: an older broker
+        // (404) or an auth/transport miss simply leaves it unknown.
+        async function probeBrokerId(url, token) {
+            // Cross-origin /info probe. Returns the broker_id string, or null on
+            // any failure (404 older broker, 401 wrong token, network) — caller
+            // treats null as "unknown identity, allow with no warning".
+            try {
+                const r = await fetch(hostHttpUrl({ url, token }, '/info'));
+                if (!r.ok) return null;
+                const j = await r.json();
+                if (j && j.ok && typeof j.broker_id === 'string'
+                        && j.broker_id) {
+                    return j.broker_id;
+                }
+            } catch (_) {}
+            return null;
+        }
+        function findHostByBrokerId(brokerId, hosts) {
+            if (!brokerId) return null;
+            for (const h of (hosts || getHosts())) {
+                if (h.brokerId && h.brokerId === brokerId) return h;
+            }
+            return null;
+        }
+        // Learn THIS broker's id same-origin on boot, so it can anchor the
+        // duplicate check (a remote record whose URL points back at this same
+        // broker is then flagged dup-of-local). Lease-independent, best-effort.
+        async function learnLocalBrokerId() {
+            const id = await probeBrokerId(
+                localHost().url, localHost().token);
+            if (id && localHost().brokerId !== id) {
+                localHost().brokerId = id;
+                savePrefsLocal();        // browser-local only — never PUT /state
+            }
+        }
+        // Background-learn stored remote hosts' ids (remediating the reporter's
+        // EXISTING broken state: records added before /info carry no brokerId).
+        // Re-renders the Hosts list once if anything changed. Only probes hosts
+        // still missing an id, so it converges and never render-loops.
+        let _hostIdRefreshing = false;
+        async function refreshHostIdentities() {
+            if (_hostIdRefreshing) return;
+            _hostIdRefreshing = true;
+            let changed = false;
+            try {
+                for (const h of getHosts()) {
+                    if (h.id === 'local' || h.brokerId) continue;
+                    const id = await probeBrokerId(h.url, h.token);
+                    if (id) { h.brokerId = id; changed = true; }
+                }
+            } finally {
+                _hostIdRefreshing = false;
+            }
+            if (changed) { savePrefsLocal(); renderHostsList(); }
+        }
+        // Map hostId -> the EARLIER host it duplicates (same broker_id, or same
+        // normalized origin when ids are unknown). hosts[0] is always local, so
+        // the local record is the primary and is never itself flagged; a remote
+        // pointing back at this broker is flagged dup-of-local.
+        function computeHostDuplicates(hosts) {
+            const byId = new Map();          // brokerId -> first host
+            const byOrigin = new Map();      // origin   -> first host
+            const dupOf = new Map();
+            for (const h of hosts) {
+                const origin = h.id === 'local'
+                    ? window.location.origin : normalizeHostUrl(h.url);
+                if (h.brokerId && byId.has(h.brokerId)) {
+                    dupOf.set(h.id, byId.get(h.brokerId));
+                    continue;
+                }
+                if (!h.brokerId && origin && byOrigin.has(origin)) {
+                    dupOf.set(h.id, byOrigin.get(origin));
+                    continue;
+                }
+                if (h.brokerId && !byId.has(h.brokerId)) byId.set(h.brokerId, h);
+                if (origin && !byOrigin.has(origin)) byOrigin.set(origin, h);
+            }
+            return dupOf;
+        }
+
+        async function commitHostForm() {
             setHostError('');
             const label = hostLabelEl.value.trim();
             const url = normalizeHostUrl(hostUrlEl.value);
@@ -16096,15 +16189,35 @@
                 authPrompted.delete(editing.id);
             } else {
                 if (!pass) {
-                    // The broker emits CORS only when a token is set, so a
-                    // tokenless remote is unreachable by design.
+                    // A remote /session/kill, /state etc. is token-or-loopback
+                    // gated, so a tokenless remote is undriveable from here even
+                    // though CORS is now unconditional — require the token.
                     setHostError('password required — remote brokers must '
                         + 'have an auth token configured');
                     return;
                 }
-                hosts.push({ id: mintHostId(),
-                             label: label || defaultHostLabel(url),
-                             url, token: pass });
+                // Probe identity (#64): warn (but allow) if this URL is a broker
+                // we already have under another address. A null id (older broker
+                // / unreachable / wrong token) just skips the warning.
+                let brokerId = null;
+                try {
+                    brokerId = await probeBrokerId(url, pass);
+                } catch (_) {}
+                if (brokerId) {
+                    const dup = findHostByBrokerId(brokerId, getHosts());
+                    if (dup && !confirm('This looks like the same broker you '
+                            + 'already have as "' + dup.label
+                            + '". Add anyway?')) {
+                        return;
+                    }
+                }
+                // Re-fetch the live array: getHosts() rebuilds prefs._hosts on
+                // every call (the poll loop runs during the await above), so the
+                // `hosts` captured before the probe may be detached — pushing to
+                // it would be dropped on save.
+                getHosts().push({ id: mintHostId(),
+                                  label: label || defaultHostLabel(url),
+                                  url, token: pass, brokerId });
             }
             savePrefs();
             resetHostForm();
@@ -16200,7 +16313,12 @@
 
         function renderHostsList() {
             hostsListEl.textContent = '';
-            for (const host of getHosts()) {
+            const hosts = getHosts();
+            // Flag records that resolve to a broker we already have (#64) so the
+            // user can remove the stale/duplicate one — the surgical fix the
+            // reporter actually needed (removeHost preserves other tokens).
+            const dupOf = computeHostDuplicates(hosts);
+            for (const host of hosts) {
                 const row = document.createElement('div');
                 row.className = 'set-row host-row';
                 const name = document.createElement('span');
@@ -16211,6 +16329,16 @@
                     : host.label + ' — ' + host.url;
                 name.title = name.textContent;
                 row.appendChild(name);
+                const dup = dupOf.get(host.id);
+                if (dup) {
+                    const hint = document.createElement('span');
+                    hint.className = 'host-dup';
+                    hint.textContent = 'duplicate of "' + dup.label + '"';
+                    hint.title = 'Same broker as "' + dup.label
+                        + '" reached via another URL — Remove this one to clear '
+                        + 'the duplicate taskbar chips (keeps other brokers).';
+                    row.appendChild(hint);
+                }
                 row.appendChild(hostRowButton('password',
                     'enter the password for this host',
                     () => showAuthOverlay(host, true)));
@@ -16222,6 +16350,7 @@
                 }
                 hostsListEl.appendChild(row);
             }
+            refreshHostIdentities();   // background: learns missing ids, re-renders
         }
 
         // ---- single-active view lifecycle (F-ACTIVECLIENT) ---------------
@@ -16454,6 +16583,7 @@
         })();
         fetchProfiles(localHost());   // prefetch LOCAL only — remote menus
                                       // populate lazily on right-click
+        learnLocalBrokerId();         // #64: same-origin id for dup detection
     </script>
 </body>
 </html>
