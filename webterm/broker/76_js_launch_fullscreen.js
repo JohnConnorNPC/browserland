@@ -195,18 +195,10 @@
         }
 
         // Client-only apps offered below the terminal profiles in the launch
-        // menu. The sticky-note (#81/S8) and text-editor (#83/S10) launchers moved
-        // to mods/sticky/ and mods/editor/; these are the remaining core kinds
-        // (registered as built-ins, 54_js_app_windows_store.js's
-        // registerBuiltinWindowKinds).
-        function launchFileManager() {
-            // Both panes start at the active terminal's cwd, on its host (#35) —
-            // and on its host PER PANE (#46), so each pane can be re-homed later.
-            const s = activeTerminalStart();
-            openAppWindow({ id: newAppId('fm'), appKind: 'file-manager',
-                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host,
-                            fmLeftHostId: s.host, fmRightHostId: s.host });
-        }
+        // menu. The sticky-note (#81/S8), text-editor (#83/S10) and file-manager
+        // (#84/S11) launchers moved to mods/sticky/, mods/editor/ and
+        // mods/file-manager/; these are the remaining core kinds (registered as
+        // built-ins, 54_js_app_windows_store.js's registerBuiltinWindowKinds).
         function launchTaskManager() {
             openAppWindow({ id: newAppId('tm'), appKind: 'task-manager' });
         }

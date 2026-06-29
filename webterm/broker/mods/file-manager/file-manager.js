@@ -1,3 +1,83 @@
+        // ---- mod: file manager (S11 / #84) --------------------------------
+        // The dual-pane file manager, extracted from core (fragment
+        // 71_js_file_manager.js) as a ctx.registerWindowKind mod (#84). It was a
+        // core built-in in #80's window-kind registry; the same spec now ships
+        // here and registers through the mod's ctx, so a file manager is a
+        // first-class window everywhere the registry is consulted (open /
+        // serialize / restore / close / the (+) launch menu). Only its OWNER
+        // moved from core to a mod. HIGHEST review tier — it performs DESTRUCTIVE
+        // delete (move = copy + delete-source) and upload (overwrite).
+        //
+        // What moved here, verbatim except the I/O swap below: the dual-pane
+        // builder openFileManagerWindow (list/preview, per-pane host picker #46,
+        // open-in-editor handoff, OS-file drop-to-upload, cross-pane copy/move
+        // straddling two hosts, the removed-host / re-auth lifecycle hooks) and
+        // the (+) launcher launchFileManager (moved from core 76). Both are
+        // top-level `function` declarations, so they HOIST across the one
+        // concatenated <script> and stay reachable from core regardless of
+        // mods_enabled — the same posture the editor/sticky mods use.
+        //
+        // PERSISTENCE IS BYTE-IDENTICAL (the issue's hard requirement): the spec
+        // reuses the EXACT core serializer serializeAppWindow (still core, shared
+        // with the editor + sticky mods), so every serialized field — fmLeft,
+        // fmRight, fmLeftHostId, fmRightHostId, fileHostId — round-trips unchanged
+        // through webterm:appwindows:v1.
+        //
+        // FILE I/O rides ctx.file (#82): every /file/* call goes through the
+        // fmFile() accessor (below) instead of fileApiPost / a raw upload fetch,
+        // so all filesystem access — including the DESTRUCTIVE delete + upload —
+        // is funneled through the one reviewed capability. Host routing is
+        // byte-identical — each call passes the host *id* of the host object the
+        // pane already resolved (paneHost(...).id), which ctx.file / _modFileApi
+        // re-resolve to the SAME cached object. The upload-clash check moves from
+        // the raw HTTP 409 status to the parsed body field error === 'exists'
+        // (app.py always pairs a 409 with {ok:false,error:'exists'}), so the
+        // overwrite prompt is preserved.
+        //
+        // mods_enabled=false posture: the file-manager kind is simply not
+        // REGISTERED, so the (+) "File manager" launcher disappears. Unlike the
+        // editor (whose builder openNoteOrEditorWindow IS the registry's unknown-
+        // kind default), a persisted file-manager record is NOT coerced into a
+        // note/editor on restore — openAppWindow's narrowed fallback (#84, core
+        // 54) returns null for an unknown non-note/editor kind, leaving the stored
+        // record intact so re-enabling the mod restores it faithfully. The builder
+        // is still hoisted (reachable when the mod IS on), and fmFile() degrades
+        // to the SAME core _modFileApi ctx.file wraps so I/O is identical mods on
+        // or off.
+
+        // ---- ctx.file accessor --------------------------------------------
+        // The single choke point every file-manager /file/* call flows through.
+        // init() stashes the per-mod ctx.file on fmFile.cap (a function property —
+        // no TDZ, the window.__mods / editorFile.cap pattern), which the hoisted
+        // builder closures read via fmFile(). With mods off (init never ran) it
+        // degrades to a literal mirror of ctx.file's read/list/delete/upload over
+        // the hoisted core _modFileApi (the SAME plumbing ctx.file wraps, identical
+        // request bodies + fail-closed host-id routing), so the file manager's I/O
+        // is identical mods on or off. opts.host is a host-id (win.fileHostId
+        // semantics): '' / 'local' / omitted -> local broker, a known id -> that
+        // broker, an UNKNOWN remote id -> {ok:false,error:'host_not_found'} (no
+        // request) so a removed host never silently falls back to local.
+        function fmFile() {
+            return fmFile.cap || {
+                read: function (path, opts) {
+                    const body = { path: path };
+                    if (opts && opts.b64 === true) body.b64 = true;
+                    return _modFileApi('/file/read', body, opts);
+                },
+                list: function (path, opts) {
+                    return _modFileApi('/file/list', { path: path || '' }, opts);
+                },
+                'delete': function (path, opts) {
+                    return _modFileApi('/file/delete', { path: path }, opts);
+                },
+                upload: function (path, contentB64, opts) {
+                    return _modFileApi('/file/upload',
+                        { path: path, content_b64: contentB64,
+                          overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+            };
+        }
+
         const FM_DRAG_MIME = 'application/x-webterm-file';
         function openFileManagerWindow(appData) {
             const id = String(appData.id);
@@ -201,8 +281,7 @@
                     ui.list.appendChild(errRow);
                     return;
                 }
-                const res = await fileApiPost('/file/list', { path: reqDir },
-                                              host);
+                const res = await fmFile().list(reqDir, { host: host.id });
                 // Drop a stale render: window closed, a newer render started, or
                 // the pane navigated / switched HOST while we awaited — a stale
                 // reply must not paint, nor pop the wrong host's login.
@@ -264,7 +343,7 @@
                         showNotice('open failed: host unavailable');
                         return;
                     }
-                    const r = await fileApiPost('/file/read', { path }, h);
+                    const r = await fmFile().read(path, { host: h.id });
                     if (!r || !r.ok) {
                         if (r && r.error === 'auth_required') {
                             promptFileHostAuth(h);
@@ -377,21 +456,16 @@
             };
 
             // ---- per-pane click-to-activate + drop-to-upload ----
-            // POST a base64 upload to a SPECIFIC host (#46), reading the raw
-            // 200/409 status (fileApiPost hides it) so a drop onto an existing
-            // file can prompt + overwrite. Shared by OS-file drops (per-pane
-            // host) and the cross-pane transfer (dest pane's host).
-            const uploadTo = (host, path, b64, overwrite) =>
-                fetch(hostHttpUrl(host || localHost(), '/file/upload'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path, content_b64: b64,
-                                           overwrite: !!overwrite }),
-                }).then(r => r.json()
-                    .then(j => ({ status: r.status, json: j }))
-                    .catch(() => ({ status: r.status, json: { ok: false,
-                        error: 'HTTP ' + r.status } })))
-                 .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
+            // Upload base64 bytes to a SPECIFIC host (#46) through the reviewed
+            // ctx.file capability (#82). hostId is a host-id string (paneHost(s).id,
+            // captured once so the whole upload lands on one broker); overwrite
+            // (default false) lets a drop onto an existing file retry after a
+            // confirm. Resolves to {ok,path,size} | {ok:false,error}; a clash
+            // surfaces as error:'exists' (app.py pairs the 409 with that body, so
+            // the old raw-status check is byte-equivalent). Shared by OS-file drops
+            // (per-pane host) and the cross-pane transfer (dest pane's host).
+            const uploadTo = (hostId, path, b64, overwrite) =>
+                fmFile().upload(path, b64, { host: hostId, overwrite: overwrite });
             const readB64 = (file) => new Promise((resolve, reject) => {
                 const fr = new FileReader();
                 fr.onload = () => {
@@ -420,16 +494,16 @@
                     catch (_) { showNotice('could not read ' + file.name); continue; }
                     if (win.disposed) return;         // closed mid-upload
                     const path = joinPath(cwd, file.name);
-                    let res = await uploadTo(host, path, b64, false);
+                    let res = await uploadTo(host.id, path, b64, false);
                     if (win.disposed) return;         // closed before the prompt
                     // Existing file -> confirm + retry as an overwrite.
-                    if (res.status === 409 || (res.json && res.json.error === 'exists')) {
+                    if (res && res.error === 'exists') {
                         if (!confirm('Overwrite ' + file.name + '?')) continue;
-                        res = await uploadTo(host, path, b64, true);
+                        res = await uploadTo(host.id, path, b64, true);
                     }
                     if (win.disposed) return;
-                    if (res.json && res.json.ok) { done++; continue; }
-                    const err = (res.json && res.json.error) || ('HTTP ' + res.status);
+                    if (res && res.ok) { done++; continue; }
+                    const err = (res && res.error) || 'error';
                     if (err === 'too_large') showNotice(file.name + ': too large (>5 MiB)');
                     else showNotice('upload failed (' + file.name + '): ' + err);
                 }
@@ -468,8 +542,8 @@
                     showNotice('source and destination are the same file');
                     return;
                 }
-                const r = await fileApiPost('/file/read',
-                    { path: srcPath, b64: true }, srcHost);
+                const r = await fmFile().read(srcPath,
+                    { b64: true, host: srcHost.id });
                 if (win.disposed) return;
                 if (!r || !r.ok) {
                     if (r && r.error === 'auth_required') {
@@ -496,17 +570,17 @@
                     return;
                 }
                 const b64 = r.content_b64;
-                let up = await uploadTo(destHost, destPath, b64, false);
+                let up = await uploadTo(destHost.id, destPath, b64, false);
                 if (win.disposed) return;
                 // Existing dest file -> confirm + retry as an overwrite.
-                if (up.status === 409 || (up.json && up.json.error === 'exists')) {
+                if (up && up.error === 'exists') {
                     if (!confirm('Overwrite ' + srcName + ' on "'
                             + hostPickerLabel(destHost) + '"?')) return;
-                    up = await uploadTo(destHost, destPath, b64, true);
+                    up = await uploadTo(destHost.id, destPath, b64, true);
                     if (win.disposed) return;
                 }
-                if (!(up.json && up.json.ok)) {
-                    const err = (up.json && up.json.error) || ('HTTP ' + up.status);
+                if (!(up && up.ok)) {
+                    const err = (up && up.error) || 'error';
                     if (err === 'auth_required') promptFileHostAuth(destHost);
                     if (err === 'too_large') {
                         showNotice(srcName + ': too large (>5 MiB)');
@@ -520,8 +594,7 @@
                 // HONEST: the copy already landed, so a failed delete leaves the
                 // file on BOTH hosts — say so rather than claim a move (codex).
                 if (move) {
-                    const d = await fileApiPost('/file/delete',
-                        { path: srcPath }, srcHost);
+                    const d = await fmFile().delete(srcPath, { host: srcHost.id });
                     if (win.disposed) return;
                     if (!(d && d.ok)) {
                         if (d && d.error === 'auth_required') {
@@ -756,12 +829,41 @@
             return win;
         }
 
-        // Live "Task manager" app window: lists every real terminal/agent
-        // session (sessions with kind !== 'app') across all hosts, each
-        // expandable to its child-process tree, with End-process + Destroy-
-        // window actions. Ephemeral (never persisted — saveAppWindow early-
-        // returns for it). Mirrors the openFileManagerWindow scaffold: same
-        // window chrome (title-bar _/×, 8 resize handles), the type:'app'
-        // win record, a manual kind:'app' session entry + taskbar chip, and
-        // the same teardown contract (cleanups clears the refresh interval).
-        // openAppWindow delegates here for appKind 'task-manager'.
+        // The (+) launcher — moved verbatim from core 76_js_launch_fullscreen.js.
+        // Both panes start at the active terminal's cwd, on its host (#35) — and
+        // on its host PER PANE (#46), so each pane can be re-homed later.
+        function launchFileManager() {
+            const s = activeTerminalStart();
+            openAppWindow({ id: newAppId('fm'), appKind: 'file-manager',
+                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host,
+                            fmLeftHostId: s.host, fmRightHostId: s.host });
+        }
+
+        // ---- mod registration: the file-manager window kind ----------------
+        registerMod({
+            id: 'file-manager',
+            version: '1.0.0',
+            ctxVersion: 1,
+            init: function (ctx) {
+                // Route every file-manager /file/* op (incl. the DESTRUCTIVE
+                // delete + upload) through the reviewed ctx.file capability (#82);
+                // cleared on teardown so a disabled file-manager mod falls back to
+                // the hoisted _modFileApi (see fmFile()).
+                fmFile.cap = ctx.file;
+                ctx.onUnload(function () { fmFile.cap = null; });
+                // Register the file-manager kind (the #80 built-in spec, moved
+                // here). serialize stays the shared core serializeAppWindow so
+                // webterm:appwindows:v1 persistence is byte-identical; a duplicate
+                // appKind throws -> initMod rolls the mod back; teardown removes
+                // exactly THIS registration.
+                ctx.registerWindowKind({
+                    appKind: 'file-manager',
+                    factory: function (d) { return openFileManagerWindow(d); },
+                    serialize: serializeAppWindow,
+                    menu: {
+                        label: '🗂 File manager',
+                        launch: function () { return launchFileManager(); },
+                    },
+                });
+            },
+        });

@@ -1,3 +1,12 @@
+        // Live "Task manager" app window: lists every real terminal/agent
+        // session (sessions with kind !== 'app') across all hosts, each
+        // expandable to its child-process tree, with End-process + Destroy-
+        // window actions. Ephemeral (never persisted — saveAppWindow early-
+        // returns for it). Mirrors the openFileManagerWindow scaffold: same
+        // window chrome (title-bar _/×, 8 resize handles), the type:'app'
+        // win record, a manual kind:'app' session entry + taskbar chip, and
+        // the same teardown contract (cleanups clears the refresh interval).
+        // openAppWindow delegates here for appKind 'task-manager'.
         function openTaskManagerWindow(appData) {
             const id = String(appData.id);
             const title = appData.title || 'Task manager';

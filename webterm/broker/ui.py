@@ -80,8 +80,8 @@ _ORDERED = [
     "67_js_window_lifecycle.js",
     "68_js_app_windows_files.js",
     # 69_js_codemirror.js + 70_js_editor_app.js were EXTRACTED to mods/editor/
-    # (#83/S10); the dispatcher openAppWindow moved to 54. See _MODS below.
-    "71_js_file_manager.js",
+    # (#83/S10); 71_js_file_manager.js to mods/file-manager/ (#84/S11); the
+    # dispatcher openAppWindow moved to 54. See _MODS below.
     "72_js_task_manager.js",
     "73_js_window_runtime.js",
     "74_js_drag_resize.js",
@@ -117,6 +117,7 @@ _MODS = [
     "mods/pattern/pattern.js", # S3 (#76) background-pattern select (theme-var-aware)
     "mods/clock/clock.js",     # F057 clock, extracted as the reference mod
     "mods/help/help.js",       # S5 (#78) Help window + ? chip + ctx.registerHelpCards; ships help.css
+    "mods/file-manager/file-manager.js",  # S11 (#84) dual-pane file-manager window kind via ctx.registerWindowKind + ctx.file
     "mods/editor/codemirror.js",  # S10 (#83) CodeMirror 6 lazy loader (was 69), helpers only
     "mods/editor/editor.js",   # S10 (#83) text-editor window kind via ctx.registerWindowKind + ctx.file
     "mods/sticky/sticky.js",   # S8 (#81) sticky-note window kind via ctx.registerWindowKind

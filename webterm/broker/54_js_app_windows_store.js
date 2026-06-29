@@ -165,16 +165,19 @@
         //   { appKind, factory(appData)->win, serialize(win)->record|null,
         //     restore?(record), retainOnClose?(record)->bool, menu? }
         //   menu = { label, launch(), closedItems?()->[menuItem] }
-        // The four CORE built-ins (file-manager, task-manager, control-panel,
-        // help) are registered as defaults (NOT through a mod) so they behave with
+        // The three CORE built-ins (task-manager, control-panel, help) are
+        // registered as defaults (NOT through a mod) so they behave with
         // mods_enabled=false exactly as the old hardcoded branches did; a mod adds
         // a brand-new kind through ctx.registerWindowKind. The historical sticky-
-        // note + text-editor kinds are now exactly that — the S8 (#81) mods/sticky/
-        // and S10 (#83) mods/editor/ mods register them through ctx, so each is
-        // present only with mods enabled (a pre-existing note/editor still RESTORES
-        // mods-off via the unknown-kind openAppWindow fallback; only the launcher,
-        // the kind's registry-owned serialize/menu, and — for the note — retain-on-
-        // close + its Closed-notes menu ride the mod).
+        // note, text-editor + file-manager kinds are now exactly that — the S8
+        // (#81) mods/sticky/, S10 (#83) mods/editor/ and S11 (#84) mods/file-
+        // manager/ mods register them through ctx, so each is present only with
+        // mods enabled. A pre-existing note/editor still RESTORES mods-off via the
+        // unknown-kind openAppWindow fallback (only the launcher, the kind's
+        // registry-owned serialize/menu, and — for the note — retain-on-close + its
+        // Closed-notes menu ride the mod); a file-manager is the FIRST persisted
+        // kind that ISN'T a note/editor, so mods-off it is NOT coerced into a note
+        // (openAppWindow returns null, leaving its record intact) — see there.
         //
         // Held as a memo on the registry getter (NOT a top-level const) so it is
         // free of the TDZ a `const` carries before this fragment executes — the
@@ -250,28 +253,22 @@
         function windowKindMenuList() {
             return Array.from(_windowKindRegistry().values());
         }
-        // Pre-populate the core built-ins. file-manager is persisted (shares
-        // serializeAppWindow); task-manager / control-panel / help are EPHEMERAL
-        // (no serialize => never written to appStore, never restored), matching
-        // their old early returns. help's open/launch live in mods/help/help.js but
-        // are top-level (hoisted) functions present even when mods_enabled=false, so
-        // help is a CORE built-in here (NOT a ctx registration) — registering it
-        // through the mod would break Help whenever mods are disabled. The
-        // historical sticky-note + text-editor kinds were extracted to mods/sticky/
-        // (#81/S8) and mods/editor/ (#83/S10): each is a kind a mod adds through
+        // Pre-populate the core built-ins. task-manager / control-panel / help are
+        // EPHEMERAL (no serialize => never written to appStore, never restored),
+        // matching their old early returns. help's open/launch live in
+        // mods/help/help.js but are top-level (hoisted) functions present even when
+        // mods_enabled=false, so help is a CORE built-in here (NOT a ctx
+        // registration) — registering it through the mod would break Help whenever
+        // mods are disabled. The historical sticky-note, text-editor + file-manager
+        // kinds were extracted to mods/sticky/ (#81/S8), mods/editor/ (#83/S10) and
+        // mods/file-manager/ (#84/S11): each is a kind a mod adds through
         // ctx.registerWindowKind, registered at loadMods time (appended after these
-        // built-ins) rather than here. Every factory/launch is reached through a
-        // deferred wrapper so registration never depends on declaration order and a
-        // missing help mod degrades to "Help doesn't open", never a registry-wide
-        // throw.
+        // built-ins) rather than here. file-manager is the only one of the three
+        // that is PERSISTED (shares serializeAppWindow); the others' serialize/menu
+        // ride their mods too. Every factory/launch is reached through a deferred
+        // wrapper so registration never depends on declaration order and a missing
+        // help mod degrades to "Help doesn't open", never a registry-wide throw.
         function registerBuiltinWindowKinds() {
-            registerWindowKind({
-                appKind: 'file-manager',
-                factory: function (d) { return openFileManagerWindow(d); },
-                serialize: serializeAppWindow,
-                menu: { label: '🗂 File manager',
-                        launch: function () { return launchFileManager(); } },
-            });
             registerWindowKind({
                 appKind: 'task-manager',
                 factory: function (d) { return openTaskManagerWindow(d); },
@@ -319,6 +316,17 @@
             }
             const kind = lookupWindowKind(appData.appKind);
             if (kind && kind.factory) return kind.factory(appData);
+            // Unknown/unregistered appKind. The hoisted note/editor builder
+            // (mods/editor/) is the default ONLY for the note/editor kinds and a
+            // legacy record with no appKind (a build before app windows carried a
+            // kind). Coercing some OTHER persisted kind whose mod is DISABLED —
+            // e.g. a file-manager (#84/S11) with mods off — into a sticky note
+            // would mis-render it AND rewrite its stored record to 'sticky-note'
+            // on the next saveAppWindow, silently destroying it. Leave such a
+            // record intact (return null -> restoreAppWindows skips it) so
+            // re-enabling its mod restores it faithfully.
+            const ak = appData.appKind;
+            if (ak && ak !== 'sticky-note' && ak !== 'text-editor') return null;
             return openNoteOrEditorWindow(appData);
         }
 

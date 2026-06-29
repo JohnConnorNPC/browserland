@@ -588,12 +588,13 @@ def test_register_window_kind_capability_present():
 
 
 def test_window_kind_builtins_registered_in_menu_order():
-    # registerBuiltinWindowKinds registers the FOUR core kinds (sticky-note left
-    # for the S8 mod #81, text-editor for the S10 mod #83), and their registration
-    # order is the historical (+) launch-menu order (Map iteration order drives the
-    # menu), so the built-ins reproduce the old menu order.
+    # registerBuiltinWindowKinds registers the THREE remaining core kinds
+    # (sticky-note left for the S8 mod #81, text-editor for the S10 mod #83,
+    # file-manager for the S11 mod #84), and their registration order is the
+    # historical (+) launch-menu order (Map iteration order drives the menu), so
+    # the built-ins reproduce the old relative menu order.
     src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
-    order = ["file-manager", "task-manager", "control-panel", "help"]
+    order = ["task-manager", "control-panel", "help"]
     positions = []
     for kind in order:
         needle = f"appKind: '{kind}'"
@@ -601,16 +602,18 @@ def test_window_kind_builtins_registered_in_menu_order():
         positions.append(src.index(needle))
     assert positions == sorted(positions), \
         "built-in kinds must register in the historical menu order"
-    # sticky-note + text-editor are now mods, never core built-ins (each appends
-    # through ctx at loadMods time). The sticky note's retain-on-close rode with
-    # it; the text editor's spec rode with it too.
+    # sticky-note, text-editor + file-manager are now mods, never core built-ins
+    # (each appends through ctx at loadMods time). The sticky note's retain-on-close
+    # rode with it; the text editor's + file manager's specs rode with them too.
     assert "appKind: 'sticky-note'" not in src
     assert "appKind: 'text-editor'" not in src
+    assert "appKind: 'file-manager'" not in src
     assert "retainOnClose: function (rec)" not in src
-    # Only file-manager is a persisted CORE built-in now; the text-editor's
-    # serializeAppWindow reference moved to mods/editor/ (sticky's to mods/sticky/),
-    # so core is down to one.
-    assert src.count("serialize: serializeAppWindow") == 1   # file-mgr only
+    # No persisted CORE built-in remains: the file-manager's serializeAppWindow
+    # reference moved to mods/file-manager/ (text-editor's to mods/editor/,
+    # sticky's to mods/sticky/), so core registers ZERO `serialize:` built-ins
+    # (the three survivors task/control/help are all ephemeral).
+    assert src.count("serialize: serializeAppWindow") == 0
     # help is a CORE built-in (mods-off safe), reached through deferred wrappers.
     assert "return openHelpWindow(d)" in src and "return launchHelp()" in src
 
@@ -789,6 +792,94 @@ def test_window_kind_sites_use_registry():
 
     s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
     assert "windowKindMenuList()" in s76
+
+
+# --------------------------------------------------------------------------- #
+# file-manager mod (#84 / S11)
+# --------------------------------------------------------------------------- #
+
+def test_filemanager_symbols_removed_from_core_fragments():
+    # The file manager is now a mod (#84/S11): its built-in registration is gone
+    # from core 54 and its launcher from core 76 — both moved into
+    # mods/file-manager/. The core fragment 71_js_file_manager.js is DELETED.
+    assert not (BROKER_DIR / "71_js_file_manager.js").exists()
+    assert "71_js_file_manager.js" not in ui._ORDERED
+    gone = {
+        "54_js_app_windows_store.js": ("appKind: 'file-manager'",
+                                       "function openFileManagerWindow",
+                                       "return openFileManagerWindow(d)"),
+        "76_js_launch_fullscreen.js": ("function launchFileManager",),
+    }
+    for name, symbols in gone.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+    # The moved builder + launcher are present + reachable in the served page (they
+    # ship in mods/file-manager/ as hoisted functions).
+    for sym in ("function openFileManagerWindow", "function launchFileManager"):
+        assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
+
+
+def test_openappwindow_fallback_does_not_coerce_unknown_kinds():
+    # mods-off safety (#84): a persisted file-manager record must NOT be coerced
+    # into a sticky note by the unknown-kind fallback (which would mis-render it
+    # AND rewrite its stored record, destroying it). openAppWindow's fallback only
+    # builds the note/editor for the note/editor kinds (+ a legacy record with no
+    # appKind); any other unregistered kind returns null, leaving its record intact.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "if (ak && ak !== 'sticky-note' && ak !== 'text-editor') return null;" in s54
+    # The note/editor builder is still the fallback for the kinds it owns.
+    assert "return openNoteOrEditorWindow(appData);" in s54
+
+
+def test_filemanager_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "file-manager"
+    fm_js = mod_dir / "file-manager.js"
+    manifest = mod_dir / "mod.json"
+    assert fm_js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "file-manager"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "file-manager.js"
+    assert "mods/file-manager/file-manager.js" in ui._MODS
+    src = fm_js.read_text(encoding="utf-8")
+    # Registers the file-manager mod + contributes the file-manager window kind
+    # through ctx.registerWindowKind, reusing the shared core serializer + builder.
+    assert "registerMod(" in src
+    assert "id: 'file-manager'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'file-manager'" in src
+    assert "serialize: serializeAppWindow" in src
+    assert "return openFileManagerWindow(d)" in src
+    assert "return launchFileManager()" in src
+    # File I/O (incl. the DESTRUCTIVE delete + upload) rides ctx.file (#82): the
+    # mod stashes ctx.file and every /file/* call flows through fmFile() — NO direct
+    # fileApiPost AND no raw upload fetch (hostHttpUrl) survives in the mod.
+    assert "fmFile.cap = ctx.file;" in src
+    assert "fmFile().list(" in src
+    assert "fmFile().read(" in src
+    assert "fmFile().delete(" in src
+    assert "fmFile().upload(" in src
+    assert "fileApiPost(" not in src, "file-manager mod must route I/O through ctx.file"
+    assert "hostHttpUrl(" not in src, "the raw upload fetch must be gone"
+    # Ships in the served page, AFTER the help mod and BEFORE the editor mod (so the
+    # (+) menu lists File manager right after the core built-ins, ahead of the
+    # text-editor + sticky-note mods).
+    assert "id: 'file-manager'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'file-manager'")
+    assert INDEX_HTML.index("id: 'file-manager'") < INDEX_HTML.index("id: 'editor'")
+
+
+def test_filemanager_serialized_fields_preserved():
+    # The hard #84 requirement: every file-manager serialized field round-trips.
+    # They live in the SHARED core serializeAppWindow (54), unchanged by the
+    # extraction (the mod reuses it as its `serialize`).
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    for field in ("fmLeft:", "fmRight:", "fmLeftHostId:", "fmRightHostId:",
+                  "fileHostId:"):
+        assert field in s54, f"serializeAppWindow lost the {field!r} file-manager field"
 
 
 # --------------------------------------------------------------------------- #
