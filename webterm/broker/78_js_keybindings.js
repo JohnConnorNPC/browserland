@@ -163,6 +163,11 @@
             // Only honor combos carrying a non-shift modifier, so plain typing
             // (and Shift+letter) is never hijacked into the terminal.
             if (!(e.ctrlKey || e.altKey || e.metaKey)) return;
+            // While a styled dialog is open, suppress hotkey actions: an action
+            // that opens a second dialog would silently cancel the first (the
+            // _dlgFinish singleton). Plain typing, the recorder path above, and
+            // the dialog's own Escape/Enter (handled in capture) are untouched.
+            if (isAppDialogOpen()) return;
             const map = getSettings().keybindings || {};
             let actionId = null;
             for (const id of Object.keys(map)) {
