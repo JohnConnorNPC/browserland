@@ -23,7 +23,7 @@
             ctxVersion: 1,            // bump when the ctx/win contract changes
             registered: [],           // [{id, version, ctxVersion, init}] in decl order
             active: new Map(),        // id -> { id, version, unloads:[] }  (the "slot")
-            settingToggles: [],       // [{modId, key, read, onChange, last, checkbox, section}]
+            settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
             booted: false,
         };
 
@@ -105,15 +105,34 @@
                     },
                 },
                 settings: {
-                    // Read-through accessor onto the EXISTING shared /state
+                    // Read-through accessors onto the EXISTING shared /state
                     // settings blob (NOT namespaced localStorage) + a Control
-                    // Panel checkbox in #set-mods. This is the one ctx primitive
-                    // that touches the synced blob: it lets the clock keep its
-                    // cross-browser /state sync via the existing `clock` key
-                    // without a new schema field. get() never writes the default.
+                    // Panel control in #set-mods. These are the ctx primitives
+                    // that touch the synced blob: they let a mod own an existing
+                    // settings key with cross-browser /state sync, without a new
+                    // schema field. Every get()/read is non-destructive (never
+                    // writes the default). All return {get,set,onChange}.
+                    //   boolean(key, def, {label,title,isBrowserGlobal})  -> checkbox
+                    //   radio(key, [{value,label}], {label,title,def,isBrowserGlobal})
+                    //   select(key, [{value,label}], {label,title,def,isBrowserGlobal})
                     boolean: function (key, def, opts) {
                         return _modSettingBoolean(rec, key, def, opts);
                     },
+                    radio: function (key, options, opts) {
+                        return _modSettingChoice(rec, 'radio', key, options, opts);
+                    },
+                    select: function (key, options, opts) {
+                        return _modSettingChoice(rec, 'select', key, options, opts);
+                    },
+                },
+                // #74: a full custom Control Panel section, for controls richer
+                // than a single boolean/radio/select. spec.render() builds the
+                // widget DOM (returned node is appended); spec.reflect(settings)
+                // syncs it on Control Panel open AND on every /state convergence,
+                // so it must be idempotent and preserve any in-progress edit.
+                // Browser-global by default (hidden on remote host tabs).
+                registerSettingsPane: function (spec) {
+                    return _modRegisterPane(rec, spec);
                 },
             };
         }
@@ -135,94 +154,279 @@
             return handle;
         }
 
-        function _modSettingBoolean(rec, key, def, opts) {
-            opts = opts || {};
-            const fallback = !!def;
-            // Non-destructive read: returns the live value or the default, never
-            // writes — so an upgrading user's existing `clock:true` is preserved
-            // and a brand-new key is not forced into the synced blob by a read.
-            const read = function () {
-                const v = getSettings()[key];
-                return (typeof v === 'boolean') ? v : fallback;
-            };
-            const entry = {
-                modId: rec.id, key: key, read: read,
-                onChange: null, last: read(),
-                checkbox: null, section: null,
-            };
+        // ---- Control Panel settings extension (#71 boolean; #74 radio/select/
+        // pane) --------------------------------------------------------------
+        // Shared scaffold: a titled .set-section mounted into #set-mods. It is
+        // browser-global (hidden on remote host tabs by applyBrowserGlobalVisi-
+        // bility, 81_js_control_panel.js) unless opts.isBrowserGlobal === false,
+        // so a non-global mod control can stay visible on a remote tab. The
+        // section-removal teardown is registered IMMEDIATELY so a throw while a
+        // caller is still building its widget still rolls the section back. No
+        // applyBrowserGlobalVisibility pass runs on append, so we match the live
+        // tab's visibility now to avoid a flash if a section is mounted while the
+        // panel is open on a remote tab (#74); renderSettings re-syncs later.
+        function _controlSection(rec, opts) {
+            const host = document.getElementById('set-mods');
+            const section = document.createElement('div');
+            section.className = 'set-section set-mod-setting';
+            section.dataset.modId = rec.id;
+            if (opts.isBrowserGlobal !== false) {
+                section.classList.add('set-browser-global');
+                try {
+                    if (currentSettingsTab !== 'local') section.style.display = 'none';
+                } catch (_) {}
+            }
+            if (opts.title) {
+                const t = document.createElement('div');
+                t.className = 'set-title';
+                t.textContent = opts.title;
+                section.appendChild(t);
+            }
+            if (host) host.appendChild(section);
+            rec.unloads.push(function () {
+                if (section.parentNode) section.parentNode.removeChild(section);
+            });
+            return section;
+        }
+
+        // Record a control entry on the shared list + wire its forget-on-teardown
+        // (the DOM is removed by _controlSection's own onUnload). The list drives
+        // reflect-on-open (renderModSettingsToggles) and /state convergence
+        // (notifyModSettings).
+        function _trackControl(rec, entry) {
+            window.__mods.settingToggles.push(entry);
+            rec.unloads.push(function () {
+                const list = window.__mods.settingToggles;
+                const i = list.indexOf(entry);
+                if (i !== -1) list.splice(i, 1);
+            });
+        }
+
+        // Shared {get,set,onChange} for a value control (boolean/radio/select).
+        // set() is the ONLY ctx path that writes the synced blob: it coerces +
+        // validates, no-ops on an unchanged value (no spurious savePrefs/push),
+        // then writes getSettings()[key] + savePrefs(), updates `last` BEFORE
+        // anything else can observe it (so the /state convergence pass won't
+        // re-fire), reflects the widget, and calls the mod's onChange.
+        function _valueAccessor(entry, key, read, coerce, valid) {
             const accessor = {
                 get: function () { return read(); },
                 set: function (value) {
-                    const v = !!value;
-                    if (read() === v) return;        // no spurious savePrefs/push
-                    getSettings()[key] = v;
-                    savePrefs();                     // localStorage + /state push
-                    entry.last = v;
-                    if (entry.checkbox) entry.checkbox.checked = v;
-                    if (entry.onChange) { try { entry.onChange(v); } catch (_) {} }
+                    value = coerce(value);
+                    if (!valid(value)) return;
+                    if (read() === value) return;
+                    getSettings()[key] = value;
+                    savePrefs();                 // localStorage + /state push
+                    entry.last = value;
+                    entry.reflect();
+                    if (entry.onChange) { try { entry.onChange(value); } catch (_) {} }
                 },
                 onChange: function (fn) {
                     entry.onChange = (typeof fn === 'function') ? fn : null;
                     return accessor;
                 },
             };
-            // Mount a Control Panel checkbox into #set-mods (browser-global; the
-            // section is hidden on remote host tabs via .set-browser-global).
-            const host = document.getElementById('set-mods');
-            if (host) {
-                const section = document.createElement('div');
-                section.className = 'set-section set-mod-setting';
-                section.dataset.modId = rec.id;
-                if (opts.title) {
-                    const t = document.createElement('div');
-                    t.className = 'set-title';
-                    t.textContent = opts.title;
-                    section.appendChild(t);
-                }
-                const label = document.createElement('label');
-                label.className = 'set-check';
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = read();
-                label.appendChild(checkbox);
-                label.appendChild(
-                    document.createTextNode(' ' + (opts.label || key)));
-                section.appendChild(label);
-                host.appendChild(section);
-                checkbox.addEventListener('change', function () {
-                    accessor.set(checkbox.checked);
-                });
-                entry.checkbox = checkbox;
-                entry.section = section;
-            }
-            window.__mods.settingToggles.push(entry);
-            // Teardown: drop the checkbox + forget the toggle.
-            rec.unloads.push(function () {
-                if (entry.section && entry.section.parentNode) {
-                    entry.section.parentNode.removeChild(entry.section);
-                }
-                const list = window.__mods.settingToggles;
-                const i = list.indexOf(entry);
-                if (i !== -1) list.splice(i, 1);
-            });
             return accessor;
         }
 
-        // Fire mod settings onChange callbacks on convergence (boot + every
-        // /state pull, via applyThemeSettings). Fire-on-change only: the clock's
-        // apply() is idempotent, so an unchanged pull is a cheap no-op and the
-        // running 1s interval is left alone. Guarded so the early-boot call (from
-        // 85_js_startup.js, before this fragment ran) is a clean no-op.
+        function _modSettingBoolean(rec, key, def, opts) {
+            opts = opts || {};
+            const fallback = !!def;
+            // Non-destructive read: live value or the default, never written — an
+            // upgrading user's existing `clock:true` is preserved and a brand-new
+            // key is not forced into the synced blob by a read / a panel open.
+            const read = function () {
+                const v = getSettings()[key];
+                return (typeof v === 'boolean') ? v : fallback;
+            };
+            const section = _controlSection(rec, opts);
+            const label = document.createElement('label');
+            label.className = 'set-check';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(' ' + (opts.label || key)));
+            section.appendChild(label);
+            const entry = {
+                modId: rec.id, kind: 'boolean', key: key, read: read,
+                onChange: null, last: read(), section: section,
+                reflect: function () { checkbox.checked = read(); },
+            };
+            const accessor = _valueAccessor(entry, key, read,
+                function (v) { return !!v; },           // coerce
+                function () { return true; });          // valid (any boolean)
+            checkbox.addEventListener('change', function () {
+                accessor.set(checkbox.checked);
+            });
+            entry.reflect();                            // sync the box now
+            _trackControl(rec, entry);
+            return accessor;
+        }
+
+        // Validate + normalize a radio/select options list to [{value,label}]
+        // with STRING values (DOM widget values are strings; mixing in numbers/
+        // booleans would silently fall back to the default — reject loudly).
+        // Duplicate/empty/invalid lists throw, which disables just this mod
+        // (initMod rolls it back); core + other mods continue.
+        function _normChoiceOptions(options) {
+            if (!Array.isArray(options) || !options.length) {
+                throw new Error('settings radio/select: options must be a '
+                    + 'non-empty array of {value,label}');
+            }
+            const seen = {};
+            const out = [];
+            for (const o of options) {
+                if (!o || typeof o.value !== 'string') {
+                    throw new Error('settings radio/select: each option needs a '
+                        + 'string value');
+                }
+                if (seen[o.value]) {
+                    throw new Error('settings radio/select: duplicate option '
+                        + 'value "' + o.value + '"');
+                }
+                seen[o.value] = true;
+                out.push({ value: o.value,
+                           label: (typeof o.label === 'string') ? o.label : o.value });
+            }
+            return out;
+        }
+
+        // A radio group or <select> bound to an existing synced settings key.
+        // Same read-through, non-destructive, savePrefs-on-change contract as
+        // boolean — only the widget differs. read() returns the live value when
+        // it is a known option, else the (non-written) default.
+        function _modSettingChoice(rec, kind, key, options, opts) {
+            opts = opts || {};
+            options = _normChoiceOptions(options);
+            const valid = {};
+            for (const o of options) valid[o.value] = true;
+            const fallback = (typeof opts.def === 'string' && valid[opts.def])
+                ? opts.def : options[0].value;
+            const read = function () {
+                const v = getSettings()[key];
+                return (typeof v === 'string' && valid[v]) ? v : fallback;
+            };
+            const section = _controlSection(rec, opts);
+            let reflect, bindChange;
+            if (kind === 'radio') {
+                const group = document.createElement('div');
+                group.className = 'set-row set-mod-radio';
+                const name = 'set-mod-' + rec.id + '-' + key;   // unique per control
+                const inputs = [];
+                for (const o of options) {
+                    const lab = document.createElement('label');
+                    const rb = document.createElement('input');
+                    rb.type = 'radio'; rb.name = name; rb.value = o.value;
+                    const span = document.createElement('span');
+                    span.textContent = o.label;
+                    lab.appendChild(rb); lab.appendChild(span);
+                    group.appendChild(lab);
+                    inputs.push(rb);
+                }
+                section.appendChild(group);
+                reflect = function () {
+                    const cur = read();
+                    for (const rb of inputs) rb.checked = (rb.value === cur);
+                };
+                bindChange = function (accessor) {
+                    for (const rb of inputs) {
+                        rb.addEventListener('change', function () {
+                            if (rb.checked) accessor.set(rb.value);
+                        });
+                    }
+                };
+            } else {
+                const row = document.createElement('div');
+                row.className = 'set-row';
+                if (opts.label) {
+                    const lab = document.createElement('label');
+                    lab.textContent = opts.label;
+                    row.appendChild(lab);
+                }
+                const sel = document.createElement('select');
+                for (const o of options) {
+                    const op = document.createElement('option');
+                    op.value = o.value; op.textContent = o.label;
+                    sel.appendChild(op);
+                }
+                row.appendChild(sel);
+                section.appendChild(row);
+                reflect = function () { sel.value = read(); };
+                bindChange = function (accessor) {
+                    sel.addEventListener('change', function () {
+                        accessor.set(sel.value);
+                    });
+                };
+            }
+            const entry = {
+                modId: rec.id, kind: kind, key: key, read: read,
+                onChange: null, last: read(), section: section, reflect: reflect,
+            };
+            const accessor = _valueAccessor(entry, key, read,
+                function (v) { return v; },                 // strings, no coercion
+                function (v) { return valid[v] === true; });
+            bindChange(accessor);            // listeners AFTER the accessor exists
+            entry.reflect();                 // sync widget to the current value
+            _trackControl(rec, entry);
+            return accessor;
+        }
+
+        // A full custom Control Panel section (#74). render() builds the widget
+        // DOM (returned node is appended); reflect(settings) syncs it on open and
+        // on every /state convergence — it MUST be idempotent and preserve any
+        // in-progress edit (e.g. skip a focused field), since it runs on every
+        // pull. render() throwing disables just this mod (the section, already
+        // mounted with its rollback wired, is removed); core + siblings continue.
+        function _modRegisterPane(rec, spec) {
+            spec = spec || {};
+            if (typeof spec.render !== 'function') {
+                throw new Error('registerSettingsPane[' + rec.id
+                    + ']: render() must be a function');
+            }
+            const section = _controlSection(rec,
+                { title: spec.title, isBrowserGlobal: spec.isBrowserGlobal });
+            if (spec.id) section.dataset.paneId = spec.id;
+            const node = spec.render();      // throw => initMod rolls back section
+            if (node && node.nodeType) section.appendChild(node);
+            const reflect = function () {
+                if (typeof spec.reflect !== 'function') return;
+                try { spec.reflect(getSettings()); }
+                catch (e) {
+                    console.error('[mods] settings pane reflect failed ("'
+                        + rec.id + ':' + (spec.id || '') + '"):', e);
+                }
+            };
+            const entry = {
+                modId: rec.id, kind: 'pane', key: null, read: null,
+                onChange: null, last: null, section: section, reflect: reflect,
+            };
+            entry.reflect();                 // initial sync
+            _trackControl(rec, entry);
+            return { id: spec.id || null, section: section };
+        }
+
+        // Fire mod controls on convergence (boot + every /state pull, via
+        // applyThemeSettings). Value controls (boolean/radio/select) are change-
+        // detected — the mod's apply is meant to be idempotent, so an unchanged
+        // pull is a cheap no-op (e.g. the clock's running 1s interval is left
+        // alone). Panes reflect(settings) on every pull (idempotent by contract).
+        // Each entry is isolated so one bad control can't break the rest or core.
+        // Guarded so the early-boot call (from 85_js_startup.js, before this
+        // fragment ran) is a clean no-op.
         function notifyModSettings() {
             if (!window.__mods) return;
             const list = window.__mods.settingToggles;
             for (let i = 0; i < list.length; i++) {
                 const t = list[i];
+                if (t.kind === 'pane') {
+                    try { t.reflect(); } catch (_) {}   // reflect logs its own errors
+                    continue;
+                }
                 let cur;
                 try { cur = t.read(); } catch (_) { continue; }
                 if (cur === t.last) continue;
                 t.last = cur;
-                if (t.checkbox) t.checkbox.checked = cur;
+                try { t.reflect(); } catch (_) {}
                 if (t.onChange) {
                     try { t.onChange(cur); }
                     catch (e) {
@@ -233,21 +437,19 @@
             }
         }
 
-        // Reflect mod-setting checkboxes from the live settings when the Control
-        // Panel (re)renders. Called from renderSettings (81_js_control_panel.js).
-        // Reflect-only: the checkboxes are created by each mod's init (they
-        // persist across renders and across panel open/close), so this never
-        // rebuilds #set-mods or rebinds handlers. The section is browser-global,
-        // hidden on remote tabs by applyBrowserGlobalVisibility; we still reflect
-        // (harmless) so reopening on the local tab is always current.
+        // Reflect every mod control's widget from the live settings when the
+        // Control Panel (re)renders. Called from renderSettings (81_js_control_
+        // panel.js). Reflect-only: the widgets are created once by each mod's
+        // init and persist across panel open/close, so this never rebuilds
+        // #set-mods or rebinds handlers. Visibility (hide on remote host tabs) is
+        // handled separately by applyBrowserGlobalVisibility, which renderSettings
+        // already called before us; reflecting a hidden widget is harmless. Each
+        // entry isolated so one throw can't abort the core settings render.
         function renderModSettingsToggles(isLocal) {
             if (!window.__mods) return;
             const list = window.__mods.settingToggles;
             for (let i = 0; i < list.length; i++) {
-                const t = list[i];
-                if (t.checkbox) {
-                    try { t.checkbox.checked = !!t.read(); } catch (_) {}
-                }
+                try { list[i].reflect(); } catch (_) {}
             }
         }
 
