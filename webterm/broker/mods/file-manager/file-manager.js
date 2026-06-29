@@ -395,16 +395,42 @@
                 // extraction): copy/move the row to the other pane. Captures the
                 // descriptor (host id + child path + name) at build time so a
                 // pane navigation mid-menu can't redirect the action.
+                // Open a row = exactly what its dblclick does: a dir navigates,
+                // a file opens in the editor.
+                const activateRow = (ent, child) => {
+                    if (ent.type === 'dir') {
+                        win[dirKey(side)] = child;
+                        saveAppWindow(win);
+                        renderPane(side);
+                    } else {
+                        openFile(child);
+                    }
+                };
                 const buildRowMenu = (row, ent, child) => {
                     const other = side === 'left' ? 'right' : 'left';
                     const desc = { hostId: win[hostKey(side)], path: child,
                                    name: ent.name, type: ent.type };
-                    return [
-                        { label: 'Copy → ' + other + ' pane', enabled: true,
-                          action: () => doTransfer(other, desc, false) },
-                        { label: 'Move → ' + other + ' pane', enabled: true,
-                          action: () => doTransfer(other, desc, true) },
-                    ];
+                    // Paste lands in the dir itself for a folder row, else the
+                    // current cwd (a file row's sibling dir).
+                    const pasteDir = ent.type === 'dir' ? child : cwd;
+                    const items = [];
+                    items.push({ label: 'Open', enabled: true,
+                                 action: () => activateRow(ent, child) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Cut', enabled: true,
+                                 action: () => setClipboard('cut', desc) });
+                    items.push({ label: 'Copy', enabled: true,
+                                 action: () => setClipboard('copy', desc) });
+                    items.push({ label: 'Paste', enabled: !!win.fmClipboard,
+                                 action: () => pasteInto(side, pasteDir) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Copy → ' + other + ' pane',
+                                 enabled: true,
+                                 action: () => doTransfer(other, desc, false) });
+                    items.push({ label: 'Move → ' + other + ' pane',
+                                 enabled: true,
+                                 action: () => doTransfer(other, desc, true) });
+                    return items;
                 };
                 const onRowMenu = (e, row, ent, child) => {
                     e.preventDefault();
@@ -427,6 +453,11 @@
                     };
                     up.addEventListener('click', () => { setActive(side); selectRow(up); });
                     up.addEventListener('dblclick', onUp);
+                    // '..' has no row menu (#72) — swallow the right-click so it
+                    // doesn't fall through to the pane's empty-area menu.
+                    up.addEventListener('contextmenu', (e) => {
+                        e.preventDefault(); e.stopPropagation();
+                    });
                     ui.list.appendChild(up);
                 }
                 for (const ent of (res.entries || [])) {
@@ -473,10 +504,10 @@
                         });
                         row.addEventListener('dragend',
                             () => row.classList.remove('dragging'));
-                        // Right-click a file: the shared row menu.
-                        row.addEventListener('contextmenu',
-                            (e) => onRowMenu(e, row, ent, child));
                     }
+                    // Shared row menu on BOTH file and dir rows (#72).
+                    row.addEventListener('contextmenu',
+                        (e) => onRowMenu(e, row, ent, child));
                     ui.list.appendChild(row);
                 }
             };
@@ -674,8 +705,10 @@
             //   cross host + file-> the existing binary byte path (transferTo)
             //   cross host + dir -> a clear "not supported yet" notice
             // Returns true on success so a caller (Paste) can clear a cut
-            // clipboard only when the move actually landed.
-            const doTransfer = async (destSide, src, move) => {
+            // clipboard only when the move actually landed. destDir overrides the
+            // target directory (Paste into a folder row); default = destSide's
+            // current cwd. The destination HOST is always destSide's pane host.
+            const doTransfer = async (destSide, src, move, destDir) => {
                 if (!src || !src.path) return false;
                 const srcHost = hostById(src.hostId)
                     || ((!src.hostId || src.hostId === 'local')
@@ -690,7 +723,9 @@
                     return false;
                 }
                 const srcName = src.name || baseName(src.path);
-                const destPath = joinNative(win[dirKey(destSide)], srcName);
+                const targetDir = (destDir != null)
+                    ? destDir : win[dirKey(destSide)];
+                const destPath = joinNative(targetDir, srcName);
                 // Self-overwrite guard: same host + same absolute path (a copy
                 // would be a pointless self-overwrite; a self-move would delete
                 // what it just wrote). The server re-checks ('same'), but this
@@ -746,6 +781,45 @@
                     type: payload.type }, move);
             };
 
+            // ---- single-item clipboard (#72) ----
+            // win.fmClipboard = {mode:'cut'|'copy', hostId, path, name, type}.
+            // Cut/Copy stash a descriptor; Paste routes it through doTransfer
+            // into a chosen directory; a successful cut-paste clears the
+            // clipboard (one-shot move), a copy keeps it (paste again).
+            const setClipboard = (mode, desc) => {
+                win.fmClipboard = { mode: mode, hostId: desc.hostId,
+                                    path: desc.path, name: desc.name,
+                                    type: desc.type };
+                showNotice((mode === 'cut' ? 'cut ' : 'copied ') + desc.name);
+            };
+            const pasteInto = async (destSide, destDir) => {
+                const clip = win.fmClipboard;
+                if (!clip) return;
+                const ok = await doTransfer(destSide, {
+                    hostId: clip.hostId, path: clip.path,
+                    name: clip.name, type: clip.type },
+                    clip.mode === 'cut', destDir);
+                if (ok && clip.mode === 'cut') win.fmClipboard = null;
+            };
+
+            // Right-click on a pane's empty background: New folder / Paste /
+            // Refresh / Properties of the cwd. Lives in the outer scope (reads
+            // win[dirKey(side)] live) so the one pane-level contextmenu handler
+            // can call it; the item set grows in later commits.
+            const buildEmptyMenu = (side) => {
+                const cwd = win[dirKey(side)];
+                const items = [];
+                if (win.fmClipboard) {
+                    items.push({ label: 'Paste', enabled: true,
+                                 action: () => pasteInto(side, cwd) });
+                }
+                if (items.length) items.push({ sep: true });
+                items.push({ label: 'Refresh', enabled: true,
+                             action: () => { renderPane('left');
+                                             renderPane('right'); } });
+                return items;
+            };
+
             for (const side of ['left', 'right']) {
                 const ui = sideOf(side);
                 // Activate + focus the FM root so the Tab/Enter shortcuts fire
@@ -783,15 +857,27 @@
                         transferFromPayload(payload, side, false);  // drag = copy
                     }
                 };
+                // Right-click the pane's empty background -> the empty-area menu
+                // (#72). Rows stopPropagation in onRowMenu, so this fires only on
+                // the background; stopPropagation here keeps the desktop's own
+                // context menu from overwriting it.
+                const onPaneMenu = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setActive(side);
+                    renderMenu(buildEmptyMenu(side), e.clientX, e.clientY);
+                };
                 ui.pane.addEventListener('mousedown', onClick);
                 ui.pane.addEventListener('dragover', onOver);
                 ui.pane.addEventListener('dragleave', onLeave);
                 ui.pane.addEventListener('drop', onDrop);
+                ui.pane.addEventListener('contextmenu', onPaneMenu);
                 win.cleanups.push(() => {
                     ui.pane.removeEventListener('mousedown', onClick);
                     ui.pane.removeEventListener('dragover', onOver);
                     ui.pane.removeEventListener('dragleave', onLeave);
                     ui.pane.removeEventListener('drop', onDrop);
+                    ui.pane.removeEventListener('contextmenu', onPaneMenu);
                 });
                 // Per-pane host picker (#46): the header button opens the host
                 // menu under itself; choosing another host re-roots this pane.
