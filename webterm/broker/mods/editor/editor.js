@@ -1,25 +1,70 @@
-        // Open (or focus) an app window by kind. The single dedup-by-id check lives
-        // here; each kind then dispatches through the window-kind registry (#80/S7)
-        // — the five core built-ins (text-editor, file-manager, task-manager,
-        // control-panel, help) are registered as core defaults and a mod adds its
-        // own via ctx.registerWindowKind (sticky-note is now exactly that, the S8
-        // mods/sticky/ mod). The sticky/editor builder (openNoteOrEditorWindow) is
-        // the factory for the note + editor kinds AND the default for an unknown/
-        // missing appKind (a hand-edited/corrupt store record, or a sticky note
-        // restored with mods disabled), preserving the pre-registry fall-through
-        // exactly. The delegating factories self-guard the existing-window case, so
-        // the dedup below stays the one authoritative check.
-        function openAppWindow(appData) {
-            const id = String(appData.id);
-            const existing = windows.get(id);
-            if (existing) {
-                if (existing.minimized) restoreWindow(id);
-                else bringToFront(id);
-                return existing;
-            }
-            const kind = lookupWindowKind(appData.appKind);
-            if (kind && kind.factory) return kind.factory(appData);
-            return openNoteOrEditorWindow(appData);
+        // ---- mod: text editor (S10 / #83) ---------------------------------
+        // The text-editor app window, extracted from core as a
+        // ctx.registerWindowKind mod (#83). It was a core built-in in #80's
+        // window-kind registry; the same spec now ships here and registers
+        // through the mod's ctx, so a text editor is a first-class window
+        // everywhere the registry is consulted (open / serialize / restore /
+        // close / the (+) launch menu). Only its OWNER moved from core to a mod.
+        //
+        // What moved here, verbatim except the I/O swap below: the shared
+        // sticky-note / text-editor builder openNoteOrEditorWindow (the editor
+        // half -- CodeMirror, multi-tab AGENTS.md/CLAUDE.md docs, dirty-save,
+        // find, line numbers, host/folder pickers -- plus the note half it has
+        // always shared), the CodeMirror 6 lazy loader (mods/editor/codemirror.js),
+        // the AGENTS.md hooks openAgentDocsWindow (tabbed AGENTS.md+CLAUDE.md
+        // opener) + openAgentsMdEditor (the terminal titlebar button hook, called
+        // from core 67), and the (+) launcher launchTextEditor. All are
+        // top-level `function` declarations, so they HOIST across the one
+        // concatenated <script> and stay reachable from core regardless of
+        // mods_enabled -- the same posture the help/sticky mods use.
+        //
+        // PERSISTENCE IS BYTE-IDENTICAL (the issue's hard requirement): the spec
+        // reuses the EXACT core serializer serializeAppWindow (still core, shared
+        // with file-manager + the sticky mod), so every serialized field --
+        // filePath, wrap, lineNums, startDir, docs, activeTab, agentsMdCwd,
+        // fileHostId -- round-trips unchanged through webterm:appwindows:v1.
+        //
+        // FILE I/O rides ctx.file (#82): every /file/* call goes through the
+        // editorFile() accessor (below) instead of fileApiPost directly, so all
+        // filesystem access is funneled through the one reviewed capability. The
+        // host routing is byte-identical -- each call passes the host *id* of the
+        // host object the editor already resolved (H.id), which ctx.file /
+        // _modFileApi re-resolve to the SAME cached object.
+        //
+        // mods_enabled=false posture (same as every extracted mod): the
+        // text-editor kind is simply not REGISTERED, so the (+) "Text editor"
+        // launcher disappears. But the builder + AGENTS hooks are hoisted, so a
+        // restored editor (openAppWindow's unknown-kind fallback ->
+        // openNoteOrEditorWindow) and the terminal button still open, and
+        // editorFile() falls back to the SAME core _modFileApi ctx.file wraps --
+        // so reads/writes still work. Only the launcher + the kind's
+        // registry-owned serialize/menu ride the mod; the broker mods kill switch
+        // is the deliberate "I turned the mods off" degradation.
+
+        // ---- ctx.file accessor --------------------------------------------
+        // The single choke point every editor /file/* call flows through. init()
+        // stashes the per-mod ctx.file on editorFile.cap (a function property --
+        // no TDZ, the window.__mods / localInfo._p no-TDZ pattern), which the
+        // hoisted builder closures read via editorFile(). With mods off (init
+        // never ran) it degrades to a literal mirror of ctx.file's read/write/
+        // list over the hoisted core _modFileApi (the SAME plumbing ctx.file
+        // wraps, identical request bodies + fail-closed host-id routing), so the
+        // editor's I/O is identical mods on or off. opts.host is a host-id.
+        function editorFile() {
+            return editorFile.cap || {
+                read: function (path, opts) {
+                    const body = { path: path };
+                    if (opts && opts.b64 === true) body.b64 = true;
+                    return _modFileApi('/file/read', body, opts);
+                },
+                write: function (path, content, opts) {
+                    return _modFileApi('/file/write',
+                        { path: path, content: content }, opts);
+                },
+                list: function (path, opts) {
+                    return _modFileApi('/file/list', { path: path || '' }, opts);
+                },
+            };
         }
 
         // The sticky-note / text-editor builder — the original openAppWindow body,
@@ -580,8 +625,8 @@
                 // of this (now stale) call must not clobber the newer folder.
                 const seq = (win._reHomeSeq = (win._reHomeSeq || 0) + 1);
                 const [aRes, cRes] = await Promise.all([
-                    fileApiPost('/file/read', { path: agentsPath }, host),
-                    fileApiPost('/file/read', { path: claudePath }, host),
+                    editorFile().read(agentsPath, { host: host.id }),
+                    editorFile().read(claudePath, { host: host.id }),
                 ]);
                 if (win.disposed || seq !== win._reHomeSeq) return;
                 if ((aRes && aRes.error === 'auth_required')
@@ -981,9 +1026,9 @@
                                 + 'save it to persist');
                         } else {
                             // Clean buffer: write through so buffer == disk.
-                            const w = await fileApiPost('/file/write',
-                                { path: joinNative(cwd, 'CLAUDE.md'),
-                                  content: next }, h);
+                            const w = await editorFile().write(
+                                joinNative(cwd, 'CLAUDE.md'), next,
+                                { host: h.id });
                             if (w && w.ok) {
                                 // Only mark clean if the user didn't edit CLAUDE
                                 // during the write (overwrite-behind, Codex review).
@@ -1006,7 +1051,7 @@
                         return;
                     }
                     const path = joinNative(cwd, 'CLAUDE.md');
-                    const res = await fileApiPost('/file/read', { path }, h);
+                    const res = await editorFile().read(path, { host: h.id });
                     let text = '';
                     if (res && res.ok) text = res.content || '';
                     else if (!(res && res.error === 'not_found')) return; // real error
@@ -1015,8 +1060,8 @@
                     const next = text
                         ? (text + (text.endsWith('\n') ? '' : '\n') + '@AGENTS.md\n')
                         : '@AGENTS.md\n';
-                    const w = await fileApiPost('/file/write',
-                        { path, content: next }, h);
+                    const w = await editorFile().write(path, next,
+                        { host: h.id });
                     if (w && w.ok) showNotice('ensured CLAUDE.md references @AGENTS.md');
                 };
                 const writeTo = async (path, host) => {
@@ -1040,8 +1085,8 @@
                     // different window — that would point Save at a foreign-host
                     // path (#46 review). Compared after the await below.
                     const tgtHostId = h.id;
-                    const res = await fileApiPost('/file/write',
-                        { path, content }, h);
+                    const res = await editorFile().write(path, content,
+                        { host: h.id });
                     if (!res || !res.ok) {
                         showNotice('save failed: ' + ((res && res.error) || '?'));
                         return false;
@@ -1107,8 +1152,8 @@
                     for (const d of win.tabs) {
                         if (d.kind !== 'file' || !d.dirty) continue;
                         if (!d.filePath) { allOk = false; continue; }
-                        const res = await fileApiPost('/file/write',
-                            { path: d.filePath, content: d.content }, h);
+                        const res = await editorFile().write(
+                            d.filePath, d.content, { host: h.id });
                         if (res && res.ok) {
                             d.dirty = false;
                             d.filePath = res.path || d.filePath;
@@ -1163,7 +1208,7 @@
                     const picked = await openFileDialog({
                         mode: 'open', startDir: dirOf(win.filePath), host: h });
                     if (!picked) return;
-                    const res = await fileApiPost('/file/read', { path: picked }, h);
+                    const res = await editorFile().read(picked, { host: h.id });
                     if (!res || !res.ok) {
                         showNotice('open failed: ' + ((res && res.error) || '?'));
                         return;
@@ -1284,7 +1329,7 @@
                     updateFileUi();
                     saveAppWindow(win);
                     // Re-prompt the new host's login if it isn't authed yet.
-                    fileApiPost('/file/list', {}, host).then(r => {
+                    editorFile().list('', { host: host.id }).then(r => {
                         if (win.disposed || win.fileHostId !== host.id) return;
                         if (r && r.error === 'auth_required') {
                             promptFileHostAuth(host);
@@ -1940,14 +1985,127 @@
             return win;
         }
 
-        // Midnight-Commander-style dual-pane file manager — a SEPARATE factory
-        // from openAppWindow (which builds the delicate notes/editor body). It
-        // browses the host filesystem (#35) via /file/list, opens files into
-        // the text editor (/file/read -> openAppWindow), and accepts file drops
-        // (/file/upload). Same window shape + chrome + teardown contract as
-        // openAppWindow so it tiles/drags/persists/reopens like any app window.
-        // openAppWindow delegates here for appKind 'file-manager' (it guards the
-        // existing-window case first, so we never get a live duplicate).
-        // Custom drag MIME for cross-pane file transfer (#46): present ONLY on
-        // an internal row drag, so a pane drop tells our drag apart from an OS
-        // file drop (which carries dataTransfer.files and always wins).
+        async function openAgentDocsWindow(opts) {
+            const cwd = String(opts.cwd || '');
+            const fileHostId = opts.fileHostId || 'local';
+            const host = hostById(fileHostId) || localHost();
+            const agentsPath = joinNative(cwd, 'AGENTS.md');
+            const claudePath = joinNative(cwd, 'CLAUDE.md');
+            const [aRes, cRes] = await Promise.all([
+                editorFile().read(agentsPath, { host: host.id }),
+                editorFile().read(claudePath, { host: host.id }),
+            ]);
+            // A real read error (not just "doesn't exist yet") aborts.
+            if (aRes && !aRes.ok && aRes.error !== 'not_found') {
+                showNotice('open AGENTS.md failed: ' + ((aRes && aRes.error) || '?'));
+                return;
+            }
+            const agentsContent = (aRes && aRes.ok) ? (aRes.content || '') : '';
+            const claudeContent = (cRes && cRes.ok) ? (cRes.content || '') : '';
+            const mkDoc = (name, filePath, content, isAgents) => ({
+                name, filePath, content,
+                wrap: true, lineNums: true, isAgents,
+            });
+            const docs = [
+                mkDoc('AGENTS.md', agentsPath, agentsContent, true),
+                mkDoc('CLAUDE.md', claudePath, claudeContent, false),
+            ];
+            // Label remote windows with the host so two docs windows sharing a
+            // cwd string stay distinguishable on the taskbar.
+            const title = (fileHostId === 'local')
+                ? ('Agent docs — ' + cwd)
+                : ('Agent docs — ' + (host.label || fileHostId) + ':' + cwd);
+            openAppWindow({
+                id: opts.id,
+                appKind: 'text-editor',
+                title,
+                docs,
+                activeTab: opts.activeTab || 0,
+                agentsMdCwd: cwd,
+                fileHostId,
+                geom: opts.geom,
+                color: opts.color,
+                locked: opts.locked,
+                floatGeom: opts.floatGeom,
+            });
+        }
+
+        // Open (or focus) the tabbed Agent-docs editor (AGENTS.md + CLAUDE.md +
+        // Sections) for a terminal's working dir. Keyed by host:cwd so re-clicking
+        // the titlebar 📋 button reuses one window.
+        async function openAgentsMdEditor(termId) {
+            const sess = sessions.get(termId);
+            const cwd = sess && sess.cwd;
+            if (!cwd) {
+                showNotice('working directory unknown for this session');
+                return;
+            }
+            // The terminal's cwd is an absolute path on ITS host (local OR
+            // remote). Dial that broker for every /file/* op so a remote
+            // terminal edits the remote host's docs, not a local one.
+            const fileHostId = (sess && sess.hostId) || 'local';
+            // Host-qualify the window id: local and remote terminals can share
+            // a cwd string (e.g. both rooted at /home/user), so a bare cwd key
+            // would collide and reuse the wrong broker's window.
+            const aid = 'app:agents:' + fileHostId + ':' + cwd;
+            if (windows.has(aid)) {
+                const w = windows.get(aid);
+                if (w.minimized) restoreWindow(aid);
+                else bringToFront(aid);
+                return;
+            }
+            await openAgentDocsWindow({ id: aid, cwd, fileHostId });
+            // Land the fresh docs window as a tab in the terminal it was opened
+            // from (a [terminal│AGENTS] tab group) instead of floating.
+            // openAgentDocsWindow can bail before creating the window (sandbox /
+            // read error), so guard on the window actually existing. Guard on the
+            // terminal living in the ACTIVE workspace, not merely existing in the
+            // layout: the file-read await above can interleave a workspace switch,
+            // and tabbing into an inactive-workspace tile would move the
+            // freshly-mounted docs DOM across workspaces (orphaning it until that
+            // workspace is revisited). A floating terminal (findKeyInLayout null)
+            // or one the user navigated away from mid-open leaves the docs
+            // floating, as before.
+            const docsWin = windows.get(aid);
+            const termLoc = findKeyInLayout(termId);
+            if (docsWin && termLoc && termLoc.wsIndex === getLayout().activeWs) {
+                placeWindowTiled(docsWin);        // get the docs into the layout first
+                tabWindowIntoTile(aid, termId);   // relocate it as a tab beside the term
+            }
+        }
+
+        function launchTextEditor() {
+            // Open the Open/Save dialogs at the active terminal's cwd+host (#35).
+            const s = activeTerminalStart();
+            openAppWindow({ id: newAppId('editor'),
+                            appKind: 'text-editor', content: '',
+                            startDir: s.cwd, fileHostId: s.host });
+        }
+
+        // ---- mod registration: the text-editor window kind ----------------
+        registerMod({
+            id: 'editor',
+            version: '1.0.0',
+            ctxVersion: 1,
+            init: function (ctx) {
+                // Route every editor /file/* op through the reviewed ctx.file
+                // capability (#82); cleared on teardown so a disabled editor mod
+                // falls back to the hoisted _modFileApi (see editorFile()).
+                editorFile.cap = ctx.file;
+                ctx.onUnload(function () { editorFile.cap = null; });
+                // Register the text-editor kind (the #80 built-in spec, moved
+                // here). serialize stays the shared core serializeAppWindow so
+                // webterm:appwindows:v1 persistence is byte-identical; a duplicate
+                // appKind throws -> initMod rolls the mod back; teardown removes
+                // exactly THIS registration.
+                ctx.registerWindowKind({
+                    appKind: 'text-editor',
+                    factory: function (d) { return openNoteOrEditorWindow(d); },
+                    serialize: serializeAppWindow,
+                    menu: {
+                        label: '📄 Text editor',
+                        launch: function () { return launchTextEditor(); },
+                    },
+                });
+            },
+        });

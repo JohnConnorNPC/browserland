@@ -588,13 +588,12 @@ def test_register_window_kind_capability_present():
 
 
 def test_window_kind_builtins_registered_in_menu_order():
-    # registerBuiltinWindowKinds registers the FIVE core kinds (sticky-note left
-    # for the S8 mod, #81), and their registration order is the historical (+)
-    # launch-menu order (Map iteration order drives the menu), so the built-ins
-    # reproduce the old menu byte-for-byte.
+    # registerBuiltinWindowKinds registers the FOUR core kinds (sticky-note left
+    # for the S8 mod #81, text-editor for the S10 mod #83), and their registration
+    # order is the historical (+) launch-menu order (Map iteration order drives the
+    # menu), so the built-ins reproduce the old menu order.
     src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
-    order = ["text-editor", "file-manager", "task-manager",
-             "control-panel", "help"]
+    order = ["file-manager", "task-manager", "control-panel", "help"]
     positions = []
     for kind in order:
         needle = f"appKind: '{kind}'"
@@ -602,14 +601,16 @@ def test_window_kind_builtins_registered_in_menu_order():
         positions.append(src.index(needle))
     assert positions == sorted(positions), \
         "built-in kinds must register in the historical menu order"
-    # sticky-note is now a mod, never a core built-in (it appends through ctx at
-    # loadMods time). Its retain-on-close registration rode with it (the registry
-    # plumbing still NAMES retainOnClose as a spec field — scope to the block).
+    # sticky-note + text-editor are now mods, never core built-ins (each appends
+    # through ctx at loadMods time). The sticky note's retain-on-close rode with
+    # it; the text editor's spec rode with it too.
     assert "appKind: 'sticky-note'" not in src
+    assert "appKind: 'text-editor'" not in src
     assert "retainOnClose: function (rec)" not in src
-    # The persisted core kinds share serializeAppWindow; the sticky note's
-    # serializeAppWindow reference moved to the mod, so core is down to two.
-    assert src.count("serialize: serializeAppWindow") == 2   # editor/file-mgr
+    # Only file-manager is a persisted CORE built-in now; the text-editor's
+    # serializeAppWindow reference moved to mods/editor/ (sticky's to mods/sticky/),
+    # so core is down to one.
+    assert src.count("serialize: serializeAppWindow") == 1   # file-mgr only
     # help is a CORE built-in (mods-off safe), reached through deferred wrappers.
     assert "return openHelpWindow(d)" in src and "return launchHelp()" in src
 
@@ -618,8 +619,11 @@ def test_sticky_symbols_removed_from_core_fragments():
     # The sticky note is now a mod (#81/S8): its registry registration is gone from
     # core 54, and its launcher + Closed-notes builder are gone from core 76 (both
     # moved verbatim into mods/sticky/sticky.js). The shared builder
-    # (openNoteOrEditorWindow) + serializer (serializeAppWindow) deliberately STAY
-    # in core (the text editor shares them and they are the unknown-kind fallback).
+    # (openNoteOrEditorWindow) moved to mods/editor/ (#83/S10, the text editor owns
+    # it now); the serializer (serializeAppWindow) deliberately STAYS in core (the
+    # file-manager built-in + both mods share it). The sticky mod calls back into
+    # openNoteOrEditorWindow + serializeAppWindow — both reachable in the served
+    # page regardless of which fragment/mod ships them.
     core = {
         "54_js_app_windows_store.js": ("appKind: 'sticky-note'",
                                        "retainOnClose: function (rec)"),
@@ -630,9 +634,10 @@ def test_sticky_symbols_removed_from_core_fragments():
         text = (BROKER_DIR / name).read_text(encoding="utf-8")
         for sym in symbols:
             assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
-    # The kept core helpers the mod calls back into are still present + reachable.
+    # The helpers the sticky mod calls back into are still present + reachable in
+    # the served page (openNoteOrEditorWindow now ships in mods/editor/).
     for sym in ("function openNoteOrEditorWindow", "function serializeAppWindow"):
-        assert sym in INDEX_HTML, f"{sym!r} must stay in core"
+        assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
 
 
 def test_sticky_mod_packaged_and_manifest_agrees():
@@ -665,6 +670,94 @@ def test_sticky_mod_packaged_and_manifest_agrees():
     assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'sticky'")
 
 
+# --------------------------------------------------------------------------- #
+# text-editor mod (#83 / S10)
+# --------------------------------------------------------------------------- #
+
+def test_editor_symbols_removed_from_core_fragments():
+    # The text editor is now a mod (#83/S10): its built-in registration is gone
+    # from core 54, its launcher from core 76, and the AGENTS.md hooks
+    # (openAgentDocsWindow + openAgentsMdEditor) from core 73 — all moved into
+    # mods/editor/. The CodeMirror fragment (69) + editor fragment (70) are
+    # DELETED; openAppWindow (the dispatcher) moved into core 54.
+    assert not (BROKER_DIR / "69_js_codemirror.js").exists()
+    assert not (BROKER_DIR / "70_js_editor_app.js").exists()
+    gone = {
+        "54_js_app_windows_store.js": ("appKind: 'text-editor'",
+                                       "function openNoteOrEditorWindow"),
+        "73_js_window_runtime.js": ("function openAgentDocsWindow",
+                                    "function openAgentsMdEditor"),
+        "76_js_launch_fullscreen.js": ("function launchTextEditor",),
+    }
+    for name, symbols in gone.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+    # openAppWindow (the central dispatcher) moved into core 54, NOT the mod.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "function openAppWindow" in s54
+    # And the moved builder/hooks are present + reachable in the served page (they
+    # ship in mods/editor/ as hoisted functions, so core reaches them mods-off).
+    for sym in ("function openNoteOrEditorWindow", "function loadCodeMirror",
+                "function openAgentDocsWindow", "function openAgentsMdEditor",
+                "function launchTextEditor"):
+        assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
+
+
+def test_editor_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "editor"
+    editor_js = mod_dir / "editor.js"
+    cm_js = mod_dir / "codemirror.js"
+    manifest = mod_dir / "mod.json"
+    assert editor_js.is_file() and cm_js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "editor"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "editor.js"
+    # Both mod scripts are declared in _MODS (the codemirror lazy loader + the
+    # editor), so the .js drift guard accepts them.
+    assert "mods/editor/codemirror.js" in ui._MODS
+    assert "mods/editor/editor.js" in ui._MODS
+    src = editor_js.read_text(encoding="utf-8")
+    # Registers the editor mod + contributes the text-editor window kind through
+    # ctx.registerWindowKind, reusing the shared core serializer + builder.
+    assert "registerMod(" in src
+    assert "id: 'editor'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'text-editor'" in src
+    assert "serialize: serializeAppWindow" in src
+    assert "return openNoteOrEditorWindow(d)" in src
+    assert "return launchTextEditor()" in src
+    # File I/O rides ctx.file (#82): the mod stashes ctx.file and every /file/*
+    # call flows through editorFile() — NO direct fileApiPost survives in the mod.
+    assert "editorFile.cap = ctx.file;" in src
+    assert "editorFile().read(" in src
+    assert "editorFile().write(" in src
+    assert "editorFile().list(" in src
+    assert "fileApiPost(" not in src, "editor mod must route I/O through ctx.file"
+    # The CodeMirror loader rode along as a separate file (helpers only, no
+    # registerMod), so it can stay a small fragment.
+    cm = cm_js.read_text(encoding="utf-8")
+    assert "function loadCodeMirror" in cm and "function detectLanguage" in cm
+    assert "registerMod(" not in cm
+    # Ships in the served page, AFTER the help mod, BEFORE the sticky mod (so the
+    # (+) menu lists Text editor before Sticky note, after the core built-ins).
+    assert "id: 'editor'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'editor'")
+    assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'sticky'")
+
+
+def test_editor_serialized_fields_preserved():
+    # The hard #83 requirement: every editor serialized field round-trips. They
+    # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    for field in ("filePath:", "wrap:", "lineNums:", "startDir:", "docs:",
+                  "activeTab:", "agentsMdCwd:", "fileHostId:"):
+        assert field in s54, f"serializeAppWindow lost the {field!r} editor field"
+
+
 def test_window_kind_sites_use_registry():
     # The seven hardcoded appKind branches are replaced by registry lookups, and
     # the old per-kind branches are gone from each fragment they lived in.
@@ -674,14 +767,17 @@ def test_window_kind_sites_use_registry():
                  "win.appKind === 'help'"):
         assert gone not in s54, f"old saveAppWindow branch survived: {gone!r}"
 
-    s70 = (BROKER_DIR / "70_js_editor_app.js").read_text(encoding="utf-8")
-    assert "const kind = lookupWindowKind(appData.appKind);" in s70
-    assert "return openNoteOrEditorWindow(appData);" in s70
+    # openAppWindow (the dispatcher) moved from the deleted 70 into core 54
+    # (#83/S10) when the editor was extracted; it still dispatches via the registry
+    # with the unknown-kind openNoteOrEditorWindow fallback, and the old per-kind
+    # branches stay gone.
+    assert "const kind = lookupWindowKind(appData.appKind);" in s54
+    assert "return openNoteOrEditorWindow(appData);" in s54
     for gone in ("return openFileManagerWindow(appData)",
                  "return openTaskManagerWindow(appData)",
                  "return openControlPanelWindow(appData)",
                  "return openHelpWindow(appData)"):
-        assert gone not in s70, f"old openAppWindow dispatch branch survived: {gone!r}"
+        assert gone not in s54, f"old openAppWindow dispatch branch survived: {gone!r}"
 
     s73 = (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8")
     assert "kind.retainOnClose(rec)" in s73
