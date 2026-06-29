@@ -406,6 +406,24 @@
                         openFile(child);
                     }
                 };
+                // Make a row draggable to the other pane / another FM window
+                // (#72): files AND dirs. effectAllowed='copyMove' so a plain drag
+                // copies and a Shift-drag moves (the drop handler reads e.shiftKey
+                // and the payload carries the type for the cross-host dir refusal).
+                const makeDraggable = (row, ent, child) => {
+                    row.draggable = true;
+                    row.addEventListener('dragstart', (e) => {
+                        setActive(side); selectRow(row);
+                        if (!e.dataTransfer) return;
+                        e.dataTransfer.effectAllowed = 'copyMove';
+                        e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
+                            winId: id, side, hostId: win[hostKey(side)],
+                            path: child, name: ent.name, type: ent.type }));
+                        row.classList.add('dragging');
+                    });
+                    row.addEventListener('dragend',
+                        () => row.classList.remove('dragging'));
+                };
                 // Rename in place = a /file/move to a validated sibling name in
                 // this same dir (cwd). Client-side name validation is UX; the
                 // server re-checks.
@@ -679,24 +697,9 @@
                             setActive(side); selectRow(row);
                         });
                         row.addEventListener('dblclick', () => openFile(child));
-                        // Drag a file to the OTHER pane to COPY it (#46) — works
-                        // across hosts. effectAllowed='copy' (drag is copy-only;
-                        // move is the explicit context-menu action, since a drag
-                        // modifier can't be read reliably during dragover).
-                        row.draggable = true;
-                        row.addEventListener('dragstart', (e) => {
-                            setActive(side); selectRow(row);
-                            if (!e.dataTransfer) return;
-                            e.dataTransfer.effectAllowed = 'copy';
-                            e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
-                                winId: id, side, hostId: win[hostKey(side)],
-                                path: child, name: ent.name }));
-                            row.classList.add('dragging');
-                        });
-                        row.addEventListener('dragend',
-                            () => row.classList.remove('dragging'));
                     }
-                    // Shared row menu on BOTH file and dir rows (#72).
+                    // Draggable + shared row menu on BOTH file and dir rows (#72).
+                    makeDraggable(row, ent, child);
                     row.addEventListener('contextmenu',
                         (e) => onRowMenu(e, row, ent, child));
                     ui.list.appendChild(row);
@@ -1103,7 +1106,10 @@
                 const onClick = () => { setActive(side); fmBody.focus(); };
                 const onOver = (e) => {
                     e.preventDefault();
-                    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                    // Shift = move, else copy — mirror it in the cursor (#72).
+                    if (e.dataTransfer) {
+                        e.dataTransfer.dropEffect = e.shiftKey ? 'move' : 'copy';
+                    }
                     ui.pane.classList.add('drop-hover');
                 };
                 const onLeave = () => ui.pane.classList.remove('drop-hover');
@@ -1130,7 +1136,9 @@
                     // of the same side name — is a real transfer (#46 review).
                     if (payload && payload.path
                         && !(payload.winId === id && payload.side === side)) {
-                        transferFromPayload(payload, side, false);  // drag = copy
+                        // Shift-drop = move, plain drop = copy (#72). doTransfer
+                        // routes by type: a cross-host dir gets a clear refusal.
+                        transferFromPayload(payload, side, e.shiftKey);
                     }
                 };
                 // Right-click the pane's empty background -> the empty-area menu
