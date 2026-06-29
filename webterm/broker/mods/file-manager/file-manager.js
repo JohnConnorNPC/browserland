@@ -406,6 +406,44 @@
                         openFile(child);
                     }
                 };
+                // Rename in place = a /file/move to a validated sibling name in
+                // this same dir (cwd). Client-side name validation is UX; the
+                // server re-checks.
+                const renameRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('rename failed: host unavailable');
+                        return;
+                    }
+                    const name = await openTextPrompt({
+                        title: 'Rename', label: 'New name', value: ent.name,
+                        okLabel: 'Rename', validate: validateName });
+                    if (name == null || win.disposed) return;
+                    const trimmed = name.trim();
+                    if (trimmed === ent.name) return;        // no change
+                    const dst = joinNative(cwd, trimmed);
+                    let res = await fmFile().move(child, dst, { host: host.id });
+                    if (win.disposed) return;
+                    if (res && res.error === 'exists') {
+                        const ok = await openConfirmDialog({
+                            title: 'Rename',
+                            message: 'Overwrite ' + trimmed + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) return;
+                        res = await fmFile().move(child, dst,
+                            { host: host.id, overwrite: true });
+                        if (win.disposed) return;
+                    }
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('rename failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('renamed to ' + trimmed);
+                    renderPane(side);
+                };
                 const buildRowMenu = (row, ent, child) => {
                     const other = side === 'left' ? 'right' : 'left';
                     const desc = { hostId: win[hostKey(side)], path: child,
@@ -423,6 +461,8 @@
                                  action: () => setClipboard('copy', desc) });
                     items.push({ label: 'Paste', enabled: !!win.fmClipboard,
                                  action: () => pasteInto(side, pasteDir) });
+                    items.push({ label: 'Rename…', enabled: true,
+                                 action: () => renameRow(ent, child) });
                     items.push({ sep: true });
                     items.push({ label: 'Copy → ' + other + ' pane',
                                  enabled: true,
@@ -802,6 +842,45 @@
                 if (ok && clip.mode === 'cut') win.fmClipboard = null;
             };
 
+            // Client-side name check (UX only — the server re-validates). Rejects
+            // both separators (/ and \), the ADS colon, '.'/'..', and empty.
+            // Returns '' when OK (openTextPrompt treats a truthy return as the
+            // error to show and keeps the dialog open).
+            const validateName = (name) => {
+                const n = (name || '').trim();
+                if (!n) return 'enter a name';
+                if (n === '.' || n === '..') return 'invalid name';
+                if (/[\/\\]/.test(n)) return 'name can’t contain / or \\';
+                if (n.indexOf(':') !== -1) return 'name can’t contain :';
+                return '';
+            };
+            // New folder in a pane's cwd via a styled prompt -> /file/mkdir.
+            const newFolder = async (side) => {
+                const host = paneHost(side);
+                if (!host) {
+                    showNotice('new folder failed: host unavailable');
+                    return;
+                }
+                const name = await openTextPrompt({
+                    title: 'New folder', label: 'Folder name',
+                    okLabel: 'Create', validate: validateName });
+                if (name == null || win.disposed) return;
+                const dst = joinNative(win[dirKey(side)], name.trim());
+                const res = await fmFile().mkdir(dst, { host: host.id });
+                if (win.disposed) return;
+                if (!(res && res.ok)) {
+                    if (res && res.error === 'auth_required') {
+                        promptFileHostAuth(host);
+                    }
+                    const err = (res && res.error) || '?';
+                    showNotice('new folder failed: '
+                        + (err === 'exists' ? 'already exists' : err));
+                    return;
+                }
+                showNotice('created ' + name.trim());
+                renderPane(side);
+            };
+
             // Right-click on a pane's empty background: New folder / Paste /
             // Refresh / Properties of the cwd. Lives in the outer scope (reads
             // win[dirKey(side)] live) so the one pane-level contextmenu handler
@@ -809,11 +888,13 @@
             const buildEmptyMenu = (side) => {
                 const cwd = win[dirKey(side)];
                 const items = [];
+                items.push({ label: 'New folder…', enabled: true,
+                             action: () => newFolder(side) });
                 if (win.fmClipboard) {
                     items.push({ label: 'Paste', enabled: true,
                                  action: () => pasteInto(side, cwd) });
                 }
-                if (items.length) items.push({ sep: true });
+                items.push({ sep: true });
                 items.push({ label: 'Refresh', enabled: true,
                              action: () => { renderPane('left');
                                              renderPane('right'); } });
