@@ -920,6 +920,27 @@ def test_file_capability_present():
         assert sym in INDEX_HTML, f"ctx.file missing from served page: {sym!r}"
 
 
+def test_dialog_component_present():
+    # #72 (Part A): the reusable styled dialog primitive + wrappers ship as the
+    # new 69_js_dialog.js fragment, registered right after the file-dialog
+    # fragment, and reach the served page; its CSS rides the shared dialogs
+    # fragment by folding .app-dialog into the existing selector groups.
+    assert "69_js_dialog.js" in ui._ORDERED
+    assert ui._ORDERED.index("69_js_dialog.js") == \
+        ui._ORDERED.index("68_js_app_windows_files.js") + 1
+    assert (BROKER_DIR / "69_js_dialog.js").is_file()
+    src = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    for sym in ("function openDialog", "function openTextPrompt",
+                "function openConfirmDialog", "function openInfoModal"):
+        assert sym in src, f"dialog fragment missing {sym!r}"
+        assert sym in INDEX_HTML, f"dialog symbol missing from served page: {sym!r}"
+    css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
+    for sel in (".app-dialog-overlay", ".app-dialog button.danger",
+                ".app-dialog-rows"):
+        assert sel in css, f"dialog CSS missing {sel!r}"
+    assert ".app-dialog" in INDEX_HTML
+
+
 def test_file_capability_richer_ops_present():
     # #72: ctx.file gains mkdir/copy/move/zip/unzip/stat and a recursive flag on
     # delete; ctxVersion stays 1 (additive). The SAME methods are mirrored in the
