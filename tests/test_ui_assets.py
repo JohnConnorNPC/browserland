@@ -559,3 +559,80 @@ def test_register_help_cards_capability_present():
                 "function _sanitizeHelpCard", "function _sanitizeHelpBlocks",
                 "helpCards:"):
         assert sym in INDEX_HTML, f"missing registerHelpCards symbol: {sym!r}"
+
+
+# --------------------------------------------------------------------------- #
+# window-kind registry (#80 / S7)
+# --------------------------------------------------------------------------- #
+
+def test_window_kind_registry_core_present():
+    # The registry primitives ride in the served page: the no-TDZ getter, the
+    # register/lookup/list/delete helpers, the shared serializer, and the lazy
+    # built-in population. The Playwright acceptance drives these via globals +
+    # window.__mods.__test.windowKinds.
+    for sym in ("function _windowKindRegistry", "function registerWindowKind",
+                "function deleteWindowKind", "function lookupWindowKind",
+                "function windowKindMenuList", "function registerBuiltinWindowKinds",
+                "function serializeAppWindow", "function openNoteOrEditorWindow",
+                "windowKinds: function"):
+        assert sym in INDEX_HTML, f"missing window-kind registry symbol: {sym!r}"
+
+
+def test_register_window_kind_capability_present():
+    # #80 (S7): ctx.registerWindowKind + its loader-side wrapper (validate via the
+    # core registerWindowKind, teardown that removes exactly this registration).
+    # The fixture-mod acceptance (a brand-new kind end-to-end) depends on these.
+    for sym in ("registerWindowKind: function", "function _modRegisterWindowKind",
+                "deleteWindowKind(entry.appKind, entry)"):
+        assert sym in INDEX_HTML, f"missing registerWindowKind symbol: {sym!r}"
+
+
+def test_window_kind_builtins_registered_in_menu_order():
+    # registerBuiltinWindowKinds registers all six kinds, and their registration
+    # order is the historical (+) launch-menu order (Map iteration order drives the
+    # menu), so the built-ins reproduce the old menu byte-for-byte.
+    src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    order = ["sticky-note", "text-editor", "file-manager", "task-manager",
+             "control-panel", "help"]
+    positions = []
+    for kind in order:
+        needle = f"appKind: '{kind}'"
+        assert needle in src, f"built-in kind not registered: {kind}"
+        positions.append(src.index(needle))
+    assert positions == sorted(positions), \
+        "built-in kinds must register in the historical menu order"
+    # The persisted kinds share serializeAppWindow; only the sticky note retains.
+    assert src.count("serialize: serializeAppWindow") == 3   # sticky/editor/file-mgr
+    assert "retainOnClose: function (rec)" in src
+    # help is a CORE built-in (mods-off safe), reached through deferred wrappers.
+    assert "return openHelpWindow(d)" in src and "return launchHelp()" in src
+
+
+def test_window_kind_sites_use_registry():
+    # The seven hardcoded appKind branches are replaced by registry lookups, and
+    # the old per-kind branches are gone from each fragment they lived in.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "const kind = lookupWindowKind(win.appKind);" in s54
+    for gone in ("win.appKind === 'task-manager'", "win.appKind === 'control-panel'",
+                 "win.appKind === 'help'"):
+        assert gone not in s54, f"old saveAppWindow branch survived: {gone!r}"
+
+    s70 = (BROKER_DIR / "70_js_editor_app.js").read_text(encoding="utf-8")
+    assert "const kind = lookupWindowKind(appData.appKind);" in s70
+    assert "return openNoteOrEditorWindow(appData);" in s70
+    for gone in ("return openFileManagerWindow(appData)",
+                 "return openTaskManagerWindow(appData)",
+                 "return openControlPanelWindow(appData)",
+                 "return openHelpWindow(appData)"):
+        assert gone not in s70, f"old openAppWindow dispatch branch survived: {gone!r}"
+
+    s73 = (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8")
+    assert "kind.retainOnClose(rec)" in s73
+    assert "rec.appKind === 'sticky-note'" not in s73
+
+    s84 = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    assert "lookupWindowKind(rec && rec.appKind)" in s84
+    assert "=== 'task-manager'" not in s84   # the old explicit skip list is gone
+
+    s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
+    assert "windowKindMenuList()" in s76
