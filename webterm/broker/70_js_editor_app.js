@@ -1,3 +1,13 @@
+        // Open (or focus) an app window by kind. The single dedup-by-id check lives
+        // here; each kind then dispatches through the window-kind registry (#80/S7)
+        // — the six built-ins (sticky-note, text-editor, file-manager, task-manager,
+        // control-panel, help) are registered as core defaults and a mod adds its
+        // own via ctx.registerWindowKind. The sticky/editor builder
+        // (openNoteOrEditorWindow) is the factory for those two kinds AND the
+        // default for an unknown/missing appKind (a hand-edited/corrupt store
+        // record), preserving the pre-registry fall-through exactly. The delegating
+        // factories self-guard the existing-window case, so the dedup below stays
+        // the one authoritative check.
         function openAppWindow(appData) {
             const id = String(appData.id);
             const existing = windows.get(id);
@@ -6,24 +16,20 @@
                 else bringToFront(id);
                 return existing;
             }
-            // File-manager windows have their own factory (the notes/editor body
-            // below is delicate); delegate before any sticky/editor logic runs.
-            if (appData.appKind === 'file-manager') {
-                return openFileManagerWindow(appData);
-            }
-            if (appData.appKind === 'task-manager') {
-                return openTaskManagerWindow(appData);
-            }
-            // Help has its own ephemeral factory (#40) — delegate before the
-            // sticky/editor logic below.
-            if (appData.appKind === 'help') {
-                return openHelpWindow(appData);
-            }
-            // The Control Panel is a floating window again (#59) with its own
-            // ephemeral factory — delegate like the other app kinds.
-            if (appData.appKind === 'control-panel') {
-                return openControlPanelWindow(appData);
-            }
+            const kind = lookupWindowKind(appData.appKind);
+            if (kind && kind.factory) return kind.factory(appData);
+            return openNoteOrEditorWindow(appData);
+        }
+
+        // The sticky-note / text-editor builder — the original openAppWindow body,
+        // extracted (#80/S7) so it can be the registry `factory` for both kinds (and
+        // the unknown-kind default). The notes/editor DOM is delicate; the other app
+        // kinds have their own factories (openFileManagerWindow, openTaskManager-
+        // Window, openControlPanelWindow, openHelpWindow). Reached only via
+        // openAppWindow, which already ran the dedup-by-id check, so this rebuilds
+        // unconditionally.
+        function openNoteOrEditorWindow(appData) {
+            const id = String(appData.id);
             // Legacy single-doc AGENTS.md record (agentsMdCwd, no docs): a build
             // before the tabbed agent-docs window. Upgrade it on reopen by reading
             // AGENTS.md + CLAUDE.md fresh, preserving the stored geom/color/tiling.

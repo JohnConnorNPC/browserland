@@ -20,18 +20,21 @@
         // re-runs the exact same path.
         function restoreAppWindows() {
             for (const appId of Object.keys(appStore)) {
+                const rec = appStore[appId];
                 // Skip docs the user closed (open:false): they live in the store
                 // and reopen from the launch (+) menu's "Closed" list. Legacy
                 // records predate the flag (open === undefined) — auto-open
                 // those so nothing silently vanishes on upgrade.
-                if (appStore[appId] && appStore[appId].open === false) continue;
-                // Ephemeral kinds (task manager, control panel) are never
-                // persisted by saveAppWindow, but a hand-edited/corrupt store
-                // could carry a stale record — never auto-recreate those.
-                const ak = appStore[appId] && appStore[appId].appKind;
-                if (ak === 'task-manager' || ak === 'control-panel'
-                    || ak === 'help') continue;
-                try { openAppWindow(appStore[appId]); }
+                if (rec && rec.open === false) continue;
+                // Ephemeral kinds (task manager / control panel / help: registered
+                // without a serialize) are never persisted by saveAppWindow, but a
+                // hand-edited/corrupt store could carry a stale record — never auto-
+                // recreate those (#80/S7). An UNKNOWN/unregistered kind still goes
+                // through openAppWindow (-> the note/editor default), exactly as
+                // before. A kind may supply its own restore; else openAppWindow.
+                const kind = lookupWindowKind(rec && rec.appKind);
+                if (kind && !kind.serialize) continue;
+                try { (kind && kind.restore ? kind.restore : openAppWindow)(rec); }
                 catch (e) { console.warn('app window restore failed', appId, e); }
             }
         }

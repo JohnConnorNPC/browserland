@@ -148,6 +148,17 @@
                 registerHelpCards: function (cards) {
                     return _modRegisterHelpCards(rec, cards);
                 },
+                // #80 (S7): register a brand-new app window kind in one call —
+                // factory (open), serialize (persist), restore?, retainOnClose
+                // (× keep-vs-discard), and a (+) launch-menu entry. Built on the
+                // shared S6 chrome factory (buildAppChrome/addResizeHandles/
+                // wireAppChrome). The same registry the six core built-ins use, so
+                // a mod kind is a first-class window everywhere the registry is
+                // consulted. A duplicate appKind throws (initMod rolls the mod
+                // back); the kind is removed from the registry on teardown.
+                registerWindowKind: function (spec) {
+                    return _modRegisterWindowKind(rec, spec);
+                },
             };
         }
 
@@ -511,6 +522,25 @@
             return added.length;
         }
 
+        // ---- window-kind contribution (#80 / S7) ----------------------------
+        // ctx.registerWindowKind hands a mod the SAME core registry the six built-
+        // ins use (registerWindowKind in 54_js_app_windows_store.js). The core call
+        // validates the spec and throws ModConflictError on a duplicate appKind —
+        // that throw propagates out of init() so initMod rolls the whole mod back
+        // (no half-registered kind). On success we wire teardown IMMEDIATELY (before
+        // the mod's init does anything else) so a LATER init throw, or a normal
+        // disable, removes exactly THIS registration — guarded by entry identity so
+        // a re-register by someone else is never clobbered. Live windows of the kind
+        // are the mod's own responsibility to close in onUnload; the registry just
+        // forgets the kind, so closing one afterwards no longer serializes/retains.
+        function _modRegisterWindowKind(rec, spec) {
+            const entry = registerWindowKind(spec);   // throws => initMod rolls back
+            rec.unloads.push(function () {
+                deleteWindowKind(entry.appKind, entry);
+            });
+            return entry;
+        }
+
         // Fire mod controls on convergence (boot + every /state pull, via
         // applyThemeSettings). Value controls (boolean/radio/select) are change-
         // detected — the mod's apply is meant to be idempotent, so an unchanged
@@ -667,4 +697,10 @@
             isActive: function (id) { return window.__mods.active.has(id); },
             active: function () { return Array.from(window.__mods.active.keys()); },
             get: function (id) { return window.__mods.active.get(id) || null; },
+            // #80 (S7): the registered window kinds, in registration order — the
+            // Playwright acceptance inspects this to prove the six built-ins ride
+            // the registry and a fixture mod's kind appears/disappears with it.
+            windowKinds: function () {
+                return windowKindMenuList().map(function (k) { return k.appKind; });
+            },
         };

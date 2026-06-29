@@ -577,23 +577,23 @@
             try { win.dom.remove(); } catch (_) {}
             windows.delete(id);
             // App windows are document-model: × close tears down the live
-            // window AND its taskbar chip + synthetic session. Issue #11: closing
-            // retains ONLY a non-empty sticky note; every other kind is discarded.
-            // saveAppWindow above refreshed the record's content, so the trim
-            // sees the latest keystrokes. A retained sticky note is stored with
-            // its content trimmed and open:false (it reopens from the launch
-            // menu's "Closed notes" list). An empty sticky note, a text editor,
-            // a file manager, or any other kind is deleted outright — editors
-            // back their real content with server files (the × dirty-save prompt
-            // offers to write them first), and a kept-but-hidden record would be
-            // unreachable dead storage anyway. destroyAppWindow remains the
-            // explicit per-doc discard for a live note.
+            // window AND its taskbar chip + synthetic session. The window kind's
+            // retainOnClose decides keep-vs-discard (#80/S7): issue #11 keeps ONLY
+            // a non-empty sticky note (its registry entry trims the content + says
+            // keep), stored open:false so it reopens from the launch menu's "Closed
+            // notes" list. saveAppWindow above refreshed the record, so the trim
+            // sees the latest keystrokes. Every other kind (no retainOnClose) — an
+            // empty sticky note, a text editor, a file manager, or an unknown kind —
+            // is deleted outright: editors back their real content with server files
+            // (the × dirty-save prompt offers to write them first) and a kept-but-
+            // hidden record would be unreachable dead storage anyway. Ephemeral
+            // kinds wrote no record (rec is absent), so they fall through untouched.
+            // destroyAppWindow remains the explicit per-doc discard for a live note.
             if (isApp) {
                 const rec = appStore[id];
                 if (rec) {
-                    const content = String(rec.content == null ? '' : rec.content).trim();
-                    if (rec.appKind === 'sticky-note' && content) {
-                        rec.content = content;
+                    const kind = lookupWindowKind(rec.appKind);
+                    if (kind && kind.retainOnClose && kind.retainOnClose(rec)) {
                         rec.open = false;
                     } else {
                         delete appStore[id];

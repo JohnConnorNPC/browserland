@@ -252,17 +252,30 @@
             }
             return items;
         }
+        // The "client apps" block of the (+) launch menu, now driven by the window-
+        // kind registry (#80/S7): a leading separator, one launcher per registered
+        // kind that carries a menu (registration order — so the built-ins reproduce
+        // the old Sticky / Editor / File-mgr / Task-mgr / Control-panel / Help
+        // order, and a mod's kind appends after Help), then each kind's closed-doc
+        // items (only the sticky note contributes any — its "Closed notes" list).
         function appMenuItems() {
-            return [
-                { sep: true },
-                { label: '📝 Sticky note', enabled: true, action: launchStickyNote },
-                { label: '📄 Text editor', enabled: true, action: launchTextEditor },
-                { label: '🗂 File manager', enabled: true, action: launchFileManager },
-                { label: '🧰 Task manager', enabled: true, action: launchTaskManager },
-                { label: '🎛 Control panel', enabled: true, action: launchControlPanel },
-                { label: '❓ Help', enabled: true, action: launchHelp },
-                ...closedAppMenuItems(),
-            ];
+            const kinds = windowKindMenuList();
+            const items = [{ sep: true }];
+            for (const k of kinds) {
+                const m = k.menu;
+                if (m && m.label && typeof m.launch === 'function') {
+                    items.push({ label: m.label, enabled: true, action: m.launch });
+                }
+            }
+            for (const k of kinds) {
+                const m = k.menu;
+                if (m && typeof m.closedItems === 'function') {
+                    try {
+                        for (const it of m.closedItems()) items.push(it);
+                    } catch (_) {}
+                }
+            }
+            return items;
         }
 
         if (launchBtn) {

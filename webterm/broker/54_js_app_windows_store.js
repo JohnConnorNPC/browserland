@@ -43,27 +43,13 @@
             }
             if (changed) saveAppStore();
         })();
-        // Snapshot a live app window into the store (content/geom/color).
-        function saveAppWindow(win) {
-            if (!win || win.type !== 'app') return;
-            // The task manager is a live monitor, not a saved document: never
-            // persist it (so it never lands in appStore nor the "Closed notes /
-            // files" menu). It still keeps a live taskbar chip while open.
-            if (win.appKind === 'task-manager') return;
-            // The Control Panel is a floating window (#59) but ephemeral: it edits
-            // global / per-host settings that persist via /state, so the window
-            // itself has nothing of its own to save (geometry stays unpersisted,
-            // like Help / the task manager).
-            if (win.appKind === 'control-panel') return;
-            // Help is a live reference monitor, not a saved document (#40): never
-            // persist it (so it never lands in appStore nor restores on reload).
-            if (win.appKind === 'help') return;
-            // Multi-tab agent-docs window: snapshot the live editor back into the
-            // active doc first, so the serialized `docs` below are never stale.
-            if (win.tabs && win._captureActiveDoc) {
-                try { win._captureActiveDoc(); } catch (_) {}
-            }
-            appStore[win.id] = {
+        // Snapshot a live app window into a plain store record. The shared
+        // serializer for the persisted built-ins (sticky-note / text-editor /
+        // file-manager) and the default for an unknown stored kind (#80/S7). Pure:
+        // it reads the window and returns the record; saveAppWindow owns the
+        // appStore write + the multi-tab capture.
+        function serializeAppWindow(win) {
+            return {
                 id: win.id,
                 appKind: win.appKind,
                 title: win.name,
@@ -139,6 +125,22 @@
                 fmLeftHostId: win.fmLeftHostId || '',
                 fmRightHostId: win.fmRightHostId || '',
             };
+        }
+        // Persist a live app window through its window-kind serializer (#80/S7).
+        // Ephemeral kinds (task-manager / control-panel / help: registered with no
+        // serialize) are never stored — the old per-kind early returns. An UNKNOWN
+        // appKind (no registry entry) still falls back to the shared serializer, so
+        // anything but those three is stored exactly as before. A multi-tab editor
+        // captures its live doc first so the serialized `docs` are never stale.
+        function saveAppWindow(win) {
+            if (!win || win.type !== 'app') return;
+            const kind = lookupWindowKind(win.appKind);
+            if (kind && !kind.serialize) return;
+            if (win.tabs && win._captureActiveDoc) {
+                try { win._captureActiveDoc(); } catch (_) {}
+            }
+            appStore[win.id] = (kind && kind.serialize ? kind.serialize
+                                                       : serializeAppWindow)(win);
             saveAppStore();
         }
         function deleteAppWindow(id) {
@@ -152,6 +154,159 @@
         function newAppId(kind) {
             appSeq += 1;
             return 'app:' + kind + ':' + Date.now().toString(36) + '-' + appSeq;
+        }
+
+        // ---- window-kind registry (#80 / S7) ------------------------------
+        // A registry of "app window kinds" so a kind lives in ONE place instead of
+        // branching across openAppWindow (factory), saveAppWindow (serialize),
+        // restoreAppWindows (restore), closeWindow (retain-vs-delete) and the (+)
+        // launch menu. Each entry:
+        //   { appKind, factory(appData)->win, serialize(win)->record|null,
+        //     restore?(record), retainOnClose?(record)->bool, menu? }
+        //   menu = { label, launch(), closedItems?()->[menuItem] }
+        // The six built-ins (sticky-note, text-editor, file-manager, task-manager,
+        // control-panel, help) are registered as CORE defaults (NOT through a mod)
+        // so they behave with mods_enabled=false exactly as the old hardcoded
+        // branches did; a mod adds a brand-new kind through ctx.registerWindowKind.
+        //
+        // Held as a memo on the registry getter (NOT a top-level const) so it is
+        // free of the TDZ a `const` carries before this fragment executes — the
+        // same no-TDZ pattern localInfo._p uses. First touch lazily registers the
+        // built-ins; the Map is assigned BEFORE registering so the re-entrant
+        // registerWindowKind -> _windowKindRegistry calls can't recurse.
+        function _windowKindRegistry() {
+            if (!_windowKindRegistry._m) {
+                _windowKindRegistry._m = new Map();   // assign first (recursion guard)
+                registerBuiltinWindowKinds();
+            }
+            return _windowKindRegistry._m;
+        }
+        // Register one window kind. A non-string/empty appKind or a duplicate is a
+        // hard error (no silent last-wins, mirroring registerMod) so a mod that
+        // collides with a built-in or another mod is rolled back by initMod. close
+        // retention only ever sees a record saveAppWindow wrote, so a retainOnClose
+        // without a serialize is meaningless — reject it.
+        function registerWindowKind(spec) {
+            if (!spec || typeof spec !== 'object') {
+                throw new Error('registerWindowKind: spec must be an object');
+            }
+            const appKind = spec.appKind;
+            if (typeof appKind !== 'string' || !appKind) {
+                throw new Error('registerWindowKind: a non-empty string appKind is required');
+            }
+            if (typeof spec.factory !== 'function') {
+                throw new Error('registerWindowKind[' + appKind
+                    + ']: factory(appData) must be a function');
+            }
+            for (const k of ['serialize', 'restore', 'retainOnClose']) {
+                if (spec[k] != null && typeof spec[k] !== 'function') {
+                    throw new Error('registerWindowKind[' + appKind + ']: '
+                        + k + ' must be a function');
+                }
+            }
+            if (spec.retainOnClose && !spec.serialize) {
+                throw new Error('registerWindowKind[' + appKind
+                    + ']: retainOnClose requires serialize');
+            }
+            const reg = _windowKindRegistry();
+            if (reg.has(appKind)) {
+                throw ModConflictError('registerWindowKind: duplicate appKind "'
+                    + appKind + '"');
+            }
+            const entry = {
+                appKind: appKind,
+                factory: spec.factory,
+                serialize: spec.serialize || null,
+                restore: spec.restore || null,
+                retainOnClose: spec.retainOnClose || null,
+                menu: (spec.menu && typeof spec.menu === 'object') ? spec.menu : null,
+            };
+            reg.set(appKind, entry);
+            return entry;
+        }
+        // Remove a registered kind (ctx.registerWindowKind teardown). When `entry`
+        // is given, only deletes if it is STILL the live registration for that
+        // appKind, so a re-register by another owner is never clobbered.
+        function deleteWindowKind(appKind, entry) {
+            const reg = _windowKindRegistry();
+            if (!reg.has(appKind)) return false;
+            if (entry && reg.get(appKind) !== entry) return false;
+            reg.delete(appKind);
+            return true;
+        }
+        function lookupWindowKind(appKind) {
+            if (typeof appKind !== 'string' || !appKind) return undefined;
+            return _windowKindRegistry().get(appKind);
+        }
+        // Registered kinds in registration order (Map insertion order) — drives the
+        // (+) launch menu, so built-in order == the old hardcoded menu order.
+        function windowKindMenuList() {
+            return Array.from(_windowKindRegistry().values());
+        }
+        // Pre-populate the six built-ins. sticky-note + text-editor share the
+        // notes/editor builder + record shape; only a non-empty sticky note is
+        // retained on close and it contributes the "Closed notes" submenu.
+        // file-manager is persisted too. task-manager / control-panel / help are
+        // EPHEMERAL (no serialize => never written to appStore, never restored),
+        // matching their old early returns. help's open/launch live in
+        // mods/help/help.js but are top-level (hoisted) functions present even when
+        // mods_enabled=false, so help is a CORE built-in here (NOT a ctx
+        // registration) — registering it through the mod would break Help whenever
+        // mods are disabled. Every factory/launch is reached through a deferred
+        // wrapper so registration never depends on declaration order and a missing
+        // help mod degrades to "Help doesn't open", never a registry-wide throw.
+        function registerBuiltinWindowKinds() {
+            registerWindowKind({
+                appKind: 'sticky-note',
+                factory: function (d) { return openNoteOrEditorWindow(d); },
+                serialize: serializeAppWindow,
+                retainOnClose: function (rec) {
+                    // Issue #11: keep ONLY a non-empty sticky note, content
+                    // trimmed; an empty note is discarded. Mutates the record in
+                    // place (closeWindow saves the store right after).
+                    const content = String(rec.content == null ? '' : rec.content).trim();
+                    if (!content) return false;
+                    rec.content = content;
+                    return true;
+                },
+                menu: {
+                    label: '📝 Sticky note',
+                    launch: function () { return launchStickyNote(); },
+                    closedItems: function () { return closedAppMenuItems(); },
+                },
+            });
+            registerWindowKind({
+                appKind: 'text-editor',
+                factory: function (d) { return openNoteOrEditorWindow(d); },
+                serialize: serializeAppWindow,
+                menu: { label: '📄 Text editor',
+                        launch: function () { return launchTextEditor(); } },
+            });
+            registerWindowKind({
+                appKind: 'file-manager',
+                factory: function (d) { return openFileManagerWindow(d); },
+                serialize: serializeAppWindow,
+                menu: { label: '🗂 File manager',
+                        launch: function () { return launchFileManager(); } },
+            });
+            registerWindowKind({
+                appKind: 'task-manager',
+                factory: function (d) { return openTaskManagerWindow(d); },
+                menu: { label: '🧰 Task manager',
+                        launch: function () { return launchTaskManager(); } },
+            });
+            registerWindowKind({
+                appKind: 'control-panel',
+                factory: function (d) { return openControlPanelWindow(d); },
+                menu: { label: '🎛 Control panel',
+                        launch: function () { return launchControlPanel(); } },
+            });
+            registerWindowKind({
+                appKind: 'help',
+                factory: function (d) { return openHelpWindow(d); },
+                menu: { label: '❓ Help',
+                        launch: function () { return launchHelp(); } },
+            });
         }
 
         // One-time migration: pre-multi-host builds keyed per-session prefs
