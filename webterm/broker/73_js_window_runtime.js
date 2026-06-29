@@ -556,7 +556,13 @@
                 // rather than silently dropping the server save.
                 const what = win.tabs ? 'the open documents'
                     : (win.filePath || 'this file');
-                if (confirm('Save changes to ' + what + ' before closing?')) {
+                if (await openConfirmDialog({
+                        title: 'Unsaved changes',
+                        message: 'Save changes to ' + what + ' before closing?',
+                        okLabel: 'Save' })) {
+                    // The /sessions reaper can call closeWindow during the dialog,
+                    // tearing the window down — don't try to save a dead window.
+                    if (win.disposed) return;
                     let ok = false;
                     const saver = win._saveAllDirty || win._saveToServer;
                     if (saver) {

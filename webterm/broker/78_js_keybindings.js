@@ -163,6 +163,11 @@
             // Only honor combos carrying a non-shift modifier, so plain typing
             // (and Shift+letter) is never hijacked into the terminal.
             if (!(e.ctrlKey || e.altKey || e.metaKey)) return;
+            // While a styled dialog is open, suppress hotkey actions: an action
+            // that opens a second dialog would silently cancel the first (the
+            // _dlgFinish singleton). Plain typing, the recorder path above, and
+            // the dialog's own Escape/Enter (handled in capture) are untouched.
+            if (isAppDialogOpen()) return;
             const map = getSettings().keybindings || {};
             let actionId = null;
             for (const id of Object.keys(map)) {
@@ -532,9 +537,12 @@
             // terminal/agent window win.id IS the session key terminateWindow
             // expects.
             if (win.type !== 'app') {
-                items.push({ label: 'Terminate', enabled: true, action: () => {
-                    if (confirm('Terminate this session? '
-                            + 'The shell process tree will be killed.'))
+                items.push({ label: 'Terminate', enabled: true, action: async () => {
+                    if (await openConfirmDialog({
+                            title: 'Terminate session',
+                            message: 'Terminate this session? '
+                                + 'The shell process tree will be killed.',
+                            okLabel: 'Terminate', danger: true }))
                         terminateWindow(win.id);
                 }});
             }
@@ -552,9 +560,12 @@
                 items.push({
                     label: 'Delete ' + what,
                     enabled: true,
-                    action: () => {
-                        if (confirm('Delete this ' + what + ' permanently? '
-                                + 'Its saved content is removed.'))
+                    action: async () => {
+                        if (await openConfirmDialog({
+                                title: 'Delete ' + what,
+                                message: 'Delete this ' + what + ' permanently? '
+                                    + 'Its saved content is removed.',
+                                okLabel: 'Delete', danger: true }))
                             destroyAppWindow(win.id);
                     },
                 });
@@ -657,9 +668,12 @@
             // Terminate: terminals/agents only (app docs have no pid). Enabled
             // whenever the session exists — works on a parked session too.
             if (!isApp) {
-                items.push({ label: 'Terminate', enabled: !!sess, action: () => {
-                    if (confirm('Terminate this session? '
-                            + 'The shell process tree will be killed.'))
+                items.push({ label: 'Terminate', enabled: !!sess, action: async () => {
+                    if (await openConfirmDialog({
+                            title: 'Terminate session',
+                            message: 'Terminate this session? '
+                                + 'The shell process tree will be killed.',
+                            okLabel: 'Terminate', danger: true }))
                         terminateWindow(key);
                 }});
             }

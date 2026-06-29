@@ -135,10 +135,14 @@
                 } catch (_) {}
                 if (brokerId) {
                     const dup = findHostByBrokerId(brokerId, getHosts());
-                    if (dup && !confirm('This looks like the same broker you '
-                            + 'already have as "' + dup.label
-                            + '". Add anyway?')) {
-                        return;
+                    if (dup) {
+                        const ok = await openConfirmDialog({
+                            title: 'Duplicate broker',
+                            message: 'This looks like the same broker you '
+                                + 'already have as "' + dup.label
+                                + '". Add anyway?',
+                            okLabel: 'Add anyway' });
+                        if (!ok) return;
                     }
                 }
                 // Re-fetch the live array: getHosts() rebuilds prefs._hosts on

@@ -941,6 +941,19 @@ def test_dialog_component_present():
     assert ".app-dialog" in INDEX_HTML
 
 
+def test_no_native_dialogs_in_served_page():
+    # #89: the whole app routes every confirm/prompt through the styled dialog
+    # component — NO native confirm()/prompt()/alert() survives anywhere in the
+    # served page (core + every mod, assembled in one shot). The lookbehind skips
+    # method calls / longer identifiers, and the styled wrappers are capitalized
+    # (openConfirmDialog / openTextPrompt) so they never trip the lowercase match.
+    import re
+    assert not re.search(r"(?<![\w.])(confirm|prompt|alert)\s*\(", ui.INDEX_HTML), \
+        "native confirm()/prompt()/alert() must not survive (use the styled dialog)"
+    for sym in ("openConfirmDialog(", "openTextPrompt("):
+        assert sym in ui.INDEX_HTML, f"styled dialog wrapper missing: {sym!r}"
+
+
 def test_file_capability_richer_ops_present():
     # #72: ctx.file gains mkdir/copy/move/zip/unzip/stat and a recursive flag on
     # delete; ctxVersion stays 1 (additive). The SAME methods are mirrored in the

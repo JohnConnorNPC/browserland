@@ -194,6 +194,12 @@
             }).then(function (r) { return !!(r && r.value); });
         }
 
+        // True while a styled dialog is live (the _dlgFinish singleton is set).
+        // The keybinding dispatcher consults this to suppress modifier-hotkey
+        // actions under an open dialog, so an action can't open a second dialog
+        // that would silently cancel the first.
+        function isAppDialogOpen() { return !!_dlgFinish; }
+
         // Read-only info modal (Properties): a list of {k,v} rows + a Close.
         function openInfoModal(opts) {
             opts = opts || {};

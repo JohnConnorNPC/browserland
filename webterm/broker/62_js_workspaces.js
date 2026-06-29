@@ -329,25 +329,35 @@
             savePrefs();
             renderWorkspaces();
         }
-        function renameWorkspace(i) {
+        async function renameWorkspace(i) {
             const L = getLayout();
             const ws = L.workspaces[i];
             if (!ws) return;
-            const name = prompt('Workspace ' + (i + 1)
-                + ' name (blank = use the number):', ws.name || '');
+            const name = await openTextPrompt({
+                title: 'Rename workspace',
+                label: 'Name',
+                value: ws.name || '',
+                placeholder: 'blank = use the number',
+                okLabel: 'Rename',
+            });
             if (name === null) return;          // cancelled
+            // A state-sync poll-adopt during the await can swap prefs._layout
+            // wholesale, so re-find the live workspace by id before mutating it.
+            const L2 = getLayout();
+            const ws2 = L2.workspaces.find(w => w.id === ws.id);
+            if (!ws2) return;
             const t = name.trim();
             if (t) {
-                ws.name = t.slice(0, 40);
+                ws2.name = t.slice(0, 40);
                 getSettings().wsLabelMode = 'name';   // naming implies showing names
             } else {
-                delete ws.name;
+                delete ws2.name;
             }
             savePrefs();
             renderWorkspaces();
             applyTaskbarWorkspace();
         }
-        function removeWorkspace(i) {
+        async function removeWorkspace(i) {
             const L = getLayout();
             if (L.workspaces.length <= 1) {
                 showNotice('cannot remove the last workspace');
@@ -357,26 +367,42 @@
             const victim = L.workspaces[i];
             const hasContent = (victim.columns && victim.columns.length)
                 || anyFloatingOnWs(victim.id);
-            if (hasContent && !confirm('Remove workspace ' + (i + 1)
-                + '? Its windows move to an adjacent workspace.')) return;
-            const neighborIdx = (i > 0) ? i - 1 : 1;
-            const neighbor = L.workspaces[neighborIdx];
+            if (hasContent) {
+                const ok = await openConfirmDialog({
+                    title: 'Remove workspace',
+                    message: 'Remove workspace ' + (i + 1)
+                        + '? Its windows move to an adjacent workspace.',
+                    okLabel: 'Remove',
+                    danger: true,
+                });
+                if (!ok) return;
+            }
+            // A state-sync poll-adopt during the await can replace prefs._layout
+            // wholesale, so the captured L / victim / i go stale. Re-acquire the
+            // live layout and re-locate the victim by id before mutating.
+            const L2 = getLayout();
+            if (L2.workspaces.length <= 1) return;
+            const vi = L2.workspaces.findIndex(w => w.id === victim.id);
+            if (vi < 0) return;
+            const live = L2.workspaces[vi];
+            const neighborIdx = (vi > 0) ? vi - 1 : 1;
+            const neighbor = L2.workspaces[neighborIdx];
             // Move tiled columns into the neighbor (keeps their windows).
-            for (const col of victim.columns) neighbor.columns.push(col);
+            for (const col of live.columns) neighbor.columns.push(col);
             // Reassign floating windows locked to the victim -> neighbor (by id,
             // so no index bookkeeping is needed across the splice).
-            reassignFloatingWs(victim.id, neighbor.id);
+            reassignFloatingWs(live.id, neighbor.id);
             // Park the victim's tiled windows first so the relayout below never
             // tries to mount them under the now-removed workspace.
-            for (const col of victim.columns) {
+            for (const col of live.columns) {
                 for (const k of columnKeys(col)) parkWindow(windows.get(k));
             }
-            L.workspaces.splice(i, 1);
+            L2.workspaces.splice(vi, 1);
             // Fix the active index.
-            let active = L.activeWs;
-            if (active === i) active = Math.max(0, i - 1);
-            else if (active > i) active -= 1;
-            L.activeWs = Math.max(0, Math.min(active, L.workspaces.length - 1));
+            let active = L2.activeWs;
+            if (active === vi) active = Math.max(0, vi - 1);
+            else if (active > vi) active -= 1;
+            L2.activeWs = Math.max(0, Math.min(active, L2.workspaces.length - 1));
             savePrefs();
             renderWorkspaces();
             relayoutStrip();
