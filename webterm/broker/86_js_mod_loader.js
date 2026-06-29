@@ -24,6 +24,7 @@
             registered: [],           // [{id, version, ctxVersion, init}] in decl order
             active: new Map(),        // id -> { id, version, unloads:[] }  (the "slot")
             settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
+            helpCards: [],            // #78: mod-contributed Help cards (ctx.registerHelpCards), sanitized typed entries the Help mod merges with the core corpus
             booted: false,
         };
 
@@ -133,6 +134,19 @@
                 // Browser-global by default (hidden on remote host tabs).
                 registerSettingsPane: function (spec) {
                     return _modRegisterPane(rec, spec);
+                },
+                // #78 (S5): contribute typed Help cards. Each card is a DOM-safe
+                // block/span schema (NEVER raw HTML) — same typed shape as the
+                // wiki corpus:
+                //   { slug, section, title, body:[block], keys?, search? }
+                //   block = { t:'p'|'bullet'|'sub', spans:[span] }
+                //   span  = { t:'text'|'strong'|'code'|'kbd', v:String }
+                // Cards are sanitized here (unknown block/span types degrade to
+                // text; values are coerced to String) and merged into the Help
+                // window by the help mod. Removed on teardown; if Help is open
+                // when a mod (un)registers, it re-renders.
+                registerHelpCards: function (cards) {
+                    return _modRegisterHelpCards(rec, cards);
                 },
             };
         }
@@ -403,6 +417,98 @@
             entry.reflect();                 // initial sync
             _trackControl(rec, entry);
             return { id: spec.id || null, section: section };
+        }
+
+        // ---- Help-card contribution (#78 / S5) ------------------------------
+        // ctx.registerHelpCards sanitizes mod-supplied cards to the SAME typed
+        // block/span schema the wiki corpus uses, so a contributed card can only
+        // ever be rendered as text nodes (the help renderer is textContent-only)
+        // — never raw HTML. Unknown block/span types degrade to the nearest safe
+        // type; every value is coerced to String. The sanitized entries live on
+        // window.__mods.helpCards (the Help mod merges them with the core
+        // corpus) and are removed on the contributing mod's teardown.
+        const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1 };
+        const _HELP_SPAN_TYPES = { text: 1, strong: 1, code: 1, kbd: 1 };
+        function _sanitizeHelpSpan(sp) {
+            if (!sp || typeof sp !== 'object') return null;
+            const t = _HELP_SPAN_TYPES[sp.t] ? sp.t : 'text';
+            return { t: t, v: sp.v == null ? '' : String(sp.v) };
+        }
+        function _sanitizeHelpBlock(blk) {
+            if (!blk || typeof blk !== 'object') return null;
+            const t = _HELP_BLOCK_TYPES[blk.t] ? blk.t : 'p';
+            const spans = [];
+            const raw = Array.isArray(blk.spans) ? blk.spans : [];
+            for (let i = 0; i < raw.length; i++) {
+                const s = _sanitizeHelpSpan(raw[i]);
+                if (s) spans.push(s);
+            }
+            return { t: t, spans: spans };
+        }
+        function _sanitizeHelpBlocks(body) {
+            const out = [];
+            const raw = Array.isArray(body) ? body : [];
+            for (let i = 0; i < raw.length; i++) {
+                const b = _sanitizeHelpBlock(raw[i]);
+                if (b) out.push(b);
+            }
+            return out;
+        }
+        // One card -> a normalized Help entry, or null when it lacks a title (the
+        // minimum to render). `search` defaults to the title/section/keys + all
+        // sanitized body text, lower-cased, so a contributed card is discoverable
+        // by its body even when the mod omits an explicit search string.
+        function _sanitizeHelpCard(card, modId) {
+            if (!card || typeof card !== 'object') return null;
+            const title = card.title == null ? '' : String(card.title);
+            if (!title) return null;
+            const slug = card.slug == null ? ('mod-' + modId) : String(card.slug);
+            const section = card.section == null ? (slug || modId) : String(card.section);
+            const keys = card.keys == null ? '' : String(card.keys);
+            const bodyFrags = _sanitizeHelpBlocks(
+                card.body != null ? card.body : card.bodyFrags);
+            let search = card.search == null ? '' : String(card.search);
+            if (!search) {
+                const parts = [title, section, keys];
+                for (const b of bodyFrags) for (const s of b.spans) parts.push(s.v);
+                search = parts.join(' ');
+            }
+            return { modId: modId, slug: slug, section: section, title: title,
+                     bodyFrags: bodyFrags, keys: keys, search: search.toLowerCase() };
+        }
+        // Re-render the live Help window (if any) so newly (un)registered cards
+        // appear without a reopen. findHelpWindow/refreshHelpCorpus are hoisted
+        // from the help mod; typeof-guarded so an absent/disabled help mod is a
+        // clean no-op.
+        function _refreshHelpIfOpen() {
+            try {
+                if (typeof findHelpWindow === 'function'
+                    && typeof refreshHelpCorpus === 'function') {
+                    const w = findHelpWindow();
+                    if (w) refreshHelpCorpus(w);
+                }
+            } catch (_) {}
+        }
+        function _modRegisterHelpCards(rec, cards) {
+            if (!Array.isArray(window.__mods.helpCards)) window.__mods.helpCards = [];
+            const list = Array.isArray(cards) ? cards : [cards];
+            const added = [];
+            for (let i = 0; i < list.length; i++) {
+                const norm = _sanitizeHelpCard(list[i], rec.id);
+                if (norm) { window.__mods.helpCards.push(norm); added.push(norm); }
+            }
+            // Forget exactly these entries on teardown (the DOM is re-rendered by
+            // _refreshHelpIfOpen), then refresh the open Help window.
+            rec.unloads.push(function () {
+                const reg = window.__mods.helpCards || [];
+                for (const e of added) {
+                    const idx = reg.indexOf(e);
+                    if (idx !== -1) reg.splice(idx, 1);
+                }
+                _refreshHelpIfOpen();
+            });
+            _refreshHelpIfOpen();
+            return added.length;
         }
 
         // Fire mod controls on convergence (boot + every /state pull, via
