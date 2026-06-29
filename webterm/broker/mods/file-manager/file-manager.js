@@ -390,6 +390,30 @@
                         fileHostId: win[hostKey(side)],
                     });
                 };
+                // Right-click row menu (#72). One builder shared by file and dir
+                // rows; the item set grows in later commits. Today (pure
+                // extraction): copy/move the row to the other pane. Captures the
+                // descriptor (host id + child path + name) at build time so a
+                // pane navigation mid-menu can't redirect the action.
+                const buildRowMenu = (row, ent, child) => {
+                    const other = side === 'left' ? 'right' : 'left';
+                    const srcHostId = win[hostKey(side)];
+                    return [
+                        { label: 'Copy → ' + other + ' pane', enabled: true,
+                          action: () => transferTo(other, srcHostId, child,
+                                                   ent.name, false) },
+                        { label: 'Move → ' + other + ' pane', enabled: true,
+                          action: () => transferTo(other, srcHostId, child,
+                                                   ent.name, true) },
+                    ];
+                };
+                const onRowMenu = (e, row, ent, child) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setActive(side); selectRow(row);
+                    renderMenu(buildRowMenu(row, ent, child),
+                               e.clientX, e.clientY);
+                };
                 // '..' row (not at root): navigates to the parent dir.
                 if (res.parent !== null && res.parent !== undefined) {
                     const up = document.createElement('div');
@@ -450,25 +474,9 @@
                         });
                         row.addEventListener('dragend',
                             () => row.classList.remove('dragging'));
-                        // Right-click a file: copy / move it to the other pane.
-                        row.addEventListener('contextmenu', (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setActive(side); selectRow(row);
-                            const other = side === 'left' ? 'right' : 'left';
-                            renderMenu([
-                                { label: 'Copy → ' + other + ' pane',
-                                  enabled: true,
-                                  action: () => transferTo(other,
-                                      win[hostKey(side)], child, ent.name,
-                                      false) },
-                                { label: 'Move → ' + other + ' pane',
-                                  enabled: true,
-                                  action: () => transferTo(other,
-                                      win[hostKey(side)], child, ent.name,
-                                      true) },
-                            ], e.clientX, e.clientY);
-                        });
+                        // Right-click a file: the shared row menu.
+                        row.addEventListener('contextmenu',
+                            (e) => onRowMenu(e, row, ent, child));
                     }
                     ui.list.appendChild(row);
                 }
