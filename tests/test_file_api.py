@@ -10,9 +10,90 @@ from pathlib import Path
 
 import pytest
 
-from webterm.broker.app import _resolve_host_path
+from webterm.broker.app import _resolve_host_path, create_app
 
 WIN = sys.platform == "win32"
+
+
+# --------------------------------------------------------------------------- #
+# /file/* handler tests (#72) — driven through the in-process Sanic test client
+# --------------------------------------------------------------------------- #
+# Each create_app needs a UNIQUE Sanic name (Sanic refuses two same-named apps
+# in one process). editor_root points at tmp_path so a relative body path
+# resolves into the test's sandbox; state_path keeps the identity/state files
+# out of the repo. No token => a loopback request (the test client dials
+# 127.0.0.1) passes the gate.
+_app_seq = 0
+
+
+def _make_file_app(tmp_path, monkeypatch, token=None):
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"editor_root": str(tmp_path),
+           "state_path": str(tmp_path / "webterm_state.json")}
+    if token:
+        cfg["auth_token"] = token
+    return create_app(cfg, name=f"webterm-file-test-{_app_seq}")
+
+
+# ---- /file/mkdir ---------------------------------------------------------
+
+def test_mkdir_creates_dir(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/mkdir", json={"path": "newdir"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "newdir").is_dir()
+
+
+def test_mkdir_existing_is_conflict(tmp_path, monkeypatch):
+    (tmp_path / "d").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/mkdir", json={"path": "d"})
+    assert r.status == 409 and r.json["error"] == "exists"
+
+
+def test_mkdir_parent_missing(tmp_path, monkeypatch):
+    # os.mkdir, not makedirs: the missing intermediate parents are NOT created.
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/mkdir",
+                                json={"path": "no/such/parent/leaf"})
+    assert r.status == 400 and r.json["error"] == "parent_missing"
+    assert not (tmp_path / "no").exists()
+
+
+def test_mkdir_bad_path(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/mkdir", json={"path": ""})
+    assert r.status == 400 and r.json["error"] == "bad_path"
+
+
+# ---- cross-cutting route guard (#72 P2-3) --------------------------------
+
+def test_every_file_route_has_options_and_enforces_auth(tmp_path, monkeypatch):
+    # Every POST /file/* route must (a) carry a matching OPTIONS preflight — a
+    # missing one silently 405s every cross-origin (remote-pane) call — and (b)
+    # enforce the token gate (401 when a token is configured and absent).
+    # Enumerated from the LIVE router so a future endpoint can't skip the guard.
+    app = _make_file_app(tmp_path, monkeypatch, token="sekrit")
+    posts, options = set(), set()
+    for route in app.router.routes:
+        path = "/" + route.path.lstrip("/")
+        if not path.startswith("/file/"):
+            continue
+        methods = set(route.methods or ())
+        if "OPTIONS" in methods:
+            options.add(path)
+        if methods - {"OPTIONS"}:
+            posts.add(path)
+    assert posts, "no /file/* POST routes discovered"
+    missing = posts - options
+    assert not missing, f"/file/* routes without an OPTIONS preflight: {sorted(missing)}"
+    for path in sorted(posts):
+        _, r = app.test_client.post(path, json={"path": "x"})
+        assert r.status == 401, f"{path} skipped the auth gate (got {r.status})"
+        _, r = app.test_client.options(path)
+        assert r.status == 204, f"{path} OPTIONS not 204 (got {r.status})"
 
 
 def test_empty_resolves_to_default(tmp_path):

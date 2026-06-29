@@ -43,8 +43,10 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -67,6 +69,13 @@ DEFAULT_PORT = 4445
 # Editor file-API: a single read/write is capped at this many bytes (the cap
 # is enforced on the UTF-8 encoded payload, not the character count).
 MAX_FILE_BYTES = 5 * 2**20  # 5 MiB
+
+# /file/zip + /file/unzip caps (#72). Bound the work a single archive op will do
+# so a hostile (or accidental) huge source tree or zip-bomb can't exhaust disk
+# or memory: cumulative UNCOMPRESSED size and member/entry count are both
+# pre-scanned and rejected BEFORE any write or extract. Tunable.
+MAX_ARCHIVE_BYTES = 1 * 2**30      # 1 GiB cumulative uncompressed
+MAX_ARCHIVE_ENTRIES = 50000        # member/entry count
 
 # /state: the shared per-broker UI settings+layout blob is small (a layout
 # tree + a settings object); cap the serialized JSON so a hostile PUT can't
@@ -962,6 +971,55 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True,
                            "path": str(p)})      # absolute, host-wide (#35)
 
+    # ---- richer file operations (#72) ------------------------------------
+    # mkdir / copy / move / zip / unzip / stat round out the file manager's
+    # context menu. Same token-or-loopback gate, host-wide resolution
+    # (_resolve_host_path) and absolute-path echo as the read/write/delete
+    # endpoints above; they add NO new privilege (an authenticated client
+    # already has shell-level filesystem access). Heavy IO (copytree / rmtree /
+    # zip / unzip) runs OFF the event loop via run_in_executor, and the catch is
+    # broadened past OSError (shutil.Error, RecursionError, ValueError) so a
+    # non-OSError failure still keeps the {ok:false,error} contract instead of
+    # surfacing as a 500 + traceback.
+    async def _file_mkdir(request: Request):
+        # Create ONE directory. os.mkdir (NOT makedirs) — the parent must
+        # already be a dir (parent_missing else), so a typo can't silently
+        # build a chain of dirs. An existing path is a 409 conflict.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind != "missing":
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        parent = p.parent
+        pkind = _classify_path(parent)
+        if pkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if pkind != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, os.mkdir, str(p))
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True,
+                           "path": str(p)})      # absolute, host-wide (#35)
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -1539,6 +1597,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_write, "/file/write", methods=["POST"])
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
     app.add_route(_file_delete, "/file/delete", methods=["POST"])
+    app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -1567,6 +1626,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/write", "preflight_file_write"),
                              ("/file/upload", "preflight_file_upload"),
                              ("/file/delete", "preflight_file_delete"),
+                             ("/file/mkdir", "preflight_file_mkdir"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
