@@ -397,14 +397,13 @@
                 // pane navigation mid-menu can't redirect the action.
                 const buildRowMenu = (row, ent, child) => {
                     const other = side === 'left' ? 'right' : 'left';
-                    const srcHostId = win[hostKey(side)];
+                    const desc = { hostId: win[hostKey(side)], path: child,
+                                   name: ent.name, type: ent.type };
                     return [
                         { label: 'Copy → ' + other + ' pane', enabled: true,
-                          action: () => transferTo(other, srcHostId, child,
-                                                   ent.name, false) },
+                          action: () => doTransfer(other, desc, false) },
                         { label: 'Move → ' + other + ' pane', enabled: true,
-                          action: () => transferTo(other, srcHostId, child,
-                                                   ent.name, true) },
+                          action: () => doTransfer(other, desc, true) },
                     ];
                 };
                 const onRowMenu = (e, row, ent, child) => {
@@ -532,9 +531,13 @@
                     const path = joinPath(cwd, file.name);
                     let res = await uploadTo(host.id, path, b64, false);
                     if (win.disposed) return;         // closed before the prompt
-                    // Existing file -> confirm + retry as an overwrite.
+                    // Existing file -> styled confirm + retry as an overwrite.
                     if (res && res.error === 'exists') {
-                        if (!confirm('Overwrite ' + file.name + '?')) continue;
+                        const ok = await openConfirmDialog({
+                            title: 'Overwrite',
+                            message: 'Overwrite ' + file.name + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) { if (win.disposed) return; continue; }
                         res = await uploadTo(host.id, path, b64, true);
                     }
                     if (win.disposed) return;
@@ -556,6 +559,12 @@
             // OWN per-host auth. The descriptor is captured at call time and
             // never recomputed after a prompt/await, so navigating a pane
             // mid-transfer can't redirect the write (codex review).
+            // Cross-host SINGLE-FILE byte path (the only transfer a single
+            // broker can't do server-side). Reached from doTransfer for a
+            // cross-host file. Returns true on a complete success, false
+            // otherwise (incl. the honest "copied but couldn't remove source"
+            // partial-move), so a cut-paste only clears its clipboard when the
+            // move actually completed.
             const transferTo = async (destSide, srcHostId, srcPath, srcName,
                                       move) => {
                 const srcHost = hostById(srcHostId)
@@ -564,11 +573,11 @@
                 const destHost = paneHost(destSide);
                 if (!srcHost) {
                     showNotice('transfer failed: source host unavailable');
-                    return;
+                    return false;
                 }
                 if (!destHost) {
                     showNotice('transfer failed: destination host unavailable');
-                    return;
+                    return false;
                 }
                 const destPath = joinNative(win[dirKey(destSide)], srcName);
                 // Refuse a copy/move onto the SAME file (same host + same
@@ -576,11 +585,11 @@
                 // and a self-MOVE would then delete the file it just wrote.
                 if (srcHost.id === destHost.id && destPath === srcPath) {
                     showNotice('source and destination are the same file');
-                    return;
+                    return false;
                 }
                 const r = await fmFile().read(srcPath,
                     { b64: true, host: srcHost.id });
-                if (win.disposed) return;
+                if (win.disposed) return false;
                 if (!r || !r.ok) {
                     if (r && r.error === 'auth_required') {
                         promptFileHostAuth(srcHost);
@@ -592,7 +601,7 @@
                         showNotice('transfer failed (read ' + srcName + '): '
                             + err);
                     }
-                    return;
+                    return false;
                 }
                 // The source broker accepted the read but returned no
                 // content_b64: it predates the binary-safe read (#46 review).
@@ -603,17 +612,21 @@
                 if (typeof r.content_b64 !== 'string') {
                     showNotice('transfer failed: ' + srcName + ' — source broker '
                         + 'lacks binary read (upgrade it)');
-                    return;
+                    return false;
                 }
                 const b64 = r.content_b64;
                 let up = await uploadTo(destHost.id, destPath, b64, false);
-                if (win.disposed) return;
-                // Existing dest file -> confirm + retry as an overwrite.
+                if (win.disposed) return false;
+                // Existing dest file -> styled confirm + retry as an overwrite.
                 if (up && up.error === 'exists') {
-                    if (!confirm('Overwrite ' + srcName + ' on "'
-                            + hostPickerLabel(destHost) + '"?')) return;
+                    const ok = await openConfirmDialog({
+                        title: 'Overwrite',
+                        message: 'Overwrite ' + srcName + ' on "'
+                            + hostPickerLabel(destHost) + '"?',
+                        okLabel: 'Overwrite', danger: true });
+                    if (!ok || win.disposed) return false;
                     up = await uploadTo(destHost.id, destPath, b64, true);
-                    if (win.disposed) return;
+                    if (win.disposed) return false;
                 }
                 if (!(up && up.ok)) {
                     const err = (up && up.error) || 'error';
@@ -624,14 +637,14 @@
                         showNotice('transfer failed (write ' + srcName + '): '
                             + err);
                     }
-                    return;
+                    return false;
                 }
                 // Move = copy succeeded, now delete the source. Best-effort and
                 // HONEST: the copy already landed, so a failed delete leaves the
                 // file on BOTH hosts — say so rather than claim a move (codex).
                 if (move) {
                     const d = await fmFile().delete(srcPath, { host: srcHost.id });
-                    if (win.disposed) return;
+                    if (win.disposed) return false;
                     if (!(d && d.ok)) {
                         if (d && d.error === 'auth_required') {
                             promptFileHostAuth(srcHost);
@@ -640,7 +653,7 @@
                             + 'the source: ' + ((d && d.error) || '?'));
                         renderPane('left');
                         renderPane('right');
-                        return;
+                        return false;
                     }
                 }
                 showNotice((move ? 'moved ' : 'copied ') + srcName + ' to "'
@@ -649,11 +662,88 @@
                 // lost one. Cheap, and side-agnostic (either pane may be source).
                 renderPane('left');
                 renderPane('right');
+                return true;
+            };
+            // ---- unified transfer dispatcher (#72) ----
+            // ONE entry point for every copy/move: the two pane actions, Paste,
+            // and a drop all route through here. src is a descriptor captured at
+            // call time {hostId, path, name, type}. Routing:
+            //   same host        -> server-side /file/copy|/file/move (handles
+            //                       DIRECTORIES, no 5 MiB cap; exists -> styled
+            //                       confirm -> retry overwrite)
+            //   cross host + file-> the existing binary byte path (transferTo)
+            //   cross host + dir -> a clear "not supported yet" notice
+            // Returns true on success so a caller (Paste) can clear a cut
+            // clipboard only when the move actually landed.
+            const doTransfer = async (destSide, src, move) => {
+                if (!src || !src.path) return false;
+                const srcHost = hostById(src.hostId)
+                    || ((!src.hostId || src.hostId === 'local')
+                        ? localHost() : null);
+                const destHost = paneHost(destSide);
+                if (!srcHost) {
+                    showNotice('transfer failed: source host unavailable');
+                    return false;
+                }
+                if (!destHost) {
+                    showNotice('transfer failed: destination host unavailable');
+                    return false;
+                }
+                const srcName = src.name || baseName(src.path);
+                const destPath = joinNative(win[dirKey(destSide)], srcName);
+                // Self-overwrite guard: same host + same absolute path (a copy
+                // would be a pointless self-overwrite; a self-move would delete
+                // what it just wrote). The server re-checks ('same'), but this
+                // is a cleaner message and saves a round trip.
+                if (srcHost.id === destHost.id && destPath === src.path) {
+                    showNotice('source and destination are the same');
+                    return false;
+                }
+                if (srcHost.id === destHost.id) {
+                    // Same host: server-side op (files AND dirs, no size cap).
+                    const op = (overwrite) => move
+                        ? fmFile().move(src.path, destPath,
+                                        { host: srcHost.id, overwrite: overwrite })
+                        : fmFile().copy(src.path, destPath,
+                                        { host: srcHost.id, overwrite: overwrite });
+                    let res = await op(false);
+                    if (win.disposed) return false;
+                    if (res && res.error === 'exists') {
+                        const ok = await openConfirmDialog({
+                            title: move ? 'Move' : 'Copy',
+                            message: 'Overwrite ' + srcName + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) return false;
+                        res = await op(true);
+                        if (win.disposed) return false;
+                    }
+                    if (!(res && res.ok)) {
+                        const err = (res && res.error) || 'error';
+                        if (err === 'auth_required') promptFileHostAuth(srcHost);
+                        showNotice((move ? 'move' : 'copy') + ' failed ('
+                            + srcName + '): ' + err);
+                        return false;
+                    }
+                    showNotice((move ? 'moved ' : 'copied ') + srcName);
+                    renderPane('left');
+                    renderPane('right');
+                    return true;
+                }
+                // Cross host. The single-broker server-side ops can't straddle
+                // two hosts, and the byte path only carries a single file.
+                if (src.type === 'dir') {
+                    showNotice('cross-host folder copy isn’t supported yet');
+                    return false;
+                }
+                return await transferTo(destSide, src.hostId, src.path,
+                                        srcName, move);
             };
             const transferFromPayload = (payload, destSide, move) => {
                 if (!payload || !payload.path) return;
-                transferTo(destSide, payload.hostId, payload.path,
-                    payload.name || baseName(payload.path), move);
+                doTransfer(destSide, {
+                    hostId: payload.hostId, path: payload.path,
+                    name: payload.name || baseName(payload.path),
+                    type: payload.type }, move);
             };
 
             for (const side of ['left', 'right']) {
