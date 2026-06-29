@@ -98,51 +98,29 @@
                 ? Math.max(NOTE_FONT_MIN, Math.min(NOTE_FONT_MAX, _fsRaw))
                 : NOTE_FONT_DEFAULT;
 
-            const dom = document.createElement('div');
-            dom.className = 'term-window app-window '
-                + (isNote ? 'app-note' : 'app-editor');
-            dom.dataset.sessionId = id;
-            dom.style.left = geom.left + 'px';
-            dom.style.top = geom.top + 'px';
-            // Same content-box -4 math as openWindow / applyGeomToWindow.
-            dom.style.width = (geom.width - 4) + 'px';
-            dom.style.height = (geom.height - 4) + 'px';
-            dom.style.setProperty('--accent', color);
-            dom.classList.toggle('dark-accent', isDarkAccent(color));
+            // Shared chrome (#79): the .term-window shell + title bar (_ / ×) +
+            // the eight resize handles come from the window-runtime factory. The
+            // editor hangs its kind-specific extras (note paper/fg, the rename
+            // hint, the note A-/A+/wrap buttons, the color picker, the toolbar +
+            // body) onto the returned refs.
+            const chrome = buildAppChrome({
+                id,
+                appClass: isNote ? 'app-note' : 'app-editor',
+                badge: '#' + sid,
+                geom, color, locked, title,
+            });
+            const { dom, titleBar, titleText, minBtn } = chrome;
+            // A sticky note's paper/fg are DERIVED from the chosen accent.
             if (isNote) {
                 const sw0 = noteSwatchFor(color);
                 dom.style.setProperty('--note-paper', sw0.paper);
                 dom.style.setProperty('--note-fg', sw0.fg);
             }
-            if (locked) dom.classList.add('scroll-locked');   // pinned float
-
-            const titleBar = document.createElement('div');
-            titleBar.className = 'title-bar';
-
-            const idBadge = document.createElement('span');
-            idBadge.className = 'ti-id-badge';
-            idBadge.textContent = '#' + sid;
-
-            const titleText = document.createElement('span');
-            titleText.className = 'title-text';
-            titleText.textContent = title;
             titleText.title = 'double-click to rename';
 
-            const minBtn = document.createElement('button');
-            minBtn.type = 'button';
-            minBtn.className = 'tb-btn btn-min';
-            minBtn.textContent = '_';
-            minBtn.title = 'minimize';
-
-            const closeBtn = document.createElement('button');
-            closeBtn.type = 'button';
-            closeBtn.className = 'tb-btn btn-close';
-            closeBtn.textContent = '×';
-            closeBtn.title = 'close';
-
             // Sticky-note controls (#19): smaller / larger text + word-wrap
-            // toggle, in the title bar (notes have no editor toolbar). Wired
-            // below once `win` exists.
+            // toggle, inserted into the title bar BEFORE the minimize button
+            // (notes have no editor toolbar). Wired below once `win` exists.
             let noteFontDownBtn = null, noteFontUpBtn = null, noteWrapBtn = null;
             if (isNote) {
                 const mkNoteBtn = (label, ttl) => {
@@ -157,17 +135,10 @@
                 noteFontDownBtn = mkNoteBtn('A-', 'smaller text');
                 noteFontUpBtn = mkNoteBtn('A+', 'larger text');
                 noteWrapBtn = mkNoteBtn('↩', 'toggle word wrap');
+                titleBar.insertBefore(noteFontDownBtn, minBtn);
+                titleBar.insertBefore(noteFontUpBtn, minBtn);
+                titleBar.insertBefore(noteWrapBtn, minBtn);
             }
-
-            titleBar.appendChild(idBadge);
-            titleBar.appendChild(titleText);
-            if (isNote) {
-                titleBar.appendChild(noteFontDownBtn);
-                titleBar.appendChild(noteFontUpBtn);
-                titleBar.appendChild(noteWrapBtn);
-            }
-            titleBar.appendChild(minBtn);
-            titleBar.appendChild(closeBtn);
 
             // Editor-only: show line numbers (default true). Notes ignore it.
             const lineNums = !isNote && (docs ? !!initialDoc.lineNums
@@ -309,7 +280,7 @@
                 sectionsPanel.style.display = 'none';
             }
 
-            dom.appendChild(titleBar);
+            // titleBar is already the first child (buildAppChrome appended it).
             if (tabBar) dom.appendChild(tabBar);
             if (toolbar) dom.appendChild(toolbar);
             if (findBar) dom.appendChild(findBar);
@@ -327,12 +298,7 @@
                 if (bodyWrap) bodyWrap.style.display = 'none';
                 sectionsPanel.style.display = '';
             }
-            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
-                const h = document.createElement('div');
-                h.className = 'rh rh-' + dir;
-                h.dataset.dir = dir;
-                dom.appendChild(h);
-            }
+            addResizeHandles(dom);   // last children: edge/corner hit zones on top
 
             document.getElementById('desktop').appendChild(dom);
             document.getElementById('desktop').classList.remove('empty');
@@ -664,10 +630,9 @@
                 showNotice('re-homed to ' + newCwd);
             };
 
+            // stopProp is shared by the note/tab/find/color button handlers below
+            // (the dom-mousedown raise + min/close are wired by wireAppChrome).
             const stopProp = (e) => e.stopPropagation();
-            const onMouseDown = () => bringToFront(id);
-            dom.addEventListener('mousedown', onMouseDown);
-            win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
             // Window-color control (issue 5): the shared swatch-dropdown. App
             // windows now use the SAME unified 11-color palette as terminals
@@ -757,21 +722,6 @@
                 titleText.removeEventListener('keydown', onTitleKey);
                 titleText.removeEventListener('blur', commitRename);
                 titleText.removeEventListener('mousedown', onTitleEditDown);
-            });
-
-            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
-            // × routes through requestCloseAppWindow so a dirty editor offers to
-            // flush its server file first (closeWindow stays prompt-free).
-            const onCloseClick = (e) => { e.stopPropagation(); requestCloseAppWindow(id); };
-            minBtn.addEventListener('mousedown', stopProp);
-            minBtn.addEventListener('click', onMinClick);
-            closeBtn.addEventListener('mousedown', stopProp);
-            closeBtn.addEventListener('click', onCloseClick);
-            win.cleanups.push(() => {
-                minBtn.removeEventListener('mousedown', stopProp);
-                minBtn.removeEventListener('click', onMinClick);
-                closeBtn.removeEventListener('mousedown', stopProp);
-                closeBtn.removeEventListener('click', onCloseClick);
             });
 
             // Autosave: debounced on input, immediate on blur so a click-away
@@ -1939,23 +1889,12 @@
                 }
             }
 
-            wireDrag(win, titleBar);
-            // Title-bar right-click: the per-window WM menu (float<->tile, pin,
-            // minimize, close, delete). stopPropagation keeps the desktop menu
-            // from also firing. The textarea is left alone so its native
-            // copy/paste menu still works.
-            const onTitleCtx = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                bringToFront(win.id);
-                buildWindowMenu(win, e.clientX, e.clientY);
-            };
-            titleBar.addEventListener('contextmenu', onTitleCtx);
-            win.cleanups.push(() =>
-                titleBar.removeEventListener('contextmenu', onTitleCtx));
-            for (const handle of dom.querySelectorAll('.rh')) {
-                wireResize(win, handle, handle.dataset.dir);
-            }
+            // Raise / minimize / close / drag / 8-way resize / WM context menu
+            // (the title-bar right-click menu — float<->tile, pin, minimize,
+            // close, delete). × routes through requestCloseAppWindow so a dirty
+            // editor offers to flush its server file first (closeWindow stays
+            // prompt-free). The textarea keeps its native copy/paste menu.
+            wireAppChrome(win, chrome, requestCloseAppWindow);
 
             // Manual taskbar item (app windows are never poll-managed). The
             // synthetic session entry keeps formatTitle / applyDisplaySettings
