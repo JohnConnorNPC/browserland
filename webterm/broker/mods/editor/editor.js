@@ -612,9 +612,16 @@
                 win._captureActiveDoc();
                 const fileDocs = win.tabs.filter(d => d.kind === 'file');
                 if (fileDocs.some(d => d.dirty)) {
-                    if (!confirm('Re-home this window to:\n' + newCwd
-                        + '\n\nUnsaved changes in the AGENTS.md / CLAUDE.md tabs '
-                        + 'will be discarded.')) return;
+                    const ok = await openConfirmDialog({
+                        title: 'Re-home window',
+                        message: 'Re-home this window to:\n' + newCwd
+                            + '\n\nUnsaved changes in the AGENTS.md / CLAUDE.md '
+                            + 'tabs will be discarded.',
+                        okLabel: 'Re-home', danger: true });
+                    if (!ok) return;
+                    // The window can be torn down (or its tabs cleared) while the
+                    // dialog is open — re-check before the re-home sequence.
+                    if (win.disposed || !win.tabs) return;
                 }
                 const hid = win.fileHostId || 'local';
                 const host = hostById(hid) || localHost();
@@ -1197,11 +1204,15 @@
                     if (win.filePath) return await writeTo(win.filePath);
                     return await doSaveAs();
                 };
-                // Exposed for Ctrl+S and the close-save prompt (returns a
+                // Exposed for Ctrl+S and the close-save dialog (returns a
                 // truthy result on a successful write).
                 win._saveToServer = doSave;
                 const doOpen = async () => {
-                    if (win.dirty && !confirm('Discard unsaved changes?')) return;
+                    if (win.dirty && !(await openConfirmDialog({
+                            title: 'Discard changes?',
+                            message: 'Discard unsaved changes?',
+                            okLabel: 'Discard', danger: true }))) return;
+                    if (win.disposed) return;
                     // One host for both the browse and the read (see doSaveAs).
                     const h = fileHost();
                     if (!h) { showNotice('open failed: host unavailable'); return; }
@@ -1225,8 +1236,12 @@
                     saveAppWindow(win);
                     showNotice('opened ' + win.filePath);
                 };
-                const doNew = () => {
-                    if (win.dirty && !confirm('Discard unsaved changes?')) return;
+                const doNew = async () => {
+                    if (win.dirty && !(await openConfirmDialog({
+                            title: 'Discard changes?',
+                            message: 'Discard unsaved changes?',
+                            okLabel: 'Discard', danger: true }))) return;
+                    if (win.disposed) return;
                     win.setContent('');
                     win.filePath = null;
                     win.dirty = false;
@@ -1235,6 +1250,7 @@
                     // Cleared path -> plain (no language).
                     if (win._setCmLanguage) win._setCmLanguage();
                     saveAppWindow(win);
+                    if (win.focusEditor) win.focusEditor();
                 };
                 const doWrap = () => {
                     win.wrap = !win.wrap;
@@ -1293,7 +1309,7 @@
                     hostBtn.title = 'reads/writes on: ' + lbl
                         + ' — click to switch host';
                 };
-                const switchEditorHost = (host) => {
+                const switchEditorHost = async (host) => {
                     if (!host || host.id === win.fileHostId) return;
                     // Detach an OPEN file: its absolute path belongs to the OLD
                     // host, and silently re-pointing Save at a same-spelled path
@@ -1310,13 +1326,17 @@
                             || ((!oid || oid === 'local') ? localHost() : null);
                         const oldLbl = oldH ? hostPickerLabel(oldH)
                             : (oid + ' (removed)');
-                        const ok = confirm('Switch this editor to "'
-                            + hostPickerLabel(host) + '"?\n\nIt will detach from '
-                            + oldLbl + ':' + win.filePath
-                            + '\nThe text stays here as an unsaved document; '
-                            + 'Save will write to "' + hostPickerLabel(host)
-                            + '".');
+                        const ok = await openConfirmDialog({
+                            title: 'Switch host',
+                            message: 'Switch this editor to "'
+                                + hostPickerLabel(host) + '"?\n\nIt will detach from '
+                                + oldLbl + ':' + win.filePath
+                                + '\nThe text stays here as an unsaved document; '
+                                + 'Save will write to "' + hostPickerLabel(host)
+                                + '".',
+                            okLabel: 'Switch' });
                         if (!ok) return;
+                        if (win.disposed) return;
                         win.filePath = null;
                         if (win.agentsMdCwd) clearAgentsMd();
                         win.dirty = !!win.getContent();
@@ -1328,6 +1348,8 @@
                     if (win._updateFolderBtn) win._updateFolderBtn();
                     updateFileUi();
                     saveAppWindow(win);
+                    // The confirm dialog stole focus from the editor; restore it.
+                    if (win.focusEditor) win.focusEditor();
                     // Re-prompt the new host's login if it isn't authed yet.
                     editorFile().list('', { host: host.id }).then(r => {
                         if (win.disposed || win.fileHostId !== host.id) return;
@@ -1578,10 +1600,14 @@
                             commitStructural(arr);   // re-renders with the new row
                         });
                         resetBtn.addEventListener('mousedown', stopProp);
-                        resetBtn.addEventListener('click', (e) => {
+                        resetBtn.addEventListener('click', async (e) => {
                             e.stopPropagation();
-                            if (!confirm('Replace the section library with the '
-                                + 'built-in defaults?')) return;
+                            if (!(await openConfirmDialog({
+                                    title: 'Reset sections',
+                                    message: 'Replace the section library with the '
+                                        + 'built-in defaults?',
+                                    okLabel: 'Reset', danger: true }))) return;
+                            if (win.disposed) return;
                             commitStructural(DEFAULT_SECTIONS.map(
                                 t => ({ id: t.id, label: t.label, body: t.body })));
                         });
