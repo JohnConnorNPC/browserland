@@ -14187,6 +14187,30 @@
             });
         }
 
+        // POST /session/kill to one host record and normalize the result. A
+        // network/CORS throw becomes status 0; a 409 session_gone counts as
+        // success (the kill raced the agent's ACK). Shared by terminateWindow's
+        // primary attempt and its cross-host fallback (#64).
+        async function killSessionOnHost(h, id, pid) {
+            let res;
+            try {
+                res = await fetch(hostHttpUrl(h, '/session/kill'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, pid }),
+                }).then(r => r.json()
+                    .then(j => ({ status: r.status, json: j }))
+                    .catch(() => ({ status: r.status,
+                                    json: { ok: false, error: 'HTTP ' + r.status } })));
+            } catch (e) {
+                res = { status: 0, json: { ok: false, error: String(e) } };
+            }
+            const j = res.json || {};
+            res.gone = res.status === 409 && j.error === 'session_gone';
+            res.ok = (res.status === 200 && j.ok) || res.gone;
+            return res;
+        }
+
         // Hard-kill a terminal/agent session's shell process tree, then close
         // its window. Reusable top-level twin of the Task Manager's
         // destroySession (that one is trapped in a closure over busyOps/render
@@ -14197,9 +14221,14 @@
         // the broker may answer HTTP 409 + error:'session_gone' — that is
         // SUCCESS, same as a 200 ok:true. On success we optimistically tear down
         // the window + chip + session entry so the chip doesn't linger ~2s for
-        // the next /sessions poll; a failure logs to the console and raises a
-        // STICKY host-named error (the old 4s toast vanished unread, #64), with
-        // no teardown. Host-aware fetch mirrors setWindowMcpMode.
+        // the next /sessions poll. A transport/auth failure (status 0/401/403)
+        // against THIS URL triggers a strictly-gated fallback — retry the same
+        // {id,pid} against another record that is the SAME physical broker
+        // (matching brokerId) and currently lists the session; a broker answer
+        // (404/409) or busy/alive (429/504) never retries. An unrecovered
+        // failure logs to the console and raises a STICKY host-named error (the
+        // old 4s toast vanished unread, #64). Host-aware fetch mirrors
+        // setWindowMcpMode.
         async function terminateWindow(key) {
             const sess = sessions.get(key);
             if (!sess) {
@@ -14235,41 +14264,87 @@
                 showNotice('terminate failed: no host');
                 return;
             }
-            let res;
-            try {
-                res = await fetch(hostHttpUrl(host, '/session/kill'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: sess.id, pid: sess.pid }),
-                }).then(r => r.json()
-                    .then(j => ({ status: r.status, json: j }))
-                    .catch(() => ({ status: r.status,
-                                    json: { ok: false, error: 'HTTP ' + r.status } })));
-            } catch (e) {
-                res = { status: 0, json: { ok: false, error: String(e) } };
-            }
-            const j = res.json || {};
-            const gone = res.status === 409 && j.error === 'session_gone';
-            const ok = (res.status === 200 && j.ok) || gone;
-            if (!ok) {
-                const reason = j.error || ('HTTP ' + res.status);
+            const res = await killSessionOnHost(host, sess.id, sess.pid);
+            if (!res.ok) {
+                const reason = (res.json || {}).error
+                    || ('HTTP ' + res.status);
                 console.warn('[terminate] kill failed',
                     Object.assign({ status: res.status, reason }, ctx));
-                // Sticky, host-named error (#64): the old 4s toast auto-dismissed
-                // before the user could read it, so a failed kill looked silent.
-                showNotice('terminate failed on ' + hostUrl + ' [' + key
-                    + ']: ' + reason, { sticky: true, type: 'error' });
-                return;
+                // Gated cross-host fallback (#64). ONLY when THIS URL had a
+                // transport/auth failure (status 0/401/403 — host down, wrong
+                // token, or CORS) AND we know its brokerId: retry the SAME
+                // {id,pid} against another record that is the SAME physical
+                // broker and currently lists this exact session. We never fall
+                // back on a broker ANSWER (404 unknown_session / 409 — terminal)
+                // or a busy/alive broker (429/504 — retry risks a double-kill),
+                // and never without a matching known brokerId (an unrelated
+                // broker can share an {id,pid} → wrong-machine kill).
+                const transportFail = res.status === 0
+                    || res.status === 401 || res.status === 403;
+                let recoveredVia = null;
+                if (transportFail && host.brokerId) {
+                    const cands = getHosts().filter(h =>
+                        h.id !== host.id
+                        && h.brokerId && h.brokerId === host.brokerId
+                        && pollStateFor(h.id).sessions.some(s =>
+                            s.id === sess.id && s.pid === sess.pid));
+                    // Prefer the local record (no network hop, always reachable).
+                    cands.sort((a, b) =>
+                        (a.url === '' ? -1 : 0) - (b.url === '' ? -1 : 0));
+                    for (const h of cands) {
+                        const via = h.url || '(local)';
+                        console.warn('[terminate] retry via matching broker',
+                            { via, viaHostId: h.id, brokerId: h.brokerId });
+                        const r2 = await killSessionOnHost(h, sess.id, sess.pid);
+                        if (r2.ok) {
+                            console.warn('[terminate] fallback succeeded', { via });
+                            recoveredVia = via;
+                            break;
+                        }
+                        console.warn('[terminate] fallback attempt failed',
+                            { via, status: r2.status,
+                              reason: (r2.json || {}).error });
+                    }
+                }
+                if (!recoveredVia) {
+                    // Sticky, host-named error (#64): the old 4s toast vanished
+                    // unread, so a failed kill looked silent. Point an unknown-id
+                    // transport failure at the Troubleshooting remover.
+                    const hint = (transportFail && !host.brokerId)
+                        ? ' — open Settings ▸ Browser ▸ Troubleshooting to '
+                          + 'remove the stale/duplicate host'
+                        : '';
+                    showNotice('terminate failed on ' + hostUrl + ' [' + key
+                        + ']: ' + reason + hint,
+                        { sticky: true, type: 'error' });
+                    return;
+                }
             }
             // Optimistic cleanup (copies destroyAppWindow's chip-node removal):
             // drop the window, the synthetic session entry, and the chip now so
             // nothing lingers until the next poll. Guarded by windows.has so a
             // parked (process-alive, window-closed) session still terminates.
-            if (windows.has(key)) closeWindow(key);
-            sessions.delete(key);
-            const tItem = document.querySelector(
-                '.taskbar-item[data-session-id="' + cssEscape(key) + '"]');
-            if (tItem) tItem.remove();
+            // Also sweep the DUPLICATE chips for the same process reached via
+            // other alias records of this broker (#64) — same brokerId + same
+            // {id,pid} — so the user isn't left clicking a twin that would now
+            // 404 unknown_session. Same-broker only: on one broker the id keys
+            // a unique session, so this can never touch another machine's.
+            const victims = new Set([key]);
+            if (host.brokerId) {
+                for (const [k, s] of sessions) {
+                    if (k === key) continue;
+                    if (s.id !== sess.id || s.pid !== sess.pid) continue;
+                    const sh = hostById(s.hostId);
+                    if (sh && sh.brokerId === host.brokerId) victims.add(k);
+                }
+            }
+            for (const k of victims) {
+                if (windows.has(k)) closeWindow(k);
+                sessions.delete(k);
+                const el = document.querySelector(
+                    '.taskbar-item[data-session-id="' + cssEscape(k) + '"]');
+                if (el) el.remove();
+            }
             updateTaskbarActive();
             showNotice('terminated ' + (sess.title || ('#' + sess.sid)));
         }
