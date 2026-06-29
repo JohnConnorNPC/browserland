@@ -920,6 +920,30 @@ def test_file_capability_present():
         assert sym in INDEX_HTML, f"ctx.file missing from served page: {sym!r}"
 
 
+def test_file_capability_richer_ops_present():
+    # #72: ctx.file gains mkdir/copy/move/zip/unzip/stat and a recursive flag on
+    # delete; ctxVersion stays 1 (additive). The SAME methods are mirrored in the
+    # file-manager's fmFile() fallback so its I/O is identical mods on or off.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
+        for sym in ("mkdir: function", "copy: function", "move: function",
+                    "zip: function", "unzip: function", "stat: function"):
+            assert sym in src, f"{label} missing #72 method: {sym!r}"
+        for route in ("'/file/mkdir'", "'/file/copy'", "'/file/move'",
+                      "'/file/zip'", "'/file/unzip'", "'/file/stat'"):
+            assert route in src, f"{label} does not wrap route {route!r}"
+        # delete carries the recursive flag.
+        assert "recursive: !!(opts && opts.recursive)" in src, \
+            f"{label} delete missing recursive flag"
+    # ctxVersion unchanged (additive capability).
+    assert "ctxVersion: 1" in loader
+    # And the new routes reach the served page.
+    for route in ("'/file/copy'", "'/file/zip'", "'/file/stat'"):
+        assert route in INDEX_HTML, f"#72 route missing from served page: {route!r}"
+
+
 def test_file_capability_trust_doc_present():
     # The trust-tier doc ships in-code WITH the capability: ctx.file is operator-
     # granted REVIEW HYGIENE, not enforcement (a same-origin mod can already POST

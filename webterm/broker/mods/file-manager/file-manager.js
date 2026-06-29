@@ -68,12 +68,40 @@
                     return _modFileApi('/file/list', { path: path || '' }, opts);
                 },
                 'delete': function (path, opts) {
-                    return _modFileApi('/file/delete', { path: path }, opts);
+                    return _modFileApi('/file/delete',
+                        { path: path,
+                          recursive: !!(opts && opts.recursive) }, opts);
                 },
                 upload: function (path, contentB64, opts) {
                     return _modFileApi('/file/upload',
                         { path: path, content_b64: contentB64,
                           overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+                // #72 richer ops mirror (mods-off parity with ctx.file).
+                mkdir: function (path, opts) {
+                    return _modFileApi('/file/mkdir', { path: path }, opts);
+                },
+                copy: function (src, dst, opts) {
+                    return _modFileApi('/file/copy',
+                        { src: src, dst: dst,
+                          overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+                move: function (src, dst, opts) {
+                    return _modFileApi('/file/move',
+                        { src: src, dst: dst,
+                          overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+                zip: function (src, dest, opts) {
+                    return _modFileApi('/file/zip',
+                        { src: src, dest: dest,
+                          overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+                unzip: function (path, dest, opts) {
+                    return _modFileApi('/file/unzip',
+                        { path: path, dest: dest }, opts);
+                },
+                stat: function (path, opts) {
+                    return _modFileApi('/file/stat', { path: path }, opts);
                 },
             };
         }
