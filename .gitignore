@@ -34,3 +34,9 @@ webterm_mcp.json
 # Agent Files
 CLAUDE.md
 AGENTS.md
+.claude/
+
+# Loop/feature tracking scratch
+every_feature.md
+feature_loop.md
+status.md
