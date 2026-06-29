@@ -83,6 +83,29 @@ def test_info_loopback_ok_no_token(tmp_path, monkeypatch):
     assert body["version"] == app.ctx.version
 
 
+def test_info_reports_mods_enabled_default_true(tmp_path, monkeypatch):
+    # #71: the mod-system master switch defaults ON and is surfaced via /info so
+    # the frontend loader can gate at runtime (fail-open / default-on).
+    app = _make_app(tmp_path, monkeypatch, token=None)
+    assert app.ctx.mods_enabled is True
+    _, response = app.test_client.get("/info")
+    assert response.status == 200
+    assert response.json["mods_enabled"] is True
+
+
+def test_info_reports_mods_enabled_false_when_configured(tmp_path, monkeypatch):
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "mods_enabled": False}
+    app = create_app(cfg, name=f"webterm-info-test-{_app_seq}")
+    assert app.ctx.mods_enabled is False
+    _, response = app.test_client.get("/info")
+    assert response.status == 200
+    assert response.json["mods_enabled"] is False
+
+
 def test_info_requires_token_when_configured(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
     # No / wrong token -> 401.

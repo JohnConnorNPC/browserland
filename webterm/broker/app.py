@@ -355,6 +355,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # This broker's build id (#22): surfaced in /mcp/info and used as the
     # baseline to flag a producer whose reported version differs as stale.
     app.ctx.version = build_version()
+    # Frontend mod-system master switch (#71). Mirrors the mcp_enabled posture
+    # but defaults ON: the first-wave mods are first-party, in-repo and reviewed
+    # (the clock ships as one), so an out-of-the-box install runs them. Surfaced
+    # via /info so the loader can gate at runtime (fail-open / default-on).
+    app.ctx.mods_enabled = bool(config.get("mods_enabled", True))
     app.ctx.registry = BrokerRegistry()
     app.ctx.launcher = Launcher(
         app.ctx.registry,
@@ -1446,7 +1451,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if err is not None:
             return err
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
-                           "version": app.ctx.version})
+                           "version": app.ctx.version,
+                           "mods_enabled": app.ctx.mods_enabled})
 
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
