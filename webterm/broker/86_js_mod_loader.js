@@ -61,6 +61,17 @@
                 version: (typeof decl.version === 'string') ? decl.version : '0',
                 // null = "pin nothing" (still init); a number must match exactly.
                 ctxVersion: (typeof decl.ctxVersion === 'number') ? decl.ctxVersion : null,
+                // #86 (S13): declared trust tiers, the ctx-capability families a
+                // reviewed mod uses (settings / taskbar / file / session / window).
+                // Display + review only — the "Mods" pane shows them so the operator
+                // can review what each mod touches BEFORE enabling it. Like every
+                // tier in this system they are DECLARED, not enforced (ctx grants no
+                // runtime boundary, #71): a reviewer cross-checks the declaration
+                // against the mod's actual `ctx.` usage. Non-strings dropped; a mod
+                // that declares none renders as "unspecified".
+                tiers: Array.isArray(decl.tiers)
+                    ? decl.tiers.filter(function (t) { return typeof t === 'string'; })
+                    : [],
                 init: decl.init,
             });
         }
@@ -710,7 +721,10 @@
         // fragment ran) is a clean no-op.
         function notifyModSettings() {
             if (!window.__mods) return;
-            const list = window.__mods.settingToggles;
+            // Snapshot: a control's reflect/onChange could, in principle, mutate the
+            // list (e.g. the #86 Mods pane toggling a mod whose teardown splices its
+            // own entries out), so iterate a copy to never skip or revisit (#86).
+            const list = window.__mods.settingToggles.slice();
             for (let i = 0; i < list.length; i++) {
                 const t = list[i];
                 if (t.kind === 'pane') {
@@ -742,7 +756,9 @@
         // entry isolated so one throw can't abort the core settings render.
         function renderModSettingsToggles(isLocal) {
             if (!window.__mods) return;
-            const list = window.__mods.settingToggles;
+            // Snapshot for the same reason as notifyModSettings: a reflect must never
+            // be able to skip a sibling by mutating the live list mid-iteration (#86).
+            const list = window.__mods.settingToggles.slice();
             for (let i = 0; i < list.length; i++) {
                 try { list[i].reflect(); } catch (_) {}
             }
@@ -825,9 +841,163 @@
             return true;
         }
 
+        // ---- per-mod enable, on top of the master gate (#86 / S13) ----------
+        // Operator enable/disable PER MOD, layered on the broker's mods_enabled
+        // master gate (master off => loadMods returns before any of this, so every
+        // mod is off regardless of per-mod state — the gate stays absolute). State
+        // is stored loader-private in localStorage as a DISABLED set of ids, NOT in
+        // the synced /state settings blob: a /state pull from another browser would
+        // otherwise live-tear-down a mod you are actively using (e.g. an open file
+        // manager). So this is deliberately PER-BROWSER. "Disabled list" (not an
+        // "enabled list") semantics means a NEWLY shipped mod defaults ON — it is
+        // simply absent from the set — matching the pre-#86 "init every registered
+        // mod" behavior. localStorage failures are swallowed: the toggle then has no
+        // durable effect but never throws, and reflect() re-reads the real state.
+        const MODS_DISABLED_KEY = 'webterm:mods:disabled';
+        function _modsDisabled() {
+            let raw = null;
+            try { raw = localStorage.getItem(MODS_DISABLED_KEY); } catch (_) {}
+            const set = new Set();
+            if (raw) {
+                try {
+                    const arr = JSON.parse(raw);
+                    if (Array.isArray(arr)) {
+                        for (const id of arr) if (typeof id === 'string') set.add(id);
+                    }
+                } catch (_) {}
+            }
+            return set;
+        }
+        function _writeModsDisabled(set) {
+            try {
+                localStorage.setItem(MODS_DISABLED_KEY,
+                    JSON.stringify(Array.from(set)));
+            } catch (_) {}
+        }
+        function isModEnabled(id) { return !_modsDisabled().has(id); }
+        // Persist the per-mod choice AND apply it live, reusing the SAME isolated
+        // initMod/disableMod paths boot uses (so a live toggle exercises production
+        // code, not a parallel harness). Only a KNOWN (registered) id is accepted
+        // (returns null otherwise, so a stale/renamed id can't accrete junk). The
+        // live init/teardown is itself gated on the master switch: with master off
+        // we persist the preference but never init (the gate is absolute). Returns
+        // the new enabled state.
+        function setModEnabled(id, on) {
+            const decl = window.__mods.registered.find(
+                function (m) { return m.id === id; });
+            if (!decl) return null;
+            on = !!on;
+            const set = _modsDisabled();
+            if (on) set.delete(id); else set.add(id);
+            _writeModsDisabled(set);
+            if (window.__mods.masterEnabled !== false) {
+                if (on) {
+                    if (!window.__mods.active.has(id)) initMod(decl);
+                } else {
+                    disableMod(id);
+                }
+            }
+            return on;
+        }
+
+        // ---- "Mods" Control Panel pane (#86 / S13) --------------------------
+        // CORE loader UI (NOT a toggleable mod) listing every registered mod with
+        // an enable checkbox + its declared trust tiers + live status (active /
+        // off / failed). Built on the S1 pane scaffold (_modRegisterPane) through a
+        // STATIC loader-owned rec whose teardown never runs — the pane is permanent
+        // core chrome, so it never appears in registered/active and can't disable
+        // itself. Idempotent: a second loadMods() can't double-mount it. Mounted
+        // ONLY when the master gate is on (loadMods returns before here when off),
+        // so master-off means no mod UI at all and the gate's meaning stays crisp.
+        // The reflect closure is registered via _trackControl (kind:'pane'), so it
+        // re-syncs on Control Panel open AND on every /state pull (idempotent, read
+        // only) like every other pane.
+        function _mountModsManagerPane() {
+            if (window.__mods._managerMounted) return;
+            window.__mods._managerMounted = true;
+            const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
+            const rows = [];
+            function _reflectManager() {
+                const disabled = _modsDisabled();
+                for (const r of rows) {
+                    const enabled = !disabled.has(r.id);
+                    r.cb.checked = enabled;
+                    let state;
+                    if (!enabled) state = 'off';
+                    else if (window.__mods.active.has(r.id)) state = 'active';
+                    else state = 'failed';
+                    r.status.textContent = state;
+                    r.status.dataset.state = state;
+                }
+            }
+            _modRegisterPane(rec, {
+                id: 'mods',
+                title: 'Mods',
+                isBrowserGlobal: true,    // per-browser state -> local tab only
+                render: function () {
+                    const wrap = document.createElement('div');
+                    const hint = document.createElement('div');
+                    hint.className = 'set-hint';
+                    hint.textContent = 'Enable or disable installed mods (this '
+                        + 'browser). The broker’s master switch can disable all at '
+                        + 'once.';
+                    wrap.appendChild(hint);
+                    const list = document.createElement('div');
+                    list.className = 'set-mods-list';
+                    for (const m of window.__mods.registered) {
+                        const row = document.createElement('div');
+                        row.className = 'set-mod-row';
+                        row.dataset.modId = m.id;
+                        const label = document.createElement('label');
+                        label.className = 'set-check set-mod-toggle';
+                        const cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        const mid = m.id;
+                        cb.addEventListener('change', function () {
+                            setModEnabled(mid, cb.checked);
+                            _reflectManager();   // refresh status after the live toggle
+                        });
+                        label.appendChild(cb);
+                        const name = document.createElement('span');
+                        name.className = 'set-mod-name';
+                        name.textContent = m.id;
+                        label.appendChild(name);
+                        const status = document.createElement('span');
+                        status.className = 'set-mod-status';
+                        label.appendChild(status);
+                        row.appendChild(label);
+                        const tiers = document.createElement('div');
+                        tiers.className = 'set-mod-tiers';
+                        const declTiers = (m.tiers && m.tiers.length) ? m.tiers : null;
+                        if (declTiers) {
+                            for (const t of declTiers) {
+                                const b = document.createElement('span');
+                                b.className = 'set-mod-tier';
+                                b.textContent = t;
+                                tiers.appendChild(b);
+                            }
+                        } else {
+                            const b = document.createElement('span');
+                            b.className = 'set-mod-tier set-mod-tier-none';
+                            b.textContent = 'unspecified';
+                            tiers.appendChild(b);
+                        }
+                        row.appendChild(tiers);
+                        rows.push({ id: m.id, cb: cb, status: status });
+                        list.appendChild(row);
+                    }
+                    wrap.appendChild(list);
+                    return wrap;
+                },
+                reflect: function () { _reflectManager(); },
+            });
+            window.__mods._reflectManager = _reflectManager;
+        }
+
         // The boot entry (called once by 90_js_mod_boot.js). Gates on the
-        // broker's mods_enabled (runtime, via the memoized /info; fail-open) then
-        // inits every registered mod, each isolated.
+        // broker's mods_enabled (runtime, via the memoized /info; fail-open); when
+        // enabled it mounts the Mods pane (#86), prunes any stale disabled ids, then
+        // inits every per-mod-ENABLED registered mod, each isolated.
         async function loadMods() {
             if (window.__mods.booted) return;
             window.__mods.booted = true;
@@ -836,11 +1006,27 @@
                 const info = await localInfo();
                 if (info && info.mods_enabled === false) enabled = false;
             } catch (_) {}
+            window.__mods.masterEnabled = enabled;
             if (!enabled) {
                 console.info('[mods] disabled by broker (mods_enabled=false)');
                 return;
             }
+            _mountModsManagerPane();
+            // Prune ids for mods that no longer exist (renamed/removed) so the set
+            // can never grow unbounded junk; write back only if it actually changed.
+            const known = new Set(window.__mods.registered.map(
+                function (m) { return m.id; }));
+            const disabled = _modsDisabled();
+            let pruned = false;
+            for (const id of Array.from(disabled)) {
+                if (!known.has(id)) { disabled.delete(id); pruned = true; }
+            }
+            if (pruned) _writeModsDisabled(disabled);
             for (const decl of window.__mods.registered.slice()) {
+                if (disabled.has(decl.id)) {
+                    console.info('[mods] "' + decl.id + '" disabled by operator');
+                    continue;
+                }
                 initMod(decl);
             }
         }
@@ -861,5 +1047,17 @@
             // the registry and a fixture mod's kind appears/disappears with it.
             windowKinds: function () {
                 return windowKindMenuList().map(function (k) { return k.appKind; });
+            },
+            // #86 (S13): the per-mod enable surface the Mods-pane acceptance drives.
+            // setEnabled persists + applies live (master-gated) via the SAME path
+            // the pane checkbox uses; the rest are read-only inspectors.
+            setEnabled: function (id, on) { return setModEnabled(id, on); },
+            isEnabled: function (id) { return isModEnabled(id); },
+            disabledIds: function () { return Array.from(_modsDisabled()); },
+            masterEnabled: function () { return window.__mods.masterEnabled; },
+            registered: function () {
+                return window.__mods.registered.map(function (m) {
+                    return { id: m.id, tiers: (m.tiers || []).slice() };
+                });
             },
         };

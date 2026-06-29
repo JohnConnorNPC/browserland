@@ -34,6 +34,7 @@
             id: 'sticky',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['window'],   // #86: registers the sticky-note window kind (ctx.registerWindowKind)
             init: function (ctx) {
                 // The (+) launch-menu "Sticky note" entry: a new, empty, pinned
                 // note (moved verbatim from 76_js_launch_fullscreen.js).

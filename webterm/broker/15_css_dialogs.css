@@ -241,3 +241,21 @@
         }
         #file-modal button:hover { background: #262626; border-color: #6a8; }
         #file-modal .set-foot { display: flex; justify-content: flex-end; gap: 8px; }
+        /* #86 (S13): the "Mods" Control Panel pane — per-mod enable + trust tiers.
+           Core loader chrome (mounted into #set-mods via the S1 pane scaffold). */
+        .set-mods-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+        .set-mod-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 10px; flex-wrap: wrap;
+        }
+        .set-mod-toggle { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+        .set-mod-name { font-weight: 600; }
+        .set-mod-status { font-size: 11px; color: var(--fg-dim); }
+        .set-mod-status[data-state="active"] { color: #3fb950; }
+        .set-mod-status[data-state="failed"] { color: #f85149; }
+        .set-mod-tiers { display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; }
+        .set-mod-tier {
+            font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;
+            border: 1px solid var(--bg-3); background: var(--bg); color: var(--fg-dim);
+        }
+        .set-mod-tier-none { font-style: italic; opacity: 0.7; }

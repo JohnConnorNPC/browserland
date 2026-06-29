@@ -29,6 +29,7 @@
             id: 'theme',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['settings'],   // #86: owns the synced `theme` key (ctx.settings.radio)
             init: function (ctx) {
                 // A theme is a thin override of the six chrome CSS vars defined in
                 // :root. `night` reproduces the current defaults EXACTLY so an

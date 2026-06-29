@@ -1051,3 +1051,117 @@ def test_session_capability_trust_doc_present():
     assert "REVIEW HYGIENE" in loader
     assert "POST to /session/*" in loader
     assert "session_gone" in loader
+
+
+# --------------------------------------------------------------------------- #
+# packaging + enable/permission UI (#86 / S13)
+# --------------------------------------------------------------------------- #
+
+# The trust-tier vocabulary the in-repo mods declare. Kept here (not in the
+# loader) as the test's source of truth: a typo or a new unreviewed token trips
+# this guard. Mirrors the ctx-capability families a mod can use.
+_KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage"}
+
+# What each shipped mod is reviewed to use, derived from its actual `ctx.` usage
+# (see each mod's registerMod). Hardcoded like the other drift sentinels so an
+# accidental tier change in a mod surfaces here for re-review.
+_EXPECTED_TIERS = {
+    "theme": ["settings"],
+    "pattern": ["settings"],
+    "clock": ["settings", "taskbar"],
+    "help": ["settings"],
+    "task-manager": ["session", "window"],
+    "file-manager": ["file", "window"],
+    "editor": ["file", "window"],
+    "sticky": ["window"],
+}
+
+
+def test_mods_manager_pane_and_enable_api_present():
+    # #86 (S13): the per-mod enable state (loader-private localStorage), the
+    # persist+apply-live setter, and the "Mods" Control Panel pane all ride in the
+    # served loader. The Playwright acceptance (list + toggle + master gate) drives
+    # these via window.__mods.__test.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for sym in (
+        "'webterm:mods:disabled'",       # the loader-private persistence key
+        "function _modsDisabled",
+        "function _writeModsDisabled",
+        "function isModEnabled",
+        "function setModEnabled",
+        "function _mountModsManagerPane",
+        "window.__mods.masterEnabled",   # master-gate state the live setter honors
+        "set-mods-list",                  # the pane's list container class
+    ):
+        assert sym in loader, f"missing S13 loader symbol: {sym!r}"
+    # The pane is built on the S1 pane scaffold (reuse, not a parallel renderer).
+    assert "_modRegisterPane(rec, {" in loader
+    # The per-mod enable test surface the acceptance drives.
+    for sym in ("setEnabled: function", "isEnabled: function",
+                "disabledIds: function", "masterEnabled: function"):
+        assert sym in loader, f"missing S13 test-API symbol: {sym!r}"
+    # And it all reaches the served page (mounts into the existing #set-mods host).
+    for sym in ("function setModEnabled", "function _mountModsManagerPane",
+                "set-mods-list", 'id="set-mods"'):
+        assert sym in INDEX_HTML, f"S13 surface missing from served page: {sym!r}"
+
+
+def test_mods_manager_pane_styles_present():
+    # The pane's core chrome CSS ships in the head <style> (core fragment 15, not a
+    # mod stylesheet, so the served page stays free of any mod-css splice).
+    css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
+    for sel in (".set-mods-list", ".set-mod-row", ".set-mod-tier",
+                ".set-mod-status"):
+        assert sel in css, f"missing S13 pane style: {sel!r}"
+    assert ".set-mods-list" in INDEX_HTML
+
+
+def test_per_mod_enable_is_loader_private_not_state_schema():
+    # The per-mod enable is deliberately PER-BROWSER (localStorage), NOT a synced
+    # /state settings field: it must not have leaked a new key into the backend
+    # /state normalizer (the inherited "no schema change for new keys" rule), and
+    # the loader documents the per-browser choice.
+    settings = (BROKER_DIR / "55_js_settings_model.js").read_text(encoding="utf-8")
+    assert "modsDisabled" not in settings
+    assert "webterm:mods:disabled" not in settings
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "PER-BROWSER" in loader
+
+
+def test_loadmods_honors_per_mod_disabled_under_master_gate():
+    # Boot skips a per-mod-disabled mod, but ONLY after the master gate passes
+    # (master off still returns first => every mod off). The pane mounts only when
+    # the master gate is on, so master-off means no mod UI at all.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    boot = loader[loader.index("async function loadMods"):]
+    # master gate returns BEFORE the pane mount + the per-mod skip.
+    assert boot.index("mods_enabled=false") < boot.index("_mountModsManagerPane()")
+    assert boot.index("_mountModsManagerPane()") < boot.index("disabled.has(decl.id)")
+    # stale ids are pruned so the set can't grow junk.
+    assert "pruned" in boot
+
+
+def test_mods_declare_reviewed_trust_tiers():
+    # Every in-repo mod declares a `tiers:` array in its registerMod, the values
+    # are from the known vocabulary, and they match the reviewed expectation for
+    # that mod (derived from its actual ctx usage). This is the declared-tier drift
+    # guard the "Mods" pane's permission review depends on.
+    import re
+    for mod_dir in dict.fromkeys(
+            PurePosixPath(m).parent.as_posix() for m in ui._MODS):
+        mod_id = PurePosixPath(mod_dir).name
+        if mod_id not in _EXPECTED_TIERS:
+            continue  # codemirror.js shares the editor dir; only registrants count
+        # The registerMod-bearing script is the one named <id>.js.
+        src = (BROKER_DIR / mod_dir / f"{mod_id}.js").read_text(encoding="utf-8")
+        m = re.search(r"id:\s*'%s'.*?tiers:\s*\[([^\]]*)\]" % re.escape(mod_id),
+                      src, re.S)
+        assert m, f"mod {mod_id!r} must declare a tiers: [...] array in registerMod"
+        tokens = re.findall(r"'([a-z-]+)'", m.group(1))
+        assert tokens, f"mod {mod_id!r} declared an empty tiers array"
+        assert set(tokens) <= _KNOWN_TIERS, (
+            f"mod {mod_id!r} declares unknown tier(s): "
+            f"{sorted(set(tokens) - _KNOWN_TIERS)}")
+        assert tokens == _EXPECTED_TIERS[mod_id], (
+            f"mod {mod_id!r} tiers drifted: declared {tokens}, "
+            f"reviewed {_EXPECTED_TIERS[mod_id]}")

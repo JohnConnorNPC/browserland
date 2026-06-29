@@ -2099,6 +2099,7 @@
             id: 'editor',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['file', 'window'],   // #86: host filesystem read/write (ctx.file) + a window kind
             init: function (ctx) {
                 // Route every editor /file/* op through the reviewed ctx.file
                 // capability (#82); cleared on teardown so a disabled editor mod

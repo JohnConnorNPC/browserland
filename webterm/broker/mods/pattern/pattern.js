@@ -69,6 +69,7 @@
             id: 'pattern',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['settings'],   // #86: owns the synced `pattern` key (ctx.settings.select)
             init: function (ctx) {
                 // Mount the Control Panel <select> + own the synced `pattern`
                 // key. The options mirror the moved PATTERNS / PATTERN_LABELS so

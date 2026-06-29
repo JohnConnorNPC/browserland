@@ -489,6 +489,7 @@
             id: 'help',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['settings'],   // #86: owns the synced `showHelpButton` key (the ? chip is direct DOM)
             init: function (ctx) {
                 // Build the "?" chip (was static #help-chip markup in 40_body.html).
                 // Hidden until applyHelpButton adds .on; #help-chip rules ship in

@@ -568,6 +568,7 @@
             id: 'task-manager',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['session', 'window'],   // #86: destructive session RPC (ctx.session) + a window kind
             init: function (ctx) {
                 // Route every task-manager /session/* op (incl. the DESTRUCTIVE
                 // kill / session destroy) through the reviewed ctx.session

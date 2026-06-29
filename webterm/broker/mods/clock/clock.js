@@ -14,6 +14,7 @@
             id: 'clock',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['settings', 'taskbar'],   // #86: owns the synced `clock` key + a taskbar chip
             init: function (ctx) {
                 // Build the chip once. align-items is harmless while hidden; the
                 // display toggle (none <-> inline-flex) is what shows/hides it,

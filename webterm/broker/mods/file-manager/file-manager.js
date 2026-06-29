@@ -844,6 +844,7 @@
             id: 'file-manager',
             version: '1.0.0',
             ctxVersion: 1,
+            tiers: ['file', 'window'],   // #86: host filesystem incl. destructive ops (ctx.file) + a window kind
             init: function (ctx) {
                 // Route every file-manager /file/* op (incl. the DESTRUCTIVE
                 // delete + upload) through the reviewed ctx.file capability (#82);
