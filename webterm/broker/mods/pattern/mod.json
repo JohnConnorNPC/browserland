@@ -1,0 +1,9 @@
+{
+  "id": "pattern",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Background pattern",
+  "description": "Desktop background-pattern Control Panel select + the theme-var-aware #desktop painter (extracted from core, #76).",
+  "entry": "pattern.js",
+  "author": "JohnConnorNPC"
+}

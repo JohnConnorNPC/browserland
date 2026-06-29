@@ -354,10 +354,10 @@
 
             // Appearance is browser-global — reflect the LIVE local settings
             // (these controls are hidden on remote tabs, shown only on local).
-            // #75: the color-scheme radio reflects itself through the theme mod
-            // (renderModSettingsToggles below); core only reflects pattern/font.
+            // #75/#76: the color-scheme radio and the background-pattern select
+            // reflect themselves through their mods (renderModSettingsToggles
+            // below); core only reflects the terminal font.
             const ls = getSettings();
-            setPatternEl.value = ls.pattern;
             setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
             renderModSettingsToggles(t.isLocal);   // #71: reflect mod toggles (clock, …)
             setHelpButtonEl.checked = !!ls.showHelpButton;   // #40 (browser-global)
@@ -650,19 +650,15 @@
             applyTaskbarWorkspace();
         });
 
-        // Appearance (pattern / start label): browser-local like restore-on-
-        // refresh — write the LIVE local getSettings() directly (NOT
+        // Appearance (terminal font / start label): browser-local like restore-
+        // on-refresh — write the LIVE local getSettings() directly (NOT
         // settingsTarget, which may point at a remote host), persist, then apply
         // to this browser immediately. This is why the Control Panel window (#59)
         // can host a remote host's tab without appearance edits leaking to it.
-        // #75: the color-scheme radio's change handler now lives in the theme mod
-        // (ctx.settings.radio wires #set-mods -> savePrefs + applyTheme, which
-        // also re-applies the theme-var-aware pattern).
-        setPatternEl.addEventListener('change', () => {
-            getSettings().pattern = setPatternEl.value;
-            savePrefs();
-            applyPattern(setPatternEl.value);
-        });
+        // #75/#76: the color-scheme radio's and background-pattern select's change
+        // handlers now live in their mods (ctx.settings.radio / ctx.settings.
+        // select wire #set-mods -> savePrefs + applyTheme / applyPattern; the
+        // theme mod's apply also re-applies the theme-var-aware pattern).
         setTermFontEl.addEventListener('change', () => {   // #18: terminal font
             getSettings().termFont = setTermFontEl.value;
             savePrefs();

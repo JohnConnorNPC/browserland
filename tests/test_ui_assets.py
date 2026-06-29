@@ -277,3 +277,61 @@ def test_theme_mod_packaged_and_manifest_agrees():
     # The default stays night: it is the first option, the radio's `def`, and
     # still equals the :root CSS, so the visual default survives a pre-load paint.
     assert "def: 'night'" in src
+
+
+# --------------------------------------------------------------------------- #
+# pattern mod (#76 / S3)
+# --------------------------------------------------------------------------- #
+
+def test_pattern_symbols_removed_from_core_fragments():
+    # The desktop background pattern is now a mod (#76): its PATTERNS list /
+    # labels / the theme-var-aware applyPattern painter, the #set-pattern <select>
+    # markup, the core normalization, and its Control Panel reflect/handler are
+    # gone from core. Scope the check to the CORE fragments it was extracted from
+    # (the mod script legitimately still names PATTERNS / applyPattern / the
+    # `pattern` key; comments may still mention the word "pattern"). The sentinels
+    # are specific enough not to match the surviving prose.
+    core = {
+        "65_js_display_theming.js": ("const PATTERNS", "PATTERN_LABELS", "function applyPattern"),
+        "55_js_settings_model.js": ("PATTERNS.indexOf",),
+        "40_body.html": ('id="set-pattern"',),
+        "79_js_settings_modal.js": ("setPatternEl", "of PATTERNS"),
+        "81_js_control_panel.js": ("setPatternEl", "applyPattern("),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+
+
+def test_pattern_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "pattern"
+    js = mod_dir / "pattern.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "pattern"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "pattern.js"
+    # The script registers the pattern mod, owns the synced `pattern` key through
+    # the #74 select API, and carries the moved list + labels + painter.
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'pattern'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.settings.select('pattern'" in src
+    assert "const PATTERNS" in src
+    assert "function applyPattern" in src
+    # The default stays none: it is the first option AND the select's `def`, and
+    # applyPattern('none') clears the inline background, so the visual default is
+    # preserved with no core normalization.
+    assert "def: 'none'" in src
+    # And the mod ships in the served page (present in the mod / gone from core),
+    # registered AFTER the theme mod so notifyModSettings writes the chrome vars
+    # before the pattern repaints on a both-changed /state pull, and applyPattern
+    # is a hoisted global the theme mod's coupling can still reach.
+    assert "ctx.settings.select('pattern'" in INDEX_HTML
+    assert "id: 'pattern'" in INDEX_HTML
+    assert "function applyPattern" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'theme'") < INDEX_HTML.index("id: 'pattern'")

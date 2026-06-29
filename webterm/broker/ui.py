@@ -106,8 +106,9 @@ _ORDERED = [
 # glob) so a stray file in mods/ can never be swept into the served page, and a
 # forgotten mod script trips the drift guard in tests/test_ui_assets.py.
 _MODS = [
-    "mods/theme/theme.js",   # S2 (#75) color-scheme radio + the six chrome vars
-    "mods/clock/clock.js",   # F057 clock, extracted as the reference mod
+    "mods/theme/theme.js",     # S2 (#75) color-scheme radio + the six chrome vars
+    "mods/pattern/pattern.js", # S3 (#76) background-pattern select (theme-var-aware)
+    "mods/clock/clock.js",     # F057 clock, extracted as the reference mod
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

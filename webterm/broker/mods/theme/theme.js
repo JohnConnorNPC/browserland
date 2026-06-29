@@ -15,15 +15,16 @@
         // default survives even before this mod loads (CSS :root is night).
         //
         // PATTERN COUPLING (intentional, do NOT remove): the desktop background
-        // pattern is still core-owned (S3) and theme-var-aware — applyPattern
-        // reads the live --bg/--bg-3 this mod sets. So apply() re-runs the core
-        // applyPattern AFTER writing the vars, byte-for-byte what the deleted
-        // #set-theme change handler did (applyTheme -> applyPattern). On a /state
-        // pull core already calls applyPattern(s.pattern) before notifyModSettings
-        // with the OLD vars; this re-apply is the second pass that lands the
-        // pattern on the NEW vars when the theme actually changed. Dropping it as
-        // "duplicative" would leave a cross-browser theme change painting the
-        // pattern in stale colors.
+        // pattern is now owned by mods/pattern/pattern.js (S3 / #76) and is theme-
+        // var-aware — its applyPattern (a hoisted global declared in that mod)
+        // reads the live --bg/--bg-3 this mod sets. So apply() re-runs applyPattern
+        // AFTER writing the vars, byte-for-byte what the deleted #set-theme change
+        // handler did (applyTheme -> applyPattern). This is the ONLY thing that
+        // repaints the pattern on a theme-only change: the pattern mod's select is
+        // change-detected, so it does NOT fire when just `theme` changed (local
+        // pick or a cross-browser /state pull). Dropping this re-apply would leave
+        // a theme change painting the pattern in stale colors. Guarded by typeof
+        // so the theme mod still works if the pattern mod is absent/disabled.
         registerMod({
             id: 'theme',
             version: '1.0.0',
@@ -69,11 +70,17 @@
                         for (const k in t) root.style.setProperty(k, t[k]);
                     } catch (_) {}
                 }
-                // Set the theme vars, then re-paint the (core-owned, theme-var-
-                // aware) pattern off the fresh vars — see PATTERN COUPLING above.
+                // Set the theme vars, then re-paint the (pattern-mod-owned, theme-
+                // var-aware) pattern off the fresh vars — see PATTERN COUPLING
+                // above. typeof-guarded so an absent/disabled pattern mod is a
+                // clean no-op rather than a (caught) ReferenceError.
                 function apply(name) {
                     applyTheme(name);
-                    try { applyPattern(getSettings().pattern); } catch (_) {}
+                    try {
+                        if (typeof applyPattern === 'function') {
+                            applyPattern(getSettings().pattern);
+                        }
+                    } catch (_) {}
                 }
 
                 // Mount the Control Panel radio + own the synced `theme` key. The

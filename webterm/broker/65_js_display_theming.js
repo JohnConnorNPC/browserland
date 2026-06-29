@@ -8,11 +8,15 @@
         // of applyThemeSettings (below). `night` still equals the :root defaults,
         // so the visual default survives even before the mod loads.
 
-        // ---- desktop background patterns (Win 3.1 style) -------------------
-        // Theme-var-aware CSS background-images painted on #desktop, BEHIND the
-        // strip + floating windows (they are positioned children, so the
-        // element background sits under them). `none` clears it. Never throws.
-        const PATTERNS = ['none', 'weave', 'dither', 'dots', 'hatch', 'tiles'];
+        // ---- desktop background patterns: EXTRACTED to a mod (#76) ----------
+        // The background pattern moved to mods/pattern/pattern.js, which owns the
+        // PATTERNS list, its labels, the theme-var-aware applyPattern painter and
+        // the #set-mods <select> via ctx.settings.select — byte-identical, incl.
+        // cross-browser /state sync. Core no longer reads `pattern`; convergence
+        // reaches the mod via notifyModSettings() at the end of applyThemeSettings
+        // (below). applyPattern stays a hoisted global (now declared in the mod),
+        // so the theme mod's theme<->pattern coupling keeps repainting it.
+
         // Issue #18: selectable terminal font. Each entry's `value` is the full
         // CSS font-family stack (so an uninstalled choice falls back to Consolas/
         // monospace); '' = the built-in default. Browser-global (xterm renders
@@ -32,44 +36,6 @@
             const f = (getSettings().termFont || '').trim();
             return f || TERM_FONT_DEFAULT;
         }
-        const PATTERN_LABELS = {
-            none: 'None', weave: 'Weave', dither: 'Dither',
-            dots: 'Dots', hatch: 'Hatch', tiles: 'Tiles',
-        };
-        function applyPattern(name) {
-            try {
-                const desk = document.getElementById('desktop');
-                if (!desk) return;
-                if (PATTERNS.indexOf(name) < 0) name = 'none';
-                const cs = getComputedStyle(document.documentElement);
-                const bg = (cs.getPropertyValue('--bg') || '#1e1e1e').trim();
-                const bg3 = (cs.getPropertyValue('--bg-3') || '#3a3a3a').trim();
-                let img = '', size = '';
-                if (name === 'weave') {
-                    img = 'repeating-linear-gradient(45deg,' + bg3 + ' 0 1px,'
-                        + 'transparent 1px 8px),'
-                        + 'repeating-linear-gradient(-45deg,' + bg3 + ' 0 1px,'
-                        + 'transparent 1px 8px)';
-                } else if (name === 'dither') {
-                    img = 'repeating-conic-gradient(' + bg3 + ' 0 25%,'
-                        + bg + ' 0 50%)';
-                    size = '6px 6px';
-                } else if (name === 'dots') {
-                    img = 'radial-gradient(' + bg3 + ' 1.2px, transparent 1.4px)';
-                    size = '14px 14px';
-                } else if (name === 'hatch') {
-                    img = 'repeating-linear-gradient(45deg,' + bg3 + ' 0 1px,'
-                        + 'transparent 1px 10px)';
-                } else if (name === 'tiles') {
-                    img = 'linear-gradient(' + bg3 + ' 1px, transparent 1px),'
-                        + 'linear-gradient(90deg,' + bg3 + ' 1px, transparent 1px)';
-                    size = '24px 24px';
-                }
-                desk.style.backgroundImage = img;
-                desk.style.backgroundSize = size;
-            } catch (_) {}
-        }
-
         // ---- live clock (bottom-right of the taskbar) ----------------------
         // EXTRACTED to a mod (#71): the clock is now mods/clock/clock.js, which
         // owns the chip, the 1s interval, and the synced `clock` setting through
@@ -107,10 +73,12 @@
         function applyThemeSettings() {
             try {
                 const s = getSettings();
-                // #75: `theme` is mod-owned now (mods/theme/theme.js); it writes
-                // the chrome vars via notifyModSettings() below. Pattern stays
-                // core (S3) and is theme-var-aware, so it still applies here.
-                applyPattern(s.pattern);    // reads the live theme vars
+                // #75/#76: `theme` and `pattern` are mod-owned now
+                // (mods/theme/, mods/pattern/). They converge via
+                // notifyModSettings() below — the pattern select repaints on a
+                // `pattern` change, and the theme mod repaints the (theme-var-
+                // aware) pattern after it writes the chrome vars on a `theme`
+                // change. Core no longer paints either directly.
                 applyHelpButton(s.showHelpButton);   // #40
                 applyStartButton();
                 applyTerminalFont();        // #18: configurable terminal font

@@ -55,14 +55,11 @@
                      immediately, so renderSettings() shows the `.set-browser-global`
                      sections ONLY on the local ('this broker') tab — a remote host
                      tab shows just that host's own settings (#17). -->
-                <!-- #75: the Color scheme radio moved to mods/theme/theme.js; it
-                     mounts into #set-mods (below) via ctx.settings.radio, like
-                     the clock checkbox. -->
-                <div class="set-section set-browser-global">
-                    <div class="set-title">Background pattern</div>
-                    <div class="set-row"><label>pattern</label>
-                        <select id="set-pattern"></select></div>
-                </div>
+                <!-- #75/#76: the Color scheme radio and the Background pattern
+                     select moved to mods/theme/theme.js and mods/pattern/
+                     pattern.js; they mount into #set-mods (below) via
+                     ctx.settings.radio / ctx.settings.select, like the clock
+                     checkbox. -->
                 <div class="set-section set-browser-global">
                     <div class="set-title">Terminal font</div>
                     <div class="set-row"><label>font</label>

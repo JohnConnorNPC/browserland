@@ -65,14 +65,12 @@
             }
             // Task 12: Control Panel theming. Each field self-heals so a hand-
             // edited blob AND a remote host's settings converge to valid values;
-            // the defaults reproduce the current look exactly (none/off/+). #75:
-            // `theme` is owned by mods/theme/theme.js now — its radio does the
-            // read-through validation (unknown -> night) WITHOUT rewriting the
-            // synced blob, so core no longer normalizes it here or references the
-            // palette. Default stays night via the mod's fallback + the :root CSS.
-            if (typeof s.pattern !== 'string' || PATTERNS.indexOf(s.pattern) < 0) {
-                s.pattern = 'none';
-            }
+            // the defaults reproduce the current look exactly (off/+). #75/#76:
+            // `theme` and `pattern` are owned by mods/theme/ and mods/pattern/
+            // now — their radio/select do the read-through validation (unknown ->
+            // night / none) WITHOUT rewriting the synced blob, so core no longer
+            // normalizes them here or references the palette / PATTERNS list. The
+            // defaults stay night/none via the mods' fallbacks + the :root CSS.
             // Issue #18: terminal font. Whitelist to the offered TERM_FONTS
             // values ('' = built-in default) so an unknown/hand-edited value
             // can't leave the picker blank while a stray font silently applies.
