@@ -72,10 +72,13 @@
                         setting, like the color scheme); an uninstalled font falls
                         back to Consolas / monospace.</div>
                 </div>
-                <!-- #71: mod-contributed settings toggles (e.g. the clock's
-                     "Show date & time" checkbox) mount here. Browser-global like
-                     the appearance controls; hidden on remote host tabs. -->
-                <div class="set-section set-browser-global" id="set-mods"></div>
+                <!-- #71/#74: mod-contributed Control Panel controls mount here
+                     (boolean/radio/select toggles + registerSettingsPane panes).
+                     Each mounted section carries its OWN .set-browser-global per
+                     the mod's isBrowserGlobal opt (default on), so this host div
+                     is NOT itself browser-global — a non-global mod control can
+                     stay visible on a remote host tab. -->
+                <div class="set-section" id="set-mods"></div>
                 <div class="set-section set-browser-global">
                     <div class="set-title">Help button</div>
                     <label class="set-check"><input type="checkbox" id="set-help-button" />

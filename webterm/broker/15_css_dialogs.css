@@ -91,6 +91,11 @@
         #set-theme { flex-wrap: wrap; gap: 4px 14px; }
         #set-theme label { display: inline-flex; align-items: center; gap: 5px;
             cursor: pointer; user-select: none; }
+        /* Mod-contributed radio groups (#74, ctx.settings.radio): same wrap +
+           inline-label layout as the color-scheme radios above. */
+        .set-mod-radio { flex-wrap: wrap; gap: 4px 14px; }
+        .set-mod-radio label { display: inline-flex; align-items: center; gap: 5px;
+            cursor: pointer; user-select: none; }
         .host-row { font-family: monospace; font-size: 12px; }
         .host-row .host-name {
             flex: 1 1 auto;
