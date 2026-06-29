@@ -365,3 +365,71 @@ def test_move_symlink_to_dir_moves_link_not_target(tmp_path, monkeypatch):
     assert not os.path.lexists(str(link))         # old link gone
     assert target.is_dir()                        # target tree intact
     assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+# --------------------------------------------------------------------------- #
+# /file/delete (#72 — recursive + reparse-safe)
+# --------------------------------------------------------------------------- #
+
+def test_delete_file_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete", json={"path": "a.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "a.txt").exists()
+
+
+def test_delete_dir_without_recursive_is_400(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    (d / "child.txt").parent.mkdir()
+    (d / "child.txt").write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete", json={"path": "d"})
+    assert r.status == 400 and r.json["error"] == "is_a_directory"
+    assert d.is_dir()                             # untouched without recursive
+
+
+def test_delete_dir_recursive_ok(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    (d / "sub").mkdir(parents=True)
+    (d / "sub" / "f.txt").write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete",
+                                json={"path": "d", "recursive": True})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not d.exists()
+
+
+def test_delete_missing_404(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete", json={"path": "nope"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+
+
+def test_delete_symlink_to_dir_unlinks_link_keeps_target(tmp_path, monkeypatch):
+    # THE headline data-loss guard: deleting a symlink-to-dir (even recursive)
+    # removes only the link; the target tree and its files survive.
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete",
+                                json={"path": "link", "recursive": True})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not os.path.lexists(str(link))         # link gone
+    assert target.is_dir()                        # target intact
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_delete_symlink_to_file_unlinks_link_keeps_target(tmp_path, monkeypatch):
+    target = tmp_path / "real.txt"
+    target.write_text("precious", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    _symlink_or_skip(target, link)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/delete", json={"path": "link.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not os.path.lexists(str(link))
+    assert target.read_text(encoding="utf-8") == "precious"

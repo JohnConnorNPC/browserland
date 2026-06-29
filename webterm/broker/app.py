@@ -1042,16 +1042,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "size": len(data)})
 
     async def _file_delete(request: Request):
-        # Destructive sibling of /file/write (#46): same host-wide resolution,
-        # gate, and absolute-path echo. SINGLE FILE ONLY — is_file() refuses a
-        # directory (and a symlink-to-dir, which is_file() reports False), so
-        # this can never recurse a tree. Like read/write/upload, the path is
-        # fully resolved first (_resolve_host_path ends in .resolve()), so a
-        # symlink-to-file deletes its TARGET — the same link-following semantics
-        # those endpoints already use. Used by the file manager's cross-pane
-        # MOVE (copy-to-dest, then delete-source). No NEW privilege: /file/write
-        # already grants full host-wide overwrite under this exact auth gate —
-        # delete stays within it.
+        # Destructive sibling of /file/write (#46), extended for the file manager
+        # context menu (#72): a real directory is removed too, but only when the
+        # caller passes recursive=true (a plain delete of a non-empty dir is a
+        # 400 is_a_directory, so a mis-click can't wipe a tree).
+        #
+        # The headline correctness change (#72): the leaf is resolved BOTH ways.
+        # p_leaf (link-safe) is checked for being a symlink/junction FIRST — if
+        # so only the link ENTRY is removed, NEVER the target it points at. Only
+        # a genuinely real path falls through to unlink (file) / rmtree (dir),
+        # acting on the fully-resolved p. This closes the data-loss hole the old
+        # ".resolve() then operate" path had (deleting a symlink-to-dir would
+        # have rmtree'd the link's target tree, host-wide). No NEW privilege:
+        # /file/write already grants full host-wide overwrite under this gate.
         err = _file_auth_error(request)
         if err is not None:
             return err
@@ -1061,22 +1064,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         rel = body.get("path")
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        recursive = bool(body.get("recursive", False))
         try:
             p = _resolve_host_path(rel, app.ctx.editor_root)
+            p_leaf = _resolve_host_path(rel, app.ctx.editor_root,
+                                        follow_leaf=False)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        leaf_str = str(p_leaf)
+        # lexists, not exists: a broken symlink (target gone) still has a link
+        # entry that should be deletable, and a real link must be detected here
+        # before any classification follows it.
+        if not os.path.lexists(leaf_str):
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if _is_reparse_point(leaf_str):
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _remove_link, leaf_str)
+            except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+            return sanic_json({"ok": True, "path": leaf_str})
         kind = _classify_path(p)
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
         if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if kind != "file":
+        if kind == "dir":
+            if not recursive:
+                return sanic_json({"ok": False, "error": "is_a_directory"},
+                                  status=400)
+            fn, arg = shutil.rmtree, str(p)
+        elif kind == "file":
+            fn, arg = os.unlink, str(p)
+        else:
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         try:
-            os.unlink(str(p))
-        except OSError as exc:
+            await asyncio.get_running_loop().run_in_executor(None, fn, arg)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({"ok": True,
                            "path": str(p)})      # absolute, host-wide (#35)
