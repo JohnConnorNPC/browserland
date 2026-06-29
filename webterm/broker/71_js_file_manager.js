@@ -6,45 +6,12 @@
             const color = normalizeHex(appData.color || defaultColor(id));
             const locked = appData.locked !== undefined ? !!appData.locked : true;
 
-            const dom = document.createElement('div');
-            dom.className = 'term-window app-window app-fm';
-            dom.dataset.sessionId = id;
-            dom.style.left = geom.left + 'px';
-            dom.style.top = geom.top + 'px';
-            // Same content-box -4 math as openWindow / openAppWindow.
-            dom.style.width = (geom.width - 4) + 'px';
-            dom.style.height = (geom.height - 4) + 'px';
-            dom.style.setProperty('--accent', color);
-            dom.classList.toggle('dark-accent', isDarkAccent(color));
-            if (locked) dom.classList.add('scroll-locked');   // pinned float
-
-            const titleBar = document.createElement('div');
-            titleBar.className = 'title-bar';
-
-            const idBadge = document.createElement('span');
-            idBadge.className = 'ti-id-badge';
-            idBadge.textContent = '#fm';
-
-            const titleText = document.createElement('span');
-            titleText.className = 'title-text';
-            titleText.textContent = title;
-
-            const minBtn = document.createElement('button');
-            minBtn.type = 'button';
-            minBtn.className = 'tb-btn btn-min';
-            minBtn.textContent = '_';
-            minBtn.title = 'minimize';
-
-            const closeBtn = document.createElement('button');
-            closeBtn.type = 'button';
-            closeBtn.className = 'tb-btn btn-close';
-            closeBtn.textContent = '×';
-            closeBtn.title = 'close';
-
-            titleBar.appendChild(idBadge);
-            titleBar.appendChild(titleText);
-            titleBar.appendChild(minBtn);
-            titleBar.appendChild(closeBtn);
+            // Shared chrome (#79): .term-window shell + title bar (_ / ×) + the
+            // eight resize handles, built + wired by the window-runtime factory.
+            const chrome = buildAppChrome({
+                id, appClass: 'app-fm', badge: '#fm', geom, color, locked, title,
+            });
+            const { dom, titleText } = chrome;
 
             // Toolbar (Refresh / Open / ↑ Up) — same chrome class as the editor.
             const toolbar = document.createElement('div');
@@ -105,15 +72,9 @@
             fmBody.appendChild(left.pane);
             fmBody.appendChild(right.pane);
 
-            dom.appendChild(titleBar);
             dom.appendChild(toolbar);
             dom.appendChild(fmBody);
-            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
-                const h = document.createElement('div');
-                h.className = 'rh rh-' + dir;
-                h.dataset.dir = dir;
-                dom.appendChild(h);
-            }
+            addResizeHandles(dom);   // last children: edge/corner hit zones on top
 
             document.getElementById('desktop').appendChild(dom);
             document.getElementById('desktop').classList.remove('empty');
@@ -161,10 +122,9 @@
             };
             windows.set(id, win);
 
+            // stopProp is shared by the toolbar/pane/host/folder button handlers
+            // below (the dom-mousedown raise + min/close are wired by wireAppChrome).
             const stopProp = (e) => e.stopPropagation();
-            const onMouseDown = () => bringToFront(id);
-            dom.addEventListener('mousedown', onMouseDown);
-            win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
             // ---- pane state + rendering ----
             // The active pane (left/right) gets the .active outline; clicking a
@@ -735,35 +695,10 @@
                 renderPane(activeSide);
             });
 
-            // Title: minimize / close. Issue #11: × discards the file manager
-            // (the Closed list keeps only non-empty sticky notes); its nav state
-            // is not retained.
-            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
-            const onCloseClick = (e) => { e.stopPropagation(); closeWindow(id); };
-            minBtn.addEventListener('mousedown', stopProp);
-            minBtn.addEventListener('click', onMinClick);
-            closeBtn.addEventListener('mousedown', stopProp);
-            closeBtn.addEventListener('click', onCloseClick);
-            win.cleanups.push(() => {
-                minBtn.removeEventListener('mousedown', stopProp);
-                minBtn.removeEventListener('click', onMinClick);
-                closeBtn.removeEventListener('mousedown', stopProp);
-                closeBtn.removeEventListener('click', onCloseClick);
-            });
-
-            wireDrag(win, titleBar);
-            const onTitleCtx = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                bringToFront(win.id);
-                buildWindowMenu(win, e.clientX, e.clientY);
-            };
-            titleBar.addEventListener('contextmenu', onTitleCtx);
-            win.cleanups.push(() =>
-                titleBar.removeEventListener('contextmenu', onTitleCtx));
-            for (const handle of dom.querySelectorAll('.rh')) {
-                wireResize(win, handle, handle.dataset.dir);
-            }
+            // Raise / minimize / close / drag / 8-way resize / WM context menu.
+            // Issue #11: × discards the file manager (the Closed list keeps only
+            // non-empty sticky notes); its nav state is not retained.
+            wireAppChrome(win, chrome);
 
             // Manual taskbar item (app windows are never poll-managed), same as
             // openAppWindow: synthetic session keeps formatTitle happy +
