@@ -561,3 +561,38 @@ def test_unzip_traversal_member_stays_in_dest(tmp_path, monkeypatch):
     assert not (tmp_path / "escape.txt").exists()    # did NOT escape
     assert (tmp_path / "out" / "escape.txt").read_text(
         encoding="utf-8") == "pwned"
+
+
+# --------------------------------------------------------------------------- #
+# /file/stat (#72)
+# --------------------------------------------------------------------------- #
+
+def test_stat_file(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert r.json["type"] == "file"
+    assert r.json["size"] == 5
+    assert isinstance(r.json["mtime"], (int, float))
+    assert isinstance(r.json["mode"], int)
+    assert "children" not in r.json
+
+
+def test_stat_dir_has_child_count(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "a").write_text("a", encoding="utf-8")
+    (d / "b").write_text("b", encoding="utf-8")
+    (d / "sub").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/stat", json={"path": "d"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert r.json["type"] == "dir"
+    assert r.json["children"] == 3
+
+
+def test_stat_missing_404(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/stat", json={"path": "nope"})
+    assert r.status == 404 and r.json["error"] == "not_found"

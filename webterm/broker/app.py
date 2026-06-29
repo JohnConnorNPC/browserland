@@ -1499,6 +1499,44 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({"ok": True, "path": dest_str})
 
+    async def _file_stat(request: Request):
+        # Properties (#72): type/size/mtime/mode for one path, plus a shallow
+        # child count for a directory. Read-only and chosen over extending
+        # /file/list (which only describes a dir's CHILDREN and is the hot path
+        # behind openFileDialog/renderPane). mtime is epoch seconds; mode is the
+        # raw st_mode int (the UI formats both).
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        try:
+            st = p.stat()
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        out = {"ok": True, "path": str(p), "type": kind,
+               "size": st.st_size, "mtime": st.st_mtime, "mode": st.st_mode}
+        if kind == "dir":
+            try:
+                out["children"] = sum(1 for _ in p.iterdir())
+            except OSError:
+                pass                               # unreadable dir — omit count
+        return sanic_json(out)
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -2081,6 +2119,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_move, "/file/move", methods=["POST"])
     app.add_route(_file_zip, "/file/zip", methods=["POST"])
     app.add_route(_file_unzip, "/file/unzip", methods=["POST"])
+    app.add_route(_file_stat, "/file/stat", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -2114,6 +2153,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/move", "preflight_file_move"),
                              ("/file/zip", "preflight_file_zip"),
                              ("/file/unzip", "preflight_file_unzip"),
+                             ("/file/stat", "preflight_file_stat"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
