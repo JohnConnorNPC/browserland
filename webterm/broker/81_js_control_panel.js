@@ -360,7 +360,7 @@
             }
             setPatternEl.value = ls.pattern;
             setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
-            setClockEl.checked = !!ls.clock;
+            renderModSettingsToggles(t.isLocal);   // #71: reflect mod toggles (clock, …)
             setHelpButtonEl.checked = !!ls.showHelpButton;   // #40 (browser-global)
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
             // Default start path is PER-HOST (#17): read the target host's own
@@ -674,11 +674,9 @@
             savePrefs();
             applyTerminalFont();
         });
-        setClockEl.addEventListener('change', () => {
-            getSettings().clock = !!setClockEl.checked;
-            savePrefs();
-            applyClock(setClockEl.checked);
-        });
+        // #71: the clock toggle's change handler now lives in the clock mod
+        // (ctx.settings.boolean wires the #set-mods checkbox to savePrefs +
+        // re-apply). Core only reflects it on render (renderModSettingsToggles).
         setHelpButtonEl.addEventListener('change', () => {   // #40
             getSettings().showHelpButton = !!setHelpButtonEl.checked;
             savePrefs();

@@ -25,7 +25,8 @@
         // modal stays in sync with applyThemeSettings() at boot / on /state pull.
         const setThemeEl = document.getElementById('set-theme');
         const setPatternEl = document.getElementById('set-pattern');
-        const setClockEl = document.getElementById('set-clock');
+        // #71: the clock's "Show date & time" checkbox is no longer a fixed core
+        // control — the clock mod mounts it into #set-mods via ctx.settings.
         const setHelpButtonEl = document.getElementById('set-help-button');   // #40
         const setStartLabelEl = document.getElementById('set-start-label');
         const setStartPathEl = document.getElementById('set-start-path');

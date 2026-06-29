@@ -89,9 +89,29 @@ _ORDERED = [
     "83_js_broker_identity.js",
     "84_js_active_view_lifecycle.js",
     "85_js_startup.js",
+    # Frontend mod loader (#71): defines registerMod/loadMods/ctx. Ordered after
+    # all core JS so a mod's init(ctx) sees the finished desktop, but BEFORE the
+    # in-repo mod scripts (which call registerMod) and the boot fragment.
+    "86_js_mod_loader.js",
+    # Single `loadMods();` -- ordered LAST among the JS so every mod has been
+    # registered (the mod scripts run between the loader and this).
+    "90_js_mod_boot.js",
     # </script> </body> </html>  (trailing newline preserved)
     "99_tail.html",
 ]
+
+# In-repo mod scripts (#71), concatenated into the one <script> BETWEEN the
+# loader (86) and the boot fragment (90). Each calls registerMod({id, ...});
+# loadMods() (90) then inits them. Like _ORDERED this is an explicit list (not a
+# glob) so a stray file in mods/ can never be swept into the served page, and a
+# forgotten mod script trips the drift guard in tests/test_ui_assets.py.
+_MODS = [
+    "mods/clock/clock.js",   # F057 clock, extracted as the reference mod
+]
+
+# The fragment the mod scripts are spliced in front of -- loadMods() must run
+# after every registerMod() call, so the splice point is the boot fragment.
+_MOD_SPLICE_BEFORE = "90_js_mod_boot.js"
 
 
 def _read(name: str) -> str:
@@ -101,5 +121,18 @@ def _read(name: str) -> str:
     return (_DIR / name).read_text(encoding="utf-8")
 
 
-# Empty-string join: every fragment already ends in its own newline.
-INDEX_HTML = "".join(_read(_name) for _name in _ORDERED)
+def assemble() -> str:
+    """Three-segment empty-string join: core fragments up to the boot splice
+    point, then the in-repo mod scripts, then the boot fragment + tail. Every
+    piece already ends in its own newline, so the empty join preserves byte
+    layout (a ``"\\n".join`` would inject a double newline at every seam)."""
+    cut = _ORDERED.index(_MOD_SPLICE_BEFORE)
+    pre, post = _ORDERED[:cut], _ORDERED[cut:]
+    return (
+        "".join(_read(_name) for _name in pre)
+        + "".join(_read(_name) for _name in _MODS)
+        + "".join(_read(_name) for _name in post)
+    )
+
+
+INDEX_HTML = assemble()

@@ -31,9 +31,14 @@
         // Learn THIS broker's id same-origin on boot, so it can anchor the
         // duplicate check (a remote record whose URL points back at this same
         // broker is then flagged dup-of-local). Lease-independent, best-effort.
+        // Shares the memoized localInfo() (86_js_mod_loader.js) with the mod
+        // loader's mods_enabled gate, so same-origin /info is fetched ONCE.
         async function learnLocalBrokerId() {
-            const id = await probeBrokerId(
-                localHost().url, localHost().token);
+            let id = null;
+            try {
+                const info = await localInfo();
+                if (info && typeof info.broker_id === 'string') id = info.broker_id;
+            } catch (_) {}
             if (id && localHost().brokerId !== id) {
                 localHost().brokerId = id;
                 savePrefsLocal();        // browser-local only — never PUT /state

@@ -81,11 +81,23 @@ def test_fragment_counts():
 
 
 def test_no_multi_thousand_line_fragment():
-    # The whole point of #68: no fragment is a giant script again.
+    # The whole point of #68: no fragment is a giant script again. Mod scripts
+    # (#71) ride the same cap.
     cap = 2500
-    for name in ui._ORDERED:
+    for name in (*ui._ORDERED, *ui._MODS):
         lines = (BROKER_DIR / name).read_text(encoding="utf-8").count("\n")
         assert lines <= cap, f"{name} has {lines} lines (> {cap}); split it further"
+
+
+def test_every_fragment_ends_in_newline_and_has_no_bom():
+    # The empty-string join (#68) relies on each piece ending in its own \n; a
+    # missing trailing newline fuses two statements/rules across a seam, and a
+    # UTF-8 BOM mid-stream injects U+FEFF into the served bytes. Covers the mod
+    # scripts (#71) too, since they splice into the same one <script>.
+    for name in (*ui._ORDERED, *ui._MODS):
+        raw = (BROKER_DIR / name).read_text(encoding="utf-8")
+        assert raw.endswith("\n"), f"{name} must end in a newline"
+        assert "﻿" not in raw, f"{name} carries a UTF-8 BOM"
 
 
 # --------------------------------------------------------------------------- #
@@ -96,16 +108,97 @@ def test_ordered_list_matches_disk_exactly():
     # Every fragment ui.py expects exists, and nothing else (no stray .bak /
     # Zone.Identifier / forgotten file) lives alongside them. Mismatch here is
     # exactly the failure mode the explicit _ORDERED list exists to prevent.
+    # p.is_file() hardening (#71): the mods/ subdir is a directory, not a stray
+    # fragment, so it must never count as "extra".
     ordered = set(ui._ORDERED)
     on_disk = {p.name for p in BROKER_DIR.iterdir()
-               if p.suffix in (".html", ".css", ".js")}
+               if p.is_file() and p.suffix in (".html", ".css", ".js")}
     missing = ordered - on_disk
     extra = on_disk - ordered
     assert not missing, f"fragments in _ORDERED but missing on disk: {sorted(missing)}"
     assert not extra, f"fragment-typed files on disk not in _ORDERED: {sorted(extra)}"
 
 
-def test_assembled_equals_join_of_fragments():
-    rebuilt = "".join((BROKER_DIR / name).read_text(encoding="utf-8")
-                      for name in ui._ORDERED)
+def test_assembled_equals_three_segment_join():
+    # #71 splices the in-repo mod scripts (ui._MODS) into the one <script>
+    # BETWEEN the loader and the boot fragment, so the served page is a 3-segment
+    # join, not a flat join of _ORDERED. Rebuild it the same way ui.assemble does
+    # and assert byte-equality with what gets served.
+    cut = ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
+    pre, post = ui._ORDERED[:cut], ui._ORDERED[cut:]
+    rebuilt = (
+        "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in pre)
+        + "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in ui._MODS)
+        + "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in post)
+    )
     assert rebuilt == INDEX_HTML
+
+
+# --------------------------------------------------------------------------- #
+# mod system (#71)
+# --------------------------------------------------------------------------- #
+
+def test_mod_loader_fragments_present_and_ordered():
+    # The loader defines registerMod; the boot fragment runs loadMods() last.
+    for frag in ("86_js_mod_loader.js", "90_js_mod_boot.js"):
+        assert frag in ui._ORDERED, f"{frag} must be wired into _ORDERED"
+    # loadMods() must be ordered after the loader so it's defined; the splice
+    # point guarantees the mod scripts (registerMod) run before it.
+    assert ui._ORDERED.index("86_js_mod_loader.js") \
+        < ui._ORDERED.index("90_js_mod_boot.js")
+    assert ui._MOD_SPLICE_BEFORE == "90_js_mod_boot.js"
+
+
+def test_mod_scripts_exist_on_disk_and_match_mods_dir():
+    # _MODS drift guard: the declared mod scripts exist, and every *.js under
+    # mods/ is declared (no orphan mod script silently absent from the page).
+    for rel in ui._MODS:
+        assert (BROKER_DIR / rel).is_file(), f"declared mod missing on disk: {rel}"
+    on_disk = {p.relative_to(BROKER_DIR).as_posix()
+               for p in (BROKER_DIR / "mods").rglob("*.js")}
+    declared = set(ui._MODS)
+    assert on_disk == declared, (
+        f"mods/ *.js drift: declared={sorted(declared)} on_disk={sorted(on_disk)}")
+
+
+def test_clock_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "clock"
+    js = mod_dir / "clock.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "clock"
+    assert meta["ctxVersion"] == 1
+    # The script registers the same id/ctxVersion the manifest declares.
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'clock'" in src
+    assert "ctxVersion: 1" in src
+
+
+def test_set_mods_mount_and_loader_api_present():
+    # The Control Panel mount point for mod-contributed settings, plus the public
+    # loader API the mods + tests depend on, are in the served page.
+    assert 'id="set-mods"' in INDEX_HTML
+    for sym in ("function registerMod", "function loadMods",
+                "function notifyModSettings", "function localInfo",
+                "renderModSettingsToggles", "window.__mods"):
+        assert sym in INDEX_HTML, f"missing loader symbol: {sym!r}"
+
+
+def test_clock_symbols_removed_from_core_fragments():
+    # The clock is now a mod: its core renderer/handlers/markup are gone. Scope
+    # the check to the CORE fragments it was extracted from (the mod script
+    # legitimately still names clock-chip / the `clock` key).
+    core = {
+        "65_js_display_theming.js": ("applyClock", "_renderClock", "_clockTimer"),
+        "40_body.html": ('id="clock-chip"', 'id="set-clock"'),
+        "11_css_apps.css": ("#clock-chip",),
+        "79_js_settings_modal.js": ("setClockEl",),
+        "81_js_control_panel.js": ("setClockEl",),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"

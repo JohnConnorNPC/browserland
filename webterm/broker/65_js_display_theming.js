@@ -103,33 +103,10 @@
         }
 
         // ---- live clock (bottom-right of the taskbar) ----------------------
-        // Single guarded interval; default off. applyClock(true) shows the chip
-        // and starts the tick, applyClock(false) hides + stops it.
-        let _clockTimer = null;
-        function _renderClock() {
-            try {
-                const el = document.getElementById('clock-chip');
-                if (!el) return;
-                const d = new Date();
-                el.textContent = d.toLocaleDateString() + '  '
-                    + d.toLocaleTimeString();
-            } catch (_) {}
-        }
-        function applyClock(on) {
-            try {
-                const el = document.getElementById('clock-chip');
-                if (!el) return;
-                if (on) {
-                    el.classList.add('on');
-                    _renderClock();
-                    if (!_clockTimer) _clockTimer = setInterval(_renderClock, 1000);
-                } else {
-                    el.classList.remove('on');
-                    if (_clockTimer) { clearInterval(_clockTimer); _clockTimer = null; }
-                    el.textContent = '';
-                }
-            } catch (_) {}
-        }
+        // EXTRACTED to a mod (#71): the clock is now mods/clock/clock.js, which
+        // owns the chip, the 1s interval, and the synced `clock` setting through
+        // ctx.settings.boolean. Core no longer renders it; convergence reaches
+        // the mod via notifyModSettings() at the end of applyThemeSettings.
 
         // ---- #40 help chip visibility --------------------------------------
         // The taskbar "?" chip; same show/hide-on-an-`.on`-class pattern as the
@@ -164,10 +141,13 @@
                 const s = getSettings();
                 applyTheme(s.theme);
                 applyPattern(s.pattern);    // after theme: reads the live vars
-                applyClock(s.clock);
                 applyHelpButton(s.showHelpButton);   // #40
                 applyStartButton();
                 applyTerminalFont();        // #18: configurable terminal font
+                // #71: fire mod-owned settings (the clock, etc.) LAST so every
+                // /state pull converges them too. No-op until loadMods() runs and
+                // before any toggle registers (guarded inside).
+                notifyModSettings();
             } catch (_) {}
         }
 

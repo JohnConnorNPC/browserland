@@ -336,21 +336,6 @@
         }
         .term-window.app-tm .tm-kill:hover { background: #5a2323; border-color: #c66; color: #fff; }
 
-        /* Live clock chip on the taskbar (bottom-right). Hidden by default;
-           applyClock(true) flips it visible. */
-        #clock-chip {
-            display: none;
-            flex: 0 0 auto;
-            font-family: monospace;
-            font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 3px;
-            border: 1px solid var(--bg-3);
-            background: var(--bg);
-            color: var(--fg-dim);
-            user-select: none;
-            white-space: nowrap;
-            margin-left: 2px;
-        }
-        #clock-chip.on { display: inline-flex; align-items: center; }
+        /* The taskbar clock chip moved to mods/clock/clock.js (#71); it styles
+           itself with inline styles referencing the same theme vars. */
 

@@ -37,7 +37,10 @@ include = ["webterm*"]
 # packaged fallback for the in-app Help guide when wiki/ isn't shipped
 # alongside the code (issue #60). Same flat-dir glob that already shipped the
 # old single index.html -- ui.py's explicit _ORDERED list picks the fragments.
-"webterm.broker" = ["*.html", "*.json", "*.css", "*.js"]
+# mods/*/* ships the in-repo frontend mods (#71): ui.py's _MODS splices their
+# scripts into INDEX_HTML, so the wheel must carry the nested mod files too.
+"webterm.broker" = ["*.html", "*.json", "*.css", "*.js",
+                    "mods/*/*.js", "mods/*/*.css", "mods/*/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
