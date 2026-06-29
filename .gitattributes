@@ -3,3 +3,12 @@
 # (byte-equality vs a fresh parse of wiki/) holds on every platform regardless
 # of core.autocrlf. Never hand-edit it; run `python -m webterm.broker.help_corpus`.
 webterm/broker/help_corpus.json text eol=lf
+
+# Issue #68: the desktop UI ships as ordered fragments (NN_*.html / *.css /
+# *.js) that ui.py reassembles into a BYTE-IDENTICAL INDEX_HTML. Pin them to LF
+# (like help_corpus.json above) so the on-disk form is deterministic across
+# platforms regardless of core.autocrlf, and the assembled bytes never depend
+# on checkout settings. The numeric-prefix glob matches the fragments only.
+webterm/broker/[0-9][0-9]_*.html text eol=lf
+webterm/broker/*.css text eol=lf
+webterm/broker/*.js text eol=lf

@@ -1,0 +1,84 @@
+        // ---- hosts ----------------------------------------------------------
+        // prefs._hosts = [{id, label, url, token}], reserved key like
+        // _settings. Entry 0 is always the implicit local host (id 'local',
+        // url '' = same-origin) — non-removable, its token slot replaces the
+        // old ?token= URL persistence. Remote ids are random strings minted
+        // at add time and stable across URL edits, so host-qualified
+        // per-session prefs survive. Self-heals like getSettings(): a
+        // hand-edited blob can never break startup.
+        function getHosts() {
+            const raw = Array.isArray(prefs._hosts) ? prefs._hosts : [];
+            const clean = [];
+            let local = null;
+            for (const h of raw) {
+                if (!h || typeof h !== 'object' || Array.isArray(h)) continue;
+                if (h.id === 'local') { if (!local) local = h; continue; }
+                if (typeof h.id !== 'string' || !h.id) continue;
+                if (typeof h.url !== 'string' || !h.url) continue;
+                if (typeof h.label !== 'string' || !h.label) h.label = h.url;
+                if (typeof h.token !== 'string') h.token = '';
+                if (typeof h.hidden !== 'boolean') h.hidden = false;
+                clean.push(h);
+            }
+            if (!local) local = { id: 'local' };
+            local.label = 'this broker';
+            local.url = '';
+            if (typeof local.token !== 'string') local.token = '';
+            if (typeof local.hidden !== 'boolean') local.hidden = false;
+            clean.unshift(local);
+            prefs._hosts = clean;
+            return clean;
+        }
+        function allHosts() { return getHosts(); }
+        function localHost() { return getHosts()[0]; }
+        function hostById(id) {
+            for (const h of getHosts()) { if (h.id === id) return h; }
+            return null;
+        }
+
+        // ---- per-broker hide toggle ("focus mode") ------------------------
+        // Each host carries a persisted `hidden` flag (see getHosts). Hiding
+        // is a pure display mask: the .broker-hidden class (display:none) is
+        // applied to that broker's .term-window and .taskbar-item nodes; the
+        // xterm + WebSocket stay alive so toggling back is instant. The
+        // bringToFront() guard keeps focus off hidden windows everywhere.
+        function hostHidden(id) {
+            const h = hostById(id);
+            // Display-masked when the user hid this broker (focus mode) OR when
+            // another browser holds its single-active lease (leaseInactive) —
+            // either way its windows + chips go display:none. The HOME host is
+            // never leaseInactive (its lease drives the whole page, not a mask).
+            return !!(h && h.hidden) || !!pollStateFor(id).leaseInactive;
+        }
+        // Idempotent reconciler — called on toggle AND every poll tick (so a
+        // window/taskbar item that appears later under a hidden broker gets
+        // masked). The per-node early-out (class already matches) is what
+        // makes the per-tick call cheap and avoids focus/relayout churn.
+        function applyHostVisibilityAll() {
+            let changedTiled = false;
+            for (const win of windows.values()) {
+                if (win.disposed) continue;
+                const hide = hostHidden(win.hostId);
+                if (win.dom.classList.contains('broker-hidden') === hide) continue;
+                win.dom.classList.toggle('broker-hidden', hide);
+                if (hide && frontId === win.id) frontId = null;
+                if (win.tiled) changedTiled = true;
+            }
+            document.querySelectorAll('.taskbar-item').forEach(el => {
+                const key = el.dataset.sessionId || '';
+                const ci = key.indexOf(':');
+                const hid = ci !== -1 ? key.slice(0, ci) : 'local';
+                el.classList.toggle('broker-hidden', hostHidden(hid));
+            });
+            if (changedTiled) requestRelayout();
+        }
+        function toggleHostHidden(id) {
+            const h = hostById(id);
+            if (!h) return;
+            h.hidden = !h.hidden;
+            savePrefs();
+            applyHostVisibilityAll();
+            updateTaskbarActive();
+            renderHostStatus();
+        }
+

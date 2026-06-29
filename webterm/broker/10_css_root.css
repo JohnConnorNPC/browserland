@@ -1,0 +1,455 @@
+        :root {
+            --bg: #1e1e1e;
+            --bg-2: #2a2a2a;
+            --bg-3: #3a3a3a;
+            --fg: #ddd;
+            --fg-dim: #888;
+            --accent-default: #4aa3ff;
+            --taskbar-h: 40px;
+            --title-h: 26px;
+            --handle-thick: 6px;
+            --corner-size: 12px;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: var(--bg);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        body { display: flex; flex-direction: column; }
+        #desktop {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+        #desktop.empty::before {
+            content: 'click + to launch a terminal, or a taskbar entry to open one';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: var(--fg-dim);
+            font-style: italic;
+            pointer-events: none;
+        }
+        #taskbar {
+            display: flex;
+            align-items: center;
+            height: var(--taskbar-h);
+            background: var(--bg-2);
+            border-top: 1px solid #000;
+            padding: 0 8px;
+            box-sizing: border-box;
+            gap: 6px;
+            overflow: hidden;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        /* min-width: 0 defeats the implicit min-width:auto flex floor so
+           the item strip can actually shrink below its content width. */
+        #taskbar-items {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+        }
+        /* Per-host status chips. renderHostStatus() draws one chip per broker,
+           always (even a single healthy local), so the per-broker hide toggle is
+           always reachable. The :empty rule below mainly matters before the first
+           render — there's always at least the local host, so the bar isn't empty
+           once chips exist. */
+        #host-status {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        #host-status:empty { display: none; }
+        /* Always-visible virtual-desktop pager (bottom-right of the taskbar,
+           left of the host chips). Shows in both floating and tiling mode.
+           Reuses .ws-dot. */
+        #ws-pager {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .host-chip {
+            font-family: monospace;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            border: 1px solid var(--bg-3);
+            background: var(--bg);
+            color: var(--fg-dim);
+            user-select: none;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+        .host-chip:hover { background: #262626; }
+        .host-chip.ok { border-color: #3a6a4a; color: #5fbf7f; }
+        .host-chip.down { border-color: #a66; color: #e96d6d; }
+        .host-chip.auth { border-color: #a8842c; color: #e0a93a; }
+        /* "lease" = reachable, but ANOTHER browser is the active one on this
+           remote broker; click to take over. Its windows are masked. */
+        .host-chip.lease { border-color: #3a5a8a; color: #6fa3e0; }
+        /* "off" = this broker's windows are toggled hidden (focus mode). */
+        .host-chip.off { opacity: 0.45; text-decoration: line-through; }
+        /* Display mask for hidden brokers — xterm + WebSocket stay alive. */
+        .term-window.broker-hidden { display: none; }
+        .taskbar-item.broker-hidden { display: none; }
+        #btn-launch, #btn-fullscreen {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            background: var(--bg);
+            border: 1px solid var(--bg-3);
+            border-radius: 3px;
+            color: var(--fg);
+            font-family: monospace;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            user-select: none;
+            padding: 0;
+            flex-shrink: 0;
+        }
+        #btn-launch:hover, #btn-fullscreen:hover { background: #262626; border-color: #6a8; }
+        #btn-launch:active, #btn-fullscreen:active { background: #1a1a1a; }
+        /* ⛶ glyph is wider than +, so shrink it to fit the 28×28 box. */
+        #btn-fullscreen { font-size: 15px; }
+        /* Fullscreen-ON highlight, mirroring the .active accent pattern. */
+        #btn-fullscreen.active { border-color: var(--accent-default); color: var(--accent-default); }
+        #taskbar-empty {
+            color: var(--fg-dim);
+            font-style: italic;
+            font-size: 13px;
+            padding: 0 6px;
+            flex: 0 0 auto;
+        }
+        /* Windows-taskbar style shrink-to-fit: every item gets an equal
+           share (flex-basis 0), capped at 280px when there are few. Below
+           ~110px the id chip auto-hides (container query); below the 56px
+           floor the rightmost items clip — accepted degenerate case, no
+           scrollbar. */
+        .taskbar-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--bg);
+            border: 1px solid var(--bg-3);
+            border-left: 4px solid var(--accent, var(--accent-default));
+            border-radius: 3px;
+            padding: 4px 10px;
+            font-family: monospace;
+            font-size: 13px;
+            color: var(--fg);
+            cursor: pointer;
+            user-select: none;
+            flex: 1 1 0;
+            min-width: 56px;
+            max-width: 280px;
+            box-sizing: border-box;
+            container-type: inline-size;
+            overflow: hidden;
+        }
+        .taskbar-item:hover { background: #262626; }
+        .taskbar-item.active {
+            background: var(--bg-3);   /* fallback if color-mix unsupported */
+            background: color-mix(in srgb, var(--accent, var(--accent-default)) 22%, var(--bg));
+            border-color: var(--accent, var(--accent-default));
+        }
+        .taskbar-item.minimized { opacity: 0.65; }
+        .taskbar-item.stale { opacity: 0.45; border-left-style: dashed; }
+        .taskbar-item .ti-id { color: var(--fg-dim); flex: 0 0 auto; }
+        @container (max-width: 110px) {
+            .taskbar-item .ti-id { display: none; }
+        }
+        .taskbar-item .ti-title {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        body.hide-ids .ti-id,
+        body.hide-ids .ti-id-badge { display: none; }
+
+        .term-window {
+            position: absolute;
+            background: #000;
+            border: 2px solid var(--accent, var(--accent-default));
+            border-radius: 4px;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+            display: flex;
+            flex-direction: column;
+            min-width: 280px;
+            min-height: 160px;
+            overflow: hidden;
+            transition: transform 120ms ease, box-shadow 160ms ease, opacity 120ms ease;
+        }
+        .term-window.minimized { display: none; }
+        .term-window.swap-target {
+            box-shadow:
+                0 0 0 4px var(--accent, var(--accent-default)),
+                0 0 28px 8px var(--accent, var(--accent-default)),
+                0 6px 24px rgba(0,0,0,0.6);
+            transform: scale(1.03);
+            z-index: 9998 !important;
+        }
+        .term-window.swap-source {
+            opacity: 0.65;
+        }
+        .term-window .title-bar {
+            display: flex;
+            align-items: center;
+            position: relative;   /* anchor for the git status popover */
+            height: var(--title-h);
+            background: var(--accent, var(--accent-default));
+            color: #000;
+            padding: 0 6px;
+            cursor: move;
+            user-select: none;
+            font-family: monospace;
+            font-size: 12px;
+            font-weight: bold;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .term-window .ti-id-badge { opacity: 0.7; }
+        .term-window .title-text {
+            flex: 1;
+            padding: 2px 4px;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            pointer-events: none;
+        }
+        /* App windows make the title text interactive so its double-click rename
+           handler fires (terminals keep pointer-events:none — they rename via
+           OSC titles, not inline). Mousedown still bubbles to start a drag when
+           not editing; the JS stops it only while contentEditable is on. When
+           editing, show a caret + let text be selected. */
+        .term-window.app-window .title-text { pointer-events: auto; }
+        .term-window.app-window .title-text[contenteditable="true"] {
+            cursor: text; text-overflow: clip; overflow: visible;
+            background: rgba(0,0,0,0.25); border-radius: 2px; outline: none;
+        }
+        /* Unified window-color control (issue 5): one picker for every window
+           type — a colored button (a bordered dot of the current accent, kept
+           visible even when the title bar is that same color) that opens a
+           dropdown of preset swatches. Replaces both the native
+           <input type=color> (terminals) and the inline swatch row (notes). */
+        .term-window .color-btn { padding: 0; }
+        .term-window .color-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--accent, var(--accent-default));
+            border: 1px solid rgba(0,0,0,0.55);
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.55);
+            box-sizing: border-box;
+        }
+        .term-window .swatch-popover {
+            position: absolute;
+            z-index: 50;
+            display: grid;
+            grid-template-columns: repeat(4, 20px);
+            gap: 5px;
+            box-sizing: border-box;
+            padding: 7px;
+            background: var(--bg-2, #2a2a2a);
+            border: 1px solid var(--bg-3, #555);
+            border-radius: 4px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .term-window .swatch-cell {
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border-radius: 50%;
+            border: 1px solid rgba(0,0,0,0.45);
+            box-sizing: border-box;
+            cursor: pointer;
+        }
+        .term-window .swatch-cell:hover { transform: scale(1.12); }
+        .term-window .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
+        /* Custom-color cell (#29): a 12th slot that opens a native color input.
+           An eyedropper icon on a neutral fill sets it apart from the round
+           preset swatches. */
+        .term-window .swatch-cell.custom {
+            display: flex; align-items: center; justify-content: center;
+            background: var(--bg-3, #555); color: #fff;
+        }
+        .term-window .swatch-cell.custom svg {
+            width: 12px; height: 12px; display: block;
+        }
+        /* Recents row (#29): the last-used colors, separated from the presets by
+           a full-width divider spanning all four grid columns. */
+        .term-window .swatch-divider {
+            grid-column: 1 / -1;
+            height: 1px;
+            margin: 1px 0;
+            background: var(--bg-3, #555);
+        }
+        /* MCP access control (#20): a robot button by the color swatch whose
+           dropdown sets this terminal's per-window MCP mode. It lights up (the
+           shared .tb-btn.on accent) when access is read/readwrite and dims when
+           off, so a window's MCP exposure is visible at a glance. */
+        .term-window .mcp-btn svg { width: 13px; height: 13px; display: block; }
+        .term-window .mcp-btn.mcp-off { opacity: 0.5; }
+        /* #33: transient MCP-activity pulse on the robot icon. Read = cool, soft,
+           slow glow (passive observation); write = warm, sharp, fast brightness
+           hit (active mutation) — unmistakable at a glance. Both animate only
+           box-shadow / filter so they ride on top of the .on (lit) and .mcp-off
+           (dimmed) states instead of fighting their background/opacity. */
+        @keyframes mcpReadPulse {
+            /* outer glow + an INSET half: the title bar's overflow:hidden clips
+               the top of an outward-only glow (the button has ~4px clearance),
+               so the inset keeps the read cue robust by painting in-bounds. */
+            0%   { box-shadow: 0 0 0 0 rgba(74,163,255,0), inset 0 0 0 0 rgba(74,163,255,0); }
+            40%  { box-shadow: 0 0 7px 2px rgba(74,163,255,0.80), inset 0 0 4px rgba(74,163,255,0.60); }
+            100% { box-shadow: 0 0 0 0 rgba(74,163,255,0), inset 0 0 0 0 rgba(74,163,255,0); }
+        }
+        @keyframes mcpWriteFlash {
+            0%   { box-shadow: 0 0 0 0 rgba(224,155,58,0); filter: brightness(1); }
+            18%  { box-shadow: 0 0 9px 3px rgba(224,155,58,0.95); filter: brightness(1.6); }
+            100% { box-shadow: 0 0 0 0 rgba(224,155,58,0); filter: brightness(1); }
+        }
+        .term-window .mcp-btn.mcp-flash-read  { animation: mcpReadPulse 280ms ease-in-out; }
+        .term-window .mcp-btn.mcp-flash-write { animation: mcpWriteFlash 200ms ease-out; }
+        @media (prefers-reduced-motion: reduce) {
+            .term-window .mcp-btn.mcp-flash-read,
+            .term-window .mcp-btn.mcp-flash-write { animation: none; }
+        }
+        .term-window .mcp-popover {
+            position: absolute;
+            z-index: 50;
+            min-width: 118px;
+            box-sizing: border-box;
+            padding: 4px;
+            background: var(--bg-2, #2a2a2a);
+            border: 1px solid var(--bg-3, #555);
+            border-radius: 4px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }
+        .term-window .mcp-popover .mcp-head {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+            color: #999; padding: 3px 8px 4px;
+        }
+        .term-window .mcp-popover .mcp-opt {
+            display: block; width: 100%; text-align: left;
+            padding: 5px 8px; border: 0; border-radius: 3px;
+            background: transparent; color: #ddd;
+            font-family: inherit; font-size: 12px; cursor: pointer;
+            white-space: nowrap;
+        }
+        .term-window .mcp-popover .mcp-opt:hover { background: rgba(255,255,255,0.12); }
+        .term-window .mcp-popover .mcp-opt.sel { color: var(--accent-default); font-weight: 600; }
+        .term-window .tb-btn {
+            width: 22px;
+            height: 18px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.15);
+            border: 1px solid rgba(0,0,0,0.4);
+            color: #000;
+            font-family: monospace;
+            font-size: 14px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0;
+        }
+        .term-window .tb-btn:hover { background: rgba(0,0,0,0.3); }
+        /* Active toggle (e.g. a sticky note's word-wrap button, #19) — a clear
+           accent that reads on both light and dark title bars. */
+        .term-window .tb-btn.on,
+        .term-window.dark-accent .tb-btn.on {
+            background: #2f5d7d; border-color: #4aa3ff; color: #fff;
+        }
+        /* Dark accents flip the title-bar foreground to white so the title,
+           id badge, and min/close buttons stay readable. */
+        .term-window.dark-accent .title-bar { color: #fff; }
+        .term-window.dark-accent .tb-btn {
+            color: #fff;
+            background: rgba(255,255,255,0.15);
+            border-color: rgba(255,255,255,0.5);
+        }
+        .term-window.dark-accent .tb-btn:hover { background: rgba(255,255,255,0.32); }
+        .term-window.dark-accent .color-dot {
+            border-color: rgba(255,255,255,0.7);
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.45);
+        }
+        /* Git status (task 6): muted button when not-a-repo / unknown; the
+           branch label rides to its right, turning amber when dirty. */
+        .term-window .btn-git.muted { opacity: 0.4; }
+        .term-window .git-label {
+            font-size: 10px;
+            margin: 0 2px 0 1px;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+        }
+        .term-window .git-label.git-dirty { color: #d98a00; font-weight: bold; }
+        .term-window.dark-accent .git-label.git-dirty { color: #ffc04d; }
+        /* Git status popover: a small absolutely-positioned card anchored under
+           the git button inside the (relative) title bar. */
+        .term-window .git-popover {
+            position: absolute;
+            z-index: 50;
+            min-width: 150px;
+            background: var(--bg-2, #2a2a2a);
+            color: var(--fg, #eee);
+            border: 1px solid var(--bg-3, #555);
+            box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+            padding: 6px 8px;
+            font-size: 11px;
+            font-family: Consolas, monospace;
+            cursor: default;
+        }
+        .term-window .git-pop-head {
+            font-weight: bold;
+            margin-bottom: 4px;
+            white-space: nowrap;
+        }
+        .term-window .git-pop-row { line-height: 1.5; white-space: nowrap; }
+        .term-window .git-pop-row.git-dirty { color: #d98a00; }
+        .term-window .git-pop-row.git-bad { color: #e05050; }
+        .term-window .git-pop-foot {
+            margin-top: 5px;
+            display: flex;
+            justify-content: flex-end;
+        }
+        .term-window .term-body {
+            flex: 1;
+            min-height: 0;
+            background: #000;
+            padding: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        .term-window .term-body .xterm-viewport,
+        .term-window .term-body .xterm-viewport::-webkit-scrollbar {
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+            overflow: hidden !important;
+        }
+        .term-window .term-body .xterm-viewport::-webkit-scrollbar {
+            width: 0 !important;
+            height: 0 !important;
+            display: none;
+        }
+

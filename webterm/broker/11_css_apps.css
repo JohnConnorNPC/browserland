@@ -1,0 +1,356 @@
+        /* ---- client-only app windows (sticky note / text editor) ---- */
+        .term-window.app-window .app-textarea {
+            flex: 1;
+            min-height: 0;
+            width: 100%;
+            box-sizing: border-box;
+            border: 0;
+            outline: none;
+            resize: none;
+            margin: 0;
+            padding: 8px 10px;
+            font-size: 13px;
+            line-height: 1.45;
+            background: #fbfbf5;
+            color: #1a1a1a;
+            overflow: auto;
+        }
+        .term-window.app-note .app-textarea {
+            /* Paper is driven by the chosen swatch (--note-paper/--note-fg),
+               falling back to the classic yellow for an un-themed note. */
+            background: var(--note-paper, #fff7ae);
+            color: var(--note-fg, #3a3000);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+        .term-window.app-editor .app-textarea {
+            background: #1e1e1e;
+            color: #e6e6e6;
+            caret-color: #e6e6e6;
+            font-family: Consolas, 'Liberation Mono', monospace;
+            white-space: pre;            /* no-wrap default; .wrap flips it */
+        }
+        .term-window.app-editor .app-textarea.wrap { white-space: pre-wrap; }
+        .term-window.app-editor .app-textarea::selection { background: #2d4a6a; }
+        /* Sticky-note word wrap (#19): no-wrap base (horizontal scroll) with
+           .wrap flipping to wrapping, mirroring the editor. New notes default to
+           wrap on (the builder adds .wrap), so an un-toggled note still wraps. */
+        .term-window.app-note .app-textarea { white-space: pre; }
+        .term-window.app-note .app-textarea.wrap {
+            white-space: pre-wrap; overflow-wrap: anywhere;
+        }
+
+
+        /* text-editor toolbar (between the title bar and the textarea) */
+        .term-window .app-toolbar {
+            display: flex; align-items: center; gap: 4px;
+            padding: 3px 6px;
+            background: #2a2a2a;
+            border-bottom: 1px solid #000;
+            flex: 0 0 auto;
+            font-family: Arial, sans-serif; font-size: 11px;
+        }
+        .term-window .app-toolbar button {
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 11px; padding: 2px 7px; cursor: pointer;
+        }
+        .term-window .app-toolbar button:hover { background: #333; border-color: #6a8; }
+        .term-window .app-toolbar button.on { background: #2f5d7d; border-color: #4aa3ff; color: #fff; }
+        /* Host picker (#46): a mode control — distinct from the action buttons,
+           and a long host label ellipsizes instead of blowing out the toolbar. */
+        .term-window .app-toolbar .app-host-btn {
+            font-family: monospace; max-width: 40%;
+            background: #242b33; border-color: #555;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .term-window .app-toolbar .app-host-btn:hover { border-color: #4aa3ff; }
+        .term-window .app-toolbar .app-file-name {
+            margin-left: auto; color: #aaa; font-family: monospace;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 48%;
+        }
+        .term-window .app-toolbar .app-dirty { color: #ffcf5e; margin-left: 2px; min-width: 8px; }
+
+        /* editor body: a flex row holding the line-number gutter + textarea.
+           bodyWrap owns the vertical space (flex:1) so the textarea fills it. */
+        .term-window.app-editor .app-editor-body {
+            display: flex; flex: 1 1 0; min-height: 0;
+        }
+        .term-window.app-editor .app-editor-body .app-textarea {
+            flex: 1; min-height: 0; min-width: 0; width: auto;
+        }
+        /* CodeMirror 6 (mounted lazily in place of the textarea): fill the flex
+           body and scroll internally rather than growing the window. oneDark
+           supplies the token colors; these rules just handle layout. */
+        .term-window.app-editor .app-editor-body .cm-editor {
+            flex: 1 1 0; min-height: 0; min-width: 0; height: 100%;
+        }
+        .term-window.app-editor .app-editor-body .cm-editor.cm-focused {
+            outline: none;
+        }
+        .term-window.app-editor .app-editor-body .cm-scroller { overflow: auto; }
+        /* line-number gutter: SAME font-size/line-height/padding-top as
+           .app-textarea (13px / 1.45 / 8px) so row N aligns with line N — exact
+           only with wrap off. overflow:hidden; JS keeps scrollTop in sync. */
+        .term-window.app-editor .app-linenums {
+            flex: 0 0 auto;
+            text-align: right;
+            padding: 8px 6px 8px 8px;
+            color: var(--fg-dim, #6a6a6a);
+            background: rgba(0,0,0,0.18);
+            user-select: none;
+            overflow: hidden;
+            white-space: pre;
+            font-family: Consolas, 'Liberation Mono', monospace;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        /* find bar (hidden until Ctrl+F): a compact flex row above the body. */
+        .term-window.app-editor .app-find { display: none; }
+        .term-window.app-editor .app-find.open {
+            display: flex; align-items: center; gap: 4px;
+            padding: 3px 6px;
+            background: #232323;
+            border-bottom: 1px solid #000;
+            flex: 0 0 auto;
+            font-family: Arial, sans-serif; font-size: 11px;
+        }
+        .term-window.app-editor .app-find .app-find-input {
+            flex: 1; min-width: 0;
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 11px; padding: 2px 6px; outline: none;
+        }
+        .term-window.app-editor .app-find button {
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 11px; padding: 2px 7px; cursor: pointer;
+        }
+        .term-window.app-editor .app-find button:hover { background: #333; border-color: #6a8; }
+        .term-window.app-editor .app-find .app-find-count {
+            color: #aaa; font-family: monospace; min-width: 34px; text-align: center;
+        }
+        /* AGENTS.md template checklist (one row of checkboxes below the toolbar) */
+        .term-window.app-editor .app-tpl-panel {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            padding: 3px 6px;
+            background: #262626;
+            border-bottom: 1px solid #000;
+            flex: 0 0 auto;
+            font-family: Arial, sans-serif; font-size: 11px; color: #ccc;
+        }
+        .term-window.app-editor .app-tpl-panel .app-tpl-lbl { color: #888; }
+        .term-window.app-editor .app-tpl-panel .app-tpl-item {
+            display: inline-flex; align-items: center; gap: 3px; cursor: pointer;
+        }
+
+        /* multi-tab agent-docs window: tab strip between title bar + toolbar */
+        .term-window.app-editor .app-tabs {
+            display: flex; align-items: stretch; gap: 2px;
+            padding: 3px 6px 0 6px;
+            background: #232323;
+            border-bottom: 1px solid #000;
+            flex: 0 0 auto;
+            font-family: Arial, sans-serif; font-size: 11px;
+        }
+        .term-window.app-editor .app-tabs .app-tab {
+            background: #1b1b1b; border: 1px solid #3a3a3a; border-bottom: none;
+            border-radius: 5px 5px 0 0;
+            color: #bbb; font-size: 11px; padding: 3px 11px; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 5px;
+        }
+        .term-window.app-editor .app-tabs .app-tab:hover { background: #2a2a2a; color: #ddd; }
+        .term-window.app-editor .app-tabs .app-tab.active {
+            background: #2f5d7d; border-color: #4aa3ff; color: #fff;
+        }
+        .term-window.app-editor .app-tabs .app-tab-dot {
+            color: #ffcf5e; min-width: 6px; font-size: 10px;
+        }
+        /* Sections CRUD panel (shown in place of the editor body on that tab) */
+        .term-window.app-editor .app-sections-panel {
+            display: flex; flex-direction: column; gap: 6px;
+            flex: 1 1 0; min-height: 0; overflow: auto;
+            padding: 8px; background: #1e1e1e;
+            font-family: Arial, sans-serif; font-size: 12px; color: #ddd;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-bar {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-note {
+            color: #888; font-size: 10px; line-height: 1.35;
+        }
+        .term-window.app-editor .app-sections-panel button {
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 11px; padding: 2px 8px; cursor: pointer;
+        }
+        .term-window.app-editor .app-sections-panel button:hover {
+            background: #333; border-color: #6a8;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-row {
+            display: flex; flex-direction: column; gap: 4px;
+            border: 1px solid #333; border-radius: 5px; padding: 6px; background: #242424;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-head {
+            display: flex; align-items: center; gap: 6px;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-label {
+            flex: 1; min-width: 0;
+            background: #1a1a1a; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #eee; font-size: 12px; padding: 3px 6px; outline: none;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-id {
+            color: #777; font-family: monospace; font-size: 10px; white-space: nowrap;
+        }
+        /* an auto (label-tracking, not-yet-locked) id reads as provisional */
+        .term-window.app-editor .app-sections-panel .app-sec-id-auto {
+            color: #5a6b7a; font-style: italic;
+        }
+        .term-window.app-editor .app-sections-panel .app-sec-body {
+            width: 100%; min-height: 34px; max-height: 160px;
+            resize: vertical; box-sizing: border-box;
+            background: #1a1a1a; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-family: Consolas, 'Liberation Mono', monospace;
+            font-size: 12px; padding: 5px 6px; outline: none; overflow: auto;
+        }
+
+        /* ---- dual-pane file manager (toolbar reuses .app-toolbar chrome) ---- */
+        .term-window.app-fm .app-fm-body {
+            display: flex; flex: 1 1 0; min-height: 0; outline: none;
+        }
+        .term-window.app-fm .app-fm-pane {
+            flex: 1 1 0; display: flex; flex-direction: column; min-width: 0;
+            border-right: 1px solid var(--bg-3); overflow: hidden;
+        }
+        .term-window.app-fm .app-fm-pane:last-child { border-right: 0; }
+        .term-window.app-fm .app-fm-pane.active {
+            outline: 1px solid var(--accent-default); outline-offset: -1px;
+        }
+        .term-window.app-fm .app-fm-pane.drop-hover {
+            background: rgba(74,163,255,0.12);
+        }
+        /* Pane header (#46): per-pane host picker + the absolute cwd. */
+        .term-window.app-fm .app-fm-head {
+            display: flex; align-items: stretch; gap: 4px;
+            background: rgba(0,0,0,0.25);
+            border-bottom: 1px solid var(--bg-3);
+        }
+        .term-window.app-fm .app-fm-hostbtn {
+            flex: 0 0 auto; max-width: 50%; margin: 2px;
+            background: #242b33; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #cfe3ff; font: 11px monospace; padding: 1px 6px;
+            cursor: pointer; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .term-window.app-fm .app-fm-hostbtn:hover { border-color: #4aa3ff; }
+        .term-window.app-fm .app-fm-path {
+            flex: 1 1 auto; align-self: center;
+            font: 11px monospace; padding: 3px 6px; color: var(--fg-dim);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .term-window.app-fm .app-fm-list {
+            flex: 1 1 0; overflow: auto; font: 12px monospace;
+        }
+        .term-window.app-fm .app-fm-row {
+            display: flex; gap: 6px; padding: 2px 6px; cursor: default;
+            white-space: nowrap; user-select: none;
+        }
+        .term-window.app-fm .app-fm-row:hover { background: #2a2a2a; }
+        .term-window.app-fm .app-fm-row.sel { background: #2f5d7d; color: #fff; }
+        /* Cross-pane transfer (#46): a file row can be dragged to the other pane. */
+        .term-window.app-fm .app-fm-row[draggable="true"] { cursor: grab; }
+        .term-window.app-fm .app-fm-row.dragging { opacity: 0.45; }
+        .term-window.app-fm .app-fm-row .fm-name {
+            flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+        }
+        .term-window.app-fm .app-fm-row .fm-size { color: var(--fg-dim); }
+
+        /* ---- task manager (live window/process tree; toolbar reuses chrome) ---- */
+        .term-window.app-tm .tm-body {
+            flex: 1 1 0; overflow: auto; min-height: 0;
+            background: var(--bg-2, #1b1b1b); color: var(--fg, #ddd);
+        }
+        .term-window.app-tm .tm-empty {
+            padding: 14px 10px; color: var(--fg-dim, #888);
+            font: 12px Arial, sans-serif;
+        }
+        .term-window.app-tm .tm-sess {
+            border-bottom: 1px solid var(--bg-3, #000);
+        }
+        .term-window.app-tm .tm-sess-row {
+            display: flex; align-items: center; gap: 5px;
+            padding: 4px 6px; cursor: pointer; user-select: none;
+            font: 12px Arial, sans-serif;
+        }
+        .term-window.app-tm .tm-sess-row:hover { background: var(--bg-3, #262626); }
+        .term-window.app-tm .tm-tri {
+            width: 12px; flex: 0 0 auto; text-align: center;
+            color: var(--fg-dim, #888);
+        }
+        .term-window.app-tm .tm-icon { flex: 0 0 auto; }
+        .term-window.app-tm .tm-title {
+            flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .term-window.app-tm .tm-wid {
+            color: var(--fg-dim, #888); font-family: monospace; font-size: 11px;
+        }
+        .term-window.app-tm .tm-host {
+            color: var(--accent, var(--accent-default)); font-size: 11px;
+        }
+        .term-window.app-tm .tm-badge {
+            background: var(--accent, var(--accent-default)); color: #061018;
+            border-radius: 3px; padding: 0 4px; font-size: 10px;
+            text-transform: uppercase; letter-spacing: .03em;
+        }
+        .term-window.app-tm .tm-btn {
+            flex: 0 0 auto;
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 10px; padding: 1px 6px; cursor: pointer;
+        }
+        .term-window.app-tm .tm-btn:hover { background: #5a2323; border-color: #c66; color: #fff; }
+        .term-window.app-tm .tm-procs {
+            font: 11px Consolas, 'Liberation Mono', monospace;
+            background: rgba(0,0,0,0.22);
+            padding: 2px 0 4px 0;
+        }
+        .term-window.app-tm .tm-proc-note {
+            padding: 3px 8px 3px 26px; color: var(--fg-dim, #888);
+        }
+        .term-window.app-tm .tm-proc {
+            display: flex; align-items: center; gap: 6px;
+            padding: 1px 6px 1px 8px; white-space: nowrap;
+        }
+        .term-window.app-tm .tm-proc:hover { background: var(--bg-3, #262626); }
+        .term-window.app-tm .tm-proc.tm-root { color: #ffcf5e; }
+        .term-window.app-tm .tm-pid {
+            flex: 0 0 auto; color: var(--fg-dim, #999); min-width: 48px;
+        }
+        .term-window.app-tm .tm-pname { flex: 0 0 auto; }
+        .term-window.app-tm .tm-cmd {
+            flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+            color: var(--fg-dim, #9a9a9a);
+        }
+        .term-window.app-tm .tm-meta {
+            flex: 0 0 auto; color: var(--fg-dim, #888); font-size: 10px;
+        }
+        .term-window.app-tm .tm-kill {
+            flex: 0 0 auto;
+            background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+            color: #ddd; font-size: 10px; padding: 0 5px; cursor: pointer;
+        }
+        .term-window.app-tm .tm-kill:hover { background: #5a2323; border-color: #c66; color: #fff; }
+
+        /* Live clock chip on the taskbar (bottom-right). Hidden by default;
+           applyClock(true) flips it visible. */
+        #clock-chip {
+            display: none;
+            flex: 0 0 auto;
+            font-family: monospace;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            border: 1px solid var(--bg-3);
+            background: var(--bg);
+            color: var(--fg-dim);
+            user-select: none;
+            white-space: nowrap;
+            margin-left: 2px;
+        }
+        #clock-chip.on { display: inline-flex; align-items: center; }
+

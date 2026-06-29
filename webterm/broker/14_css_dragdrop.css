@@ -1,0 +1,156 @@
+        /* ---- P4 drag-and-drop overlays (viewport-fixed, pointer-events
+           none so they never intercept the drag) ----------------------- */
+        body.tiled-dragging { cursor: grabbing; }
+        body.tiled-dragging .term-window.tiled.drag-source { opacity: 0.45; }
+        /* #38: a tiled drag held still long enough to pop OUT to a float — a
+           distinct "release to float" affordance layered over .drag-source. */
+        body.tiled-dragging .term-window.tiled.pop-out-arm {
+            opacity: 0.7;
+            outline: 2px dashed var(--accent-default);
+            outline-offset: -2px;
+            box-shadow: 0 0 14px 3px var(--accent-default);
+        }
+        #drop-vbar {
+            position: fixed;
+            z-index: 199990;
+            width: 4px;
+            background: var(--accent-default);
+            box-shadow: 0 0 8px 2px var(--accent-default);
+            pointer-events: none;
+            display: none;
+        }
+        #drop-col {
+            position: fixed;
+            z-index: 199989;
+            box-sizing: border-box;
+            border: 3px solid var(--accent-default);
+            background: rgba(74, 163, 255, 0.12);
+            pointer-events: none;
+            display: none;
+        }
+        #drop-float {
+            position: fixed;
+            z-index: 199988;
+            left: 0; right: 0;
+            box-sizing: border-box;
+            border: 2px dashed var(--accent-default);
+            background: rgba(74, 163, 255, 0.12);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            font-style: italic;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            display: none;
+        }
+        #drop-float.show { display: flex; }
+        #drop-vbar.show, #drop-col.show { display: block; }
+        /* Hold-to-snap cancel zone: top-left "return to floating" safe area.
+           z-index above #drop-col/#drop-vbar so it reads as topmost. */
+        #snap-cancel {
+            position: fixed;
+            z-index: 199991;
+            box-sizing: border-box;
+            border: 2px dashed var(--accent-default);
+            background: rgba(74, 163, 255, 0.18);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            font-style: italic;
+            text-align: center;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            display: none;
+        }
+        #snap-cancel.show { display: flex; }
+
+        /* Floating window pinned to the screen (locked) — shows a pin so the
+           scroll-lock state is visible at a glance. Unlocked is the default
+           and travels with the strip. */
+        .term-window.scroll-locked .title-text::before {
+            content: '\1F4CC';      /* 📌 */
+            margin-right: 5px;
+            font-size: 11px;
+        }
+
+        #notice-host {
+            position: fixed;
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100000;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            pointer-events: none;
+        }
+        .notice {
+            background: #4a2a1e;
+            border: 1px solid #a66;
+            border-radius: 4px;
+            color: #fdd;
+            font-family: monospace;
+            font-size: 13px;
+            padding: 6px 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            pointer-events: auto;
+            max-width: 520px;
+            word-break: break-word;
+        }
+        .notice-error { background: #5a1717; border-color: #e06666; }
+        .notice-sticky {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+        .notice-close {
+            background: transparent;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+            padding: 0 2px;
+            flex: 0 0 auto;
+        }
+        .notice-close:hover { color: #fff; }
+        #ctx-menu {
+            position: fixed;
+            z-index: 200000;
+            min-width: 200px;
+            background: var(--bg-2);
+            border: 1px solid #000;
+            box-shadow: 2px 2px 8px rgba(0,0,0,0.6);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            padding: 3px 0;
+            user-select: none;
+            display: none;
+        }
+        #ctx-menu.open { display: block; }
+        #ctx-menu .ctx-item {
+            padding: 5px 18px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        #ctx-menu .ctx-item:hover {
+            background: var(--accent-default);
+            color: #000;
+        }
+        #ctx-menu .ctx-item.disabled {
+            color: var(--fg-dim);
+            cursor: default;
+        }
+        #ctx-menu .ctx-item.disabled:hover {
+            background: transparent;
+            color: var(--fg-dim);
+        }
+        #ctx-menu .ctx-sep {
+            height: 1px;
+            background: #000;
+            margin: 3px 0;
+        }
+

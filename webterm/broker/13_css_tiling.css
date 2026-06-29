@@ -1,0 +1,266 @@
+        /* ---- tiling layer (niri-style WM) -------------------------------
+           #strip is the scrolling tiled layer: a horizontal flex row of
+           .strip-col columns living on an infinite strip the viewport
+           scrolls via native overflow-x (NO css transform — transforms
+           desync getBoundingClientRect from layout and corrupt the
+           cell-grid measurement). Floating .term-window nodes stay
+           position:absolute siblings stacked above it via z-index.
+           Empty (floating mode) it is inert: pointer-events:none so the
+           desktop background keeps receiving right-clicks; populated, the
+           engine flips this on (see #desktop.tiling). */
+        #strip {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: row;
+            align-items: stretch;
+            overflow-x: auto;
+            overflow-y: hidden;
+            pointer-events: none;
+            scrollbar-width: none;          /* native bar always off (see below) */
+        }
+        #desktop.tiling #strip { pointer-events: auto; }
+        /* The native strip scrollbar is ALWAYS hidden so there's never a double
+           bar — the custom overlay (#strip-scrollbar) is the only one shown, and
+           the strip is never resized by it (no terminal reflow). */
+        #strip::-webkit-scrollbar { height: 0; width: 0; display: none; }
+        /* Custom workspace scrollbar: a slim absolute overlay at the very bottom
+           of #desktop and a SIBLING of #strip (so teardownView() emptying #strip
+           leaves it intact). Visibility is driven from JS (display block/none),
+           never a CSS class combo. */
+        #strip-scrollbar {
+            position: absolute;
+            left: 0; right: 0; bottom: 0;
+            height: 10px;
+            display: none;
+            z-index: 50;
+            pointer-events: none;           /* track inert; thumb re-enables below */
+        }
+        #strip-scrollbar .sb-thumb {
+            position: absolute;
+            top: 2px;
+            left: 0;                        /* origin for translateX positioning */
+            height: 6px;
+            min-width: 24px;
+            border-radius: 3px;
+            background: var(--accent, var(--accent-default));
+            opacity: 0.5;
+            pointer-events: auto;
+            cursor: grab;
+        }
+        #strip-scrollbar .sb-thumb:hover { opacity: 0.7; }
+        #strip-scrollbar .sb-thumb.dragging { cursor: grabbing; opacity: 0.85; }
+        .strip-col {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            flex: 0 0 auto;          /* width set inline by relayoutStrip */
+            height: 100%;
+            min-width: 0;
+            min-height: 0;
+            box-sizing: border-box;
+        }
+        /* A tiled window hands its box to flex: position:static, the column
+           owns width (align-items:stretch) and flex-basis owns height. width
+           /height:auto + min-*:0 + transform:none defeat any stale inline /
+           min-content sizing so flex fully owns the box. No width/height
+           transition — an animated terminal size produces bad intermediate
+           PTY grids mid-tween. */
+        .term-window.tiled {
+            position: static;
+            flex: 1 1 0;             /* height fraction set inline */
+            width: auto;
+            height: auto;
+            min-width: 0;
+            min-height: 0;
+            transform: none;
+            box-shadow: none;
+            transition: none;
+        }
+        .term-window.tiled .rh { display: none; }
+        /* Vertical workspaces: inactive-workspace windows are parked here
+           (display:none -> zero rect -> isResizable() blocks any resize while
+           parked) without destroying their xterm/WebSocket. */
+        #park { display: none; }
+        .ws-dot {
+            width: 26px;
+            height: 26px;
+            border-radius: 4px;
+            border: 1px solid var(--bg-3);
+            background: var(--bg-2);
+            color: var(--fg-dim);
+            font-family: monospace;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        .ws-dot:hover { border-color: var(--accent-default); color: var(--fg); }
+        .ws-dot.active {
+            background: var(--accent-default);
+            color: #000;
+            border-color: var(--accent-default);
+        }
+        .ws-dot.add { font-size: 16px; }
+        .ws-dot.named { width: auto; min-width: 26px; padding: 0 9px; }
+        /* Workspace hover preview (task 19): a scaled schematic of the columns
+           / rows in that workspace, like a Linux pager thumbnail. */
+        .ws-preview {
+            position: fixed;
+            z-index: 10000;
+            background: var(--bg-2);
+            border: 1px solid var(--bg-3);
+            border-radius: 5px;
+            padding: 6px;
+            box-shadow: 0 6px 22px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+        .ws-preview .wsp-title { font: 11px monospace; color: var(--fg-dim); margin-bottom: 4px; }
+        .ws-preview .wsp-map {
+            position: relative; width: 168px; height: 104px;
+            background: var(--bg); border: 1px solid var(--bg-3);
+        }
+        .ws-preview .wsp-rect {
+            position: absolute; background: rgba(74,163,255,0.22);
+            border: 1px solid var(--accent-default); box-sizing: border-box;
+            overflow: hidden;
+        }
+        .ws-preview .wsp-rect span {
+            font: 8px monospace; color: var(--fg); opacity: 0.85;
+            padding: 1px 3px; display: block; white-space: nowrap;
+        }
+        .ws-preview .wsp-empty { font: 10px monospace; color: var(--fg-dim); padding: 10px 18px; }
+        /* Engine-owned splitter between vertically-stacked rows in a column.
+           Flex item with a fixed thickness; drag adjusts the two adjacent
+           rows' height fractions. */
+        .strip-gutter {
+            flex: 0 0 6px;
+            height: 6px;
+            cursor: ns-resize;
+            background: transparent;
+            position: relative;
+            z-index: 6;
+        }
+        .strip-gutter::after {
+            content: '';
+            position: absolute;
+            left: 0; right: 0; top: 2px; height: 2px;
+            background: var(--bg-3);
+        }
+        .strip-gutter:hover::after { background: var(--accent-default); }
+        /* Horizontal splitter between columns (task 9): full-height grab strip
+           that drags column widths. Mirror of .strip-gutter, rotated. */
+        .strip-col-gutter {
+            flex: 0 0 6px;
+            align-self: stretch;
+            cursor: col-resize;
+            background: transparent;
+            position: relative;
+            z-index: 6;
+        }
+        .strip-col-gutter::after {
+            content: '';
+            position: absolute;
+            top: 0; bottom: 0; left: 2px; width: 2px;
+            background: var(--bg-3);
+        }
+        .strip-col-gutter:hover::after { background: var(--accent-default); }
+        body.col-resizing, body.col-resizing * { cursor: col-resize !important; }
+        body.col-resizing { user-select: none; }
+        /* Per-cell width splitter inside a horizontally-split tile (F-HSPLIT):
+           a full-height vertical grab bar between two cells, mirror of the
+           inter-column .strip-col-gutter (NOT the 6px-tall row .strip-gutter).
+           Drag adjusts the two adjacent cells' width fractions; reuses
+           body.col-resizing for the cursor. */
+        .strip-hgutter {
+            flex: 0 0 6px;
+            align-self: stretch;
+            cursor: col-resize;
+            background: transparent;
+            position: relative;
+            z-index: 6;
+        }
+        .strip-hgutter::after {
+            content: '';
+            position: absolute;
+            top: 0; bottom: 0; left: 2px; width: 2px;
+            background: var(--bg-3);
+        }
+        .strip-hgutter:hover::after { background: var(--accent-default); }
+        /* Per-tile tab groups (i3/sway-style): a tabbed ROW renders as a
+           .strip-tile wrapper — a vertical flex item inside its .strip-col,
+           holding a .strip-tabs bar over one visible window (the active tab;
+           the rest carry .tab-hidden). Single-window rows are bare flexed
+           .term-window children with no wrapper. The ⊟ button explodes the
+           tile back into single-window rows. The tile's flex-grow (its height
+           fraction) is set inline by relayoutStrip. */
+        .strip-tile {
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            flex: 1 1 0;             /* height fraction set inline */
+            min-width: 0;
+            min-height: 0;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+        /* A horizontally-split TILE (F-HSPLIT) lays its cells out in a row,
+           each window flexed to its width fraction with a .strip-hgutter
+           between consecutive cells. Same wrapper element / tileEls WeakMap as
+           the tabbed tile, re-themed by toggling the .hsplit class. */
+        .strip-tile.hsplit { flex-direction: row; }
+        .strip-tabs {
+            display: flex;
+            flex: 0 0 auto;
+            gap: 2px;
+            padding: 2px;
+            background: var(--bg-2);
+            overflow-x: auto;
+        }
+        .strip-tab {
+            font: 11px monospace;
+            padding: 2px 8px;
+            border: 1px solid var(--bg-3);
+            border-radius: 3px 3px 0 0;
+            background: var(--bg);
+            color: var(--fg-dim);
+            cursor: pointer;
+            white-space: nowrap;
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .strip-tab.active {
+            background: var(--accent-default);
+            color: #000;
+            border-color: var(--accent-default);
+        }
+        .strip-tab-untab { margin-left: auto; }
+        .term-window.tab-hidden { display: none !important; }
+        /* Tab drop candidate (floating Alt-drag): mirror of .swap-target. */
+        .term-window.tab-target {
+            box-shadow:
+                0 0 0 4px var(--accent, var(--accent-default)),
+                0 0 28px 8px var(--accent, var(--accent-default)),
+                0 6px 24px rgba(0,0,0,0.6);
+            transform: scale(1.03);
+            z-index: 9998 !important;
+        }
+        /* Floating windows locked to a workspace (task 8): hidden off their
+           ws (display:none -> zero rect blocks resize, like #park). */
+        .term-window.ws-hidden { display: none; }
+        /* Taskbar items for windows on another workspace (task 16): dimmed +
+           a small workspace badge so the bar indicates the current ws. */
+        .taskbar-item.other-ws { opacity: 0.5; }
+        .taskbar-item.ws-hidden { display: none; }
+        .taskbar-item .ti-ws {
+            font-size: 9px;
+            opacity: 0.75;
+            margin-left: 3px;
+            padding: 0 3px;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.10);
+        }
+

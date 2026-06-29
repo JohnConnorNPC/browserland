@@ -1,0 +1,242 @@
+        /* Control Panel modal sits above windows (100000) but below #ctx-menu
+           (200000); the re-auth overlay outranks everything. */
+        #settings-overlay, #auth-overlay, #become-active-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.55);
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        #settings-overlay { z-index: 150000; }
+        #auth-overlay { z-index: 250000; }
+        /* The deactivated full-page takeover prompt sits just below the auth
+           overlay so a password prompt still wins. */
+        #become-active-overlay { z-index: 240000; background: rgba(0,0,0,0.82); }
+        #settings-overlay.open, #auth-overlay.open,
+        #become-active-overlay.open { display: flex; }
+        #become-active-box {
+            background: var(--bg-2);
+            border: 1px solid #000;
+            border-left: 4px solid var(--accent-default);
+            border-radius: 4px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            padding: 20px 22px;
+            min-width: 300px;
+            max-width: 420px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            text-align: center;
+            align-items: center;
+        }
+        #become-active-btn {
+            font-size: 14px;
+            padding: 8px 20px;
+            cursor: pointer;
+        }
+        #settings-modal, #auth-form {
+            background: var(--bg-2);
+            border: 1px solid #000;
+            border-left: 4px solid var(--accent-default);
+            border-radius: 4px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+            color: var(--fg);
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            padding: 14px 16px;
+            min-width: 340px;
+            max-width: 480px;
+            max-height: 80vh;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        /* #59: the Control Panel is a floating window. It borrows #settings-modal
+           as its body; cp-windowed strips the modal-box chrome so the panel fills
+           the window and scrolls with it (the .term-window provides the frame). */
+        .app-control-panel #settings-modal.cp-windowed {
+            min-width: 0; max-width: none; max-height: none;
+            width: auto; flex: 1 1 auto; min-height: 0;
+            border: none; border-radius: 0; box-shadow: none;
+        }
+        .app-control-panel #settings-modal.cp-windowed .set-head,
+        .app-control-panel #settings-modal.cp-windowed .set-foot { display: none; }
+        .set-head { font-family: monospace; font-weight: bold; font-size: 14px; }
+        .set-section { display: flex; flex-direction: column; gap: 6px; }
+        .set-title {
+            color: var(--fg-dim);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .set-row { display: flex; align-items: center; gap: 6px; }
+        .set-hint { color: var(--fg-dim); font-size: 11px; font-style: italic; }
+        .set-err { color: #e96d6d; font-family: monospace; font-size: 12px; display: none; }
+        .set-err.show { display: block; }
+        .set-check {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .set-x { color: var(--fg-dim); }
+        /* Color-scheme radios (injected into #set-theme): wrap across rows so
+           the five theme labels fit the modal width. */
+        #set-theme { flex-wrap: wrap; gap: 4px 14px; }
+        #set-theme label { display: inline-flex; align-items: center; gap: 5px;
+            cursor: pointer; user-select: none; }
+        .host-row { font-family: monospace; font-size: 12px; }
+        .host-row .host-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .host-row .host-dup {
+            flex: 0 0 auto;
+            color: #e0a040;
+            font-size: 11px;
+            white-space: nowrap;
+            cursor: help;
+        }
+        #settings-modal input[type=number],
+        #settings-modal input[type=text],
+        #settings-modal input[type=password],
+        #auth-form input[type=password] {
+            background: var(--bg);
+            border: 1px solid var(--bg-3);
+            border-radius: 3px;
+            color: var(--fg);
+            font-family: monospace;
+            font-size: 13px;
+            padding: 5px 7px;
+            outline: none;
+        }
+        #settings-modal input:focus,
+        #auth-form input:focus { border-color: var(--accent-default); }
+        #settings-modal input[type=number] { width: 64px; }
+        #settings-modal input[type=text],
+        #settings-modal input[type=password] { flex: 1 1 auto; min-width: 0; }
+        #settings-modal button, #auth-form button {
+            background: var(--bg);
+            border: 1px solid var(--bg-3);
+            border-radius: 3px;
+            color: var(--fg);
+            font-family: monospace;
+            font-size: 12px;
+            padding: 5px 10px;
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+        #settings-modal button:hover,
+        #auth-form button:hover { background: #262626; border-color: #6a8; }
+        .set-foot { display: flex; justify-content: flex-end; }
+        /* Tabbed settings (tasks 13/14): a flex row of small tab buttons, the
+           active one highlighted with the accent. Wraps when many hosts. */
+        .set-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            border-bottom: 1px solid var(--bg-3);
+            padding-bottom: 8px;
+        }
+        .set-tabs .set-tab {
+            background: var(--bg);
+            border: 1px solid var(--bg-3);
+            border-radius: 3px;
+            color: var(--fg-dim);
+            font-family: monospace;
+            font-size: 12px;
+            padding: 4px 9px;
+            cursor: pointer;
+            flex: 0 0 auto;
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .set-tabs .set-tab:hover { background: #262626; border-color: #6a8; }
+        .set-tabs .set-tab.active {
+            color: var(--fg);
+            border-color: var(--accent-default);
+            background: #20312a;
+        }
+        /* Each tab's body is a column of sections; only the active one shows. */
+        .set-pane { display: none; flex-direction: column; gap: 12px; }
+        .set-pane.active { display: flex; }
+        .set-loading { color: var(--fg-dim); font-style: italic; font-size: 12px; }
+        /* Keybindings rows: label | combo | Set | Clear. */
+        .kb-row { display: flex; align-items: center; gap: 6px; }
+        .kb-row .kb-label { flex: 1 1 auto; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .kb-row .kb-combo {
+            font-family: monospace; font-size: 11px;
+            color: var(--fg); background: var(--bg);
+            border: 1px solid var(--bg-3); border-radius: 3px;
+            padding: 2px 6px; min-width: 130px; text-align: center;
+        }
+        .kb-row .kb-combo.recording {
+            border-color: var(--accent-default); color: var(--accent-default);
+        }
+        .kb-row .kb-combo.unset { color: var(--fg-dim); font-style: italic; }
+
+        /* editor file-browser dialog: sits above settings (150000) but below
+           #ctx-menu (200000), mirroring the settings-modal styling. */
+        #file-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0, 0, 0, 0.55);
+            display: none; align-items: center; justify-content: center;
+            z-index: 180000;
+        }
+        #file-overlay.open { display: flex; }
+        #file-modal {
+            background: var(--bg-2);
+            border: 1px solid #000;
+            border-left: 4px solid var(--accent-default);
+            border-radius: 4px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+            color: var(--fg);
+            font-family: Arial, sans-serif; font-size: 13px;
+            padding: 14px 16px;
+            min-width: 420px; max-width: 560px; width: 70vw;
+            max-height: 80vh;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        #file-modal .file-path {
+            font-family: monospace; font-size: 11px; color: var(--fg-dim);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        #file-modal .file-list {
+            flex: 1 1 auto; min-height: 180px; max-height: 50vh; overflow-y: auto;
+            border: 1px solid var(--bg-3); border-radius: 3px; background: var(--bg);
+        }
+        #file-modal .file-entry {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 10px; cursor: pointer;
+            font-family: monospace; font-size: 12px;
+        }
+        #file-modal .file-entry:hover { background: var(--bg-3); }
+        #file-modal .file-entry.sel { background: #2f5d7d; color: #fff; }
+        #file-modal .file-entry .fe-icon { width: 1.1em; flex: 0 0 auto; }
+        #file-modal .file-entry .fe-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+        #file-modal .file-entry .fe-size { color: var(--fg-dim); font-size: 11px; flex: 0 0 auto; }
+        #file-modal input[type=text] {
+            background: var(--bg); border: 1px solid var(--bg-3); border-radius: 3px;
+            color: var(--fg); font-family: monospace; font-size: 13px; padding: 5px 7px;
+            flex: 1 1 auto; min-width: 0; outline: none;
+        }
+        #file-modal input[type=text]:focus { border-color: var(--accent-default); }
+        #file-modal button {
+            background: var(--bg); border: 1px solid var(--bg-3); border-radius: 3px;
+            color: var(--fg); font-family: monospace; font-size: 12px; padding: 5px 10px;
+            cursor: pointer; flex: 0 0 auto;
+        }
+        #file-modal button:hover { background: #262626; border-color: #6a8; }
+        #file-modal .set-foot { display: flex; justify-content: flex-end; gap: 8px; }

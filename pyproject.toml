@@ -32,9 +32,12 @@ browserland-mcp = "webterm.mcptool.__main__:main"
 include = ["webterm*"]
 
 [tool.setuptools.package-data]
-# index.html is the UI; help_corpus.json is the packaged fallback for the
-# in-app Help guide when wiki/ isn't shipped alongside the code (issue #60).
-"webterm.broker" = ["*.html", "*.json"]
+# The desktop UI ships as ordered fragments (*.html/*.css/*.js) that ui.py
+# assembles into INDEX_HTML at import (issue #68); help_corpus.json is the
+# packaged fallback for the in-app Help guide when wiki/ isn't shipped
+# alongside the code (issue #60). Same flat-dir glob that already shipped the
+# old single index.html -- ui.py's explicit _ORDERED list picks the fragments.
+"webterm.broker" = ["*.html", "*.json", "*.css", "*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

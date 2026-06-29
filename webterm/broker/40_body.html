@@ -1,0 +1,280 @@
+    </style>
+</head>
+<body>
+    <div id="desktop" class="empty"><div id="strip"></div><div id="strip-scrollbar"><div class="sb-thumb"></div></div></div>
+    <div id="park"></div>
+    <div id="taskbar">
+        <button type="button" id="btn-launch"
+                title="new terminal &#8212; right-click for profiles">+</button>
+        <div id="taskbar-items"></div>
+        <div id="ws-pager"></div>
+        <div id="host-status"></div>
+        <button type="button" id="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+        <div id="clock-chip" title="date &amp; time"></div>
+        <div id="help-chip" title="Help &#8212; interface guide" role="button"
+             tabindex="0" aria-label="Help">?</div>
+    </div>
+    <div id="notice-host"></div>
+    <div id="drop-vbar"></div>
+    <div id="drop-col"></div>
+    <div id="drop-float">drop here to float this window</div>
+    <div id="snap-cancel">return to floating</div>
+    <div id="ctx-menu" role="menu"></div>
+    <div id="file-overlay">
+        <div id="file-modal">
+            <div class="set-head" id="file-title">Open file</div>
+            <div class="file-path" id="file-path"></div>
+            <div class="file-list" id="file-list"></div>
+            <div class="set-row" id="file-name-row">
+                <span class="set-x">Name:</span>
+                <input type="text" id="file-name" placeholder="filename.txt"
+                       autocomplete="off" spellcheck="false">
+            </div>
+            <div class="set-err" id="file-err"></div>
+            <div class="set-foot">
+                <button type="button" id="file-cancel">Cancel</button>
+                <button type="button" id="file-ok">Open</button>
+            </div>
+        </div>
+    </div>
+    <div id="settings-overlay">
+        <div id="settings-modal">
+            <div class="set-head">Control Panel</div>
+            <!-- Tabs (tasks 13/14): "Browser" = where-to-connect (host list,
+                 browser-local); one tab per configured host = that broker's own
+                 settings. Built dynamically by renderSettingsTabs(). -->
+            <div class="set-tabs" id="set-tabs"></div>
+            <!-- Per-host settings pane. Fixed IDs are reused for every tab; the
+                 settingsTarget indirection points them at the right blob. -->
+            <div class="set-pane" id="set-pane-host">
+                <div class="set-loading" id="set-host-loading"
+                     style="display:none">loading settings&hellip;</div>
+                <!-- Appearance + browser chrome (theme/pattern/clock/start-button/
+                     restore/taskbar-filter) are BROWSER-GLOBAL: one browser renders
+                     one theme regardless of which host's windows it shows. They bind
+                     to the live local getSettings() and apply to this browser
+                     immediately, so renderSettings() shows the `.set-browser-global`
+                     sections ONLY on the local ('this broker') tab — a remote host
+                     tab shows just that host's own settings (#17). -->
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Color scheme</div>
+                    <div id="set-theme" class="set-row"></div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Background pattern</div>
+                    <div class="set-row"><label>pattern</label>
+                        <select id="set-pattern"></select></div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Terminal font</div>
+                    <div class="set-row"><label>font</label>
+                        <select id="set-term-font"></select></div>
+                    <div class="set-hint">applies to your terminals (an appearance
+                        setting, like the color scheme); an uninstalled font falls
+                        back to Consolas / monospace.</div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Date &amp; time</div>
+                    <label class="set-check"><input type="checkbox" id="set-clock" />
+                        Show date &amp; time (bottom-right)</label>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Help button</div>
+                    <label class="set-check"><input type="checkbox" id="set-help-button" />
+                        Show help (?) button (bottom-right)</label>
+                    <div class="set-hint">a searchable guide to every interface
+                        feature; opens from the &ldquo;?&rdquo; chip on the taskbar.
+                        You can also bind a key to it under Keyboard shortcuts.</div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Start button</div>
+                    <div class="set-row"><label>label</label>
+                        <input type="text" id="set-start-label" maxlength="24"
+                               placeholder="+" /></div>
+                    <div class="set-hint">The launch button still launches /
+                        right-click for profiles. Blank = +</div>
+                </div>
+                <!-- Default start path is PER-HOST (#17): editing it on a remote
+                     host's tab persists to THAT host (no .set-browser-global). -->
+                <div class="set-section">
+                    <div class="set-title">Default start path</div>
+                    <div class="set-row">
+                        <input type="text" id="set-start-path"
+                               placeholder="e.g. C:\projects or /home/me/projects" /></div>
+                    <div class="set-hint">Where new terminals start on THIS host.
+                        Must be an existing folder. Blank = the agent's
+                        default.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Window size (cols &#215; rows)</div>
+                    <div class="set-row">
+                        <input type="number" id="set-cols" min="35" max="500"
+                               placeholder="cols" />
+                        <span class="set-x">&#215;</span>
+                        <input type="number" id="set-rows" min="8" max="200"
+                               placeholder="rows" />
+                        <button type="button" id="set-size-clear"
+                                title="reset to the legacy 720&#215;480 px default">reset</button>
+                    </div>
+                    <div class="set-hint">empty = legacy 720&#215;480 px. Drives new
+                        windows, Lock Size, and tile actions.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Taskbar / title labels</div>
+                    <label class="set-check"><input type="checkbox" id="set-show-id" />
+                        window id</label>
+                    <label class="set-check"><input type="checkbox" id="set-show-pid" />
+                        pid</label>
+                    <label class="set-check"><input type="checkbox" id="set-show-host" />
+                        host</label>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Window mode</div>
+                    <label class="set-check"><input type="checkbox" id="set-tiling" />
+                        Tiling mode</label>
+                    <div class="set-hint">tiling arranges windows in a niri-style
+                        scrolling strip; unchecked = free-floating windows.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Drag hold delay</div>
+                    <div class="set-row">
+                        <input type="number" id="set-snap-hold" min="0" max="20000"
+                               step="50" placeholder="3000" />
+                        <span class="set-x">ms</span>
+                    </div>
+                    <div class="set-hint">hold a drag still this long before a
+                        floating window snaps into the grid, or a tiled window pops
+                        out to a float. <b>0</b> disables both; otherwise
+                        250&#8211;20000ms (default 3000).</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Workspace scrollbar</div>
+                    <label class="set-check"><input type="checkbox" id="set-strip-scrollbar" />
+                        Show workspace scrollbar</label>
+                    <div class="set-hint">a slim draggable bar at the bottom of the
+                        tiling workspace, shown whenever the strip can scroll right.</div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Restore on refresh</div>
+                    <label class="set-check"><input type="checkbox" id="set-restore-refresh" />
+                        Restore open terminals on refresh</label>
+                    <div class="set-hint">when this browser reloads, re-open the
+                        terminals you had open and reattach to their running
+                        agents. Governs this browser's startup.</div>
+                </div>
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Taskbar workspace filter</div>
+                    <label class="set-check"><input type="checkbox" id="set-taskbar-hide-other-ws" />
+                        Hide windows on other workspaces</label>
+                    <div class="set-hint">show only the active workspace's windows in the
+                        taskbar. Governs this browser.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Default terminal profile</div>
+                    <div class="set-row"><label>profile</label>
+                        <select id="set-default-profile">
+                            <option value="">(broker default)</option>
+                        </select></div>
+                    <div class="set-hint">which shell profile new terminals on this
+                        host launch with; "(broker default)" uses the broker's own
+                        configured default.</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">MCP access</div>
+                    <label class="set-check"><input type="checkbox" id="set-mcp-enabled" />
+                        Enable MCP access</label>
+                    <div class="set-row"><label>token</label>
+                        <input type="password" id="set-mcp-token"
+                               placeholder="(none — MCP disabled)" autocomplete="off" />
+                        <button type="button" id="set-mcp-generate">generate</button></div>
+                    <div class="set-row"><label>default mode</label>
+                        <select id="set-mcp-default-mode">
+                            <option value="off">Off</option>
+                            <option value="read">Read</option>
+                            <option value="readwrite">Read-write</option>
+                        </select></div>
+                    <label class="set-check"><input type="checkbox" id="set-mcp-allow-launch" />
+                        Allow MCP to launch terminals</label>
+                    <div class="set-hint">lets an external MCP server read (and,
+                        per-window, type into) your terminals. Requires a token AND
+                        the enable box; new windows start in "default mode", and each
+                        window's mode is overridable from its title-bar menu. Connect
+                        URL: <code id="set-mcp-url">&mdash;</code></div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Keybindings</div>
+                    <div id="set-keybindings"></div>
+                    <div class="set-hint">Ctrl/Alt/Meta combos only (so plain
+                        typing reaches the terminal). "Set" then press the new
+                        combo; "Clear" removes the binding.</div>
+                </div>
+            </div>
+            <!-- Browser tab: connection list (where to connect), browser-local. -->
+            <div class="set-pane" id="set-pane-browser">
+                <div class="set-section">
+                    <div class="set-title">Hosts</div>
+                    <div id="set-hosts-list"></div>
+                    <div class="set-row">
+                        <input type="text" id="set-host-label" placeholder="label" />
+                    </div>
+                    <div class="set-row">
+                        <input type="text" id="set-host-url"
+                               placeholder="http://hostname:4445" />
+                    </div>
+                    <div class="set-row">
+                        <input type="password" id="set-host-pass"
+                               placeholder="password" autocomplete="off" />
+                        <button type="button" id="set-host-add">add</button>
+                    </div>
+                    <div id="set-host-err" class="set-err"></div>
+                    <div class="set-hint">remote brokers must have an auth token
+                        configured (it doubles as the password here)</div>
+                </div>
+                <div class="set-section">
+                    <div class="set-title">Troubleshooting</div>
+                    <div class="set-row">
+                        <button type="button" id="set-reset-view">Reset local
+                            view</button>
+                    </div>
+                    <div class="set-hint">Rebuilds this browser's windows from
+                        the broker's saved layout — clears stale window state when
+                        Ctrl+F5 wasn't enough. Browser-local only: it never
+                        changes other browsers or the broker's shared layout.</div>
+                    <div id="set-troubleshoot-dups"></div>
+                    <div class="set-hint">A broker reached through several URLs
+                        (e.g. 127.0.0.1, localhost and a Tailscale address) shows
+                        up as duplicate taskbar chips and can make Terminate fail.
+                        Remove the extra record to clear the duplicates — your
+                        other brokers and their passwords are kept.</div>
+                </div>
+            </div>
+            <div class="set-foot">
+                <button type="button" id="settings-close">close</button>
+            </div>
+        </div>
+    </div>
+    <div id="auth-overlay">
+        <form id="auth-form">
+            <div class="set-head">password required</div>
+            <div id="auth-host-line" class="set-hint"></div>
+            <div id="auth-error" class="set-err"></div>
+            <input type="password" id="auth-token" placeholder="password"
+                   autocomplete="off" />
+            <div class="set-row">
+                <button type="submit">connect</button>
+                <button type="button" id="auth-cancel">cancel</button>
+            </div>
+        </form>
+    </div>
+    <div id="become-active-overlay">
+        <div id="become-active-box">
+            <div class="set-head">another browser is active</div>
+            <div class="set-hint">This broker allows one active browser at a
+                time. Taking over will deactivate the other one.</div>
+            <button type="button" id="become-active-btn">Become active</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script>
