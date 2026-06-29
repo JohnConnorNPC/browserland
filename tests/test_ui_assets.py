@@ -187,6 +187,28 @@ def test_set_mods_mount_and_loader_api_present():
         assert sym in INDEX_HTML, f"missing loader symbol: {sym!r}"
 
 
+def test_settings_extension_api_present():
+    # #74 (S1): the generalized Control Panel settings-extension surface — radio,
+    # select, and a full custom registerSettingsPane — rides in the served loader
+    # alongside the unchanged boolean. These are the symbols mods (S2/S3/S5) and
+    # the Playwright acceptance depend on.
+    for sym in (
+        "registerSettingsPane: function",
+        "function _modSettingChoice",
+        "function _modRegisterPane",
+        "function _controlSection",
+        "function _normChoiceOptions",
+    ):
+        assert sym in INDEX_HTML, f"missing settings-extension symbol: {sym!r}"
+    # ctx.settings now exposes radio/select next to the unchanged boolean.
+    for sym in ("boolean: function", "radio: function", "select: function"):
+        assert sym in INDEX_HTML, f"missing ctx.settings widget: {sym!r}"
+    # The #set-mods host is no longer itself browser-global (visibility is now
+    # per-mounted-section, driven by each control's isBrowserGlobal opt), so a
+    # non-global mod control can show on a remote host tab.
+    assert '<div class="set-section" id="set-mods"></div>' in INDEX_HTML
+
+
 def test_clock_symbols_removed_from_core_fragments():
     # The clock is now a mod: its core renderer/handlers/markup are gone. Scope
     # the check to the CORE fragments it was extracted from (the mod script
