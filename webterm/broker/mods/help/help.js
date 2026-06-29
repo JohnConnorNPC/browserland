@@ -372,39 +372,16 @@
             const geom = clampGeom(appData.geom || helpDefaultGeom());
             const color = normalizeHex(appData.color || defaultColor(id));
 
-            const dom = document.createElement('div');
-            dom.className = 'term-window app-window app-help';
-            dom.dataset.sessionId = id;
-            dom.style.left = geom.left + 'px';
-            dom.style.top = geom.top + 'px';
-            dom.style.width = (geom.width - 4) + 'px';
-            dom.style.height = (geom.height - 4) + 'px';
-            dom.style.setProperty('--accent', color);
-            dom.classList.toggle('dark-accent', isDarkAccent(color));
-
-            const titleBar = document.createElement('div');
-            titleBar.className = 'title-bar';
-            const idBadge = document.createElement('span');
-            idBadge.className = 'ti-id-badge';
-            idBadge.textContent = '#help';
-            const titleText = document.createElement('span');
-            titleText.className = 'title-text';
-            titleText.textContent = title;
-            const minBtn = document.createElement('button');
-            minBtn.type = 'button';
-            minBtn.className = 'tb-btn btn-min';
-            minBtn.textContent = '_';
-            minBtn.title = 'minimize';
-            const closeBtn = document.createElement('button');
-            closeBtn.type = 'button';
-            closeBtn.className = 'tb-btn btn-close';
-            closeBtn.textContent = '×';
-            closeBtn.title = 'close';
-            titleBar.appendChild(idBadge);
-            titleBar.appendChild(titleText);
-            titleBar.appendChild(minBtn);
-            titleBar.appendChild(closeBtn);
-            dom.appendChild(titleBar);
+            // Shared chrome (#79): the help mod reuses the CORE window-chrome
+            // factory (hoisted core functions, reachable from this concatenated mod
+            // script even when mods are disabled) for the .term-window shell, title
+            // bar (_ / ×), eight resize handles, and the raise/drag/resize/context-
+            // menu wiring — byte-identical to the built-in app windows.
+            const chrome = buildAppChrome({
+                id, appClass: 'app-help', badge: '#help',
+                geom, color, locked: false, title,
+            });
+            const { dom, titleText } = chrome;
 
             const win = {
                 id, sid: 'help', hostId: 'app',
@@ -446,49 +423,14 @@
                 if (prefs[id]) { delete prefs[id]; savePrefs(); }
             });
             dom.appendChild(helpBody);
-
-            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
-                const hnd = document.createElement('div');
-                hnd.className = 'rh rh-' + dir;
-                hnd.dataset.dir = dir;
-                dom.appendChild(hnd);
-            }
+            addResizeHandles(dom);   // last children: edge/corner hit zones on top
 
             document.getElementById('desktop').appendChild(dom);
             document.getElementById('desktop').classList.remove('empty');
             windows.set(id, win);
 
-            const stopProp = (e) => e.stopPropagation();
-            const onMouseDown = () => bringToFront(id);
-            dom.addEventListener('mousedown', onMouseDown);
-            win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
-
-            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
-            const onCloseClick = (e) => { e.stopPropagation(); closeWindow(id); };
-            minBtn.addEventListener('mousedown', stopProp);
-            minBtn.addEventListener('click', onMinClick);
-            closeBtn.addEventListener('mousedown', stopProp);
-            closeBtn.addEventListener('click', onCloseClick);
-            win.cleanups.push(() => {
-                minBtn.removeEventListener('mousedown', stopProp);
-                minBtn.removeEventListener('click', onMinClick);
-                closeBtn.removeEventListener('mousedown', stopProp);
-                closeBtn.removeEventListener('click', onCloseClick);
-            });
-
-            wireDrag(win, titleBar);
-            const onTitleCtx = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                bringToFront(win.id);
-                buildWindowMenu(win, e.clientX, e.clientY);
-            };
-            titleBar.addEventListener('contextmenu', onTitleCtx);
-            win.cleanups.push(() =>
-                titleBar.removeEventListener('contextmenu', onTitleCtx));
-            for (const handle of dom.querySelectorAll('.rh')) {
-                wireResize(win, handle, handle.dataset.dir);
-            }
+            // Raise / minimize / close / drag / 8-way resize / WM context menu.
+            wireAppChrome(win, chrome);
 
             const appSess = { key: id, sid: 'help', id, title, stale: false,
                               kind: 'app', hostId: 'app' };
