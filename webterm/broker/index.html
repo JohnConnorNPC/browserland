@@ -1939,6 +1939,23 @@
                     <div class="set-hint">remote brokers must have an auth token
                         configured (it doubles as the password here)</div>
                 </div>
+                <div class="set-section">
+                    <div class="set-title">Troubleshooting</div>
+                    <div class="set-row">
+                        <button type="button" id="set-reset-view">Reset local
+                            view</button>
+                    </div>
+                    <div class="set-hint">Rebuilds this browser's windows from
+                        the broker's saved layout — clears stale window state when
+                        Ctrl+F5 wasn't enough. Browser-local only: it never
+                        changes other browsers or the broker's shared layout.</div>
+                    <div id="set-troubleshoot-dups"></div>
+                    <div class="set-hint">A broker reached through several URLs
+                        (e.g. 127.0.0.1, localhost and a Tailscale address) shows
+                        up as duplicate taskbar chips and can make Terminate fail.
+                        Remove the extra record to clear the duplicates — your
+                        other brokers and their passwords are kept.</div>
+                </div>
             </div>
             <div class="set-foot">
                 <button type="button" id="settings-close">close</button>
@@ -16520,8 +16537,68 @@
                 }
                 hostsListEl.appendChild(row);
             }
+            renderTroubleshooting();   // keep the dup recovery list in sync
             refreshHostIdentities();   // background: learns missing ids, re-renders
         }
+
+        // Troubleshooting (#64): echo the detected duplicate brokers with a
+        // one-click remove (removeHost keeps every other broker's token), so the
+        // user has ONE place to recover from the duplicate-chip / silent-
+        // terminate state. Driven by the same computeHostDuplicates as the Hosts
+        // list above; re-rendered whenever that list is.
+        function renderTroubleshooting() {
+            const box = document.getElementById('set-troubleshoot-dups');
+            if (!box) return;
+            box.textContent = '';
+            const hosts = getHosts();
+            const dupOf = computeHostDuplicates(hosts);
+            const dups = hosts.filter(
+                h => h.id !== 'local' && dupOf.has(h.id));
+            const label = document.createElement('div');
+            label.className = 'set-hint';
+            label.textContent = dups.length
+                ? 'Duplicate brokers (same backend, different URL):'
+                : 'No duplicate brokers detected.';
+            box.appendChild(label);
+            for (const h of dups) {
+                const row = document.createElement('div');
+                row.className = 'set-row host-row';
+                const name = document.createElement('span');
+                name.className = 'host-name';
+                name.textContent = h.label + ' — ' + h.url
+                    + '  (same as "' + dupOf.get(h.id).label + '")';
+                name.title = name.textContent;
+                row.appendChild(name);
+                row.appendChild(hostRowButton('remove',
+                    'remove this duplicate host record (keeps other brokers)',
+                    () => removeHost(h.id)));
+                box.appendChild(row);
+            }
+        }
+
+        // "Reset local view": clear ONLY browser-local, non-synced state — the
+        // per-session geometry pref keys (prefs['<hostId>:<sid>'], never pushed
+        // to /state) and the in-memory view — then rebuild from the authoritative
+        // /state via the existing lease teardown->rebuild path. Persisted with
+        // savePrefsLocal so it can NEVER PUT /state: _hosts / _settings / _layout
+        // are untouched, so another browser's layout and the shared rev are not
+        // disturbed. This is the safe "Ctrl+F5 wasn't enough" stale-window
+        // recovery; it does NOT by itself fix the duplicate chips (remove the
+        // duplicate host above for that).
+        function resetLocalView() {
+            for (const k of Object.keys(prefs)) {
+                if (k.charAt(0) === '_') continue;   // keep _hosts/_settings/_layout
+                delete prefs[k];                     // per-session geometry only
+            }
+            savePrefsLocal();                        // local only — never PUT /state
+            if (_booted && !_deactivated) {
+                teardownView();                      // dispose windows + in-memory
+                rebuildView();                       // re-adopt /state + restore
+            }
+            showNotice('local view reset');
+        }
+        const resetViewBtn = document.getElementById('set-reset-view');
+        if (resetViewBtn) resetViewBtn.addEventListener('click', resetLocalView);
 
         // ---- single-active view lifecycle (F-ACTIVECLIENT) ---------------
         // Boot defers the heavy restore (app windows, deep-link, restore queue,
