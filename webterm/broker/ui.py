@@ -34,9 +34,16 @@ localStorage, and multi-host federation (settings host list, per-host polling
 and status chips).
 """
 
-from pathlib import Path
+import json
+import logging
+from pathlib import Path, PurePosixPath
 
 _DIR = Path(__file__).resolve().parent
+_LOG = logging.getLogger(__name__)
+
+# Every fragment (core, mod .js, and now mod .css) rides the same line cap as the
+# #68/#71 split guard, so no mod can smuggle a giant script/stylesheet back in.
+_MAX_LINES = 2500
 
 # Page order, top to bottom. The numeric filename prefixes mirror this order so
 # the directory reads top-to-bottom too, but THIS list is authoritative.
@@ -115,25 +122,152 @@ _MODS = [
 # after every registerMod() call, so the splice point is the boot fragment.
 _MOD_SPLICE_BEFORE = "90_js_mod_boot.js"
 
+# Mod stylesheets (#77/S4). A mod manifest (mod.json) MAY declare `styles`: a
+# list of bare ``<file>.css`` filenames in its own dir. ui.py concatenates them
+# into the head <style> zone immediately AFTER this core CSS fragment -- i.e.
+# BEFORE 40_body.html's closing </style> -- so a CSS-heavy mod (Help/S5) ships a
+# real stylesheet instead of inline styles. Routing happens at ASSEMBLY time,
+# exactly like the mod .js splice and INDEPENDENT of the mods_enabled RUNTIME
+# gate: a disabled mod's CSS is present-but-inert (its selectors match nothing
+# until the mod's JS -- which loadMods() gates -- adds its markup/classes), the
+# same posture as the spliced-but-not-initialized mod JS. With no manifest
+# declaring `styles`, the css segment is empty and the page is byte-identical to
+# the #71 join.
+_MOD_CSS_AFTER = "15_css_dialogs.css"
 
-def _read(name: str) -> str:
+
+def _read(name: str, base: Path = _DIR) -> str:
     # Text mode -> universal-newline translation -> LF-normalized, exactly as
     # the old single-file read. Raises FileNotFoundError naming the missing
-    # fragment if one is dropped from the package.
-    return (_DIR / name).read_text(encoding="utf-8")
+    # fragment if one is dropped from the package. `base` is threaded through so
+    # assemble() can be driven against a fixture tree in tests.
+    return (Path(base) / name).read_text(encoding="utf-8")
 
 
-def assemble() -> str:
-    """Three-segment empty-string join: core fragments up to the boot splice
-    point, then the in-repo mod scripts, then the boot fragment + tail. Every
-    piece already ends in its own newline, so the empty join preserves byte
-    layout (a ``"\\n".join`` would inject a double newline at every seam)."""
-    cut = _ORDERED.index(_MOD_SPLICE_BEFORE)
-    pre, post = _ORDERED[:cut], _ORDERED[cut:]
+def _mod_dirs(mods):
+    """Ordered-unique mod directories ('mods/<id>') derived from the _MODS .js
+    entries, first-seen order preserved -- so a mod's manifest is read once even
+    if it ever ships multiple .js files."""
+    seen, out = set(), []
+    for rel in mods:
+        d = PurePosixPath(rel).parent.as_posix()
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _manifest(mod_dir: str, base: Path = _DIR) -> dict:
+    """Parsed mod.json for one mod dir, best-effort: any read/parse problem (or a
+    non-object payload) logs a warning and yields ``{}`` so a malformed manifest
+    can never crash assembly at import."""
+    p = Path(base) / mod_dir / "mod.json"
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:  # missing / bad JSON / unreadable
+        _LOG.warning("mod manifest unreadable (%s): %s", p, exc)
+        return {}
+    if not isinstance(meta, dict):
+        _LOG.warning("mod manifest is not a JSON object (%s)", p)
+        return {}
+    return meta
+
+
+def _is_bare_css(name) -> bool:
+    """A manifest ``styles`` entry must be a bare ``<file>.css`` filename so it can
+    only resolve INSIDE its own mod dir: no path separator ('/' or '\\'), no
+    '..'/absolute escape, no nested dir, must end in '.css'. Rejects the
+    adversarial set '../x.css', '..\\x.css', '/abs.css', 'nested/x.css', 'x.js',
+    '', and non-strings."""
     return (
-        "".join(_read(_name) for _name in pre)
-        + "".join(_read(_name) for _name in _MODS)
-        + "".join(_read(_name) for _name in post)
+        isinstance(name, str)
+        and name.endswith(".css")
+        and "/" not in name
+        and "\\" not in name
+        and name not in (".", "..")
+        and PurePosixPath(name).name == name
+    )
+
+
+def _css_servable(rel: str, base: Path = _DIR) -> bool:
+    """True iff the mod css at ``<base>/<rel>`` is safe to splice into the served
+    page: it exists, carries no UTF-8 BOM, ends in its own newline (the empty
+    join depends on it), is valid UTF-8, and rides the same <=2500-line cap as
+    every other fragment. Read as BYTES so the BOM and final-newline checks see
+    the file as written (pre universal-newline translation). Any reject logs +
+    returns False -- best-effort: the broker still boots, the css is just
+    dropped; the strict drift/identity tests fail CI on the same conditions."""
+    p = Path(base) / rel
+    try:
+        raw = p.read_bytes()
+    except Exception as exc:
+        _LOG.warning("mod css unreadable (%s): %s", p, exc)
+        return False
+    if raw.startswith(b"\xef\xbb\xbf"):
+        _LOG.warning("mod css carries a UTF-8 BOM (%s)", p)
+        return False
+    if not raw.endswith(b"\n"):
+        _LOG.warning("mod css does not end in a newline (%s)", p)
+        return False
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        _LOG.warning("mod css is not valid UTF-8 (%s): %s", p, exc)
+        return False
+    if text.count("\n") > _MAX_LINES:
+        _LOG.warning("mod css exceeds %d lines (%s)", _MAX_LINES, p)
+        return False
+    return True
+
+
+def _mod_css(mods, base: Path = _DIR):
+    """Repo-relative ``mods/<id>/<file>.css`` paths to splice into the head, in
+    _MODS order then manifest ``styles`` order, deduped. Best-effort throughout:
+    a missing/non-list ``styles``, a non-bare entry, or an unservable file is
+    skipped + logged so a packaging mistake degrades to "no css from that mod",
+    never an import crash. The strict equivalents (drift + per-file guards) live
+    in tests/test_ui_assets.py."""
+    out, seen = [], set()
+    for mod_dir in _mod_dirs(mods):
+        styles = _manifest(mod_dir, base).get("styles", [])
+        if not isinstance(styles, list):
+            _LOG.warning("mod %s: `styles` must be a list, got %s",
+                         mod_dir, type(styles).__name__)
+            continue
+        for name in styles:
+            if not _is_bare_css(name):
+                _LOG.warning("mod %s: ignoring non-bare/non-css style %r",
+                             mod_dir, name)
+                continue
+            rel = (PurePosixPath(mod_dir) / name).as_posix()
+            if rel in seen:
+                continue
+            if _css_servable(rel, base):
+                seen.add(rel)
+                out.append(rel)
+    return out
+
+
+def assemble(ordered=_ORDERED, mods=_MODS, base: Path = _DIR) -> str:
+    """Five-segment empty-string join: core fragments up to the head-css splice
+    point, the mod stylesheets, the rest of core up to the mod-js splice point,
+    the mod scripts, then the boot fragment + tail. Every piece already ends in
+    its own newline, so the empty join preserves byte layout (a ``"\\n".join``
+    would inject a double newline at every seam). With no mod declaring a
+    ``styles`` file the css segment is empty and the result is byte-identical to
+    the #71 three-segment join."""
+    css_cut = ordered.index(_MOD_CSS_AFTER) + 1   # splice css AFTER this fragment
+    js_cut = ordered.index(_MOD_SPLICE_BEFORE)     # splice js BEFORE the boot frag
+
+    def _join(names):
+        return "".join(_read(_name, base) for _name in names)
+
+    return (
+        _join(ordered[:css_cut])
+        + _join(_mod_css(mods, base))
+        + _join(ordered[css_cut:js_cut])
+        + _join(mods)
+        + _join(ordered[js_cut:])
     )
 
 

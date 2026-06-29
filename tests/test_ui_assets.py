@@ -16,12 +16,63 @@ Byte-identity vs the pre-split page is verified once, out of band, via a sha256
 gate; it is deliberately NOT asserted here so ordinary UI edits stay free.
 """
 
-from pathlib import Path
+import json
+from pathlib import Path, PurePosixPath
 
 from webterm.broker import ui
 from webterm.broker.ui import INDEX_HTML
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
+
+
+def _declared_mod_css():
+    """Every ``mods/<id>/<file>.css`` the in-repo manifests claim to ship, read
+    STRICTLY (a bad manifest raises here, by design) and deduped in _MODS-then-
+    `styles` order. This is the strict source of truth the drift + per-file
+    guards compare against ui's best-effort ``_mod_css`` (#77/S4)."""
+    out, seen = [], set()
+    for mod_dir in dict.fromkeys(
+            PurePosixPath(m).parent.as_posix() for m in ui._MODS):
+        meta = json.loads((BROKER_DIR / mod_dir / "mod.json").read_text(encoding="utf-8"))
+        for name in meta.get("styles", []):
+            rel = f"{mod_dir}/{name}"
+            if rel not in seen:
+                seen.add(rel)
+                out.append(rel)
+    return out
+
+
+# --- #77/S4 fixture helpers: a synthetic fragment tree in tmp_path lets us drive
+# ui.assemble() against a mod that actually ships .css without touching the real
+# served page (which stays byte-identical because no in-repo mod declares css).
+_SYNTH_ORDERED = [
+    "00_head.html", "15_css_dialogs.css", "40_body.html",
+    "86_js_mod_loader.js", "90_js_mod_boot.js", "99_tail.html",
+]
+
+
+def _write_synth_core(base):
+    # Realistic head/body/script boundaries so position asserts mean what the
+    # served page means: 15 is the last core css, 40 closes </style> + opens the
+    # one <script>, 90 is loadMods(). The css/js splice anchors are the SAME
+    # module constants assemble() uses.
+    (base / "00_head.html").write_text("<!DOCTYPE html>\n<head><style>\n", encoding="utf-8")
+    (base / "15_css_dialogs.css").write_text("/*DIALOGS*/\n", encoding="utf-8")
+    (base / "40_body.html").write_text("</style></head>\n<body>\n<script>\n", encoding="utf-8")
+    (base / "86_js_mod_loader.js").write_text("/*LOADER*/\n", encoding="utf-8")
+    (base / "90_js_mod_boot.js").write_text("loadMods();\n", encoding="utf-8")
+    (base / "99_tail.html").write_text("</script></body></html>\n", encoding="utf-8")
+
+
+def _write_fixture_mod(base, mod_id, styles, files):
+    md = base / "mods" / mod_id
+    md.mkdir(parents=True, exist_ok=True)
+    meta = {"id": mod_id, "ctxVersion": 1, "entry": f"{mod_id}.js", "styles": styles}
+    (md / "mod.json").write_text(json.dumps(meta) + "\n", encoding="utf-8")
+    (md / f"{mod_id}.js").write_text(f"/*{mod_id.upper()}-JS*/\n", encoding="utf-8")
+    for fn, content in files.items():
+        (md / fn).write_text(content, encoding="utf-8")
+    return f"mods/{mod_id}/{mod_id}.js"
 
 
 # --------------------------------------------------------------------------- #
@@ -82,9 +133,9 @@ def test_fragment_counts():
 
 def test_no_multi_thousand_line_fragment():
     # The whole point of #68: no fragment is a giant script again. Mod scripts
-    # (#71) ride the same cap.
+    # (#71) and mod stylesheets (#77) ride the same cap.
     cap = 2500
-    for name in (*ui._ORDERED, *ui._MODS):
+    for name in (*ui._ORDERED, *ui._MODS, *_declared_mod_css()):
         lines = (BROKER_DIR / name).read_text(encoding="utf-8").count("\n")
         assert lines <= cap, f"{name} has {lines} lines (> {cap}); split it further"
 
@@ -93,8 +144,9 @@ def test_every_fragment_ends_in_newline_and_has_no_bom():
     # The empty-string join (#68) relies on each piece ending in its own \n; a
     # missing trailing newline fuses two statements/rules across a seam, and a
     # UTF-8 BOM mid-stream injects U+FEFF into the served bytes. Covers the mod
-    # scripts (#71) too, since they splice into the same one <script>.
-    for name in (*ui._ORDERED, *ui._MODS):
+    # scripts (#71) AND mod stylesheets (#77), since both splice into the same
+    # one <script> / one <style>.
+    for name in (*ui._ORDERED, *ui._MODS, *_declared_mod_css()):
         raw = (BROKER_DIR / name).read_text(encoding="utf-8")
         assert raw.endswith("\n"), f"{name} must end in a newline"
         assert "﻿" not in raw, f"{name} carries a UTF-8 BOM"
@@ -119,19 +171,104 @@ def test_ordered_list_matches_disk_exactly():
     assert not extra, f"fragment-typed files on disk not in _ORDERED: {sorted(extra)}"
 
 
-def test_assembled_equals_three_segment_join():
-    # #71 splices the in-repo mod scripts (ui._MODS) into the one <script>
-    # BETWEEN the loader and the boot fragment, so the served page is a 3-segment
-    # join, not a flat join of _ORDERED. Rebuild it the same way ui.assemble does
-    # and assert byte-equality with what gets served.
-    cut = ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
-    pre, post = ui._ORDERED[:cut], ui._ORDERED[cut:]
+def test_assembled_equals_segment_join():
+    # #71 splices the mod scripts (ui._MODS) into the one <script> BETWEEN the
+    # loader and the boot fragment; #77 additionally splices each mod's manifest
+    # .css into the head <style> zone, AFTER ui._MOD_CSS_AFTER and before
+    # 40_body.html's </style>. So the served page is a 5-segment join, not a flat
+    # join of _ORDERED. Rebuild it the same way ui.assemble does (mod-css comes
+    # from the same best-effort ui._mod_css) and assert byte-equality with what
+    # gets served. With no in-repo mod declaring `styles`, the css segment is
+    # empty and this reduces to the #71 three-segment join.
+    css_cut = ui._ORDERED.index(ui._MOD_CSS_AFTER) + 1
+    js_cut = ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
+
+    def _j(names):
+        return "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in names)
+
     rebuilt = (
-        "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in pre)
-        + "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in ui._MODS)
-        + "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in post)
+        _j(ui._ORDERED[:css_cut])
+        + _j(ui._mod_css(ui._MODS, BROKER_DIR))
+        + _j(ui._ORDERED[css_cut:js_cut])
+        + _j(ui._MODS)
+        + _j(ui._ORDERED[js_cut:])
     )
     assert rebuilt == INDEX_HTML
+
+
+def test_mod_css_declared_matches_disk():
+    # Drift guard for mod stylesheets (#77), the .css analogue of the _MODS .js
+    # guard: every .css under mods/ is declared in some manifest's `styles`, and
+    # every declared .css exists -- no orphan stylesheet silently absent from the
+    # page, no dangling reference. (Both sides are empty until a mod ships css.)
+    declared = set(_declared_mod_css())
+    on_disk = {p.relative_to(BROKER_DIR).as_posix()
+               for p in (BROKER_DIR / "mods").rglob("*.css")}
+    assert declared == on_disk, (
+        f"mods/ *.css drift: declared={sorted(declared)} on_disk={sorted(on_disk)}")
+
+
+def test_mod_css_routed_into_head_style_zone(tmp_path):
+    # A mod that ships a .css has it served INSIDE the still-open head <style>:
+    # after the last core css fragment and before 40_body.html's </style>. Drive
+    # the REAL ui.assemble against a synthetic fragment tree so the assertion
+    # exercises production routing, not a parallel harness.
+    _write_synth_core(tmp_path)
+    js = _write_fixture_mod(tmp_path, "probe", ["probe.css"],
+                            {"probe.css": "/*PROBE-CSS*/\n"})
+    page = ui.assemble(ordered=_SYNTH_ORDERED, mods=[js], base=tmp_path)
+    assert page.count("/*PROBE-CSS*/") == 1
+    assert page.index("/*DIALOGS*/") < page.index("/*PROBE-CSS*/") < page.index("</style>")
+    # ...and the mod .js still splices between the loader and loadMods() (#71).
+    assert page.index("/*LOADER*/") < page.index("/*PROBE-JS*/") < page.index("loadMods();")
+
+
+def test_malformed_mod_css_skipped_best_effort(tmp_path):
+    # A malformed mod css (here: no trailing newline) is skipped + logged, never
+    # crashes assembly -- the broker still boots and the rest of the page (incl.
+    # the mod's own .js) is unaffected. INDEX_HTML stays a module-scope str.
+    _write_synth_core(tmp_path)
+    js = _write_fixture_mod(tmp_path, "probe", ["probe.css"],
+                            {"probe.css": "/*NO-NEWLINE*/"})  # missing trailing \n
+    page = ui.assemble(ordered=_SYNTH_ORDERED, mods=[js], base=tmp_path)
+    assert "/*NO-NEWLINE*/" not in page          # the bad css is dropped
+    assert "</style>" in page and "loadMods();" in page   # page still assembled
+    assert "/*PROBE-JS*/" in page                # the mod's js is unaffected
+
+
+def test_mod_css_rejects_unsafe_paths_and_dedupes(tmp_path):
+    # Packaging/security edges: a `styles` entry that escapes the mod dir
+    # ('../abs.css', '/abs.css'), nests ('nested/x.css'), or isn't css ('probe.js')
+    # is rejected; a duplicate is emitted once. An out-of-dir abs.css that DOES
+    # exist proves the '../' reference can't reach it.
+    _write_synth_core(tmp_path)
+    (tmp_path / "abs.css").write_text("/*ABS-ESCAPE*/\n", encoding="utf-8")
+    styles = ["../abs.css", "/abs.css", "nested/x.css", "probe.js",
+              "probe.css", "probe.css"]
+    js = _write_fixture_mod(tmp_path, "probe", styles,
+                            {"probe.css": "/*GOOD-CSS*/\n"})
+    page = ui.assemble(ordered=_SYNTH_ORDERED, mods=[js], base=tmp_path)
+    assert page.count("/*GOOD-CSS*/") == 1       # the one valid css, deduped to once
+    assert "/*ABS-ESCAPE*/" not in page          # '../' / '/' never resolved out of dir
+    assert "</style>" in page                    # assembly completed despite the junk
+    # _mod_css returns exactly the one safe, repo-relative path.
+    assert ui._mod_css([js], tmp_path) == ["mods/probe/probe.css"]
+
+
+def test_mod_css_absent_styles_is_empty_and_noop(tmp_path):
+    # A manifest with no `styles` (the state of every in-repo mod today) yields no
+    # css segment, so the served page is byte-identical to the #71 join -- the
+    # "no UI behavior change for existing features" guarantee.
+    _write_synth_core(tmp_path)
+    md = tmp_path / "mods" / "bare"
+    md.mkdir(parents=True)
+    (md / "mod.json").write_text(json.dumps({"id": "bare", "entry": "bare.js"}) + "\n",
+                                 encoding="utf-8")
+    (md / "bare.js").write_text("/*BARE-JS*/\n", encoding="utf-8")
+    assert ui._mod_css(["mods/bare/bare.js"], tmp_path) == []
+    page = ui.assemble(ordered=_SYNTH_ORDERED, mods=["mods/bare/bare.js"], base=tmp_path)
+    # css zone is empty: </style> immediately follows the last core css.
+    assert "/*DIALOGS*/\n</style>" in page
 
 
 # --------------------------------------------------------------------------- #
