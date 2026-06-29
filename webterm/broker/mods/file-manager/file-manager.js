@@ -617,6 +617,10 @@
                     items.push({ label: 'Move → ' + other + ' pane',
                                  enabled: true,
                                  action: () => doTransfer(other, desc, true) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Properties…', enabled: true,
+                                 action: () => showProperties(side, child,
+                                                              ent.name) });
                     return items;
                 };
                 const onRowMenu = (e, row, ent, child) => {
@@ -1027,11 +1031,52 @@
                 showNotice('created ' + name.trim());
                 renderPane(side);
             };
+            // Properties: /file/stat -> a read-only styled info modal. Shared by
+            // the row menu (a file/dir) and the empty menu (the cwd).
+            const showProperties = async (side, path, displayName) => {
+                const host = paneHost(side);
+                if (!host) {
+                    showNotice('properties failed: host unavailable');
+                    return;
+                }
+                const r = await fmFile().stat(path, { host: host.id });
+                if (win.disposed) return;
+                if (!(r && r.ok)) {
+                    if (r && r.error === 'auth_required') {
+                        promptFileHostAuth(host);
+                    }
+                    showNotice('properties failed: ' + ((r && r.error) || '?'));
+                    return;
+                }
+                const rows = [];
+                rows.push({ k: 'Name',
+                            v: displayName || baseName(r.path || path) });
+                rows.push({ k: 'Path', v: r.path || path });
+                rows.push({ k: 'Type', v: r.type === 'dir' ? 'Folder'
+                            : (r.type === 'file' ? 'File' : r.type) });
+                if (r.type === 'dir') {
+                    if (typeof r.children === 'number') {
+                        rows.push({ k: 'Items', v: String(r.children) });
+                    }
+                } else {
+                    rows.push({ k: 'Size',
+                                v: fmtSize(r.size) + ' (' + r.size + ' bytes)' });
+                }
+                if (r.mtime != null) {
+                    rows.push({ k: 'Modified',
+                                v: new Date(r.mtime * 1000).toLocaleString() });
+                }
+                if (typeof r.mode === 'number') {
+                    rows.push({ k: 'Mode',
+                                v: '0' + (r.mode & 0o7777).toString(8) });
+                }
+                await openInfoModal({ title: 'Properties', rows: rows });
+            };
 
             // Right-click on a pane's empty background: New folder / Paste /
             // Refresh / Properties of the cwd. Lives in the outer scope (reads
             // win[dirKey(side)] live) so the one pane-level contextmenu handler
-            // can call it; the item set grows in later commits.
+            // can call it.
             const buildEmptyMenu = (side) => {
                 const cwd = win[dirKey(side)];
                 const items = [];
@@ -1045,6 +1090,9 @@
                 items.push({ label: 'Refresh', enabled: true,
                              action: () => { renderPane('left');
                                              renderPane('right'); } });
+                items.push({ label: 'Properties…', enabled: true,
+                             action: () => showProperties(side, cwd,
+                                                          baseName(cwd)) });
                 return items;
             };
 
