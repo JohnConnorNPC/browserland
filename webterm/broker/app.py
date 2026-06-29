@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import uuid
 import zipfile
@@ -223,7 +225,8 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
-def _resolve_host_path(rel: str, default_dir: Path) -> Path:
+def _resolve_host_path(rel: str, default_dir: Path,
+                       follow_leaf: bool = True) -> Path:
     """Resolve a client-supplied file path **host-wide** — anywhere on this box,
     with NO ``editor_root`` confinement (#35).
 
@@ -249,7 +252,17 @@ def _resolve_host_path(rel: str, default_dir: Path) -> Path:
     dir is the POINT here, not a bypass to defend against). A colon in any
     non-anchor component (``file:ads``, ``dir:x\\f``) is an NTFS
     alternate-data-stream spelling and is rejected. Resolver failures (symlink
-    loop, bad drive) raise ``ValueError`` -> the caller maps to ``bad_path``."""
+    loop, bad drive) raise ``ValueError`` -> the caller maps to ``bad_path``.
+
+    ``follow_leaf`` (#72, default ``True``) keeps the full ``resolve()`` — i.e.
+    every existing caller is byte-identical. With ``follow_leaf=False`` the
+    PARENT is resolved (symlinks higher in the path still collapse) and the raw
+    leaf name is re-attached, so a symlink or junction AT the leaf is *preserved*
+    for the caller to handle rather than dereferenced. This is load-bearing for
+    the destructive ops: a naive ``rmtree``/``rename``/``move`` of a fully
+    resolved symlink-to-dir would operate on the link's TARGET tree (host-wide
+    data loss); link-safe resolution hands the caller the link itself. The ADS
+    and half-absolute rejections apply identically in both modes."""
     raw = rel or ""
     base = Path(raw)
     # ADS guard (Windows only — ':' is a legal filename char on POSIX): drop the
@@ -266,9 +279,106 @@ def _resolve_host_path(rel: str, default_dir: Path) -> Path:
     else:
         p = default_dir / base
     try:
-        return p.resolve()
+        if follow_leaf:
+            return p.resolve()
+        # Link-safe leaf: resolve the parent, re-attach the raw leaf name. A path
+        # that is its own anchor (no leaf name, e.g. ``C:\``) has nothing to
+        # preserve, so fall back to a full resolve.
+        name = p.name
+        if not name:
+            return p.resolve()
+        return p.parent.resolve() / name
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError("bad_path") from exc
+
+
+def _is_reparse_point(path_str: str) -> bool:
+    """True if the leaf at ``path_str`` is a symlink OR (Windows) a junction /
+    other reparse point. ``os.path.islink`` alone misses junctions on Python
+    < 3.12, so the reparse-point attribute bit is checked too — a destructive op
+    must treat a junction-to-dir like a link (remove the entry, never recurse
+    into its target). Best-effort: any stat failure returns False and the
+    caller's normal classification handles it."""
+    try:
+        if os.path.islink(path_str):
+            return True
+    except OSError:
+        return False
+    if os.name == "nt":
+        try:
+            attrs = os.lstat(path_str).st_file_attributes
+        except (OSError, AttributeError):
+            return False
+        return bool(attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def _remove_link(path_str: str) -> None:
+    """Remove a symlink / junction ENTRY without touching its target. A
+    directory-type link (dir symlink or junction) needs ``os.rmdir`` on Windows
+    — ``os.unlink`` raises on it — while a file symlink (and a broken link) need
+    ``os.unlink``. ``os.path.isdir`` follows the link to choose; a broken link
+    (isdir False) takes the unlink path."""
+    if os.path.isdir(path_str):
+        os.rmdir(path_str)
+    else:
+        os.unlink(path_str)
+
+
+def _force_remove(path_str: str) -> None:
+    """Remove any leaf — a symlink/junction (entry only, never the target), a
+    real file, or a real directory tree. Used by move-overwrite and recursive
+    delete. The reparse-point check comes first so a link is never dereferenced
+    into an rmtree of its target."""
+    if _is_reparse_point(path_str):
+        _remove_link(path_str)
+    elif os.path.isdir(path_str):
+        shutil.rmtree(path_str)
+    else:
+        os.unlink(path_str)
+
+
+def _rename_or_move(src_str: str, dst_str: str) -> None:
+    """Move ``src`` onto a NON-EXISTENT ``dst``: ``os.replace`` (atomic on one
+    volume; moves a symlink/junction as the entry, not the target), falling back
+    to ``shutil.move`` only on a cross-device error (EXDEV)."""
+    try:
+        os.replace(src_str, dst_str)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.EXDEV:
+            shutil.move(src_str, dst_str)
+        else:
+            raise
+
+
+def _resolve_two(body: Dict[str, Any], default_dir: Path,
+                 src_follow_leaf: bool = True,
+                 dst_follow_leaf: bool = True):
+    """Resolve the ``src`` and ``dst`` string fields of a copy/move body
+    host-wide. Returns ``(src, dst)`` Paths, or raises ``ValueError`` (mapped to
+    ``bad_path`` by the caller) on a missing / non-string field or a resolver
+    failure. ``*_follow_leaf`` pick link-safe leaf resolution per side: move
+    resolves both link-safe (so it relocates a link entry, not its target); copy
+    follows (it is non-destructive to the source)."""
+    src_rel = body.get("src")
+    dst_rel = body.get("dst")
+    if not isinstance(src_rel, str) or not src_rel:
+        raise ValueError("bad_path")
+    if not isinstance(dst_rel, str) or not dst_rel:
+        raise ValueError("bad_path")
+    src = _resolve_host_path(src_rel, default_dir, follow_leaf=src_follow_leaf)
+    dst = _resolve_host_path(dst_rel, default_dir, follow_leaf=dst_follow_leaf)
+    return src, dst
+
+
+def _is_within(child: Path, ancestor: Path) -> bool:
+    """True if ``child`` is ``ancestor`` or lives under it (case-insensitive on
+    Windows via the pure-path compare). Refuses copying/moving a tree into
+    itself — which would recurse infinitely and litter a partial copy."""
+    try:
+        return child.is_relative_to(ancestor)
+    except (ValueError, TypeError):
+        return False
 
 
 def _classify_path(p: Path) -> str:
@@ -1020,6 +1130,161 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True,
                            "path": str(p)})      # absolute, host-wide (#35)
 
+    async def _file_copy(request: Request):
+        # Copy a file or directory tree. src is followed (copy is non-destructive
+        # to the source); dst is the FULL target path (not a container). A dir
+        # uses copytree(symlinks=True) so INNER links are copied as links, not
+        # materialised; a file uses copy2 (metadata preserved). Refuses src==dst
+        # and dst-inside-src (the latter would recurse / litter — P0-2).
+        #
+        # NOTE: an overwrite is NOT atomic — copy2 / copytree(dirs_exist_ok=True)
+        # write over the destination in place, so a mid-copy failure can leave a
+        # damaged dst the caller asked to replace. Partial-dst cleanup therefore
+        # runs only when !overwrite (where dst was freshly created and is ours to
+        # remove); an overwrite failure is reported, not rolled back.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        try:
+            src, dst = _resolve_two(body, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if src == dst:
+            return sanic_json({"ok": False, "error": "same"}, status=400)
+        if _is_within(dst, src):
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_kind = _classify_path(src)
+        if src_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if src_kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if src_kind not in ("file", "dir"):
+            return sanic_json({"ok": False, "error": "not_supported"},
+                              status=400)
+        dst_kind = _classify_path(dst)
+        if dst_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        dparent = _classify_path(dst.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        if dst_kind != "missing":
+            if not overwrite:
+                return sanic_json({"ok": False, "error": "exists"}, status=409)
+            if dst_kind != src_kind:
+                return sanic_json({"ok": False, "error": "type_mismatch"},
+                                  status=400)
+        src_str, dst_str = str(src), str(dst)
+
+        def _do_copy():
+            if src_kind == "dir":
+                shutil.copytree(src_str, dst_str, symlinks=True,
+                                dirs_exist_ok=overwrite)
+            else:
+                shutil.copy2(src_str, dst_str)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_copy)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            if not overwrite:
+                # dst was freshly created by this op — remove the partial litter.
+                try:
+                    if os.path.isdir(dst_str) and not _is_reparse_point(dst_str):
+                        shutil.rmtree(dst_str, ignore_errors=True)
+                    elif os.path.lexists(dst_str):
+                        os.unlink(dst_str)
+                except OSError:
+                    pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dst_str})
+
+    async def _file_move(request: Request):
+        # Move/rename a file or directory. Both paths resolve LINK-SAFE (#72): a
+        # symlink/junction src relocates the LINK entry, never its target tree.
+        # dst is the FULL target path. An existing dst needs overwrite=true (409
+        # otherwise). Overwrite never loses the old dst: two real files use the
+        # atomic os.replace; anything else (dir, symlink/junction, type change)
+        # renames the existing dst to a sibling backup, moves src into place, and
+        # only then drops the backup — restoring it if the move fails.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        try:
+            src, dst = _resolve_two(body, app.ctx.editor_root,
+                                    src_follow_leaf=False, dst_follow_leaf=False)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if src == dst:
+            return sanic_json({"ok": False, "error": "same"}, status=400)
+        if _is_within(dst, src):
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_str, dst_str = str(src), str(dst)
+        # lexists (not exists): a broken symlink leaf still exists and must be
+        # movable; a real symlink/junction must not be dereferenced here.
+        if not os.path.lexists(src_str):
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        dparent = _classify_path(dst.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        dst_exists = os.path.lexists(dst_str)
+        if dst_exists and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+
+        def _do_move():
+            if not (dst_exists and overwrite):
+                _rename_or_move(src_str, dst_str)
+                return
+            both_real_files = (
+                os.path.isfile(src_str) and not _is_reparse_point(src_str)
+                and os.path.isfile(dst_str) and not _is_reparse_point(dst_str))
+            if both_real_files:
+                _rename_or_move(src_str, dst_str)   # atomic file replace
+                return
+            # No atomic replace for these (no dir-over-dir replace on Windows);
+            # back up the existing dst, move, restore on ANY failure so dst is
+            # never lost.
+            backup = dst_str + ".webterm-bak-" + uuid.uuid4().hex
+            os.rename(dst_str, backup)
+            try:
+                _rename_or_move(src_str, dst_str)
+            except BaseException:
+                try:
+                    if os.path.lexists(dst_str):
+                        _force_remove(dst_str)
+                except OSError:
+                    pass
+                try:
+                    os.rename(backup, dst_str)
+                except OSError:
+                    pass
+                raise
+            _force_remove(backup)
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_move)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dst_str})
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -1598,6 +1863,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
     app.add_route(_file_delete, "/file/delete", methods=["POST"])
     app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
+    app.add_route(_file_copy, "/file/copy", methods=["POST"])
+    app.add_route(_file_move, "/file/move", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -1627,6 +1894,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/upload", "preflight_file_upload"),
                              ("/file/delete", "preflight_file_delete"),
                              ("/file/mkdir", "preflight_file_mkdir"),
+                             ("/file/copy", "preflight_file_copy"),
+                             ("/file/move", "preflight_file_move"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),

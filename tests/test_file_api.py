@@ -5,6 +5,7 @@ browse the whole host (gated by the same auth as ``/launch``, which already
 grants shell-level filesystem access). These cover the resolution rules and the
 half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -168,3 +169,199 @@ def test_posix_absolute_and_colon_filenames(tmp_path):
     # ':' is a legal POSIX filename char — must NOT be rejected as ADS.
     assert _resolve_host_path("weird:name", tmp_path) == \
         (tmp_path / "weird:name").resolve()
+
+
+# --------------------------------------------------------------------------- #
+# link-safe resolver (#72, follow_leaf)
+# --------------------------------------------------------------------------- #
+
+def _symlink_or_skip(target: Path, link: Path):
+    try:
+        os.symlink(str(target), str(link),
+                   target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks not supported in this environment: {exc}")
+
+
+def test_follow_leaf_preserves_symlink_leaf(tmp_path):
+    target = tmp_path / "target_dir"
+    target.mkdir()
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    # Default (follow_leaf=True) dereferences the leaf -> the real target.
+    assert _resolve_host_path("link", tmp_path) == target.resolve()
+    # Link-safe (follow_leaf=False) preserves the link entry itself.
+    safe = _resolve_host_path("link", tmp_path, follow_leaf=False)
+    assert os.path.islink(str(safe))
+    assert safe == (tmp_path.resolve() / "link")
+
+
+# --------------------------------------------------------------------------- #
+# /file/copy (#72)
+# --------------------------------------------------------------------------- #
+
+def test_copy_file_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "a.txt", "dst": "b.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "hello"
+    assert (tmp_path / "a.txt").exists()          # source untouched
+
+
+def test_copy_dir_ok(tmp_path, monkeypatch):
+    src = tmp_path / "tree"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "tree", "dst": "tree2"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "tree2" / "sub" / "f.txt").read_text(encoding="utf-8") == "x"
+
+
+def test_copy_exists_without_overwrite_409(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "a.txt", "dst": "b.txt"})
+    assert r.status == 409 and r.json["error"] == "exists"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b"   # untouched
+
+
+def test_copy_overwrite_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/copy", json={"src": "a.txt", "dst": "b.txt", "overwrite": True})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "a"
+
+
+def test_copy_dest_in_source_rejected_no_500(tmp_path, monkeypatch):
+    # Copying a dir into its own subtree would recurse forever — must be a clean
+    # 400, never a 500 / RecursionError + half-built litter.
+    (tmp_path / "tree").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "tree", "dst": "tree/inner"})
+    assert r.status == 400 and r.json["error"] == "dest_in_source"
+
+
+def test_copy_same_rejected(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "a.txt", "dst": "a.txt"})
+    assert r.status == 400 and r.json["error"] == "same"
+
+
+def test_copy_type_mismatch(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/copy", json={"src": "a.txt", "dst": "d", "overwrite": True})
+    assert r.status == 400 and r.json["error"] == "type_mismatch"
+
+
+def test_copy_source_missing_404(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/copy",
+                                json={"src": "nope", "dst": "x"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# /file/move (#72)
+# --------------------------------------------------------------------------- #
+
+def test_move_file_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/move",
+                                json={"src": "a.txt", "dst": "b.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "a.txt").exists()
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_move_dir_ok(tmp_path, monkeypatch):
+    src = tmp_path / "tree"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/move",
+                                json={"src": "tree", "dst": "tree2"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "tree").exists()
+    assert (tmp_path / "tree2" / "sub" / "f.txt").read_text(encoding="utf-8") == "x"
+
+
+def test_move_exists_without_overwrite_409(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/move",
+                                json={"src": "a.txt", "dst": "b.txt"})
+    assert r.status == 409 and r.json["error"] == "exists"
+    assert (tmp_path / "a.txt").exists()          # source untouched
+
+
+def test_move_overwrite_file_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/move", json={"src": "a.txt", "dst": "b.txt", "overwrite": True})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "a.txt").exists()
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "a"
+
+
+def test_move_overwrite_dir_ok(tmp_path, monkeypatch):
+    # The backup-and-restore path (no atomic dir-over-dir replace on Windows).
+    src = tmp_path / "tree"
+    src.mkdir()
+    (src / "f.txt").write_text("new", encoding="utf-8")
+    dst = tmp_path / "dest"
+    dst.mkdir()
+    (dst / "old.txt").write_text("old", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/move", json={"src": "tree", "dst": "dest", "overwrite": True})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "tree").exists()
+    assert (tmp_path / "dest" / "f.txt").read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / "dest" / "old.txt").exists()   # replaced, not merged
+    # no stray backup left behind
+    assert not list(tmp_path.glob("dest.webterm-bak-*"))
+
+
+def test_move_source_missing_404(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/move",
+                                json={"src": "nope", "dst": "x"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+
+
+def test_move_symlink_to_dir_moves_link_not_target(tmp_path, monkeypatch):
+    # The headline data-loss guard for move: relocating a symlink-to-dir moves
+    # the LINK entry; the target tree (and its contents) stays put.
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/move",
+                                json={"src": "link", "dst": "moved"})
+    assert r.status == 200 and r.json["ok"] is True
+    moved = tmp_path / "moved"
+    assert os.path.islink(str(moved))             # the link itself moved
+    assert not os.path.lexists(str(link))         # old link gone
+    assert target.is_dir()                        # target tree intact
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
