@@ -153,6 +153,46 @@
                               overwrite: !!(opts && opts.overwrite) }, opts);
                     },
                 },
+                // #85 (S12): host session RPC — ONE reviewed wrapper over the
+                // existing /session/procs (enumerate a session's process tree) and
+                // the DESTRUCTIVE /session/kill (end a pid; killing the shell pid
+                // destroys the whole session). Host-aware, mirroring the task
+                // manager's old inline sessionPost (72_js_task_manager.js).
+                //
+                // TRUST TIER — HIGH. Like ctx.file this is operator-granted REVIEW
+                // HYGIENE, NOT a permission boundary or sandbox: a same-origin mod
+                // already holds the page's auth token and can POST to /session/*
+                // directly, exactly like core does; ctx.session grants NO new
+                // privilege and confines nothing. Its only job is to funnel every
+                // mod's session RPC — including the destructive process kill /
+                // session destroy — through one reviewed, host-aware choke point, so
+                // "don't merge a mod that kills sessions" stays a code-review
+                // decision (the only real control). opts.host is a host *id* string
+                // (sess.hostId / win.fileHostId semantics): a known id routes to that
+                // broker, ''/'local'/omitted -> the local broker, and an UNKNOWN
+                // remote id resolves to a synthetic no-host result (NO request made)
+                // rather than silently hitting local. Every call resolves to
+                // {status, json} — never a rejected promise: `status` is the HTTP
+                // status (0 for a transport / no-host failure) and `json` the parsed
+                // body, so a caller honors the broker's status contract verbatim — a
+                // 409 + {error:'session_gone'} is the session-destroy SUCCESS path,
+                // NOT an error. Feature-detect with `if (ctx.session)` (ctxVersion
+                // stays 1 — this is an additive capability).
+                session: {
+                    // Enumerate one session's process tree.
+                    // -> {status, json:{ok,procs}}
+                    procs: function (id, opts) {
+                        return _modSessionApi('/session/procs', { id: id }, opts);
+                    },
+                    // DESTRUCTIVE: end `pid` in a session (the shell pid destroys
+                    // it). -> {status, json}: 200 {ok:true}, or 409 {error:
+                    // 'session_gone'} when killing the shell tore the agent down
+                    // before it could reply — that 409 is the destroy SUCCESS path.
+                    kill: function (id, pid, opts) {
+                        return _modSessionApi('/session/kill',
+                            { id: id, pid: pid }, opts);
+                    },
+                },
                 taskbar: {
                     // Mount a status node in the taskbar (before #help-chip, so a
                     // mod keeps the old clock slot). Auto-removed on teardown.
@@ -620,6 +660,44 @@
                 return Promise.resolve({ ok: false, error: 'host_not_found' });
             }
             return fileApiPost(route, body, host);
+        }
+
+        // ---- ctx.session host routing (#85 / S12) ---------------------------
+        // The session-RPC twin of _modFileHost/_modFileApi (#82): resolve a mod-
+        // supplied host *id* to the host object, FAIL CLOSED (a known id -> that
+        // host; ''/'local'/undefined -> the local broker; an UNKNOWN remote id ->
+        // null so the op aborts as a synthetic no-host rather than silently hitting
+        // local — a removed host must never quietly fall through to a kill on the
+        // wrong broker), then POST a /session/* route. Returns {status, json} on
+        // EVERY outcome (never rejects): the parsed body with its HTTP status, an
+        // HTTP-<status> stub when the body isn't JSON (status PRESERVED — a non-JSON
+        // 409 must still read as 409, so the session-destroy success path survives),
+        // a status-0 no_host when the host won't resolve, or a status-0
+        // {error:String(e)} on a transport failure. Byte-identical to the task
+        // manager's old inline sessionPost (the local host id is literally 'local',
+        // which hostById resolves, so a real session never reaches the ''/'local'
+        // fallback branch).
+        function _modSessionHost(hostId) {
+            const h = hostById(hostId);
+            if (h) return h;
+            if (!hostId || hostId === 'local') return localHost();
+            return null;
+        }
+        function _modSessionApi(route, body, opts) {
+            const host = _modSessionHost(opts && opts.host);
+            if (!host) {
+                return Promise.resolve(
+                    { status: 0, json: { ok: false, error: 'no_host' } });
+            }
+            return fetch(hostHttpUrl(host, route), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            }).then(r => r.json()
+                .then(j => ({ status: r.status, json: j }))
+                .catch(() => ({ status: r.status,
+                                json: { ok: false, error: 'HTTP ' + r.status } })))
+             .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
         }
 
         // Fire mod controls on convergence (boot + every /state pull, via
