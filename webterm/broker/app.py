@@ -44,6 +44,7 @@ import os
 import re
 import secrets
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -180,6 +181,37 @@ def _write_state_atomic(path: Path, state: Dict[str, Any]) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+def _load_or_create_broker_id(path: Path) -> str:
+    """This broker's stable identity (a uuid4 hex), persisted in a standalone
+    file (``webterm_identity.json``) beside the state store. Minted + written on
+    first run, then immutable across restarts.
+
+    Deliberately kept OUT of ``webterm_state.json`` (the {rev,settings,layout}
+    blob that syncs to clients and bumps every save) and the MCP sidecar, so the
+    id is never tied to the rev cycle and never round-trips through /state. Used
+    ONLY for duplicate-broker warnings and to gate the terminate fallback (#64);
+    it is non-secret and never an authorization input, so a hand-edited or
+    truncated file simply self-heals by re-minting (no startup break)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            bid = data.get("broker_id")
+            if isinstance(bid, str) and bid:
+                return bid
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        pass
+    bid = uuid.uuid4().hex
+    try:
+        _write_state_atomic(path, {"broker_id": bid})
+    except OSError:
+        # Read-only dir / disk full: serve a process-local id this run rather
+        # than crash. It will differ on the next restart, at worst re-showing a
+        # duplicate warning — never an auth or correctness failure.
+        pass
+    return bid
 
 
 def _resolve_host_path(rel: str, default_dir: Path) -> Path:
@@ -352,6 +384,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # Stable per-broker identity (#64): minted once into a sibling identity file,
+    # immutable across restarts and OUTSIDE the rev cycle. Surfaced via /info so
+    # the UI can detect the same broker reached through several URLs (the
+    # duplicate-host-record bug) and gate the terminate fallback. Non-secret.
+    app.ctx.broker_id = _load_or_create_broker_id(
+        app.ctx.state_path.parent / "webterm_identity.json")
+    LOGGER.info("broker identity: %s", app.ctx.broker_id)
     # Detached fire-and-forget tasks (e.g. the #33 MCP-activity pulse), held in
     # a set so they aren't GC'd mid-flight; each self-removes on completion.
     app.ctx.bg_tasks = set()
@@ -1395,6 +1434,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.mcp_cfg = cfg
         return sanic_json(_mcp_cfg_public(cfg))
 
+    # ---- broker identity (/info) -----------------------------------------
+    # Non-secret stable id + build version (#64). Gated by the SAME
+    # token-or-loopback policy as /state: the same-origin local probe passes via
+    # loopback (no token); the cross-origin add-time probe passes via the
+    # ?token= appendHostToken already attaches. Gating (vs fully public) keeps a
+    # durable broker fingerprint off the unauthenticated network — adding a
+    # remote already requires a token anyway.
+    async def _info(request: Request):
+        err = _gated_auth_error(request, "/info")
+        if err is not None:
+            return err
+        return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
+                           "version": app.ctx.version})
+
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
     # concurrency on an integer rev: GET returns {rev, settings, layout}; PUT
@@ -1484,6 +1537,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
     app.add_route(_session_mcp, "/session/mcp", methods=["POST"])
+    app.add_route(_info, "/info", methods=["GET"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
     # MCP HTTP interface (external MCP server) + its browser-facing config.
@@ -1511,6 +1565,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
                              ("/session/mcp", "preflight_session_mcp"),
+                             ("/info", "preflight_info"),
                              ("/state", "preflight_state"),
                              ("/mcp/info", "preflight_mcp_info"),
                              ("/mcp/terminals", "preflight_mcp_terminals"),

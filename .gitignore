@@ -12,6 +12,9 @@ broker_config.json
 webterm_state.json
 .webterm-state-*.tmp
 
+# Stable broker identity (/info, #64) — sibling of the state store
+webterm_identity.json
+
 # Playwright verification screenshots (test artifacts)
 /*.png
 
