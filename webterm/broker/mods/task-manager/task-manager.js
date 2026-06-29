@@ -355,15 +355,26 @@
                         killBtn.textContent = '…';
                     }
                     killBtn.addEventListener('mousedown', stopProp);
-                    killBtn.addEventListener('click', (e) => {
+                    killBtn.addEventListener('click', async (e) => {
                         e.stopPropagation();
+                        // Full if/else so exactly ONE dialog ever opens (an
+                        // if/else-if would let the second guard fire after the
+                        // first resolved, opening a stray dialog).
                         if (isRoot) {
-                            if (!confirm('Kill the shell of "'
-                                + (sess.title || ('#' + sess.id))
-                                + '"? This destroys the window.')) return;
-                        } else if (!confirm('End process ' + proc.pid
-                                + ' (' + (proc.name || '?') + ')?')) {
-                            return;
+                            const ok = await openConfirmDialog({
+                                title: 'Kill shell',
+                                message: 'Kill the shell of "'
+                                    + (sess.title || ('#' + sess.id))
+                                    + '"? This destroys the window.',
+                                okLabel: 'Kill', danger: true });
+                            if (!ok || win.disposed) return;
+                        } else {
+                            const ok = await openConfirmDialog({
+                                title: 'End process',
+                                message: 'End process ' + proc.pid
+                                    + ' (' + (proc.name || '?') + ')?',
+                                okLabel: 'End', danger: true });
+                            if (!ok || win.disposed) return;
                         }
                         endProcess(sess, proc.pid);
                     });
@@ -463,10 +474,14 @@
                         destroyBtn.textContent = '…';
                     }
                     destroyBtn.addEventListener('mousedown', stopProp);
-                    destroyBtn.addEventListener('click', (e) => {
+                    destroyBtn.addEventListener('click', async (e) => {
                         e.stopPropagation();
-                        if (!confirm('Destroy "' + (sess.title || ('#' + sess.id))
-                            + '"? This kills the session.')) return;
+                        const ok = await openConfirmDialog({
+                            title: 'Destroy session',
+                            message: 'Destroy "' + (sess.title || ('#' + sess.id))
+                                + '"? This kills the session.',
+                            okLabel: 'Destroy', danger: true });
+                        if (!ok || win.disposed) return;
                         destroySession(sess);
                     });
                     row.appendChild(destroyBtn);
