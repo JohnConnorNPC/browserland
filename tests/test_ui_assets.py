@@ -693,3 +693,50 @@ def test_window_kind_sites_use_registry():
 
     s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
     assert "windowKindMenuList()" in s76
+
+
+# --------------------------------------------------------------------------- #
+# ctx.file capability (#82 / S9)
+# --------------------------------------------------------------------------- #
+
+def test_file_capability_present():
+    # #82 (S9): the ctx.file wrapper over /file/* + its host-routing helpers ride
+    # in the served loader. These are the symbols the Playwright acceptance (and
+    # any S10/S11 mod) depends on. ctxVersion stays 1 (additive capability).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    # The capability object + its five methods, on the per-mod ctx.
+    for sym in ("file: {",
+                "read: function (path, opts)",
+                "write: function (path, content, opts)",
+                "list: function (path, opts)",
+                "'delete': function (path, opts)",
+                "upload: function (path, contentB64, opts)"):
+        assert sym in loader, f"missing ctx.file method: {sym!r}"
+    # Each method targets the matching /file/* route, wrapped here.
+    for route in ("'/file/read'", "'/file/write'", "'/file/list'",
+                  "'/file/delete'", "'/file/upload'"):
+        assert route in loader, f"ctx.file does not wrap route {route!r}"
+    # The host-routing helpers: fail-closed resolution + the synthetic error.
+    for sym in ("function _modFileHost", "function _modFileApi",
+                "error: 'host_not_found'"):
+        assert sym in loader, f"missing ctx.file host-routing symbol: {sym!r}"
+    # Routing reuses the EXISTING core helpers (no parallel host logic).
+    for sym in ("hostById(hostId)", "return localHost();",
+                "fileApiPost(route, body, host)"):
+        assert sym in loader, f"ctx.file must reuse core host helper: {sym!r}"
+    # ctxVersion is unchanged — ctx.file is additive.
+    assert "ctxVersion: 1" in loader
+    # And it all reaches the served page.
+    for sym in ("function _modFileApi", "file: {", "error: 'host_not_found'"):
+        assert sym in INDEX_HTML, f"ctx.file missing from served page: {sym!r}"
+
+
+def test_file_capability_trust_doc_present():
+    # The trust-tier doc ships in-code WITH the capability: ctx.file is operator-
+    # granted REVIEW HYGIENE, not enforcement (a same-origin mod can already POST
+    # /file/* directly), and there is NO editor_root confinement.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "REVIEW HYGIENE" in loader
+    assert "permission boundary" in loader
+    assert "POST to /file/* directly" in loader
+    assert "editor_root confinement" in loader
