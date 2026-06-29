@@ -1,0 +1,9 @@
+{
+  "id": "theme",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Color scheme",
+  "description": "Color-scheme (theme) Control Panel radio + the six chrome CSS vars (extracted from core, #75).",
+  "entry": "theme.js",
+  "author": "JohnConnorNPC"
+}

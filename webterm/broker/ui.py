@@ -106,6 +106,7 @@ _ORDERED = [
 # glob) so a stray file in mods/ can never be swept into the served page, and a
 # forgotten mod script trips the drift guard in tests/test_ui_assets.py.
 _MODS = [
+    "mods/theme/theme.js",   # S2 (#75) color-scheme radio + the six chrome vars
     "mods/clock/clock.js",   # F057 clock, extracted as the reference mod
 ]
 

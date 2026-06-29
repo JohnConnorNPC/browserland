@@ -354,10 +354,9 @@
 
             // Appearance is browser-global — reflect the LIVE local settings
             // (these controls are hidden on remote tabs, shown only on local).
+            // #75: the color-scheme radio reflects itself through the theme mod
+            // (renderModSettingsToggles below); core only reflects pattern/font.
             const ls = getSettings();
-            for (const rb of setThemeEl.querySelectorAll('input[type=radio]')) {
-                rb.checked = (rb.value === ls.theme);
-            }
             setPatternEl.value = ls.pattern;
             setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
             renderModSettingsToggles(t.isLocal);   // #71: reflect mod toggles (clock, …)
@@ -651,19 +650,14 @@
             applyTaskbarWorkspace();
         });
 
-        // Appearance (theme / pattern / clock / start label): browser-local like
-        // restore-on-refresh — write the LIVE local getSettings() directly (NOT
+        // Appearance (pattern / start label): browser-local like restore-on-
+        // refresh — write the LIVE local getSettings() directly (NOT
         // settingsTarget, which may point at a remote host), persist, then apply
         // to this browser immediately. This is why the Control Panel window (#59)
         // can host a remote host's tab without appearance edits leaking to it.
-        setThemeEl.addEventListener('change', (e) => {
-            const rb = e.target;
-            if (!rb || rb.type !== 'radio' || !rb.checked) return;
-            getSettings().theme = rb.value;
-            savePrefs();
-            applyTheme(rb.value);
-            applyPattern(getSettings().pattern);   // re-apply: it is theme-var-aware
-        });
+        // #75: the color-scheme radio's change handler now lives in the theme mod
+        // (ctx.settings.radio wires #set-mods -> savePrefs + applyTheme, which
+        // also re-applies the theme-var-aware pattern).
         setPatternEl.addEventListener('change', () => {
             getSettings().pattern = setPatternEl.value;
             savePrefs();

@@ -224,3 +224,56 @@ def test_clock_symbols_removed_from_core_fragments():
         text = (BROKER_DIR / name).read_text(encoding="utf-8")
         for sym in symbols:
             assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+
+
+# --------------------------------------------------------------------------- #
+# theme mod (#75 / S2)
+# --------------------------------------------------------------------------- #
+
+def test_theme_symbols_removed_from_core_fragments():
+    # The color scheme is now a mod (#75): its THEMES palette / labels /
+    # applyTheme, the #set-theme radio markup + CSS, the core normalization, and
+    # its Control Panel reflect/handler are gone from core. Scope the check to the
+    # CORE fragments it was extracted from (the mod script legitimately still
+    # names THEMES / applyTheme / the `theme` key). applyThemeSettings (the still-
+    # core convergence entry point) deliberately survives — the sentinels below
+    # are specific enough not to match it.
+    core = {
+        "65_js_display_theming.js": ("const THEMES", "THEME_LABELS", "applyTheme(name)"),
+        "55_js_settings_model.js": ("hasOwnProperty.call(THEMES",),
+        "40_body.html": ('id="set-theme"',),
+        "15_css_dialogs.css": ("#set-theme",),
+        "79_js_settings_modal.js": ("setThemeEl", "Object.keys(THEMES)"),
+        "81_js_control_panel.js": ("setThemeEl", "applyTheme("),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+
+
+def test_theme_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "theme"
+    js = mod_dir / "theme.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "theme"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "theme.js"
+    # The script registers the theme mod, owns the synced `theme` key through the
+    # #74 radio API, and carries the moved palette + apply function.
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'theme'" in src
+    assert "ctxVersion: 1" in src
+    assert "ctx.settings.radio('theme'" in src
+    assert "const THEMES" in src
+    assert "function applyTheme(name)" in src
+    # And the mod ships in the served page (present in the mod / gone from core).
+    assert "ctx.settings.radio('theme'" in INDEX_HTML
+    assert "id: 'theme'" in INDEX_HTML
+    # The default stays night: it is the first option, the radio's `def`, and
+    # still equals the :root CSS, so the visual default survives a pre-load paint.
+    assert "def: 'night'" in src

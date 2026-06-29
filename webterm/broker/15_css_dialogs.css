@@ -86,13 +86,9 @@
             user-select: none;
         }
         .set-x { color: var(--fg-dim); }
-        /* Color-scheme radios (injected into #set-theme): wrap across rows so
-           the five theme labels fit the modal width. */
-        #set-theme { flex-wrap: wrap; gap: 4px 14px; }
-        #set-theme label { display: inline-flex; align-items: center; gap: 5px;
-            cursor: pointer; user-select: none; }
-        /* Mod-contributed radio groups (#74, ctx.settings.radio): same wrap +
-           inline-label layout as the color-scheme radios above. */
+        /* Mod-contributed radio groups (#74, ctx.settings.radio) — e.g. the
+           color-scheme radio extracted to mods/theme/ (#75). Wrap across rows so
+           several inline labels fit the panel width. */
         .set-mod-radio { flex-wrap: wrap; gap: 4px 14px; }
         .set-mod-radio label { display: inline-flex; align-items: center; gap: 5px;
             cursor: pointer; user-select: none; }

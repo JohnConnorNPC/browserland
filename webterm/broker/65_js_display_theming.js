@@ -1,44 +1,12 @@
         // ---- display settings ------------------------------------------------
-        // ---- theming engine (Control Panel) --------------------------------
-        // A theme is a thin override of the six chrome CSS vars defined in
-        // :root. `night` reproduces the current defaults EXACTLY so an empty
-        // settings blob looks identical to today. xterm's terminal theme is
-        // NOT touched here (terminals stay black). applyTheme writes the six
-        // vars inline on documentElement; an unknown name falls back to night.
-        const THEMES = {
-            night: {   // current dark default — must match :root exactly
-                '--bg': '#1e1e1e', '--bg-2': '#2a2a2a', '--bg-3': '#3a3a3a',
-                '--fg': '#ddd', '--fg-dim': '#888', '--accent-default': '#4aa3ff',
-            },
-            day: {     // light
-                '--bg': '#e8e8e8', '--bg-2': '#d6d6d6', '--bg-3': '#b8b8b8',
-                '--fg': '#1a1a1a', '--fg-dim': '#5a5a5a', '--accent-default': '#1d6fd0',
-            },
-            redmond: { // Win95 teal/silver
-                '--bg': '#008080', '--bg-2': '#c0c0c0', '--bg-3': '#808080',
-                '--fg': '#000000', '--fg-dim': '#404040', '--accent-default': '#000080',
-            },
-            midnight: {// Midnight Blue
-                '--bg': '#0a1a33', '--bg-2': '#12274d', '--bg-3': '#1e3a6b',
-                '--fg': '#dce8ff', '--fg-dim': '#7d96c4', '--accent-default': '#4aa3ff',
-            },
-            sunday: {  // Sunday Orange
-                '--bg': '#3a1d05', '--bg-2': '#5a2f0a', '--bg-3': '#7d4413',
-                '--fg': '#ffe7cc', '--fg-dim': '#c79873', '--accent-default': '#ff9b3d',
-            },
-        };
-        const THEME_LABELS = {
-            night: 'Night (dark)', day: 'Day (light)',
-            redmond: 'Redmond (teal)', midnight: 'Midnight Blue',
-            sunday: 'Sunday Orange',
-        };
-        function applyTheme(name) {
-            try {
-                const t = THEMES[name] || THEMES.night;
-                const root = document.documentElement;
-                for (const k in t) root.style.setProperty(k, t[k]);
-            } catch (_) {}
-        }
+        // ---- theming engine: EXTRACTED to a mod (#75) ----------------------
+        // The color scheme moved to mods/theme/theme.js, which owns the palette,
+        // its labels, the apply function (the six chrome CSS vars written inline
+        // on documentElement) and the #set-mods radio via ctx.settings.radio —
+        // byte-identical, incl. cross-browser /state sync. Core no longer reads
+        // `theme`; convergence reaches the mod via notifyModSettings() at the end
+        // of applyThemeSettings (below). `night` still equals the :root defaults,
+        // so the visual default survives even before the mod loads.
 
         // ---- desktop background patterns (Win 3.1 style) -------------------
         // Theme-var-aware CSS background-images painted on #desktop, BEHIND the
@@ -139,8 +107,10 @@
         function applyThemeSettings() {
             try {
                 const s = getSettings();
-                applyTheme(s.theme);
-                applyPattern(s.pattern);    // after theme: reads the live vars
+                // #75: `theme` is mod-owned now (mods/theme/theme.js); it writes
+                // the chrome vars via notifyModSettings() below. Pattern stays
+                // core (S3) and is theme-var-aware, so it still applies here.
+                applyPattern(s.pattern);    // reads the live theme vars
                 applyHelpButton(s.showHelpButton);   // #40
                 applyStartButton();
                 applyTerminalFont();        // #18: configurable terminal font

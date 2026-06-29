@@ -65,11 +65,11 @@
             }
             // Task 12: Control Panel theming. Each field self-heals so a hand-
             // edited blob AND a remote host's settings converge to valid values;
-            // the defaults reproduce the current look exactly (night/none/off/+).
-            if (typeof s.theme !== 'string'
-                || !Object.prototype.hasOwnProperty.call(THEMES, s.theme)) {
-                s.theme = 'night';
-            }
+            // the defaults reproduce the current look exactly (none/off/+). #75:
+            // `theme` is owned by mods/theme/theme.js now — its radio does the
+            // read-through validation (unknown -> night) WITHOUT rewriting the
+            // synced blob, so core no longer normalizes it here or references the
+            // palette. Default stays night via the mod's fallback + the :root CSS.
             if (typeof s.pattern !== 'string' || PATTERNS.indexOf(s.pattern) < 0) {
                 s.pattern = 'none';
             }
