@@ -383,6 +383,135 @@
             }, RESIZE_DEBOUNCE_MS);
         }
 
+        // ---- shared app-window chrome factory (#79) -----------------------
+        // Every app-window KIND -- sticky-note + text-editor (openAppWindow),
+        // file-manager, task-manager, control-panel, and the help mod -- builds
+        // the SAME .term-window.app-window shell: a .title-bar with an id badge,
+        // a title, and minimize/close buttons; eight .rh resize handles; and the
+        // identical raise-on-mousedown / drag / 8-way resize / title-bar context
+        // menu wiring. These three helpers own that shared chrome so each kind
+        // only supplies its own body + behavior. PURE REFACTOR (#79): the DOM
+        // produced (element order, classes, attributes) and the listeners wired
+        // are byte-for-byte what each kind built inline before. Terminals
+        // (openWindow, .term-window WITHOUT .app-window) are deliberately out --
+        // their title bar carries git/MCP controls and is left untouched.
+        //
+        // They are top-level `function` declarations (hoisted across the one
+        // concatenated <script>, so the earlier kind fragments AND the help mod
+        // script can call them regardless of fragment order) and run only at
+        // window-open time, when every dependency (isDarkAccent, wireDrag,
+        // wireResize, buildWindowMenu, bringToFront, minimizeWindow, closeWindow)
+        // is already initialized.
+
+        // Build the shell + title bar. Returns the element refs a kind needs to
+        // hang its own extras (toolbar, body, color picker, note buttons). It does
+        // NOT append the resize handles (those go AFTER the body, via
+        // addResizeHandles, so they stay the last children) and does NOT insert
+        // into the desktop. `spec.geom` is the already-clamped OUTER box; the -4
+        // turns it into the content-box width/height exactly as openWindow /
+        // applyGeomToWindow do. `spec.badge` is the literal id-badge text
+        // ('#cp' for the control panel, whose badge differs from its sid).
+        function buildAppChrome(spec) {
+            const dom = document.createElement('div');
+            dom.className = 'term-window app-window ' + spec.appClass;
+            dom.dataset.sessionId = spec.id;
+            dom.style.left = spec.geom.left + 'px';
+            dom.style.top = spec.geom.top + 'px';
+            // Same content-box -4 math as openWindow / applyGeomToWindow.
+            dom.style.width = (spec.geom.width - 4) + 'px';
+            dom.style.height = (spec.geom.height - 4) + 'px';
+            dom.style.setProperty('--accent', spec.color);
+            dom.classList.toggle('dark-accent', isDarkAccent(spec.color));
+            if (spec.locked) dom.classList.add('scroll-locked');   // pinned float
+
+            const titleBar = document.createElement('div');
+            titleBar.className = 'title-bar';
+            const idBadge = document.createElement('span');
+            idBadge.className = 'ti-id-badge';
+            idBadge.textContent = spec.badge;
+            const titleText = document.createElement('span');
+            titleText.className = 'title-text';
+            titleText.textContent = spec.title;
+            const minBtn = document.createElement('button');
+            minBtn.type = 'button';
+            minBtn.className = 'tb-btn btn-min';
+            minBtn.textContent = '_';
+            minBtn.title = 'minimize';
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'tb-btn btn-close';
+            closeBtn.textContent = '×';
+            closeBtn.title = 'close';
+            titleBar.appendChild(idBadge);
+            titleBar.appendChild(titleText);
+            titleBar.appendChild(minBtn);
+            titleBar.appendChild(closeBtn);
+            dom.appendChild(titleBar);
+
+            return { dom, titleBar, idBadge, titleText, minBtn, closeBtn };
+        }
+
+        // Append the eight .rh resize handles (edges n/s/e/w + corners). Called
+        // AFTER a kind appends its body so the handles stay the LAST children:
+        // they are absolute-positioned overlays whose edge/corner hit zones must
+        // sit on top of the body.
+        function addResizeHandles(dom) {
+            for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
+                const h = document.createElement('div');
+                h.className = 'rh rh-' + dir;
+                h.dataset.dir = dir;
+                dom.appendChild(h);
+            }
+        }
+
+        // Wire the shared chrome interactions onto an app window: raise-on-
+        // mousedown, the minimize + close buttons (close defaults to closeWindow;
+        // the text-editor passes requestCloseAppWindow so a dirty buffer offers to
+        // flush its server file first), the title-bar drag, the title-bar context
+        // menu (the per-window WM menu), and the eight resize handles. Every
+        // listener is registered in win.cleanups so closeWindow tears them down.
+        // `chrome` carries the refs from buildAppChrome.
+        function wireAppChrome(win, chrome, onClose) {
+            const id = win.id;
+            const titleBar = chrome.titleBar;
+            const minBtn = chrome.minBtn;
+            const closeBtn = chrome.closeBtn;
+            const close = onClose || closeWindow;
+            const stopProp = (e) => e.stopPropagation();
+
+            const onMouseDown = () => bringToFront(id);
+            win.dom.addEventListener('mousedown', onMouseDown);
+            win.cleanups.push(() =>
+                win.dom.removeEventListener('mousedown', onMouseDown));
+
+            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
+            const onCloseClick = (e) => { e.stopPropagation(); close(id); };
+            minBtn.addEventListener('mousedown', stopProp);
+            minBtn.addEventListener('click', onMinClick);
+            closeBtn.addEventListener('mousedown', stopProp);
+            closeBtn.addEventListener('click', onCloseClick);
+            win.cleanups.push(() => {
+                minBtn.removeEventListener('mousedown', stopProp);
+                minBtn.removeEventListener('click', onMinClick);
+                closeBtn.removeEventListener('mousedown', stopProp);
+                closeBtn.removeEventListener('click', onCloseClick);
+            });
+
+            wireDrag(win, titleBar);
+            const onTitleCtx = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                bringToFront(win.id);
+                buildWindowMenu(win, e.clientX, e.clientY);
+            };
+            titleBar.addEventListener('contextmenu', onTitleCtx);
+            win.cleanups.push(() =>
+                titleBar.removeEventListener('contextmenu', onTitleCtx));
+            for (const handle of win.dom.querySelectorAll('.rh')) {
+                wireResize(win, handle, handle.dataset.dir);
+            }
+        }
+
         function minimizeWindow(id) {
             const win = windows.get(id);
             if (!win) return;
