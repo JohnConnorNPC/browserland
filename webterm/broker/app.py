@@ -1311,6 +1311,194 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({"ok": True, "path": dst_str})
 
+    async def _file_zip(request: Request):
+        # Create a .zip from a file or directory tree. dest is the output archive
+        # path (its parent must be a dir). A pre-scan rejects a source that
+        # exceeds the caps BEFORE writing; the archive is built into a tempfile
+        # in dest's parent and os.replace'd into place, so dest is never left
+        # partial and an overwrite keeps the old archive until the new one is
+        # complete. Reparse-point subdirectories (symlinks AND junctions) are NOT
+        # followed (filtered out of the walk, so they're omitted); symlinked
+        # FILES are archived as their target content (zf.write follows them, and
+        # the pre-scan counts the same target size via getsize). The caps are
+        # pre-scan advisory — single-user, the source is the caller's own tree.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        src_rel = body.get("src")
+        dest_rel = body.get("dest")
+        if not isinstance(src_rel, str) or not src_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not isinstance(dest_rel, str) or not dest_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            src = _resolve_host_path(src_rel, app.ctx.editor_root)
+            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        src_kind = _classify_path(src)
+        if src_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if src_kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if src_kind not in ("file", "dir"):
+            return sanic_json({"ok": False, "error": "not_supported"},
+                              status=400)
+        dest_kind = _classify_path(dest)
+        if dest_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dest_kind == "dir":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        if dest_kind != "missing" and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        dparent = _classify_path(dest.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        if src_kind == "dir" and _is_within(dest, src):
+            # The growing archive must not live inside the tree being zipped.
+            return sanic_json({"ok": False, "error": "dest_in_source"},
+                              status=400)
+        src_str, dest_str = str(src), str(dest)
+
+        def _do_zip():
+            total = 0
+            count = 0
+            if src_kind == "file":
+                total = os.path.getsize(src_str)
+                count = 1
+            else:
+                for root, dirs, files in os.walk(src_str):
+                    dirs[:] = [d for d in dirs
+                               if not _is_reparse_point(os.path.join(root, d))]
+                    count += 1 + len(files)        # this dir entry + its files
+                    if count > MAX_ARCHIVE_ENTRIES:
+                        raise ValueError("too_many_entries")
+                    for name in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, name))
+                        except OSError:
+                            pass
+                    if total > MAX_ARCHIVE_BYTES:
+                        raise ValueError("archive_too_large")
+            parent = os.path.dirname(dest_str) or "."
+            fd, tmp = tempfile.mkstemp(dir=parent, prefix=".webterm-zip-",
+                                       suffix=".tmp")
+            os.close(fd)
+            try:
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                    if src_kind == "file":
+                        zf.write(src_str, arcname=os.path.basename(src_str))
+                    else:
+                        # arcnames relative to src's PARENT so the archive holds
+                        # the top folder; write each walked dir (preserves empty
+                        # dirs) then each file.
+                        base = os.path.dirname(src_str)
+                        for root, dirs, files in os.walk(src_str):
+                            dirs[:] = [d for d in dirs
+                                       if not _is_reparse_point(
+                                           os.path.join(root, d))]
+                            zf.write(root, arcname=os.path.relpath(root, base))
+                            for name in files:
+                                fp = os.path.join(root, name)
+                                zf.write(fp, arcname=os.path.relpath(fp, base))
+                os.replace(tmp, dest_str)
+                tmp = None
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_zip)
+        except (OSError, ValueError, shutil.Error, RecursionError,
+                zipfile.BadZipFile) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dest_str})
+
+    async def _file_unzip(request: Request):
+        # Extract a .zip into a FRESH dest directory (dest must not exist). A
+        # zip-bomb / oversize guard rejects an archive whose entry count or
+        # cumulative declared uncompressed size exceeds the caps BEFORE any
+        # extraction. CPython's extractall already neutralises path traversal
+        # (absolute / drive-letter / '..' members are sanitised to land UNDER
+        # dest), so there is deliberately no hand-rolled commonpath loop; a
+        # malformed member fails extraction cleanly and the freshly-created dest
+        # is removed. The size guard trusts the central-directory sizes
+        # (single-user threat model).
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        path_rel = body.get("path")
+        dest_rel = body.get("dest")
+        if not isinstance(path_rel, str) or not path_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        if not isinstance(dest_rel, str) or not dest_rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            zpath = _resolve_host_path(path_rel, app.ctx.editor_root)
+            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        zkind = _classify_path(zpath)
+        if zkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if zkind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if zkind != "file":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        dest_kind = _classify_path(dest)
+        if dest_kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dest_kind != "missing":
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        dparent = _classify_path(dest.parent)
+        if dparent == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if dparent != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        zpath_str, dest_str = str(zpath), str(dest)
+
+        def _do_unzip():
+            with zipfile.ZipFile(zpath_str) as zf:
+                infos = zf.infolist()
+                if len(infos) > MAX_ARCHIVE_ENTRIES:
+                    raise ValueError("too_many_entries")
+                if sum(zi.file_size for zi in infos) > MAX_ARCHIVE_BYTES:
+                    raise ValueError("archive_too_large")
+                os.mkdir(dest_str)
+                try:
+                    zf.extractall(dest_str)
+                except BaseException:
+                    shutil.rmtree(dest_str, ignore_errors=True)
+                    raise
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _do_unzip)
+        except zipfile.BadZipFile:
+            return sanic_json({"ok": False, "error": "bad_zip"}, status=400)
+        except (OSError, ValueError, shutil.Error, RecursionError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": dest_str})
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -1891,6 +2079,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
     app.add_route(_file_copy, "/file/copy", methods=["POST"])
     app.add_route(_file_move, "/file/move", methods=["POST"])
+    app.add_route(_file_zip, "/file/zip", methods=["POST"])
+    app.add_route(_file_unzip, "/file/unzip", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -1922,6 +2112,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/mkdir", "preflight_file_mkdir"),
                              ("/file/copy", "preflight_file_copy"),
                              ("/file/move", "preflight_file_move"),
+                             ("/file/zip", "preflight_file_zip"),
+                             ("/file/unzip", "preflight_file_unzip"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),

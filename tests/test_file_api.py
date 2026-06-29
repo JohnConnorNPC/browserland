@@ -7,10 +7,12 @@ half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 
+import webterm.broker.app as app_mod
 from webterm.broker.app import _resolve_host_path, create_app
 
 WIN = sys.platform == "win32"
@@ -433,3 +435,129 @@ def test_delete_symlink_to_file_unlinks_link_keeps_target(tmp_path, monkeypatch)
     assert r.status == 200 and r.json["ok"] is True
     assert not os.path.lexists(str(link))
     assert target.read_text(encoding="utf-8") == "precious"
+
+
+# --------------------------------------------------------------------------- #
+# /file/zip + /file/unzip (#72)
+# --------------------------------------------------------------------------- #
+
+def test_zip_file_then_unzip_roundtrip(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/zip",
+                                json={"src": "a.txt", "dest": "a.zip"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "a.zip").is_file()
+    with zipfile.ZipFile(tmp_path / "a.zip") as zf:
+        assert zf.namelist() == ["a.txt"]
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "a.zip", "dest": "out"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "out" / "a.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_zip_dir_then_unzip_roundtrip(tmp_path, monkeypatch):
+    src = tmp_path / "tree"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
+    (src / "top.txt").write_text("t", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/zip",
+                                json={"src": "tree", "dest": "tree.zip"})
+    assert r.status == 200 and r.json["ok"] is True
+    # the archive carries the top folder name
+    with zipfile.ZipFile(tmp_path / "tree.zip") as zf:
+        names = set(zf.namelist())
+    assert any(n.startswith("tree/") for n in names)
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "tree.zip", "dest": "out"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert (tmp_path / "out" / "tree" / "sub" / "f.txt").read_text(
+        encoding="utf-8") == "x"
+    assert (tmp_path / "out" / "tree" / "top.txt").read_text(
+        encoding="utf-8") == "t"
+
+
+def test_zip_dest_exists_409(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "a.zip").write_text("not really a zip", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/zip",
+                                json={"src": "a.txt", "dest": "a.zip"})
+    assert r.status == 409 and r.json["error"] == "exists"
+
+
+def test_zip_dest_overwrite_ok(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "a.zip").write_text("stale", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/zip", json={"src": "a.txt", "dest": "a.zip", "overwrite": True})
+    assert r.status == 200 and r.json["ok"] is True
+    with zipfile.ZipFile(tmp_path / "a.zip") as zf:   # a real archive now
+        assert zf.namelist() == ["a.txt"]
+
+
+def test_zip_too_many_entries_rejected(tmp_path, monkeypatch):
+    src = tmp_path / "tree"
+    src.mkdir()
+    (src / "a.txt").write_text("a", encoding="utf-8")
+    (src / "b.txt").write_text("b", encoding="utf-8")
+    monkeypatch.setattr(app_mod, "MAX_ARCHIVE_ENTRIES", 1)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/zip",
+                                json={"src": "tree", "dest": "out.zip"})
+    assert r.status == 400 and r.json["error"] == "too_many_entries"
+    assert not (tmp_path / "out.zip").exists()       # no partial archive
+
+
+def test_zip_dest_in_source_rejected(tmp_path, monkeypatch):
+    (tmp_path / "tree").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/zip",
+                                json={"src": "tree", "dest": "tree/inner.zip"})
+    assert r.status == 400 and r.json["error"] == "dest_in_source"
+
+
+def test_unzip_dest_exists_409(tmp_path, monkeypatch):
+    with zipfile.ZipFile(tmp_path / "a.zip", "w") as zf:
+        zf.writestr("x.txt", "x")
+    (tmp_path / "out").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "a.zip", "dest": "out"})
+    assert r.status == 409 and r.json["error"] == "exists"
+
+
+def test_unzip_bad_zip(tmp_path, monkeypatch):
+    (tmp_path / "a.zip").write_text("not a zip at all", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "a.zip", "dest": "out"})
+    assert r.status == 400 and r.json["error"] == "bad_zip"
+    assert not (tmp_path / "out").exists()
+
+
+def test_unzip_zip_bomb_rejected(tmp_path, monkeypatch):
+    with zipfile.ZipFile(tmp_path / "big.zip", "w") as zf:
+        zf.writestr("a.txt", "x" * 1000)
+    monkeypatch.setattr(app_mod, "MAX_ARCHIVE_BYTES", 10)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "big.zip", "dest": "out"})
+    assert r.status == 400 and r.json["error"] == "archive_too_large"
+    assert not (tmp_path / "out").exists()           # nothing extracted
+
+
+def test_unzip_traversal_member_stays_in_dest(tmp_path, monkeypatch):
+    # A malicious '../escape.txt' member must be sanitised to land UNDER dest by
+    # CPython's extractall — it must NOT escape to dest's parent.
+    with zipfile.ZipFile(tmp_path / "evil.zip", "w") as zf:
+        zf.writestr("../escape.txt", "pwned")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/unzip",
+                                json={"path": "evil.zip", "dest": "out"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (tmp_path / "escape.txt").exists()    # did NOT escape
+    assert (tmp_path / "out" / "escape.txt").read_text(
+        encoding="utf-8") == "pwned"
