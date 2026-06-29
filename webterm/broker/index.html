@@ -1407,7 +1407,26 @@
             padding: 6px 12px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.5);
             pointer-events: auto;
+            max-width: 520px;
+            word-break: break-word;
         }
+        .notice-error { background: #5a1717; border-color: #e06666; }
+        .notice-sticky {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+        }
+        .notice-close {
+            background: transparent;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+            font-size: 16px;
+            line-height: 1;
+            padding: 0 2px;
+            flex: 0 0 auto;
+        }
+        .notice-close:hover { color: #fff; }
         #ctx-menu {
             position: fixed;
             z-index: 200000;
@@ -7327,13 +7346,55 @@
         }
 
         // ---- notices ------------------------------------------------------
-        function showNotice(text, ms) {
+        // Back-compat: showNotice(text) / showNotice(text, ms) auto-dismiss
+        // after ms (default 4000). An options object { ms, sticky, type } makes
+        // a sticky error (type:'error') that renders a × close button and NEVER
+        // auto-dismisses — used for terminate failures the user must see and act
+        // on (#64), since the old 4s toast vanished before it could be read.
+        const STICKY_NOTICE_MAX = 4;
+        function showNotice(text, opts) {
             const host = document.getElementById('notice-host');
+            let ms = 4000, sticky = false, type = null;
+            if (typeof opts === 'number') {
+                ms = opts;                                  // legacy (text, ms)
+            } else if (opts && typeof opts === 'object') {
+                if (typeof opts.ms === 'number') ms = opts.ms;
+                sticky = !!opts.sticky;
+                type = opts.type || null;
+            }
+            if (sticky) {
+                // Dedupe: identical sticky text already up -> don't stack it
+                // again (repeated Terminate clicks must not pile up).
+                const dup = Array.from(host.querySelectorAll('.notice-sticky'))
+                    .find(n => n._noticeText === text);
+                if (dup) return;
+                const div = document.createElement('div');
+                div.className = 'notice notice-sticky'
+                    + (type === 'error' ? ' notice-error' : '');
+                div._noticeText = text;
+                const span = document.createElement('span');
+                span.textContent = text;
+                div.appendChild(span);
+                const close = document.createElement('button');
+                close.type = 'button';
+                close.className = 'notice-close';
+                close.textContent = '×';
+                close.title = 'dismiss';
+                close.addEventListener('click', () => div.remove());
+                div.appendChild(close);
+                host.appendChild(div);
+                // Cap accumulated sticky notices — drop the oldest beyond MAX.
+                const all = host.querySelectorAll('.notice-sticky');
+                for (let i = 0; i < all.length - STICKY_NOTICE_MAX; i++) {
+                    all[i].remove();
+                }
+                return;
+            }
             const div = document.createElement('div');
-            div.className = 'notice';
+            div.className = 'notice' + (type === 'error' ? ' notice-error' : '');
             div.textContent = text;
             host.appendChild(div);
-            setTimeout(() => { div.remove(); }, ms || 4000);
+            setTimeout(() => { div.remove(); }, ms);
         }
 
         // ---- z-order ------------------------------------------------------
@@ -14131,20 +14192,49 @@
         // destroySession (that one is trapped in a closure over busyOps/render
         // and Task-Manager-only state). The ARGUMENT is the session KEY
         // ('<hostId>:<windowId>'); the wire {id} is the BARE sess.id (like
-        // /session/git). App docs have no pid -> no-op. Killing the shell tears
-        // the agent down before it can ACK, so the broker may answer HTTP 409 +
-        // error:'session_gone' — that is SUCCESS, same as a 200 ok:true. On
-        // success we optimistically tear down the window + chip + session entry
-        // so the chip doesn't linger ~2s for the next /sessions poll; any other
-        // failure (429 busy / 504 timeout / 404 / network) is a notice only,
-        // with no teardown. Host-aware fetch mirrors setWindowMcpMode.
+        // /session/git). App docs have no pid -> a notice, not a silent no-op
+        // (#64). Killing the shell tears the agent down before it can ACK, so
+        // the broker may answer HTTP 409 + error:'session_gone' — that is
+        // SUCCESS, same as a 200 ok:true. On success we optimistically tear down
+        // the window + chip + session entry so the chip doesn't linger ~2s for
+        // the next /sessions poll; a failure logs to the console and raises a
+        // STICKY host-named error (the old 4s toast vanished unread, #64), with
+        // no teardown. Host-aware fetch mirrors setWindowMcpMode.
         async function terminateWindow(key) {
             const sess = sessions.get(key);
-            if (!sess) { showNotice('terminate: session not found'); return; }
-            if (sess.kind === 'app') return;              // app docs have no pid
-            if (sess.pid == null) { showNotice('terminate: no pid'); return; }
+            if (!sess) {
+                console.warn('[terminate] session not found', { key });
+                showNotice('terminate: session not found');
+                return;
+            }
             const host = hostById(sess.hostId);
-            if (!host) { showNotice('terminate failed: no host'); return; }
+            const hostUrl = (host && host.url) ? host.url
+                : (sess.hostId === 'local' || (host && host.id === 'local'))
+                    ? '(local)' : (sess.hostId || '(unknown)');
+            const ctx = { key, hostId: sess.hostId, url: hostUrl,
+                          id: sess.id, pid: sess.pid, kind: sess.kind };
+            // Console logging (#64): the single highest-leverage diagnostic for
+            // "Terminate did nothing" — it was previously SILENT, so a kill
+            // bound to a stale host record left no trace at all.
+            console.warn('[terminate] requested', ctx);
+            if (sess.kind === 'app') {
+                // App docs are local-only synthetic windows with no process to
+                // kill. This used to bare-return — indistinguishable from the
+                // silent-failure bug; say so out loud now (#64).
+                console.warn('[terminate] app window has no process', ctx);
+                showNotice('cannot terminate an app window');
+                return;
+            }
+            if (sess.pid == null) {
+                console.warn('[terminate] session has no pid', ctx);
+                showNotice('terminate: no pid');
+                return;
+            }
+            if (!host) {
+                console.warn('[terminate] no host record for session', ctx);
+                showNotice('terminate failed: no host');
+                return;
+            }
             let res;
             try {
                 res = await fetch(hostHttpUrl(host, '/session/kill'), {
@@ -14162,8 +14252,13 @@
             const gone = res.status === 409 && j.error === 'session_gone';
             const ok = (res.status === 200 && j.ok) || gone;
             if (!ok) {
-                showNotice('terminate failed: '
-                    + (j.error || ('HTTP ' + res.status)));
+                const reason = j.error || ('HTTP ' + res.status);
+                console.warn('[terminate] kill failed',
+                    Object.assign({ status: res.status, reason }, ctx));
+                // Sticky, host-named error (#64): the old 4s toast auto-dismissed
+                // before the user could read it, so a failed kill looked silent.
+                showNotice('terminate failed on ' + hostUrl + ' [' + key
+                    + ']: ' + reason, { sticky: true, type: 'error' });
                 return;
             }
             // Optimistic cleanup (copies destroyAppWindow's chip-node removal):
