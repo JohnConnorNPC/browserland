@@ -9,14 +9,13 @@ frontend's Help render path never uses innerHTML on corpus content.
 """
 
 import re
-from pathlib import Path
 
 import pytest
 
 from webterm.broker import help_corpus as hc
-
-REPO = Path(__file__).resolve().parents[1]
-INDEX_HTML = REPO / "webterm" / "broker" / "index.html"
+# The desktop page is assembled from on-disk fragments by ui.py (issue #68);
+# import the byte-identical assembled string rather than reading a single file.
+from webterm.broker.ui import INDEX_HTML
 
 
 # --------------------------------------------------------------------------- #
@@ -363,7 +362,7 @@ def test_load_corpus_falls_back_when_wiki_missing(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_help_render_path_has_no_innerhtml():
-    html = INDEX_HTML.read_text(encoding="utf-8")
+    html = INDEX_HTML  # already a str (assembled by ui.py); byte-identical
     start = html.index("function helpAppendHighlighted(")
     end = html.index("function findHelpWindow(")
     region = html[start:end]
