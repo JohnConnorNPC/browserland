@@ -54,7 +54,7 @@
             color: #ddd; font-size: 11px; padding: 2px 7px; cursor: pointer;
         }
         .term-window .app-toolbar button:hover { background: #333; border-color: #6a8; }
-        .term-window .app-toolbar button.on { background: #2f5d7d; border-color: #4aa3ff; color: #fff; }
+        .term-window .app-toolbar button.on { background: var(--sel-bg); border-color: var(--accent-default); color: var(--fg); }
         /* Host picker (#46): a mode control — distinct from the action buttons,
            and a long host label ellipsizes instead of blowing out the toolbar. */
         .term-window .app-toolbar .app-host-btn {
@@ -157,7 +157,7 @@
         }
         .term-window.app-editor .app-tabs .app-tab:hover { background: #2a2a2a; color: #ddd; }
         .term-window.app-editor .app-tabs .app-tab.active {
-            background: #2f5d7d; border-color: #4aa3ff; color: #fff;
+            background: var(--sel-bg); border-color: var(--accent-default); color: var(--fg);
         }
         .term-window.app-editor .app-tabs .app-tab-dot {
             color: #ffcf5e; min-width: 6px; font-size: 10px;
