@@ -15,7 +15,10 @@ WorkingDirectory=/opt/web_terminal
 Environment=BROWSERLAND_BROKER_URL=ws://127.0.0.1:4445/browserland
 Environment=WEB_TERMINAL_TOKEN=changeme
 ExecStart=/opt/web_terminal/launchers/run-agent.sh
-Restart=always
+# on-failure (not always): a deliberate UI Terminate of the always-on shell
+# exits 0 and stays gone; a crash exits non-zero and respawns. Boot start is
+# unaffected. Note: typing `exit` in the shell (code 0) also no longer respawns.
+Restart=on-failure
 RestartSec=2
 
 [Install]

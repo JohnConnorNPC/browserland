@@ -193,6 +193,12 @@ class Agent:
         # the rows that changed since a prior hash (`since`) instead of the
         # whole grid. Bounded against memory; misses fall back to a full grid.
         self._frame_cache: "OrderedDict[str, List[str]]" = OrderedDict()
+        # Set when a /session/kill RPC targets the session-root shell itself: a
+        # deliberate UI Terminate, not a crash. run() then returns 0 so a
+        # supervisor with Restart=on-failure does NOT respawn the shell, while a
+        # genuine non-zero crash still does. Written on the loop in
+        # _on_kill_request before kill_proc, read in _on_pty_exit/run().
+        self._terminated_by_request = False
 
     async def run(self) -> int:
         """Run until the child exits; returns the child's exit code."""
@@ -238,6 +244,12 @@ class Agent:
                 client_task.cancel()
                 await asyncio.gather(client_task, return_exceptions=True)
         LOGGER.info("child exited with code %s", code)
+        if self._terminated_by_request:
+            # Deliberate UI Terminate of the session-root shell: report a clean
+            # exit so an on-failure supervisor leaves it dead instead of
+            # respawning. A real crash never sets the flag, so it still respawns.
+            LOGGER.info("exit was a requested terminate; reporting code 0")
+            return 0
         return code
 
     # -- PTY -> broker (called on the loop by the backend) -------------------
@@ -398,12 +410,29 @@ class Agent:
     def _on_kill_request(self, req: int, pid: int) -> None:
         loop = asyncio.get_running_loop()
 
+        # If the kill targets the session-root shell (pinned at spawn), this is a
+        # deliberate Terminate. Mark it now, on the loop and before kill_proc
+        # runs, so the flag is reliably set before a successful kill makes
+        # _on_pty_exit resolve _exit_fut (run() reads the flag after the await).
+        # kill_proc may still reject the kill (recycled PID / identity mismatch /
+        # psutil unavailable); in that case the shell keeps running, so we clear
+        # the flag below once the executor confirms ok=False — otherwise a later
+        # genuine crash would be masked as a clean exit and not respawn.
+        root_kill = bool(self.state.pid) and pid == self.state.pid
+        if root_kill:
+            self._terminated_by_request = True
+
         async def _run() -> None:
             try:
                 ok, err = await loop.run_in_executor(
                     None, self.backend.kill_proc, pid)
             except Exception as exc:
                 ok, err = False, str(exc)[:200]
+            if root_kill and not ok and not (
+                    self._exit_fut is not None and self._exit_fut.done()):
+                # Kill was rejected and the shell hasn't exited yet: this was not
+                # an effective Terminate, so don't let it mask a future crash.
+                self._terminated_by_request = False
             self._enqueue("txt", protocol.killed_frame(req, ok, error=err,
                                                         pid=pid))
 
