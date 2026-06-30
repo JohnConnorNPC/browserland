@@ -189,8 +189,9 @@
                     <label class="set-check"><input type="checkbox" id="set-mcp-enabled" />
                         Enable MCP access</label>
                     <div class="set-row"><label>token</label>
-                        <input type="password" id="set-mcp-token"
-                               placeholder="(none — MCP disabled)" autocomplete="off" />
+                        <input type="text" id="set-mcp-token" class="masked-secret"
+                               placeholder="(none — MCP disabled)" autocomplete="off"
+                               spellcheck="false" />
                         <button type="button" id="set-mcp-generate">generate</button></div>
                     <div class="set-row"><label>default mode</label>
                         <select id="set-mcp-default-mode">
@@ -227,8 +228,9 @@
                                placeholder="http://hostname:4445" />
                     </div>
                     <div class="set-row">
-                        <input type="password" id="set-host-pass"
-                               placeholder="password" autocomplete="off" />
+                        <input type="text" id="set-host-pass" class="masked-secret"
+                               placeholder="password" autocomplete="off"
+                               spellcheck="false" />
                         <button type="button" id="set-host-add">add</button>
                     </div>
                     <div id="set-host-err" class="set-err"></div>

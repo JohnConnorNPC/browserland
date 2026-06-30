@@ -116,7 +116,6 @@
         }
         #settings-modal input[type=number],
         #settings-modal input[type=text],
-        #settings-modal input[type=password],
         #auth-form input[type=password],
         .app-dialog input[type=text] {
             background: var(--bg);
@@ -132,8 +131,8 @@
         #auth-form input:focus,
         .app-dialog input:focus { border-color: var(--accent-default); }
         #settings-modal input[type=number] { width: 64px; }
-        #settings-modal input[type=text],
-        #settings-modal input[type=password] { flex: 1 1 auto; min-width: 0; }
+        #settings-modal input[type=text] { flex: 1 1 auto; min-width: 0; }
+        #settings-modal input.masked-secret { -webkit-text-security: disc; }
         #settings-modal button, #auth-form button, .app-dialog button {
             background: var(--bg);
             border: 1px solid var(--bg-3);

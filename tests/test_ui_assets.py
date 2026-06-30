@@ -1341,3 +1341,34 @@ def test_mods_declare_reviewed_trust_tiers():
         assert tokens == _EXPECTED_TIERS[mod_id], (
             f"mod {mod_id!r} tiers drifted: declared {tokens}, "
             f"reviewed {_EXPECTED_TIERS[mod_id]}")
+
+
+# --------------------------------------------------------------------------- #
+# control-panel secrets are masked text, not native password inputs (#99)
+# --------------------------------------------------------------------------- #
+
+def test_control_panel_has_no_native_password_inputs():
+    # #99: closing the Control Panel reparents its #settings-modal subtree (with a
+    # populated MCP token field, next to text "username" fields) into a hidden
+    # overlay, which Chromium reads as a completed login and offers to "Save
+    # password?". The root-cause fix removes password-field classification: the two
+    # control-panel secrets are now masked type=text inputs, so the password
+    # manager can't engage. Lock that no native password input survives in the
+    # panel — neither the old markup (regression) nor any future one.
+    for old in ('type="password" id="set-mcp-token"',
+                'type="password" id="set-host-pass"'):
+        assert old not in INDEX_HTML, \
+            f"control-panel secret regressed to a native password input: {old!r}"
+    # Both secrets ship as masked text inputs (CSS-masked, .value read identically).
+    for masked in ('type="text" id="set-mcp-token" class="masked-secret"',
+                   'type="text" id="set-host-pass" class="masked-secret"'):
+        assert masked in INDEX_HTML, f"masked secret input missing: {masked!r}"
+    # The visual mask rides the assembled CSS.
+    assert "-webkit-text-security: disc" in INDEX_HTML, \
+        "masked-secret CSS mask missing from the served page"
+    # The ONLY native password input left anywhere is the separate #auth-form
+    # re-auth field (out of scope — a real login form where saving may be wanted).
+    import re
+    pw_ids = re.findall(r'type="password"\s+id="([^"]+)"', INDEX_HTML)
+    assert pw_ids == ["auth-token"], \
+        f"unexpected native password input(s) survive: {pw_ids}"
