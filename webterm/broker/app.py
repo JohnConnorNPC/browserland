@@ -60,8 +60,10 @@ from .. import build_version, protocol
 from . import auth, relay
 from .launcher import LaunchError, Launcher
 from .registry import BrokerRegistry, run_producer_session
-from .help_corpus import HELP_CORPUS
-from .ui import INDEX_HTML
+# NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
+# create_app, gated on serve_ui — headless brokers (#87) must never assemble the
+# desktop page or parse the wiki. These are the only production importers, so the
+# deferral is what actually skips the work.
 
 LOGGER = logging.getLogger(__name__)
 
@@ -439,14 +441,20 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
 
 async def _index(request: Request):
-    return html(INDEX_HTML)
+    return html(request.app.ctx.index_html)
 
 
 async def _help_corpus(request: Request):
     # The in-app Help guide's static cards, parsed from wiki/*.md (issue #60).
     # Public like "/" (help content is non-sensitive); built once at import in
     # help_corpus.py, so a wiki edit needs a broker restart to show up.
-    return sanic_json(HELP_CORPUS)
+    return sanic_json(request.app.ctx.help_corpus)
+
+
+async def _index_headless(request: Request):
+    # Headless broker (serve_ui=False, #87): no desktop page is served. JSON so a
+    # client hitting GET / can tell the UI is intentionally absent, not just missing.
+    return sanic_json({"ui": False})
 
 
 async def _handle_404(request: Request, exception):
@@ -479,6 +487,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # (the clock ships as one), so an out-of-the-box install runs them. Surfaced
     # via /info so the loader can gate at runtime (fail-open / default-on).
     app.ctx.mods_enabled = bool(config.get("mods_enabled", True))
+    # Headless mode (#87): when off, the broker serves the full JSON/WS API but
+    # not the desktop page (GET /) or the in-app Help corpus, and skips
+    # assembling both UI constants entirely. Defaults ON so existing deploys are
+    # unchanged. The --headless CLI flag folds into config before we read it.
+    app.ctx.serve_ui = bool(config.get("serve_ui", True))
     app.ctx.registry = BrokerRegistry()
     app.ctx.launcher = Launcher(
         app.ctx.registry,
@@ -2027,7 +2040,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return err
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
                            "version": app.ctx.version,
-                           "mods_enabled": app.ctx.mods_enabled})
+                           "mods_enabled": app.ctx.mods_enabled,
+                           "serve_ui": app.ctx.serve_ui})
 
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
@@ -2101,8 +2115,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.state = new_state
         return sanic_json({"ok": True, "rev": new_state["rev"]})
 
-    app.add_route(_index, "/", methods=["GET"])
-    app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
+    if app.ctx.serve_ui:
+        # Import (and thus assemble) the UI constants here, gated on serve_ui, so
+        # a headless broker never reads the NN_* fragments or the wiki. Assembly
+        # at create_app time preserves UI mode's loud-at-startup failure for a
+        # missing/oversized fragment (ui.assemble() is non-protective); deferring
+        # it into the handler would let a broken broker boot "healthy" and only
+        # 500 on the first GET /. sys.modules caches the assembled values.
+        from .ui import INDEX_HTML
+        from .help_corpus import HELP_CORPUS
+        app.ctx.index_html = INDEX_HTML
+        app.ctx.help_corpus = HELP_CORPUS
+        app.add_route(_index, "/", methods=["GET"])
+        app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
+    else:
+        app.add_route(_index_headless, "/", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")
     app.add_websocket_route(_control_ws, "/control")
     app.add_websocket_route(_producer_ws, "/browserland")

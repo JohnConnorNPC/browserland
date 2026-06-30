@@ -23,10 +23,14 @@ never be swept in; a forgotten fragment is caught by the byte-identity tests.
 
 INDEX_HTML is held at module scope (not as a closure) so that Sanic's
 ``_determine_error_format`` introspection (inspect.getsource + dedent +
-ast.parse on the *handler*, which just does ``return html(INDEX_HTML)``)
-succeeds -- a multiline raw HTML string closed over by the handler breaks that
-with IndentationError. The internal assembly here is irrelevant to that
-introspection; only the module-scope ``str`` and the handler shape matter.
+ast.parse on the *handler*) succeeds -- a multiline raw HTML string closed over
+by the handler breaks that with IndentationError. The internal assembly here is
+irrelevant to that introspection; only the module-scope ``str`` and the handler
+shape matter. The handler (``app._index``) now reads the assembled value off
+``request.app.ctx.index_html`` -- stashed there by ``create_app`` so a headless
+broker can skip this module entirely (#87) -- but still returns via a plain
+``html(...)`` call, so the introspection that scans for the response-fn name is
+unaffected.
 
 See README.md for the UI overview; it covers draggable/resizable windows,
 taskbar, tiling, per-window colors, prefs persistence, token login via

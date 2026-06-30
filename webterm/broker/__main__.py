@@ -29,11 +29,19 @@ def main() -> int:
     parser.add_argument("--config", default=None,
                         help="path to broker_config.json "
                              "(default: $WEB_TERMINAL_CONFIG, then repo root)")
+    parser.add_argument("--headless", action="store_true",
+                        help="serve the JSON/WS API only — no desktop page or "
+                             "help corpus (overrides serve_ui in config)")
     ns = parser.parse_args()
 
     config = load_config(ns.config)
     host = ns.host or config.get("host") or "127.0.0.1"
     port = ns.port or int(config.get("port") or DEFAULT_PORT)
+    # CLI wins over config, matching --host/--port precedence. Fold into the
+    # config dict so create_app's single config.get("serve_ui") read is the one
+    # source of truth. There's no --no-headless; to default headless use the key.
+    if ns.headless:
+        config["serve_ui"] = False
 
     app = create_app(config, port=port)
     # single_process avoids Sanic's multi-worker spawn path, which on
