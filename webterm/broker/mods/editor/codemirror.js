@@ -57,78 +57,127 @@
             xml: '@codemirror/lang-xml@6.1.0',
             yaml: '@codemirror/lang-yaml@6.1.2',
             java: '@codemirror/lang-java@6.0.1',
+            // legacy StreamLanguage modes (StreamLanguage itself comes from our
+            // single @codemirror/language instance above; these submodules are
+            // pure StreamParser data, so they add NO second @codemirror/state
+            // importer). ?target=es2022 matches the core imports' build target so
+            // esm.sh dedupes any shared dep onto the same concrete URL (#36).
+            lmShell: '@codemirror/legacy-modes@6.5.1/mode/shell?target=es2022',
+            lmToml: '@codemirror/legacy-modes@6.5.1/mode/toml?target=es2022',
+            lmDocker: '@codemirror/legacy-modes@6.5.1/mode/dockerfile?target=es2022',
+            lmProps: '@codemirror/legacy-modes@6.5.1/mode/properties?target=es2022',
         };
         let _cmModulesPromise = null;
         function loadCodeMirror() {
             if (_cmModulesPromise) return _cmModulesPromise;
-            const imp = (spec) => import(CM_CDN + CM_VER[spec]);
-            _cmModulesPromise = Promise.all([
-                imp('view'), imp('state'), imp('language'), imp('commands'),
-                imp('search'), imp('autocomplete'), imp('theme'),
-                imp('js'), imp('py'), imp('json'), imp('html'), imp('css'),
-                imp('md'), imp('cpp'), imp('rust'), imp('go'), imp('sql'),
-                imp('xml'), imp('yaml'), imp('java'),
-            ]).then(([
-                view, state, language, commands, search, autocomplete, theme,
-                js, py, json, html, css, md, cpp, rust, go, sql, xml, yaml, java,
-            ]) => ({
-                view, state, language, commands, search, autocomplete, theme,
-                // language-pack factories keyed by the names detectLanguage emits
-                langs: {
-                    javascript: () => js.javascript(),
-                    jsx: () => js.javascript({ jsx: true }),
-                    typescript: () => js.javascript({ typescript: true }),
-                    tsx: () => js.javascript({ typescript: true, jsx: true }),
-                    python: () => py.python(),
-                    json: () => json.json(),
-                    html: () => html.html(),
-                    css: () => css.css(),
-                    markdown: () => md.markdown(),
-                    cpp: () => cpp.cpp(),
-                    rust: () => rust.rust(),
-                    go: () => go.go(),
-                    sql: () => sql.sql(),
-                    xml: () => xml.xml(),
-                    yaml: () => yaml.yaml(),
-                    java: () => java.java(),
-                },
-            })).catch((e) => {
-                // Allow a later retry (e.g. transient CDN blip) by clearing the
-                // cache, then re-reject so this caller keeps the textarea.
-                _cmModulesPromise = null;
-                throw e;
-            });
+            // Name-keyed resolve: import every CM_VER entry in key order and zip
+            // the results back onto a `m` map by the SAME keys, so adding/removing
+            // an import can never off-by-one a positional destructure (codex).
+            const keys = Object.keys(CM_VER);
+            _cmModulesPromise = Promise.all(keys.map((k) => import(CM_CDN + CM_VER[k])))
+                .then((arr) => {
+                    const m = {};
+                    keys.forEach((k, i) => { m[k] = arr[i]; });
+                    // StreamLanguage rides our single @codemirror/language
+                    // instance, so the legacy modes share its state facets (#36).
+                    const SL = m.language.StreamLanguage;
+                    return {
+                        view: m.view, state: m.state, language: m.language,
+                        commands: m.commands, search: m.search,
+                        autocomplete: m.autocomplete, theme: m.theme,
+                        // language-pack factories keyed by the names detectLanguage emits
+                        langs: {
+                            javascript: () => m.js.javascript(),
+                            jsx: () => m.js.javascript({ jsx: true }),
+                            typescript: () => m.js.javascript({ typescript: true }),
+                            tsx: () => m.js.javascript({ typescript: true, jsx: true }),
+                            python: () => m.py.python(),
+                            json: () => m.json.json(),
+                            html: () => m.html.html(),
+                            css: () => m.css.css(),
+                            markdown: () => m.md.markdown(),
+                            cpp: () => m.cpp.cpp(),
+                            rust: () => m.rust.rust(),
+                            go: () => m.go.go(),
+                            sql: () => m.sql.sql(),
+                            xml: () => m.xml.xml(),
+                            yaml: () => m.yaml.yaml(),
+                            java: () => m.java.java(),
+                            // StreamLanguage modes (legacy-modes export names:
+                            // shell.shell, toml.toml, dockerfile.dockerFile,
+                            // properties.properties — note the capital F).
+                            shell: () => SL.define(m.lmShell.shell),
+                            toml: () => SL.define(m.lmToml.toml),
+                            dockerfile: () => SL.define(m.lmDocker.dockerFile),
+                            properties: () => SL.define(m.lmProps.properties),
+                        },
+                    };
+                }).catch((e) => {
+                    // Allow a later retry (e.g. transient CDN blip) by clearing the
+                    // cache, then re-reject so this caller keeps the textarea.
+                    _cmModulesPromise = null;
+                    throw e;
+                });
             return _cmModulesPromise;
         }
-        // Map a file path's extension to a detectLanguage key (see langs above).
-        // Unknown/blank -> null (plain, no highlighting). A tiny content sniff
-        // covers extension-less shebang/markup files.
+        // Resolve a file path to a detectLanguage key (see langs above). Order:
+        // extension map -> basename map (extensionless/dotfiles like Dockerfile,
+        // .bashrc) -> prefix rules (Dockerfile.dev, .env.local) -> content sniff
+        // (shebang/markup) -> null (plain, no highlighting). `log`/`txt`, and
+        // Makefile/.gitignore/.dockerignore are INTENTIONALLY unmapped (no good
+        // mode) -> they fall through to null and open as clean plain text.
         function detectLanguage(filePath, sample) {
             const p = String(filePath || '');
-            const dot = p.lastIndexOf('.');
-            const slash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-            const ext = (dot > slash && dot !== -1) ? p.slice(dot + 1).toLowerCase() : '';
+            // Basename: drop any trailing separators, then take the last segment
+            // (split on EITHER separator so C:\a\b and /a/b both work).
+            const trimmed = p.replace(/[\/\\]+$/, '');
+            const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+            const base = cut === -1 ? trimmed : trimmed.slice(cut + 1);
+            const lower = base.toLowerCase();
+            // Extension = text after the LAST dot, but a LEADING dot is "no ext"
+            // (dot>0), so `.bashrc` has none while `.eslintrc.json` keeps `json`.
+            const dot = base.lastIndexOf('.');
+            const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
             const byExt = {
                 js: 'javascript', mjs: 'javascript', cjs: 'javascript',
-                jsx: 'jsx', ts: 'typescript', tsx: 'tsx',
-                py: 'python', pyw: 'python',
-                json: 'json', jsonc: 'json',
-                html: 'html', htm: 'html',
+                jsx: 'jsx',
+                ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
+                py: 'python', pyw: 'python', pyi: 'python',
+                json: 'json', jsonc: 'json', json5: 'json',
+                html: 'html', htm: 'html', xhtml: 'html',
                 css: 'css',
-                md: 'markdown', markdown: 'markdown',
-                xml: 'xml', svg: 'xml',
+                md: 'markdown', markdown: 'markdown', mdown: 'markdown', mkd: 'markdown',
+                xml: 'xml', svg: 'xml', xsd: 'xml', xsl: 'xml', xslt: 'xml',
+                plist: 'xml', rss: 'xml', atom: 'xml',
                 yaml: 'yaml', yml: 'yaml',
-                sh: 'cpp', bash: 'cpp',           // no shell pack; cpp ~ ok-ish
+                sh: 'shell', bash: 'shell', zsh: 'shell', ksh: 'shell',
+                toml: 'toml',
+                ini: 'properties', conf: 'properties', cfg: 'properties',
+                properties: 'properties',
                 rs: 'rust', go: 'go',
                 c: 'cpp', h: 'cpp', cpp: 'cpp', cc: 'cpp', cxx: 'cpp',
                 hpp: 'cpp', hh: 'cpp',
                 java: 'java',
                 sql: 'sql',
             };
-            if (byExt[ext]) return byExt[ext];
-            // Content sniff for extension-less files (nice-to-have).
+            if (ext && byExt[ext]) return byExt[ext];
+            // Extensionless / dotfile basenames (lowercased — case-insensitive by
+            // intent, so Dockerfile and DOCKERFILE both match). Makefile,
+            // .gitignore, .dockerignore are deliberately absent -> plain text.
+            const byName = {
+                dockerfile: 'dockerfile', containerfile: 'dockerfile',
+                '.bashrc': 'shell', '.bash_profile': 'shell', '.zshrc': 'shell',
+                '.profile': 'shell', '.kshrc': 'shell',
+                '.editorconfig': 'properties', '.npmrc': 'properties',
+                '.inputrc': 'properties',
+            };
+            if (byName[lower]) return byName[lower];
+            // Prefix rules: Dockerfile.dev/Dockerfile.prod, and .env/.env.local.
+            if (lower.startsWith('dockerfile.')) return 'dockerfile';
+            if (lower === '.env' || lower.startsWith('.env.')) return 'properties';
+            // Content sniff for files no name/extension matched (nice-to-have).
             const s = String(sample || '').slice(0, 200);
-            if (/^#!.*\b(sh|bash)\b/.test(s)) return 'cpp';
+            if (/^#!.*\b(sh|bash|zsh|ksh)\b/.test(s)) return 'shell';
             if (/^#!.*\bpython/.test(s)) return 'python';
             if (/^#!.*\bnode/.test(s)) return 'javascript';
             if (/^\s*<\?xml/.test(s)) return 'xml';

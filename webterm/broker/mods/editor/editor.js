@@ -1818,7 +1818,15 @@
                         const fp = doc ? doc.filePath : win.filePath;
                         const key = detectLanguage(fp, docContentOf(doc));
                         const make = key && CM.langs[key];
-                        return make ? make() : [];
+                        if (!make) return [];
+                        // A broken/undefined (legacy) parser must degrade to plain
+                        // text for THIS file only, never throw out of makeEditorState
+                        // and drop the whole editor to the textarea fallback (codex).
+                        try { return make(); }
+                        catch (e) {
+                            console.warn('[webterm] language load failed:', key, e);
+                            return [];
+                        }
                     };
                     const makeEditorState = (doc) => EditorState.create({
                         doc: docContentOf(doc),
