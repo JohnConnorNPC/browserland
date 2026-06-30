@@ -259,6 +259,13 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 
 ## Documentation
 
+New here, or setting up more than one machine? Start with
+**[`docs/SETUP.md`](docs/SETUP.md)** — the onboarding guide: the broker / agent /
+browser mental model, joining machines over Tailscale via Control Panel → Hosts,
+what *not* to hand-edit, and running the broker unattended in the background
+(Windows Task Scheduler / Linux systemd). It's written to be followed by a human
+or a coding agent.
+
 The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)**:
 
 - the complete wire protocol and frame semantics,
