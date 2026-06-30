@@ -39,20 +39,32 @@
         }
         const windows = new Map();    // key -> win record (see openWindow)
         let nextZ = 100;
-        // Sticky notes are always-on-top (todo2 task 9) WHEN PINNED (#95): a
-        // pinned note's floating z lives in a high tier so a normal window
-        // brought to front (plain nextZ) never covers it, while modals
-        // (>=100000) and drop overlays still sit above. The check stays SCOPED to
-        // sticky notes — `pinned` is a per-note toggle, not a global z-capability
-        // — and `!== false` keeps a note with no/true `pinned` always-on-top
-        // (backward-compatible for existing persisted notes); only an explicitly
-        // unpinned note (pinned === false) drops to the normal tier. Distinct
-        // from scroll-lock, which only pins them against strip scroll.
+        // Floating windows stack in "always-on-top" tiers above the plain nextZ
+        // band, so focus-raising a normal window never covers them; modals
+        // (>=100000) and drop overlays still sit above every tier:
+        //   plain windows   nextZ                          (~100+)
+        //   sticky notes     NOTE_Z_BASE + nextZ           (90000+)  above windows
+        //   control panel    CONTROL_PANEL_Z_BASE + nextZ  (95000+)  above notes (#98)
+        // Sticky notes are always-on-top (todo2 task 9) WHEN PINNED (#95): the
+        // note branch stays SCOPED to sticky notes — `pinned` is a per-note
+        // toggle, not a global z-capability — and `!== false` keeps a note with
+        // no/true `pinned` always-on-top (backward-compatible for existing
+        // persisted notes); only an explicitly unpinned note (pinned === false)
+        // drops to the normal tier.
+        // The floating Control Panel (#98) rides a tier ABOVE notes so notes
+        // never obscure it. All tiers share nextZ, so fronting the Control Panel
+        // captures the current high-water mark + the tier gap and thus lands
+        // above every note alive at that moment; a note only re-covers it after
+        // ~5000 further focuses with no panel interaction, and clicking the panel
+        // restores it on top (self-healing). Distinct from scroll-lock, which
+        // only pins notes against strip scroll.
         const NOTE_Z_BASE = 90000;
+        const CONTROL_PANEL_Z_BASE = NOTE_Z_BASE + 5000;   // 95000 (#98)
         function floatZIndex(win) {
             nextZ += 1;
-            return (win && win.appKind === 'sticky-note' && win.pinned !== false)
-                ? (NOTE_Z_BASE + nextZ) : nextZ;
+            if (win && win.appKind === 'control-panel') return CONTROL_PANEL_Z_BASE + nextZ;
+            if (win && win.appKind === 'sticky-note' && win.pinned !== false) return NOTE_Z_BASE + nextZ;
+            return nextZ;
         }
         let cascadeIndex = 0;
         let frontId = null;

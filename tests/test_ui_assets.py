@@ -1003,6 +1003,16 @@ def test_sticky_pin_button_present():
     assert ".btn-pin" in css
 
 
+def test_control_panel_floats_above_sticky_notes():
+    # #98: the floating Control Panel rides a z-tier ABOVE the sticky-note
+    # always-on-top tier (single floatZIndex source of truth, core 64).
+    src = (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(encoding="utf-8")
+    assert "CONTROL_PANEL_Z_BASE" in src
+    assert "appKind === 'control-panel'" in src
+    assert "NOTE_Z_BASE = 90000" in src          # tier sits above the note tier
+    assert "CONTROL_PANEL_Z_BASE" in INDEX_HTML   # and reaches the served page
+
+
 def test_no_native_dialogs_in_served_page():
     # #89: the whole app routes every confirm/prompt through the styled dialog
     # component — NO native confirm()/prompt()/alert() survives anywhere in the
