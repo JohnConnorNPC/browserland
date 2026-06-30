@@ -212,6 +212,13 @@
         /* ---- dual-pane file manager (toolbar reuses .app-toolbar chrome) ---- */
         .term-window.app-fm .app-fm-body {
             display: flex; flex: 1 1 0; min-height: 0; outline: none;
+            /* #94: paint the FM surface in the theme bg. Without this the panes
+               are transparent and fall through to the terminal-black .term-window
+               body (10_css_root.css), so they stayed black on every scheme — the
+               core "FM doesn't follow the color scheme" bug. var(--bg) matches the
+               Open/Save dialog's .file-list. Panes stay transparent, so the
+               translucent .drop-hover tint composites over this themed bg. */
+            background: var(--bg);
         }
         .term-window.app-fm .app-fm-pane {
             flex: 1 1 0; display: flex; flex-direction: column; min-width: 0;
