@@ -252,7 +252,7 @@
             font-family: monospace; font-size: 12px;
         }
         #file-modal .file-entry:hover { background: var(--bg-3); }
-        #file-modal .file-entry.sel { background: #2f5d7d; color: #fff; }
+        #file-modal .file-entry.sel { background: var(--sel-bg); color: var(--fg); }
         #file-modal .file-entry .fe-icon { width: 1.1em; flex: 0 0 auto; }
         #file-modal .file-entry .fe-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
         #file-modal .file-entry .fe-size { color: var(--fg-dim); font-size: 11px; flex: 0 0 auto; }

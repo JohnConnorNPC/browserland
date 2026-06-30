@@ -222,7 +222,7 @@
             outline: 1px solid var(--accent-default); outline-offset: -1px;
         }
         .term-window.app-fm .app-fm-pane.drop-hover {
-            background: rgba(74,163,255,0.12);
+            background: color-mix(in srgb, var(--accent-default) 12%, transparent);
         }
         /* Pane header (#46): per-pane host picker + the absolute cwd. */
         .term-window.app-fm .app-fm-head {
@@ -232,12 +232,12 @@
         }
         .term-window.app-fm .app-fm-hostbtn {
             flex: 0 0 auto; max-width: 50%; margin: 2px;
-            background: #242b33; border: 1px solid #3a3a3a; border-radius: 3px;
-            color: #cfe3ff; font: 11px monospace; padding: 1px 6px;
+            background: var(--bg-2); border: 1px solid var(--bg-3); border-radius: 3px;
+            color: var(--accent-default); font: 11px monospace; padding: 1px 6px;
             cursor: pointer; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis;
         }
-        .term-window.app-fm .app-fm-hostbtn:hover { border-color: #4aa3ff; }
+        .term-window.app-fm .app-fm-hostbtn:hover { border-color: var(--accent-default); }
         .term-window.app-fm .app-fm-path {
             flex: 1 1 auto; align-self: center;
             font: 11px monospace; padding: 3px 6px; color: var(--fg-dim);
@@ -250,8 +250,8 @@
             display: flex; gap: 6px; padding: 2px 6px; cursor: default;
             white-space: nowrap; user-select: none;
         }
-        .term-window.app-fm .app-fm-row:hover { background: #2a2a2a; }
-        .term-window.app-fm .app-fm-row.sel { background: #2f5d7d; color: #fff; }
+        .term-window.app-fm .app-fm-row:hover { background: var(--bg-3); }
+        .term-window.app-fm .app-fm-row.sel { background: var(--sel-bg); color: var(--fg); }
         /* Cross-pane transfer (#46): a file row can be dragged to the other pane. */
         .term-window.app-fm .app-fm-row[draggable="true"] { cursor: grab; }
         .term-window.app-fm .app-fm-row.dragging { opacity: 0.45; }

@@ -5,6 +5,11 @@
             --fg: #ddd;
             --fg-dim: #888;
             --accent-default: #4aa3ff;
+            /* Themed selection / active highlight (#94): one accent-tinted color the whole
+               app shares for selected/on rows, tabs and buttons, replacing the hardcoded
+               #2f5d7d. References the theme's accent + bg, so it recolors with every scheme.
+               (color-mix is already required by .taskbar-item.active + container queries.) */
+            --sel-bg: color-mix(in srgb, var(--accent-default) 28%, var(--bg));
             --taskbar-h: 40px;
             --title-h: 26px;
             --handle-thick: 6px;
