@@ -1542,7 +1542,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         out = {"ok": True, "path": str(p), "type": kind,
-               "size": st.st_size, "mtime": st.st_mtime, "mode": st.st_mode}
+               "size": st.st_size, "mtime": st.st_mtime, "mode": st.st_mode,
+               "os": "windows" if os.name == "nt" else "posix"}        # #96
+        if os.name == "nt":
+            # Windows attr breakdown from the already-acquired st (no extra
+            # syscall). POSIX rwx is derivable client-side from `mode`, so it
+            # needs nothing here. FILE_ATTRIBUTE_* exist on all platforms but
+            # are only referenced under this nt guard (mirrors _is_reparse_point).
+            attrs = getattr(st, "st_file_attributes", 0)
+            out["attributes"] = {
+                "readonly": bool(attrs & stat.FILE_ATTRIBUTE_READONLY),
+                "hidden":   bool(attrs & stat.FILE_ATTRIBUTE_HIDDEN),
+                "archive":  bool(attrs & stat.FILE_ATTRIBUTE_ARCHIVE),
+            }
         if kind == "dir":
             try:
                 out["children"] = sum(1 for _ in p.iterdir())
