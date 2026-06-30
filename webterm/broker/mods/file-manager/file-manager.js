@@ -236,10 +236,11 @@
 
             // ---- pane state + rendering ----
             // The active pane (left/right) gets the .active outline; clicking a
-            // pane activates it. paneSeq guards against stale async renders: a
-            // slower /file/list must not paint over a newer navigation/upload.
+            // pane activates it. Each pane's directory browsing runs through a
+            // shared createBrowsePane instance (#93, sideOf(s).browse) — the
+            // component owns row markup / selection / the navigate sequencing;
+            // the per-pane hooks below own host routing, auth, and persistence.
             let activeSide = 'left';
-            const paneSeq = { left: 0, right: 0 };
             const sideOf = (s) => (s === 'left' ? left : right);
             const dirKey = (s) => (s === 'left' ? 'fmLeft' : 'fmRight');
             const setActive = (s) => {
@@ -277,6 +278,16 @@
                 ui.hostBtn.title = s + ' pane on: ' + lbl
                     + ' — click to switch host';
             };
+            // Re-list a pane: refresh its host button, then navigate the browse
+            // pane (#93) to the pane's current dir. The byte-for-byte stand-in
+            // for the old renderPane(side), which began by calling
+            // updatePaneHostBtn then listing win[dirKey(side)]. Reading
+            // sideOf(s).browse lazily lets the per-pane instances be created in
+            // the setup loop below (so their hooks close over `side`).
+            const reList = (s) => {
+                updatePaneHostBtn(s);
+                sideOf(s).browse.navigate(win[dirKey(s)]);
+            };
             // Switch a pane to another broker: reset its dir ('' = the new
             // host's default dir, since the old ABSOLUTE path belonged to the
             // old host) and re-list (which pops the new host's login if needed).
@@ -285,435 +296,16 @@
                 win[hostKey(s)] = host.id;
                 win[dirKey(s)] = '';
                 saveAppWindow(win);
-                updatePaneHostBtn(s);
-                renderPane(s);
+                reList(s);
             };
 
-            const renderPane = async (side, _retried) => {
-                const ui = sideOf(side);
-                const seq = ++paneSeq[side];
-                const reqDir = win[dirKey(side)];
-                const reqHostId = win[hostKey(side)];
-                if (ui.hostBtn) updatePaneHostBtn(side);
-                const host = paneHost(side);
-                if (!host) {
-                    // Known-remote host removed: NEVER let fileApiPost fall back
-                    // to its `host || localHost()` default — that would silently
-                    // list LOCAL files in a pane that was showing a remote.
-                    ui.path.textContent = '(no host)';
-                    ui.path.title = '';
-                    ui.list.innerHTML = '';
-                    const errRow = document.createElement('div');
-                    errRow.className = 'app-fm-row';
-                    errRow.textContent = '⚠ host unavailable — pick a host';
-                    ui.list.appendChild(errRow);
-                    return;
-                }
-                const res = await fmFile().list(reqDir, { host: host.id });
-                // Drop a stale render: window closed, a newer render started, or
-                // the pane navigated / switched HOST while we awaited — a stale
-                // reply must not paint, nor pop the wrong host's login.
-                if (win.disposed || seq !== paneSeq[side]
-                    || win[dirKey(side)] !== reqDir
-                    || win[hostKey(side)] !== reqHostId) return;
-                if (!res || !res.ok) {
-                    // Not authenticated on this host yet: pop its login (without
-                    // stealing an in-progress different-host form) and show a
-                    // neutral placeholder — not a scary ⚠ toast + row. _onHostAuth
-                    // re-lists the pane once that host authenticates.
-                    if (res && res.error === 'auth_required') {
-                        promptFileHostAuth(host);
-                        ui.path.textContent = hostPickerLabel(host);
-                        ui.path.title = hostPickerLabel(host);
-                        ui.list.innerHTML = '';
-                        const signin = document.createElement('div');
-                        signin.className = 'app-fm-row';
-                        signin.textContent = '🔒 sign in to '
-                            + hostPickerLabel(host) + '…';
-                        ui.list.appendChild(signin);
-                        return;
-                    }
-                    // A vanished dir (deleted/renamed) resets the pane to root and
-                    // re-renders once — the guard above stops an infinite retry.
-                    if (res && res.error === 'not_found' && !_retried && reqDir) {
-                        win[dirKey(side)] = '';
-                        saveAppWindow(win);
-                        return renderPane(side, true);
-                    }
-                    showNotice('list failed: ' + ((res && res.error) || '?'));
-                    ui.list.innerHTML = '';
-                    const errRow = document.createElement('div');
-                    errRow.className = 'app-fm-row';
-                    errRow.textContent = '⚠ ' + ((res && res.error) || 'error');
-                    ui.list.appendChild(errRow);
-                    return;
-                }
-                // Adopt the server's canonical cwd (collapses '.'/trailing slash).
-                const cwd = res.cwd || '';
-                if (win[dirKey(side)] !== cwd) {
-                    win[dirKey(side)] = cwd;
-                    saveAppWindow(win);
-                }
-                // Absolute path now (#35) — show it as-is, not '/'-prefixed.
-                ui.path.textContent = cwd;
-                ui.path.title = cwd;
-                ui.list.innerHTML = '';
-                // Selecting a row (single-click) marks it for Open/Enter; only
-                // file rows carry a path. Tracked per render via the .sel class.
-                const selectRow = (row) => {
-                    ui.list.querySelectorAll('.app-fm-row.sel')
-                        .forEach(r => r.classList.remove('sel'));
-                    row.classList.add('sel');
-                };
-                const openFile = async (path) => {
-                    const h = paneHost(side);
-                    if (!h) {
-                        showNotice('open failed: host unavailable');
-                        return;
-                    }
-                    const r = await fmFile().read(path, { host: h.id });
-                    if (!r || !r.ok) {
-                        if (r && r.error === 'auth_required') {
-                            promptFileHostAuth(h);
-                        }
-                        showNotice('open failed: ' + ((r && r.error) || '?'));
-                        return;
-                    }
-                    // Open the file on the SAME host THIS PANE is browsing (#46),
-                    // at the dir it lives in, so its editor Save lands back there.
-                    openAppWindow({
-                        id: newAppId('editor'),
-                        appKind: 'text-editor',
-                        filePath: r.path || path,
-                        content: r.content || '',
-                        title: baseName(r.path || path),
-                        fileHostId: win[hostKey(side)],
-                    });
-                };
-                // Right-click row menu (#72). One builder shared by file and dir
-                // rows; the item set grows in later commits. Today (pure
-                // extraction): copy/move the row to the other pane. Captures the
-                // descriptor (host id + child path + name) at build time so a
-                // pane navigation mid-menu can't redirect the action.
-                // Open a row = exactly what its dblclick does: a dir navigates,
-                // a file opens in the editor.
-                const activateRow = (ent, child) => {
-                    if (ent.type === 'dir') {
-                        win[dirKey(side)] = child;
-                        saveAppWindow(win);
-                        renderPane(side);
-                    } else {
-                        openFile(child);
-                    }
-                };
-                // Make a row draggable to the other pane / another FM window
-                // (#72): files AND dirs. effectAllowed='copyMove' so a plain drag
-                // copies and a Shift-drag moves (the drop handler reads e.shiftKey
-                // and the payload carries the type for the cross-host dir refusal).
-                const makeDraggable = (row, ent, child) => {
-                    row.draggable = true;
-                    row.addEventListener('dragstart', (e) => {
-                        setActive(side); selectRow(row);
-                        if (!e.dataTransfer) return;
-                        e.dataTransfer.effectAllowed = 'copyMove';
-                        e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
-                            winId: id, side, hostId: win[hostKey(side)],
-                            path: child, name: ent.name, type: ent.type }));
-                        row.classList.add('dragging');
-                    });
-                    row.addEventListener('dragend',
-                        () => row.classList.remove('dragging'));
-                };
-                // Rename in place = a /file/move to a validated sibling name in
-                // this same dir (cwd). Client-side name validation is UX; the
-                // server re-checks.
-                const renameRow = async (ent, child) => {
-                    const host = paneHost(side);
-                    if (!host) {
-                        showNotice('rename failed: host unavailable');
-                        return;
-                    }
-                    const name = await openTextPrompt({
-                        title: 'Rename', label: 'New name', value: ent.name,
-                        okLabel: 'Rename', validate: validateName });
-                    if (name == null || win.disposed) return;
-                    const trimmed = name.trim();
-                    if (trimmed === ent.name) return;        // no change
-                    const dst = joinNative(cwd, trimmed);
-                    let res = await fmFile().move(child, dst, { host: host.id });
-                    if (win.disposed) return;
-                    if (res && res.error === 'exists') {
-                        const ok = await openConfirmDialog({
-                            title: 'Rename',
-                            message: 'Overwrite ' + trimmed + '?',
-                            okLabel: 'Overwrite', danger: true });
-                        if (!ok || win.disposed) return;
-                        res = await fmFile().move(child, dst,
-                            { host: host.id, overwrite: true });
-                        if (win.disposed) return;
-                    }
-                    if (!(res && res.ok)) {
-                        if (res && res.error === 'auth_required') {
-                            promptFileHostAuth(host);
-                        }
-                        showNotice('rename failed: ' + ((res && res.error) || '?'));
-                        return;
-                    }
-                    showNotice('renamed to ' + trimmed);
-                    renderPane(side);
-                };
-                // Delete with a styled confirm; a directory deletes recursively.
-                const deleteRow = async (ent, child) => {
-                    const host = paneHost(side);
-                    if (!host) {
-                        showNotice('delete failed: host unavailable');
-                        return;
-                    }
-                    const isDir = ent.type === 'dir';
-                    const ok = await openConfirmDialog({
-                        title: 'Delete',
-                        message: 'Delete ' + (isDir ? 'folder ' : '') + ent.name
-                            + (isDir ? ' and everything inside it?' : '?'),
-                        okLabel: 'Delete', danger: true });
-                    if (!ok || win.disposed) return;
-                    const res = await fmFile().delete(child,
-                        { host: host.id, recursive: isDir });
-                    if (win.disposed) return;
-                    if (!(res && res.ok)) {
-                        if (res && res.error === 'auth_required') {
-                            promptFileHostAuth(host);
-                        }
-                        showNotice('delete failed: ' + ((res && res.error) || '?'));
-                        return;
-                    }
-                    showNotice('deleted ' + ent.name);
-                    renderPane(side);
-                };
-                // Download a file to the local machine: read base64, decode to
-                // bytes, save via an anchor. Bounded by /file/read's 5 MiB cap —
-                // a larger file surfaces a clear notice (a streaming download GET
-                // is a future enhancement, #72 risks).
-                const downloadRow = async (ent, child) => {
-                    const host = paneHost(side);
-                    if (!host) {
-                        showNotice('download failed: host unavailable');
-                        return;
-                    }
-                    const r = await fmFile().read(child,
-                        { b64: true, host: host.id });
-                    if (win.disposed) return;
-                    if (!(r && r.ok) || typeof r.content_b64 !== 'string') {
-                        const err = (r && r.error) || '?';
-                        if (err === 'auth_required') promptFileHostAuth(host);
-                        if (err === 'too_large') {
-                            showNotice(ent.name
-                                + ': too large to download (>5 MiB)');
-                        } else {
-                            showNotice('download failed: ' + err);
-                        }
-                        return;
-                    }
-                    try {
-                        const bin = atob(r.content_b64);
-                        const arr = new Uint8Array(bin.length);
-                        for (let i = 0; i < bin.length; i++) {
-                            arr[i] = bin.charCodeAt(i);
-                        }
-                        const url = URL.createObjectURL(
-                            new Blob([arr], { type: 'application/octet-stream' }));
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = ent.name;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        setTimeout(() => URL.revokeObjectURL(url), 10000);
-                    } catch (_) {
-                        showNotice('download failed: could not decode '
-                            + ent.name);
-                    }
-                };
-                // Zip a file/folder into a .zip in this dir (prompt for the name).
-                const zipRow = async (ent, child) => {
-                    const host = paneHost(side);
-                    if (!host) {
-                        showNotice('zip failed: host unavailable');
-                        return;
-                    }
-                    const name = await openTextPrompt({
-                        title: 'Zip', label: 'Archive name',
-                        value: ent.name + '.zip', okLabel: 'Zip',
-                        validate: validateName });
-                    if (name == null || win.disposed) return;
-                    const dest = joinNative(cwd, name.trim());
-                    let res = await fmFile().zip(child, dest, { host: host.id });
-                    if (win.disposed) return;
-                    if (res && res.error === 'exists') {
-                        const ok = await openConfirmDialog({
-                            title: 'Zip',
-                            message: 'Overwrite ' + name.trim() + '?',
-                            okLabel: 'Overwrite', danger: true });
-                        if (!ok || win.disposed) return;
-                        res = await fmFile().zip(child, dest,
-                            { host: host.id, overwrite: true });
-                        if (win.disposed) return;
-                    }
-                    if (!(res && res.ok)) {
-                        if (res && res.error === 'auth_required') {
-                            promptFileHostAuth(host);
-                        }
-                        showNotice('zip failed: ' + ((res && res.error) || '?'));
-                        return;
-                    }
-                    showNotice('created ' + name.trim());
-                    renderPane(side);
-                };
-                // Unzip a .zip into a fresh archive-stem sibling dir.
-                const unzipRow = async (ent, child) => {
-                    const host = paneHost(side);
-                    if (!host) {
-                        showNotice('unzip failed: host unavailable');
-                        return;
-                    }
-                    const stem = ent.name.replace(/\.zip$/i, '')
-                        || (ent.name + '_extracted');
-                    const dest = joinNative(cwd, stem);
-                    const res = await fmFile().unzip(child, dest,
-                        { host: host.id });
-                    if (win.disposed) return;
-                    if (!(res && res.ok)) {
-                        if (res && res.error === 'auth_required') {
-                            promptFileHostAuth(host);
-                        }
-                        const err = (res && res.error) || '?';
-                        if (err === 'exists') {
-                            showNotice('unzip failed: "' + stem
-                                + '" already exists');
-                        } else {
-                            showNotice('unzip failed: ' + err);
-                        }
-                        return;
-                    }
-                    showNotice('extracted to ' + stem);
-                    renderPane(side);
-                };
-                const buildRowMenu = (row, ent, child) => {
-                    const other = side === 'left' ? 'right' : 'left';
-                    const desc = { hostId: win[hostKey(side)], path: child,
-                                   name: ent.name, type: ent.type };
-                    // Paste lands in the dir itself for a folder row, else the
-                    // current cwd (a file row's sibling dir).
-                    const pasteDir = ent.type === 'dir' ? child : cwd;
-                    const items = [];
-                    items.push({ label: 'Open', enabled: true,
-                                 action: () => activateRow(ent, child) });
-                    items.push({ sep: true });
-                    items.push({ label: 'Cut', enabled: true,
-                                 action: () => setClipboard('cut', desc) });
-                    items.push({ label: 'Copy', enabled: true,
-                                 action: () => setClipboard('copy', desc) });
-                    items.push({ label: 'Paste', enabled: !!win.fmClipboard,
-                                 action: () => pasteInto(side, pasteDir) });
-                    items.push({ label: 'Rename…', enabled: true,
-                                 action: () => renameRow(ent, child) });
-                    if (ent.type !== 'dir') {
-                        items.push({ label: 'Download', enabled: true,
-                                     action: () => downloadRow(ent, child) });
-                    }
-                    items.push({ label: 'Zip', enabled: true,
-                                 action: () => zipRow(ent, child) });
-                    if (ent.type !== 'dir' && /\.zip$/i.test(ent.name)) {
-                        items.push({ label: 'Unzip', enabled: true,
-                                     action: () => unzipRow(ent, child) });
-                    }
-                    items.push({ label: 'Delete', enabled: true,
-                                 action: () => deleteRow(ent, child) });
-                    items.push({ sep: true });
-                    items.push({ label: 'Copy → ' + other + ' pane',
-                                 enabled: true,
-                                 action: () => doTransfer(other, desc, false) });
-                    items.push({ label: 'Move → ' + other + ' pane',
-                                 enabled: true,
-                                 action: () => doTransfer(other, desc, true) });
-                    items.push({ sep: true });
-                    items.push({ label: 'Properties…', enabled: true,
-                                 action: () => showProperties(side, child,
-                                                              ent.name) });
-                    return items;
-                };
-                const onRowMenu = (e, row, ent, child) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setActive(side); selectRow(row);
-                    renderMenu(buildRowMenu(row, ent, child),
-                               e.clientX, e.clientY);
-                };
-                // '..' row (not at root): navigates to the parent dir.
-                if (res.parent !== null && res.parent !== undefined) {
-                    const up = document.createElement('div');
-                    up.className = 'app-fm-row';
-                    up.innerHTML = '<span class="fm-icon">📁</span>'
-                        + '<span class="fm-name">..</span>'
-                        + '<span class="fm-size"></span>';
-                    const onUp = () => {
-                        win[dirKey(side)] = res.parent;
-                        saveAppWindow(win);
-                        renderPane(side);
-                    };
-                    up.addEventListener('click', () => { setActive(side); selectRow(up); });
-                    up.addEventListener('dblclick', onUp);
-                    // '..' has no row menu (#72) — swallow the right-click so it
-                    // doesn't fall through to the pane's empty-area menu.
-                    up.addEventListener('contextmenu', (e) => {
-                        e.preventDefault(); e.stopPropagation();
-                    });
-                    ui.list.appendChild(up);
-                }
-                for (const ent of (res.entries || [])) {
-                    const row = document.createElement('div');
-                    row.className = 'app-fm-row';
-                    row.dataset.type = ent.type;
-                    const icon = ent.type === 'dir' ? '📁' : '📄';
-                    row.innerHTML = '<span class="fm-icon">' + icon
-                        + '</span><span class="fm-name"></span>'
-                        + '<span class="fm-size">'
-                        + (ent.type === 'dir' ? '' : fmtSize(ent.size))
-                        + '</span>';
-                    row.querySelector('.fm-name').textContent = ent.name;
-                    const child = joinPath(cwd, ent.name);
-                    if (ent.type === 'dir') {
-                        const enter = () => {
-                            win[dirKey(side)] = child;
-                            saveAppWindow(win);
-                            renderPane(side);
-                        };
-                        row.addEventListener('click', () => {
-                            setActive(side); selectRow(row);
-                        });
-                        row.addEventListener('dblclick', enter);
-                    } else {
-                        row.dataset.path = child;
-                        row.addEventListener('click', () => {
-                            setActive(side); selectRow(row);
-                        });
-                        row.addEventListener('dblclick', () => openFile(child));
-                    }
-                    // Draggable + shared row menu on BOTH file and dir rows (#72).
-                    makeDraggable(row, ent, child);
-                    row.addEventListener('contextmenu',
-                        (e) => onRowMenu(e, row, ent, child));
-                    ui.list.appendChild(row);
-                }
-            };
             // Activate the row currently selected in the active pane (toolbar
             // Open + Enter): a file row opens it in the editor, a dir/'..' row
-            // navigates — exactly what each row's dblclick handler does.
-            const openOrEnterActive = () => {
-                const ui = sideOf(activeSide);
-                const sel = ui.list.querySelector('.app-fm-row.sel');
-                if (!sel) return;
-                sel.dispatchEvent(new MouseEvent('dblclick'));
-            };
+            // navigates. The browse component (#93) owns selection + the
+            // activation policy, so this just defers to it — replacing the old
+            // synthetic dispatchEvent(dblclick) (codex #8).
+            const openOrEnterActive = () =>
+                sideOf(activeSide).browse.activateSelected();
 
             // ---- per-pane click-to-activate + drop-to-upload ----
             // Upload base64 bytes to a SPECIFIC host (#46) through the reviewed
@@ -773,7 +365,7 @@
                 }
                 if (win.disposed) return;
                 if (done) showNotice('uploaded ' + done + ' file(s)');
-                renderPane(side);
+                reList(side);
             };
 
             // ---- cross-pane copy / move (#46) ----
@@ -876,8 +468,8 @@
                         }
                         showNotice('copied ' + srcName + ', but could not remove '
                             + 'the source: ' + ((d && d.error) || '?'));
-                        renderPane('left');
-                        renderPane('right');
+                        reList('left');
+                        reList('right');
                         return false;
                     }
                 }
@@ -885,8 +477,8 @@
                     + hostPickerLabel(destHost) + '"');
                 // Re-list both panes: the dest gained a file, a move's source
                 // lost one. Cheap, and side-agnostic (either pane may be source).
-                renderPane('left');
-                renderPane('right');
+                reList('left');
+                reList('right');
                 return true;
             };
             // ---- unified transfer dispatcher (#72) ----
@@ -954,8 +546,8 @@
                         return false;
                     }
                     showNotice((move ? 'moved ' : 'copied ') + srcName);
-                    renderPane('left');
-                    renderPane('right');
+                    reList('left');
+                    reList('right');
                     return true;
                 }
                 // Cross host. The single-broker server-side ops can't straddle
@@ -1032,7 +624,7 @@
                     return;
                 }
                 showNotice('created ' + name.trim());
-                renderPane(side);
+                reList(side);
             };
             // Properties: /file/stat -> a read-only styled info modal. Shared by
             // the row menu (a file/dir) and the empty menu (the cwd).
@@ -1091,8 +683,8 @@
                 }
                 items.push({ sep: true });
                 items.push({ label: 'Refresh', enabled: true,
-                             action: () => { renderPane('left');
-                                             renderPane('right'); } });
+                             action: () => { reList('left');
+                                             reList('right'); } });
                 items.push({ label: 'Properties…', enabled: true,
                              action: () => showProperties(side, cwd,
                                                           baseName(cwd)) });
@@ -1101,6 +693,391 @@
 
             for (const side of ['left', 'right']) {
                 const ui = sideOf(side);
+                // ---- per-pane row actions (close over `side` + `ui`) --------
+                // These used to live inside renderPane (recreated every render);
+                // they now live here once per pane, reading the live cwd via
+                // ui.browse.getCwd() at action time. The browse component (#93)
+                // owns the rows; these own what the FM does WITH a row.
+                const openFile = async (path) => {
+                    const h = paneHost(side);
+                    if (!h) {
+                        showNotice('open failed: host unavailable');
+                        return;
+                    }
+                    const r = await fmFile().read(path, { host: h.id });
+                    if (!r || !r.ok) {
+                        if (r && r.error === 'auth_required') {
+                            promptFileHostAuth(h);
+                        }
+                        showNotice('open failed: ' + ((r && r.error) || '?'));
+                        return;
+                    }
+                    // Open the file on the SAME host THIS PANE is browsing (#46),
+                    // at the dir it lives in, so its editor Save lands back there.
+                    openAppWindow({
+                        id: newAppId('editor'),
+                        appKind: 'text-editor',
+                        filePath: r.path || path,
+                        content: r.content || '',
+                        title: baseName(r.path || path),
+                        fileHostId: win[hostKey(side)],
+                    });
+                };
+                // Open a row = exactly what its dblclick does: a dir navigates,
+                // a file opens in the editor.
+                const activateRow = (ent, child) => {
+                    if (ent.type === 'dir') ui.browse.navigate(child);
+                    else openFile(child);
+                };
+                // Make a row draggable to the other pane / another FM window
+                // (#72): files AND dirs. effectAllowed='copyMove' so a plain drag
+                // copies and a Shift-drag moves (the drop handler reads e.shiftKey
+                // and the payload carries the type for the cross-host dir refusal).
+                // `select` is the component-owned selection for this row.
+                const makeDraggable = (row, ent, child, select) => {
+                    row.draggable = true;
+                    row.addEventListener('dragstart', (e) => {
+                        setActive(side); select();
+                        if (!e.dataTransfer) return;
+                        e.dataTransfer.effectAllowed = 'copyMove';
+                        e.dataTransfer.setData(FM_DRAG_MIME, JSON.stringify({
+                            winId: id, side, hostId: win[hostKey(side)],
+                            path: child, name: ent.name, type: ent.type }));
+                        row.classList.add('dragging');
+                    });
+                    row.addEventListener('dragend',
+                        () => row.classList.remove('dragging'));
+                };
+                // Rename in place = a /file/move to a validated sibling name in
+                // this same dir (cwd). Client-side name validation is UX; the
+                // server re-checks.
+                const renameRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('rename failed: host unavailable');
+                        return;
+                    }
+                    const cwd = ui.browse.getCwd();
+                    const name = await openTextPrompt({
+                        title: 'Rename', label: 'New name', value: ent.name,
+                        okLabel: 'Rename', validate: validateName });
+                    if (name == null || win.disposed) return;
+                    const trimmed = name.trim();
+                    if (trimmed === ent.name) return;        // no change
+                    const dst = joinNative(cwd, trimmed);
+                    let res = await fmFile().move(child, dst, { host: host.id });
+                    if (win.disposed) return;
+                    if (res && res.error === 'exists') {
+                        const ok = await openConfirmDialog({
+                            title: 'Rename',
+                            message: 'Overwrite ' + trimmed + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) return;
+                        res = await fmFile().move(child, dst,
+                            { host: host.id, overwrite: true });
+                        if (win.disposed) return;
+                    }
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('rename failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('renamed to ' + trimmed);
+                    reList(side);
+                };
+                // Delete with a styled confirm; a directory deletes recursively.
+                const deleteRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('delete failed: host unavailable');
+                        return;
+                    }
+                    const isDir = ent.type === 'dir';
+                    const ok = await openConfirmDialog({
+                        title: 'Delete',
+                        message: 'Delete ' + (isDir ? 'folder ' : '') + ent.name
+                            + (isDir ? ' and everything inside it?' : '?'),
+                        okLabel: 'Delete', danger: true });
+                    if (!ok || win.disposed) return;
+                    const res = await fmFile().delete(child,
+                        { host: host.id, recursive: isDir });
+                    if (win.disposed) return;
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('delete failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('deleted ' + ent.name);
+                    reList(side);
+                };
+                // Download a file to the local machine: read base64, decode to
+                // bytes, save via an anchor. Bounded by /file/read's 5 MiB cap —
+                // a larger file surfaces a clear notice (a streaming download GET
+                // is a future enhancement, #72 risks).
+                const downloadRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('download failed: host unavailable');
+                        return;
+                    }
+                    const r = await fmFile().read(child,
+                        { b64: true, host: host.id });
+                    if (win.disposed) return;
+                    if (!(r && r.ok) || typeof r.content_b64 !== 'string') {
+                        const err = (r && r.error) || '?';
+                        if (err === 'auth_required') promptFileHostAuth(host);
+                        if (err === 'too_large') {
+                            showNotice(ent.name
+                                + ': too large to download (>5 MiB)');
+                        } else {
+                            showNotice('download failed: ' + err);
+                        }
+                        return;
+                    }
+                    try {
+                        const bin = atob(r.content_b64);
+                        const arr = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) {
+                            arr[i] = bin.charCodeAt(i);
+                        }
+                        const url = URL.createObjectURL(
+                            new Blob([arr], { type: 'application/octet-stream' }));
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = ent.name;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        setTimeout(() => URL.revokeObjectURL(url), 10000);
+                    } catch (_) {
+                        showNotice('download failed: could not decode '
+                            + ent.name);
+                    }
+                };
+                // Zip a file/folder into a .zip in this dir (prompt for the name).
+                const zipRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('zip failed: host unavailable');
+                        return;
+                    }
+                    const cwd = ui.browse.getCwd();
+                    const name = await openTextPrompt({
+                        title: 'Zip', label: 'Archive name',
+                        value: ent.name + '.zip', okLabel: 'Zip',
+                        validate: validateName });
+                    if (name == null || win.disposed) return;
+                    const dest = joinNative(cwd, name.trim());
+                    let res = await fmFile().zip(child, dest, { host: host.id });
+                    if (win.disposed) return;
+                    if (res && res.error === 'exists') {
+                        const ok = await openConfirmDialog({
+                            title: 'Zip',
+                            message: 'Overwrite ' + name.trim() + '?',
+                            okLabel: 'Overwrite', danger: true });
+                        if (!ok || win.disposed) return;
+                        res = await fmFile().zip(child, dest,
+                            { host: host.id, overwrite: true });
+                        if (win.disposed) return;
+                    }
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        showNotice('zip failed: ' + ((res && res.error) || '?'));
+                        return;
+                    }
+                    showNotice('created ' + name.trim());
+                    reList(side);
+                };
+                // Unzip a .zip into a fresh archive-stem sibling dir.
+                const unzipRow = async (ent, child) => {
+                    const host = paneHost(side);
+                    if (!host) {
+                        showNotice('unzip failed: host unavailable');
+                        return;
+                    }
+                    const cwd = ui.browse.getCwd();
+                    const stem = ent.name.replace(/\.zip$/i, '')
+                        || (ent.name + '_extracted');
+                    const dest = joinNative(cwd, stem);
+                    const res = await fmFile().unzip(child, dest,
+                        { host: host.id });
+                    if (win.disposed) return;
+                    if (!(res && res.ok)) {
+                        if (res && res.error === 'auth_required') {
+                            promptFileHostAuth(host);
+                        }
+                        const err = (res && res.error) || '?';
+                        if (err === 'exists') {
+                            showNotice('unzip failed: "' + stem
+                                + '" already exists');
+                        } else {
+                            showNotice('unzip failed: ' + err);
+                        }
+                        return;
+                    }
+                    showNotice('extracted to ' + stem);
+                    reList(side);
+                };
+                // Right-click row menu (#72). One builder shared by file and dir
+                // rows. Captures the descriptor (host id + child path + name) at
+                // build time so a pane navigation mid-menu can't redirect the
+                // action; reads the live cwd for paste/sibling targets.
+                const buildRowMenu = (row, ent, child) => {
+                    const other = side === 'left' ? 'right' : 'left';
+                    const cwd = ui.browse.getCwd();
+                    const desc = { hostId: win[hostKey(side)], path: child,
+                                   name: ent.name, type: ent.type };
+                    // Paste lands in the dir itself for a folder row, else the
+                    // current cwd (a file row's sibling dir).
+                    const pasteDir = ent.type === 'dir' ? child : cwd;
+                    const items = [];
+                    items.push({ label: 'Open', enabled: true,
+                                 action: () => activateRow(ent, child) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Cut', enabled: true,
+                                 action: () => setClipboard('cut', desc) });
+                    items.push({ label: 'Copy', enabled: true,
+                                 action: () => setClipboard('copy', desc) });
+                    items.push({ label: 'Paste', enabled: !!win.fmClipboard,
+                                 action: () => pasteInto(side, pasteDir) });
+                    items.push({ label: 'Rename…', enabled: true,
+                                 action: () => renameRow(ent, child) });
+                    if (ent.type !== 'dir') {
+                        items.push({ label: 'Download', enabled: true,
+                                     action: () => downloadRow(ent, child) });
+                    }
+                    items.push({ label: 'Zip', enabled: true,
+                                 action: () => zipRow(ent, child) });
+                    if (ent.type !== 'dir' && /\.zip$/i.test(ent.name)) {
+                        items.push({ label: 'Unzip', enabled: true,
+                                     action: () => unzipRow(ent, child) });
+                    }
+                    items.push({ label: 'Delete', enabled: true,
+                                 action: () => deleteRow(ent, child) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Copy → ' + other + ' pane',
+                                 enabled: true,
+                                 action: () => doTransfer(other, desc, false) });
+                    items.push({ label: 'Move → ' + other + ' pane',
+                                 enabled: true,
+                                 action: () => doTransfer(other, desc, true) });
+                    items.push({ sep: true });
+                    items.push({ label: 'Properties…', enabled: true,
+                                 action: () => showProperties(side, child,
+                                                              ent.name) });
+                    return items;
+                };
+                const onRowMenu = (e, row, ent, child, select) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setActive(side); select();
+                    renderMenu(buildRowMenu(row, ent, child),
+                               e.clientX, e.clientY);
+                };
+
+                // ---- the shared browse kernel (#93) ------------------------
+                // The component owns row markup + '..' + .sel selection + the
+                // navigate/await sequencing; these hooks own host routing, auth,
+                // not_found policy, and every saveAppWindow — so persistence
+                // stays byte-identical and the fail-closed host semantics hold.
+                ui.browse = createBrowsePane({
+                    listEl: ui.list,
+                    classes: { row: 'app-fm-row', icon: 'fm-icon',
+                               name: 'fm-name', size: 'fm-size' },
+                    dirActivateOn: 'double',
+                    listDir: (p, token) => {
+                        // Host resolved once per request (at snapshot time). A
+                        // null host means paneHost() fail-closed — never hit the
+                        // wire; surface no_host so onListError shows pick-a-host.
+                        if (!token.host) {
+                            return Promise.resolve(
+                                { ok: false, error: 'no_host' });
+                        }
+                        return fmFile().list(p, { host: token.host.id });
+                    },
+                    snapshot: () => ({ dir: win[dirKey(side)],
+                                       hostId: win[hostKey(side)],
+                                       host: paneHost(side) }),
+                    // The exact old 4-clause guard, run AFTER the await: window
+                    // closed, or the pane navigated / switched HOST while we
+                    // awaited. seq (a newer navigate) is the component's job.
+                    isCurrent: (token) => !win.disposed
+                        && win[dirKey(side)] === token.dir
+                        && win[hostKey(side)] === token.hostId,
+                    onSelect: () => setActive(side),
+                    onActivateFile: (child) => openFile(child),
+                    onDirChanged: (cwd) => {
+                        // Adopt the server's canonical cwd (collapses '.'/
+                        // trailing slash); persist ONLY when it changed.
+                        if (win[dirKey(side)] !== cwd) {
+                            win[dirKey(side)] = cwd;
+                            saveAppWindow(win);
+                        }
+                        ui.path.textContent = cwd;   // absolute path (#35)
+                        ui.path.title = cwd;
+                    },
+                    onListError: (res, info) => {
+                        const err = res && res.error;
+                        if (err === 'auth_required') {
+                            // Not authenticated on this host yet: pop its login
+                            // (without stealing an in-progress different-host
+                            // form) and show a neutral placeholder. _onHostAuth
+                            // re-lists once that host authenticates.
+                            promptFileHostAuth(info.host);
+                            ui.path.textContent = hostPickerLabel(info.host);
+                            ui.path.title = hostPickerLabel(info.host);
+                            info.placeholder('🔒 sign in to '
+                                + hostPickerLabel(info.host) + '…');
+                            return;
+                        }
+                        if (err === 'no_host') {
+                            // Known-remote host removed: NEVER fall back to
+                            // local — show the neutral pick-a-host placeholder.
+                            ui.path.textContent = '(no host)';
+                            ui.path.title = '';
+                            info.placeholder('⚠ host unavailable — pick a host');
+                            return;
+                        }
+                        if (err === 'not_found' && info.requestedPath) {
+                            // A vanished dir (deleted/renamed) resets the pane to
+                            // root and re-lists once; the retry's requestedPath
+                            // is '' (falsy), so it can't recurse (matches the old
+                            // !_retried && reqDir bound).
+                            win[dirKey(side)] = '';
+                            saveAppWindow(win);
+                            info.navigate('');
+                            return;
+                        }
+                        showNotice('list failed: ' + (err || '?'));
+                        info.placeholder('⚠ ' + (err || 'error'));
+                    },
+                    decorateRow: ({ rowEl, entry, childPath, kind, select }) => {
+                        if (kind === 'parent') {
+                            // '..' has no row menu (#72) — swallow the right-
+                            // click so it doesn't fall through to the empty menu.
+                            rowEl.addEventListener('contextmenu', (e) => {
+                                e.preventDefault(); e.stopPropagation();
+                            });
+                            return;
+                        }
+                        // Both file + dir rows are draggable to the other pane /
+                        // window and share the row menu; only files carry a path
+                        // (drag payload + Playwright dataset).
+                        rowEl.dataset.type = entry.type;
+                        if (kind === 'file') rowEl.dataset.path = childPath;
+                        makeDraggable(rowEl, entry, childPath, select);
+                        rowEl.addEventListener('contextmenu',
+                            (e) => onRowMenu(e, rowEl, entry, childPath, select));
+                    },
+                });
+                win.cleanups.push(() => ui.browse.destroy());
+
                 // Activate + focus the FM root so the Tab/Enter shortcuts fire
                 // (they're bound on fmBody, which needs focus to receive keys).
                 const onClick = () => { setActive(side); fmBody.focus(); };
@@ -1203,7 +1180,7 @@
                         if (win[hostKey(side)] === host.id) {
                             win[dirKey(side)] = picked;
                             saveAppWindow(win);
-                            renderPane(side);
+                            reList(side);
                         }
                     };
                     fb.addEventListener('mousedown', onFolderDown);
@@ -1252,17 +1229,12 @@
                     btn.removeEventListener('click', onClick);
                 });
             };
-            wireBtn(refreshBtn, () => { renderPane('left'); renderPane('right'); });
+            wireBtn(refreshBtn, () => { reList('left'); reList('right'); });
             wireBtn(openBtn, openOrEnterActive);
-            wireBtn(upBtn, () => {
-                // Parent of the active pane: drop the last path segment ('' = root).
-                const cur = win[dirKey(activeSide)];
-                if (!cur) return;
-                const i = cur.lastIndexOf('/');
-                win[dirKey(activeSide)] = i === -1 ? '' : cur.slice(0, i);
-                saveAppWindow(win);
-                renderPane(activeSide);
-            });
+            // ↑ Up: the active pane's browse component walks to the server's
+            // parent of the current dir (#93 goParent — the same target as the
+            // pane's own '..' row, and separator-correct on every host).
+            wireBtn(upBtn, () => sideOf(activeSide).browse.goParent());
 
             // Raise / minimize / close / drag / 8-way resize / WM context menu.
             // Issue #11: × discards the file manager (the Closed list keeps only
@@ -1303,8 +1275,8 @@
                 if (touched) {
                     saveAppWindow(win);
                     showNotice('host removed — pane reset to this broker');
-                    renderPane('left');
-                    renderPane('right');
+                    reList('left');
+                    reList('right');
                 }
                 return true;
             };
@@ -1312,14 +1284,14 @@
             // form keys terminal-healing on win.hostId, which is 'app' here).
             win._onHostAuth = (hid) => {
                 for (const s of ['left', 'right']) {
-                    if (win[hostKey(s)] === hid) renderPane(s);
+                    if (win[hostKey(s)] === hid) reList(s);
                 }
             };
 
             saveAppWindow(win);
             setActive('left');
-            renderPane('left');
-            renderPane('right');
+            reList('left');
+            reList('right');
             if (findKeyInLayout(id)) placeWindowTiled(win);
             else bringToFront(id);
             return win;
