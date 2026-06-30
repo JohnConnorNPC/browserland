@@ -315,6 +315,37 @@ def _is_reparse_point(path_str: str) -> bool:
     return False
 
 
+def _set_windows_attributes(path_str: str, toggles: Dict[str, bool]) -> None:
+    """#96: set/clear READONLY/HIDDEN/ARCHIVE via SetFileAttributesW. os.chmod on
+    Windows only flips read-only, so the others need Win32. Read-modify-write so
+    DIRECTORY/REPARSE/COMPRESSED and other settable bits survive. Raises OSError on
+    failure to keep the {ok:false,error} contract.
+
+    A FRESH WinDLL(..., use_last_error=True) (not the cached ctypes.windll handle,
+    which has no use_last_error) with explicit arg/restypes so get_last_error()
+    reflects THIS call and WinError carries the real Win32 code (C1)."""
+    import ctypes                                   # Windows-only; not at module top
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
+    k32.GetFileAttributesW.restype = ctypes.c_uint32
+    k32.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+    k32.SetFileAttributesW.restype = ctypes.c_int
+    cur = k32.GetFileAttributesW(path_str)
+    if cur == 0xFFFFFFFF:                           # INVALID_FILE_ATTRIBUTES
+        raise ctypes.WinError(ctypes.get_last_error())
+    bits = {"readonly": stat.FILE_ATTRIBUTE_READONLY,
+            "hidden":   stat.FILE_ATTRIBUTE_HIDDEN,
+            "archive":  stat.FILE_ATTRIBUTE_ARCHIVE}
+    new = cur
+    for name, flag in bits.items():
+        if name in toggles:
+            new = (new | flag) if toggles[name] else (new & ~flag)
+    if new == 0:
+        new = stat.FILE_ATTRIBUTE_NORMAL            # 0 -> ERROR_INVALID_PARAMETER
+    if k32.SetFileAttributesW(path_str, new) == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _remove_link(path_str: str) -> None:
     """Remove a symlink / junction ENTRY without touching its target. A
     directory-type link (dir symlink or junction) needs ``os.rmdir`` on Windows
@@ -1562,6 +1593,65 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 pass                               # unreadable dir — omit count
         return sanic_json(out)
 
+    async def _file_setattr(request: Request):
+        # Editable Properties (#96): flip Windows READONLY/HIDDEN/ARCHIVE or
+        # POSIX rwx on ONE path — the mutating sibling of /file/stat. follow_leaf
+        # stays True (the default) ON PURPOSE: operate on the TARGET the dialog
+        # showed, the opposite of move/delete which preserve a leaf link (S4).
+        # The branch is chosen from the broker's OWN os.name; we never infer the
+        # host OS from the payload shape (S1).
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:        # N3
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        loop = asyncio.get_running_loop()
+        if os.name == "nt":
+            attributes = body.get("attributes")
+            if not isinstance(attributes, dict):
+                return sanic_json({"ok": False, "error": "bad_attrs"},
+                                  status=400)
+            try:
+                await loop.run_in_executor(
+                    None, _set_windows_attributes, str(p), attributes)
+            except OSError as exc:                  # N1/N2: Win32 / long-path
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        else:
+            mode = body.get("mode")
+            # A non-int (or bool, an int subclass) would make os.chmod raise
+            # TypeError — NOT in the catch tuple — and escape as a 500 (C2).
+            if (not isinstance(mode, int) or isinstance(mode, bool)
+                    or not 0 <= mode <= 0o7777):
+                return sanic_json({"ok": False, "error": "bad_mode"},
+                                  status=400)
+
+            def _chmod():
+                # Preserve special bits (setuid/setgid/sticky) SERVER-SIDE from a
+                # live re-stat, never the client (C3): only the low 9 perm bits
+                # come from the request.
+                live = os.stat(str(p)).st_mode
+                os.chmod(str(p), (mode & 0o777) | (live & 0o7000))
+
+            try:
+                await loop.run_in_executor(None, _chmod)
+            except OSError as exc:                  # not-owner PermissionError, …
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({"ok": True, "path": str(p)})
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -2159,6 +2249,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_zip, "/file/zip", methods=["POST"])
     app.add_route(_file_unzip, "/file/unzip", methods=["POST"])
     app.add_route(_file_stat, "/file/stat", methods=["POST"])
+    app.add_route(_file_setattr, "/file/setattr", methods=["POST"])
     app.add_route(_session_procs, "/session/procs", methods=["POST"])
     app.add_route(_session_kill, "/session/kill", methods=["POST"])
     app.add_route(_session_git, "/session/git", methods=["POST"])
@@ -2193,6 +2284,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/zip", "preflight_file_zip"),
                              ("/file/unzip", "preflight_file_unzip"),
                              ("/file/stat", "preflight_file_stat"),
+                             ("/file/setattr", "preflight_file_setattr"),
                              ("/session/procs", "preflight_session_procs"),
                              ("/session/kill", "preflight_session_kill"),
                              ("/session/git", "preflight_session_git"),
