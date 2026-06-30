@@ -84,8 +84,16 @@ for destroy (no fallback yet).
 ## Broker
 
 ```
-python -m webterm.broker [--host 127.0.0.1] [--port 4445] [--config PATH]
+python -m webterm.broker [--host 127.0.0.1] [--port 4445] [--config PATH] [--headless]
 ```
+
+`--headless` (or config `"serve_ui": false`, default `true`) serves the full
+JSON/WS API but **not** the desktop page or the in-app Help — `GET /` returns
+`200 {"ui": false}`, `/help-corpus.json` 404s, and both UI constants
+(`INDEX_HTML`, `HELP_CORPUS`) are never assembled (#87). `--headless` overrides
+the config key (like `--host`/`--port`); there is no `--no-headless`. `GET /info`
+reports the active mode as `serve_ui` (the one additive change to a JSON route);
+existing JSON/WS behavior is otherwise unchanged in either mode.
 
 Config (`broker_config.json`, path overridable via `$WEB_TERMINAL_CONFIG`;
 see `broker_config.example.json`): `auth_token`, plus `agent.profiles` for
