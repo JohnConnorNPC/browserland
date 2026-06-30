@@ -15,10 +15,16 @@ state_path at a tmp dir so the identity file never lands in the repo.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from webterm.broker.app import _load_or_create_broker_id, create_app
+
+REPO = Path(__file__).resolve().parents[1]
 
 IDENTITY = "webterm_identity.json"
 
@@ -104,6 +110,85 @@ def test_info_reports_mods_enabled_false_when_configured(tmp_path, monkeypatch):
     _, response = app.test_client.get("/info")
     assert response.status == 200
     assert response.json["mods_enabled"] is False
+
+
+# ---- headless mode / serve_ui (#87) --------------------------------------
+
+def test_serve_ui_default_true_serves_page_and_help(tmp_path, monkeypatch):
+    # Default (serve_ui unset): UI mode. /info reports serve_ui true; the desktop
+    # page and the help corpus are both served, exactly as before #87.
+    app = _make_app(tmp_path, monkeypatch, token=None)
+    assert app.ctx.serve_ui is True
+    _, response = app.test_client.get("/info")
+    assert response.status == 200
+    assert response.json["serve_ui"] is True
+    _, page = app.test_client.get("/")
+    assert page.status == 200
+    assert "<title>Browserland</title>" in page.body.decode("utf-8")
+    _, corpus = app.test_client.get("/help-corpus.json")
+    assert corpus.status == 200
+
+
+def test_headless_serves_api_but_not_page_or_help(tmp_path, monkeypatch):
+    # serve_ui False: headless. GET / is a self-describing 200 {"ui": false},
+    # /help-corpus.json is unregistered (404), but the JSON API still answers.
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "serve_ui": False}
+    app = create_app(cfg, name=f"webterm-info-test-{_app_seq}")
+    assert app.ctx.serve_ui is False
+    _, response = app.test_client.get("/info")
+    assert response.status == 200
+    assert response.json["serve_ui"] is False
+    _, page = app.test_client.get("/")
+    assert page.status == 200
+    assert page.json == {"ui": False}            # self-describing, not the page
+    _, corpus = app.test_client.get("/help-corpus.json")
+    assert corpus.status == 404                  # route not registered
+    _, sessions = app.test_client.get("/sessions")
+    assert sessions.status == 200                # JSON/WS API unaffected
+    assert isinstance(sessions.json, list)
+
+
+def _create_app_in_subprocess(serve_ui: bool, tmp_path) -> str:
+    """Run create_app(serve_ui=...) in a FRESH interpreter and report which of
+    webterm.broker.{ui,help_corpus} ended up in sys.modules. Must be a clean
+    process: other tests import those modules directly and pollute sys.modules,
+    so an in-process check could not prove the gate skipped the assembly.
+    cwd=tmp_path keeps state/identity files out of the repo; PYTHONPATH=REPO
+    lets the broker import and (in UI mode) read its packaged assets."""
+    # Importing __main__ too (its top level pulls in app) catches a regression
+    # where someone re-adds a top-level UI import on the actual CLI entrypoint —
+    # importing as a module doesn't trip the `if __name__ == "__main__"` guard.
+    code = (
+        "import sys\n"
+        "import webterm.broker.__main__  # noqa: F401 (CLI import path)\n"
+        "from webterm.broker.app import create_app\n"
+        f"create_app({{'serve_ui': {serve_ui!r}}}, name='h')\n"
+        "print('ui' if 'webterm.broker.ui' in sys.modules else '-',\n"
+        "      'help' if 'webterm.broker.help_corpus' in sys.modules else '-')\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path),
+                         env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_headless_skips_ui_and_help_assembly(tmp_path):
+    # The core invariant (#87): headless never imports — and so never assembles —
+    # webterm.broker.ui (INDEX_HTML) or webterm.broker.help_corpus (HELP_CORPUS).
+    # Guards against someone re-adding a top-level import, which every other test
+    # would still pass while silently defeating the feature.
+    assert _create_app_in_subprocess(False, tmp_path) == "- -"
+
+
+def test_ui_mode_imports_ui_and_help(tmp_path):
+    # The inverse: UI mode DOES assemble both at create_app time (loud-at-startup).
+    assert _create_app_in_subprocess(True, tmp_path) == "ui help"
 
 
 def test_info_requires_token_when_configured(tmp_path, monkeypatch):

@@ -1134,3 +1134,57 @@ def test_launch_real_agent(broker_proc):
                     pass
             time.sleep(0.2)  # zombies reparent to the live broker
             # subprocess; module teardown reaps them with it.
+
+
+def test_headless_subprocess_serves_api_not_page():
+    """Headless mode end-to-end (#87): spawn the broker with --headless and
+    confirm GET / is the self-describing {"ui": false} (not the windowed page),
+    /help-corpus.json 404s, but the JSON API (/sessions) still answers. The
+    readiness probe stays on /sessions — / no longer serves the page."""
+    port = _free_port()
+    env = dict(os.environ)
+    env.pop("WEB_TERMINAL_TOKEN", None)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("BROWSERLAND_BROKER_URL", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "webterm.broker", "--headless",
+         "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(REPO), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.time() + 20
+        while True:
+            try:
+                status, _ = _http("GET", f"{base}/sessions")
+                if status == 200:
+                    break
+            except OSError:
+                pass
+            if proc.poll() is not None:
+                raise RuntimeError(f"broker exited early: {proc.returncode}")
+            if time.time() > deadline:
+                raise RuntimeError("broker did not come up")
+            time.sleep(0.2)
+        # GET / is JSON {"ui": false}, NOT the <title>Browserland</title> page.
+        status, payload = _http("GET", f"{base}/")
+        assert status == 200
+        assert payload == {"ui": False}
+        # /help-corpus.json route is not registered -> falls through to 404.
+        status, _, _ = _request("GET", f"{base}/help-corpus.json")
+        assert status == 404
+        # The JSON API is unaffected.
+        status, sessions = _http("GET", f"{base}/sessions")
+        assert status == 200
+        assert isinstance(sessions, list)
+        # /info surfaces the mode.
+        status, info = _http("GET", f"{base}/info")
+        assert status == 200
+        assert info["serve_ui"] is False
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
