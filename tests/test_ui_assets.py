@@ -941,6 +941,36 @@ def test_dialog_component_present():
     assert ".app-dialog" in INDEX_HTML
 
 
+def test_browse_pane_component_present():
+    # #93: the reusable single browse-pane kernel ships as the new
+    # 70_js_browse_pane.js fragment, ordered right after the dialog fragment,
+    # and reaches the served page. BOTH consumers — the editor's openFileDialog
+    # (core 68) and the file-manager mod — instantiate it, which is what proves
+    # the two drifted directory-browsers were actually collapsed onto one.
+    assert "70_js_browse_pane.js" in ui._ORDERED
+    assert ui._ORDERED.index("70_js_browse_pane.js") == \
+        ui._ORDERED.index("69_js_dialog.js") + 1
+    frag = BROKER_DIR / "70_js_browse_pane.js"
+    assert frag.is_file()
+    src = frag.read_text(encoding="utf-8")
+    assert "function createBrowsePane" in src
+    assert "function createBrowsePane" in INDEX_HTML
+    # Both consumers instantiate the component (the duplication is gone).
+    dlg = (BROKER_DIR / "68_js_app_windows_files.js").read_text(encoding="utf-8")
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    assert "createBrowsePane(" in dlg, "the editor dialog must use createBrowsePane"
+    assert "createBrowsePane(" in fm, "the file manager must use createBrowsePane"
+    # The component is strictly host-/IO-agnostic: it must NOT reach for hosts,
+    # the file API, or persistence — those are injected per-consumer via hooks.
+    # Locking this keeps the editor dialog working mods-off and the FM's
+    # fail-closed host semantics where they belong (the consumer).
+    for banned in ("fileApiPost(", "hostHttpUrl(", "saveAppWindow(",
+                   "paneHost(", "fmFile("):
+        assert banned not in src, \
+            f"browse-pane component must stay I/O-agnostic, found {banned!r}"
+
+
 def test_no_native_dialogs_in_served_page():
     # #89: the whole app routes every confirm/prompt through the styled dialog
     # component — NO native confirm()/prompt()/alert() survives anywhere in the
