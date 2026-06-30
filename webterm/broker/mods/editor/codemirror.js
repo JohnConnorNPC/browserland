@@ -21,42 +21,64 @@
         // esm.sh resolves all of them to the LATEST matching build's es2022 URL
         // (currently /@codemirror/state@6.7.0/es2022/state.mjs).
         //
-        // So `state` below is imported via the SAME request the transitive
-        // importers make — `@codemirror/state@^6.5.0?target=es2022` (verbatim
-        // what view@6.36.2's build imports) — NOT a manually pinned version.
-        // Two things make this the durable form:
+        // So the three SHARED-FACET packages — `state`, `view`, AND `language`
+        // — are imported below via the SAME request shape the transitive
+        // importers make: `@codemirror/<pkg>@^<floor>?target=es2022`, a RANGE +
+        // target, NOT a manually pinned exact version. Two things make this the
+        // durable form:
         //   - the RANGE auto-tracks whatever esm.sh resolves the transitive
-        //     ranges to, so it can't drift behind them (a low exact pin loaded a
-        //     2nd state instance -> CM throws "Unrecognized extension value ...
-        //     multiple instances of @codemirror/state" -> textarea fallback, #36);
+        //     ranges to, so it can't drift behind them (a low exact pin loads a
+        //     2nd instance of that package -> its facet identities no longer
+        //     match the transitively-loaded copy. For @codemirror/state that
+        //     throws "Unrecognized extension value ... multiple instances of
+        //     @codemirror/state" -> textarea fallback (#36). For @codemirror/view
+        //     it's SILENT and nastier: highlight/decoration ViewPlugins live in
+        //     the transitive (newer) view, register decorations on ITS
+        //     EditorView.decorations facet, and our pinned (older) EditorView
+        //     never reads them -> no syntax highlighting at all, no error. Same
+        //     trap for @codemirror/language's `language` facet (LR packs + theme
+        //     vs. our StreamLanguage modes landing in different facets));
         //   - the explicit ?target=es2022 pins the build target so the direct
         //     import can't land on a different per-UA build than the transitive
         //     ?target=es2022 imports (e.g. under a non-es2022 browser default).
-        // DO NOT replace this with a bare exact version — that reintroduces #36
-        // the next time upstream advances the range resolution. (xterm needs none
-        // of this — single self-contained package.)
+        // DO NOT replace any of these three with a bare exact version — that
+        // reintroduces the multi-instance break the next time upstream advances
+        // the range resolution. (xterm needs none of this — single self-contained
+        // package.)
+        //
+        // The remaining packages (commands/search/autocomplete/theme/lang-*/
+        // legacy-modes) ARE exact-pinned, but NOT because "we're the only
+        // importer makes them immune" — they aren't identity-isolated leaves
+        // (commands/search/autocomplete export view ViewPlugins, theme imports
+        // view+language). An exact pin is safe only while THEIR transitive
+        // state/view/language resolve to the SAME concrete build as the three
+        // above. The lever that guarantees that is `?target=es2022` on EVERY
+        // import below: esm.sh propagates the parent's target to its transitive
+        // dep URLs, so pinning the target everywhere forces the whole graph onto
+        // the /es2022/ builds (and thus the single deduped state/view/language)
+        // regardless of the browser's per-UA default target (codex review).
         const CM_CDN = 'https://esm.sh/';
         const CM_VER = {
-            view: '@codemirror/view@6.36.2',
+            view: '@codemirror/view@^6.23.0?target=es2022',
             state: '@codemirror/state@^6.5.0?target=es2022',
-            language: '@codemirror/language@6.10.8',
-            commands: '@codemirror/commands@6.8.0',
-            search: '@codemirror/search@6.5.10',
-            autocomplete: '@codemirror/autocomplete@6.18.6',
-            theme: '@codemirror/theme-one-dark@6.1.2',
-            js: '@codemirror/lang-javascript@6.2.2',
-            py: '@codemirror/lang-python@6.1.7',
-            json: '@codemirror/lang-json@6.0.1',
-            html: '@codemirror/lang-html@6.4.9',
-            css: '@codemirror/lang-css@6.3.1',
-            md: '@codemirror/lang-markdown@6.3.2',
-            cpp: '@codemirror/lang-cpp@6.0.2',
-            rust: '@codemirror/lang-rust@6.0.1',
-            go: '@codemirror/lang-go@6.0.1',
-            sql: '@codemirror/lang-sql@6.8.0',
-            xml: '@codemirror/lang-xml@6.1.0',
-            yaml: '@codemirror/lang-yaml@6.1.2',
-            java: '@codemirror/lang-java@6.0.1',
+            language: '@codemirror/language@^6.10.0?target=es2022',
+            commands: '@codemirror/commands@6.8.0?target=es2022',
+            search: '@codemirror/search@6.5.10?target=es2022',
+            autocomplete: '@codemirror/autocomplete@6.18.6?target=es2022',
+            theme: '@codemirror/theme-one-dark@6.1.2?target=es2022',
+            js: '@codemirror/lang-javascript@6.2.2?target=es2022',
+            py: '@codemirror/lang-python@6.1.7?target=es2022',
+            json: '@codemirror/lang-json@6.0.1?target=es2022',
+            html: '@codemirror/lang-html@6.4.9?target=es2022',
+            css: '@codemirror/lang-css@6.3.1?target=es2022',
+            md: '@codemirror/lang-markdown@6.3.2?target=es2022',
+            cpp: '@codemirror/lang-cpp@6.0.2?target=es2022',
+            rust: '@codemirror/lang-rust@6.0.1?target=es2022',
+            go: '@codemirror/lang-go@6.0.1?target=es2022',
+            sql: '@codemirror/lang-sql@6.8.0?target=es2022',
+            xml: '@codemirror/lang-xml@6.1.0?target=es2022',
+            yaml: '@codemirror/lang-yaml@6.1.2?target=es2022',
+            java: '@codemirror/lang-java@6.0.1?target=es2022',
             // legacy StreamLanguage modes (StreamLanguage itself comes from our
             // single @codemirror/language instance above; these submodules are
             // pure StreamParser data, so they add NO second @codemirror/state
