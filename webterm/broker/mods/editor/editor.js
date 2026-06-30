@@ -406,9 +406,11 @@
                 // terminal's hostId so reads/writes hit the remote broker. A
                 // removed host falls back to local via fileHost() below.
                 fileHostId: appData.fileHostId || 'local',
-                // Initial dir for a NEW editor's Open/Save dialogs (#35): the
-                // active terminal's cwd, so a blank editor saves "where I am"
-                // instead of the broker's default dir. Ignored once filePath set.
+                // Initial dir for a NEW editor's Open/Save dialogs: the
+                // configured Control Panel start path when set (#73), else the
+                // active terminal's cwd (#35) — so a blank editor saves at the
+                // configured start path / "where I am" instead of the broker's
+                // default dir. Seeded by launchTextEditor; ignored once filePath set.
                 startDir: appData.startDir ? String(appData.startDir) : '',
                 _saveTimer: null,
                 // CodeMirror handle (null until/unless CM mounts for an editor).
@@ -985,8 +987,9 @@
                 };
                 // filePath is an ABSOLUTE host path now (#35), so split on EITHER
                 // separator (C:\a\b.txt as well as /a/b.txt). dirOf('') and a new
-                // editor's null filePath fall back to win.startDir (the terminal
-                // cwd the editor was opened at) so Open/Save start "where I am".
+                // editor's null filePath fall back to win.startDir (the configured
+                // start path when set, else the terminal cwd the editor was opened
+                // at) so Open/Save start at the configured start path / "where I am".
                 const dirOf = (p) => {
                     if (!p) return win.startDir || '';
                     const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
@@ -2112,12 +2115,23 @@
             }
         }
 
-        function launchTextEditor() {
-            // Open the Open/Save dialogs at the active terminal's cwd+host (#35).
+        async function launchTextEditor() {
+            // Open the Open/Save dialogs at the Control Panel Default start path
+            // when set (#73), else the active terminal's cwd+host (#35).
             const s = activeTerminalStart();
-            openAppWindow({ id: newAppId('editor'),
-                            appKind: 'text-editor', content: '',
-                            startDir: s.cwd, fileHostId: s.host });
+            let startDir = s.cwd;                 // fallback = today's behavior
+            try {
+                // Mirror fileHost(): hostById, then explicit 'local' fallback; a
+                // removed remote stays null so we don't resolve a LOCAL startPath
+                // for a remote-targeted editor (Codex review).
+                let h = hostById(s.host);
+                if (!h && (!s.host || s.host === 'local')) h = localHost();
+                // #73: Control Panel Default start path wins when set; else the
+                // active terminal cwd / broker default, exactly as before.
+                if (h) startDir = (await resolveStartPath(h)) || s.cwd;
+            } catch (_) { startDir = s.cwd; }
+            openAppWindow({ id: newAppId('editor'), appKind: 'text-editor',
+                            content: '', startDir: startDir, fileHostId: s.host });
         }
 
         // ---- mod registration: the text-editor window kind ----------------

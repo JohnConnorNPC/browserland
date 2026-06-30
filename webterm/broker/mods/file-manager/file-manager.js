@@ -1326,12 +1326,24 @@
         }
 
         // The (+) launcher — moved verbatim from core 76_js_launch_fullscreen.js.
-        // Both panes start at the active terminal's cwd, on its host (#35) — and
-        // on its host PER PANE (#46), so each pane can be re-homed later.
-        function launchFileManager() {
+        // Both panes start at the Control Panel Default start path when set (#73),
+        // else the active terminal's cwd, on its host (#35) — and on its host PER
+        // PANE (#46), so each pane can be re-homed later.
+        async function launchFileManager() {
             const s = activeTerminalStart();
+            let startDir = s.cwd;                 // fallback = today's behavior
+            try {
+                // Mirror fileHost()'s host resolution: hostById, then explicit
+                // 'local' fallback; a removed remote stays null so we don't resolve
+                // a LOCAL startPath for a remote-targeted pane (Codex review).
+                let h = hostById(s.host);
+                if (!h && (!s.host || s.host === 'local')) h = localHost();
+                // #73: Control Panel Default start path wins when set; else the
+                // active terminal cwd / broker default, exactly as before.
+                if (h) startDir = (await resolveStartPath(h)) || s.cwd;
+            } catch (_) { startDir = s.cwd; }
             openAppWindow({ id: newAppId('fm'), appKind: 'file-manager',
-                            fmLeft: s.cwd, fmRight: s.cwd, fileHostId: s.host,
+                            fmLeft: startDir, fmRight: startDir, fileHostId: s.host,
                             fmLeftHostId: s.host, fmRightHostId: s.host });
         }
 
