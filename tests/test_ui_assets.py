@@ -971,6 +971,38 @@ def test_browse_pane_component_present():
             f"browse-pane component must stay I/O-agnostic, found {banned!r}"
 
 
+def test_sticky_pin_button_present():
+    # #95: a sticky note's titlebar gains an always-on-top (▲/△) toggle. The
+    # feature is three wired edits — a per-note `pinned` flag (default true)
+    # persisted by the shared serializer, a z-tier gate so an unpinned note drops
+    # out of the high NOTE_Z_BASE tier, and the titlebar button itself — so lock
+    # each edit at its source AND in the served page. (Real click/z-order
+    # behavior is verified out of band via Playwright; this is the presence gate.)
+    editor_js = (BROKER_DIR / "mods" / "editor" / "editor.js").read_text(
+        encoding="utf-8")
+    store_js = (BROKER_DIR / "54_js_app_windows_store.js").read_text(
+        encoding="utf-8")
+    poll_js = (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(
+        encoding="utf-8")
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+
+    # The titlebar button (class hook + accessible title) ships in the editor mod
+    # and reaches the served page.
+    for needle in ("btn-pin", "always on top"):
+        assert needle in editor_js, f"editor mod missing pin marker {needle!r}"
+        assert needle in INDEX_HTML, f"pin marker missing from served page: {needle!r}"
+    # The flag is persisted unconditionally by the shared serializer.
+    assert "pinned: !!win.pinned" in store_js
+    assert "pinned: !!win.pinned" in INDEX_HTML
+    # The note z-tier is gated on the flag, still SCOPED to sticky notes so
+    # `pinned` never becomes a cross-app z-capability.
+    assert "win.pinned !== false" in poll_js
+    assert "appKind === 'sticky-note'" in poll_js
+    assert "win.pinned !== false" in INDEX_HTML
+    # And the CSS styling/test hook exists.
+    assert ".btn-pin" in css
+
+
 def test_no_native_dialogs_in_served_page():
     # #89: the whole app routes every confirm/prompt through the styled dialog
     # component — NO native confirm()/prompt()/alert() survives anywhere in the
