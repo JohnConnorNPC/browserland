@@ -695,9 +695,12 @@
                 const ui = sideOf(side);
                 // ---- per-pane row actions (close over `side` + `ui`) --------
                 // These used to live inside renderPane (recreated every render);
-                // they now live here once per pane, reading the live cwd via
-                // ui.browse.getCwd() at action time. The browse component (#93)
-                // owns the rows; these own what the FM does WITH a row.
+                // they now live here once per pane. The destination cwd is
+                // captured ONCE in buildRowMenu (= the render cwd of the row the
+                // menu was opened on) and threaded into rename/zip/unzip, so a
+                // pane navigation while the menu is still open can't redirect the
+                // op — byte-faithful to the old per-render closure. The browse
+                // component (#93) owns the rows; these own what to DO with one.
                 const openFile = async (path) => {
                     const h = paneHost(side);
                     if (!h) {
@@ -751,13 +754,12 @@
                 // Rename in place = a /file/move to a validated sibling name in
                 // this same dir (cwd). Client-side name validation is UX; the
                 // server re-checks.
-                const renameRow = async (ent, child) => {
+                const renameRow = async (ent, child, cwd) => {
                     const host = paneHost(side);
                     if (!host) {
                         showNotice('rename failed: host unavailable');
                         return;
                     }
-                    const cwd = ui.browse.getCwd();
                     const name = await openTextPrompt({
                         title: 'Rename', label: 'New name', value: ent.name,
                         okLabel: 'Rename', validate: validateName });
@@ -859,13 +861,12 @@
                     }
                 };
                 // Zip a file/folder into a .zip in this dir (prompt for the name).
-                const zipRow = async (ent, child) => {
+                const zipRow = async (ent, child, cwd) => {
                     const host = paneHost(side);
                     if (!host) {
                         showNotice('zip failed: host unavailable');
                         return;
                     }
-                    const cwd = ui.browse.getCwd();
                     const name = await openTextPrompt({
                         title: 'Zip', label: 'Archive name',
                         value: ent.name + '.zip', okLabel: 'Zip',
@@ -895,13 +896,12 @@
                     reList(side);
                 };
                 // Unzip a .zip into a fresh archive-stem sibling dir.
-                const unzipRow = async (ent, child) => {
+                const unzipRow = async (ent, child, cwd) => {
                     const host = paneHost(side);
                     if (!host) {
                         showNotice('unzip failed: host unavailable');
                         return;
                     }
-                    const cwd = ui.browse.getCwd();
                     const stem = ent.name.replace(/\.zip$/i, '')
                         || (ent.name + '_extracted');
                     const dest = joinNative(cwd, stem);
@@ -947,16 +947,16 @@
                     items.push({ label: 'Paste', enabled: !!win.fmClipboard,
                                  action: () => pasteInto(side, pasteDir) });
                     items.push({ label: 'Rename…', enabled: true,
-                                 action: () => renameRow(ent, child) });
+                                 action: () => renameRow(ent, child, cwd) });
                     if (ent.type !== 'dir') {
                         items.push({ label: 'Download', enabled: true,
                                      action: () => downloadRow(ent, child) });
                     }
                     items.push({ label: 'Zip', enabled: true,
-                                 action: () => zipRow(ent, child) });
+                                 action: () => zipRow(ent, child, cwd) });
                     if (ent.type !== 'dir' && /\.zip$/i.test(ent.name)) {
                         items.push({ label: 'Unzip', enabled: true,
-                                     action: () => unzipRow(ent, child) });
+                                     action: () => unzipRow(ent, child, cwd) });
                     }
                     items.push({ label: 'Delete', enabled: true,
                                  action: () => deleteRow(ent, child) });
