@@ -199,6 +199,15 @@
                     stat: function (path, opts) {
                         return _modFileApi('/file/stat', { path: path }, opts);
                     },
+                    // #96: editable Properties. attrs = {mode} (POSIX rwx, low 9
+                    // bits; server preserves special bits) OR {attributes:{read-
+                    // only,hidden,archive}} (Windows). -> {ok,path}.
+                    setattr: function (path, attrs, opts) {
+                        const body = { path: path };
+                        if (attrs && attrs.mode != null) body.mode = attrs.mode;
+                        if (attrs && attrs.attributes) body.attributes = attrs.attributes;
+                        return _modFileApi('/file/setattr', body, opts);
+                    },
                 },
                 // #85 (S12): host session RPC — ONE reviewed wrapper over the
                 // existing /session/procs (enumerate a session's process tree) and

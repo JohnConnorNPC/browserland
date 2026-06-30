@@ -103,6 +103,13 @@
                 stat: function (path, opts) {
                     return _modFileApi('/file/stat', { path: path }, opts);
                 },
+                // #96: editable Properties (mods-off mirror of ctx.file.setattr).
+                setattr: function (path, attrs, opts) {
+                    const body = { path: path };
+                    if (attrs && attrs.mode != null) body.mode = attrs.mode;
+                    if (attrs && attrs.attributes) body.attributes = attrs.attributes;
+                    return _modFileApi('/file/setattr', body, opts);
+                },
             };
         }
 
