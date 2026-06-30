@@ -633,8 +633,12 @@
                 showNotice('created ' + name.trim());
                 reList(side);
             };
-            // Properties: /file/stat -> a read-only styled info modal. Shared by
-            // the row menu (a file/dir) and the empty menu (the cwd).
+            // Properties (#96): /file/stat -> an EDITABLE platform-aware dialog.
+            // Read-only info rows on top; an editable block below — Windows
+            // Read-only/Hidden/Archive checkboxes, or the POSIX owner/group/other
+            // rwx grid. Save -> /file/setattr. Shared by the row menu (a file/
+            // dir) and the empty menu (the cwd). The host's OS (r.os) picks the
+            // editor — never this browser's platform (a remote pane may straddle).
             const showProperties = async (side, path, displayName) => {
                 const host = paneHost(side);
                 if (!host) {
@@ -650,29 +654,147 @@
                     showNotice('properties failed: ' + ((r && r.error) || '?'));
                     return;
                 }
-                const rows = [];
-                rows.push({ k: 'Name',
-                            v: displayName || baseName(r.path || path) });
-                rows.push({ k: 'Path', v: r.path || path });
-                rows.push({ k: 'Type', v: r.type === 'dir' ? 'Folder'
-                            : (r.type === 'file' ? 'File' : r.type) });
+                // S1: editor follows the FILE's host OS (r.os); fall back to the
+                // path separator only when an older broker omits it.
+                const isWin = r.os ? r.os === 'windows'
+                    : (pathSepOf(r.path || path) === '\\');
+                // Read-only info rows (same look as the old read-only modal).
+                const infoRows = [];
+                infoRows.push({ k: 'Name',
+                                v: displayName || baseName(r.path || path) });
+                infoRows.push({ k: 'Path', v: r.path || path });
+                infoRows.push({ k: 'Type', v: r.type === 'dir' ? 'Folder'
+                                : (r.type === 'file' ? 'File' : r.type) });
                 if (r.type === 'dir') {
                     if (typeof r.children === 'number') {
-                        rows.push({ k: 'Items', v: String(r.children) });
+                        infoRows.push({ k: 'Items', v: String(r.children) });
                     }
                 } else {
-                    rows.push({ k: 'Size',
-                                v: fmtSize(r.size) + ' (' + r.size + ' bytes)' });
+                    infoRows.push({ k: 'Size',
+                                   v: fmtSize(r.size) + ' (' + r.size + ' bytes)' });
                 }
                 if (r.mtime != null) {
-                    rows.push({ k: 'Modified',
-                                v: new Date(r.mtime * 1000).toLocaleString() });
+                    infoRows.push({ k: 'Modified',
+                                   v: new Date(r.mtime * 1000).toLocaleString() });
                 }
-                if (typeof r.mode === 'number') {
-                    rows.push({ k: 'Mode',
-                                v: '0' + (r.mode & 0o7777).toString(8) });
+                // Octal mode is meaningful on POSIX only.
+                if (!isWin && typeof r.mode === 'number') {
+                    infoRows.push({ k: 'Mode',
+                                   v: '0' + (r.mode & 0o7777).toString(8) });
                 }
-                await openInfoModal({ title: 'Properties', rows: rows });
+                // Editable widget refs, closed over so .checked survives the
+                // dialog teardown (S2: openDialog fields are text-only; we build
+                // the checkboxes ourselves and read detached inputs afterwards).
+                const winRefs = {};
+                const posixRefs = [];          // [{bit, input}]
+                const mkCheck = (labelText, checked) => {
+                    const label = document.createElement('label');
+                    label.className = 'set-check';
+                    const input = document.createElement('input');
+                    input.type = 'checkbox';
+                    input.checked = !!checked;
+                    label.appendChild(input);
+                    label.appendChild(document.createTextNode(' ' + labelText));
+                    return { label: label, input: input };
+                };
+                const res = await openDialog({
+                    title: 'Properties',
+                    body: function (c) {
+                        const tbl = document.createElement('div');
+                        tbl.className = 'app-dialog-rows';
+                        for (const row of infoRows) {
+                            const rr = document.createElement('div');
+                            rr.className = 'app-dialog-row';
+                            const k = document.createElement('span');
+                            k.className = 'app-dialog-k';
+                            k.textContent = String(row.k);
+                            const v = document.createElement('span');
+                            v.className = 'app-dialog-v';
+                            v.textContent = String(row.v);
+                            rr.appendChild(k);
+                            rr.appendChild(v);
+                            tbl.appendChild(rr);
+                        }
+                        c.appendChild(tbl);
+                        const section = document.createElement('div');
+                        section.className = 'set-section';
+                        const title = document.createElement('div');
+                        title.className = 'set-title';
+                        section.appendChild(title);
+                        if (isWin) {
+                            title.textContent = 'Attributes';
+                            const a = r.attributes || {};
+                            const ro = mkCheck('Read-only', a.readonly);
+                            const hd = mkCheck('Hidden', a.hidden);
+                            const arc = mkCheck('Archive', a.archive);
+                            winRefs.readonly = ro.input;
+                            winRefs.hidden = hd.input;
+                            winRefs.archive = arc.input;
+                            section.appendChild(ro.label);
+                            section.appendChild(hd.label);
+                            section.appendChild(arc.label);
+                        } else {
+                            title.textContent = 'Permissions';
+                            const mode = (typeof r.mode === 'number') ? r.mode : 0;
+                            const classes = [
+                                { who: 'Owner', bits: [0o400, 0o200, 0o100] },
+                                { who: 'Group', bits: [0o040, 0o020, 0o010] },
+                                { who: 'Other', bits: [0o004, 0o002, 0o001] },
+                            ];
+                            const rwx = ['r', 'w', 'x'];
+                            for (const cls of classes) {
+                                const rowEl = document.createElement('div');
+                                rowEl.className = 'set-row';
+                                const lab = document.createElement('span');
+                                lab.textContent = cls.who;
+                                rowEl.appendChild(lab);
+                                for (let i = 0; i < 3; i++) {
+                                    const bit = cls.bits[i];
+                                    const chk = mkCheck(rwx[i],
+                                        (mode & bit) !== 0);
+                                    posixRefs.push({ bit: bit,
+                                                     input: chk.input });
+                                    rowEl.appendChild(chk.label);
+                                }
+                                section.appendChild(rowEl);
+                            }
+                        }
+                        c.appendChild(section);
+                    },
+                    buttons: [
+                        { label: 'Save', value: 'save', primary: true },
+                        { label: 'Cancel', value: 'cancel' },
+                    ],
+                });
+                // Cancel / Escape / backdrop: no-op, no request.
+                if (res == null || res.value !== 'save') return;
+                let payload;
+                if (isWin) {
+                    payload = { attributes: {
+                        readonly: !!winRefs.readonly.checked,
+                        hidden: !!winRefs.hidden.checked,
+                        archive: !!winRefs.archive.checked,
+                    } };
+                } else {
+                    let mode = 0;
+                    for (const ref of posixRefs) {
+                        if (ref.input.checked) mode |= ref.bit;
+                    }
+                    payload = { mode: mode };    // server merges special bits (C3)
+                }
+                const applied = await fmFile().setattr(path, payload,
+                                                       { host: host.id });
+                if (win.disposed) return;
+                if (!(applied && applied.ok)) {
+                    if (applied && applied.error === 'auth_required') {
+                        promptFileHostAuth(host);
+                    }
+                    showNotice('apply failed: '
+                        + ((applied && applied.error) || '?'));
+                    return;
+                }
+                showNotice('attributes updated');
+                reList(side);
             };
 
             // Right-click on a pane's empty background: New folder / Paste /
