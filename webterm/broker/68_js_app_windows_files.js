@@ -135,9 +135,6 @@
             errEl.classList.remove('show');
             errEl.textContent = '';
             return new Promise((resolve) => {
-                // 'dir' mode tracks the absolute root so commit can join it with
-                // the current relative cwd into an absolute path /launch accepts.
-                const state = { cwd: '', selected: null, root: '' };
                 const showErr = (m) => {
                     errEl.textContent = m; errEl.classList.add('show');
                 };
@@ -146,6 +143,10 @@
                     overlay.classList.remove('open');
                     okBtn.onclick = null; cancelBtn.onclick = null;
                     document.removeEventListener('keydown', onKey, true);
+                    // Flip the component's disposed flag synchronously so a
+                    // superseded in-flight list can't paint the shared
+                    // #file-list after we've closed (codex #9).
+                    pane.destroy();
                     resolve(val);
                 };
                 _fileDlgFinish = finish;
@@ -154,76 +155,54 @@
                         const name = (nameEl.value || '').trim();
                         if (!name) { showErr('enter a filename'); return; }
                         // cwd is ABSOLUTE now (#35); join the typed name onto it.
-                        finish(state.cwd ? joinNative(state.cwd, name) : name);
+                        const cwd = pane.getCwd();
+                        finish(cwd ? joinNative(cwd, name) : name);
                     } else if (mode === 'dir') {
                         // The shown folder's cwd IS the absolute path to return
                         // (host-wide #35 — no root+relative reconstruction).
-                        if (!state.cwd) { showErr('folder not loaded'); return; }
-                        finish(state.cwd);
+                        const cwd = pane.getCwd();
+                        if (!cwd) { showErr('folder not loaded'); return; }
+                        finish(cwd);
                     } else {
-                        if (!state.selected) { showErr('select a file'); return; }
-                        finish(state.selected);
+                        const sel = pane.getSelected();
+                        if (!sel) { showErr('select a file'); return; }
+                        finish(sel);
                     }
                 };
-                const render = (data) => {
-                    state.cwd = data.cwd || '';        // absolute path (#35)
-                    state.root = data.root || '';      // FS anchor (informational)
-                    state.selected = null;
-                    pathEl.textContent = state.cwd || state.root || '';
-                    listEl.innerHTML = '';
-                    if (data.parent !== null && data.parent !== undefined) {
-                        const up = document.createElement('div');
-                        up.className = 'file-entry';
-                        up.innerHTML = '<span class="fe-icon">📁</span>'
-                            + '<span class="fe-name">..</span>'
-                            + '<span class="fe-size"></span>';
-                        up.addEventListener('click', () => navigate(data.parent));
-                        listEl.appendChild(up);
-                    }
-                    for (const ent of (data.entries || [])) {
-                        const row = document.createElement('div');
-                        row.className = 'file-entry';
-                        const icon = ent.type === 'dir' ? '📁' : '📄';
-                        row.innerHTML = '<span class="fe-icon">' + icon
-                            + '</span><span class="fe-name"></span>'
-                            + '<span class="fe-size">'
-                            + (ent.type === 'dir' ? '' : fmtSize(ent.size))
-                            + '</span>';
-                        row.querySelector('.fe-name').textContent = ent.name;
-                        const child = joinNative(state.cwd, ent.name);
-                        if (ent.type === 'dir') {
-                            row.addEventListener('click', () => navigate(child));
-                        } else if (mode === 'dir') {
-                            // Folder picker: files are greyed + inert (you can
-                            // only navigate folders and commit the shown one).
-                            row.classList.add('disabled');
-                            row.style.opacity = '0.4';
-                            row.style.cursor = 'default';
+                // The shared browse kernel (#93). The dialog is host-aware via a
+                // closure over dlgHost, so snapshot/isCurrent are trivial — the
+                // component's own seq + disposed flag suffice (one #file-overlay
+                // singleton, no per-pane host/dir drift to validate).
+                const pane = createBrowsePane({
+                    listEl: listEl,
+                    classes: { row: 'file-entry', icon: 'fe-icon',
+                               name: 'fe-name', size: 'fe-size' },
+                    filesInteractive: mode !== 'dir',
+                    dirActivateOn: 'single',
+                    listDir: (p) => {
+                        errEl.classList.remove('show');
+                        return fileApiPost('/file/list',
+                            { path: p || '' }, dlgHost);
+                    },
+                    snapshot: () => ({}),
+                    isCurrent: () => true,
+                    onSelect: (entry) => {
+                        if (mode === 'save' && entry) nameEl.value = entry.name;
+                    },
+                    onActivateFile: (child, entry) => {
+                        if (mode === 'save') {
+                            nameEl.value = entry.name; commit();
                         } else {
-                            row.addEventListener('click', () => {
-                                listEl.querySelectorAll('.file-entry.sel')
-                                    .forEach(e => e.classList.remove('sel'));
-                                row.classList.add('sel');
-                                state.selected = child;
-                                if (mode === 'save') nameEl.value = ent.name;
-                            });
-                            row.addEventListener('dblclick', () => {
-                                state.selected = child; commit();
-                            });
+                            finish(child);   // 'open' (dir mode never reaches)
                         }
-                        listEl.appendChild(row);
-                    }
-                };
-                const navigate = async (path) => {
-                    errEl.classList.remove('show');
-                    const data = await fileApiPost('/file/list',
-                        { path: path || '' }, dlgHost);
-                    if (!data || !data.ok) {
-                        showErr('list failed: ' + ((data && data.error) || '?'));
-                        return;
-                    }
-                    render(data);
-                };
+                    },
+                    onDirChanged: (cwd, res) => {
+                        pathEl.textContent = cwd || res.root || '';
+                    },
+                    onListError: (res) => {
+                        showErr('list failed: ' + ((res && res.error) || '?'));
+                    },
+                });
                 const onKey = (e) => {
                     if (e.key === 'Escape') {
                         e.preventDefault(); e.stopPropagation(); finish(null);
@@ -235,7 +214,7 @@
                 cancelBtn.onclick = () => finish(null);
                 document.addEventListener('keydown', onKey, true);
                 overlay.classList.add('open');
-                navigate(opts.startDir || '');
+                pane.navigate(opts.startDir || '');
             });
         }
 

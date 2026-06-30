@@ -86,10 +86,15 @@ _ORDERED = [
     # Reusable styled dialog primitive (#72, Part A): openDialog + openTextPrompt
     # / openConfirmDialog / openInfoModal, hoisted globals for core + mods.
     "69_js_dialog.js",
-    # 69_js_codemirror.js + 70_js_editor_app.js were EXTRACTED to mods/editor/
-    # (#83/S10); 71_js_file_manager.js to mods/file-manager/ (#84/S11);
-    # 72_js_task_manager.js to mods/task-manager/ (#85/S12); the dispatcher
-    # openAppWindow moved to 54. See _MODS below.
+    # Reusable single browse-pane component (#93): createBrowsePane -- the host-
+    # and I/O-agnostic directory-browser kernel shared by openFileDialog (68)
+    # and the file-manager mod, so the editor dialog still browses mods-off.
+    "70_js_browse_pane.js",
+    # The 69_js_codemirror.js + (old) 70_js_editor_app.js fragments were
+    # EXTRACTED to mods/editor/ (#83/S10) -- that 70 was a DIFFERENT, now-deleted
+    # file, unrelated to 70_js_browse_pane.js above; 71_js_file_manager.js went
+    # to mods/file-manager/ (#84/S11); 72_js_task_manager.js to mods/task-
+    # manager/ (#85/S12); the dispatcher openAppWindow moved to 54. See _MODS.
     "73_js_window_runtime.js",
     "74_js_drag_resize.js",
     "75_js_taskbar_hosts.js",
