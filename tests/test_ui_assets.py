@@ -1035,10 +1035,12 @@ def test_file_capability_richer_ops_present():
         encoding="utf-8")
     for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
         for sym in ("mkdir: function", "copy: function", "move: function",
-                    "zip: function", "unzip: function", "stat: function"):
+                    "zip: function", "unzip: function", "stat: function",
+                    "setattr: function"):                       # #96
             assert sym in src, f"{label} missing #72 method: {sym!r}"
         for route in ("'/file/mkdir'", "'/file/copy'", "'/file/move'",
-                      "'/file/zip'", "'/file/unzip'", "'/file/stat'"):
+                      "'/file/zip'", "'/file/unzip'", "'/file/stat'",
+                      "'/file/setattr'"):                       # #96
             assert route in src, f"{label} does not wrap route {route!r}"
         # delete carries the recursive flag.
         assert "recursive: !!(opts && opts.recursive)" in src, \
@@ -1046,7 +1048,8 @@ def test_file_capability_richer_ops_present():
     # ctxVersion unchanged (additive capability).
     assert "ctxVersion: 1" in loader
     # And the new routes reach the served page.
-    for route in ("'/file/copy'", "'/file/zip'", "'/file/stat'"):
+    for route in ("'/file/copy'", "'/file/zip'", "'/file/stat'",
+                  "'/file/setattr'"):                           # #96
         assert route in INDEX_HTML, f"#72 route missing from served page: {route!r}"
 
 
@@ -1064,8 +1067,10 @@ def test_filemanager_richer_menu_present():
                 "const showProperties", "const makeDraggable",
                 "win.fmClipboard"):
         assert sym in fm, f"file manager missing #72 symbol: {sym!r}"
-    # Uses the styled dialog component, not native modals.
-    for sym in ("openConfirmDialog(", "openTextPrompt(", "openInfoModal("):
+    # Uses the styled dialog component, not native modals. Properties moved from
+    # the read-only openInfoModal to the editable openDialog primitive (#96), so
+    # the mod now calls openDialog directly (openInfoModal stays defined in core).
+    for sym in ("openConfirmDialog(", "openTextPrompt(", "openDialog("):
         assert sym in fm, f"file manager should use styled dialog: {sym!r}"
     import re
     assert not re.search(r"(?<![A-Za-z])confirm\(", fm), \
@@ -1076,6 +1081,19 @@ def test_filemanager_richer_menu_present():
     assert "type: ent.type" in fm
     # And the menu wiring reaches the served page.
     assert "buildRowMenu" in INDEX_HTML and "buildEmptyMenu" in INDEX_HTML
+
+
+def test_properties_dialog_editable_present():
+    # #96: Properties is editable + platform-aware. The dialog Saves via the
+    # capability wrapper (never a raw fetch) and carries both the Windows
+    # 'Attributes' block and the POSIX 'Permissions' grid. Lock the sentinels in
+    # the mod AND in the served page (a one-sided drift would otherwise slip by).
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for sym in ("fmFile().setattr(", "'Attributes'", "'Permissions'"):
+        assert sym in fm, f"editable Properties dialog missing {sym!r}"
+        assert sym in INDEX_HTML, \
+            f"editable Properties sentinel missing from served page: {sym!r}"
 
 
 def test_file_capability_trust_doc_present():

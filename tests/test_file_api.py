@@ -6,6 +6,7 @@ grants shell-level filesystem access). These cover the resolution rules and the
 half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
 import os
+import stat
 import sys
 import zipfile
 from pathlib import Path
@@ -595,4 +596,120 @@ def test_stat_dir_has_child_count(tmp_path, monkeypatch):
 def test_stat_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     _, r = app.test_client.post("/file/stat", json={"path": "nope"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+
+
+def test_stat_reports_os(tmp_path, monkeypatch):
+    # #96: the platform discriminator that picks the dialog's editor branch.
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    assert r.json["os"] == ("windows" if WIN else "posix")
+
+
+@pytest.mark.skipif(not WIN, reason="windows-only attribute breakdown")
+def test_stat_windows_attributes(tmp_path, monkeypatch):
+    # #96: stat exposes the READONLY/HIDDEN/ARCHIVE booleans the dialog pre-checks.
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    assert r.status == 200 and r.json["ok"] is True
+    attrs = r.json["attributes"]
+    assert set(attrs) == {"readonly", "hidden", "archive"}
+    assert all(isinstance(v, bool) for v in attrs.values())
+
+
+# --------------------------------------------------------------------------- #
+# /file/setattr (#96)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(WIN, reason="POSIX rwx semantics")
+def test_setattr_chmod_posix(tmp_path, monkeypatch):
+    f = tmp_path / "s.sh"
+    f.write_text("#!/bin/sh\n", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/setattr",
+                                json={"path": "s.sh", "mode": 0o640})
+    assert r.status == 200 and r.json["ok"] is True
+    assert stat.S_IMODE(f.stat().st_mode) == 0o640
+    # The headline +x case: flip the execute bits on.
+    _, r = app.test_client.post("/file/setattr",
+                                json={"path": "s.sh", "mode": 0o755})
+    assert r.status == 200 and r.json["ok"] is True
+    m = f.stat().st_mode
+    assert stat.S_IMODE(m) == 0o755
+    assert m & stat.S_IXUSR and m & stat.S_IXGRP and m & stat.S_IXOTH
+
+
+@pytest.mark.skipif(WIN, reason="POSIX special-mode bits")
+def test_setattr_posix_preserves_special_bits(tmp_path, monkeypatch):
+    # C3: the client sends only the low 9 perm bits; setgid/setuid/sticky are
+    # preserved server-side from a live re-stat.
+    f = tmp_path / "g.sh"
+    f.write_text("x", encoding="utf-8")
+    os.chmod(str(f), 0o2755)                       # setgid + rwxr-xr-x
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/setattr",
+                                json={"path": "g.sh", "mode": 0o644})
+    assert r.status == 200 and r.json["ok"] is True
+    assert stat.S_IMODE(f.stat().st_mode) == 0o2644   # setgid survived
+
+
+@pytest.mark.skipif(WIN, reason="POSIX mode validation")
+def test_setattr_posix_requires_mode(tmp_path, monkeypatch):
+    f = tmp_path / "m.txt"
+    f.write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    # Missing mode.
+    _, r = app.test_client.post("/file/setattr", json={"path": "m.txt"})
+    assert r.status == 400 and r.json["error"] == "bad_mode"
+    # Non-int mode (would make os.chmod raise TypeError -> 500 if not guarded).
+    _, r = app.test_client.post("/file/setattr",
+                                json={"path": "m.txt", "mode": "755"})
+    assert r.status == 400 and r.json["error"] == "bad_mode"
+    # A bool is an int subclass — still rejected.
+    _, r = app.test_client.post("/file/setattr",
+                                json={"path": "m.txt", "mode": True})
+    assert r.status == 400 and r.json["error"] == "bad_mode"
+
+
+@pytest.mark.skipif(not WIN, reason="windows attribute semantics")
+def test_setattr_windows_readonly(tmp_path, monkeypatch):
+    f = tmp_path / "w.txt"
+    f.write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post(
+        "/file/setattr",
+        json={"path": "w.txt", "attributes": {"readonly": True}})
+    assert r.status == 200 and r.json["ok"] is True
+    assert f.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    # Clear it again — also lets the tmp_path teardown delete the file.
+    _, r = app.test_client.post(
+        "/file/setattr",
+        json={"path": "w.txt", "attributes": {"readonly": False}})
+    assert r.status == 200 and r.json["ok"] is True
+    assert not (f.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY)
+
+
+@pytest.mark.skipif(not WIN, reason="windows attribute validation")
+def test_setattr_windows_requires_attributes(tmp_path, monkeypatch):
+    f = tmp_path / "w.txt"
+    f.write_text("x", encoding="utf-8")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/setattr", json={"path": "w.txt"})
+    assert r.status == 400 and r.json["error"] == "bad_attrs"
+
+
+def test_setattr_bad_path(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/setattr", json={"path": ""})
+    assert r.status == 400 and r.json["error"] == "bad_path"
+
+
+def test_setattr_missing_404(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    body = {"path": "nope", "attributes": {"readonly": True}} if WIN \
+        else {"path": "nope", "mode": 0o644}
+    _, r = app.test_client.post("/file/setattr", json=body)
     assert r.status == 404 and r.json["error"] == "not_found"
