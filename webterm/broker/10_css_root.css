@@ -390,6 +390,10 @@
         .term-window.dark-accent .tb-btn.on {
             background: var(--sel-bg); border-color: var(--accent-default); color: var(--fg);
         }
+        /* Sticky-note always-on-top toggle (#95): ▲/△ render a touch large at the
+           14px .tb-btn size, so nudge them down. The accent/checked look comes
+           from .tb-btn.on above; this is the styling + test-assertion hook. */
+        .term-window .tb-btn.btn-pin { font-size: 11px; }
         /* Dark accents flip the title-bar foreground to white so the title,
            id badge, and min/close buttons stay readable. */
         .term-window.dark-accent .title-bar { color: #fff; }

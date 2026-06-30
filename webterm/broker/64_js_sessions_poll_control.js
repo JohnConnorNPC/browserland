@@ -39,14 +39,19 @@
         }
         const windows = new Map();    // key -> win record (see openWindow)
         let nextZ = 100;
-        // Sticky notes are always-on-top (todo2 task 9): their floating z lives
-        // in a high tier so a normal window brought to front (plain nextZ) never
-        // covers them, while modals (>=100000) and drop overlays still sit above.
-        // Distinct from scroll-lock, which only pins them against strip scroll.
+        // Sticky notes are always-on-top (todo2 task 9) WHEN PINNED (#95): a
+        // pinned note's floating z lives in a high tier so a normal window
+        // brought to front (plain nextZ) never covers it, while modals
+        // (>=100000) and drop overlays still sit above. The check stays SCOPED to
+        // sticky notes — `pinned` is a per-note toggle, not a global z-capability
+        // — and `!== false` keeps a note with no/true `pinned` always-on-top
+        // (backward-compatible for existing persisted notes); only an explicitly
+        // unpinned note (pinned === false) drops to the normal tier. Distinct
+        // from scroll-lock, which only pins them against strip scroll.
         const NOTE_Z_BASE = 90000;
         function floatZIndex(win) {
             nextZ += 1;
-            return (win && win.appKind === 'sticky-note')
+            return (win && win.appKind === 'sticky-note' && win.pinned !== false)
                 ? (NOTE_Z_BASE + nextZ) : nextZ;
         }
         let cascadeIndex = 0;

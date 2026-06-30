@@ -138,6 +138,11 @@
             // New notes default to pinned (locked); a restored doc keeps its
             // saved choice. Editors default to word-wrap on.
             const locked = appData.locked !== undefined ? !!appData.locked : true;
+            // Sticky notes are always-on-top by default (#95); a restored note
+            // keeps its saved choice. `!== false` → a note with no/true `pinned`
+            // stays pinned (backward-compatible for pre-#95 records). Note-only;
+            // false for editors so it never lifts them into the note z-tier.
+            const pinned = isNote ? (appData.pinned !== false) : false;
             // Word wrap applies to BOTH editors and notes (#19); both default on.
             const wrap = docs ? !!initialDoc.wrap
                 : (appData.wrap !== undefined ? !!appData.wrap : true);
@@ -173,7 +178,8 @@
             // Sticky-note controls (#19): smaller / larger text + word-wrap
             // toggle, inserted into the title bar BEFORE the minimize button
             // (notes have no editor toolbar). Wired below once `win` exists.
-            let noteFontDownBtn = null, noteFontUpBtn = null, noteWrapBtn = null;
+            let noteFontDownBtn = null, noteFontUpBtn = null, noteWrapBtn = null,
+                notePinBtn = null;
             if (isNote) {
                 const mkNoteBtn = (label, ttl) => {
                     const b = document.createElement('button');
@@ -187,6 +193,11 @@
                 noteFontDownBtn = mkNoteBtn('A-', 'smaller text');
                 noteFontUpBtn = mkNoteBtn('A+', 'larger text');
                 noteWrapBtn = mkNoteBtn('↩', 'toggle word wrap');
+                // Always-on-top toggle (#95). ▲ pinned / △ unpinned — a distinct
+                // glyph from scroll-lock's 📌 badge so two pins never collide.
+                // Inserted after the color swatch (below) for order 🎨 ▲ _ ×.
+                notePinBtn = mkNoteBtn('▲', 'always on top');
+                notePinBtn.classList.add('btn-pin');   // styling + test hook
                 titleBar.insertBefore(noteFontDownBtn, minBtn);
                 titleBar.insertBefore(noteFontUpBtn, minBtn);
                 titleBar.insertBefore(noteWrapBtn, minBtn);
@@ -372,6 +383,10 @@
                 floatGeom: appData.floatGeom
                     ? Object.assign({}, appData.floatGeom) : null,
                 locked,
+                // Always-on-top (#95), note-only. MUST be set in this literal so
+                // win.pinned exists before the builder's terminal bringToFront(id)
+                // computes the note's initial z-tier (floatZIndex reads it).
+                pinned,
                 // Multi-tab agent-docs model (null for notes + single-doc
                 // editors): the per-tab file buffers + Sections tab, the active
                 // tab index, and the window's cwd. win.filePath/dirty/wrap/
@@ -443,8 +458,20 @@
                         ? 'word wrap: on (click to turn off)'
                         : 'word wrap: off (click to turn on)';
                 };
+                // Always-on-top toggle (#95), mirroring applyNoteWrap: reflect
+                // win.pinned onto the ▲/△ button (accent + glyph + a11y).
+                const applyPin = () => {
+                    const on = win.pinned !== false;
+                    notePinBtn.classList.toggle('on', on);   // accent when pinned
+                    notePinBtn.textContent = on ? '▲' : '△'; // ▲ pinned / △ unpinned
+                    notePinBtn.title = on
+                        ? 'always on top: on (click to unpin)'
+                        : 'always on top: off (click to pin)';
+                    notePinBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                };
                 applyNoteFont();
                 applyNoteWrap();
+                applyPin();
                 noteFontDownBtn.addEventListener('click', () => {
                     win.fontSize = Math.max(NOTE_FONT_MIN, win.fontSize - 1);
                     applyNoteFont();
@@ -460,10 +487,23 @@
                     applyNoteWrap();
                     saveAppWindow(win);
                 });
+                notePinBtn.addEventListener('click', () => {
+                    win.pinned = !win.pinned;   // literal guarantees a clean boolean
+                    applyPin();
+                    saveAppWindow(win);         // persist the new choice
+                    // Re-apply the note's z with the NEW pinned value via the
+                    // canonical raise path: floatZIndex now routes an unpinned
+                    // note to the normal tier (and a re-pinned one back to
+                    // NOTE_Z_BASE). The button's own mousedown stopPropagation
+                    // (below) suppresses the dom-mousedown raise, so without this
+                    // the live z-index would not change to reflect the toggle.
+                    bringToFront(win.id);
+                });
                 // A title-bar mousedown otherwise starts a window drag (wireDrag
                 // listens on the title bar; tiled notes drag immediately) — stop
                 // it on these buttons, like min/close do.
-                for (const b of [noteFontDownBtn, noteFontUpBtn, noteWrapBtn]) {
+                for (const b of [noteFontDownBtn, noteFontUpBtn, noteWrapBtn,
+                                 notePinBtn]) {
                     b.addEventListener('mousedown', (e) => e.stopPropagation());
                 }
             }
@@ -718,6 +758,9 @@
                     updateTaskbarColor(id);
                 });
             titleBar.insertBefore(colorBtn, minBtn);
+            // The always-on-top toggle (#95, built in the isNote block above) sits
+            // right of the color swatch, so insert it AFTER colorBtn → 🎨 ▲ _ ×.
+            if (notePinBtn) titleBar.insertBefore(notePinBtn, minBtn);
 
             // Inline rename (notes + editors): double-click the title text to
             // edit it in place. commitRename trims/caps the text, falls back to
@@ -1992,10 +2035,13 @@
             const appSess = { key: id, sid, id, title, stale: false,
                               kind: 'app', hostId: 'app' };
             sessions.set(id, appSess);
-            // Sticky notes stay OFF the taskbar (todo2 task 9): they're pinned
-            // always-on-top and reachable from the (+) menu, so a chip is noise.
-            // The synthetic session entry above is kept (formatTitle /
-            // applyDisplaySettings rely on it); only the chip is skipped.
+            // Sticky notes stay OFF the taskbar (todo2 task 9): they default
+            // always-on-top (#95) so a chip is noise, and an UNPINNED note that
+            // gets covered is still retrievable via the desktop right-click
+            // Cascade/Tile menu (floatingWindowsOrdered includes notes) — no
+            // lost-note trap. The synthetic session entry above is kept
+            // (formatTitle / applyDisplaySettings rely on it); only the chip is
+            // skipped.
             if (!isNote) {
                 const itemsHost = document.getElementById('taskbar-items');
                 // Idempotent: reuse a chip already in the DOM rather than

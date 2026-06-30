@@ -71,6 +71,10 @@
                 // Tiling MEMBERSHIP is NOT stored here — findKeyInLayout (over
                 // prefs._layout) is authoritative for that.
                 locked: !!win.locked,
+                // Per-sticky-note always-on-top toggle (#95): pinned notes sit in
+                // the high z-tier (floatZIndex gates on this). Harmless (false)
+                // for non-note kinds, which never read it back.
+                pinned: !!win.pinned,
                 floatGeom: win.floatGeom ? Object.assign({}, win.floatGeom) : null,
                 // Editor-only: last server file + word-wrap + line-number
                 // preference, and (for AGENTS.md editors) the folder whose
