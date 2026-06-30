@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import errno
 import json
 import logging
@@ -71,8 +72,108 @@ CONFIG_ENV = "WEB_TERMINAL_CONFIG"
 DEFAULT_PORT = 4445
 
 # Editor file-API: a single read/write is capped at this many bytes (the cap
-# is enforced on the UTF-8 encoded payload, not the character count).
+# is enforced on the ENCODED payload, not the character count — correct for
+# UTF-16's ~2x size).
 MAX_FILE_BYTES = 5 * 2**20  # 5 MiB
+
+
+# Non-UTF-8 editor support (#97). The broker ships only sanic+websockets, so
+# detection is STDLIB-only (no chardet) and BOM-based for the multibyte
+# encodings — Windows Notepad always writes a BOM, and guessing BOM-less
+# UTF-16 is exactly what turns binary into garbage text. Every multibyte label
+# is reached ONLY via its BOM, so the label alone implies BOM presence and the
+# save round-trip is byte-faithful with no separate `bom` flag.
+_TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "utf-16-le", "utf-16-be",
+                   "cp1252", "latin-1")
+
+
+class _NotText(Exception):
+    """raw bytes aren't decodable as a supported text encoding (UTF-32, or a
+    binary blob). The /file/read caller maps it to the back-compat ``not_utf8``
+    error code (which now means 'not supported text / looks binary')."""
+
+
+def _looks_binary(raw: bytes) -> bool:
+    """Heuristic 'binary, not text' check in a single pass over ``raw``.
+
+    Primary signal: any NUL byte → binary. Compressed/encrypted/executable
+    payloads almost always carry one, and no supported text encoding emits a
+    lone NUL for a BOM-less file — so this both keeps the existing binary-blob
+    test green and, critically, stops BOM-less ``A\\x00B\\x00`` UTF-16 from
+    being mistaken for text. Secondary: a high ratio of non-text control bytes
+    (< 0x20, excluding the usual whitespace + ESC) also marks it binary. The
+    NUL guard is the only protection before the TOTAL latin-1 fallback."""
+    if not raw:
+        return False
+    allowed = (0x09, 0x0a, 0x0c, 0x0d, 0x1b)   # \t \n \f \r ESC
+    ctrl = 0
+    for b in raw:
+        if b == 0x00:
+            return True                        # NUL → binary, decisive
+        if b < 0x20 and b not in allowed:
+            ctrl += 1
+    return (ctrl / len(raw)) > 0.30
+
+
+def _decode_file_text(raw: bytes):
+    """Decode file bytes to ``(text, encoding_label)``; raises ``_NotText`` for
+    UTF-32 / binary / a corrupt BOM. Detection order (#97): UTF-32 BOM (rejected
+    first so ``ff fe 00 00`` can't be misread as UTF-16LE), UTF-8 BOM, UTF-16
+    LE/BE BOM, then the binary guard, then BOM-less strict UTF-8, then cp1252,
+    falling back to total latin-1 for cp1252's five undefined bytes."""
+    if raw[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        raise _NotText("utf-32 unsupported")
+    # A declared BOM that doesn't actually decode (truncated/odd-length UTF-16,
+    # invalid UTF-8 after the BOM) is corrupt, not text — map the
+    # UnicodeDecodeError to _NotText so the route returns not_utf8 rather than
+    # 500ing on an unhandled exception.
+    try:
+        if raw[:3] == codecs.BOM_UTF8:             # ef bb bf
+            return raw[3:].decode("utf-8"), "utf-8-sig"
+        if raw[:2] == codecs.BOM_UTF16_LE:         # ff fe
+            return raw[2:].decode("utf-16-le"), "utf-16-le"
+        if raw[:2] == codecs.BOM_UTF16_BE:         # fe ff
+            return raw[2:].decode("utf-16-be"), "utf-16-be"
+    except UnicodeDecodeError:
+        raise _NotText("declared BOM but undecodable") from None
+    # No BOM. The binary guard runs BEFORE the UTF-8 decode so a BOM-less
+    # UTF-16 / embedded-NUL file rejects cleanly as not_utf8 instead of
+    # decoding into NUL-riddled garbage text (a NUL is valid UTF-8 but never
+    # appears in real text). It also gates the total latin-1 fallback below.
+    if _looks_binary(raw):
+        raise _NotText("looks binary")
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("cp1252"), "cp1252"
+    except UnicodeDecodeError:
+        # cp1252 leaves 81 8d 8f 90 9d undefined; latin-1 is total (no raise).
+        return raw.decode("latin-1"), "latin-1"
+
+
+def _encode_file_text(content: str, encoding_label: str) -> bytes:
+    """Encode editor text back to bytes for ``encoding_label`` (re-adding the
+    BOM for the BOM-implying labels) — the inverse of ``_decode_file_text``, so
+    an unedited file round-trips byte-identically. Caller MUST pre-validate the
+    label against ``_TEXT_ENCODINGS`` (an unknown one is a programming error,
+    KeyError). May raise ``UnicodeEncodeError`` when edited text gains a char a
+    legacy encoding (cp1252/latin-1) can't store — the caller maps that to
+    ``encode_failed`` and prompts to save as UTF-8 (never a silent convert)."""
+    if encoding_label == "utf-8":
+        return content.encode("utf-8")
+    if encoding_label == "utf-8-sig":
+        return content.encode("utf-8-sig")     # re-adds the UTF-8 BOM
+    if encoding_label == "utf-16-le":
+        return codecs.BOM_UTF16_LE + content.encode("utf-16-le")
+    if encoding_label == "utf-16-be":
+        return codecs.BOM_UTF16_BE + content.encode("utf-16-be")
+    if encoding_label == "cp1252":
+        return content.encode("cp1252")
+    if encoding_label == "latin-1":
+        return content.encode("latin-1")
+    raise KeyError(encoding_label)
 
 # /file/zip + /file/unzip caps (#72). Bound the work a single archive op will do
 # so a hostile (or accidental) huge source tree or zip-bomb can't exhaust disk
@@ -948,13 +1049,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                "path": str(p),   # absolute, host-wide (#35)
                                "content_b64": base64.b64encode(raw)
                                .decode("ascii")})
+        # #97: detect the common Windows/Mac/Linux text encodings (BOM-based for
+        # multibyte) so a UTF-16/cp1252 file opens, and return the label so the
+        # client can round-trip it on save. not_utf8 is kept for back-compat
+        # (existing test + client copy); it now means "not supported text".
         try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
+            content, encoding = _decode_file_text(raw)
+        except _NotText:
             return sanic_json({"ok": False, "error": "not_utf8"}, status=400)
         return sanic_json({"ok": True,
                            "path": str(p),       # absolute, host-wide (#35)
-                           "content": content})
+                           "content": content,
+                           "encoding": encoding})
 
     async def _file_write(request: Request):
         err = _file_auth_error(request)
@@ -965,12 +1071,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
         rel = body.get("path")
         content = body.get("content")
+        # #97: preserve the source encoding on save. None → utf-8 keeps existing
+        # callers/tests (which send no encoding) writing plain UTF-8.
+        encoding = body.get("encoding")
+        if encoding is None:
+            encoding = "utf-8"
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         if not isinstance(content, str):
             return sanic_json({"ok": False, "error": "bad_content"},
                               status=400)
-        data = content.encode("utf-8")
+        if not isinstance(encoding, str) or encoding not in _TEXT_ENCODINGS:
+            return sanic_json({"ok": False, "error": "bad_encoding"},
+                              status=400)
+        try:
+            data = _encode_file_text(content, encoding)
+        except UnicodeEncodeError:
+            # Edited text gained a char the source encoding can't store; the
+            # client prompts to re-save as UTF-8 (never a silent conversion).
+            return sanic_json({"ok": False, "error": "encode_failed",
+                               "encoding": encoding}, status=400)
         if len(data) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
         try:

@@ -851,6 +851,9 @@
                         appKind: 'text-editor',
                         filePath: r.path || path,
                         content: r.content || '',
+                        // #97: carry the detected source encoding so the editor
+                        // saves a UTF-16/cp1252 file back in its own encoding.
+                        encoding: r.encoding,
                         title: baseName(r.path || path),
                         fileHostId: win[hostKey(side)],
                     });

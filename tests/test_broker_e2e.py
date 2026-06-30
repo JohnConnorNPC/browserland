@@ -882,6 +882,64 @@ def test_file_read_b64_binary(broker_proc, tmp_path):
         == "héllo", r
 
 
+def test_file_read_write_preserves_encoding(broker_proc, tmp_path):
+    """#97: /file/read detects the common Windows text encodings (BOM-based for
+    multibyte) and returns the label; /file/write with that label reproduces
+    byte-identical bytes (full round-trip). bad/encode_failed are rejected."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+
+    def _post(path, body):
+        return _http("POST", f"{base}{path}",
+                     body=json.dumps(body).encode(), headers=auth)
+
+    # UTF-16LE + BOM (the #97 repro: PowerShell `echo . > x.md`).
+    u16 = tmp_path / "utf16.md"
+    u16.write_bytes(b"\xff\xfe" + "héllo".encode("utf-16-le"))
+    st, r = _post("/file/read", {"path": str(u16)})
+    assert st == 200 and r["content"] == "héllo", r
+    assert r["encoding"] == "utf-16-le", r
+    st, r = _post("/file/write", {"path": str(u16), "content": "héllo",
+                                  "encoding": "utf-16-le"})
+    assert st == 200 and r["ok"], r
+    out = u16.read_bytes()
+    assert out.startswith(b"\xff\xfe"), out          # BOM preserved
+    assert out == b"\xff\xfe" + "héllo".encode("utf-16-le"), out
+
+    # UTF-8 with BOM (utf-8-sig) round-trips byte-identically.
+    u8b = tmp_path / "utf8bom.md"
+    u8b.write_bytes("héllo".encode("utf-8-sig"))
+    st, r = _post("/file/read", {"path": str(u8b)})
+    assert st == 200 and r["encoding"] == "utf-8-sig" and r["content"] == "héllo", r
+    st, r = _post("/file/write", {"path": str(u8b), "content": "héllo",
+                                  "encoding": "utf-8-sig"})
+    assert st == 200 and r["ok"], r
+    assert u8b.read_bytes() == "héllo".encode("utf-8-sig")
+
+    # Windows-1252 (em-dash 0x97); round-trips through the cp1252 label.
+    cp = tmp_path / "ansi.txt"
+    cp.write_bytes(b"a\x97b")
+    st, r = _post("/file/read", {"path": str(cp)})
+    assert st == 200 and r["encoding"] == "cp1252" and r["content"] == "a—b", r
+    st, r = _post("/file/write", {"path": str(cp), "content": "a—b",
+                                  "encoding": "cp1252"})
+    assert st == 200 and r["ok"], r
+    assert cp.read_bytes() == b"a\x97b", cp.read_bytes()
+
+    # An unknown encoding label is rejected (bad_encoding) before any write.
+    st, r = _post("/file/write", {"path": str(tmp_path / "z.txt"),
+                                  "content": "x", "encoding": "bogus"})
+    assert st == 400 and r["error"] == "bad_encoding", r
+
+    # cp1252 that can't store an emoji -> encode_failed (client prompts UTF-8).
+    st, r = _post("/file/write", {"path": str(cp), "content": "smile 😀",
+                                  "encoding": "cp1252"})
+    assert st == 400 and r["error"] == "encode_failed", r
+    assert r["encoding"] == "cp1252", r
+    assert cp.read_bytes() == b"a\x97b"               # original untouched
+
+
 def test_file_delete(broker_proc, tmp_path):
     """#46/#72: /file/delete removes a single FILE; a directory needs
     recursive=true (else is_a_directory, so a mis-click can't wipe a tree);

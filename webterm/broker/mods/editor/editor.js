@@ -58,8 +58,9 @@
                     return _modFileApi('/file/read', body, opts);
                 },
                 write: function (path, content, opts) {
-                    return _modFileApi('/file/write',
-                        { path: path, content: content }, opts);
+                    const body = { path: path, content: content };
+                    if (opts && opts.encoding) body.encoding = opts.encoding;
+                    return _modFileApi('/file/write', body, opts);
                 },
                 list: function (path, opts) {
                     return _modFileApi('/file/list', { path: path || '' }, opts);
@@ -106,6 +107,10 @@
                     lineNums: d.lineNums !== undefined ? !!d.lineNums : true,
                     isAgents: d.isAgents !== undefined ? !!d.isAgents
                         : (d.name === 'AGENTS.md' || i === 0),
+                    // Source encoding (#97) so a restored UTF-16/cp1252 tab
+                    // saves back in its own encoding (default utf-8).
+                    encoding: typeof d.encoding === 'string' ? d.encoding
+                        : 'utf-8',
                     cmState: null, scrollTop: 0, scrollLeft: 0,
                   }))
                 : null;
@@ -398,6 +403,12 @@
                 // editor document state (notes ignore filePath/wrap/lineNums)
                 filePath: docs ? (initialDoc.filePath || null)
                     : (appData.filePath != null ? String(appData.filePath) : null),
+                // Source text encoding (#97), a MIRROR of the active file doc
+                // for multi-tab windows (refreshDocGlobalsFrom keeps it in sync
+                // on tab switch). Round-trips open -> edit -> save so a UTF-16/
+                // cp1252 file is rewritten in its own encoding. Default utf-8.
+                encoding: docs ? (initialDoc.encoding || 'utf-8')
+                    : (appData.encoding || 'utf-8'),
                 // Mirror the active doc's dirty for a restored multi-tab window.
                 dirty: docs ? !!initialDoc.dirty : false,
                 wrap,
@@ -533,6 +544,7 @@
                 win.dirty = !!doc.dirty;
                 win.wrap = !!doc.wrap;
                 win.lineNums = !!doc.lineNums;
+                win.encoding = doc.encoding || 'utf-8';
                 win.agentsMdCwd = doc.isAgents ? (win.docsCwd || null) : null;
             };
             win._activeFileDoc = activeFileDoc;
@@ -556,6 +568,9 @@
                     d.scrollLeft = textarea.scrollLeft;
                 }
                 d.dirty = win.dirty;
+                // Keep the bound doc's encoding mirror (#97) in sync with the
+                // window-level mirror (the UTF-8 fallback flips win.encoding).
+                d.encoding = win.encoding || 'utf-8';
             };
             // Rebuild the tab strip (labels + per-doc dirty dots + active state).
             win._refreshTabBar = () => {
@@ -1138,8 +1153,37 @@
                     // different window — that would point Save at a foreign-host
                     // path (#46 review). Compared after the await below.
                     const tgtHostId = h.id;
-                    const res = await editorFile().write(path, content,
-                        { host: h.id });
+                    // #97: write in the doc's source encoding so a UTF-16/cp1252
+                    // file round-trips. `enc` is the active doc's (multi-tab) or
+                    // the window's mirror, captured before the await with content.
+                    const enc = (doc ? doc.encoding : win.encoding) || 'utf-8';
+                    let res = await editorFile().write(path, content,
+                        { host: h.id, encoding: enc });
+                    // The source encoding can't store newly-typed characters:
+                    // offer a one-time re-save as UTF-8 (styled confirm — never a
+                    // silent convert). Confirm -> retry as utf-8 + flip this
+                    // doc/window's encoding mirror; decline -> abort, stay dirty.
+                    let savedAsUtf8 = false;
+                    if (res && !res.ok && res.error === 'encode_failed') {
+                        const label = res.encoding || enc;
+                        const ok = await openConfirmDialog({
+                            title: 'Save as UTF-8?',
+                            message: 'This file is ' + label + ' and can’t store '
+                                + 'the new characters. Save as UTF-8 instead?',
+                            okLabel: 'Save as UTF-8' });
+                        if (!ok || win.disposed) return false;
+                        res = await editorFile().write(path, content,
+                            { host: h.id, encoding: 'utf-8' });
+                        if (res && res.ok) {
+                            savedAsUtf8 = true;
+                            // Flip the CAPTURED doc's encoding (a stable ref, so a
+                            // tab switch during the confirm can't redirect it).
+                            // win.encoding (the active-doc mirror) is flipped only
+                            // below, under the same disposed/host-drift guard that
+                            // protects filePath/dirty.
+                            if (doc) doc.encoding = 'utf-8';
+                        }
+                    }
                     if (!res || !res.ok) {
                         showNotice('save failed: ' + ((res && res.error) || '?'));
                         return false;
@@ -1149,7 +1193,8 @@
                     // to `h` succeeded — report it, but leave the window's
                     // filePath/dirty/host alone (re-attaching would cross hosts).
                     if (win.disposed || win.fileHostId !== tgtHostId) {
-                        showNotice('saved ' + savedPath);
+                        showNotice(savedAsUtf8 ? 'saved as UTF-8'
+                            : 'saved ' + savedPath);
                         return true;
                     }
                     if (doc) {
@@ -1167,6 +1212,7 @@
                         if (bound) {
                             win.filePath = savedPath;
                             win.dirty = !clean;
+                            if (savedAsUtf8) win.encoding = 'utf-8';
                             updateFileUi();
                             if (clean && win._setCmLanguage) win._setCmLanguage();
                         }
@@ -1174,12 +1220,14 @@
                     } else {
                         win.filePath = savedPath;
                         win.dirty = false;
+                        if (savedAsUtf8) win.encoding = 'utf-8';
                         updateFileUi();
                         // Save As may have changed the extension -> re-detect lang.
                         if (win._setCmLanguage) win._setCmLanguage();
                     }
                     saveAppWindow(win);
-                    showNotice('saved ' + savedPath);
+                    showNotice(savedAsUtf8 ? 'saved as UTF-8'
+                        : 'saved ' + savedPath);
                     if (isAgentsSave) {
                         try {
                             await ensureClaudeMd(win.docsCwd || win.agentsMdCwd, h);
@@ -1205,8 +1253,25 @@
                     for (const d of win.tabs) {
                         if (d.kind !== 'file' || !d.dirty) continue;
                         if (!d.filePath) { allOk = false; continue; }
-                        const res = await editorFile().write(
-                            d.filePath, d.content, { host: h.id });
+                        // #97: per-doc source encoding; encode_failed prompts a
+                        // per-tab UTF-8 fallback (named so the user knows which).
+                        const enc = d.encoding || 'utf-8';
+                        let res = await editorFile().write(
+                            d.filePath, d.content, { host: h.id, encoding: enc });
+                        if (res && !res.ok && res.error === 'encode_failed') {
+                            const label = res.encoding || enc;
+                            const ok = await openConfirmDialog({
+                                title: 'Save as UTF-8?',
+                                message: 'The ' + d.name + ' tab is ' + label
+                                    + ' and can’t store the new characters. Save '
+                                    + 'as UTF-8 instead?',
+                                okLabel: 'Save as UTF-8' });
+                            if (ok && !win.disposed) {
+                                res = await editorFile().write(d.filePath,
+                                    d.content, { host: h.id, encoding: 'utf-8' });
+                                if (res && res.ok) d.encoding = 'utf-8';
+                            }
+                        }
                         if (res && res.ok) {
                             d.dirty = false;
                             d.filePath = res.path || d.filePath;
@@ -1273,6 +1338,11 @@
                     win.setContent(res.content || '');
                     win.filePath = res.path || picked;
                     win.dirty = false;
+                    // #97: adopt the opened file's source encoding so Save
+                    // round-trips it (mirror onto the bound doc for multi-tab).
+                    win.encoding = res.encoding || 'utf-8';
+                    const _od = activeFileDoc();
+                    if (_od) _od.encoding = win.encoding;
                     // Opening a different file drops the AGENTS.md special mode.
                     if (win.agentsMdCwd) clearAgentsMd();
                     updateFileUi();
@@ -1291,6 +1361,9 @@
                     win.setContent('');
                     win.filePath = null;
                     win.dirty = false;
+                    win.encoding = 'utf-8';       // fresh buffer -> plain UTF-8
+                    const _nd = activeFileDoc();
+                    if (_nd) _nd.encoding = 'utf-8';
                     updateFileUi();
                     if (win._renderLineNums) win._renderLineNums();
                     // Cleared path -> plain (no language).
@@ -2097,13 +2170,16 @@
             }
             const agentsContent = (aRes && aRes.ok) ? (aRes.content || '') : '';
             const claudeContent = (cRes && cRes.ok) ? (cRes.content || '') : '';
-            const mkDoc = (name, filePath, content, isAgents) => ({
+            const mkDoc = (name, filePath, content, isAgents, encoding) => ({
                 name, filePath, content,
                 wrap: true, lineNums: true, isAgents,
+                encoding: encoding || 'utf-8',   // #97: round-trip source enc
             });
             const docs = [
-                mkDoc('AGENTS.md', agentsPath, agentsContent, true),
-                mkDoc('CLAUDE.md', claudePath, claudeContent, false),
+                mkDoc('AGENTS.md', agentsPath, agentsContent, true,
+                      aRes && aRes.ok ? aRes.encoding : 'utf-8'),
+                mkDoc('CLAUDE.md', claudePath, claudeContent, false,
+                      cRes && cRes.ok ? cRes.encoding : 'utf-8'),
             ];
             // Label remote windows with the host so two docs windows sharing a
             // cwd string stay distinguishable on the taskbar.

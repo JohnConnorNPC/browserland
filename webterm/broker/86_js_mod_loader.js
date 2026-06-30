@@ -140,10 +140,15 @@
                         if (opts && opts.b64 === true) body.b64 = true;
                         return _modFileApi('/file/read', body, opts);
                     },
-                    // UTF-8 text write (atomic, host-wide). -> {ok,path}
+                    // Text write (atomic, host-wide). opts.encoding (#97) is an
+                    // optional source-encoding label the server round-trips so a
+                    // UTF-16/cp1252 file saves in its own encoding; omitted ->
+                    // server defaults utf-8 (so other callers are unaffected).
+                    // -> {ok,path}.
                     write: function (path, content, opts) {
-                        return _modFileApi('/file/write',
-                            { path: path, content: content }, opts);
+                        const body = { path: path, content: content };
+                        if (opts && opts.encoding) body.encoding = opts.encoding;
+                        return _modFileApi('/file/write', body, opts);
                     },
                     // Directory listing (''/relative -> the broker default dir).
                     // -> {ok,root,cwd,parent,entries:[{name,type,size}]}

@@ -83,6 +83,9 @@
                 filePath: win.filePath || null,
                 wrap: !!win.wrap,
                 lineNums: !!win.lineNums,
+                // Source text encoding (#97), so a reopened editor restores the
+                // encoding it round-trips on save (UTF-16/cp1252 stay themselves).
+                encoding: win.encoding || 'utf-8',
                 // Per-sticky-note text size (#19); harmless for other kinds.
                 fontSize: win.fontSize,
                 // For a multi-tab window store the window's cwd (win.agentsMdCwd
@@ -103,6 +106,8 @@
                         wrap: !!d.wrap,
                         lineNums: !!d.lineNums,
                         isAgents: !!d.isAgents,
+                        encoding: d.encoding || 'utf-8',   // #97 per-tab source enc
+                        // (Sections tab is synthetic; not serialized here.)
                         // Persist dirty so a buffer that differs from disk reopens
                         // honestly dirty (and re-prompts on close) rather than
                         // looking clean while silently out of sync (Codex review).

@@ -13,8 +13,11 @@ from pathlib import Path
 
 import pytest
 
+import gzip
+
 import webterm.broker.app as app_mod
-from webterm.broker.app import _resolve_host_path, create_app
+from webterm.broker.app import (_NotText, _decode_file_text, _encode_file_text,
+                                _looks_binary, _resolve_host_path, create_app)
 
 WIN = sys.platform == "win32"
 
@@ -39,6 +42,94 @@ def _make_file_app(tmp_path, monkeypatch, token=None):
     if token:
         cfg["auth_token"] = token
     return create_app(cfg, name=f"webterm-file-test-{_app_seq}")
+
+
+# --------------------------------------------------------------------------- #
+# #97 text-encoding helpers — pure, stdlib-only, unit-tested directly
+# --------------------------------------------------------------------------- #
+
+def test_decode_utf8_plain_and_bom():
+    assert _decode_file_text(b"h\xc3\xa9llo") == ("héllo", "utf-8")
+    # UTF-8 BOM (ef bb bf) -> stripped, labelled utf-8-sig.
+    assert _decode_file_text("héllo".encode("utf-8-sig")) == ("héllo", "utf-8-sig")
+
+
+def test_decode_utf16_le_bom_the_97_repro():
+    # The #97 repro: PowerShell `echo . > x.md` writes UTF-16LE + BOM.
+    raw = b"\xff\xfe" + "héllo".encode("utf-16-le")
+    assert _decode_file_text(raw) == ("héllo", "utf-16-le")
+
+
+def test_decode_utf16_be_bom():
+    raw = b"\xfe\xff" + "héllo".encode("utf-16-be")
+    assert _decode_file_text(raw) == ("héllo", "utf-16-be")
+
+
+def test_decode_cp1252_and_latin1_fallback():
+    # 0x97 is the cp1252 em-dash (invalid as UTF-8 -> cp1252 path).
+    assert _decode_file_text(b"a\x97b") == ("a—b", "cp1252")
+    # 0x90 is UNDEFINED in cp1252 (raises) -> total latin-1 fallback.
+    assert _decode_file_text(b"a\x90b") == ("a\x90b", "latin-1")
+
+
+def test_decode_utf32_bom_rejected():
+    with pytest.raises(_NotText):
+        _decode_file_text(b"\xff\xfe\x00\x00rest")        # UTF-32 LE BOM
+    with pytest.raises(_NotText):
+        _decode_file_text(b"\x00\x00\xfe\xffrest")        # UTF-32 BE BOM
+
+
+def test_decode_malformed_bom_is_not_text_not_500():
+    # A declared BOM that doesn't decode (odd-length UTF-16, invalid UTF-8 after
+    # the BOM) must map to _NotText -> not_utf8, never an unhandled 500.
+    with pytest.raises(_NotText):
+        _decode_file_text(b"\xff\xfeA")                   # UTF-16LE BOM, odd tail
+    with pytest.raises(_NotText):
+        _decode_file_text(b"\xfe\xffA")                   # UTF-16BE BOM, odd tail
+    with pytest.raises(_NotText):
+        _decode_file_text(b"\xef\xbb\xbf\xff")            # UTF-8 BOM + invalid
+
+
+def test_decode_bomless_embedded_nul_is_not_text():
+    # codex: a BOM-less embedded-NUL file (incl. BOM-less UTF-16) is valid UTF-8
+    # but must reject as binary, not open as NUL-riddled garbage text.
+    assert _looks_binary(b"A\x00B\x00C\x00") is True
+    with pytest.raises(_NotText):
+        _decode_file_text(b"A\x00B\x00C\x00")
+
+
+def test_looks_binary_and_decode_rejects_binary():
+    # NUL anywhere -> binary; the full byte range contains NUL.
+    assert _looks_binary(bytes(range(256))) is True
+    # codex: high-regular NUL (BOM-less UTF-16-looking) must NOT become text.
+    assert _looks_binary(b"A\x00B\x00C\x00" + os.urandom(64)) is True
+    assert _looks_binary(os.urandom(4096)) is True
+    assert _looks_binary(gzip.compress(b"hello world" * 100)) is True
+    assert _looks_binary(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR") is True
+    # Plain text isn't binary.
+    assert _looks_binary(b"hello\tworld\r\n") is False
+    for blob in (bytes(range(256)), b"A\x00B\x00C\x00" + os.urandom(64),
+                 os.urandom(4096), gzip.compress(b"x" * 200),
+                 b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"):
+        with pytest.raises(_NotText):
+            _decode_file_text(blob)
+
+
+@pytest.mark.parametrize("label", ["utf-8", "utf-8-sig", "utf-16-le",
+                                   "utf-16-be", "cp1252", "latin-1"])
+def test_encode_decode_round_trip(label):
+    # Every label round-trips ASCII + an in-range non-ASCII char byte-faithfully.
+    s = "abc — déf"                                       # em-dash is in cp1252
+    if label == "latin-1":
+        s = "abc \x90 déf"                                # cp1252-undefined byte
+    assert _decode_file_text(_encode_file_text(s, label)) == (s, label)
+
+
+def test_encode_legacy_cant_store_emoji_raises():
+    with pytest.raises(UnicodeEncodeError):
+        _encode_file_text("smile 😀", "cp1252")
+    with pytest.raises(UnicodeEncodeError):
+        _encode_file_text("smile 😀", "latin-1")
 
 
 # ---- /file/mkdir ---------------------------------------------------------

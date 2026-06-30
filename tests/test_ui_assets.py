@@ -759,7 +759,7 @@ def test_editor_serialized_fields_preserved():
     # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
     s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
     for field in ("filePath:", "wrap:", "lineNums:", "startDir:", "docs:",
-                  "activeTab:", "agentsMdCwd:", "fileHostId:"):
+                  "activeTab:", "agentsMdCwd:", "fileHostId:", "encoding:"):
         assert field in s54, f"serializeAppWindow lost the {field!r} editor field"
 
 
