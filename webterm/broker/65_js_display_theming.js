@@ -109,6 +109,23 @@
             }
         }
 
+        // #88: keep every open TERMINAL's × affordance (tooltip + destructive
+        // hover) in step with the terminalCloseTerminates setting. Mirrors
+        // applyTerminalFont's windows walk; `!win.term` skips app windows (their
+        // × is the unchanged soft-close). Called from applyDisplaySettings so it
+        // converges on the local toggle AND every /state pull / boot / view
+        // rebuild — matching how onCloseClick reads the same LOCAL getSettings().
+        function applyTerminalCloseAffordance() {
+            const term = !!getSettings().terminalCloseTerminates;
+            for (const [, win] of windows) {
+                if (!win || win.disposed || !win.term) continue;   // terminals only
+                const b = win.dom && win.dom.querySelector('.btn-close');
+                if (!b) continue;
+                b.title = term ? 'terminate' : 'close';
+                b.classList.toggle('btn-close-terminate', term);
+            }
+        }
+
         function applyDisplaySettings() {
             const show = getSettings().show;
             document.body.classList.toggle('hide-ids', !show.id);
@@ -128,6 +145,8 @@
             // Workspace-scrollbar option may have toggled (local change or a
             // /state adopt, which routes through here) → re-evaluate visibility.
             updateStripScrollbar();
+            // #88: terminal × terminate affordance may have toggled the same way.
+            applyTerminalCloseAffordance();
         }
 
         function hexToRgb(c) {

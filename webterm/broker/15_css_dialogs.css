@@ -89,6 +89,9 @@
             cursor: pointer;
             user-select: none;
         }
+        /* #88: dim a checkbox row whose input is disabled (e.g. "Confirm before
+           terminating" while the terminate toggle is off) so it reads as inert. */
+        .set-check:has(input:disabled) { opacity: .5; }
         .set-x { color: var(--fg-dim); }
         /* Mod-contributed radio groups (#74, ctx.settings.radio) — e.g. the
            color-scheme radio extracted to mods/theme/ (#75). Wrap across rows so

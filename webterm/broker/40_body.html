@@ -147,6 +147,18 @@
                     <div class="set-hint">a slim draggable bar at the bottom of the
                         tiling workspace, shown whenever the strip can scroll right.</div>
                 </div>
+                <div class="set-section">
+                    <div class="set-title">Terminal close button</div>
+                    <label class="set-check"><input type="checkbox" id="set-close-terminates" />
+                        Close (&#215;) terminates terminal sessions</label>
+                    <div class="set-hint">when on, the &#215; button on a terminal hard-kills the
+                        session instead of just detaching the view. App windows are unaffected;
+                        the soft-close stays available from the title-bar right-click menu.</div>
+                    <label class="set-check"><input type="checkbox" id="set-confirm-terminate" />
+                        Confirm before terminating</label>
+                    <div class="set-hint">ask before the &#215; button kills a session. Only applies
+                        when the option above is on.</div>
+                </div>
                 <div class="set-section set-browser-global">
                     <div class="set-title">Restore on refresh</div>
                     <label class="set-check"><input type="checkbox" id="set-restore-refresh" />

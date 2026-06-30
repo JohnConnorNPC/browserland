@@ -101,7 +101,11 @@
             closeBtn.type = 'button';
             closeBtn.className = 'tb-btn btn-close';
             closeBtn.textContent = '×';
-            closeBtn.title = 'close';
+            // #88: reflect the terminal-close setting on the × affordance. Kept in
+            // sync afterwards by applyTerminalCloseAffordance (on toggle / /state).
+            const _term = !!getSettings().terminalCloseTerminates;
+            closeBtn.title = _term ? 'terminate' : 'close';
+            closeBtn.classList.toggle('btn-close-terminate', _term);
 
             titleBar.appendChild(idBadge);
             titleBar.appendChild(titleText);
@@ -218,7 +222,36 @@
             const onMinDown = stopProp;
             const onCloseDown = stopProp;
             const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
-            const onCloseClick = (e) => { e.stopPropagation(); closeWindow(id); };
+            // #88: the × button soft-closes (detach the view; the shell keeps
+            // running) by default. When terminalCloseTerminates is ON it instead
+            // hard-kills the session via terminateWindow → POST /session/kill,
+            // optionally behind the same styled confirm the right-click Terminate
+            // uses. Reads the LOCAL getSettings() (per-host display setting, like
+            // stripScrollbar); terminateWindow itself routes the kill to the
+            // session's own host. The right-click Close stays the soft-close path.
+            const onCloseClick = (e) => {
+                e.stopPropagation();
+                const st = getSettings();
+                if (st.terminalCloseTerminates) {
+                    if (st.terminalCloseConfirm) {
+                        openConfirmDialog({
+                            title: 'Terminate session',
+                            message: 'Terminate this session? '
+                                + 'The shell process tree will be killed.',
+                            okLabel: 'Terminate', danger: true,
+                        }).then((ok) => {
+                            // The /sessions reaper can tear this window down while
+                            // the dialog is open — guard so a stale OK doesn't toast
+                            // "session not found".
+                            if (ok && windows.has(id)) terminateWindow(id);
+                        });
+                    } else {
+                        terminateWindow(id);
+                    }
+                    return;
+                }
+                closeWindow(id);
+            };
             minBtn.addEventListener('mousedown', onMinDown);
             minBtn.addEventListener('click', onMinClick);
             closeBtn.addEventListener('mousedown', onCloseDown);

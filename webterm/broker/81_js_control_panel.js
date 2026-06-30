@@ -243,6 +243,11 @@
                 ? isTilingMode()
                 : (remoteTilingMode(t) === 'tiling');
             setStripScrollbar.checked = !!s.stripScrollbar;
+            // #88: terminal × terminate toggle + its confirm companion. Confirm
+            // is greyed while the terminate toggle is off (it only applies then).
+            setCloseTerminates.checked = !!s.terminalCloseTerminates;
+            setConfirmTerminate.checked = !!s.terminalCloseConfirm;
+            setConfirmTerminate.disabled = !s.terminalCloseTerminates;
             // #38: per-host dwell delay. s is already normalized (0 or a clamped
             // number), so reflect it verbatim; 0 shows as "0" (= disabled).
             setSnapHold.value = (typeof s.snapHoldMs === 'number') ? s.snapHoldMs : 3000;
@@ -481,6 +486,26 @@
             t.s.stripScrollbar = setStripScrollbar.checked;
             t.save();
             if (t.isLocal) applyDisplaySettings();
+        });
+
+        // #88: terminal × terminate toggle (per-host display setting, same shape
+        // as stripScrollbar above). The × behavior + its affordance read the LOCAL
+        // getSettings() — like stripScrollbar's effect — so reapply only for the
+        // local tab. The companion confirm checkbox follows the toggle's grey/live
+        // state immediately; its stored value is kept (re-enabling restores it).
+        setCloseTerminates.addEventListener('change', () => {
+            const t = settingsTarget;
+            if (!t) return;
+            t.s.terminalCloseTerminates = setCloseTerminates.checked;
+            t.save();
+            setConfirmTerminate.disabled = !setCloseTerminates.checked;
+            if (t.isLocal) applyDisplaySettings();   // live re-title open terminal × buttons
+        });
+        setConfirmTerminate.addEventListener('change', () => {
+            const t = settingsTarget;
+            if (!t) return;
+            t.s.terminalCloseConfirm = setConfirmTerminate.checked;
+            t.save();
         });
 
         // #38: per-host dwell delay (ms) for the snap / pop-out gestures. There's

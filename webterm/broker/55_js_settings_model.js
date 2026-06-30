@@ -53,6 +53,15 @@
             // Hide (vs. dim) taskbar items for windows on other workspaces.
             // Browser-global UI-chrome preference; default off (today's behavior).
             if (typeof s.hideTaskbarOtherWs !== 'boolean') s.hideTaskbarOtherWs = false;
+            // #88: when ON, a terminal window's × button terminates (hard-kills)
+            // the session instead of the default soft-close (detach the view; the
+            // session keeps running in the broker). App windows are unaffected.
+            // Per-host, synced via /state like stripScrollbar above. Default OFF,
+            // so out-of-box × behavior is identical to today.
+            if (typeof s.terminalCloseTerminates !== 'boolean') s.terminalCloseTerminates = false;
+            // #88: when ON (and terminalCloseTerminates is ON), the terminal × shows
+            // a styled confirm before terminating. Default OFF → immediate terminate.
+            if (typeof s.terminalCloseConfirm !== 'boolean') s.terminalCloseConfirm = false;
             // Task 4: customizable keybindings (actionId -> combo string).
             // Any missing/non-string action falls back to its default so a
             // partially hand-edited blob still has a working set.

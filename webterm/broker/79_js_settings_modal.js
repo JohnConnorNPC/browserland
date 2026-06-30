@@ -14,6 +14,8 @@
         const setShowHost = document.getElementById('set-show-host');
         const setTiling = document.getElementById('set-tiling');
         const setStripScrollbar = document.getElementById('set-strip-scrollbar');
+        const setCloseTerminates = document.getElementById('set-close-terminates');   // #88
+        const setConfirmTerminate = document.getElementById('set-confirm-terminate'); // #88
         const setSnapHold = document.getElementById('set-snap-hold');   // #38 dwell delay (ms)
         const setRestore = document.getElementById('set-restore-refresh');
         const setHideOtherWs = document.getElementById('set-taskbar-hide-other-ws');

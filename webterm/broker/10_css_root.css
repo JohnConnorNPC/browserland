@@ -371,6 +371,14 @@
             padding: 0;
         }
         .term-window .tb-btn:hover { background: rgba(0,0,0,0.3); }
+        /* #88: when the × button terminates (terminalCloseTerminates on) a
+           destructive red hover marks the harder action. Scoped through .tb-btn
+           (and the dark-accent variant) so it outweighs the .tb-btn:hover rules
+           above on both light and dark title bars. */
+        .term-window .tb-btn.btn-close-terminate:hover,
+        .term-window.dark-accent .tb-btn.btn-close-terminate:hover {
+            background: #c0392b; color: #fff;
+        }
         /* Active toggle (e.g. a sticky note's word-wrap button, #19) — a clear
            accent that reads on both light and dark title bars. */
         .term-window .tb-btn.on,
