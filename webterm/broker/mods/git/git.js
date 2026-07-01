@@ -279,6 +279,11 @@
                         if (torn) return;
                         torn = true;
                         disposers.delete(teardown);
+                        // Drop the decorate-once guard so IF this exact win object
+                        // were ever re-emitted (it is not today — closeWindow /
+                        // teardownView both discard the win before any replay), a
+                        // future create would re-decorate rather than silently skip.
+                        decorated.delete(win);
                         gitBtn.removeEventListener('mousedown', stopProp);
                         gitBtn.removeEventListener('click', onGitClick);
                         closeGitPopover();
