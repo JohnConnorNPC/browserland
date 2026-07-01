@@ -4,7 +4,7 @@ The mod ships **disabled by default**. Clipboards carry secrets — passwords, t
 
 ## Opening the window
 
-Open a Clipboard window from the desktop **+** (launch) menu → **📋 Clipboard**. You can open more than one; every clipboard window shows the same shared history. For more on the launch menu, see [[Taskbar]].
+Open the Clipboard window from the desktop **+** (launch) menu → **📋 Clipboard**, or click the **📋** chip in the taskbar near the clock. There is only one window at a time — opening it again (from either entry point) just focuses the existing window rather than stacking another. For more on the launch menu, see [[Taskbar]].
 
 ## What it captures
 
