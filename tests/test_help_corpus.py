@@ -399,12 +399,12 @@ def test_full_corpus_includes_mod_sections():
     assert len(slugs) == len(set(slugs)), "no duplicate slug across wiki + mods"
     assert "taskbar" in slugs                    # a surviving wiki section
     for mod_slug in ("sticky", "editor", "file-manager", "task-manager",
-                     "clock", "help", "aistatus"):
+                     "clock", "help", "aistatus", "git"):
         assert mod_slug in slugs
     # every mod section is tagged and sorts AFTER every wiki section.
     mod_orders = [s["order"] for s in full["sections"] if "mod" in s]
     wiki_orders = [s["order"] for s in full["sections"] if "mod" not in s]
-    assert len(mod_orders) == 7
+    assert len(mod_orders) == 8   # +git (#116)
     assert min(mod_orders) > max(wiki_orders)
 
 

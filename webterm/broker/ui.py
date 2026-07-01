@@ -135,6 +135,7 @@ _MODS = [
     "mods/editor/editor.js",   # S10 (#83) text-editor window kind via ctx.registerWindowKind + ctx.file
     "mods/sticky/sticky.js",   # S8 (#81) sticky-note window kind via ctx.registerWindowKind
     "mods/aistatus/aistatus.js",  # #112 AI-provider status chip + window; ships default-off, polls /status/fetch; ships aistatus.css
+    "mods/git/git.js",         # S14 (#116) per-terminal git status widget via ctx.windows.onTerminalCreate + ctx.session.git; default-off; ships git.css
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

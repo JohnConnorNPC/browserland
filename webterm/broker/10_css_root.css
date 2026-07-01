@@ -219,7 +219,7 @@
         .term-window .title-bar {
             display: flex;
             align-items: center;
-            position: relative;   /* anchor for the git status popover */
+            position: relative;   /* anchor for the color-swatch / MCP / git popovers */
             height: var(--title-h);
             background: var(--accent, var(--accent-default));
             color: #000;
@@ -432,49 +432,6 @@
         .term-window.dark-accent .color-dot {
             border-color: rgba(255,255,255,0.7);
             box-shadow: 0 0 0 1px rgba(0,0,0,0.45);
-        }
-        /* Git status (task 6): muted button when not-a-repo / unknown; the
-           branch label rides to its right, turning amber when dirty. */
-        .term-window .btn-git.muted { opacity: 0.4; }
-        .term-window .git-label {
-            font-size: 10px;
-            margin: 0 2px 0 1px;
-            max-width: 120px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            display: inline-flex;
-            align-items: center;
-        }
-        .term-window .git-label.git-dirty { color: #d98a00; font-weight: bold; }
-        .term-window.dark-accent .git-label.git-dirty { color: #ffc04d; }
-        /* Git status popover: a small absolutely-positioned card anchored under
-           the git button inside the (relative) title bar. */
-        .term-window .git-popover {
-            position: absolute;
-            z-index: 50;
-            min-width: 150px;
-            background: var(--bg-2, #2a2a2a);
-            color: var(--fg, #eee);
-            border: 1px solid var(--bg-3, #555);
-            box-shadow: 0 4px 14px rgba(0,0,0,0.5);
-            padding: 6px 8px;
-            font-size: 11px;
-            font-family: Consolas, monospace;
-            cursor: default;
-        }
-        .term-window .git-pop-head {
-            font-weight: bold;
-            margin-bottom: 4px;
-            white-space: nowrap;
-        }
-        .term-window .git-pop-row { line-height: 1.5; white-space: nowrap; }
-        .term-window .git-pop-row.git-dirty { color: #d98a00; }
-        .term-window .git-pop-row.git-bad { color: #e05050; }
-        .term-window .git-pop-foot {
-            margin-top: 5px;
-            display: flex;
-            justify-content: flex-end;
         }
         .term-window .term-body {
             flex: 1;

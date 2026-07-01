@@ -8,6 +8,14 @@
         // and auto-unsubscribes on the mod's teardown. `windows` is the cross-
         // fragment core Map (64_js_sessions_poll_control.js); these live at the one
         // shared top-level scope, so create-time + replay both reach them.
+        //
+        // INVARIANT: a callback is a lifetime notification for a CONCRETE `win`.
+        // Its per-window teardown rides win.cleanups (via onDispose), drained by
+        // closeWindow (73) on close AND by teardownView (84) on a lost HOME lease.
+        // teardownView also windows.clear()s, and rebuildView re-opens each
+        // terminal through openWindow — so a lease-loss/reactivate DISPOSES the old
+        // win and RE-EMITS a fresh create for the rebuilt one; the widget is torn
+        // down and re-decorated, never silently lost or double-mounted.
         const termCreateCbs = [];
         // Build the per-window context object and hand it to ONE subscriber. Used
         // by both the create-time emit and the replay, so both see an identical
@@ -144,18 +152,10 @@
             agentsMdBtn.textContent = '📋';
             agentsMdBtn.title = 'Edit AGENTS.md for this folder';
 
-            // Git status button (Task 6): shows this terminal's working-dir git
-            // branch + a dirty badge; click opens a status popover. Starts muted
-            // (no status known yet); hidden when the cwd is not a repo or the
-            // broker is too old to have /session/git. Branch label sits to its
-            // right; both are managed by refreshGit/renderGit below.
-            const gitBtn = document.createElement('button');
-            gitBtn.type = 'button';
-            gitBtn.className = 'tb-btn btn-git muted';
-            gitBtn.textContent = '⎇';
-            gitBtn.title = 'Git status';
-            const gitLabel = document.createElement('span');
-            gitLabel.className = 'git-label';
+            // #116: the per-terminal git status button + branch label used to be
+            // built here; they moved to the default-off git mod (mods/git/), which
+            // subscribes to ctx.windows.onTerminalCreate and inserts them into this
+            // title bar (before the min button, its original slot) when enabled.
 
             const minBtn = document.createElement('button');
             minBtn.type = 'button';
@@ -176,8 +176,6 @@
             titleBar.appendChild(idBadge);
             titleBar.appendChild(titleText);
             titleBar.appendChild(agentsMdBtn);
-            titleBar.appendChild(gitBtn);
-            titleBar.appendChild(gitLabel);
             titleBar.appendChild(minBtn);
             titleBar.appendChild(closeBtn);
 
@@ -212,12 +210,6 @@
             const win = {
                 id, sid, hostId, dom, body, term, fitAddon,
                 titleText,
-                // Git status (task 6): gitBtn/gitLabel are the title-bar UI;
-                // gitStatus the last successful {ok:true,...} payload (or null);
-                // gitState one of 'unknown'|'repo'|'norepo'|'unavailable' so the
-                // button can render muted/hidden without a status toast.
-                gitBtn, gitLabel, gitStatus: null, gitState: 'unknown',
-                gitPopover: null, gitFetching: false, gitTimer: null, gitSeq: 0,
                 ws: null,
                 minimized: false,
                 geom,
@@ -353,221 +345,6 @@
                 agentsMdBtn.removeEventListener('mousedown', stopProp);
                 agentsMdBtn.removeEventListener('click', onAgentsMdClick);
             });
-
-            // ---- Git status (task 6) --------------------------------------
-            // Host-aware POST /session/git {id:<wireId>}: the AGENT runs git in
-            // its own live cwd, so we send only the bare wire id. Wrapped to a
-            // {status, json} result so a non-repo / 404 / network error never
-            // throws or toasts on a routine terminal.
-            const gitPost = () => {
-                const host = hostById(win.hostId);
-                if (!host) {
-                    return Promise.resolve(
-                        { status: 0, json: { ok: false, error: 'no_host' } });
-                }
-                return fetch(hostHttpUrl(host, '/session/git'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: win.sid }),
-                }).then(r => r.json()
-                    .then(j => ({ status: r.status, json: j }))
-                    .catch(() => ({ status: r.status,
-                                    json: { ok: false, error: 'HTTP ' + r.status } })))
-                 .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
-            };
-            // Paint the button + label from win.gitState/gitStatus. Muted when
-            // not-a-repo / unknown; HIDDEN when the route is unavailable (404 on
-            // an old broker). Branch name + a dirty badge ride alongside.
-            const renderGit = () => {
-                if (win.disposed) return;
-                if (win.gitState === 'unavailable') {
-                    gitBtn.style.display = 'none';
-                    gitLabel.style.display = 'none';
-                    return;
-                }
-                gitBtn.style.display = '';
-                const st = win.gitStatus;
-                const isRepo = win.gitState === 'repo' && st && st.ok;
-                gitBtn.classList.toggle('muted', !isRepo);
-                if (!isRepo) {
-                    gitLabel.style.display = 'none';
-                    gitLabel.textContent = '';
-                    gitBtn.title = (win.gitState === 'norepo')
-                        ? 'Git: not a repository' : 'Git status';
-                    return;
-                }
-                const branch = st.detached ? 'detached'
-                    : (st.branch || '(no branch)');
-                gitLabel.style.display = '';
-                gitLabel.textContent = branch;
-                gitLabel.classList.toggle('git-dirty', !!st.dirty);
-                // A small dirty badge: the change count when known, else a dot.
-                let badge = '';
-                if (st.dirty) {
-                    badge = (typeof st.dirty_count === 'number'
-                             && st.dirty_count > 0)
-                        ? (' ●' + st.dirty_count) : ' ●';
-                }
-                gitLabel.textContent = branch + badge;
-                const ab = [];
-                if (st.ahead) ab.push('↑' + st.ahead);
-                if (st.behind) ab.push('↓' + st.behind);
-                gitBtn.title = 'Git: ' + branch
-                    + (ab.length ? (' ' + ab.join(' ')) : '')
-                    + (st.dirty ? ' (dirty)' : ' (clean)');
-                // If the popover is open, keep it in sync with the new status.
-                if (win.gitPopover) fillGitPopover();
-            };
-            // Fetch + classify. Never throws. 404/no route -> 'unavailable'
-            // (hide forever this session); not_a_repo/no_cwd -> 'norepo'
-            // (muted); ok -> 'repo'.
-            const refreshGit = async () => {
-                if (win.disposed || win.gitFetching) return;
-                win.gitFetching = true;
-                // Monotonic token: a slow earlier reply must not paint over a
-                // newer one (gitFetching blocks overlap from THIS caller, but
-                // the token is the durable guard).
-                const seq = ++win.gitSeq;
-                let res;
-                try { res = await gitPost(); }
-                catch (_) { res = { status: 0, json: { ok: false } }; }
-                finally { win.gitFetching = false; }
-                if (win.disposed || seq !== win.gitSeq) return;
-                const j = res.json || {};
-                if (res.status === 404) {
-                    win.gitState = 'unavailable';
-                    // Old broker without the route: stop the keep-alive poll —
-                    // it will only keep 404ing. The button stays hidden.
-                    if (win.gitTimer) {
-                        clearInterval(win.gitTimer); win.gitTimer = null;
-                    }
-                } else if (j.ok) {
-                    win.gitState = 'repo';
-                    win.gitStatus = j;
-                } else if (j.error === 'not_a_repo' || j.error === 'no_cwd') {
-                    win.gitState = 'norepo';
-                    win.gitStatus = null;
-                } else {
-                    // Transient/unknown error: stay muted, don't toast, don't
-                    // hide (a later refresh may succeed).
-                    if (win.gitState === 'unknown') win.gitState = 'norepo';
-                }
-                renderGit();
-            };
-            // Status popover anchored under the button: branch/detached, ahead/
-            // behind, the four index counts, + a Refresh button. Closes on
-            // outside-click / Escape; registered for teardown in win.cleanups.
-            const fillGitPopover = () => {
-                const pop = win.gitPopover;
-                if (!pop) return;
-                const st = win.gitStatus;
-                pop.innerHTML = '';
-                const head = document.createElement('div');
-                head.className = 'git-pop-head';
-                if (win.gitState === 'repo' && st && st.ok) {
-                    head.textContent = st.detached
-                        ? 'detached HEAD' : (st.branch || '(no branch)');
-                } else if (win.gitState === 'norepo') {
-                    head.textContent = 'not a git repository';
-                } else {
-                    head.textContent = 'git status unavailable';
-                }
-                pop.appendChild(head);
-                if (win.gitState === 'repo' && st && st.ok) {
-                    const ab = document.createElement('div');
-                    ab.className = 'git-pop-row';
-                    ab.textContent = 'ahead ↑' + (st.ahead || 0)
-                        + '   behind ↓' + (st.behind || 0);
-                    pop.appendChild(ab);
-                    const counts = [
-                        ['staged', st.staged], ['unstaged', st.unstaged],
-                        ['untracked', st.untracked], ['conflicts', st.conflicts],
-                    ];
-                    for (const [k, v] of counts) {
-                        const r = document.createElement('div');
-                        r.className = 'git-pop-row';
-                        r.textContent = k + ': ' + (v || 0);
-                        if (k === 'conflicts' && v) r.classList.add('git-bad');
-                        pop.appendChild(r);
-                    }
-                    const dirty = document.createElement('div');
-                    dirty.className = 'git-pop-row '
-                        + (st.dirty ? 'git-dirty' : '');
-                    dirty.textContent = st.dirty
-                        ? ('dirty (' + (st.dirty_count || 0) + ')') : 'clean';
-                    pop.appendChild(dirty);
-                }
-                const foot = document.createElement('div');
-                foot.className = 'git-pop-foot';
-                const refreshBtn = document.createElement('button');
-                refreshBtn.type = 'button';
-                refreshBtn.className = 'tb-btn';
-                refreshBtn.style.width = 'auto';
-                refreshBtn.style.padding = '0 8px';
-                refreshBtn.textContent = 'Refresh';
-                refreshBtn.addEventListener('mousedown', stopProp);
-                refreshBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    refreshGit();
-                });
-                foot.appendChild(refreshBtn);
-                pop.appendChild(foot);
-            };
-            const closeGitPopover = () => {
-                if (!win.gitPopover) return;
-                document.removeEventListener('mousedown', onGitOutside, true);
-                document.removeEventListener('keydown', onGitKey, true);
-                try { win.gitPopover.remove(); } catch (_) {}
-                win.gitPopover = null;
-            };
-            const onGitOutside = (e) => {
-                // The button + its branch label form one affordance: a click on
-                // either is "inside" (the button toggles, the popover stays).
-                if (win.gitPopover && !win.gitPopover.contains(e.target)
-                    && e.target !== gitBtn && e.target !== gitLabel) {
-                    closeGitPopover();
-                }
-            };
-            const onGitKey = (e) => {
-                if (e.key === 'Escape') {
-                    e.preventDefault(); e.stopPropagation(); closeGitPopover();
-                }
-            };
-            const openGitPopover = () => {
-                if (win.gitPopover) { closeGitPopover(); return; }
-                const pop = document.createElement('div');
-                pop.className = 'git-popover';
-                titleBar.appendChild(pop);
-                win.gitPopover = pop;
-                fillGitPopover();
-                // Anchor under the button within the title bar (relative parent).
-                pop.style.left = Math.max(0, gitBtn.offsetLeft) + 'px';
-                pop.style.top = (gitBtn.offsetTop + gitBtn.offsetHeight + 2) + 'px';
-                document.addEventListener('mousedown', onGitOutside, true);
-                document.addEventListener('keydown', onGitKey, true);
-                // Always refresh on open (cheap, keeps the popover live).
-                refreshGit();
-            };
-            const onGitClick = (e) => {
-                e.stopPropagation();
-                openGitPopover();
-            };
-            gitBtn.addEventListener('mousedown', stopProp);
-            gitBtn.addEventListener('click', onGitClick);
-            win.cleanups.push(() => {
-                gitBtn.removeEventListener('mousedown', stopProp);
-                gitBtn.removeEventListener('click', onGitClick);
-                closeGitPopover();
-                if (win.gitTimer) { clearInterval(win.gitTimer); win.gitTimer = null; }
-            });
-            // Initial fetch shortly after open, plus a slow keep-alive poll.
-            // Both best-effort; refreshGit never throws and self-guards on
-            // disposed. Each call runs a git subprocess on the agent, so keep
-            // the interval slow.
-            setTimeout(() => { if (!win.disposed) refreshGit(); }, 800);
-            win.gitTimer = setInterval(() => {
-                if (!win.disposed) refreshGit();
-            }, 15000);
 
             // drag
             wireDrag(win, titleBar);

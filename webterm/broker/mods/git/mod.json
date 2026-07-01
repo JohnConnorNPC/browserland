@@ -1,0 +1,11 @@
+{
+  "id": "git",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Git status",
+  "description": "Per-terminal git branch + dirty badge + status popover, on every terminal's title bar (extracted from core, #116). Rides ctx.windows.onTerminalCreate + ctx.session.git. Ships disabled by default.",
+  "entry": "git.js",
+  "styles": ["git.css"],
+  "author": "JohnConnorNPC",
+  "help": { "slug": "git", "label": "Git status", "order": 2045, "icon": "⎇" }
+}

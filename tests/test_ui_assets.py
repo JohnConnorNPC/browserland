@@ -1388,6 +1388,107 @@ def test_session_capability_trust_doc_present():
 
 
 # --------------------------------------------------------------------------- #
+# git status mod (#116 / S14)
+# --------------------------------------------------------------------------- #
+
+def test_git_symbols_removed_from_core_fragments():
+    # The per-terminal git status widget is now a mod (#116/S14): its inline JS
+    # left 67_js_window_lifecycle.js and its CSS left 10_css_root.css — both moved
+    # into mods/git/. Only the ctx.windows.onTerminalCreate emit hook stays in core.
+    core_js = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    for sym in ("btn-git", "git-popover", "git-label", "refreshGit", "renderGit",
+                "gitPost", "/session/git", "gitStatus", "gitTimer"):
+        assert sym not in core_js, \
+            f"{sym!r} should be gone from 67_js_window_lifecycle.js"
+    core_css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    for sym in ("btn-git", "git-label", "git-popover", "git-pop-"):
+        assert sym not in core_css, f"{sym!r} should be gone from 10_css_root.css"
+    # The shared title-bar anchor STAYS (the color-swatch / MCP popovers need it),
+    # but its comment no longer claims to be git-only.
+    assert "position: relative;" in core_css
+    assert "anchor for the git status popover" not in core_css
+    # The per-terminal-window emit hook the mod subscribes to DOES remain in core.
+    assert "function registerTerminalCreate" in core_js
+    assert "onTerminalCreate" in core_js
+
+
+def test_git_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "git"
+    git_js = mod_dir / "git.js"
+    git_css = mod_dir / "git.css"
+    manifest = mod_dir / "mod.json"
+    assert git_js.is_file() and git_css.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "git"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "git.js"
+    assert meta["styles"] == ["git.css"]
+    assert "mods/git/git.js" in ui._MODS
+    src = git_js.read_text(encoding="utf-8")
+    # Registers the git mod, default-OFF, with the reviewed tiers.
+    assert "registerMod(" in src
+    assert "id: 'git'" in src
+    assert "ctxVersion: 1" in src
+    assert "defaultEnabled: false" in src
+    assert "tiers: ['session', 'window']" in src
+    # Rides the per-terminal-window hook + the session git capability (#116),
+    # feature-detected — NOT a raw inline fetch (no hostHttpUrl in the mod).
+    assert "if (!ctx.windows) return;" in src
+    assert "ctx.windows.onTerminalCreate(" in src
+    assert "ctx.session.git(" in src
+    assert "hostHttpUrl(" not in src, "the raw inline git fetch must be gone from the mod"
+    # Per-window teardown covers BOTH a window close (onDispose) and a mod disable
+    # (ctx.onUnload drains the disposer set) — no stray interval / orphan DOM.
+    assert "info.onDispose(" in src
+    assert "ctx.onUnload(" in src
+    assert "clearInterval(" in src
+    # Ships in the served page, AFTER the aistatus mod (appended last in _MODS).
+    assert "id: 'git'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'aistatus'") < INDEX_HTML.index("id: 'git'")
+    # The moved CSS rides the served page via the mod-css splice.
+    assert ".git-popover" in INDEX_HTML
+
+
+def test_windows_capability_and_session_git_present():
+    # #116 (S14): the additive ctx.windows per-terminal-window hook + ctx.session.git
+    # (wrapping the /session/git route) ride in the served loader, and the core emit
+    # lives in 67_js_window_lifecycle.js. The git mod + Playwright acceptance depend
+    # on these. ctxVersion stays 1 (both additive).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for sym in ("windows: {", "onTerminalCreate: function (cb)",
+                "registerTerminalCreate(cb)",
+                "git: function (id, opts)", "'/session/git'"):
+        assert sym in loader, f"missing #116 loader capability symbol: {sym!r}"
+    assert "ctxVersion: 1" in loader
+    # The core hook + its create-time emit ride core fragment 67.
+    core = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    for sym in ("function registerTerminalCreate", "function _emitTerminalCreate",
+                "const termCreateCbs", "addTitleBarItem", "onDispose"):
+        assert sym in core, f"missing #116 core hook symbol: {sym!r}"
+    # And it all reaches the served page.
+    for sym in ("onTerminalCreate", "git: function (id, opts)", "'/session/git'"):
+        assert sym in INDEX_HTML, f"#116 capability missing from served page: {sym!r}"
+
+
+def test_default_enabled_capability_present():
+    # #106/#116: the loader's defaultEnabled capability the git (and aistatus #112)
+    # default-off mods ride, and which #106 inherits. registerMod records the
+    # declared default; the enable state resolves default XOR override, so the
+    # persisted set means "ids toggled AWAY from their default" — key unchanged
+    # (zero migration).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for sym in ("defaultEnabled: (decl.defaultEnabled !== false)",
+                "function _modDefault",
+                "_modsDisabled().has(id) ? !def : def",
+                "if (on === _modDefault(id)) set.delete(id); else set.add(id);",
+                "TOGGLED AWAY",
+                "'webterm:mods:disabled'"):
+        assert sym in loader, f"missing defaultEnabled loader symbol: {sym!r}"
+    assert "function _modDefault" in INDEX_HTML
+
+
+# --------------------------------------------------------------------------- #
 # packaging + enable/permission UI (#86 / S13)
 # --------------------------------------------------------------------------- #
 
@@ -1409,6 +1510,7 @@ _EXPECTED_TIERS = {
     "editor": ["file", "window"],
     "sticky": ["window"],
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
+    "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
 }
 
 
