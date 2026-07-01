@@ -6,7 +6,7 @@ From left to right, the taskbar contains:
 
 | Element | What it does |
 |---|---|
-| Launch button (**+**) | Left-click to launch the local broker's default terminal; right-click for the full profile / app menu |
+| Launch button (**+**) | By default, left-click launches the local broker's default terminal and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (except sticky notes) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
 | Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
@@ -38,8 +38,14 @@ By default, buttons for windows on other workspaces still appear (dimmed) so you
 
 The launch button doubles as a Start button.
 
+By default:
+
 - **Left-click** launches a terminal using the **local broker's** default profile.
 - **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager — see [[Window-Types]]). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
+
+### Swapping the click gestures
+
+If you open the picker more often than you use the one-click default, turn on **Control Panel → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches the local broker's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
 
 ### Open in folder…
 
@@ -47,7 +53,7 @@ The right-click menu also includes an **Open in folder…** item under each host
 
 ### Renaming the button
 
-The button shows `+` by default. To change its label, set Control Panel → Start button. Leave it blank to fall back to `+`. Only the visible label changes — left-click still launches and right-click still opens the profile menu.
+The button shows `+` by default. To change its label, set Control Panel → Start button. Leave it blank to fall back to `+`. Only the visible label changes — the click gestures follow whichever mapping you have set (see [Swapping the click gestures](#swapping-the-click-gestures) above).
 
 ## Fullscreen
 
