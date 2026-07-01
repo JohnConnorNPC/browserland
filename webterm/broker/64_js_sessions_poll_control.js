@@ -7,19 +7,49 @@
         // stays the bare wire id.
         const sessions = new Map();
 
-        // Display label honoring the Control Panel toggles. The defaults (host
-        // on, pid off) reproduce the bridge's "host: title" format exactly.
-        // Always use textContent at call sites — never inject this string
-        // as HTML.
-        function formatTitle(sess) {
-            const show = getSettings().show;
-            const id = sess && sess.id != null ? String(sess.id) : '';
+        // #123: single source of truth for the taskbar/title label — order AND
+        // per-component visibility. Returns the VISIBLE parts in `show.order`,
+        // each {key, text, cls} so the taskbar can render one span per part (id
+        // can interleave) and formatTitle() can join a string. The datum-guard
+        // expressions are byte-identical to the old formatTitle (same id/title/
+        // host/pid truthiness + host trim), so the default order+toggles (host
+        // on, pid off, title on) reproduce "#id host: title [pid]" exactly.
+        // Always use textContent at call sites — never inject as HTML.
+        function composeLabelParts(sess) {
+            const show = getSettings().show, order = show.order;
+            const id    = sess && sess.id != null ? String(sess.id) : '';
             const title = (sess && sess.title) || ('session ' + id);
-            const host = sess && sess.host ? String(sess.host).trim() : '';
-            let out = (show.host && host) ? host + ': ' + title : title;
-            // pid is absent from old brokers' /sessions — guard.
-            if (show.pid && sess && sess.pid) out += ' [' + sess.pid + ']';
-            return out;
+            const host  = sess && sess.host ? String(sess.host).trim() : '';
+            // pid is absent from old brokers' /sessions — guarded like the old code.
+            const pid   = (sess && sess.pid) ? String(sess.pid) : '';
+            const want = { id: !!(show.id && id), host: !!(show.host && host),
+                           title: !!show.title, pid: !!(show.pid && pid) };
+            let visible = order.filter(k => want[k]);
+            // Never-empty guarantee: a session whose toggled-on components have no
+            // datum (e.g. host-only toggle on a hostless app session) still gets a
+            // label — the title text — instead of a blank chip/title.
+            if (!visible.length) visible = ['title'];
+            return visible.map((k, i) => {
+                const next = visible[i + 1];
+                let text;
+                if (k === 'id')        text = '#' + id;
+                else if (k === 'pid')  text = '[' + pid + ']';
+                // colon only immediately before the title, so the default reads
+                // "host: title" but a reordered host (e.g. host last) reads bare.
+                else if (k === 'host') text = (next === 'title') ? host + ':' : host;
+                else                   text = title;
+                return { key: k, text: text, cls: 'ti-' + k };
+            });
+        }
+        // String label for the window TITLE BAR: the same composer, minus the id
+        // (the title bar shows #id separately as a leading .ti-id-badge). Falls
+        // back to the bare title if id was the ONLY visible part, so the
+        // title-text is never blank (id-only setting still leaves the badge).
+        function formatTitle(sess) {
+            const parts = composeLabelParts(sess).filter(p => p.key !== 'id');
+            if (parts.length) return parts.map(p => p.text).join(' ');
+            const id = sess && sess.id != null ? String(sess.id) : '';
+            return (sess && sess.title) || ('session ' + id);
         }
         // Hover tooltip: always shows everything, independent of toggles.
         // `agent` rides here only — most webterm sessions are agents, so a

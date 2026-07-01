@@ -8,6 +8,27 @@
         // runs on a REMOTE host's settings too (task 13/14): the local blob is
         // getSettings()'s live prefs._settings; a remote blob comes from that
         // broker's /state and is normalized before it lands in hostStateCache.
+        // #123: the taskbar/title label component order. `show.order` is a
+        // permutation of these four keys; the canonical order IS today's layout
+        // (#id host: title [pid] — id first, then host, title, pid), so a blob
+        // lacking `order` self-heals to a byte-identical default. Modeled on the
+        // order-preserving normalizeSectionsArray: keep the first occurrence of
+        // each known key in the given order, drop junk/dups, then append any
+        // missing key in canonical order — so the result is ALWAYS a full,
+        // duplicate-free permutation of the four keys no matter how mangled the
+        // input (hand-edited blob, stale /state, unknown key).
+        const LABEL_ORDER_KEYS = ['id', 'host', 'title', 'pid'];
+        function normalizeLabelOrder(arr) {
+            const seen = new Set(), out = [];
+            for (const k of (Array.isArray(arr) ? arr : [])) {
+                if (typeof k === 'string' && LABEL_ORDER_KEYS.indexOf(k) !== -1
+                        && !seen.has(k)) {
+                    seen.add(k); out.push(k);
+                }
+            }
+            for (const k of LABEL_ORDER_KEYS) if (!seen.has(k)) out.push(k);
+            return out;
+        }
         function normalizeSettings(s) {
             if (!s || typeof s !== 'object' || Array.isArray(s)) s = {};
             const sz = s.size;
@@ -22,6 +43,13 @@
             if (typeof s.show.id !== 'boolean') s.show.id = true;
             if (typeof s.show.pid !== 'boolean') s.show.pid = false;
             if (typeof s.show.host !== 'boolean') s.show.host = true;
+            // #123: `title` gains its own on/off toggle (default on, so the label
+            // is unchanged); `order` self-heals to a full permutation. Both are
+            // synced per-host in the same `show` blob as id/pid/host, and run on
+            // BOTH the local blob and every remote-host blob, so an upgrade never
+            // loses today's order/appearance.
+            if (typeof s.show.title !== 'boolean') s.show.title = true;
+            s.show.order = normalizeLabelOrder(s.show.order);
             const cd = s.cellDims;
             if (!cd || typeof cd !== 'object' || !(cd.w > 0) || !(cd.h > 0)) {
                 s.cellDims = null;                // {w,h} last measured cell
