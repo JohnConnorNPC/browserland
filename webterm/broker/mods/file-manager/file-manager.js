@@ -549,33 +549,55 @@
                 // Cancel still drops the dest temp and (crucially, for a move)
                 // never reaches the source-delete below. (#109)
                 if (aborted()) return await cancelExit();
-                // 3) Commit (atomic replace on the dest). On failure the server has
-                //    already dropped the temp + session, so no abort is needed.
+                // 3) For a MOVE, verify the dest bytes match the source by SHA-256
+                //    BEFORE the commit — because that commit is what gates the
+                //    source-delete below (#110). Hash the source (a bounded,
+                //    streaming re-read on the SOURCE broker) and hand it to
+                //    uploadCommit as expected_sha256; the dest broker compares it
+                //    against the hash it accumulated on write and REFUSES the
+                //    os.replace on mismatch (existing dest untouched, .part
+                //    dropped). A source that changed mid-transfer just fails the
+                //    match -> source kept (never a half-completed move). COPY skips
+                //    this (non-destructive) and commits unverified.
+                let expectedSha = null;
+                if (move) {
+                    const hres = await fmFile().hash(srcPath, { host: srcHost.id });
+                    if (win.disposed) return await failAbort();
+                    if (!(hres && hres.ok && hres.sha256)) {
+                        if (hres && hres.error === 'auth_required') {
+                            promptFileHostAuth(srcHost);
+                        }
+                        return await failAbort('transfer failed: could not verify '
+                            + srcName + ': ' + ((hres && hres.error) || '?'));
+                    }
+                    expectedSha = hres.sha256;
+                }
+                // 4) Commit (atomic replace on the dest). On a plain failure the
+                //    server has already dropped the temp + session, so no abort is
+                //    needed; a checksum_mismatch is a distinct, source-safe outcome.
                 const cm = await fmFile().uploadCommit(uploadId,
-                    { host: destHost.id });
+                    { host: destHost.id, expected_sha256: expectedSha });
                 if (win.disposed) return false;
+                if (cm && cm.error === 'checksum_mismatch') {
+                    showNotice('transfer failed: checksum mismatch — ' + srcName
+                        + ' not moved, source kept');
+                    reList('left');
+                    reList('right');
+                    return false;                       // source NOT deleted
+                }
                 if (!(cm && cm.ok)) {
                     const err = (cm && cm.error) || 'error';
                     if (err === 'auth_required') promptFileHostAuth(destHost);
                     showNotice('transfer failed (finish ' + srcName + '): ' + err);
                     return false;
                 }
-                // 4) Move = copy landed, now delete the source. SIZE-VERIFIED first
-                //    (belt-and-suspenders vs a truncated transfer; #110 upgrades
-                //    this to a SHA-256 match): if the committed size doesn't equal
-                //    the source size we first observed, the file changed under us —
-                //    keep BOTH copies rather than delete a good source for a
-                //    possibly-bad dest. Otherwise the existing honest best-effort
-                //    delete: a failed delete still reports "copied but couldn't
-                //    remove the source".
+                // 5) Move = copy landed AND was SHA-256-verified at commit (above),
+                //    so the dest provably matches the source — now delete it. A
+                //    hash match implies a size match AND rules out a source that
+                //    changed mid-transfer (its new hash wouldn't match), so the old
+                //    size check is redundant. Honest best-effort delete: a failed
+                //    delete still reports "copied but couldn't remove the source".
                 if (move) {
-                    if (srcSize !== null && cm.size !== srcSize) {
-                        showNotice('copied ' + srcName + ', but the source changed '
-                            + 'during transfer — source kept');
-                        reList('left');
-                        reList('right');
-                        return false;
-                    }
                     const d = await fmFile().delete(srcPath, { host: srcHost.id });
                     if (win.disposed) return false;
                     if (!(d && d.ok)) {
