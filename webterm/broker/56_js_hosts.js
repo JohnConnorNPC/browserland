@@ -47,6 +47,23 @@
             const c = h && h.color;
             return (typeof c === 'string' && strictHex(c)) ? c : '';
         }
+        // Optional per-launch-profile DEFAULT accent (#115): the color a new
+        // terminal seeds from when its launch profile carries one — it sits
+        // ABOVE the per-host default (#103) but BELOW a saved per-window color
+        // in the precedence chain. Unlike the host color (browser-local), the
+        // profile color is broker-owned: it rides the names-only /profiles map
+        // as a name->hex side-map, cached per host in profilesCache (76). Same
+        // contract as hostDefaultColor: strictHex rejects a corrupt/absent value
+        // so it cleanly falls through, and an unknown/renamed/deleted profile
+        // name (or a cold cache) just returns '' -> host default / auto-pick.
+        function profileDefaultColor(hostId, name) {
+            if (!name) return '';
+            const cached = profilesCache.get(hostId);
+            const colors = cached && cached.colors;
+            if (!colors || typeof colors !== 'object') return '';
+            const c = colors[name];
+            return (typeof c === 'string' && strictHex(c)) ? c : '';
+        }
 
         // ---- per-broker hide toggle ("focus mode") ------------------------
         // Each host carries a persisted `hidden` flag (see getHosts). Hiding

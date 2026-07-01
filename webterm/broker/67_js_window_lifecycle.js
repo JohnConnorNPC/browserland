@@ -94,14 +94,16 @@
                 geom.width = ls.width;
                 geom.height = ls.height;
             }
-            // Precedence: a saved per-window color wins; else the host's optional
+            // Precedence: a saved per-window color wins; else this window's
+            // launch-profile DEFAULT accent (#115); else the host's optional
             // DEFAULT accent (#103); else the palette auto-pick for adjacency.
-            // hostDefaultColor('' when unset) keeps today's behavior for hosts
-            // with no default. This seeds the STARTING color only — it is not
-            // persisted into pref.color, so an un-recolored window re-seeds from
-            // the host default on each reopen, and a user recolor permanently wins.
+            // Each helper returns '' when unset, so an absent tier falls through.
+            // This seeds the STARTING color only — it is not persisted into
+            // pref.color, so an un-recolored window re-seeds from its profile/host
+            // on each reopen, and a user recolor permanently wins.
             const color = normalizeHex(
-                pref.color || hostDefaultColor(hostId) || defaultColor(id));
+                pref.color || profileDefaultColor(hostId, sess && sess.profile)
+                || hostDefaultColor(hostId) || defaultColor(id));
             const name = formatTitle(sess || { id: sid });
 
             const dom = document.createElement('div');

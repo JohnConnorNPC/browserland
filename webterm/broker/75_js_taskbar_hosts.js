@@ -20,12 +20,15 @@
             if (!el) return;
             const win = windows.get(id);
             const pref = prefs[String(id)] || {};
-            // #103: mirror openWindow's seed so a chip without an open window
-            // still reflects the host default — live win.color, saved pref.color,
-            // host default, then the palette auto-pick.
+            // #103/#115: mirror openWindow's seed so a chip without an open window
+            // still reflects the same color — live win.color, saved pref.color,
+            // the launch-profile default (#115), the host default (#103), then the
+            // palette auto-pick.
             const ci = String(id).indexOf(':');
             const hid = ci !== -1 ? String(id).slice(0, ci) : 'local';
+            const sess = sessions.get(id);
             const color = (win && win.color) || pref.color
+                || profileDefaultColor(hid, sess && sess.profile)
                 || hostDefaultColor(hid) || defaultColor(id);
             el.style.setProperty('--accent', color);
         }
@@ -39,12 +42,14 @@
             el.className = 'taskbar-item';
             el.dataset.sessionId = key;
             const pref = prefs[key] || {};
-            // #103: seed from the host default when there is no saved per-window
-            // color, so the chip matches a would-be terminal on that host.
+            // #103/#115: seed from the launch-profile default (#115), else the
+            // host default (#103), when there is no saved per-window color — so
+            // the chip matches a would-be terminal on that host/profile.
             const ci = key.indexOf(':');
             const hid = ci !== -1 ? key.slice(0, ci) : 'local';
             el.style.setProperty('--accent',
-                pref.color || hostDefaultColor(hid) || defaultColor(key));
+                pref.color || profileDefaultColor(hid, s.profile)
+                || hostDefaultColor(hid) || defaultColor(key));
             const idSpan = document.createElement('span');
             idSpan.className = 'ti-id';
             idSpan.textContent = '#' + (s.sid != null ? s.sid : s.id);
@@ -268,6 +273,7 @@
                         kind: s.kind,
                         agent: s.agent || '',   // absent on old brokers
                         cwd: s.cwd || '',       // absent on old brokers
+                        profile: s.profile || '', // #115: launch profile (old brokers: '')
                         mcp: s.mcp || 'off',    // effective MCP mode (old brokers: off)
                         mcpKnown: ('mcp' in s), // broker reports MCP at all?
                         stale,
@@ -469,6 +475,20 @@
             // /launch returns the new id and ?session= deep links seed it;
             // open each parked key the moment it shows up in its host's
             // /sessions.
+            // #115: warm each reachable host's /profiles (which now carries the
+            // per-profile color map) BEFORE opening any parked/restored window, so
+            // openWindow seeds the window FRAME from its launch-profile color on
+            // the first paint. Without this, a restored window opened on the first
+            // poll (cache cold) would fall through to the host/auto color and the
+            // FRAME would never correct (updateTaskbarColor only fixes the chip).
+            // fetchProfiles caches, so this is one fetch per host per page load;
+            // the `ok` gate keeps us off unreachable/unauth hosts (no auth pop).
+            if (pendingOpens.size) {
+                await Promise.all(hosts.map(h =>
+                    (pollStateFor(h.id).ok && !profilesCache.has(h.id))
+                        ? fetchProfiles(h) : null));
+                if (_deactivated) return;   // a teardown may land during the await
+            }
             if (pendingOpens.size) {
                 const now = Date.now();
                 for (const [key, deadline] of Array.from(pendingOpens)) {
