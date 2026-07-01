@@ -89,6 +89,9 @@
             font-family: monospace;
             font-size: 11px;
             padding: 2px 8px;
+            /* #103: border-box so a 2px per-host identity border (set inline in
+               renderHostStatus) doesn't jitter chip width vs the 1px default. */
+            box-sizing: border-box;
             border-radius: 3px;
             border: 1px solid var(--bg-3);
             background: var(--bg);
@@ -254,8 +257,14 @@
            visible even when the title bar is that same color) that opens a
            dropdown of preset swatches. Replaces both the native
            <input type=color> (terminals) and the inline swatch row (notes). */
-        .term-window .color-btn { padding: 0; }
-        .term-window .color-dot {
+        /* #103: the same picker is reused in the Hosts settings pane
+           (per-host default color), so every window-scoped picker rule is
+           extended with a #set-hosts-list twin — additive, so window
+           specificity/behavior is unchanged. */
+        .term-window .color-btn,
+        #set-hosts-list .color-btn { padding: 0; }
+        .term-window .color-dot,
+        #set-hosts-list .color-dot {
             width: 12px;
             height: 12px;
             border-radius: 50%;
@@ -264,7 +273,8 @@
             box-shadow: 0 0 0 1px rgba(255,255,255,0.55);
             box-sizing: border-box;
         }
-        .term-window .swatch-popover {
+        .term-window .swatch-popover,
+        #set-hosts-list .swatch-popover {
             position: absolute;
             z-index: 50;
             display: grid;
@@ -277,7 +287,8 @@
             border-radius: 4px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.5);
         }
-        .term-window .swatch-cell {
+        .term-window .swatch-cell,
+        #set-hosts-list .swatch-cell {
             width: 20px;
             height: 20px;
             padding: 0;
@@ -286,21 +297,26 @@
             box-sizing: border-box;
             cursor: pointer;
         }
-        .term-window .swatch-cell:hover { transform: scale(1.12); }
-        .term-window .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
+        .term-window .swatch-cell:hover,
+        #set-hosts-list .swatch-cell:hover { transform: scale(1.12); }
+        .term-window .swatch-cell.sel,
+        #set-hosts-list .swatch-cell.sel { box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
         /* Custom-color cell (#29): a 12th slot that opens a native color input.
            An eyedropper icon on a neutral fill sets it apart from the round
            preset swatches. */
-        .term-window .swatch-cell.custom {
+        .term-window .swatch-cell.custom,
+        #set-hosts-list .swatch-cell.custom {
             display: flex; align-items: center; justify-content: center;
             background: var(--bg-3, #555); color: #fff;
         }
-        .term-window .swatch-cell.custom svg {
+        .term-window .swatch-cell.custom svg,
+        #set-hosts-list .swatch-cell.custom svg {
             width: 12px; height: 12px; display: block;
         }
         /* Recents row (#29): the last-used colors, separated from the presets by
            a full-width divider spanning all four grid columns. */
-        .term-window .swatch-divider {
+        .term-window .swatch-divider,
+        #set-hosts-list .swatch-divider {
             grid-column: 1 / -1;
             height: 1px;
             margin: 1px 0;

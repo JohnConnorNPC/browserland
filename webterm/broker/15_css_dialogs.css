@@ -99,7 +99,9 @@
         .set-mod-radio { flex-wrap: wrap; gap: 4px 14px; }
         .set-mod-radio label { display: inline-flex; align-items: center; gap: 5px;
             cursor: pointer; user-select: none; }
-        .host-row { font-family: monospace; font-size: 12px; }
+        /* position:relative anchors the per-host color popover (#103, the reused
+           swatch picker) to the row instead of the whole settings pane. */
+        .host-row { font-family: monospace; font-size: 12px; position: relative; }
         .host-row .host-name {
             flex: 1 1 auto;
             min-width: 0;

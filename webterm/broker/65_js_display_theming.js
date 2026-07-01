@@ -273,15 +273,19 @@
             return { accent: normalizeHex(accent), paper, fg };
         }
 
-        // Unified window-color picker (issue 5). Builds the title-bar control
-        // shared by terminals AND app windows: a colored button whose dot
-        // tracks --accent, opening a dropdown of preset swatches. `swatches` is
-        // an array of { color, paper?, fg? }; `applyPick(sw)` does the
-        // window-type-specific recolor + persistence (prefs for terminals,
-        // appStore via saveAppWindow for app windows). Returns the button so the
-        // caller can place it in the title bar; outside-click / Escape dismissal
-        // and teardown are registered on win.cleanups (mirrors the git popover).
-        function attachColorPicker(win, titleBar, swatches, applyPick) {
+        // Unified color picker (issue 5; generalized #103). Builds a colored
+        // button whose dot tracks the target's current color, opening a dropdown
+        // of preset swatches. `target` is any DUCK-TYPED object exposing
+        // { color (getter), disposed, cleanups } — a real window (terminals, app
+        // windows) OR a lightweight host-row shim (#103, the Hosts settings pane);
+        // `container` is the element the popover mounts into (a title bar, or a
+        // host row). `swatches` is an array of { color, paper?, fg? };
+        // `applyPick(sw)` does the target-specific recolor + persistence (prefs
+        // for terminals, appStore via saveAppWindow for app windows, prefs._hosts
+        // for the per-host default). Returns the button so the caller can place
+        // it; outside-click / Escape dismissal and teardown are registered on
+        // target.cleanups (mirrors the git popover).
+        function attachColorPicker(target, container, swatches, applyPick) {
             const stopProp = (e) => e.stopPropagation();
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -309,16 +313,16 @@
                 }
             };
             // Hidden native color input for the custom-color cell (#29). One per
-            // picker, reused across opens and cleaned up with the window, so it
+            // picker, reused across opens and cleaned up with the target, so it
             // never accumulates on document.body. Its change fires after the OS
-            // dialog closes — possibly after closePop/window-close, so guard on
-            // win.disposed before mutating anything.
+            // dialog closes — possibly after closePop/target-dispose, so guard on
+            // target.disposed before mutating anything.
             const colorInput = document.createElement('input');
             colorInput.type = 'color';
             colorInput.style.display = 'none';
             document.body.appendChild(colorInput);
             const onColorPick = () => {
-                if (win.disposed) return;
+                if (target.disposed) return;
                 applyPick({ color: colorInput.value });
                 closePop();
             };
@@ -327,7 +331,7 @@
                 if (pop) { closePop(); return; }   // toggle
                 pop = document.createElement('div');
                 pop.className = 'swatch-popover';
-                const cur = normalizeHex(win.color);
+                const cur = normalizeHex(target.color);
                 swatches.forEach((sw) => {
                     const cell = document.createElement('button');
                     cell.type = 'button';
@@ -359,7 +363,7 @@
                 customCell.addEventListener('mousedown', stopProp);
                 customCell.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    colorInput.value = normalizeHex(win.color);   // start at current
+                    colorInput.value = normalizeHex(target.color);   // start at current
                     colorInput.click();    // OS picker; change -> applyPick (above)
                 });
                 pop.appendChild(customCell);
@@ -386,11 +390,11 @@
                         pop.appendChild(cell);
                     });
                 }
-                titleBar.appendChild(pop);
-                // Right-align under the button and clamp inside the title bar so
-                // a button near the window's right edge never overflows.
+                container.appendChild(pop);
+                // Right-align under the button and clamp inside the container so
+                // a button near its right edge never overflows.
                 const popW = pop.offsetWidth;
-                const tbW = titleBar.clientWidth;
+                const tbW = container.clientWidth;
                 let left = btn.offsetLeft + btn.offsetWidth - popW;
                 left = Math.max(2, Math.min(left, Math.max(2, tbW - popW - 2)));
                 pop.style.top = (btn.offsetTop + btn.offsetHeight + 2) + 'px';
@@ -401,7 +405,7 @@
             const onClick = (e) => { e.stopPropagation(); openPop(); };
             btn.addEventListener('mousedown', stopProp);
             btn.addEventListener('click', onClick);
-            win.cleanups.push(() => {
+            target.cleanups.push(() => {
                 btn.removeEventListener('mousedown', stopProp);
                 btn.removeEventListener('click', onClick);
                 colorInput.removeEventListener('change', onColorPick);
