@@ -6,6 +6,7 @@ grants shell-level filesystem access). These cover the resolution rules and the
 half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
 import base64
+import hashlib
 import os
 import stat
 import sys
@@ -825,8 +826,9 @@ def test_chunk_routes_registered(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     paths = {"/" + r.path.lstrip("/") for r in app.router.routes}
     for p in ("/file/read_chunk", "/file/upload_begin", "/file/upload_chunk",
-              "/file/upload_commit", "/file/upload_abort"):
-        assert p in paths, f"missing #108 route {p}"
+              "/file/upload_commit", "/file/upload_abort",
+              "/file/hash"):                   # #110
+        assert p in paths, f"missing chunk/hash route {p}"
 
 
 # ---- /file/read_chunk ----------------------------------------------------
@@ -1110,3 +1112,155 @@ def test_upload_begin_sweeps_stale_session(tmp_path, monkeypatch):
         assert uid1 not in app.ctx.uploads
         assert not os.path.exists(tmp1)
         client.post("/file/upload_abort", json={"upload_id": r.json["upload_id"]})
+
+
+# --------------------------------------------------------------------------- #
+# #110 checksum-verified move — /file/hash + verified upload_commit
+# --------------------------------------------------------------------------- #
+# The auth + OPTIONS preflight for /file/hash are covered by the router-
+# enumerating test_every_file_route_has_options_and_enforces_auth above; these
+# cover the digest itself and the verified-commit gate. /file/hash is a single
+# request (app.test_client); the commit flow spans requests (ReusableClient).
+
+
+def test_file_hash_matches_hashlib(tmp_path, monkeypatch):
+    # /file/hash streams the file through SHA-256; the digest must equal a direct
+    # hashlib.sha256 of the same bytes, and size the byte count.
+    data = bytes((i * 31) % 256 for i in range(10000))
+    (tmp_path / "f.bin").write_bytes(data)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/hash", json={"path": "f.bin"})
+    assert r.status == 200 and r.json["ok"], r.json
+    assert r.json["sha256"] == hashlib.sha256(data).hexdigest()
+    assert r.json["size"] == len(data)
+
+
+def test_file_hash_beats_5mib_cap(tmp_path, monkeypatch):
+    # A >5 MiB file hashes fine — /file/hash is NOT bound by MAX_FILE_BYTES (which
+    # /file/read still enforces), and streams in bounded blocks.
+    big = b"A" * (5 * 2 ** 20 + 4096)          # just over 5 MiB
+    (tmp_path / "big.bin").write_bytes(big)
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 4096)   # force many blocks
+    _, r = app.test_client.post("/file/hash", json={"path": "big.bin"})
+    assert r.status == 200 and r.json["ok"], r.json
+    assert r.json["sha256"] == hashlib.sha256(big).hexdigest()
+    assert r.json["size"] == len(big)
+    # /file/read still rejects the same oversized file, unchanged.
+    _, r = app.test_client.post("/file/read", json={"path": "big.bin"})
+    assert r.status == 400 and r.json["error"] == "too_large"
+
+
+def test_file_hash_empty_file(tmp_path, monkeypatch):
+    # A 0-byte file hashes to sha256(b"") — the same digest an empty upload
+    # session accumulates, so an empty-file move verifies cleanly.
+    (tmp_path / "e.bin").write_bytes(b"")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/hash", json={"path": "e.bin"})
+    assert r.status == 200 and r.json["ok"], r.json
+    assert r.json["sha256"] == hashlib.sha256(b"").hexdigest()
+    assert r.json["size"] == 0
+
+
+def test_file_hash_missing_and_dir_errors(tmp_path, monkeypatch):
+    (tmp_path / "d").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/hash", json={"path": "nope"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+    _, r = app.test_client.post("/file/hash", json={"path": "d"})
+    assert r.status == 400 and r.json["error"] == "not_a_file"
+    _, r = app.test_client.post("/file/hash", json={"path": ""})
+    assert r.status == 400 and r.json["error"] == "bad_path"
+
+
+def test_upload_commit_returns_sha256(tmp_path, monkeypatch):
+    # The copy path: commit WITHOUT expected_sha256 still replaces AND returns the
+    # accumulated sha256 (additive) — matching a direct hashlib of the payload.
+    payload = bytes((i * 17) % 256 for i in range(3000))
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "c.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(payload).decode(),
+                                 "offset": 0})
+        assert r.status == 200
+        _, r = client.post("/file/upload_commit", json={"upload_id": uid})
+        assert r.status == 200 and r.json["ok"], r.json
+        assert r.json["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert r.json["size"] == len(payload)
+    assert (tmp_path / "c.bin").read_bytes() == payload
+
+
+def test_upload_commit_verifies_sha256_match(tmp_path, monkeypatch):
+    # The move path, happy case: commit with the CORRECT expected_sha256 -> 200,
+    # dest replaced.
+    payload = b"move me exactly"
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "m.bin"})
+        uid = r.json["upload_id"]
+        client.post("/file/upload_chunk",
+                    json={"upload_id": uid,
+                          "content_b64": base64.b64encode(payload).decode(),
+                          "offset": 0})
+        _, r = client.post(
+            "/file/upload_commit",
+            json={"upload_id": uid,
+                  "expected_sha256": hashlib.sha256(payload).hexdigest()})
+        assert r.status == 200 and r.json["ok"], r.json
+    assert (tmp_path / "m.bin").read_bytes() == payload
+
+
+def test_upload_commit_rejects_sha256_mismatch(tmp_path, monkeypatch):
+    # The move path, corruption case: a wrong expected_sha256 -> 409
+    # checksum_mismatch; temp + session dropped; a PRE-EXISTING dest keeps its OLD
+    # bytes (the os.replace is REFUSED, never overwriting good data with bad).
+    (tmp_path / "d.bin").write_bytes(b"ORIGINAL-GOOD-DEST")
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin",
+                           json={"path": "d.bin", "overwrite": True})
+        uid = r.json["upload_id"]
+        tmp = app.ctx.uploads[uid]["tmp"]
+        client.post("/file/upload_chunk",
+                    json={"upload_id": uid,
+                          "content_b64": base64.b64encode(b"NEWBYTES").decode(),
+                          "offset": 0})
+        _, r = client.post("/file/upload_commit",
+                           json={"upload_id": uid,
+                                 "expected_sha256": "0" * 64})   # valid hex, wrong
+        assert r.status == 409 and r.json["error"] == "checksum_mismatch", r.json
+        assert r.json["sha256"] == hashlib.sha256(b"NEWBYTES").hexdigest()
+        assert uid not in app.ctx.uploads      # session dropped
+        assert not os.path.exists(tmp)         # temp dropped
+    # The existing dest was NEVER replaced — still holds its original bytes.
+    assert (tmp_path / "d.bin").read_bytes() == b"ORIGINAL-GOOD-DEST"
+
+
+def test_upload_commit_rejects_malformed_sha256(tmp_path, monkeypatch):
+    # A present-but-malformed expected_sha256 -> 400 bad_sha256 WITHOUT committing
+    # and WITHOUT dropping the session (a bad request must never silently downgrade
+    # a verified move to an unverified one, nor 500 on a non-string). The session
+    # survives so a correct re-commit (or abort) is still possible.
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "bad.bin"})
+        uid = r.json["upload_id"]
+        client.post("/file/upload_chunk",
+                    json={"upload_id": uid,
+                          "content_b64": base64.b64encode(b"hi").decode(),
+                          "offset": 0})
+        for bad in ("deadbeef", "z" * 64, 12345, ["abc"]):
+            _, r = client.post("/file/upload_commit",
+                               json={"upload_id": uid, "expected_sha256": bad})
+            assert r.status == 400 and r.json["error"] == "bad_sha256", (bad, r.json)
+            assert uid in app.ctx.uploads      # session KEPT
+        # A correct re-commit on the same live session still lands.
+        _, r = client.post(
+            "/file/upload_commit",
+            json={"upload_id": uid,
+                  "expected_sha256": hashlib.sha256(b"hi").hexdigest()})
+        assert r.status == 200 and r.json["ok"], r.json
+    assert (tmp_path / "bad.bin").read_bytes() == b"hi"

@@ -858,6 +858,30 @@ def test_file_upload_roundtrip(broker_proc, tmp_path):
             pass
 
 
+def test_file_hash_roundtrip(broker_proc, tmp_path):
+    # #110: a live /file/hash returns the SHA-256 of the file's bytes (this is what
+    # a cross-host move hashes on the source before gating its source-delete).
+    import hashlib as _hashlib
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    blob = bytes(range(256)) * 40              # >5 MiB? no — small but non-UTF-8
+    target = tmp_path / "hash_me.bin"
+    target.write_bytes(blob)
+    status, resp = _http(
+        "POST", f"{base}/file/hash",
+        body=json.dumps({"path": str(target)}).encode(), headers=auth)
+    assert status == 200 and resp["ok"] is True, resp
+    assert resp["sha256"] == _hashlib.sha256(blob).hexdigest()
+    assert resp["size"] == len(blob)
+    # Auth is enforced (same gate as every /file/*).
+    status, _ = _http(
+        "POST", f"{base}/file/hash",
+        body=json.dumps({"path": str(target)}).encode(),
+        headers={"Content-Type": "application/json"})
+    assert status == 401
+
+
 def test_file_api_is_host_wide(broker_proc, tmp_path):
     """#35: the file API browses the WHOLE host (same auth gate as /launch, which
     already grants shell-level filesystem access). ANY absolute path reads/writes

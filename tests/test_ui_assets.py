@@ -1129,6 +1129,38 @@ def test_file_capability_chunked_ops_present():
     assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
 
 
+def test_checksum_verified_move_present():
+    # #110: ctx.file gains hash() and threads expected_sha256 into uploadCommit;
+    # the file-manager's cross-host MOVE hashes the source and gates the source-
+    # delete on a VERIFIED commit. ctxVersion stays 1 (additive). The capability is
+    # mirrored in the fmFile() fallback so I/O is identical mods on or off.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
+        assert "hash: function" in src, f"{label} missing hash() method"
+        assert "'/file/hash'" in src, f"{label} does not wrap /file/hash"
+        # expected_sha256 is conditionally threaded into the commit body (not the
+        # old bare {upload_id} literal), matching read/write's field style.
+        assert "expected_sha256" in src, \
+            f"{label} does not thread expected_sha256 into uploadCommit"
+    # ctxVersion unchanged (additive capability).
+    assert "ctxVersion: 1" in loader
+    # The new route + method reach the served page.
+    assert "'/file/hash'" in INDEX_HTML and "hash: function" in INDEX_HTML, \
+        "#110 /file/hash missing from served page"
+    # The MOVE actually DRIVES the verification: hash the source, and a distinct
+    # checksum-mismatch outcome keeps the source (never a silent bad delete).
+    assert "fmFile().hash(" in fm, "move does not hash the source"
+    assert "checksum_mismatch" in fm, "move does not handle a checksum_mismatch"
+    assert "checksum mismatch" in fm, "move missing a checksum-mismatch notice"
+    # The old size-only move check is gone (the SHA-256 match supersedes it).
+    assert "the source changed" not in fm, \
+        "dead size-only move check remains — superseded by the SHA-256 gate"
+    # The mod still routes ALL I/O through the capability — no raw fetch snuck in.
+    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+
+
 def test_transfer_progress_window_present():
     # #109: cross-host transfer + in-app download show a Win9x-style modal
     # progress window with a byte-accurate bar + a working Cancel. Core adds ONE
