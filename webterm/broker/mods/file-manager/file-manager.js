@@ -1111,12 +1111,29 @@
                         }
                     };
                     if (win.disposed) { await abortWritable(); return; }
+                    // #109: live progress window for the streamed download +
+                    // Cancel. Opened AFTER showSaveFilePicker/createWritable so
+                    // the picker's user-activation is never spent on the dialog;
+                    // the Firefox (no-picker) fallback has no gesture to protect,
+                    // so this is effectively at the top. The finally below closes
+                    // it on every exit (success, cancel, error, win.disposed).
+                    const progress = openProgressDialog({
+                        title: 'Downloading', name: ent.name,
+                        from: hostPickerLabel(host) + ' — ' + child,
+                        to: ent.name });
                     // Shared chunked read loop. offset advances by the DECODED
-                    // bytes the server reports (rc.length), never the base64 length.
+                    // bytes the server reports (rc.length), never the base64
+                    // length; total is captured from the first chunk's rc.size.
                     const parts = [];
                     let offset = 0;
+                    let total = null;
                     try {
                         while (true) {
+                            if (progress.signal.aborted) {
+                                await abortWritable();
+                                showNotice('download cancelled');
+                                return;
+                            }
                             const rc = await fmFile().readChunk(child,
                                 { host: host.id, offset: offset,
                                   length: FM_CHUNK_BYTES });
@@ -1131,6 +1148,7 @@
                                 showNotice('download failed: ' + err);
                                 return;
                             }
+                            if (total === null) total = rc.size;
                             const bin = atob(rc.content_b64);
                             const bytes = new Uint8Array(bin.length);
                             for (let i = 0; i < bin.length; i++) {
@@ -1139,6 +1157,7 @@
                             if (writable) await writable.write(bytes);
                             else parts.push(bytes);
                             offset += rc.length;
+                            progress.update(offset, total);
                             // A 0-byte non-EOF read would spin forever — bail.
                             if (rc.length === 0 && !rc.eof) {
                                 await abortWritable();
@@ -1147,6 +1166,15 @@
                                 return;
                             }
                             if (rc.eof) break;
+                        }
+                        // A Cancel during the final chunk breaks on eof before the
+                        // loop-top check re-runs — re-check before finalizing so a
+                        // late Cancel discards the file (FSA writable.abort drops
+                        // it; the fallback simply never builds the Blob/anchor).
+                        if (progress.signal.aborted) {
+                            await abortWritable();
+                            showNotice('download cancelled');
+                            return;
                         }
                         if (writable) {
                             await writable.close();
@@ -1164,6 +1192,8 @@
                     } catch (_) {
                         await abortWritable();
                         showNotice('download failed: could not save ' + ent.name);
+                    } finally {
+                        progress.close();
                     }
                 };
                 // Zip a file/folder into a .zip in this dir (prompt for the name).
