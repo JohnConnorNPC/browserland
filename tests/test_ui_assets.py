@@ -1426,7 +1426,10 @@ def test_loadmods_honors_per_mod_disabled_under_master_gate():
     boot = loader[loader.index("async function loadMods"):]
     # master gate returns BEFORE the pane mount + the per-mod skip.
     assert boot.index("mods_enabled=false") < boot.index("_mountModsManagerPane()")
-    assert boot.index("_mountModsManagerPane()") < boot.index("disabled.has(decl.id)")
+    # #116: the per-mod skip now gates on the resolved enable state (default XOR
+    # override) instead of a raw disabled-set lookup, so a default-off mod stays
+    # off until opted in. The pane still mounts before the skip.
+    assert boot.index("_mountModsManagerPane()") < boot.index("isModEnabled(decl.id)")
     # stale ids are pruned so the set can't grow junk.
     assert "pruned" in boot
 

@@ -72,6 +72,13 @@
                 tiers: Array.isArray(decl.tiers)
                     ? decl.tiers.filter(function (t) { return typeof t === 'string'; })
                     : [],
+                // #116 (S14): declared boot default. Omitted => true (every
+                // existing mod is default-on, so their meaning is unchanged);
+                // `defaultEnabled:false` ships a mod OFF until the operator opts
+                // in via the Mods pane. The persisted enable set stores ids
+                // TOGGLED AWAY from this default (see _modsDisabled below), so a
+                // default-off mod is absent from the set until enabled.
+                defaultEnabled: (decl.defaultEnabled !== false),
                 init: decl.init,
             });
         }
@@ -990,14 +997,21 @@
         // Operator enable/disable PER MOD, layered on the broker's mods_enabled
         // master gate (master off => loadMods returns before any of this, so every
         // mod is off regardless of per-mod state — the gate stays absolute). State
-        // is stored loader-private in localStorage as a DISABLED set of ids, NOT in
-        // the synced /state settings blob: a /state pull from another browser would
-        // otherwise live-tear-down a mod you are actively using (e.g. an open file
-        // manager). So this is deliberately PER-BROWSER. "Disabled list" (not an
-        // "enabled list") semantics means a NEWLY shipped mod defaults ON — it is
-        // simply absent from the set — matching the pre-#86 "init every registered
-        // mod" behavior. localStorage failures are swallowed: the toggle then has no
-        // durable effect but never throws, and reflect() re-reads the real state.
+        // is stored loader-private in localStorage, NOT in the synced /state
+        // settings blob: a /state pull from another browser would otherwise
+        // live-tear-down a mod you are actively using (e.g. an open file manager).
+        // So this is deliberately PER-BROWSER.
+        //
+        // #116 (S14): the set holds "ids TOGGLED AWAY from their declared
+        // default" (registerMod's defaultEnabled). Absent-from-set => the mod is
+        // at its default. For every default-ON mod this is byte-for-byte the old
+        // "disabled list" (present => off), so there is ZERO migration; a
+        // default-OFF mod (git, #116) is the mirror image — present in the set
+        // means it has been ENABLED, absent means off. The key name stays
+        // `webterm:mods:disabled` for that same zero-migration reason (a legacy
+        // set of default-on ids keeps meaning "off"). localStorage failures are
+        // swallowed: the toggle then has no durable effect but never throws, and
+        // reflect() re-reads the real state.
         const MODS_DISABLED_KEY = 'webterm:mods:disabled';
         function _modsDisabled() {
             let raw = null;
@@ -1019,7 +1033,21 @@
                     JSON.stringify(Array.from(set)));
             } catch (_) {}
         }
-        function isModEnabled(id) { return !_modsDisabled().has(id); }
+        // A mod's DECLARED default (registerMod defaultEnabled). Unknown id ->
+        // true (treated like a default-on mod so a stale id is inert, not stuck).
+        function _modDefault(id) {
+            const rec = window.__mods.registered.find(
+                function (m) { return m.id === id; });
+            return rec ? rec.defaultEnabled !== false : true;
+        }
+        // Enabled = default XOR overridden. The set lists ids toggled AWAY from
+        // their default (#116): present flips the default, absent keeps it. For a
+        // default-on mod this is the old `!disabled.has(id)`; for a default-off
+        // mod it is the mirror (present => enabled).
+        function isModEnabled(id) {
+            const def = _modDefault(id);
+            return _modsDisabled().has(id) ? !def : def;
+        }
         // Persist the per-mod choice AND apply it live, reusing the SAME isolated
         // initMod/disableMod paths boot uses (so a live toggle exercises production
         // code, not a parallel harness). Only a KNOWN (registered) id is accepted
@@ -1033,7 +1061,10 @@
             if (!decl) return null;
             on = !!on;
             const set = _modsDisabled();
-            if (on) set.delete(id); else set.add(id);
+            // Store an id only while it is toggled AWAY from its default (#116);
+            // at-default means absent, so a default-off mod that gets disabled
+            // and a default-on mod that gets enabled both leave NO junk entry.
+            if (on === _modDefault(id)) set.delete(id); else set.add(id);
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
                 if (on) {
@@ -1063,9 +1094,8 @@
             const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
             const rows = [];
             function _reflectManager() {
-                const disabled = _modsDisabled();
                 for (const r of rows) {
-                    const enabled = !disabled.has(r.id);
+                    const enabled = isModEnabled(r.id);   // default XOR override (#116)
                     r.cb.checked = enabled;
                     let state;
                     if (!enabled) state = 'off';
@@ -1168,7 +1198,9 @@
             }
             if (pruned) _writeModsDisabled(disabled);
             for (const decl of window.__mods.registered.slice()) {
-                if (disabled.has(decl.id)) {
+                // #116: gate on the resolved enable state (default XOR override),
+                // so a default-off mod (git) stays off until the operator opts in.
+                if (!isModEnabled(decl.id)) {
                     console.info('[mods] "' + decl.id + '" disabled by operator');
                     continue;
                 }
