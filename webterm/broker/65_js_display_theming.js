@@ -74,6 +74,12 @@
                 + '<path d="M4 4h16v11l-5 5H4z" fill="#f5d90a" stroke="#b39a00" stroke-width="1.2" stroke-linejoin="round"/>'
                 + '<path d="M15 20v-5h5" fill="#e6c200" stroke="#b39a00" stroke-width="1.2" stroke-linejoin="round"/>'
                 + '<path d="M7 9h10M7 12h7" stroke="#8a7500" stroke-width="1.4" stroke-linecap="round"/></svg>',
+            'scratchpad':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<rect x="5" y="3.5" width="14" height="17" rx="2" fill="#d3f4ee" stroke="#0e6a5e" stroke-width="1.2"/>'
+                + '<path d="M5 8h14" stroke="#0e6a5e" stroke-width="1.2"/>'
+                + '<path d="M8 3.5v4M12 3.5v4M16 3.5v4" stroke="#0e6a5e" stroke-width="1.4" stroke-linecap="round"/>'
+                + '<path d="M8 12h8M8 15h8M8 18h5" stroke="#15a58e" stroke-width="1.4" stroke-linecap="round"/></svg>',
             'file-manager':
                 '<svg viewBox="0 0 24 24" aria-hidden="true">'
                 + '<path d="M3 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#4c8dff" stroke="#1c4b9c" stroke-width="1.2" stroke-linejoin="round"/>'
