@@ -272,6 +272,9 @@
                     //   boolean(key, def, {label,title,isBrowserGlobal})  -> checkbox
                     //   radio(key, [{value,label}], {label,title,def,isBrowserGlobal})
                     //   select(key, [{value,label}], {label,title,def,isBrowserGlobal})
+                    //   combo(key,  [{value,label}], {label,title,def,isBrowserGlobal})
+                    //     -> searchable <input list>+<datalist> (type-to-filter a
+                    //        long list; the empty-value option becomes placeholder)
                     boolean: function (key, def, opts) {
                         return _modSettingBoolean(rec, key, def, opts);
                     },
@@ -280,6 +283,9 @@
                     },
                     select: function (key, options, opts) {
                         return _modSettingChoice(rec, 'select', key, options, opts);
+                    },
+                    combo: function (key, options, opts) {
+                        return _modSettingChoice(rec, 'combo', key, options, opts);
                     },
                 },
                 // #74: a full custom Control Panel section, for controls richer
@@ -515,6 +521,61 @@
                             if (rb.checked) accessor.set(rb.value);
                         });
                     }
+                };
+            } else if (kind === 'combo') {
+                // Searchable variant of select: an <input list> + <datalist> the
+                // user can TYPE into to substring-filter a long option list (a
+                // native <select> only prefix-matches). Same _valueAccessor
+                // persistence / validation / convergence as select — only the
+                // widget DOM differs. The empty-value option (if any) becomes the
+                // input placeholder, so a blank input reads as that "(default)"
+                // label instead of a bare, blank datalist row.
+                const row = document.createElement('div');
+                row.className = 'set-row';
+                if (opts.label) {
+                    const lab = document.createElement('label');
+                    lab.textContent = opts.label;
+                    row.appendChild(lab);
+                }
+                const uid = 'set-mod-' + rec.id + '-' + key + '-list';
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.setAttribute('list', uid);
+                const datalist = document.createElement('datalist');
+                datalist.id = uid;
+                for (const o of options) {
+                    if (o.value === '') {
+                        input.placeholder = o.label;   // blank input => this label
+                        continue;                      // no empty datalist row
+                    }
+                    const op = document.createElement('option');
+                    op.value = o.value;
+                    if (o.label !== o.value) op.label = o.label;
+                    datalist.appendChild(op);
+                }
+                row.appendChild(input);
+                row.appendChild(datalist);
+                section.appendChild(row);
+                // Focus guard: a /state convergence must not clobber an in-progress
+                // edit (the pane contract, applied to a text input).
+                reflect = function () {
+                    if (document.activeElement === input) return;
+                    input.value = read();
+                };
+                bindChange = function (accessor) {
+                    input.addEventListener('change', function () {
+                        accessor.set(input.value);   // no-op for an unknown value
+                        input.value = read();        // snap back garbage / show stored
+                    });
+                    // reflect() skips a /state convergence that lands while this
+                    // input is focused (the focus guard). onChange still fires, so
+                    // the mod repaints — but the widget can stay stale if the edit
+                    // ends with no local change event. Reconcile the display on
+                    // blur so a remote change made during an edit is never left
+                    // visually stale.
+                    input.addEventListener('blur', function () {
+                        input.value = read();
+                    });
                 };
             } else {
                 const row = document.createElement('div');

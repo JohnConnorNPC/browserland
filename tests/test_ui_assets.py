@@ -339,8 +339,9 @@ def test_settings_extension_api_present():
         "function _normChoiceOptions",
     ):
         assert sym in INDEX_HTML, f"missing settings-extension symbol: {sym!r}"
-    # ctx.settings now exposes radio/select next to the unchanged boolean.
-    for sym in ("boolean: function", "radio: function", "select: function"):
+    # ctx.settings now exposes radio/select/combo next to the unchanged boolean.
+    for sym in ("boolean: function", "radio: function", "select: function",
+                "combo: function"):
         assert sym in INDEX_HTML, f"missing ctx.settings widget: {sym!r}"
     # The #set-mods host is no longer itself browser-global (visibility is now
     # per-mounted-section, driven by each control's isBrowserGlobal opt), so a
