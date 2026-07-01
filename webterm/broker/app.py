@@ -49,6 +49,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -76,6 +77,26 @@ DEFAULT_PORT = 4445
 # is enforced on the ENCODED payload, not the character count — correct for
 # UTF-16's ~2x size).
 MAX_FILE_BYTES = 5 * 2**20  # 5 MiB
+
+# Chunked transfer (#108): the cross-host copy/move byte path and in-app
+# download stream a file through /file/read_chunk + the /file/upload_* session
+# endpoints, so the 5 MiB whole-file cap above no longer bounds them. Two caps
+# keep per-request memory and per-session disk bounded:
+#   MAX_CHUNK_BYTES     — the largest single ranged read, and the largest DECODED
+#                         size of one upload chunk. One chunk (~5.3 MiB base64)
+#                         is the most a broker or the browser holds in flight.
+#   MAX_TRANSFER_BYTES  — cumulative decoded bytes one upload session may accept
+#                         before it is dropped (backpressure vs disk exhaustion;
+#                         cf. MAX_ARCHIVE_BYTES below).
+MAX_CHUNK_BYTES = 4 * 2**20        # 4 MiB per ranged read / upload chunk
+MAX_TRANSFER_BYTES = 2 * 2**30     # 2 GiB cumulative per upload session
+# In-flight upload sessions (#108) live in-memory on app.ctx (the broker runs
+# single_process, so one dict is authoritative — see __main__). Bound their
+# count so idle/abandoned begins can't exhaust the table, and expire stale ones
+# (a browser that closed mid-transfer never sends commit/abort) so their temp
+# files don't linger.
+MAX_UPLOAD_SESSIONS = 32
+UPLOAD_SESSION_TTL = 3600.0        # seconds since begin before a sweep drops it
 
 
 # Non-UTF-8 editor support (#97). The broker ships only sanic+websockets, so
@@ -828,6 +849,42 @@ def _classify_path(p: Path) -> str:
         return "denied"
 
 
+def _sweep_upload_sessions(uploads: Dict[str, Any], now: float) -> None:
+    """Drop chunked-upload sessions (#108) older than ``UPLOAD_SESSION_TTL`` and
+    best-effort unlink their temp files. Called lazily on each upload_begin so a
+    transfer the browser abandoned (closed before commit/abort) can't leak a temp
+    file or permanently hold a session slot. Keyed by ``created`` (not last-write)
+    so a genuinely stuck/idle session is reclaimed even if it never appended."""
+    stale = [uid for uid, s in uploads.items()
+             if now - s.get("created", now) > UPLOAD_SESSION_TTL]
+    for uid in stale:
+        s = uploads.pop(uid, None)
+        if s:
+            try:
+                os.unlink(s["tmp"])
+            except OSError:
+                pass
+
+
+def _sweep_orphan_parts(parent: Path, now: float) -> None:
+    """Best-effort removal of stale ``.webterm-up-*.part`` temp files directly
+    under ``parent`` (#108). A crash/kill orphans a session's temp on disk without
+    ever running the in-memory sweep; scanning the ONE dir an upload_begin is
+    about to write catches those. Only files older than the TTL are removed, so an
+    active young session's temp (recent mtime) is never touched. Any error is
+    swallowed — host-wide, so a dir we can't scan simply isn't swept."""
+    try:
+        candidates = list(parent.glob(".webterm-up-*.part"))
+    except OSError:
+        return
+    for child in candidates:
+        try:
+            if now - child.stat().st_mtime > UPLOAD_SESSION_TTL:
+                child.unlink()
+        except OSError:
+            pass
+
+
 def _json_object_body(request: "Request") -> Optional[Dict[str, Any]]:
     """Parsed JSON object body, or None on malformed / non-object JSON. An
     empty body is treated as ``{}`` (mirrors the /launch handler)."""
@@ -931,6 +988,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.editor_root = Path(
         config.get("editor_root") or os.getcwd()).resolve()
     LOGGER.info("editor file-API default dir: %s", app.ctx.editor_root)
+    # In-flight chunked-upload sessions (#108), keyed by upload_id. Each value is
+    # {tmp, dest, overwrite, received, created}. Populated by /file/upload_begin,
+    # appended by /file/upload_chunk, drained by /file/upload_commit|abort, and
+    # swept (lazily on begin + on shutdown) so an abandoned transfer's temp file
+    # never lingers. Single_process => this one dict is the source of truth.
+    app.ctx.uploads = {}
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -2096,6 +2159,253 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({"ok": True, "path": str(p)})
 
+    # ---- chunked transfer (#108) -----------------------------------------
+    # Lift the 5 MiB whole-file cap for the two BYTE paths — cross-host copy/move
+    # and in-app download — by streaming a file in bounded chunks. /file/read_chunk
+    # is a ranged read; the /file/upload_* trio is an append-and-atomic-replace
+    # upload session. All POST with the SAME auth gate as every other /file/* route
+    # (so the route-enumeration auth test covers them unchanged), and none is bound
+    # by MAX_FILE_BYTES. The editor's careful capped whole-file /file/read is left
+    # untouched — a dedicated ranged endpoint keeps that regression surface at nil.
+    async def _file_read_chunk(request: Request):
+        # Ranged read: seek(offset), read up to min(length, MAX_CHUNK_BYTES). The
+        # response carries the DECODED chunk length so the client advances offset
+        # by real bytes — never by the total size or the base64 string length.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        offset = body.get("offset", 0)
+        length = body.get("length", MAX_CHUNK_BYTES)
+        # Strict ints (bool is an int subclass — exclude it) so a bad range is a
+        # clean 400, never a seek/read TypeError surfacing as a 500.
+        if (isinstance(offset, bool) or isinstance(length, bool)
+                or not isinstance(offset, int) or not isinstance(length, int)
+                or offset < 0 or length < 1):
+            return sanic_json({"ok": False, "error": "bad_range"}, status=400)
+        length = min(length, MAX_CHUNK_BYTES)   # never read more than one chunk
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if kind != "file":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        try:
+            # stat per call so eof reflects the CURRENT size (best-effort live
+            # read; a file that grows/shrinks mid-stream converges each round —
+            # #110 adds a checksum for integrity, out of scope here).
+            size = p.stat().st_size
+            with p.open("rb") as fh:
+                fh.seek(offset)
+                raw = fh.read(length)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({
+            "ok": True,
+            "path": str(p),                 # absolute, host-wide (#35)
+            "content_b64": base64.b64encode(raw).decode("ascii"),
+            "length": len(raw),             # decoded bytes in THIS chunk
+            "size": size,                   # total file size
+            "offset": offset,
+            "eof": offset + len(raw) >= size,
+        })
+
+    async def _file_upload_begin(request: Request):
+        # Open an upload session at ``path``: validate the dest like /file/upload
+        # (parent is a dir; existing dir -> is_dir; existing file needs overwrite),
+        # then mkstemp a .part file IN THE DEST PARENT so commit's os.replace is an
+        # atomic same-filesystem swap. follow_leaf=False (like move/delete): commit
+        # replaces a symlink/junction leaf as the ENTRY, never through to its target.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        overwrite = bool(body.get("overwrite", False))
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root, follow_leaf=False)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        parent = p.parent
+        pkind = _classify_path(parent)
+        if pkind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if pkind != "dir":
+            return sanic_json({"ok": False, "error": "parent_missing"},
+                              status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "dir":
+            return sanic_json({"ok": False, "error": "is_dir"}, status=400)
+        if kind == "other":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+        if kind == "file" and not overwrite:
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        # Sweep BEFORE the cap check so abandoned sessions free their slot, and
+        # drop crash-orphaned temps in the dir we're about to write.
+        now = time.time()
+        _sweep_upload_sessions(app.ctx.uploads, now)
+        _sweep_orphan_parts(parent, now)
+        if len(app.ctx.uploads) >= MAX_UPLOAD_SESSIONS:
+            return sanic_json({"ok": False, "error": "too_many_sessions"},
+                              status=429)
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".webterm-up-",
+                                       suffix=".part")
+            os.close(fd)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        upload_id = secrets.token_hex(16)
+        app.ctx.uploads[upload_id] = {
+            "tmp": tmp, "dest": str(p), "overwrite": overwrite,
+            "received": 0, "created": now,
+        }
+        return sanic_json({"ok": True, "upload_id": upload_id})
+
+    async def _file_upload_chunk(request: Request):
+        # Append ONE chunk to an open session. Rejects (without appending) a
+        # missing session, bad base64, an oversized decoded chunk, an out-of-order
+        # offset, and a chunk that would push the session past MAX_TRANSFER_BYTES.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        upload_id = body.get("upload_id")
+        b64 = body.get("content_b64")
+        offset = body.get("offset", 0)
+        if not isinstance(upload_id, str) or not isinstance(b64, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            return sanic_json({"ok": False, "error": "bad_offset"}, status=400)
+        session = app.ctx.uploads.get(upload_id)
+        if session is None:
+            return sanic_json({"ok": False, "error": "no_session"}, status=404)
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return sanic_json({"ok": False, "error": "bad_base64"}, status=400)
+        if len(data) > MAX_CHUNK_BYTES:
+            return sanic_json({"ok": False, "error": "chunk_too_large"},
+                              status=400)
+        # Ordering guard: the client streams sequentially, so this chunk must
+        # start exactly where the last ended. A gap/dup/reorder is rejected
+        # WITHOUT appending (never silently corrupts the temp).
+        if offset != session["received"]:
+            return sanic_json({"ok": False, "error": "bad_offset",
+                               "received": session["received"]}, status=409)
+        if session["received"] + len(data) > MAX_TRANSFER_BYTES:
+            # Past the per-session ceiling: drop the whole session (temp + slot)
+            # so a runaway transfer can't keep consuming disk.
+            app.ctx.uploads.pop(upload_id, None)
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": "too_large"}, status=400)
+        try:
+            with open(session["tmp"], "ab") as fh:
+                fh.write(data)
+        except OSError as exc:
+            # A failed append leaves the temp in an unknown state — drop the
+            # session so the client can never commit a corrupt file.
+            app.ctx.uploads.pop(upload_id, None)
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        session["received"] += len(data)       # only after a successful write
+        return sanic_json({"ok": True, "received": session["received"]})
+
+    async def _file_upload_commit(request: Request):
+        # Finalize: atomically os.replace the temp onto the dest. Re-checks the
+        # exists race unless overwriting. On any failure the temp + session are
+        # dropped (nothing leaks). (#110 will verify a SHA-256 here first.)
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        upload_id = body.get("upload_id")
+        if not isinstance(upload_id, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        session = app.ctx.uploads.get(upload_id)
+        if session is None:
+            return sanic_json({"ok": False, "error": "no_session"}, status=404)
+        dest, tmp = session["dest"], session["tmp"]
+        if not session["overwrite"] and os.path.lexists(dest):
+            return sanic_json({"ok": False, "error": "exists"}, status=409)
+        try:
+            size = os.path.getsize(tmp)
+            os.replace(tmp, dest)
+        except OSError as exc:
+            # replace-over-dir (dest turned into a dir since begin) or any IO
+            # error: drop temp + session, report a clear code.
+            app.ctx.uploads.pop(upload_id, None)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            code = "is_dir" if os.path.isdir(dest) else str(exc)
+            return sanic_json({"ok": False, "error": code}, status=400)
+        app.ctx.uploads.pop(upload_id, None)
+        return sanic_json({"ok": True, "path": dest, "size": size})
+
+    async def _file_upload_abort(request: Request):
+        # Idempotent best-effort teardown: pop the session + unlink its temp.
+        # An already-gone session (e.g. a disposal abort racing a completed
+        # commit) still returns {ok:true}, so the client treats abort purely as
+        # cleanup and always reports the ORIGINAL failure.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        upload_id = body.get("upload_id")
+        if not isinstance(upload_id, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        session = app.ctx.uploads.pop(upload_id, None)
+        if session is not None:
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+        return sanic_json({"ok": True})
+
+    @app.before_server_stop
+    async def _drain_upload_sessions(app_, loop):
+        # Unlink every in-flight upload temp on shutdown so a restart doesn't
+        # leave .webterm-up-*.part litter (the lazy begin-sweep only runs while
+        # the broker is up). Best-effort; the dict is cleared regardless.
+        for session in list(app_.ctx.uploads.values()):
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+        app_.ctx.uploads.clear()
+
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
@@ -2763,8 +3073,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_launch, "/launch", methods=["POST"])
     app.add_route(_file_list, "/file/list", methods=["POST"])
     app.add_route(_file_read, "/file/read", methods=["POST"])
+    app.add_route(_file_read_chunk, "/file/read_chunk", methods=["POST"])
     app.add_route(_file_write, "/file/write", methods=["POST"])
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
+    app.add_route(_file_upload_begin, "/file/upload_begin", methods=["POST"])
+    app.add_route(_file_upload_chunk, "/file/upload_chunk", methods=["POST"])
+    app.add_route(_file_upload_commit, "/file/upload_commit", methods=["POST"])
+    app.add_route(_file_upload_abort, "/file/upload_abort", methods=["POST"])
     app.add_route(_file_delete, "/file/delete", methods=["POST"])
     app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
     app.add_route(_file_copy, "/file/copy", methods=["POST"])
@@ -2803,8 +3118,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/launch", "preflight_launch"),
                              ("/file/list", "preflight_file_list"),
                              ("/file/read", "preflight_file_read"),
+                             ("/file/read_chunk", "preflight_file_read_chunk"),
                              ("/file/write", "preflight_file_write"),
                              ("/file/upload", "preflight_file_upload"),
+                             ("/file/upload_begin", "preflight_file_upload_begin"),
+                             ("/file/upload_chunk", "preflight_file_upload_chunk"),
+                             ("/file/upload_commit", "preflight_file_upload_commit"),
+                             ("/file/upload_abort", "preflight_file_upload_abort"),
                              ("/file/delete", "preflight_file_delete"),
                              ("/file/mkdir", "preflight_file_mkdir"),
                              ("/file/copy", "preflight_file_copy"),
