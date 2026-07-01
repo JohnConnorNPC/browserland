@@ -57,6 +57,8 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 
 The clock chip shows the date and time at the bottom-right of the taskbar. It appears whenever the Clock mod is enabled — there is no separate toggle. Turn it on or off from Control Panel → Mods.
 
+The Clock mod also contributes a **Time zone** selector to its Control Panel → Mods section. It is a searchable box: start typing a city or region (for example `tokyo`) and it filters the full IANA zone list, then pick one to pin the chip to that zone. Leave it blank to follow the browser you are viewing from — the default. The chosen zone is browser-global, so it applies across every host you drive from this browser.
+
 ## Help chip
 
 The **?** chip at the bottom-right opens the in-app interface guide, with a live search box that filters every entry as you type. It appears whenever the Help mod is enabled — there is no separate toggle; turn it on or off from Control Panel → Mods. You can also bind a key to the **Toggle help** action (unbound by default). See [[Getting-Started]].

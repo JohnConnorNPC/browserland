@@ -53,7 +53,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 
 ### Per-browser vs. per-host settings
 
-- **Browser-global settings** follow the browser you are sitting at — theme and background, terminal font, the start-button label, restore-on-refresh, and the taskbar workspace filter.
+- **Browser-global settings** follow the browser you are sitting at — theme and background, terminal font, the start-button label, restore-on-refresh, the taskbar workspace filter, and the clock chip's time zone.
 - **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own.
 
 <!-- help:ignore-start -->
