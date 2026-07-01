@@ -50,6 +50,9 @@ import stat
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
@@ -213,6 +216,128 @@ MAX_STATE_BYTES = 2 * 2**20  # 2 MiB
 # reply before giving up with 504 (the agent does psutil/git work off its
 # event loop, so this is generous).
 RPC_TIMEOUT = 10.0
+
+# ---- AI-provider status proxy (#112) ---------------------------------------
+# The broker makes NO other outbound HTTP request; GET /status/fetch is its ONLY
+# egress. The aistatus mod (which ships DISABLED — no request until the operator
+# opts in) needs a server-side, ALLOWLISTED, cached proxy so browser JS can read
+# cross-origin Atlassian Statuspage summaries (the status hosts don't send
+# permissive CORS, so the browser can't fetch them directly).
+#
+# SSRF defense is STRUCTURAL, not a filter: the client supplies only an allowlist
+# ID (never a URL — see _status_fetch), each ID maps to a FIXED https base here,
+# _fetch_status_blocking refuses redirects and dials https only, so neither a
+# caller nor a compromised/redirecting status host can pivot the fetch to an
+# internal address. v1 ships the four providers confirmed to run Atlassian
+# Statuspage; mistral (Instatus) and xai (Cloudflare-gated) are non-Statuspage
+# and deferred to the same follow-up as Google/Gemini.
+STATUS_ALLOWLIST = {
+    "anthropic": {"label": "Anthropic",
+                  "base": "https://status.claude.com"},
+    "openai":    {"label": "OpenAI",
+                  "base": "https://status.openai.com"},
+    "cohere":    {"label": "Cohere",
+                  "base": "https://status.cohere.com"},
+    "copilot":   {"label": "GitHub Copilot",
+                  "base": "https://www.githubstatus.com"},
+}
+STATUS_FETCH_TIMEOUT = 4.0          # seconds per upstream request
+STATUS_MAX_BYTES = 512 * 1024       # reject an oversized status payload
+STATUS_CACHE_TTL = 60               # seconds a normalized result is cache-served
+# Statuspage summary.json overall indicators, worst last. Anything else (or a
+# fetch/parse failure) normalizes to "unknown" so the UI greys the row.
+_STATUS_INDICATORS = ("none", "minor", "major", "critical")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: a compromised/redirecting status host must NOT be
+    able to bounce the broker's fetch to an internal address (SSRF). Raising
+    here surfaces as an HTTPError the caller catches -> graceful "unknown"."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirect refused (status proxy)", headers, fp)
+
+
+# Opener built once at import: OUR no-redirect handler (a HTTPRedirectHandler
+# subclass, so build_opener drops the permissive default) + an EMPTY ProxyHandler
+# so a broker-process HTTP(S)_PROXY/ALL_PROXY env can NOT re-route this egress —
+# the only outbound destinations stay the fixed allowlist hosts, dialed direct
+# (build_opener would otherwise install the env-honoring default ProxyHandler).
+# No redirect following, no proxy, https only (asserted per-fetch).
+_STATUS_OPENER = urllib.request.build_opener(
+    _NoRedirectHandler, urllib.request.ProxyHandler({}))
+
+
+def _normalize_statuspage(pid: str, label: str, payload: Any) -> Dict[str, Any]:
+    """Reduce a raw Atlassian Statuspage summary.json to the small, fixed shape
+    the client renders. Every third-party string is coerced with str() and the
+    lists are capped, so a hostile/huge upstream payload can't bloat the response
+    or smuggle unexpected types. Unknown indicator -> "unknown"."""
+    if not isinstance(payload, dict):
+        payload = {}
+    status = payload.get("status")
+    status = status if isinstance(status, dict) else {}
+    indicator = status.get("indicator")
+    if indicator not in _STATUS_INDICATORS:
+        indicator = "unknown"
+    description = str(status.get("description") or "")
+    incidents: List[Dict[str, str]] = []
+    for inc in (payload.get("incidents") or []):
+        if not isinstance(inc, dict):
+            continue
+        # summary.json lists only UNRESOLVED incidents, but guard anyway.
+        if str(inc.get("status") or "") in ("resolved", "postmortem"):
+            continue
+        incidents.append({"name": str(inc.get("name") or ""),
+                          "impact": str(inc.get("impact") or "")})
+        if len(incidents) >= 10:
+            break
+    components: List[Dict[str, str]] = []
+    for comp in (payload.get("components") or []):
+        if not isinstance(comp, dict):
+            continue
+        st = str(comp.get("status") or "")
+        # Non-operational leaf components only; skip a group CONTAINER (it just
+        # aggregates its children's status and would double-report).
+        if st and st != "operational" and comp.get("group") is not True:
+            components.append({"name": str(comp.get("name") or ""), "status": st})
+            if len(components) >= 20:
+                break
+    return {"id": pid, "label": label, "indicator": indicator,
+            "description": description, "incidents": incidents,
+            "components": components}
+
+
+def _fetch_status_blocking(pid: str) -> Dict[str, Any]:
+    """Blocking fetch+normalize for ONE provider, run in an executor (stdlib
+    urllib, no new dep). Allowlist-backed id -> fixed https base -> summary.json,
+    https-only, no redirects, 200-only, size-capped. ANY failure degrades to an
+    "unknown" row (never blocks the UI); the exception TYPE name is echoed for a
+    quiet client-side hint but nothing upstream is trusted into the response."""
+    entry = STATUS_ALLOWLIST[pid]        # KeyError impossible: caller validated
+    label = entry["label"]
+    url = entry["base"].rstrip("/") + "/api/v2/summary.json"
+    try:
+        if urllib.parse.urlsplit(url).scheme != "https":
+            raise ValueError("non_https_base")   # belt-and-suspenders vs allowlist
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "browserland-status/1.0 (+#112)",
+            "Accept": "application/json",
+        })
+        with _STATUS_OPENER.open(req, timeout=STATUS_FETCH_TIMEOUT) as resp:
+            if resp.status != 200:
+                raise ValueError("http_%s" % resp.status)
+            body = resp.read(STATUS_MAX_BYTES + 1)
+        if len(body) > STATUS_MAX_BYTES:
+            raise ValueError("too_large")
+        payload = json.loads(body.decode("utf-8", "replace"))
+        return _normalize_statuspage(pid, label, payload)
+    except Exception as exc:   # noqa: BLE001 — any failure is a graceful "unknown"
+        LOGGER.info("status fetch failed for %s: %s", pid, type(exc).__name__)
+        return {"id": pid, "label": label, "indicator": "unknown",
+                "description": "", "incidents": [], "components": [],
+                "error": type(exc).__name__}
 
 # Valid per-window / default MCP access modes.
 MCP_MODES = ("off", "read", "readwrite")
@@ -994,6 +1119,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # swept (lazily on begin + on shutdown) so an abandoned transfer's temp file
     # never lingers. Single_process => this one dict is the source of truth.
     app.ctx.uploads = {}
+    # AI-provider status cache (#112): provider id -> {"at": loop.time(),
+    # "data": normalized}. Populated lazily by GET /status/fetch and re-fetched
+    # after STATUS_CACHE_TTL. Single-process => this one dict is the source of
+    # truth; a minor concurrent-miss stampede is acceptable for v1.
+    app.ctx.status_cache = {}
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -2978,6 +3108,48 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "mods_enabled": app.ctx.mods_enabled,
                            "serve_ui": app.ctx.serve_ui})
 
+    # ---- AI-provider status proxy (/status/fetch, #112) ------------------
+    # The broker's ONLY outbound HTTP. Gated by the SAME token-or-loopback
+    # policy as /info & /state (browser realm). The client passes ONLY allowlist
+    # ids (?provider=a,b — never a URL); unknown ids are dropped, and a request
+    # that names providers but validates NONE is a 400 (the SSRF allowlist
+    # proof). Absent/empty ?provider => all providers. Results are per-id cached
+    # (STATUS_CACHE_TTL) and the upstream fetch itself is https-only + no-redirect
+    # + size-capped (see _fetch_status_blocking). Never blocks: a dead provider
+    # degrades to an "unknown" row.
+    async def _status_one(pid: str) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        cache = app.ctx.status_cache
+        hit = cache.get(pid)
+        if hit is not None and (loop.time() - hit["at"]) < STATUS_CACHE_TTL:
+            return hit["data"]
+        data = await loop.run_in_executor(None, _fetch_status_blocking, pid)
+        cache[pid] = {"at": loop.time(), "data": data}
+        return data
+
+    async def _status_fetch(request: Request):
+        err = _gated_auth_error(request, "/status/fetch")
+        if err is not None:
+            return err
+        # Collect non-empty, comma-split tokens across any ?provider= params.
+        provided = request.args.getlist("provider")
+        tokens = [s.strip() for chunk in provided
+                  for s in chunk.split(",") if s.strip()]
+        if not tokens:
+            ids = list(STATUS_ALLOWLIST.keys())          # empty/absent => all
+        else:
+            ids = []
+            for t in tokens:
+                # Validate against the allowlist; DROP unknowns (never a URL).
+                if t in STATUS_ALLOWLIST and t not in ids:
+                    ids.append(t)
+            if not ids:                                  # named some, matched none
+                return sanic_json({"ok": False, "error": "no_valid_provider"},
+                                  status=400)
+        results = await asyncio.gather(*[_status_one(pid) for pid in ids])
+        return sanic_json({"ok": True, "fetchedAt": int(time.time()),
+                           "providers": list(results)})
+
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
     # concurrency on an integer rev: GET returns {rev, settings, layout}; PUT
@@ -3093,6 +3265,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_session_git, "/session/git", methods=["POST"])
     app.add_route(_session_mcp, "/session/mcp", methods=["POST"])
     app.add_route(_info, "/info", methods=["GET"])
+    app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
     # MCP HTTP interface (external MCP server) + its browser-facing config.
@@ -3138,6 +3311,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/session/git", "preflight_session_git"),
                              ("/session/mcp", "preflight_session_mcp"),
                              ("/info", "preflight_info"),
+                             ("/status/fetch", "preflight_status_fetch"),
                              ("/state", "preflight_state"),
                              ("/mcp/info", "preflight_mcp_info"),
                              ("/mcp/terminals", "preflight_mcp_terminals"),
