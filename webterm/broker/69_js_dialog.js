@@ -226,3 +226,148 @@
                 buttons: [{ label: 'Close', value: true, primary: true }],
             }).then(function () {});
         }
+
+        // ---- live progress modal (#109) -----------------------------------
+        // A cross-host transfer / in-app download shows this while it runs: an
+        // accurate byte-based percent bar + a working Cancel that aborts the
+        // in-flight chunk loop. Deliberately its OWN .app-dialog-overlay element
+        // and NOT registered with the _dlgFinish singleton above — so a stacked
+        // Overwrite confirm (openDialog, same z-index 185000, appended LATER in
+        // the DOM, thus painted on top) renders over this window without
+        // cancelling it, and this window survives a fumbled Escape (no Escape /
+        // no backdrop-click cancel here; Cancel button only, so a mis-key can't
+        // kill a transfer mid-flight).
+        //
+        // openProgressDialog({title, name, from, to}) -> a live handle:
+        //   { signal, update(done,total), close() }
+        //   signal          — the AbortController.signal handed to the chunk loop
+        //                     (opts.signal in transferTo / progress.signal in
+        //                     downloadRow). Cancel calls ctrl.abort().
+        //   update(done,total) — byte counters only (never string concat): fill
+        //                     width = done/total (guarded total<=0 -> 100%),
+        //                     refresh the meta line (percent · done/total ·
+        //                     throughput · ~ETA from performance.now()). No-op
+        //                     once closed, so a late progress tick can't touch a
+        //                     removed node.
+        //   close()         — remove the overlay; idempotent (safe from a finally
+        //                     AND after a Cancel).
+        function openProgressDialog(opts) {
+            opts = opts || {};
+            const ctrl = new AbortController();
+            const t0 = performance.now();
+            let closed = false;
+
+            // Compact byte + ETA formatting, local to this fragment (the progress
+            // meta line is its only consumer). fmtBytes covers B..TB; fmtEta is a
+            // rough s / m+s readout, blank when it can't be estimated.
+            const fmtBytes = function (n) {
+                if (!(n > 0)) return '0 B';
+                const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let i = 0, v = n;
+                while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+                return (i === 0 ? v : v.toFixed(1)) + ' ' + units[i];
+            };
+            const fmtEta = function (secs) {
+                if (!(secs > 0) || !isFinite(secs)) return '';
+                secs = Math.round(secs);
+                if (secs < 60) return secs + 's';
+                const m = Math.floor(secs / 60), s = secs % 60;
+                return m + 'm' + (s < 10 ? '0' : '') + s + 's';
+            };
+
+            const overlay = document.createElement('div');
+            overlay.className = 'app-dialog-overlay';
+            const modal = document.createElement('div');
+            modal.className = 'app-dialog';
+            overlay.appendChild(modal);
+
+            if (opts.title) {
+                const head = document.createElement('div');
+                head.className = 'set-head';
+                head.textContent = opts.title;
+                modal.appendChild(head);
+            }
+            const body = document.createElement('div');
+            body.className = 'app-dialog-body';
+            modal.appendChild(body);
+
+            if (opts.name) {
+                const nm = document.createElement('div');
+                nm.className = 'app-dialog-msg';
+                nm.textContent = String(opts.name);
+                body.appendChild(nm);
+            }
+            if (opts.from || opts.to) {
+                const route = document.createElement('div');
+                route.className = 'app-dialog-progress-route';
+                route.textContent = String(opts.from || '') + ' → '
+                    + String(opts.to || '');
+                body.appendChild(route);
+            }
+            const track = document.createElement('div');
+            track.className = 'app-dialog-progress';
+            const fill = document.createElement('div');
+            fill.className = 'app-dialog-progress-fill';
+            fill.style.width = '0%';
+            track.appendChild(fill);
+            body.appendChild(track);
+
+            const meta = document.createElement('div');
+            meta.className = 'app-dialog-progress-meta';
+            meta.textContent = '0%';
+            body.appendChild(meta);
+
+            const foot = document.createElement('div');
+            foot.className = 'set-foot app-dialog-foot';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.classList.add('danger');
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                if (ctrl.signal.aborted) return;
+                try { ctrl.abort(); } catch (_) {}
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = 'Cancelling…';
+            });
+            foot.appendChild(cancelBtn);
+            modal.appendChild(foot);
+
+            // Swallow a mousedown inside the box so it never reaches the desktop
+            // beneath; NO backdrop-click / Escape handler (Cancel button only).
+            modal.addEventListener('mousedown', function (e) {
+                e.stopPropagation();
+            });
+
+            document.body.appendChild(overlay);
+            overlay.classList.add('open');
+
+            const update = function (done, total) {
+                if (closed) return;
+                done = (done > 0) ? done : 0;           // clamp NaN / negatives
+                const hasTotal = (total > 0);
+                let pct = hasTotal ? (done / total) * 100 : 100;
+                if (pct > 100) pct = 100;
+                fill.style.width = pct.toFixed(1) + '%';
+                const elapsed = (performance.now() - t0) / 1000;   // seconds
+                const rate = (elapsed > 0) ? (done / elapsed) : 0; // bytes/s
+                let line = Math.round(pct) + '%';
+                line += hasTotal
+                    ? ' · ' + fmtBytes(done) + ' / ' + fmtBytes(total)
+                    : ' · ' + fmtBytes(done);
+                if (rate > 0) line += ' · ' + fmtBytes(rate) + '/s';
+                if (rate > 0 && hasTotal && total > done) {
+                    const eta = fmtEta((total - done) / rate);
+                    if (eta) line += ' · ~' + eta;
+                }
+                meta.textContent = line;
+            };
+            const close = function () {
+                if (closed) return;
+                closed = true;
+                if (overlay.parentNode) {
+                    overlay.parentNode.removeChild(overlay);
+                }
+            };
+            return { signal: ctrl.signal, update: update, close: close };
+        }

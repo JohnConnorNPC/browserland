@@ -168,6 +168,30 @@
         .app-dialog-row .app-dialog-v {
             flex: 1 1 auto; min-width: 0; word-break: break-all;
         }
+        /* #109: the cross-host transfer / download progress window. Its own
+           overlay (not the openDialog singleton) with a byte-accurate bar +
+           Cancel; box/button chrome is inherited from the .app-dialog groups
+           above. The track is --bg (darker than the modal's --bg-2) with an
+           inset shadow so it reads as recessed, retro/dark like the rest. */
+        .app-dialog-progress-route {
+            font-family: monospace; font-size: 11px; color: var(--fg-dim);
+            word-break: break-all; line-height: 1.4;
+        }
+        .app-dialog-progress {
+            width: 100%; height: 16px;
+            background: var(--bg);
+            border: 1px solid #000; border-radius: 2px;
+            box-shadow: inset 1px 1px 0 rgba(0, 0, 0, 0.5);
+            overflow: hidden;
+        }
+        .app-dialog-progress-fill {
+            height: 100%; width: 0;
+            background: var(--accent-default);
+            transition: width 0.15s linear;
+        }
+        .app-dialog-progress-meta {
+            font-family: monospace; font-size: 11px; color: var(--fg-dim);
+        }
         /* #70: launch-profile editor rows + Add/Edit command textarea + Detect
            list. Inputs/buttons inherit the shared #settings-modal / .app-dialog
            groups above; only the row layout + textarea are new here. */
