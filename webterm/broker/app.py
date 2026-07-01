@@ -59,7 +59,7 @@ from sanic.response import empty, html, json as sanic_json
 
 from .. import build_version, protocol
 from . import auth, relay
-from .launcher import LaunchError, Launcher
+from .launcher import LaunchError, Launcher, default_profiles
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
@@ -253,6 +253,108 @@ def _load_mcp_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         if "enabled" in data:
             cfg["enabled"] = bool(data.get("enabled"))
     return cfg
+
+
+def _valid_profile_entry(value: Any) -> Optional[Dict[str, Any]]:
+    """Coerce one raw profile value into a clean ``{command, title?, cwd?}``
+    entry, or ``None`` if it can't be salvaged. ``command`` (the argv the
+    launcher runs — RCE-by-design, never client-supplied) must be a non-empty
+    list of non-empty strings; a single bad token drops the WHOLE profile so a
+    half-mangled command can never run. ``title``/``cwd`` are optional and
+    self-heal to sane types. Used by the sidecar loader to self-heal; POST
+    /profiles/config validates STRICTLY (rejects rather than coerces) before
+    anything reaches disk."""
+    if not isinstance(value, dict):
+        return None
+    command = value.get("command")
+    if not isinstance(command, list) or not command:
+        return None
+    for part in command:
+        if not isinstance(part, str) or not part:
+            return None
+    entry: Dict[str, Any] = {"command": [str(p) for p in command]}
+    title = value.get("title")
+    entry["title"] = title[:256] if isinstance(title, str) and title else None
+    cwd = value.get("cwd")
+    entry["cwd"] = cwd if isinstance(cwd, str) and cwd else None
+    return entry
+
+
+def _heal_profiles(raw: Any) -> Dict[str, Any]:
+    """Only the salvageable ``{name: {command,...}}`` entries from a raw profiles
+    mapping, dropping anything malformed (bad name or unsalvageable command), so
+    a hand-edited/truncated sidecar or config can never break startup or
+    /launch. Names must be non-empty short strings without control characters
+    (they title windows and key the sidecar/UI)."""
+    out: Dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, value in raw.items():
+        if not isinstance(name, str):
+            continue
+        n = name.strip()
+        if not n or len(n) > 64 or any(ord(c) < 0x20 for c in n):
+            continue
+        entry = _valid_profile_entry(value)
+        if entry is not None:
+            out[n] = entry
+    return out
+
+
+def _resolve_default_profile(default_profile: Any, profiles: Dict[str, Any],
+                             fallback: str) -> str:
+    """Coerce ``default_profile`` to a real member of ``profiles`` so a launch
+    with no explicit profile always resolves: prefer the requested value, then
+    the seed fallback, then any key. Empty only when there are no profiles."""
+    if isinstance(default_profile, str) and default_profile in profiles:
+        return default_profile
+    if fallback in profiles:
+        return fallback
+    return next(iter(profiles), "")
+
+
+def _load_profiles_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the live launch-profile set: ``{profiles, default_profile,
+    source}``.
+
+    Seed = the config's ``agent`` block (profiles/default_profile) if usable,
+    else the built-in per-OS defaults. Then, IF the sidecar
+    (``webterm_profiles.json``) exists and holds at least one valid profile, the
+    SIDECAR OWNS the whole set (sidecar-owns-once-written) — broker_config.json's
+    ``agent.profiles`` is only the seed, so add/edit/delete/rename all persist
+    cleanly across restarts (mirrors _load_mcp_cfg's sidecar-is-truth posture).
+    Every field self-heals (malformed entries dropped, default coerced to a real
+    member), so a truncated/hand-edited sidecar can never break startup or brick
+    /launch; a sidecar with NO salvageable profile falls back to the seed rather
+    than leaving zero shells to launch."""
+    defaults = default_profiles()
+    agent = config.get("agent")
+    agent = agent if isinstance(agent, dict) else {}
+    seed_profiles = _heal_profiles(agent.get("profiles")) \
+        or _heal_profiles(defaults["profiles"])
+    seed_default = agent.get("default_profile")
+    if not (isinstance(seed_default, str) and seed_default):
+        seed_default = defaults["default_profile"]
+
+    profiles = seed_profiles
+    default_profile = seed_default
+    source = "config"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        healed = _heal_profiles(data.get("profiles"))
+        if healed:                       # sidecar owns once it holds >=1 profile
+            profiles = healed
+            default_profile = data.get("default_profile", seed_default)
+            source = "sidecar"
+
+    default_profile = _resolve_default_profile(
+        default_profile, profiles, seed_default)
+    return {"profiles": profiles, "default_profile": default_profile,
+            "source": source}
 
 
 def _load_state(path: Path) -> Dict[str, Any]:
@@ -625,12 +727,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # unchanged. The --headless CLI flag folds into config before we read it.
     app.ctx.serve_ui = bool(config.get("serve_ui", True))
     app.ctx.registry = BrokerRegistry()
-    app.ctx.launcher = Launcher(
-        app.ctx.registry,
-        config.get("agent"),
-        broker_port=port,
-        token=app.ctx.auth_token,
-    )
+    # The Launcher (profiles-only /launch source of truth) is constructed AFTER
+    # the state path is resolved, so its sidecar (webterm_profiles.json, #70) can
+    # sit beside the state store. See the "launch profiles" block below.
     # Editor file-API DEFAULT directory (NOT a sandbox, #35). The file tools
     # browse the whole host (same auth gate as /launch, which already grants
     # shell-level filesystem access — see _resolve_host_path); this is only the
@@ -653,6 +752,40 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # Launch profiles (#70). The profiles-only allow-list the Control Panel edits
+    # live. Persisted in a sidecar beside /state (override with
+    # "profiles_state_path"), seeded from broker_config's agent.profiles. Once the
+    # sidecar holds >=1 valid profile it OWNS the set (sidecar-owns-once-written,
+    # like webterm_mcp.json); broker_config becomes the seed only. The lock
+    # serializes the validate/write/live-swap in POST /profiles/config. The
+    # Launcher stays the single source of truth for /profiles and every launch.
+    app.ctx.profiles_path = Path(
+        config.get("profiles_state_path")
+        or (app.ctx.state_path.parent / "webterm_profiles.json")
+    ).resolve()
+    _pcfg = _load_profiles_cfg(app.ctx.profiles_path, config)
+    app.ctx.profiles_source = _pcfg["source"]
+    app.ctx.profiles_lock = asyncio.Lock()
+    app.ctx.launcher = Launcher(
+        app.ctx.registry,
+        {"profiles": _pcfg["profiles"],
+         "default_profile": _pcfg["default_profile"],
+         "python": (config.get("agent") or {}).get("python")
+         if isinstance(config.get("agent"), dict) else None},
+        broker_port=port,
+        token=app.ctx.auth_token,
+    )
+    if app.ctx.profiles_source == "sidecar":
+        # Loud so a user hand-editing broker_config.json's agent.profiles and
+        # seeing no change knows why: the sidecar shadows it (delete
+        # webterm_profiles.json to revert to the broker_config seed).
+        LOGGER.info("launch profiles: %d loaded from sidecar %s (broker_config "
+                    "agent.profiles is the seed only)",
+                    len(_pcfg["profiles"]), app.ctx.profiles_path)
+    else:
+        LOGGER.info("launch profiles: %d from broker_config/defaults (sidecar "
+                    "%s not yet written)",
+                    len(_pcfg["profiles"]), app.ctx.profiles_path)
     # Stable per-broker identity (#64): minted once into a sibling identity file,
     # immutable across restarts and OUTSIDE the rev cycle. Surfaced via /info so
     # the UI can detect the same broker reached through several URLs (the

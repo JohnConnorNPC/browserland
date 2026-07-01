@@ -91,6 +91,23 @@ class Launcher:
     def default_profile(self) -> str:
         return self._default_profile
 
+    def set_profiles(self, profiles: Dict[str, Any],
+                     default_profile: str) -> None:
+        """Live-swap the profile set (Control Panel edit, no restart — #70).
+
+        Rebinds ``self._profiles`` / ``self._default_profile`` to brand-new
+        objects the caller owns; it NEVER mutates the current dict in place. A
+        single attribute rebind is atomic under the GIL, so a ``launch()``
+        already past ``self._profiles.get(name)`` finishes against the snapshot
+        it read while a new launch sees the fresh set — no torn read, no lock
+        needed on the read path. The caller (POST /profiles/config) validates
+        the payload and serializes writes under ``profiles_lock`` before calling
+        this; here we only rebind. The ``profiles``/``default_profile``
+        properties read the live attributes, so /profiles and every launch pick
+        up the change immediately."""
+        self._profiles = dict(profiles)
+        self._default_profile = str(default_profile or "")
+
     async def launch(
         self,
         profile_name: Optional[str],
@@ -105,8 +122,15 @@ class Launcher:
         spawned shell. It MUST already be validated (existing dir) and gated by
         the caller — it is passed through to the agent as ``--cwd`` (data, not a
         command), which sets the shell's working dir."""
+        # Snapshot the live profile set once (#70 live-swap): set_profiles
+        # rebinds self._profiles / self._default_profile to fresh objects, so
+        # read them into locals here and use only the locals below. The one
+        # residual window — a no-explicit-profile launch racing an edit that
+        # renames the default — yields at most a self-correcting 400, never a
+        # torn command: the argv comes wholly from one snapshot's entry.
+        profiles = self._profiles
         name = profile_name or self._default_profile
-        profile = self._profiles.get(name)
+        profile = profiles.get(name)
         if profile is None or not profile.get("command"):
             raise LaunchError(400, "unknown_profile", profile=name)
 

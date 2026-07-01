@@ -28,6 +28,10 @@ webterm_identity.json
 
 webterm_mcp.json
 
+# Launch profiles sidecar (#70) — sibling of the state store; the Control Panel
+# profile editor persists here, seeded from broker_config's agent.profiles.
+webterm_profiles.json
+
 # Claude Code project MCP config (embeds the MCP bearer token)
 .mcp.json
 
