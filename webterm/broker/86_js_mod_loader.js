@@ -322,6 +322,21 @@
                         return _modSessionApi('/session/git', { id: id }, opts);
                     },
                 },
+                // #106: an explicit, reviewable clipboard observer seam. observe(fn)
+                // registers fn(dir, text) — dir 'out' (copied out of a terminal) |
+                // 'in' (pasted in) — called on every copy/paste core captures at its
+                // clipboard seams (copyTextToClipboard + the terminal paste listeners,
+                // 63/67). Returns an unsubscribe fn; ALSO auto-removed on the mod's
+                // teardown (rec.unloads), so capturing STOPS the moment the mod is
+                // disabled — the whole reason the #106 history mod ships default-off
+                // (clipboards carry secrets). Additive — ctxVersion stays 1; feature-
+                // detect `if (ctx.clipboard)`. Like every ctx family this is REVIEW
+                // HYGIENE, not a boundary: a same-origin mod could already observe the
+                // clipboard directly; the seam just funnels it through one reviewed
+                // choke point that a disable can switch off.
+                clipboard: {
+                    observe: function (fn) { return _modClipboardObserve(rec, fn); },
+                },
                 taskbar: {
                     // Mount a status node in the taskbar (before #help-chip, so a
                     // mod keeps the old clock slot). Auto-removed on teardown.
@@ -430,6 +445,19 @@
             };
             rec.unloads.push(handle.remove);   // torn down with the mod
             return handle;
+        }
+
+        // #106: register a clipboard observer for a mod, auto-removed on teardown
+        // (mirrors _modAddStatusItem's rec.unloads.push wiring). addClipboardObserver
+        // (63_js_clipboard_auth.js) is the hoisted core registry the copy/paste seams
+        // notify; here we push its remover onto the mod's unloads so the observer is
+        // dropped — and capturing stops — when the mod tears down (disable or master
+        // gate off). A non-function is a clean no-op returning a no-op remover.
+        function _modClipboardObserve(rec, fn) {
+            if (typeof fn !== 'function') return function () {};
+            const off = addClipboardObserver(fn);
+            rec.unloads.push(off);   // observer removed when the mod tears down
+            return off;
         }
 
         // ---- Control Panel settings extension (#71 boolean; #74 radio/select/
@@ -1290,7 +1318,10 @@
             masterEnabled: function () { return window.__mods.masterEnabled; },
             registered: function () {
                 return window.__mods.registered.map(function (m) {
-                    return { id: m.id, tiers: (m.tiers || []).slice() };
+                    // #106: expose the declared boot default so an acceptance test
+                    // can assert an opt-in mod (clipboard) ships defaultEnabled:false.
+                    return { id: m.id, tiers: (m.tiers || []).slice(),
+                             defaultEnabled: (m.defaultEnabled !== false) };
                 });
             },
         };

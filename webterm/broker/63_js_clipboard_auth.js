@@ -13,8 +13,31 @@
                 && navigator.clipboard
                 && navigator.clipboard.writeText);
         }
+        // ---- clipboard observers (#106) -----------------------------------
+        // An explicit, reviewable notify registry so a mod (the #106 clipboard
+        // history mod) can watch every copy-OUT / paste-IN WITHOUT monkey-patching
+        // core. Additive: core calls _notifyClipboard at its copy/paste seams
+        // (copyTextToClipboard below + the terminal paste listeners in
+        // 67_js_window_lifecycle.js); the Set is empty — a clean no-op — until a
+        // mod registers via addClipboardObserver (exposed as ctx.clipboard.observe).
+        // Each observer is isolated so one bad handler can't break a copy/paste or a
+        // sibling. Nothing is captured while no mod is enabled, so the default
+        // posture records nothing (the history mod ships default-off — clipboards
+        // carry secrets).
+        const _clipboardObservers = new Set();
+        function _notifyClipboard(dir, text) {
+            if (!text) return;
+            for (const fn of Array.from(_clipboardObservers)) {
+                try { fn(dir, text); } catch (_) {}
+            }
+        }
+        function addClipboardObserver(fn) {
+            _clipboardObservers.add(fn);
+            return function () { _clipboardObservers.delete(fn); };
+        }
         function copyTextToClipboard(text) {
             if (!text) return;
+            _notifyClipboard('out', text);   // #106: one call covers both write paths
             if (canWriteClipboardModern()) {
                 navigator.clipboard.writeText(text).catch(() => {
                     copyTextLegacy(text);

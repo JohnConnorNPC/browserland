@@ -397,6 +397,7 @@
                         const text = await navigator.clipboard.readText();
                         if (text) {
                             sendChunked('paste', text);
+                            _notifyClipboard('in', text);   // #106 history
                         }
                     } catch (err) {
                         console.error('paste read failed:', err);
@@ -408,6 +409,27 @@
                     catch (_) {}
                 });
             }
+
+            // #106: capture-phase paste seam — record text pasted INTO the terminal
+            // for the clipboard history mod. Capture phase so it fires before
+            // xterm's hidden-textarea paste handler; the event carries the text
+            // during the user gesture, so it works even in a non-secure context
+            // (where navigator.clipboard.readText is blocked). Ctrl+V and the
+            // browser's OWN context-menu Paste both dispatch this DOM event. The
+            // right-click onContext path (above) preventDefault()s the native menu
+            // and reads the clipboard itself — it does NOT fire a DOM paste, so it
+            // notifies inline instead; hence no double count between the two paths.
+            const onClipPaste = (e) => {
+                try {
+                    const t = e.clipboardData && e.clipboardData.getData('text');
+                    if (t) _notifyClipboard('in', t);
+                } catch (_) {}
+            };
+            term.element.addEventListener('paste', onClipPaste, true);
+            win.cleanups.push(() => {
+                try { term.element.removeEventListener('paste', onClipPaste, true); }
+                catch (_) {}
+            });
 
             // Shift+wheel scrolls the local xterm.js buffer regardless of
             // whether the running app (claude-code, vim, less, ...) has
