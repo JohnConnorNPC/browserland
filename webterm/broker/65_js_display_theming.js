@@ -43,11 +43,10 @@
         // the mod via notifyModSettings() at the end of applyThemeSettings.
 
         // ---- #40 help chip visibility: EXTRACTED to a mod (#78) ------------
-        // The taskbar "?" Help chip, its show/hide toggle, and the whole Help
-        // window moved to mods/help/. The mod creates #help-chip, owns the synced
-        // showHelpButton key via ctx.settings.boolean, and applies visibility on
-        // its own convergence (notifyModSettings, fired at the end of
-        // applyThemeSettings below). Core no longer reads showHelpButton here.
+        // The taskbar "?" Help chip and the whole Help window moved to mods/help/.
+        // The mod creates #help-chip and shows it unconditionally while enabled
+        // (#101 dropped the redundant per-setting toggle — the mod's own enable/
+        // disable is the single control). Core no longer touches the chip here.
 
         // ---- start button label --------------------------------------------
         // The `+` launch button doubles as the Win-style Start button. Only the
@@ -74,8 +73,9 @@
                 // `pattern` change, and the theme mod repaints the (theme-var-
                 // aware) pattern after it writes the chrome vars on a `theme`
                 // change. Core no longer paints either directly.
-                // #78: the Help chip's showHelpButton visibility is mod-owned too
-                // (mods/help/) — it also converges via notifyModSettings() below.
+                // #78/#101: the Help chip is mod-owned too (mods/help/); it is shown
+                // unconditionally while the mod is enabled (no synced setting to
+                // converge — #101 dropped the per-setting toggle).
                 applyStartButton();
                 applyTerminalFont();        // #18: configurable terminal font
                 // #71: fire mod-owned settings (the clock, etc.) LAST so every

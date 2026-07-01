@@ -88,10 +88,11 @@
                 s.termFont = '';
             }
             if (typeof s.clock !== 'boolean') s.clock = false;
-            // #40: the taskbar "?" help chip (browser-global, default ON) plus a
-            // one-time first-run nudge flag (flipped true once the hint shows or
-            // Help is first opened, so it never repeats).
-            if (typeof s.showHelpButton !== 'boolean') s.showHelpButton = true;
+            // #40/#101: a one-time first-run nudge flag for the Help "?" chip (flipped
+            // true once the hint shows or Help is first opened, so it never repeats).
+            // The chip's visibility is no longer a synced setting — the Help mod's own
+            // enable/disable is the single control (#101), so showHelpButton is no
+            // longer seeded (an existing synced value is a harmless orphan key).
             if (typeof s.helpHintSeen !== 'boolean') s.helpHintSeen = false;
             // Task 8: per-host default terminal profile. '' = use the broker's
             // own server default (the prior behavior).

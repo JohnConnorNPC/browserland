@@ -23,8 +23,10 @@
         // has no chip and no (+) Help entry).
 
         // The taskbar "?" chip visibility (moved from 65_js_display_theming.js):
-        // same show/hide-on-an-`.on`-class pattern as the clock, driven by the
-        // synced showHelpButton key the mod owns via ctx.settings.boolean.
+        // same show/hide-on-an-`.on`-class pattern as the clock. The mod shows the
+        // chip unconditionally while enabled (#101 dropped the redundant per-setting
+        // toggle — the mod's own enable/disable is the single control); disabling the
+        // mod removes the chip entirely (init's ctx.onUnload), not just its `.on`.
         function applyHelpButton(on) {
             try {
                 const el = document.getElementById('help-chip');
@@ -483,16 +485,14 @@
             focusOrOpenHelp();
         }
         // Register the mod: contribute the 'help' window kind (#100), create the "?"
-        // chip, own the synced showHelpButton key through ctx.settings.boolean (so the
-        // Control Panel toggle + cross-browser /state sync converge through
-        // notifyModSettings, exactly like the clock), and schedule the one-time first-
-        // run nudge. The chip is appended LAST in the taskbar, so the clock (added
-        // "before #help-chip") keeps its slot.
+        // chip (shown unconditionally while enabled — #101), and schedule the one-time
+        // first-run nudge. The chip is appended LAST in the taskbar, so the clock
+        // (added "before #help-chip") keeps its slot.
         registerMod({
             id: 'help',
             version: '1.0.0',
             ctxVersion: 1,
-            tiers: ['settings'],   // #86: owns the synced `showHelpButton` key (the ? chip is direct DOM)
+            tiers: ['taskbar'],   // #101: taskbar chip only (no synced setting), like clock
             init: function (ctx) {
                 // #100: contribute the 'help' window kind through ctx (the same core
                 // registry the built-ins use), so its (+) launch-menu entry rides the
@@ -532,22 +532,16 @@
                     if (chip.parentNode) chip.parentNode.removeChild(chip);
                 });
 
-                // Own the existing synced `showHelpButton` setting + its Control
-                // Panel checkbox (was the #set-help-button section). onChange fires
-                // on a local toggle AND on a cross-browser /state convergence
-                // (notifyModSettings, change-detected); apply once now so the saved
-                // visibility lands immediately — the early-boot applyThemeSettings()
-                // ran before this chip existed.
-                const setting = ctx.settings.boolean('showHelpButton', true, {
-                    title: 'Help button',
-                    label: 'Show help (?) button (bottom-right)',
-                });
-                setting.onChange(applyHelpButton);
-                applyHelpButton(setting.get());
+                // #101: the "?" chip is shown unconditionally while the mod is
+                // enabled — the redundant Control Panel "Show help (?) button" toggle
+                // is gone (enabling the mod already reveals the chip; two controls for
+                // the same thing was confusing). Reveal it now: the early-boot
+                // applyThemeSettings() ran before this chip existed.
+                applyHelpButton(true);
 
-                // First-run nudge: once, point new users at the "?" chip (only if
-                // it's visible). Deferred until the initial /state has been ADOPTED
-                // so it reflects the synced helpHintSeen/showHelpButton rather than
+                // First-run nudge: once, point new users at the "?" chip (now always
+                // visible while the mod is enabled). Deferred until the initial /state
+                // has been ADOPTED so it reflects the synced helpHintSeen rather than
                 // pre-pull defaults; capped (~10s) so an offline/auth-blocked broker
                 // still nudges from local prefs instead of hanging forever.
                 let hintTries = 0;
@@ -558,7 +552,7 @@
                             return;
                         }
                         const s = getSettings();
-                        if (s.helpHintSeen || !s.showHelpButton) return;
+                        if (s.helpHintSeen) return;
                         showNotice('Tip: click the "?" on the taskbar for the interface guide.', 7000);
                         s.helpHintSeen = true;
                         savePrefs();

@@ -530,15 +530,15 @@ def test_help_mod_packaged_and_manifest_agrees():
     assert meta["styles"] == ["help.css"]
     # The script registers the help mod, contributes the 'help' window kind through
     # ctx.registerWindowKind (#100, so its (+) launcher rides the mod's enable/
-    # disable), owns the synced showHelpButton key through the #74 boolean API, and
-    # carries the moved window factory + chip.
+    # disable), and carries the moved window factory + chip. The redundant
+    # showHelpButton toggle is gone (#101) — the chip follows the mod's enabled state.
     src = js.read_text(encoding="utf-8")
     assert "registerMod(" in src
     assert "id: 'help'" in src
     assert "ctxVersion: 1" in src
     assert "ctx.registerWindowKind(" in src
     assert "appKind: 'help'" in src
-    assert "ctx.settings.boolean('showHelpButton'" in src
+    assert "showHelpButton" not in src
     assert "function openHelpWindow" in src
     assert "function applyHelpButton" in src
     # XSS render-order invariant: helpAppendHighlighted must precede
@@ -1248,7 +1248,7 @@ _EXPECTED_TIERS = {
     "theme": ["settings"],
     "pattern": ["settings"],
     "clock": ["taskbar"],
-    "help": ["settings"],
+    "help": ["taskbar"],   # #101: dropped the synced showHelpButton key; chip only
     "task-manager": ["session", "window"],
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
