@@ -746,9 +746,11 @@ def test_sticky_mod_packaged_and_manifest_agrees():
 def test_editor_symbols_removed_from_core_fragments():
     # The text editor is now a mod (#83/S10): its built-in registration is gone
     # from core 54, its launcher from core 76, and the AGENTS.md hooks
-    # (openAgentDocsWindow + openAgentsMdEditor) from core 73 — all moved into
-    # mods/editor/. The CodeMirror fragment (69) + editor fragment (70) are
-    # DELETED; openAppWindow (the dispatcher) moved into core 54.
+    # (openAgentDocsWindow + openAgentsMdEditor) from core 73. The editor kind +
+    # builder + launcher live in mods/editor/; as of #120 the two AGENTS.md hooks
+    # were split further into their own mods/agent-docs/ mod (requires the editor).
+    # The CodeMirror fragment (69) + editor fragment (70) are DELETED;
+    # openAppWindow (the dispatcher) moved into core 54.
     assert not (BROKER_DIR / "69_js_codemirror.js").exists()
     assert not (BROKER_DIR / "70_js_editor_app.js").exists()
     gone = {
@@ -765,12 +767,22 @@ def test_editor_symbols_removed_from_core_fragments():
     # openAppWindow (the central dispatcher) moved into core 54, NOT the mod.
     s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
     assert "function openAppWindow" in s54
-    # And the moved builder/hooks are present + reachable in the served page (they
-    # ship in mods/editor/ as hoisted functions, so core reaches them mods-off).
+    # And the moved builder/hooks are present + reachable in the served page as
+    # hoisted functions, so core (and the editor's legacy-upgrade branch) reach
+    # them mods-off. The builder/loader/launcher ship in mods/editor/; the two
+    # AGENTS.md openers ship in mods/agent-docs/ (#120) — both are concatenated
+    # into the one shared <script>, so every symbol stays reachable.
     for sym in ("function openNoteOrEditorWindow", "function loadCodeMirror",
                 "function openAgentDocsWindow", "function openAgentsMdEditor",
                 "function launchTextEditor"):
         assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
+    # #120: the two AGENTS.md openers moved OUT of mods/editor/ and INTO
+    # mods/agent-docs/ — assert they live in the agent-docs mod, not editor.js.
+    editor_src = (BROKER_DIR / "mods" / "editor" / "editor.js").read_text(encoding="utf-8")
+    agent_src = (BROKER_DIR / "mods" / "agent-docs" / "agent-docs.js").read_text(encoding="utf-8")
+    for sym in ("function openAgentDocsWindow", "function openAgentsMdEditor"):
+        assert sym in agent_src, f"{sym!r} must live in the agent-docs mod (#120)"
+        assert sym not in editor_src, f"{sym!r} must be gone from editor.js (#120)"
 
 
 def test_editor_mod_packaged_and_manifest_agrees():
@@ -816,6 +828,56 @@ def test_editor_mod_packaged_and_manifest_agrees():
     assert "id: 'editor'" in INDEX_HTML
     assert INDEX_HTML.index("id: 'help'") < INDEX_HTML.index("id: 'editor'")
     assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'sticky'")
+
+
+def test_agent_docs_mod_packaged_and_requires_editor():
+    # #120: the Agent-docs feature (the tabbed AGENTS.md/CLAUDE.md editor opened
+    # from the terminal 📋 button) is split into its own mod that REQUIRES the
+    # editor mod. It reuses the editor's text-editor window kind (NO new appKind,
+    # NO duplicate registerWindowKind, so webterm:appwindows:v1 stays byte-
+    # identical) and inserts its 📋 title-bar button via the #116 per-terminal-
+    # window seam (ctx.windows.onTerminalCreate) — core keeps zero Agent-docs knowledge.
+    import json
+    mod_dir = BROKER_DIR / "mods" / "agent-docs"
+    js = mod_dir / "agent-docs.js"
+    manifest = mod_dir / "mod.json"
+    help_md = mod_dir / "help.md"
+    assert js.is_file() and manifest.is_file() and help_md.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "agent-docs"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "agent-docs.js"
+    assert meta["help"]["slug"] == "agent-docs"
+    # Declared in _MODS, AFTER the editor it depends on (the #121 static ordering
+    # guard also enforces this in test_requires_declared_before_dependency_...).
+    assert "mods/agent-docs/agent-docs.js" in ui._MODS
+    assert ui._MODS.index("mods/editor/editor.js") \
+        < ui._MODS.index("mods/agent-docs/agent-docs.js")
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'agent-docs'" in src
+    assert "ctxVersion: 1" in src
+    # The hard dependency on the editor mod (the #121 requires primitive).
+    assert "requires: ['editor']" in src
+    # Rides the per-terminal-window seam and adds/tears-down its button there; NO
+    # window kind of its own (it reuses the editor's text-editor kind).
+    assert "ctx.windows.onTerminalCreate(" in src
+    assert "registerWindowKind(" not in src, \
+        "agent-docs must reuse the editor's text-editor kind, not register its own"
+    assert "info.addTitleBarItem(" in src
+    assert "info.onDispose(" in src
+    # The 📋 button opens the editor keyed by the terminal WINDOW id (win.id) —
+    # how openAgentsMdEditor keys sessions/windows — not the session wire id.
+    assert "openAgentsMdEditor(win.id)" in src
+    assert "btn-agentsmd" in src
+    # Both moved openers live here now (and NOT in editor.js — see
+    # test_editor_symbols_removed_from_core_fragments).
+    assert "function openAgentDocsWindow" in src
+    assert "function openAgentsMdEditor" in src
+    # Ships in the served page, AFTER the editor mod, BEFORE the sticky mod.
+    assert "id: 'agent-docs'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'agent-docs'")
+    assert INDEX_HTML.index("id: 'agent-docs'") < INDEX_HTML.index("id: 'sticky'")
 
 
 def test_editor_serialized_fields_preserved():
@@ -1812,6 +1874,7 @@ _EXPECTED_TIERS = {
     "task-manager": ["session", "window"],
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
+    "agent-docs": ["file", "window"],  # #120 AGENTS.md/CLAUDE.md openers do host /file/* I/O + open a window
     "sticky": ["window"],
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows

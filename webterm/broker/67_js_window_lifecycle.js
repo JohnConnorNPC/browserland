@@ -145,12 +145,12 @@
             titleText.className = 'title-text';
             titleText.textContent = name;
 
-            // Open this folder's AGENTS.md in a dedicated editor (Task 12).
-            const agentsMdBtn = document.createElement('button');
-            agentsMdBtn.type = 'button';
-            agentsMdBtn.className = 'tb-btn btn-agentsmd';
-            agentsMdBtn.textContent = '📋';
-            agentsMdBtn.title = 'Edit AGENTS.md for this folder';
+            // #120: the per-terminal 📋 "Agent docs" button (opens this folder's
+            // AGENTS.md/CLAUDE.md editor) used to be built here; it moved to the
+            // default-on agent-docs mod (mods/agent-docs/), which subscribes to
+            // ctx.windows.onTerminalCreate and inserts it into this title bar
+            // (before the min button, its original slot) — the same seam as the
+            // git widget below.
 
             // #116: the per-terminal git status button + branch label used to be
             // built here; they moved to the default-off git mod (mods/git/), which
@@ -175,7 +175,6 @@
 
             titleBar.appendChild(idBadge);
             titleBar.appendChild(titleText);
-            titleBar.appendChild(agentsMdBtn);
             titleBar.appendChild(minBtn);
             titleBar.appendChild(closeBtn);
 
@@ -329,21 +328,6 @@
                 minBtn.removeEventListener('click', onMinClick);
                 closeBtn.removeEventListener('mousedown', onCloseDown);
                 closeBtn.removeEventListener('click', onCloseClick);
-            });
-
-            // AGENTS.md: open (or focus) a dedicated editor for THIS terminal's
-            // working dir, keyed by cwd so re-clicking reuses the same window.
-            // openAgentsMdEditor handles the sandbox/new-file cases + the
-            // CLAUDE.md + template wiring.
-            const onAgentsMdClick = (e) => {
-                e.stopPropagation();
-                openAgentsMdEditor(id);
-            };
-            agentsMdBtn.addEventListener('mousedown', stopProp);
-            agentsMdBtn.addEventListener('click', onAgentsMdClick);
-            win.cleanups.push(() => {
-                agentsMdBtn.removeEventListener('mousedown', stopProp);
-                agentsMdBtn.removeEventListener('click', onAgentsMdClick);
             });
 
             // drag

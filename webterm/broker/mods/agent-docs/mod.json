@@ -1,0 +1,10 @@
+{
+  "id": "agent-docs",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Agent docs",
+  "description": "The tabbed AGENTS.md + CLAUDE.md editor with the synthetic ⚙ Sections library and template checklist, opened from each terminal's 📋 title-bar button (split out of the editor mod, #120). Rides ctx.windows.onTerminalCreate; reuses the editor's text-editor window kind, so persistence stays byte-identical. Requires the Text editor mod.",
+  "entry": "agent-docs.js",
+  "author": "JohnConnorNPC",
+  "help": { "slug": "agent-docs", "label": "Agent docs", "order": 2030, "icon": "📋" }
+}

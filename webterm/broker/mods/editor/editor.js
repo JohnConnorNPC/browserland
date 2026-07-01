@@ -11,9 +11,11 @@
         // half -- CodeMirror, multi-tab AGENTS.md/CLAUDE.md docs, dirty-save,
         // find, line numbers, host/folder pickers -- plus the note half it has
         // always shared), the CodeMirror 6 lazy loader (mods/editor/codemirror.js),
-        // the AGENTS.md hooks openAgentDocsWindow (tabbed AGENTS.md+CLAUDE.md
-        // opener) + openAgentsMdEditor (the terminal titlebar button hook, called
-        // from core 67), and the (+) launcher launchTextEditor. All are
+        // and the (+) launcher launchTextEditor. (#120: the AGENTS.md hooks
+        // openAgentDocsWindow + openAgentsMdEditor were since split out into the
+        // agent-docs mod (mods/agent-docs/), which requires this mod and still
+        // drives the shared docs/Sections/template machinery below as hoisted
+        // free identifiers.) All are
         // top-level `function` declarations, so they HOIST across the one
         // concatenated <script> and stay reachable from core regardless of
         // mods_enabled -- the same posture the help/sticky mods use.
@@ -80,7 +82,9 @@
             // Legacy single-doc AGENTS.md record (agentsMdCwd, no docs): a build
             // before the tabbed agent-docs window. Upgrade it on reopen by reading
             // AGENTS.md + CLAUDE.md fresh, preserving the stored geom/color/tiling.
-            // openAgentDocsWindow re-enters openAppWindow with a `docs` array, so
+            // openAgentDocsWindow (now in the agent-docs mod, mods/agent-docs/, but
+            // a hoisted free identifier reachable here regardless of that mod's
+            // enabled state — #120) re-enters openAppWindow with a `docs` array, so
             // this branch never recurses. Async — the window appears a moment later.
             if (appData.appKind === 'text-editor' && appData.agentsMdCwd
                 && !appData.docs) {
@@ -2139,110 +2143,6 @@
             if (findKeyInLayout(id)) placeWindowTiled(win);
             else bringToFront(id);
             return win;
-        }
-
-        // Build (or restore) the tabbed "Agent docs" window for a folder: reads
-        // <cwd>/AGENTS.md AND <cwd>/CLAUDE.md in parallel on the resolved host,
-        // builds the per-tab `docs` array (+ a synthetic Sections tab is added in
-        // openAppWindow), and opens the window. Shared by the titlebar opener
-        // (openAgentsMdEditor) AND the legacy-record upgrade path in
-        // openAppWindow (which passes stored geom/color/tiling to preserve them).
-        //   opts: { id, cwd, fileHostId, geom?, color?, locked?, floatGeom?,
-        //           activeTab? }
-        // The /file API is host-wide (#35), so an AGENTS.md at any cwd opens;
-        // not_found opens an empty buffer (saving creates it). CLAUDE.md errors
-        // fall back to an empty buffer (best-effort — the AGENTS save later
-        // ensures it references @AGENTS.md).
-        async function openAgentDocsWindow(opts) {
-            const cwd = String(opts.cwd || '');
-            const fileHostId = opts.fileHostId || 'local';
-            const host = hostById(fileHostId) || localHost();
-            const agentsPath = joinNative(cwd, 'AGENTS.md');
-            const claudePath = joinNative(cwd, 'CLAUDE.md');
-            const [aRes, cRes] = await Promise.all([
-                editorFile().read(agentsPath, { host: host.id }),
-                editorFile().read(claudePath, { host: host.id }),
-            ]);
-            // A real read error (not just "doesn't exist yet") aborts.
-            if (aRes && !aRes.ok && aRes.error !== 'not_found') {
-                showNotice('open AGENTS.md failed: ' + ((aRes && aRes.error) || '?'));
-                return;
-            }
-            const agentsContent = (aRes && aRes.ok) ? (aRes.content || '') : '';
-            const claudeContent = (cRes && cRes.ok) ? (cRes.content || '') : '';
-            const mkDoc = (name, filePath, content, isAgents, encoding) => ({
-                name, filePath, content,
-                wrap: true, lineNums: true, isAgents,
-                encoding: encoding || 'utf-8',   // #97: round-trip source enc
-            });
-            const docs = [
-                mkDoc('AGENTS.md', agentsPath, agentsContent, true,
-                      aRes && aRes.ok ? aRes.encoding : 'utf-8'),
-                mkDoc('CLAUDE.md', claudePath, claudeContent, false,
-                      cRes && cRes.ok ? cRes.encoding : 'utf-8'),
-            ];
-            // Label remote windows with the host so two docs windows sharing a
-            // cwd string stay distinguishable on the taskbar.
-            const title = (fileHostId === 'local')
-                ? ('Agent docs — ' + cwd)
-                : ('Agent docs — ' + (host.label || fileHostId) + ':' + cwd);
-            openAppWindow({
-                id: opts.id,
-                appKind: 'text-editor',
-                title,
-                docs,
-                activeTab: opts.activeTab || 0,
-                agentsMdCwd: cwd,
-                fileHostId,
-                geom: opts.geom,
-                color: opts.color,
-                locked: opts.locked,
-                floatGeom: opts.floatGeom,
-            });
-        }
-
-        // Open (or focus) the tabbed Agent-docs editor (AGENTS.md + CLAUDE.md +
-        // Sections) for a terminal's working dir. Keyed by host:cwd so re-clicking
-        // the titlebar 📋 button reuses one window.
-        async function openAgentsMdEditor(termId) {
-            const sess = sessions.get(termId);
-            const cwd = sess && sess.cwd;
-            if (!cwd) {
-                showNotice('working directory unknown for this session');
-                return;
-            }
-            // The terminal's cwd is an absolute path on ITS host (local OR
-            // remote). Dial that broker for every /file/* op so a remote
-            // terminal edits the remote host's docs, not a local one.
-            const fileHostId = (sess && sess.hostId) || 'local';
-            // Host-qualify the window id: local and remote terminals can share
-            // a cwd string (e.g. both rooted at /home/user), so a bare cwd key
-            // would collide and reuse the wrong broker's window.
-            const aid = 'app:agents:' + fileHostId + ':' + cwd;
-            if (windows.has(aid)) {
-                const w = windows.get(aid);
-                if (w.minimized) restoreWindow(aid);
-                else bringToFront(aid);
-                return;
-            }
-            await openAgentDocsWindow({ id: aid, cwd, fileHostId });
-            // Land the fresh docs window as a tab in the terminal it was opened
-            // from (a [terminal│AGENTS] tab group) instead of floating.
-            // openAgentDocsWindow can bail before creating the window (sandbox /
-            // read error), so guard on the window actually existing. Guard on the
-            // terminal living in the ACTIVE workspace, not merely existing in the
-            // layout: the file-read await above can interleave a workspace switch,
-            // and tabbing into an inactive-workspace tile would move the
-            // freshly-mounted docs DOM across workspaces (orphaning it until that
-            // workspace is revisited). A floating terminal (findKeyInLayout null)
-            // or one the user navigated away from mid-open leaves the docs
-            // floating, as before.
-            const docsWin = windows.get(aid);
-            const termLoc = findKeyInLayout(termId);
-            if (docsWin && termLoc && termLoc.wsIndex === getLayout().activeWs) {
-                placeWindowTiled(docsWin);        // get the docs into the layout first
-                tabWindowIntoTile(aid, termId);   // relocate it as a tab beside the term
-            }
         }
 
         async function launchTextEditor() {
