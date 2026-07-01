@@ -144,13 +144,14 @@
                     <div class="set-row">
                         <input type="number" id="set-slide-ms" min="0" max="2000"
                                step="20" placeholder="500" />
-                        <span class="set-x">ms</span>
+                        <span class="set-x">ms / screen</span>
                     </div>
-                    <div class="set-hint">how long the viewport slides when switching
+                    <div class="set-hint">time to slide one screen-width when switching
                         to an off-screen tiled window (keyboard, taskbar chip, or a
-                        column move). <b>0</b> jumps instantly; otherwise
-                        120&#8211;2000ms (default 500). Shorter reveals scale down
-                        automatically.</div>
+                        column move). Constant speed &#8212; a longer jump takes
+                        proportionally longer. <b>0</b> jumps instantly; otherwise
+                        120&#8211;2000ms per screen (default 500). Overrides OS
+                        reduced-motion.</div>
                 </div>
                 <div class="set-section">
                     <div class="set-title">Workspace scrollbar</div>

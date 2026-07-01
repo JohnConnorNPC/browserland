@@ -249,9 +249,9 @@
             // #38: per-host dwell delay. s is already normalized (0 or a clamped
             // number), so reflect it verbatim; 0 shows as "0" (= disabled).
             setSnapHold.value = (typeof s.snapHoldMs === 'number') ? s.snapHoldMs : 3000;
-            // #125: per-broker viewport-slide duration. s is normalized (0 or a
-            // clamped number), so reflect verbatim; 0 shows as "0" (= instant).
-            setSlideMs.value = (typeof s.slideDurationMs === 'number') ? s.slideDurationMs : 500;
+            // #125: per-broker viewport-slide rate (ms/screen). s is normalized
+            // (0 or a clamped number), so reflect verbatim; 0 shows as "0".
+            setSlideMs.value = (typeof s.slideScreenMs === 'number') ? s.slideScreenMs : 500;
 
             // Restore-on-refresh governs THIS browser's startup (not a remote
             // host), so it always reflects the LOCAL setting on every host tab.
@@ -961,11 +961,11 @@
             t.save();
         });
 
-        // #125: per-broker viewport-slide duration (ms). Like snapHold there's no
-        // live side effect — scrollColumnIntoView reads getSettings() fresh on each
-        // switch — so we just normalize (0 = instant; else clamp [120,2000];
-        // blank/NaN -> the 500 default), persist to the target's blob, and echo the
-        // clamped value back so the field shows what was actually stored.
+        // #125: per-broker viewport-slide rate (ms per screen-width). Like snapHold
+        // there's no live side effect — scrollColumnIntoView reads getSettings()
+        // fresh on each switch — so we just normalize (0 = instant; else clamp
+        // [120,2000]; blank/NaN -> the 500 default), persist to the target's blob,
+        // and echo the clamped value back so the field shows what was stored.
         setSlideMs.addEventListener('change', () => {
             const t = settingsTarget;
             if (!t) return;
@@ -979,7 +979,7 @@
                 else if (v <= 0) v = 0;                     // explicit instant
                 else v = Math.max(120, Math.min(2000, v));
             }
-            t.s.slideDurationMs = v;
+            t.s.slideScreenMs = v;
             setSlideMs.value = v;                           // reflect normalization
             t.save();
         });

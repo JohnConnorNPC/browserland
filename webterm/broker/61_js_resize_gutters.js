@@ -272,32 +272,32 @@
         // Fast, cancelable viewport slide. Replaces native behavior:'smooth' (browser-
         // timed, sluggish over long jumps). Animates strip.scrollLeft so onStripScroll
         // keeps floating windows + the scrollbar thumb in sync every frame.
-        // #125: slide speed. The cap is the per-broker `slideDurationMs` setting
-        // (Control Panel; default 500, 0 = instant), passed in per call; distance
-        // sets the actual duration at ~SLIDE_PX_PER_MS px/ms so short reveals stay
-        // proportionally quicker, clamped to [half the cap, the cap].
-        const SLIDE_PX_PER_MS = 1.5;
+        // #125: constant-velocity slide. The per-broker `slideScreenMs` setting
+        // (Control Panel; default 500, 0 = instant) is the time to travel ONE
+        // viewport width; every jump moves at that same rate, so duration is
+        // proportional to distance (short reveal = quick, long jump = longer).
         let _slideRaf = null;
         let _slideExpected = 0;   // last scrollLeft we wrote; divergence => user took over
-        const _reducedMotionMql =
-            window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
         function cancelStripSlide() {
             if (_slideRaf !== null) { cancelAnimationFrame(_slideRaf); _slideRaf = null; }
         }
-        function slideStripTo(strip, to, maxMs) {
+        function slideStripTo(strip, to, msPerScreen) {
             cancelStripSlide();                       // retarget: kill any in-flight slide
-            // The only caller gates on a normalized [120,2000] cap, but keep the
-            // helper self-contained: a non-finite or <=0 cap means "no slide", so
+            // The only caller gates on a normalized [120,2000] rate, but keep the
+            // helper self-contained: a non-finite or <=0 rate means "no slide", so
             // jump instantly rather than animate with a NaN/Infinity duration.
-            if (!(maxMs > 0) || !isFinite(maxMs)) { strip.scrollLeft = to; return; }
+            if (!(msPerScreen > 0) || !isFinite(msPerScreen)) { strip.scrollLeft = to; return; }
             const from = strip.scrollLeft;
             const dist = Math.abs(to - from);
             if (dist < 1) return;
-            // distance-scaled + clamped: short reveals stay snappy, long ones stay
-            // bounded by the user's cap. minMs = half the cap keeps the clamp well-
-            // ordered (minMs <= maxMs) even when the cap is set very low.
-            const minMs = maxMs * 0.5;
-            const dur = Math.min(maxMs, Math.max(minMs, dist / SLIDE_PX_PER_MS));
+            // Constant velocity: msPerScreen is the time to cross one viewport
+            // width, so duration is strictly proportional to distance -> the same
+            // px/ms speed for every jump, near or far. A zero-width strip (hidden /
+            // mid-layout) has no viewport to cross, so jump instantly rather than
+            // stretch the duration to minutes.
+            const screen = strip.clientWidth;
+            if (!(screen > 0)) { strip.scrollLeft = to; return; }
+            const dur = Math.max(1, dist / screen * msPerScreen);
             let t0 = null;
             _slideExpected = from;
             function step(ts) {                        // ts = rAF DOMHighResTimeStamp
@@ -305,8 +305,7 @@
                 // scrollbar-thumb drag / wheel / drag-edge-scroll moved it -> yield to user
                 if (Math.abs(strip.scrollLeft - _slideExpected) > 2) { _slideRaf = null; return; }
                 const t = Math.min(1, (ts - t0) / dur);
-                const eased = 1 - Math.pow(1 - t, 3);  // ease-out cubic (snappy start, soft land)
-                strip.scrollLeft = Math.round(from + (to - from) * eased);
+                strip.scrollLeft = Math.round(from + (to - from) * t);  // linear = constant velocity
                 _slideExpected = strip.scrollLeft;     // read back (browser clamps to maxScroll)
                 _slideRaf = (t < 1) ? requestAnimationFrame(step) : null;
             }
@@ -346,14 +345,17 @@
             }
             x = Math.max(0, x);
             if (Math.abs(x - viewLeft) < 1) return;
-            // #125: cap from the per-broker slideDurationMs setting; 0 = instant
-            // (an explicit user opt-out, treated like reduced-motion).
-            const slideMs = getSettings().slideDurationMs;
-            if (smooth && slideMs > 0 && !(_reducedMotionMql && _reducedMotionMql.matches)) {
+            // #125: per-broker slide rate (ms per viewport width); 0 = instant.
+            // The explicit setting is authoritative — it intentionally OVERRIDES
+            // OS prefers-reduced-motion (set the rate to 0 for no motion) so a
+            // reduced-motion default can't silently kill a slide the user asked
+            // for. smooth=false (relayout bursts) still positions instantly.
+            const slideMs = getSettings().slideScreenMs;
+            if (smooth && slideMs > 0) {
                 slideStripTo(strip, x, slideMs);
             } else {
                 cancelStripSlide();          // instant supersedes any live slide
-                strip.scrollLeft = x;        // relayout / reduced-motion / slideMs=0
+                strip.scrollLeft = x;        // relayout burst / slideMs=0
             }
         }
         function cssEscape(s) {

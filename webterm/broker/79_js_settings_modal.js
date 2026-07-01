@@ -17,7 +17,7 @@
         const setCloseTerminates = document.getElementById('set-close-terminates');   // #88
         const setConfirmTerminate = document.getElementById('set-confirm-terminate'); // #88
         const setSnapHold = document.getElementById('set-snap-hold');   // #38 dwell delay (ms)
-        const setSlideMs = document.getElementById('set-slide-ms');     // #125 slide duration (ms)
+        const setSlideMs = document.getElementById('set-slide-ms');     // #125 slide rate (ms/screen)
         const setRestore = document.getElementById('set-restore-refresh');
         const setHideOtherWs = document.getElementById('set-taskbar-hide-other-ws');
         const setDefaultProfile = document.getElementById('set-default-profile');
