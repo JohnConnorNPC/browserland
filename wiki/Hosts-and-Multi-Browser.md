@@ -12,6 +12,12 @@ Each host you add gets its own settings tab in the Control Panel. Settings like 
 
 The password you enter is the broker's browser-login token. The bearer token AI agents use to drive terminals over MCP is a **separate** secret, configured on its own — if you plan to let agents work on this host, see [[MCP-and-AI-Agents]].
 
+## Default color per host
+
+Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.
+
+The default is only a *starting* color: recoloring an individual window with its own title-bar picker still wins and sticks, and clearing the host default (the **✕** next to the dot) reverts new terminals to the automatic per-window colors. Like a host's password, the default color is stored in this browser only and is not shared with your other browsers.
+
 ## Host status chips
 
 Browserland shows one status chip per broker — always, even for a single healthy local broker — in the host-status area of the taskbar. The chip displays the host's label; its state tells you whether that host is reachable and whether this browser holds its lease:
