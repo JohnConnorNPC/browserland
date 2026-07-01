@@ -2252,6 +2252,63 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             "eof": offset + len(raw) >= size,
         })
 
+    async def _file_hash(request: Request):
+        # #110: stream a file through SHA-256 and return the hex digest. A cross-
+        # host MOVE hashes the SOURCE here (a bounded, local streaming re-read on
+        # the source broker) so upload_commit can verify the dest matches before
+        # the source is deleted. Read in MAX_CHUNK_BYTES blocks OFF the event loop
+        # (heavy IO, like copy/zip below): bounded memory, and — like read_chunk —
+        # NOT bound by the 5 MiB MAX_FILE_BYTES (a >5 MiB file hashes fine). Same
+        # auth gate + host-wide resolution + classify guards as read_chunk.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rel = body.get("path")
+        if not isinstance(rel, str) or not rel:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        try:
+            p = _resolve_host_path(rel, app.ctx.editor_root)
+        except ValueError:
+            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        kind = _classify_path(p)
+        if kind == "denied":
+            return sanic_json({"ok": False, "error": "permission_denied"},
+                              status=400)
+        if kind == "missing":
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        if kind != "file":
+            return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
+
+        def _hash_file():
+            # `size` is the bytes actually READ+HASHED (not a separate stat), so
+            # the returned size and digest always describe the same byte stream
+            # even if the file changes mid-hash (codex review).
+            h = hashlib.sha256()
+            total = 0
+            with p.open("rb") as fh:
+                while True:
+                    block = fh.read(MAX_CHUNK_BYTES)
+                    if not block:
+                        break
+                    total += len(block)
+                    h.update(block)
+            return total, h.hexdigest()
+
+        try:
+            size, digest = await asyncio.get_running_loop().run_in_executor(
+                None, _hash_file)
+        except (OSError, ValueError) as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_json({
+            "ok": True,
+            "path": str(p),                 # absolute, host-wide (#35)
+            "sha256": digest,
+            "size": size,
+        })
+
     async def _file_upload_begin(request: Request):
         # Open an upload session at ``path``: validate the dest like /file/upload
         # (parent is a dir; existing dir -> is_dir; existing file needs overwrite),
@@ -3140,6 +3197,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_list, "/file/list", methods=["POST"])
     app.add_route(_file_read, "/file/read", methods=["POST"])
     app.add_route(_file_read_chunk, "/file/read_chunk", methods=["POST"])
+    app.add_route(_file_hash, "/file/hash", methods=["POST"])
     app.add_route(_file_write, "/file/write", methods=["POST"])
     app.add_route(_file_upload, "/file/upload", methods=["POST"])
     app.add_route(_file_upload_begin, "/file/upload_begin", methods=["POST"])
@@ -3185,6 +3243,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/list", "preflight_file_list"),
                              ("/file/read", "preflight_file_read"),
                              ("/file/read_chunk", "preflight_file_read_chunk"),
+                             ("/file/hash", "preflight_file_hash"),
                              ("/file/write", "preflight_file_write"),
                              ("/file/upload", "preflight_file_upload"),
                              ("/file/upload_begin", "preflight_file_upload_begin"),
