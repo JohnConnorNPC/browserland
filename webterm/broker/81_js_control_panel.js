@@ -445,7 +445,39 @@
         function profilesEditorHost() {
             return settingsTarget ? hostById(settingsTarget.hostId) : null;
         }
+        // #115: per-profile color pickers reuse attachColorPicker, which appends a
+        // hidden <input type=color> to document.body per picker (cleaned via
+        // target.cleanups). renderProfilesEditor wipes + rebuilds its rows on every
+        // render (tab open, poll refresh, a save, a color pick), so hold the live
+        // pickers' cleanups + their shim targets module-side and flush them at the
+        // top of each render: mark stale targets disposed (a late OS color-dialog
+        // resolve then no-ops) and run every cleanup (removes the listeners + the
+        // body inputs) BEFORE the fresh pickers register. Exact mirror of
+        // flushHostPickers (#103, 83_js_broker_identity.js). Bounded to one input-
+        // per-profile-row on document.body at a time.
+        let profilePickerCleanups = [];
+        let profilePickerTargets = [];
+        function flushProfilePickers() {
+            for (const t of profilePickerTargets) t.disposed = true;
+            for (const fn of profilePickerCleanups) { try { fn(); } catch (_) {} }
+            profilePickerCleanups = [];
+            profilePickerTargets = [];
+        }
+        // #115: set/clear one profile's default color. Mutates the cached (full)
+        // profile set and re-POSTs it (REPLACE semantics, like the Default button),
+        // which persists to the sidecar, live-swaps the launcher, drops the names-
+        // only /profiles cache, and re-renders the editor; refreshTaskbar so any
+        // rebuilt chips pick up the new color map. val=null clears the default.
+        function applyProfileColor(host, name, val) {
+            const cfg = profilesConfigCache.get(host.id);
+            if (!cfg || !cfg.profiles || !cfg.profiles[name]) return;
+            const np = Object.assign({}, cfg.profiles);
+            np[name] = Object.assign({}, np[name], { color: val || null });
+            return saveProfilesConfig(host, np, cfg.default_profile)
+                .then(() => refreshTaskbar());
+        }
         function renderProfilesEditor() {
+            flushProfilePickers();
             const t = settingsTarget;
             if (!t || !setProfilesListEl) return;
             const host = hostById(t.hostId);
@@ -510,6 +542,36 @@
                 del.className = 'danger';
                 del.addEventListener('click', () => deleteProfile(host, name));
                 acts.appendChild(mk); acts.appendChild(ed); acts.appendChild(del);
+                // #115: optional per-profile DEFAULT color — the reused swatch
+                // picker on a lightweight shim target (a `color` getter reading the
+                // live profile entry, `disposed`, and the shared module cleanups
+                // array flushed above). A pick writes the profile's color server-
+                // side via applyProfileColor; the ✕ clears it back to the host/auto
+                // default. The popover anchors to the row (position:relative).
+                const colorTarget = {
+                    get color() { return p.color || ''; },
+                    disposed: false,
+                    cleanups: profilePickerCleanups,
+                };
+                profilePickerTargets.push(colorTarget);
+                const colorBtn = attachColorPicker(
+                    colorTarget, row, PALETTE.map((c) => ({ color: c })),
+                    (sw) => applyProfileColor(host, name, normalizeHex(sw.color)));
+                colorBtn.title = 'default color for this profile';
+                // Dot shows the profile color, or the base accent when unset (auto).
+                row.style.setProperty('--accent',
+                    p.color || 'var(--accent-default)');
+                acts.appendChild(colorBtn);
+                if (p.color) {
+                    const clr = document.createElement('button');
+                    clr.type = 'button';
+                    clr.textContent = '✕';
+                    clr.title = 'clear default color (revert to host / auto '
+                        + 'per-window colors)';
+                    clr.addEventListener('click',
+                        () => applyProfileColor(host, name, null));
+                    acts.appendChild(clr);
+                }
                 row.appendChild(acts);
                 setProfilesListEl.appendChild(row);
             }
@@ -612,8 +674,13 @@
                 const live = profilesConfigCache.get(host.id) || cfg;
                 const np = Object.assign({}, live.profiles);
                 if (editName && editName !== name) delete np[editName];
+                // #115: preserve an existing per-profile default color across an
+                // Edit (the dialog doesn't expose it — the color dot on the row
+                // does), so editing the command/title/cwd never silently drops it.
+                const prevColor = editName
+                    ? ((live.profiles[editName] || {}).color || null) : null;
                 np[name] = { command: command, title: title || null,
-                             cwd: cwd || null };
+                             cwd: cwd || null, color: prevColor };
                 // Renaming the default profile carries the default to the new name.
                 let def = live.default_profile || '';
                 if (editName && def === editName) def = name;
