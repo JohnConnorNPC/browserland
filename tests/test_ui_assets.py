@@ -1129,6 +1129,44 @@ def test_file_capability_chunked_ops_present():
     assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
 
 
+def test_transfer_progress_window_present():
+    # #109: cross-host transfer + in-app download show a Win9x-style modal
+    # progress window with a byte-accurate bar + a working Cancel. Core adds ONE
+    # reusable helper (openProgressDialog) that owns its AbortController; the
+    # file-manager threads that handle's byte-progress + signal into the #108
+    # chunk loops. Behavior is exercised live (Playwright); these sentinels lock
+    # the wiring. No server test is needed — Cancel reuses the #108
+    # /file/upload_abort path, whose partial-dest removal + idempotency is covered
+    # by tests/test_file_api.py::test_upload_abort_removes_temp_and_is_idempotent.
+    dlg = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    assert "function openProgressDialog" in dlg
+    assert "function openProgressDialog" in INDEX_HTML
+    # The helper owns the AbortController that Cancel aborts + the loop reads.
+    assert "new AbortController" in dlg
+
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    # Opened at BOTH call sites — cross-host transfer (doTransfer) + download
+    # (downloadRow).
+    assert fm.count("openProgressDialog(") >= 2, \
+        "openProgressDialog must be wired at both the transfer and download sites"
+    # The handle's byte progress + AbortSignal are threaded into transferTo's
+    # existing chunk-loop opts; the download drives update/close directly.
+    assert "onProgress:" in fm and "signal:" in fm
+    assert "progress.update" in fm
+    assert "progress.close(" in fm
+    # Cancel's server-side partial-dest teardown still rides the #108 abort path.
+    assert "fmFile().uploadAbort(" in fm
+    # The mod still routes ALL I/O through the capability — no raw fetch snuck in
+    # with the progress/cancel wiring.
+    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+
+    css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
+    assert ".app-dialog-progress" in css
+    assert ".app-dialog-progress-fill" in css
+    assert ".app-dialog-progress" in INDEX_HTML
+
+
 def test_filemanager_richer_menu_present():
     # #72: the file manager grows a full right-click menu set + clipboard + drag.
     # These symbol sentinels lock the wiring (the Playwright flow exercises the
