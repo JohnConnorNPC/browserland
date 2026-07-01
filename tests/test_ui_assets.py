@@ -1486,6 +1486,95 @@ def test_default_enabled_capability_present():
                 "'webterm:mods:disabled'"):
         assert sym in loader, f"missing defaultEnabled loader symbol: {sym!r}"
     assert "function _modDefault" in INDEX_HTML
+    # #106: the test API surfaces the declared default so an acceptance can assert
+    # an opt-in mod ships defaultEnabled:false via window.__mods.__test.registered().
+    assert "defaultEnabled: (m.defaultEnabled !== false)" in loader
+
+
+# --------------------------------------------------------------------------- #
+# clipboard mod + ctx.clipboard observer seam (#106)
+# --------------------------------------------------------------------------- #
+
+def test_clipboard_capability_present():
+    # #106: the core clipboard observer seam the clipboard mod rides. The notify
+    # registry + the copy-OUT / paste-IN emit points live in core (63/67); the
+    # loader exposes ctx.clipboard.observe (additive — ctxVersion stays 1). Capture
+    # only happens while an observer is registered, so with the (default-off) mod
+    # disabled nothing is recorded.
+    clip = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    # The registry + notify + subscribe primitives, and the copy-OUT emit inside
+    # copyTextToClipboard (one call covers both write branches).
+    for sym in ("const _clipboardObservers = new Set()",
+                "function _notifyClipboard",
+                "function addClipboardObserver",
+                "_notifyClipboard('out', text);"):
+        assert sym in clip, f"missing #106 clipboard seam symbol in 63: {sym!r}"
+    # The paste-IN seams ride 67: the inline notify on the right-click paste path
+    # AND a capture-phase 'paste' listener (true) that also works in a non-secure
+    # context. Both feed _notifyClipboard('in', ...).
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "_notifyClipboard('in', text);" in life
+    assert "addEventListener('paste', onClipPaste, true)" in life
+    assert "_notifyClipboard('in', t);" in life
+    # The loader capability + its auto-teardown helper (observer removed on the
+    # mod's unload, so capturing stops the moment the mod is disabled).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for sym in ("clipboard: {", "observe: function (fn)",
+                "function _modClipboardObserve", "addClipboardObserver(fn)"):
+        assert sym in loader, f"missing #106 ctx.clipboard loader symbol: {sym!r}"
+    assert "ctxVersion: 1" in loader   # additive capability
+    # And it all reaches the served page.
+    for sym in ("function _notifyClipboard", "function addClipboardObserver",
+                "clipboard: {", "function _modClipboardObserve",
+                "_notifyClipboard('in',"):
+        assert sym in INDEX_HTML, f"#106 clipboard seam missing from served page: {sym!r}"
+
+
+def test_clipboard_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "clipboard"
+    clip_js = mod_dir / "clipboard.js"
+    clip_css = mod_dir / "clipboard.css"
+    manifest = mod_dir / "mod.json"
+    assert clip_js.is_file() and clip_css.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "clipboard"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "clipboard.js"
+    assert meta["styles"] == ["clipboard.css"]
+    assert "mods/clipboard/clipboard.js" in ui._MODS
+    src = clip_js.read_text(encoding="utf-8")
+    # Registers the clipboard mod, default-OFF (opt-in — secrets), reviewed tiers.
+    assert "registerMod(" in src
+    assert "id: 'clipboard'" in src
+    assert "ctxVersion: 1" in src
+    assert "defaultEnabled: false" in src
+    assert "tiers: ['clipboard', 'window']" in src
+    # Rides the additive ctx.clipboard observer seam, feature-detected — NOT a raw
+    # monkey-patch of copyTextToClipboard.
+    assert "if (!ctx.clipboard) return;" in src
+    assert "ctx.clipboard.observe(" in src
+    # Contributes a window kind (EPHEMERAL — NO serialize, never persisted).
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'clipboard'" in src
+    assert "return openClipboardWindow(d)" in src
+    assert "return launchClipboard()" in src
+    assert "serialize:" not in src, "clipboard is ephemeral — no serialize key"
+    # Re-copy on row click, guarded so re-copying doesn't push a duplicate top entry.
+    assert "copyTextToClipboard(entry.text)" in src
+    assert "_selfCopy" in src
+    # Rows are built with textContent only — the ONLY innerHTML use is the clear.
+    assert src.count(".innerHTML") == 1
+    assert "clipBody.innerHTML = ''" in src
+    # Teardown closes any live clipboard window WHILE the kind is still registered
+    # (so saveAppWindow early-returns — no junk record), same as the task-manager.
+    assert "closeWindow(w.id)" in src
+    assert "ctx.onUnload(" in src
+    # Ships in the served page, AFTER the git mod (appended last in _MODS).
+    assert "id: 'clipboard'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'git'") < INDEX_HTML.index("id: 'clipboard'")
+    # The CSS rides the served page via the mod-css splice.
+    assert ".app-clip .clip-row" in INDEX_HTML
 
 
 # --------------------------------------------------------------------------- #
@@ -1495,7 +1584,8 @@ def test_default_enabled_capability_present():
 # The trust-tier vocabulary the in-repo mods declare. Kept here (not in the
 # loader) as the test's source of truth: a typo or a new unreviewed token trips
 # this guard. Mirrors the ctx-capability families a mod can use.
-_KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage"}
+_KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage",
+                "clipboard"}   # #106: a mod that observes the clipboard seam
 
 # What each shipped mod is reviewed to use, derived from its actual `ctx.` usage
 # (see each mod's registerMod). Hardcoded like the other drift sentinels so an
@@ -1511,6 +1601,7 @@ _EXPECTED_TIERS = {
     "sticky": ["window"],
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
+    "clipboard": ["clipboard", "window"],  # #106 observes the clipboard seam + a window kind
 }
 
 
