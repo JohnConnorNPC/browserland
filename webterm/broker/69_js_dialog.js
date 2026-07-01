@@ -232,11 +232,11 @@
         // accurate byte-based percent bar + a working Cancel that aborts the
         // in-flight chunk loop. Deliberately its OWN .app-dialog-overlay element
         // and NOT registered with the _dlgFinish singleton above — so a stacked
-        // Overwrite confirm (openDialog, same z-index 185000, appended LATER in
-        // the DOM, thus painted on top) renders over this window without
-        // cancelling it, and this window survives a fumbled Escape (no Escape /
-        // no backdrop-click cancel here; Cancel button only, so a mis-key can't
-        // kill a transfer mid-flight).
+        // Overwrite confirm dialog (an openDialog at the same z-index 185000,
+        // appended LATER in the DOM, thus painted on top) renders over this
+        // window without cancelling it, and this window survives a fumbled
+        // Escape (no Escape / no backdrop-click cancel here; Cancel button only,
+        // so a mis-key can't kill a transfer mid-flight).
         //
         // openProgressDialog({title, name, from, to}) -> a live handle:
         //   { signal, update(done,total), close() }
