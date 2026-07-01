@@ -47,11 +47,12 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tempfile
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sanic import Request, Sanic, Websocket
 from sanic.exceptions import NotFound
@@ -441,6 +442,110 @@ def _validate_profiles_post(body: Dict[str, Any]):
     default_profile = _resolve_default_profile(
         default_profile, clean, next(iter(clean)))
     return {"profiles": clean, "default_profile": default_profile}, None
+
+
+# ---- launch-profile detection (#70, GET /profiles/detect) ----------------
+# Best-effort scan for launchable shells to SEED the Control Panel editor. The
+# user confirms every suggestion before it is saved, so this is read-only and
+# NEVER raises: a missing tool / timeout / weird output yields fewer (or zero)
+# suggestions. Detection subprocesses run off the event loop (executor).
+
+# POSIX shells worth suggesting, by bare name — an allow-list so /etc/shells
+# entries like /usr/sbin/nologin or /bin/false are never proposed.
+_POSIX_SHELLS = ("bash", "zsh", "fish", "sh")
+_WSL_NAME_MAX = 64
+
+
+def _wsl_exe() -> Optional[str]:
+    """Prefer the canonical System32 wsl.exe over a bare PATH lookup: a PATH hit
+    could resolve an attacker-planted wsl.exe earlier in PATH. Falls back to
+    ``shutil.which`` only if the System32 copy is absent."""
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    cand = os.path.join(root, "System32", "wsl.exe")
+    if os.path.isfile(cand):
+        return cand
+    return shutil.which("wsl.exe")
+
+
+def _detect_windows_shells() -> List[Dict[str, Any]]:
+    exe = _wsl_exe()
+    if not exe:
+        return []
+    try:
+        proc = subprocess.run(
+            [exe, "-l", "-q"], capture_output=True, timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    # `wsl -l -q` prints registered distro names as UTF-16-LE, often with a BOM,
+    # one per line. Decode leniently, strip BOM/NULs, and keep only plausible
+    # single-token names: this drops the localized "has no installed
+    # distributions" sentence (it carries spaces) and any control junk. Names are
+    # UNTRUSTED strings, but they only ever ride an argv element (never a shell
+    # string), so there is no injection — the caps just keep the UI/logs clean.
+    text = proc.stdout.decode("utf-16-le", errors="ignore").replace("\x00", "")
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in text.splitlines():
+        name = raw.strip().lstrip("﻿").strip()
+        if not name or name in seen:
+            continue
+        if len(name) > _WSL_NAME_MAX or any(ord(c) < 0x20 for c in name):
+            continue
+        if any(c.isspace() for c in name):     # drops the no-distro sentence
+            continue
+        seen.add(name)
+        # The recipe uses the bare "wsl.exe" (a name PATH-resolved at launch by
+        # the agent), NOT the machine-specific System32 path used above.
+        out.append({
+            "name": name, "title": f"{name} (WSL)",
+            "command": ["wsl.exe", "-d", name, "--cd", "~", "--", "bash", "-l"],
+            "exists": True,
+        })
+    return out
+
+
+def _detect_posix_shells() -> List[Dict[str, Any]]:
+    # Union of the allow-listed shells found on PATH and those listed in
+    # /etc/shells (basename must be allow-listed AND the path must exist), so a
+    # commented / bogus / nologin entry is never suggested. Deduped by shell name.
+    found = {}
+    for name in _POSIX_SHELLS:
+        path = shutil.which(name)
+        if path:
+            found[name] = path
+    try:
+        with open("/etc/shells", "r", encoding="utf-8", errors="ignore") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        lines = []
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        base = os.path.basename(entry)
+        if base in _POSIX_SHELLS and base not in found and os.path.isfile(entry):
+            found[base] = entry
+    out: List[Dict[str, Any]] = []
+    for name in _POSIX_SHELLS:                 # stable, allow-list order
+        if name in found:
+            out.append({"name": name, "title": name,
+                        "command": [name, "-l"], "exists": True})
+    return out
+
+
+def _detect_profile_suggestions() -> List[Dict[str, Any]]:
+    """Per-OS launchable-shell suggestions ({name,title,command,exists}). Runs in
+    an executor (blocking subprocess/FS). Never raises — returns [] on any
+    trouble."""
+    try:
+        return _detect_windows_shells() if os.name == "nt" \
+            else _detect_posix_shells()
+    except Exception:      # defensive: detection must never break the endpoint
+        LOGGER.warning("profile detection failed", exc_info=True)
+        return []
 
 
 def _load_state(path: Path) -> Dict[str, Any]:
@@ -2536,6 +2641,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     result["default_profile"], request.ip)
         return sanic_json(_profiles_public_view())
 
+    async def _profiles_detect(request: Request):
+        # Read-only environment scan seeding the editor (WSL distros on Windows,
+        # allow-listed shells on POSIX). Browser realm, same gate as the editor.
+        # The scan blocks (subprocess/FS), so run it off the event loop.
+        err = _gated_auth_error(request, "/profiles/detect")
+        if err is not None:
+            return err
+        suggestions = await asyncio.get_running_loop().run_in_executor(
+            None, _detect_profile_suggestions)
+        return sanic_json({"ok": True, "suggestions": suggestions})
+
     # ---- broker identity (/info) -----------------------------------------
     # Non-secret stable id + build version (#64). Gated by the SAME
     # token-or-loopback policy as /state: the same-origin local probe passes via
@@ -2678,6 +2794,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # realm — /profiles + /mcp/profiles stay names-only.
     app.add_route(_profiles_config_get, "/profiles/config", methods=["GET"])
     app.add_route(_profiles_config_post, "/profiles/config", methods=["POST"])
+    app.add_route(_profiles_detect, "/profiles/detect", methods=["GET"])
     # Explicit preflights (route resolution precedes request middleware, so
     # an unrouted OPTIONS would 405 before any middleware could answer).
     # Explicit name= per registration — auto-derived names collide.
@@ -2710,7 +2827,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
                              ("/mcp/config", "preflight_mcp_config"),
-                             ("/profiles/config", "preflight_profiles_config")):
+                             ("/profiles/config", "preflight_profiles_config"),
+                             ("/profiles/detect", "preflight_profiles_detect")):
         app.add_route(_preflight, path, methods=["OPTIONS"], name=route_name)
     app.error_handler.add(NotFound, _handle_404)
 
