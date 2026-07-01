@@ -49,15 +49,19 @@
         // disable is the single control). Core no longer touches the chip here.
 
         // ---- start button label --------------------------------------------
-        // The `+` launch button doubles as the Win-style Start button. Only the
-        // visible label changes; its click/contextmenu behavior is untouched.
+        // The `+` launch button doubles as the Win-style Start button. The
+        // visible label is set here; the tooltip's discoverability hint tracks
+        // #114's swapLaunchButtons so it names whichever gesture opens the menu.
         function applyStartButton() {
             try {
                 const btn = document.getElementById('btn-launch');
                 if (!btn) return;
                 const lbl = (getSettings().startLabel || '+');
                 btn.textContent = lbl;
-                btn.title = lbl + ' — new terminal (right-click for profiles)';
+                const swapped = !!getSettings().swapLaunchButtons;
+                btn.title = lbl + (swapped
+                    ? ' — new terminal (left-click for profiles, right-click launches default)'
+                    : ' — new terminal (right-click for profiles)');
             } catch (_) {}
         }
 

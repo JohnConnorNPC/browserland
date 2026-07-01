@@ -15,10 +15,10 @@ When the page loads you get the desktop: an empty work area with a **taskbar** a
 You have three quick ways to get a terminal on screen:
 
 - **Click an existing session** — if any terminals are already running, their buttons appear in the taskbar. Click one to focus and raise it (or restore it if it was minimized).
-- **The launch button (+)** — left-click the **+** at the left of the taskbar to launch the local broker's default terminal. Right-click it for the full profile / app menu (other profiles, app windows, and "Open in folder…"). If you have added remote hosts, the right-click menu groups profiles per host.
+- **The launch button (+)** — by default, left-click the **+** at the left of the taskbar to launch the local broker's default terminal, and right-click it for the full profile / app menu (other profiles, app windows, and "Open in folder…"). If you have added remote hosts, the menu groups profiles per host. A Control Panel toggle can swap these two gestures (see [[Taskbar]]).
 - **The "New terminal" shortcut** — press `Ctrl+Alt+Enter`.
 
-Left-click and the shortcut always launch on the **local broker**; to start a terminal on a remote host, pick its profile from the right-click menu. Each terminal is a real shell on its broker's host. Type in it like any terminal; close the window later and the shell keeps running so you can reattach.
+The quick-launch gesture and the shortcut always start on the **local broker**; to start a terminal on a remote host, pick its profile from the launch menu. Each terminal is a real shell on its broker's host. Type in it like any terminal; close the window later and the shell keeps running so you can reattach.
 
 From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, and a task manager. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
 
@@ -40,7 +40,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 | Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
 | MCP | AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
 | Keyboard shortcuts | Rebind any action (see [[Keyboard-Shortcuts]]) |
-| Start button / taskbar | The + button's label, the taskbar workspace filter, restore-on-refresh |
+| Start button / taskbar | The + button's label, whether left/right-click gestures are swapped, the taskbar workspace filter, restore-on-refresh |
 
 ### Per-browser vs. per-host settings
 
