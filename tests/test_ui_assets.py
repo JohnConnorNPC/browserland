@@ -477,6 +477,36 @@ def test_pattern_mod_packaged_and_manifest_agrees():
     assert INDEX_HTML.index("id: 'theme'") < INDEX_HTML.index("id: 'pattern'")
 
 
+def test_clock_tz_selector_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "clock"
+    js = mod_dir / "clock.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "clock"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "clock.js"
+    # #104: the clock now owns a synced `clockTz` time-zone key through the new
+    # searchable combo API (browser-global, def '' == follow the viewing
+    # browser). The zone list is built dynamically from Intl.supportedValuesOf
+    # with a curated fallback (Asia/Tokyo is one of the fallback markers). The
+    # mod declares the `settings` tier on top of `taskbar` (order must match
+    # _EXPECTED_TIERS).
+    src = js.read_text(encoding="utf-8")
+    for needle in ("registerMod(", "id: 'clock'", "ctxVersion: 1",
+                   "tiers: ['taskbar', 'settings']",
+                   "ctx.settings.combo('clockTz'", "def: ''",
+                   "(browser default)", "Intl.supportedValuesOf", "Asia/Tokyo"):
+        assert needle in src, f"missing clock-tz sentinel in mod src: {needle!r}"
+    # And it ships in the served page — the mod script + the combo primitive it
+    # relies on (the datalist-backed searchable input).
+    for needle in ("ctx.settings.combo('clockTz'", "def: ''",
+                   "(browser default)", "Intl.supportedValuesOf", "Asia/Tokyo",
+                   "createElement('datalist')"):
+        assert needle in INDEX_HTML, f"missing clock-tz sentinel in page: {needle!r}"
+
+
 # --------------------------------------------------------------------------- #
 # help mod (#78 / S5)
 # --------------------------------------------------------------------------- #
@@ -1250,7 +1280,7 @@ _KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage"}
 _EXPECTED_TIERS = {
     "theme": ["settings"],
     "pattern": ["settings"],
-    "clock": ["taskbar"],
+    "clock": ["taskbar", "settings"],
     "help": ["taskbar"],   # #101: dropped the synced showHelpButton key; chip only
     "task-manager": ["session", "window"],
     "file-manager": ["file", "window"],
