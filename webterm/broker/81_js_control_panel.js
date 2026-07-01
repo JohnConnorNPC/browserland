@@ -236,9 +236,7 @@
             applyBrowserGlobalVisibility(t.isLocal);
             setColsEl.value = s.size ? s.size.cols : '';
             setRowsEl.value = s.size ? s.size.rows : '';
-            setShowId.checked = !!s.show.id;
-            setShowPid.checked = !!s.show.pid;
-            setShowHost.checked = !!s.show.host;
+            renderLabelOrder(t);   // #123: label id/pid/host/title toggles + order
             setTiling.checked = t.isLocal
                 ? isTilingMode()
                 : (remoteTilingMode(t) === 'tiling');
@@ -292,6 +290,122 @@
             renderProfilesEditor();
             renderMcpConfig();
             renderKeybindings();
+        }
+        // #123: taskbar/title label editor. Renders one reorderable row per key
+        // in t.s.show.order (checkbox = t.s.show[key] visibility, ↑/↓ = swap
+        // adjacent, drag = splice before/after a target). All three mechanisms
+        // AND the toggle funnel through set(): mutate t.s, persist via t.save(),
+        // reapply live for the local target, then re-render. Reflects/persists
+        // through settingsTarget, so it drives both the local target (savePrefs →
+        // localStorage + /state push) and a remote-host target (/state PUT); a
+        // remote host's own viewers re-apply on their /state pull. Only the LAST
+        // remaining checked component can't be unchecked (≥1 stays on).
+        const LABEL_ORDER_NAMES = { id: 'window id', host: 'host',
+                                    pid: 'pid', title: 'title' };
+        let _labelDragKey = null;
+        function renderLabelOrder(t) {
+            const host = document.getElementById('set-label-order');
+            if (!host) return;
+            host.textContent = '';
+            const order = normalizeLabelOrder(t.s.show.order);   // defensive
+            const set = (fn) => {
+                fn();
+                t.save();
+                if (t.isLocal) applyDisplaySettings();
+                renderLabelOrder(t);
+            };
+            const commitOrder = (a) =>
+                set(() => { t.s.show.order = normalizeLabelOrder(a); });
+            const checkedCount = () =>
+                order.reduce((n, k) => n + (t.s.show[k] ? 1 : 0), 0);
+            order.forEach((key, i) => {
+                const row = document.createElement('div');
+                row.className = 'set-label-row';
+                row.draggable = true;
+                row.dataset.labelKey = key;
+
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = !!t.s.show[key];
+                cb.addEventListener('change', () => {
+                    // Never turn OFF the last remaining component — revert the
+                    // box so ≥1 datum-bearing part always stays selectable.
+                    if (!cb.checked && checkedCount() <= 1) { cb.checked = true; return; }
+                    set(() => { t.s.show[key] = cb.checked; });
+                });
+
+                const name = document.createElement('span');
+                name.className = 'set-label-name';
+                name.textContent = LABEL_ORDER_NAMES[key] || key;
+
+                const up = document.createElement('button');
+                up.type = 'button';
+                up.textContent = '↑';
+                up.title = 'move up';
+                up.disabled = (i === 0);
+                up.addEventListener('click', () => {
+                    const a = order.slice();
+                    const tmp = a[i - 1]; a[i - 1] = a[i]; a[i] = tmp;
+                    commitOrder(a);
+                });
+
+                const down = document.createElement('button');
+                down.type = 'button';
+                down.textContent = '↓';
+                down.title = 'move down';
+                down.disabled = (i === order.length - 1);
+                down.addEventListener('click', () => {
+                    const a = order.slice();
+                    const tmp = a[i + 1]; a[i + 1] = a[i]; a[i] = tmp;
+                    commitOrder(a);
+                });
+
+                // Drag-to-reorder (file-manager row mechanics). The drop lands
+                // the dragged key BEFORE or AFTER this target row depending on
+                // which half of the row the pointer is over, so the very ends
+                // stay reachable. Dropping onto itself is a no-op.
+                row.addEventListener('dragstart', (e) => {
+                    _labelDragKey = key;
+                    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+                    row.classList.add('dragging');
+                });
+                row.addEventListener('dragend', () => {
+                    _labelDragKey = null;
+                    row.classList.remove('dragging', 'drop-before', 'drop-after');
+                });
+                row.addEventListener('dragover', (e) => {
+                    if (!_labelDragKey || _labelDragKey === key) return;
+                    e.preventDefault();
+                    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+                    const r = row.getBoundingClientRect();
+                    const after = (e.clientY - r.top) > r.height / 2;
+                    row.classList.toggle('drop-after', after);
+                    row.classList.toggle('drop-before', !after);
+                });
+                row.addEventListener('dragleave', () => {
+                    row.classList.remove('drop-before', 'drop-after');
+                });
+                row.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    const drag = _labelDragKey;
+                    row.classList.remove('drop-before', 'drop-after');
+                    if (!drag || drag === key) return;
+                    const r = row.getBoundingClientRect();
+                    const after = (e.clientY - r.top) > r.height / 2;
+                    const a = order.filter(k => k !== drag);
+                    let ti = a.indexOf(key);
+                    if (ti === -1) return;
+                    if (after) ti += 1;
+                    a.splice(ti, 0, drag);
+                    commitOrder(a);
+                });
+
+                row.appendChild(cb);
+                row.appendChild(name);
+                row.appendChild(up);
+                row.appendChild(down);
+                host.appendChild(row);
+            });
         }
         // Task 8: populate the "Default terminal profile" <select> from this
         // host's /profiles (cached) and reflect the stored defaultProfile.
@@ -788,17 +902,6 @@
             t.save();
             if (t.isLocal && isSizeLocked()) applyLockedSizeToAll();
         });
-
-        for (const [cb, field] of [[setShowId, 'id'], [setShowPid, 'pid'],
-                                   [setShowHost, 'host']]) {
-            cb.addEventListener('change', () => {
-                const t = settingsTarget;
-                if (!t) return;
-                t.s.show[field] = cb.checked;
-                t.save();
-                if (t.isLocal) applyDisplaySettings();
-            });
-        }
 
         // Workspace scrollbar: shared per-host display toggle (same pattern as
         // show.* above). Persist to the target's blob; the visual bar is a LOCAL

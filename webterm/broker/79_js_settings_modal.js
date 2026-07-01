@@ -9,9 +9,9 @@
         const setHostLoadingEl = document.getElementById('set-host-loading');
         const setColsEl = document.getElementById('set-cols');
         const setRowsEl = document.getElementById('set-rows');
-        const setShowId = document.getElementById('set-show-id');
-        const setShowPid = document.getElementById('set-show-pid');
-        const setShowHost = document.getElementById('set-show-host');
+        // #123: the id/pid/host/title toggles + order are rendered by
+        // renderLabelOrder() into #set-label-order (resolved by id), so the old
+        // fixed setShowId/Pid/Host checkbox refs are gone.
         const setTiling = document.getElementById('set-tiling');
         const setStripScrollbar = document.getElementById('set-strip-scrollbar');
         const setCloseTerminates = document.getElementById('set-close-terminates');   // #88
