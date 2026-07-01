@@ -162,6 +162,28 @@ def test_hello_version_field_seeds_summary():
     asyncio.run(scenario())
 
 
+def test_hello_profile_field_seeds_summary():
+    """The hello's optional 'profile' (launch-profile name) seeds entry.profile +
+    summary(), and is absent ('') for a non-launcher / old producer (#115). This
+    is what survives a broker restart: the detached agent re-announces its
+    profile on reconnect, so /sessions re-reports it deterministically."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 9, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "profile": "prod-ssh"})
+        assert entry.profile == "prod-ssh"
+        assert entry.summary()["profile"] == "prod-ssh"
+        entry2 = await reg.register(ws, {
+            "type": "hello", "window_id": 10, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24})
+        assert entry2.profile == ""
+        assert entry2.summary()["profile"] == ""
+
+    asyncio.run(scenario())
+
+
 def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"

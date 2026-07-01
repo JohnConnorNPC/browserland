@@ -140,6 +140,59 @@ def test_post_persists_and_swaps_live(tmp_path, monkeypatch):
     assert set(persisted["profiles"]) == {"wsl-ubuntu", "pwsh"}
 
 
+def test_post_persists_color_and_exposes_map(tmp_path, monkeypatch):
+    # #115: a per-profile color round-trips through POST -> public view, the
+    # sidecar, the live launcher, and the names-only /profiles color side-map.
+    app = _make_app(tmp_path, monkeypatch)
+    body = {"profiles": {
+        "red": {"command": ["bash", "-l"], "color": "#ff0000"},
+        "plain": {"command": ["sh"]}},          # no color -> None
+        "default_profile": "red"}
+    r = _post(app, body)
+    assert r.status == 200 and r.json["ok"] is True
+    # Public view (the Control-Panel editor reads this) reflects both.
+    assert r.json["profiles"]["red"]["color"] == "#ff0000"
+    assert r.json["profiles"]["plain"]["color"] is None
+    # Live launcher set carries it (seeds the launch/summary path).
+    assert app.ctx.launcher.profiles["red"]["color"] == "#ff0000"
+    assert app.ctx.launcher.profiles["plain"].get("color") is None
+    # Persisted to the sidecar beside the state store.
+    persisted = json.loads((tmp_path / "webterm_profiles.json").read_text())
+    assert persisted["profiles"]["red"]["color"] == "#ff0000"
+    # Names-only /profiles: names stay an array, colors ride the side-map (only
+    # profiles that set one appear).
+    _, names = app.test_client.get("/profiles")
+    assert set(names.json["profiles"]) == {"red", "plain"}
+    assert names.json["colors"] == {"red": "#ff0000"}
+
+
+def test_post_clears_color_with_empty_string(tmp_path, monkeypatch):
+    # #115: an empty/absent color means "no default" (like cwd), and re-POSTing
+    # without it clears a previously-set color (REPLACE semantics).
+    app = _make_app(tmp_path, monkeypatch)
+    _post(app, {"profiles": {"a": {"command": ["a"], "color": "#010203"}},
+                "default_profile": "a"})
+    r = _post(app, {"profiles": {"a": {"command": ["a"], "color": ""}},
+                    "default_profile": "a"})
+    assert r.status == 200 and r.json["profiles"]["a"]["color"] is None
+    _, names = app.test_client.get("/profiles")
+    assert names.json["colors"] == {}            # no colored profiles remain
+
+
+def test_heal_drops_bad_color_keeps_entry(tmp_path):
+    # #115 self-heal: a hand-edited/reloaded sidecar with a junk color keeps the
+    # profile but drops only the color (never carries junk into the seed map).
+    sidecar = tmp_path / "webterm_profiles.json"
+    sidecar.write_text(json.dumps({
+        "profiles": {"a": {"command": ["a"], "color": "not-a-color"},
+                     "b": {"command": ["b"], "color": "#00ff00"}},
+        "default_profile": "a"}), encoding="utf-8")
+    cfg = _load_profiles_cfg(sidecar, {})
+    assert set(cfg["profiles"]) == {"a", "b"}        # both entries survive
+    assert cfg["profiles"]["a"]["color"] is None     # junk dropped
+    assert cfg["profiles"]["b"]["color"] == "#00ff00"
+
+
 def test_post_delete_via_replace(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     _post(app, {"profiles": {"a": {"command": ["a"]},
@@ -185,17 +238,26 @@ def test_post_rejects_too_large(tmp_path, monkeypatch):
 
 def test_mcp_profiles_stays_names_only_after_edit(tmp_path, monkeypatch):
     # The profiles-only invariant: even after the browser realm defines a new
-    # profile, the MCP realm still only ever sees NAMES (never commands).
+    # profile (now optionally with a #115 color), the MCP realm still only ever
+    # sees NAMES (never commands, never colors).
     app = _make_app(tmp_path, monkeypatch)
     # Enable the MCP realm with a token so /mcp/profiles is reachable at all.
     app.ctx.mcp_cfg = dict(app.ctx.mcp_cfg, enabled=True, token="mtok")
-    _post(app, {"profiles": {"secret": {"command": ["donotshow", "--flag"]}},
+    _post(app, {"profiles": {"secret": {"command": ["donotshow", "--flag"],
+                                        "color": "#abcdef"}},
                 "default_profile": "secret"})
     _, r = app.test_client.get("/mcp/profiles?token=mtok")
     assert r.status == 200
     assert r.json["profiles"] == ["secret"]      # names only, never commands
     blob = json.dumps(r.json)
     assert "command" not in blob and "donotshow" not in blob
+    assert "color" not in blob and "#abcdef" not in blob   # #115: no color leak
+    # The BROWSER-realm names-only /profiles DOES carry the additive color map,
+    # while its "profiles" stays a plain name array (the seed path reads both).
+    _, pr = app.test_client.get("/profiles")
+    assert pr.json["profiles"] == ["secret"]
+    assert pr.json["colors"] == {"secret": "#abcdef"}
+    assert "command" not in json.dumps(pr.json)  # still no command leak
 
 
 # ---- validation slugs (fast, exhaustive; complements the e2e sampling) ----
@@ -209,6 +271,14 @@ def test_mcp_profiles_stays_names_only_after_edit(tmp_path, monkeypatch):
     ({"profiles": {"a": {"command": [1]}}}, "bad_command"),
     ({"profiles": {"a": {"command": ["x"], "title": 5}}}, "bad_title"),
     ({"profiles": {"a": {"command": ["x"], "cwd": 5}}}, "bad_cwd"),
+    # #115: strict #rrggbb — a name, a 3-digit hex, an over-long hex, a bad hex
+    # digit, a trailing newline, and a non-string all reject (never coerce).
+    ({"profiles": {"a": {"command": ["x"], "color": "red"}}}, "bad_color"),
+    ({"profiles": {"a": {"command": ["x"], "color": "#fff"}}}, "bad_color"),
+    ({"profiles": {"a": {"command": ["x"], "color": "#1234567"}}}, "bad_color"),
+    ({"profiles": {"a": {"command": ["x"], "color": "#12345g"}}}, "bad_color"),
+    ({"profiles": {"a": {"command": ["x"], "color": "#123456\n"}}}, "bad_color"),
+    ({"profiles": {"a": {"command": ["x"], "color": 5}}}, "bad_color"),
     ({"profiles": {"a": {"command": ["x"]}}, "default_profile": "z"},
      "default_not_member"),
 ])

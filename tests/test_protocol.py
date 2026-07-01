@@ -26,14 +26,16 @@ def test_hello_minimal_shape():
 
 def test_hello_optional_fields():
     frame = json.loads(protocol.hello_frame(
-        1, 2, "t", 80, 24, host="box1", kind="agent", version="0.1.0+abc"))
+        1, 2, "t", 80, 24, host="box1", kind="agent", profile="scratch",
+        version="0.1.0+abc"))
     assert frame["host"] == "box1"
     assert frame["kind"] == "agent"
+    assert frame["profile"] == "scratch"     # launch profile (#115)
     assert frame["version"] == "0.1.0+abc"   # build id for stale detection (#22)
     # Absent when not supplied — non-agent producers omit them.
     bare = json.loads(protocol.hello_frame(1, 2, "t", 80, 24))
     assert ("host" not in bare and "kind" not in bare
-            and "version" not in bare)
+            and "profile" not in bare and "version" not in bare)
 
 
 def test_build_version_starts_with_package_version():
