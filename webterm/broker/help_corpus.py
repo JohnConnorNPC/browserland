@@ -559,8 +559,11 @@ def build_full_corpus() -> dict:
     ``build_mod_sections()``, re-sorted by ``(order, slug)``. Raises ``BuildError``
     on a slug that collides ACROSS the two sets (a mod can't shadow a wiki page).
     This is THE builder used for serving, regeneration, and the drift test.
+
+    Both dirs are looked up as module globals HERE (not via a frozen default arg)
+    so a test can monkeypatch ``WIKI_DIR`` / ``MODS_DIR`` and have it take effect.
     """
-    merged = build_corpus(WIKI_DIR)["sections"] + build_mod_sections()
+    merged = build_corpus(WIKI_DIR)["sections"] + build_mod_sections(MODS_DIR)
     seen: set = set()
     for sec in merged:
         if sec["slug"] in seen:

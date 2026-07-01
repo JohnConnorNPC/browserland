@@ -8,6 +8,7 @@ guard against the packaged help_corpus.json, and a static check that the
 frontend's Help render path never uses innerHTML on corpus content.
 """
 
+import json
 import re
 
 import pytest
@@ -299,11 +300,14 @@ def test_duplicate_slug_raises(tmp_path):
 
 def test_real_wiki_builds():
     corpus = hc.build_corpus(hc.WIKI_DIR)
+    # All 13 pages survive #113 (only mod-OWNED sections were migrated out).
     assert len(corpus["sections"]) == 13
     total = sum(len(s["cards"]) for s in corpus["sections"])
-    # The old hand-written HELP_ENTRIES_STATIC had 35 cards; wiki coverage is
-    # at least that (explicit parity bar, not "some cards generated").
-    assert total >= 35
+    # #113 moved the mod-owned cards (sticky/editor/file-manager/task-manager
+    # from Window-Types, the Taskbar clock/help chips, the Getting-Started in-app
+    # guide) into mod help.md, so the wiki-only floor dropped from 75 to 68. The
+    # migrated cards now ride build_full_corpus() (see below), not build_corpus().
+    assert total >= 68
 
 
 def test_real_wiki_section_label_parity():
@@ -343,9 +347,10 @@ def test_serialize_is_deterministic():
 
 def test_packaged_json_in_sync_with_wiki():
     # Regenerate-and-diff drift guard: the checked-in/packaged help_corpus.json
-    # must byte-match a fresh parse of wiki/ (it is tooling-generated, never
-    # hand-edited). If this fails: `python -m webterm.broker.help_corpus`.
-    fresh = hc.serialize_corpus(hc.build_corpus(hc.WIKI_DIR))
+    # must byte-match a fresh parse of wiki/ + the mod help.md files (#113 — it is
+    # tooling-generated, never hand-edited). If this fails: run the regenerator
+    # `python -m webterm.broker.help_corpus`.
+    fresh = hc.serialize_corpus(hc.build_full_corpus())
     assert hc.PACKAGED_JSON.read_bytes() == fresh, \
         "help_corpus.json is stale — run: python -m webterm.broker.help_corpus"
 
@@ -355,6 +360,120 @@ def test_load_corpus_falls_back_when_wiki_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(hc, "WIKI_DIR", tmp_path / "nope")
     corpus = hc.load_corpus()
     assert corpus["sections"], "should fall back to packaged json"
+
+
+# --------------------------------------------------------------------------- #
+# mod-owned help.md -> tagged corpus sections (issue #113)
+# --------------------------------------------------------------------------- #
+
+def _write_mods(tmp_path, mods):
+    """Build a fake mods/ tree. ``mods`` maps mod id -> (manifest, help_md):
+    a None manifest / None help_md omits that file (to exercise the "needs
+    both" gate)."""
+    root = tmp_path / "mods"
+    root.mkdir(parents=True, exist_ok=True)
+    for mod_id, (manifest, help_md) in mods.items():
+        d = root / mod_id
+        d.mkdir(parents=True, exist_ok=True)
+        if manifest is not None:
+            (d / "mod.json").write_text(json.dumps(manifest), encoding="utf-8")
+        if help_md is not None:
+            (d / "help.md").write_text(help_md, encoding="utf-8")
+    return root
+
+
+def test_mod_help_builds_section():
+    # A real shipped mod (clock) drops a help.md the same parser reads, tagged
+    # with its owner id and carrying the slug/label/icon from its help block.
+    secs = {s["slug"]: s for s in hc.build_mod_sections()}
+    clock = secs["clock"]
+    assert clock["mod"] == "clock"
+    assert clock["label"] == "Clock"
+    assert clock["icon"] == "\U0001f550"        # 🕐 declared in mod.json help
+    assert clock["cards"], "clock help.md should yield at least one card"
+
+
+def test_full_corpus_includes_mod_sections():
+    full = hc.build_full_corpus()
+    slugs = [s["slug"] for s in full["sections"]]
+    assert len(slugs) == len(set(slugs)), "no duplicate slug across wiki + mods"
+    assert "taskbar" in slugs                    # a surviving wiki section
+    for mod_slug in ("sticky", "editor", "file-manager", "task-manager",
+                     "clock", "help"):
+        assert mod_slug in slugs
+    # every mod section is tagged and sorts AFTER every wiki section.
+    mod_orders = [s["order"] for s in full["sections"] if "mod" in s]
+    wiki_orders = [s["order"] for s in full["sections"] if "mod" not in s]
+    assert len(mod_orders) == 6
+    assert min(mod_orders) > max(wiki_orders)
+
+
+def test_mod_sections_absent_when_no_mods_dir(tmp_path):
+    assert hc.build_mod_sections(tmp_path / "nope") == []
+
+
+def test_mod_needs_both_manifest_and_help(tmp_path):
+    root = _write_mods(tmp_path, {
+        "onlyhelp": (None, "intro\n\n## A\n\nbody"),
+        "onlymanifest": ({"id": "onlymanifest"}, None),
+        "good": ({"id": "good", "title": "Good"}, "intro body"),
+    })
+    slugs = {s["slug"] for s in hc.build_mod_sections(root)}
+    assert slugs == {"good"}
+
+
+def test_mod_help_block_fallbacks(tmp_path):
+    # No/blank/malformed help fields fall back deterministically; a non-int order
+    # is rejected (kept comparable) and a blank icon is dropped.
+    root = _write_mods(tmp_path, {
+        "aaa": ({"id": "aaa", "title": "Ayy", "help": "not-a-dict"}, "prose"),
+        "zzz-mod": ({"id": "zzz-mod", "help": {"order": "10", "icon": ""}}, "prose"),
+    })
+    secs = {s["slug"]: s for s in hc.build_mod_sections(root)}
+    assert secs["aaa"]["label"] == "Ayy"                    # title fallback
+    assert secs["aaa"]["order"] == hc._MOD_ORDER_BASE + 0   # index fallback
+    assert "icon" not in secs["aaa"]                        # help wasn't a dict
+    assert secs["zzz-mod"]["label"] == "zzz mod"            # humanized id
+    assert secs["zzz-mod"]["order"] == hc._MOD_ORDER_BASE + 1  # "10" rejected
+    assert "icon" not in secs["zzz-mod"]                    # "" icon dropped
+
+
+def test_mod_help_empty_page_skipped(tmp_path):
+    # A help.md that parses to no cards yields no section (silent skip).
+    root = _write_mods(tmp_path, {"blank": ({"id": "blank"}, "\n\n")})
+    assert hc.build_mod_sections(root) == []
+
+
+def test_duplicate_mod_slug_raises(tmp_path):
+    root = _write_mods(tmp_path, {
+        "one": ({"id": "one", "help": {"slug": "dup"}}, "a"),
+        "two": ({"id": "two", "help": {"slug": "dup"}}, "b"),
+    })
+    with pytest.raises(hc.BuildError):
+        hc.build_mod_sections(root)
+
+
+def test_mod_slug_colliding_with_wiki_raises(tmp_path, monkeypatch):
+    # A mod whose slug shadows a real wiki page must fail the merge (build_full_
+    # corpus looks up MODS_DIR as a live global, so this monkeypatch takes effect).
+    root = _write_mods(tmp_path, {
+        "shadow": ({"id": "shadow", "help": {"slug": "taskbar"}}, "x"),
+    })
+    monkeypatch.setattr(hc, "MODS_DIR", root)
+    with pytest.raises(hc.BuildError):
+        hc.build_full_corpus()
+
+
+def test_bad_mod_manifest_does_not_crash(tmp_path):
+    # An unparseable / non-object mod.json degrades to fallbacks (id from dir),
+    # never crashing the build. The help.md still becomes a section.
+    root = tmp_path / "mods"
+    (root / "brokenmod").mkdir(parents=True)
+    (root / "brokenmod" / "mod.json").write_text("{not json", encoding="utf-8")
+    (root / "brokenmod" / "help.md").write_text("intro body", encoding="utf-8")
+    secs = hc.build_mod_sections(root)
+    assert len(secs) == 1
+    assert secs[0]["slug"] == "brokenmod" and secs[0]["mod"] == "brokenmod"
 
 
 # --------------------------------------------------------------------------- #
