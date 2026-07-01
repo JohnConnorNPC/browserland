@@ -217,6 +217,10 @@
                 showSettingsPane('local');
                 renderSettings();
             }
+            // #107: if the removed host was the START (+) default, fall back to
+            // local — mirrors the currentSettingsTab reset above and keeps the
+            // stored/synced value tidy so local shows marked after the delete.
+            if (getSettings().defaultHost === id) getSettings().defaultHost = '';
             savePrefs();
             renderHostsList();
             renderSettingsTabs();   // the removed host's tab disappears
@@ -271,6 +275,10 @@
             // user can remove the stale/duplicate one — the surgical fix the
             // reporter actually needed (removeHost preserves other tokens).
             const dupOf = computeHostDuplicates(hosts);
+            // #107: the host the START (+) button currently launches on (resolves
+            // '' / 'local' / a removed id to the local host), so exactly one row
+            // is marked + its Default button disabled.
+            const curId = defaultLaunchHost().id;
             for (const host of hosts) {
                 const row = document.createElement('div');
                 row.className = 'set-row host-row';
@@ -282,6 +290,14 @@
                     : host.label + ' — ' + host.url;
                 name.title = name.textContent;
                 row.appendChild(name);
+                // #107: badge the START (+) default host (mirrors the profiles
+                // editor's `set-profile-badge`). Shown for the local row too.
+                if (host.id === curId) {
+                    const badge = document.createElement('span');
+                    badge.className = 'set-profile-badge';
+                    badge.textContent = 'default';
+                    name.appendChild(badge);
+                }
                 const dup = dupOf.get(host.id);
                 if (dup) {
                     const hint = document.createElement('span');
@@ -295,6 +311,19 @@
                 row.appendChild(hostRowButton('password',
                     'enter the password for this host',
                     () => showAuthOverlay(host, true)));
+                // #107: mark this host as the START (+) button's default launch
+                // target. Selectable for EVERY row (incl. local, stored as '' =
+                // canonical unset); disabled on the row already marked default.
+                const defBtn = hostRowButton('default',
+                    'launch the START (+) button on this host',
+                    () => {
+                        getSettings().defaultHost =
+                            (host.id === 'local' ? '' : host.id);
+                        savePrefs();
+                        renderHostsList();
+                    });
+                defBtn.disabled = (host.id === curId);
+                row.appendChild(defBtn);
                 if (host.id !== 'local') {
                     row.appendChild(hostRowButton('edit', null,
                         () => startEditHost(host.id)));
