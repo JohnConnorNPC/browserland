@@ -113,7 +113,8 @@ compared with `hmac.compare_digest`.
 | `WS /browserland` (producers) | loopback exempt; non-loopback needs `?token=` (or `?auth=`). No token configured → non-loopback refused. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
 | `POST /launch` | token required whenever configured; without a token only loopback is allowed (403 `launch_disabled_no_token`) — never an open RCE on a non-loopback bind. |
 | `WS /ws`, `GET /sessions` | gated by the token only when one is configured (`?token=`, `?auth=`, or `Authorization: Bearer`). |
-| CORS (JSON API) | emitted **only when a token is configured** (`Access-Control-Allow-Origin: *` on every response incl. 401/404, explicit OPTIONS preflights on `/sessions` `/profiles` `/launch`) — lets the multi-host UI on another broker's origin read this one. A tokenless loopback-only broker emits no CORS headers and stays unreadable to arbitrary websites. |
+| `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token-or-loopback, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
+| CORS (JSON API) | emitted **only when a token is configured** (`Access-Control-Allow-Origin: *` on every response incl. 401/404, explicit OPTIONS preflights on `/sessions` `/profiles` `/launch` `/profiles/config` `/profiles/detect` …) — lets the multi-host UI on another broker's origin read this one. A tokenless loopback-only broker emits no CORS headers and stays unreadable to arbitrary websites. |
 
 Tokens are passed to spawned agents via **env only** (never argv — visible
 in process lists), and auth failures log only path + client IP (the token
@@ -409,6 +410,51 @@ only these broker-wide knobs are.
 
 **Precedence.** Token: env `WEB_TERMINAL_MCP_TOKEN` > sidecar `token` > config
 `mcp_token`. Effective mode: per-window override > global `default_mode`.
+
+### Launch-profile editor (browser `auth_token`-gated) — #70
+
+The Control Panel edits the launch-profile allow-list here. Same browser
+token-or-loopback gate as `/mcp/config` above — **never** the MCP token, so the
+commands (the RCE-by-design half of profiles-only) only ever travel to an
+already-authenticated browser. `/profiles` and `/mcp/profiles` stay **names
+only**, so an MCP/AI agent still can't read a command or define a profile.
+
+**`GET /profiles/config`** → the **full** objects for this host:
+`{"ok":true,"default_profile":"cmd","profiles":{"cmd":{"command":[...],"title":...,
+"cwd":...}},"os":"windows|posix","source":"config|sidecar","exists":{"cmd":true}}`.
+`exists[name]` is `shutil.which(command[0]) is not None` (a red flag for a
+shell that isn't installed).
+
+**`POST /profiles/config`** — **replace** semantics; body
+`{"profiles":{...},"default_profile":"..."}`. Validated in full **before** any
+write (a bad field changes nothing), then written to the sidecar atomically and
+the live launcher is swapped — **no restart**. Returns the GET shape. Errors
+(all `400` unless noted): `too_large` (413, body > 256 KiB), `bad_json`,
+`bad_profiles` (not a dict), `no_profiles` (empty — would brick `/launch`),
+`too_many_profiles` (> 200), `bad_name` (empty / > 64 chars / control chars /
+outside `[A-Za-z0-9 ._+-]`), `bad_profile`, `bad_command` (not a non-empty list
+of non-empty control-char-free strings), `command_too_long`,
+`command_token_too_long`, `bad_title`/`title_too_long`, `bad_cwd`/`cwd_too_long`,
+`default_not_member`. An empty `default_profile` resolves to the first profile.
+
+**`GET /profiles/detect`** → read-only environment scan seeding the editor:
+`{"ok":true,"suggestions":[{"name","title","command","exists"}]}`. Windows lists
+WSL distros (`wsl.exe -l -q`); POSIX lists installed `bash`/`zsh`/`fish`/`sh`.
+Never errors on a missing tool — the list is just empty. Runs off the event loop.
+
+**Sidecar `webterm_profiles.json`** — the durable profile set, written atomically
+next to the `/state` store (default `<state_path dir>/webterm_profiles.json`;
+override with config `profiles_state_path`). Schema:
+
+```json
+{"profiles": {"<name>": {"command": ["..."], "title": null, "cwd": null}},
+ "default_profile": "<name>"}
+```
+
+Seeded from `broker_config.json`'s `agent.profiles`; **once written it owns the
+set** (`agent.profiles` becomes seed-only). Self-heals — a missing/corrupt/empty
+sidecar falls back to the seed, never bricking startup or `/launch`. Full recipe
+catalog + the security rationale: **[PROFILES.md](PROFILES.md)**.
 
 ### curl
 

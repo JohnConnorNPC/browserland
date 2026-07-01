@@ -89,6 +89,10 @@ The desktop with tiled and floating terminals
 - **Token auth, no open RCE**: one token gates non-loopback access and doubles
   as the UI password; launching is **profiles-only** (the client can never
   supply a raw command), with a loopback exemption for local use.
+- **Launch profiles you can edit in the UI**: add WSL/zsh/PowerShell shells from
+  **Control Panel → Launch profiles** (one-click WSL-distro / shell **Detect…**),
+  applied live with no restart — still profiles-only. See
+  **[docs/PROFILES.md](docs/PROFILES.md)** for recipes and the security model.
 
 ## MCP & AI agent access
 
@@ -266,12 +270,17 @@ what *not* to hand-edit, and running the broker unattended in the background
 (Windows Task Scheduler / Linux systemd). It's written to be followed by a human
 or a coding agent.
 
+Adding or editing launch profiles (WSL / zsh / PowerShell / Git-Bash) is covered
+in **[`docs/PROFILES.md`](docs/PROFILES.md)** — the recipe catalog, the three
+profile fields, the `webterm_profiles.json` sidecar-vs-`broker_config` rule, and
+the browser-realm-only editing model.
+
 The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)**:
 
 - the complete wire protocol and frame semantics,
 - the full auth model (every surface, token precedence, CORS),
 - every HTTP endpoint including the MCP HTTP contract and its error table,
-- access modes, the MCP config sidecar, and the shipped MCP server, and
+- access modes, the MCP + profiles config sidecars, and the shipped MCP server, and
 - deployment notes (systemd units, multi-host over Tailscale, testing).
 
 ## License

@@ -110,8 +110,12 @@ editing the wrong thing. Rules of thumb:
   `port`), `auth_token`, MCP gates, and the launchable `profiles`. Nothing in it
   points at other machines.
 - **`profiles` are an allow-list, deliberately.** The browser can only launch
-  pre-approved profiles — it can never supply a raw command. Add a profile here
-  to make a new shell launchable; don't try to pass commands from the UI.
+  pre-approved profiles — it can never supply a raw command. The `agent.profiles`
+  here are the **seed**; the easiest way to add a WSL/zsh/PowerShell profile is
+  **Control Panel → Launch profiles** (add/edit/detect, applied live with no
+  restart), which persists to a `webterm_profiles.json` sidecar that then owns
+  the set. See **[PROFILES.md](PROFILES.md)** for copyable recipes and the
+  sidecar-vs-`broker_config` rule.
 - **Tokens/passwords for *remote* hosts live in the browser** (localStorage),
   set through the add-host form — not in any file on disk.
 
