@@ -11,14 +11,16 @@
         // typed Help cards through ctx.registerHelpCards.
         //
         // HOISTING NOTE (do NOT wrap these in init/an IIFE): the window/open
-        // functions below are TOP-LEVEL `function` declarations so the CORE call
-        // sites keep resolving them by hoisting across the one concatenated
-        // <script> — openHelpWindow (openAppWindow appKind 'help', 70), launchHelp
-        // (the (+) menu, 76), toggleHelpWindow (the toggle-help keybinding, 78),
-        // and applyHelpButton — exactly as before the extraction, and even when
-        // mods_enabled=false (loadMods gates init(), never parsing). Only the chip,
-        // the Control Panel toggle, the first-run hint, and card-registration
-        // refresh are init-owned (so a disabled/absent mod has no chip).
+        // functions below are TOP-LEVEL `function` declarations so their call sites
+        // keep resolving them by hoisting across the one concatenated <script> —
+        // openHelpWindow + launchHelp are consumed by this mod's own
+        // ctx.registerWindowKind (the factory + (+) menu launch, #100), toggleHelpWindow
+        // by the toggle-help keybinding in CORE fragment 78, and applyHelpButton by
+        // init — exactly as before, and even when mods_enabled=false (loadMods gates
+        // init(), never parsing), so the keybinding still opens Help mods-off. Only the
+        // chip, the window-kind registration, the Control Panel toggle, the first-run
+        // hint, and card-registration refresh are init-owned (so a disabled/absent mod
+        // has no chip and no (+) Help entry).
 
         // The taskbar "?" chip visibility (moved from 65_js_display_theming.js):
         // same show/hide-on-an-`.on`-class pattern as the clock, driven by the
@@ -480,17 +482,32 @@
             if (ex && !ex.minimized && frontId === ex.id) { closeWindow(ex.id); return; }
             focusOrOpenHelp();
         }
-        // Register the mod: create the "?" chip, own the synced showHelpButton key
-        // through ctx.settings.boolean (so the Control Panel toggle + cross-browser
-        // /state sync converge through notifyModSettings, exactly like the clock),
-        // and schedule the one-time first-run nudge. The chip is appended LAST in
-        // the taskbar, so the clock (added "before #help-chip") keeps its slot.
+        // Register the mod: contribute the 'help' window kind (#100), create the "?"
+        // chip, own the synced showHelpButton key through ctx.settings.boolean (so the
+        // Control Panel toggle + cross-browser /state sync converge through
+        // notifyModSettings, exactly like the clock), and schedule the one-time first-
+        // run nudge. The chip is appended LAST in the taskbar, so the clock (added
+        // "before #help-chip") keeps its slot.
         registerMod({
             id: 'help',
             version: '1.0.0',
             ctxVersion: 1,
             tiers: ['settings'],   // #86: owns the synced `showHelpButton` key (the ? chip is direct DOM)
             init: function (ctx) {
+                // #100: contribute the 'help' window kind through ctx (the same core
+                // registry the built-ins use), so its (+) launch-menu entry rides the
+                // mod's enable/disable — _modRegisterWindowKind auto-pushes
+                // deleteWindowKind onto this mod's unload list, removing the kind (and
+                // its menu entry) on disable. Ephemeral (no serialize -> never
+                // restored), matching Help's old core registration. No onUnload closes
+                // a live Help window: it holds no live resource (its render/corpus fns
+                // are hoisted/core), so it closes normally after disable.
+                ctx.registerWindowKind({
+                    appKind: 'help',
+                    factory: function (d) { return openHelpWindow(d); },
+                    menu: { label: '❓ Help', launch: function () { return launchHelp(); } },
+                });
+
                 // Build the "?" chip (was static #help-chip markup in 40_body.html).
                 // Hidden until applyHelpButton adds .on; #help-chip rules ship in
                 // this mod's help.css.

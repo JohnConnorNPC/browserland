@@ -528,12 +528,16 @@ def test_help_mod_packaged_and_manifest_agrees():
     assert meta["entry"] == "help.js"
     # First mod to ship a packaged stylesheet via the S4 route (#77).
     assert meta["styles"] == ["help.css"]
-    # The script registers the help mod, owns the synced showHelpButton key
-    # through the #74 boolean API, and carries the moved window factory + chip.
+    # The script registers the help mod, contributes the 'help' window kind through
+    # ctx.registerWindowKind (#100, so its (+) launcher rides the mod's enable/
+    # disable), owns the synced showHelpButton key through the #74 boolean API, and
+    # carries the moved window factory + chip.
     src = js.read_text(encoding="utf-8")
     assert "registerMod(" in src
     assert "id: 'help'" in src
     assert "ctxVersion: 1" in src
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'help'" in src
     assert "ctx.settings.boolean('showHelpButton'" in src
     assert "function openHelpWindow" in src
     assert "function applyHelpButton" in src
@@ -588,13 +592,13 @@ def test_register_window_kind_capability_present():
 
 
 def test_window_kind_builtins_registered_in_menu_order():
-    # registerBuiltinWindowKinds registers the TWO remaining core kinds
-    # (sticky-note left for the S8 mod #81, text-editor for the S10 mod #83,
-    # file-manager for the S11 mod #84, task-manager for the S12 mod #85), and their
-    # registration order is the historical (+) launch-menu order (Map iteration
-    # order drives the menu), so the built-ins reproduce the old relative menu order.
+    # registerBuiltinWindowKinds registers the ONE remaining core kind (control-
+    # panel); sticky-note left for the S8 mod #81, text-editor for the S10 mod #83,
+    # file-manager for the S11 mod #84, task-manager for the S12 mod #85, and help
+    # for the #100 mod. Registration order is the historical (+) launch-menu order
+    # (Map iteration order drives the menu).
     src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
-    order = ["control-panel", "help"]
+    order = ["control-panel"]
     positions = []
     for kind in order:
         needle = f"appKind: '{kind}'"
@@ -602,22 +606,21 @@ def test_window_kind_builtins_registered_in_menu_order():
         positions.append(src.index(needle))
     assert positions == sorted(positions), \
         "built-in kinds must register in the historical menu order"
-    # sticky-note, text-editor, file-manager + task-manager are now mods, never core
-    # built-ins (each appends through ctx at loadMods time). The sticky note's
-    # retain-on-close rode with it; the editor / file-manager / task-manager specs
-    # rode with them too.
+    # sticky-note, text-editor, file-manager, task-manager + help are now mods, never
+    # core built-ins (each appends through ctx at loadMods time). The sticky note's
+    # retain-on-close rode with it; the editor / file-manager / task-manager / help
+    # specs rode with them too (#100 moved Help's registration into mods/help/).
     assert "appKind: 'sticky-note'" not in src
     assert "appKind: 'text-editor'" not in src
     assert "appKind: 'file-manager'" not in src
     assert "appKind: 'task-manager'" not in src
+    assert "appKind: 'help'" not in src
     assert "retainOnClose: function (rec)" not in src
     # No persisted CORE built-in remains: the file-manager's serializeAppWindow
     # reference moved to mods/file-manager/ (text-editor's to mods/editor/,
     # sticky's to mods/sticky/), so core registers ZERO `serialize:` built-ins
-    # (the three survivors task/control/help are all ephemeral).
+    # (the sole survivor control-panel is ephemeral).
     assert src.count("serialize: serializeAppWindow") == 0
-    # help is a CORE built-in (mods-off safe), reached through deferred wrappers.
-    assert "return openHelpWindow(d)" in src and "return launchHelp()" in src
 
 
 def test_sticky_symbols_removed_from_core_fragments():
