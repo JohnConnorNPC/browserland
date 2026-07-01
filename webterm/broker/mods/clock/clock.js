@@ -1,11 +1,12 @@
         // ---- mod: clock (F057) --------------------------------------------
         // The reference Browserland mod (#71): the taskbar date/time chip,
-        // extracted from core verbatim. Byte-identical behavior, including its
-        // cross-browser /state sync — it owns the EXISTING synced `clock`
-        // setting through ctx.settings.boolean (read-through onto the shared
-        // settings blob, NOT a new key / schema field), mounts its own Control
-        // Panel checkbox, keeps the old taskbar slot (before #help-chip), and
-        // tears its 1s interval + chip + checkbox down cleanly on disable.
+        // shown whenever the mod is enabled (#102 — no Control Panel toggle).
+        // The chip's lifecycle IS the mod's lifecycle: init() builds it and
+        // starts the 1s tick, ctx.onUnload tears the interval down, and the ctx
+        // primitives that mounted the chip remove it on disable. The per-mod
+        // enable switch is the real control, so there is no synced `clock`
+        // setting / Control Panel checkbox anymore. Keeps the old taskbar slot
+        // (before #help-chip).
         //
         // The chip is styled with INLINE styles referencing the live theme vars
         // (the same vars the deleted #clock-chip CSS used), so the mod needs no
@@ -14,7 +15,7 @@
             id: 'clock',
             version: '1.0.0',
             ctxVersion: 1,
-            tiers: ['settings', 'taskbar'],   // #86: owns the synced `clock` key + a taskbar chip
+            tiers: ['taskbar'],   // #102: taskbar chip only (no synced setting)
             init: function (ctx) {
                 // Build the chip once. align-items is harmless while hidden; the
                 // display toggle (none <-> inline-flex) is what shows/hides it,
@@ -66,14 +67,9 @@
                     if (timer) { clearInterval(timer); timer = null; }
                 });
 
-                // Own the existing synced `clock` setting + its Control Panel
-                // checkbox. onChange fires on every /state convergence (another
-                // browser's toggle) and on local set(); apply once now for boot.
-                const setting = ctx.settings.boolean('clock', false, {
-                    title: 'Date & time',
-                    label: 'Show date & time (bottom-right)',
-                });
-                setting.onChange(apply);
-                apply(setting.get());
+                // Mod enabled = time shown. The chip's lifecycle is the mod's
+                // lifecycle: start the 1s tick on init, stop it on unload
+                // (ctx.onUnload above). No Control Panel toggle (#102).
+                apply(true);
             },
         });

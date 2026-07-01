@@ -1244,7 +1244,7 @@ _KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage"}
 _EXPECTED_TIERS = {
     "theme": ["settings"],
     "pattern": ["settings"],
-    "clock": ["settings", "taskbar"],
+    "clock": ["taskbar"],
     "help": ["settings"],
     "task-manager": ["session", "window"],
     "file-manager": ["file", "window"],
