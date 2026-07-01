@@ -123,6 +123,22 @@ def test_default_launch_host_wired_into_page():
         assert sentinel in INDEX_HTML, f"missing #107 sentinel: {sentinel!r}"
 
 
+def test_label_order_editor_wired_into_page():
+    # #123: the configurable taskbar/title label order. No JS test runner exists
+    # (pytest only), so lock the served-page symbols: the shell the editor mounts
+    # into, the single label composer, the Control Panel editor, the self-healed
+    # permutation field, and its normalizer (used by both the settings model and
+    # the editor).
+    for sentinel in (
+        'id="set-label-order"',      # #123 editor mount point (40_body.html)
+        "function composeLabelParts",  # #123 single label composer (64)
+        "function renderLabelOrder",   # #123 Control Panel editor (81)
+        "s.show.order",                # #123 permutation field, self-healed in 55
+        "normalizeLabelOrder",         # #123 permutation normalizer (55, used by 81)
+    ):
+        assert sentinel in INDEX_HTML, f"missing #123 sentinel: {sentinel!r}"
+
+
 def test_index_html_never_puts_token_in_url():
     # Security invariant carried over from the monolith: the page must not push
     # the auth token into the address bar.

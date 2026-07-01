@@ -32,6 +32,21 @@ Each open window has a button on the taskbar — except sticky notes, which deli
 
 The taskbar menu does not have a send-to-workspace item — to move a window to another workspace, use its **title-bar** right-click menu (see [[Workspaces]]). For the difference between Close, Terminate, and Delete, see [[Floating-Window-Controls]].
 
+### Label components
+
+Each window button — and the matching window title bar — shows a label built from up to four components:
+
+| Component | Example | Notes |
+|---|---|---|
+| **window id** | `#42` | The broker-assigned window number. On the taskbar it is dimmed and auto-hides on a very narrow button; in a window title bar it stays a leading badge |
+| **host** | `myhost:` | The machine the session reports running on. The colon appears only when the host sits immediately before the title |
+| **title** | `claude` | The program or agent title (or `session <id>` when it has none) |
+| **pid** | `[12345]` | The process id, in brackets |
+
+By default the label reads **`#id host: title [pid]`** with the pid hidden — for example `#42 myhost: claude`.
+
+To change it, open **Control Panel → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and if a ticked component has no value for a given window (for example the host on an app window that has none), the title is shown instead so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
+
 ### Items for other workspaces
 
 By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide windows on other workspaces** under Control Panel → Taskbar workspace filter. This setting governs your browser.
