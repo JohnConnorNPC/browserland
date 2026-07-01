@@ -39,8 +39,11 @@ include = ["webterm*"]
 # old single index.html -- ui.py's explicit _ORDERED list picks the fragments.
 # mods/*/* ships the in-repo frontend mods (#71): ui.py's _MODS splices their
 # scripts into INDEX_HTML, so the wheel must carry the nested mod files too.
+# mods/*/*.md ships each mod's optional wiki-format help.md (#113) — help_corpus
+# bakes it into the packaged help_corpus.json, but a wheel carries the source too.
 "webterm.broker" = ["*.html", "*.json", "*.css", "*.js",
-                    "mods/*/*.js", "mods/*/*.css", "mods/*/*.json"]
+                    "mods/*/*.js", "mods/*/*.css", "mods/*/*.json",
+                    "mods/*/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
