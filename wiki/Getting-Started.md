@@ -43,7 +43,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 
 | Setting | What it controls |
 |---|---|
-| Appearance | Theme, background pattern, terminal font, clock |
+| Appearance | Theme, background pattern, terminal font |
 | Window mode | Floating vs. tiling (see [[Window-Modes]]) |
 | Drag hold delay | The hold time for the snap and pop-out gestures (see [[Snapping-and-Pop-out]]) |
 | Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
@@ -53,7 +53,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 
 ### Per-browser vs. per-host settings
 
-- **Browser-global settings** follow the browser you are sitting at — theme and background, terminal font, the clock and help-button toggles, the start-button label, restore-on-refresh, and the taskbar workspace filter.
+- **Browser-global settings** follow the browser you are sitting at — theme and background, terminal font, the help-button toggle, the start-button label, restore-on-refresh, and the taskbar workspace filter.
 - **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own.
 
 <!-- help:ignore-start -->

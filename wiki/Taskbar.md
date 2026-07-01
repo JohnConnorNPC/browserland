@@ -11,7 +11,7 @@ From left to right, the taskbar contains:
 | Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
 | Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
-| Clock chip | Optional date & time readout |
+| Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
 ## Window buttons
@@ -55,7 +55,7 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 
 ## Clock chip
 
-The clock chip shows the date and time at the bottom-right of the taskbar. It is hidden by default; turn it on with **Show date & time (bottom-right)** under Control Panel → Date & time.
+The clock chip shows the date and time at the bottom-right of the taskbar. It appears whenever the Clock mod is enabled — there is no separate toggle. Turn it on or off from Control Panel → Mods.
 
 ## Help chip
 
