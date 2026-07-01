@@ -199,6 +199,9 @@
         .set-profile-row {
             display: flex; align-items: center; gap: 8px;
             padding: 4px 6px; border: 1px solid var(--bg-3); border-radius: 3px;
+            /* position:relative anchors the per-profile color popover (#115, the
+               reused swatch picker) to the row instead of the settings pane. */
+            position: relative;
         }
         .set-profile-info { flex: 1 1 auto; min-width: 0; }
         .set-profile-name {
