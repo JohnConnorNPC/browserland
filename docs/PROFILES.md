@@ -10,7 +10,7 @@ shells, so an untrusted page or agent can never turn `/launch` into
 Profiles power the right-click **`+`** launch picker, the per-host **default
 terminal profile**, and every MCP `launch_terminal` call.
 
-## The three fields
+## The fields
 
 Each profile is an object under a short name:
 
@@ -18,7 +18,8 @@ Each profile is an object under a short name:
 "ubuntu": {
   "command": ["wsl.exe", "-d", "Ubuntu", "--cd", "~", "--", "bash", "-l"],
   "title": "Ubuntu (WSL)",   // optional — the window title; defaults to the name
-  "cwd": null                 // optional — the shell's start dir; null = agent default
+  "cwd": null,                // optional — the shell's start dir; null = agent default
+  "color": "#e06666"          // optional — default terminal color (#rrggbb); null = none
 }
 ```
 
@@ -30,6 +31,12 @@ Each profile is an object under a short name:
 - **`cwd`** (optional) — a starting directory for that shell. Omitted/`null` →
   the agent's default. (A client may *also* pass a `cwd` at launch time; that is
   validated as an existing directory separately.)
+- **`color`** (optional) — a default terminal **color** as `#rrggbb`, seeding
+  every **new** terminal launched from this profile (window frame + taskbar
+  chip). Omitted/`null` → no profile color, so the terminal falls back to the
+  per-host default color, then the automatic palette pick. A per-window recolor
+  from the title bar still wins and sticks. Unlike the per-host default (browser-
+  local), this lives in the broker's profile, so every browser/viewer sees it.
 
 ## Where profiles live
 
