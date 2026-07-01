@@ -40,6 +40,7 @@ import asyncio
 import base64
 import codecs
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -90,6 +91,10 @@ MAX_FILE_BYTES = 5 * 2**20  # 5 MiB
 #                         cf. MAX_ARCHIVE_BYTES below).
 MAX_CHUNK_BYTES = 4 * 2**20        # 4 MiB per ranged read / upload chunk
 MAX_TRANSFER_BYTES = 2 * 2**30     # 2 GiB cumulative per upload session
+# A well-formed hex SHA-256 (#110). upload_commit's optional `expected_sha256`
+# must match this exactly: absent -> unverified (copy); malformed -> a clean 400
+# (never a silent downgrade to unverified, never a .lower() 500 on a non-string).
+_SHA256_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
 # In-flight upload sessions (#108) live in-memory on app.ctx (the broker runs
 # single_process, so one dict is authoritative — see __main__). Bound their
 # count so idle/abandoned begins can't exhaust the table, and expire stale ones
@@ -2303,6 +2308,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         app.ctx.uploads[upload_id] = {
             "tmp": tmp, "dest": str(p), "overwrite": overwrite,
             "received": 0, "created": now,
+            # #110: accumulate the dest digest as chunks are written, so commit
+            # can verify it against the source with no re-read. A chunkless
+            # (0-byte) session commits sha256(b"") — matches an empty source.
+            "hash": hashlib.sha256(),
         }
         return sanic_json({"ok": True, "upload_id": upload_id})
 
@@ -2361,12 +2370,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 pass
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         session["received"] += len(data)       # only after a successful write
+        session["hash"].update(data)           # #110: hash exactly the committed
+        #   bytes — the offset guard above rejected any dup/reorder before the
+        #   write, so each byte is fed to the digest once, in order.
         return sanic_json({"ok": True, "received": session["received"]})
 
     async def _file_upload_commit(request: Request):
         # Finalize: atomically os.replace the temp onto the dest. Re-checks the
-        # exists race unless overwriting. On any failure the temp + session are
-        # dropped (nothing leaks). (#110 will verify a SHA-256 here first.)
+        # exists race unless overwriting, then (#110) verifies the accumulated
+        # SHA-256 against an optional expected_sha256 BEFORE the replace. On any
+        # failure the temp + session are dropped (nothing leaks).
         err = _file_auth_error(request)
         if err is not None:
             return err
@@ -2382,6 +2395,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         dest, tmp = session["dest"], session["tmp"]
         if not session["overwrite"] and os.path.lexists(dest):
             return sanic_json({"ok": False, "error": "exists"}, status=409)
+        # #110: verify the accumulated SHA-256 BEFORE the atomic replace, so a
+        # mismatched (truncated/corrupt/source-changed) transfer never overwrites
+        # the dest — the existing dest is left intact and only the temp is dropped.
+        #   - absent expected_sha256 (copy)  -> no comparison, replace as before.
+        #   - present-but-malformed          -> 400 bad_sha256, session KEPT (a bad
+        #     request must never silently downgrade a verified move to unverified,
+        #     nor 500 on a non-string .lower()).
+        #   - present + digest mismatch      -> 409 checksum_mismatch, temp dropped,
+        #     session popped, dest NOT replaced.
+        expected = body.get("expected_sha256")
+        if expected is not None:
+            if not isinstance(expected, str) or not _SHA256_HEX_RE.fullmatch(expected):
+                return sanic_json({"ok": False, "error": "bad_sha256"}, status=400)
+            expected = expected.lower()       # hex is case-insensitive
+        digest = session["hash"].hexdigest()  # idempotent — safe to read here + below
+        if expected is not None and digest != expected:
+            app.ctx.uploads.pop(upload_id, None)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": "checksum_mismatch",
+                               "sha256": digest}, status=409)   # dest NOT replaced
         try:
             size = os.path.getsize(tmp)
             os.replace(tmp, dest)
@@ -2396,7 +2432,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             code = "is_dir" if os.path.isdir(dest) else str(exc)
             return sanic_json({"ok": False, "error": code}, status=400)
         app.ctx.uploads.pop(upload_id, None)
-        return sanic_json({"ok": True, "path": dest, "size": size})
+        return sanic_json({"ok": True, "path": dest, "size": size,
+                           "sha256": digest})   # +sha256 (additive)
 
     async def _file_upload_abort(request: Request):
         # Idempotent best-effort teardown: pop the session + unlink its temp.
