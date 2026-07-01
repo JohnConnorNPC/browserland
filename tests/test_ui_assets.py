@@ -111,6 +111,18 @@ def test_index_html_served_sentinels_present():
         assert sentinel in INDEX_HTML, f"missing served-page sentinel: {sentinel!r}"
 
 
+def test_default_launch_host_wired_into_page():
+    # #107: the START (+) button's default-host setting. No JS test runner exists
+    # (pytest only), so lock the served-page symbols: the shared resolver, the
+    # setting it reads, and the setting written by the Hosts UI Default button.
+    for sentinel in (
+        "function defaultLaunchHost",   # #107 shared resolver (56_js_hosts)
+        "getSettings().defaultHost",    # #107 setting read (resolver) + written (hosts UI)
+        "s.defaultHost = ''",           # #107 seeded/normalized in the settings model
+    ):
+        assert sentinel in INDEX_HTML, f"missing #107 sentinel: {sentinel!r}"
+
+
 def test_index_html_never_puts_token_in_url():
     # Security invariant carried over from the monolith: the page must not push
     # the auth token into the address bar.

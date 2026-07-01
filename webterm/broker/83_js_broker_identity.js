@@ -217,6 +217,10 @@
                 showSettingsPane('local');
                 renderSettings();
             }
+            // #107: if the removed host was the START (+) default, fall back to
+            // local — mirrors the currentSettingsTab reset above and keeps the
+            // stored/synced value tidy so local shows marked after the delete.
+            if (getSettings().defaultHost === id) getSettings().defaultHost = '';
             savePrefs();
             renderHostsList();
             renderSettingsTabs();   // the removed host's tab disappears
@@ -271,6 +275,17 @@
             // user can remove the stale/duplicate one — the surgical fix the
             // reporter actually needed (removeHost preserves other tokens).
             const dupOf = computeHostDuplicates(hosts);
+            // #107: `curId` = the host START actually launches on (resolves '' /
+            // 'local' / a stale-or-foreign id to the local host) — drives the
+            // badge. `storedDefault` = the RAW stored value, which drives each
+            // row's Default-button disabled state. They diverge when the stored
+            // id is unresolvable here (e.g. a non-'local' id synced from another
+            // browser, whose ids don't sync): the badge sits on local, but local's
+            // button must stay ENABLED so the user can clear the foreign id back
+            // to ''. Disabling off `curId` instead would strand it (the only row
+            // that could clear it is the one that appears already-selected).
+            const curId = defaultLaunchHost().id;
+            const storedDefault = getSettings().defaultHost;
             for (const host of hosts) {
                 const row = document.createElement('div');
                 row.className = 'set-row host-row';
@@ -282,6 +297,14 @@
                     : host.label + ' — ' + host.url;
                 name.title = name.textContent;
                 row.appendChild(name);
+                // #107: badge the START (+) default host (mirrors the profiles
+                // editor's `set-profile-badge`). Shown for the local row too.
+                if (host.id === curId) {
+                    const badge = document.createElement('span');
+                    badge.className = 'set-profile-badge';
+                    badge.textContent = 'default';
+                    name.appendChild(badge);
+                }
                 const dup = dupOf.get(host.id);
                 if (dup) {
                     const hint = document.createElement('span');
@@ -295,6 +318,26 @@
                 row.appendChild(hostRowButton('password',
                     'enter the password for this host',
                     () => showAuthOverlay(host, true)));
+                // #107: mark this host as the START (+) button's default launch
+                // target. Selectable for EVERY row (incl. local, stored as '' =
+                // canonical unset); disabled on the row already marked default.
+                const defBtn = hostRowButton('default',
+                    'launch the START (+) button on this host',
+                    () => {
+                        getSettings().defaultHost =
+                            (host.id === 'local' ? '' : host.id);
+                        savePrefs();
+                        renderHostsList();
+                    });
+                // Disabled only when the STORED value already selects THIS row
+                // (clicking would be a no-op) — for local that's '' or the legacy
+                // 'local'. Comparing the raw stored value (not `curId`) keeps
+                // local clickable when the stored id is a foreign/stale one that
+                // merely resolves to local, so it can be cleared.
+                defBtn.disabled = host.id === 'local'
+                    ? (storedDefault === '' || storedDefault === 'local')
+                    : (storedDefault === host.id);
+                row.appendChild(defBtn);
                 if (host.id !== 'local') {
                     row.appendChild(hostRowButton('edit', null,
                         () => startEditHost(host.id)));

@@ -97,6 +97,10 @@
             // Task 8: per-host default terminal profile. '' = use the broker's
             // own server default (the prior behavior).
             if (typeof s.defaultProfile !== 'string') s.defaultProfile = '';
+            // #107: which host the START (+) button launches on. '' / 'local' =
+            // the local broker (prior behavior). A stale/removed id falls back at
+            // the call site (hostById() || localHost()), same as defaultProfile.
+            if (typeof s.defaultHost !== 'string') s.defaultHost = '';
             if (typeof s.startLabel !== 'string') {
                 s.startLabel = '+';
             } else {

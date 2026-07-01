@@ -232,15 +232,19 @@
         }
 
         if (launchBtn) {
-            // Two gestures on the LOCAL host: quick-launch its default profile
-            // (task 8 — its per-host defaultProfile, else the broker default),
-            // and a picker menu — profiles grouped under disabled host-header
-            // rows when >1 host. Which gesture is which is decided at click time
-            // by #114's swapLaunchButtons: default OFF maps left = quick-launch,
+            // Two gestures on the START (+) button: quick-launch a terminal, and
+            // a picker menu — profiles grouped under disabled host-header rows
+            // when >1 host. Which gesture is which is decided at click time by
+            // #114's swapLaunchButtons: default OFF maps left = quick-launch,
             // right = menu; ON swaps them. The listeners stay bound once and the
             // contextmenu one always suppresses the native menu (see below).
-            const quickLaunch = () =>
-                launchProfile(localHost(), hostDefaultProfile(localHost()));
+            // #107: quick-launch targets the DEFAULT host (s.defaultHost, via
+            // defaultLaunchHost() — unset/removed → local, prior behavior) using
+            // THAT host's per-host defaultProfile (else the broker default).
+            const quickLaunch = () => {
+                const h = defaultLaunchHost();
+                launchProfile(h, hostDefaultProfile(h));
+            };
             async function openLaunchMenu(x, y) {
                 const hosts = allHosts();
                 if (hosts.length === 1) {

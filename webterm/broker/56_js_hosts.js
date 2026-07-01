@@ -37,6 +37,13 @@
             for (const h of getHosts()) { if (h.id === id) return h; }
             return null;
         }
+        // #107: the host the START (+) button targets. Empty / 'local' / a removed
+        // id all fall back to the local broker, so a deleted host never bricks
+        // START. Resolution is deferred here (not in normalizeSettings) — same
+        // precedent as hostDefaultProfile / hostDefaultColor.
+        function defaultLaunchHost() {
+            return hostById(getSettings().defaultHost) || localHost();
+        }
         // Optional per-host DEFAULT accent (#103): the color a new terminal on
         // this host seeds from when it has no saved per-window color, instead of
         // the palette auto-pick. '' (or junk) = no default. strictHex rejects a

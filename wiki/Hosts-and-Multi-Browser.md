@@ -24,6 +24,12 @@ A launch **profile** can also carry its own optional **default terminal color**,
 
 The profile color sits between the per-window and per-host colors in the order of precedence: a window you have recolored by hand keeps its own color; otherwise the launch profile's color wins; failing that the host's default color; and finally the automatic palette pick. Clearing it (the **✕** next to the dot) drops back to the host/auto colors. Unlike the per-host default (stored in your browser only), the profile color lives in the broker's profile definition, so it is shared with every browser and viewer of that broker.
 
+## Default host for the START (+) button
+
+A quick-launch of the START (**+**) button — a plain left-click by default — launches a terminal on your **default host**, using that host's own default terminal profile. Pick which host that is in **Control Panel → Hosts** with the **Default** button on that host's row; the current default is marked with a **default** badge and its own button is disabled. The local **this broker** is selectable too and is the default when you have not chosen one — so leaving it unset behaves exactly as before. (The button's picker menu still lets you launch on any host regardless of this setting.)
+
+If you delete the host that was your START default, it falls back to **this broker** automatically, so the button keeps working. When the chosen host needs a password, quick-launching START surfaces its login prompt just like opening the host directly. Note that remote host identities are specific to the browser where you added them, so a non-local START default is only meaningful in that browser; other browsers fall back to launching locally.
+
 ## Host status chips
 
 Browserland shows one status chip per broker — always, even for a single healthy local broker — in the host-status area of the taskbar. The chip displays the host's label; its state tells you whether that host is reachable and whether this browser holds its lease:
