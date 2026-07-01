@@ -49,6 +49,13 @@ WIKI_DIR = _REPO_ROOT / "wiki"
 # Packaged fallback, shipped next to this module (see pyproject package-data),
 # so installed runs that don't carry wiki/ still have Help content.
 PACKAGED_JSON = Path(__file__).resolve().parent / "help_corpus.json"
+# In-repo frontend mods (webterm/broker/mods/<id>/) — the same dir ui.py splices
+# scripts from — may each drop a wiki-format help.md that becomes a Help section
+# (issue #113). Next to this module (broker/), NOT under the repo root.
+MODS_DIR = Path(__file__).resolve().parent / "mods"
+# Mod sections sort AFTER every wiki section (sidebar orders are small); a mod
+# may override with an explicit help.order in its mod.json.
+_MOD_ORDER_BASE = 2000
 
 # Pages that are navigation / boilerplate, never cards.
 _EXCLUDE_STEMS = {"home", "_sidebar", "_footer"}
@@ -472,6 +479,98 @@ def build_corpus(wiki_dir: Path) -> dict:
     return {"sections": sections}
 
 
+# --------------------------------------------------------------------------- #
+# Mod-owned help: each mods/<id>/help.md is a wiki-format page the SAME parser
+# reads, tagged with its owning mod id so the frontend can hide it when the mod
+# is disabled (issue #113). No second parser, no markdown on the frontend.
+# --------------------------------------------------------------------------- #
+
+def _mod_manifest(mod_dir: Path) -> dict:
+    """Best-effort parsed mod.json for one mod dir (mirrors ui.py:_manifest).
+
+    Any read/parse problem, or a non-object payload, yields ``{}`` so a malformed
+    manifest can never crash the corpus build (and thus broker import).
+    """
+    p = Path(mod_dir) / "mod.json"
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - missing / bad JSON / unreadable
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def build_mod_sections(mods_dir: Path = MODS_DIR) -> list[dict]:
+    """Parse each mod's optional wiki-format ``help.md`` into a tagged section.
+
+    For every subdir of ``mods_dir`` (sorted, for deterministic fallback order)
+    that has BOTH ``mod.json`` and ``help.md``: parse ``help.md`` with the same
+    ``parse_page`` the wiki uses; skip it if that yields no cards. The optional
+    ``help`` block in mod.json supplies ``slug`` / ``label`` / ``order`` / ``icon``
+    with fallbacks: slug = mod id, label = mod.json ``title`` (else humanized id),
+    order = ``_MOD_ORDER_BASE + index`` (after the wiki), icon omitted. Every
+    section is stamped with its owning mod id (and its icon, when declared) so the
+    frontend can hide it while the mod is disabled.
+
+    Strict like ``build_corpus``: raises ``BuildError`` on a duplicate mod slug.
+    """
+    mods_dir = Path(mods_dir)
+    if not mods_dir.is_dir():
+        return []
+    sections: list[dict] = []
+    seen_slugs: set = set()
+    subdirs = sorted((d for d in mods_dir.iterdir() if d.is_dir()),
+                     key=lambda d: d.name.lower())
+    for index, mod_dir in enumerate(subdirs):
+        if not ((mod_dir / "mod.json").is_file()
+                and (mod_dir / "help.md").is_file()):
+            continue
+        cards = parse_page((mod_dir / "help.md").read_text(encoding="utf-8"))
+        if not cards:
+            continue
+        manifest = _mod_manifest(mod_dir)
+        mod_id = str(manifest.get("id") or mod_dir.name)
+        block = manifest.get("help")
+        if not isinstance(block, dict):
+            block = {}
+        # `or` folds a missing OR blank manifest value to the fallback (never "").
+        slug = str(block.get("slug") or mod_id).strip().lower()
+        if slug in seen_slugs:
+            raise BuildError("duplicate mod section slug: %s" % slug)
+        seen_slugs.add(slug)
+        label = str(block.get("label") or manifest.get("title")
+                    or _humanize(mod_id))
+        order = block.get("order")
+        # Reject a non-int (or bool) order so sorting stays total across sections.
+        if not isinstance(order, int) or isinstance(order, bool):
+            order = _MOD_ORDER_BASE + index
+        section = {"slug": slug, "label": label, "order": order,
+                   "cards": cards, "mod": mod_id}
+        icon = block.get("icon")
+        if isinstance(icon, str) and icon:
+            section["icon"] = icon
+        sections.append(section)
+    return sections
+
+
+def build_full_corpus() -> dict:
+    """Merge the wiki corpus with mod-owned help sections into one corpus.
+
+    ``build_corpus(WIKI_DIR)`` (wiki-only, kept intact for parity tests) plus
+    ``build_mod_sections()``, re-sorted by ``(order, slug)``. Raises ``BuildError``
+    on a slug that collides ACROSS the two sets (a mod can't shadow a wiki page).
+    This is THE builder used for serving, regeneration, and the drift test.
+    """
+    merged = build_corpus(WIKI_DIR)["sections"] + build_mod_sections()
+    seen: set = set()
+    for sec in merged:
+        if sec["slug"] in seen:
+            raise BuildError("duplicate section slug across wiki+mods: %s"
+                             % sec["slug"])
+        seen.add(sec["slug"])
+    merged.sort(key=lambda s: (s["order"], s["slug"]))
+    return {"sections": merged}
+
+
 def serialize_corpus(corpus: dict) -> bytes:
     """Canonical bytes for a corpus — one form for generation AND the drift test.
 
@@ -487,11 +586,14 @@ def serialize_corpus(corpus: dict) -> bytes:
 def load_corpus() -> dict:
     """Build the corpus for serving — protective, never raises.
 
-    Live-parse the wiki when present; else the packaged JSON; else empty.
+    Live-parse the wiki + mod help.md files when the wiki is present; else the
+    packaged JSON (which bakes in the mod sections too — see __main__); else
+    empty. A broken mod help.md degrades to the packaged fallback rather than
+    blanking Help.
     """
     try:
         if WIKI_DIR.is_dir():
-            return build_corpus(WIKI_DIR)
+            return build_full_corpus()
     except Exception:  # noqa: BLE001 - Help must degrade, not break startup
         pass
     try:
@@ -506,7 +608,7 @@ def load_corpus() -> dict:
 HELP_CORPUS = load_corpus()
 
 
-if __name__ == "__main__":  # regenerate the packaged fallback from wiki/
-    data = serialize_corpus(build_corpus(WIKI_DIR))
+if __name__ == "__main__":  # regenerate the packaged fallback from wiki/ + mods
+    data = serialize_corpus(build_full_corpus())
     PACKAGED_JSON.write_bytes(data)
     print("wrote %s (%d bytes)" % (PACKAGED_JSON, len(data)))
