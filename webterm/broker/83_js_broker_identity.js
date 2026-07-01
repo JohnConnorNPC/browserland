@@ -245,8 +245,27 @@
             return b;
         }
 
+        // #103: the per-host default-color picker reuses attachColorPicker, which
+        // appends a hidden <input type=color> to document.body per picker (cleaned
+        // via target.cleanups). renderHostsList wipes + rebuilds its rows on every
+        // call (poll-driven identity refresh, add/remove/edit, a color pick), so
+        // hold the live pickers' cleanups + their shim targets module-side and
+        // flush them at the top of each render: mark the stale targets disposed (a
+        // late OS color-dialog resolve then no-ops) and run every cleanup (removes
+        // the listeners + the body inputs) BEFORE the fresh pickers register into
+        // new arrays. Bounded to one input-per-host on document.body at a time.
+        let hostPickerCleanups = [];
+        let hostPickerTargets = [];
+        function flushHostPickers() {
+            for (const t of hostPickerTargets) t.disposed = true;
+            for (const fn of hostPickerCleanups) { try { fn(); } catch (_) {} }
+            hostPickerCleanups = [];
+            hostPickerTargets = [];
+        }
+
         function renderHostsList() {
             hostsListEl.textContent = '';
+            flushHostPickers();
             const hosts = getHosts();
             // Flag records that resolve to a broker we already have (#64) so the
             // user can remove the stale/duplicate one — the surgical fix the
@@ -281,6 +300,40 @@
                         () => startEditHost(host.id)));
                     row.appendChild(hostRowButton('remove', null,
                         () => removeHost(host.id)));
+                }
+                // #103: optional per-host DEFAULT accent — the reused swatch
+                // picker on a lightweight shim target (a `color` getter reading
+                // the live host record, `disposed`, and the shared module cleanups
+                // array flushed above). A pick writes host.color (browser-local,
+                // like token/hidden — never pushed to /state); the ✕ clears it
+                // back to the palette auto-pick. Re-render + refresh so the row
+                // dot, new-terminal seed, taskbar chips, and the broker status
+                // chip border (renderHostStatus) all reflect it immediately.
+                const colorTarget = {
+                    get color() { return host.color || ''; },
+                    disposed: false,
+                    cleanups: hostPickerCleanups,
+                };
+                hostPickerTargets.push(colorTarget);
+                const applyHostColor = (val) => {
+                    host.color = val;
+                    savePrefs();
+                    renderHostsList();
+                    refreshTaskbar();
+                    renderHostStatus();
+                };
+                const colorBtn = attachColorPicker(
+                    colorTarget, row, PALETTE.map((c) => ({ color: c })),
+                    (sw) => applyHostColor(normalizeHex(sw.color)));
+                colorBtn.title = 'default color for this host';
+                // Dot shows the host color, or the base accent when unset (= auto).
+                row.style.setProperty('--accent',
+                    host.color || 'var(--accent-default)');
+                row.appendChild(colorBtn);
+                if (host.color) {
+                    row.appendChild(hostRowButton('✕',
+                        'clear default color (revert to auto per-window colors)',
+                        () => applyHostColor('')));
                 }
                 hostsListEl.appendChild(row);
             }
