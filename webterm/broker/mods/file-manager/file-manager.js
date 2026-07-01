@@ -1714,7 +1714,8 @@
                     factory: function (d) { return openFileManagerWindow(d); },
                     serialize: serializeAppWindow,
                     menu: {
-                        label: '🗂 File manager',
+                        label: 'File manager',
+                        iconKey: 'file-manager',   // #119: SVG folder in the (+) menu
                         launch: function () { return launchFileManager(); },
                     },
                 });

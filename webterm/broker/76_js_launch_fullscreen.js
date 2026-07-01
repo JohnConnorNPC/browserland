@@ -217,7 +217,11 @@
             for (const k of kinds) {
                 const m = k.menu;
                 if (m && m.label && typeof m.launch === 'function') {
-                    items.push({ label: m.label, enabled: true, action: m.launch });
+                    // #119: pass the kind's iconKey (a mod id) through untouched;
+                    // renderMenu resolves it to the trusted APP_ICON_SVG glyph, so
+                    // the raw SVG never travels on the item object.
+                    items.push({ label: m.label, enabled: true, action: m.launch,
+                                 iconKey: m.iconKey || '' });
                 }
             }
             for (const k of kinds) {

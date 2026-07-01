@@ -292,7 +292,7 @@
             registerWindowKind({
                 appKind: 'control-panel',
                 factory: function (d) { return openControlPanelWindow(d); },
-                menu: { label: '🎛 Control panel',
+                menu: { label: 'Control panel', iconKey: 'control-panel',
                         launch: function () { return launchControlPanel(); } },
             });
         }

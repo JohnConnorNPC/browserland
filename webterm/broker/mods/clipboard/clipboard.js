@@ -250,7 +250,8 @@
                     appKind: 'clipboard',
                     factory: function (d) { return openClipboardWindow(d); },
                     menu: {
-                        label: '📋 Clipboard',
+                        label: 'Clipboard',
+                        iconKey: 'clipboard',   // #119: SVG clipboard in the (+) menu
                         launch: function () { return launchClipboard(); },
                     },
                 });

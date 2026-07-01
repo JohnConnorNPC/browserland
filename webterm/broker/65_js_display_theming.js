@@ -48,6 +48,83 @@
         // (#101 dropped the redundant per-setting toggle — the mod's own enable/
         // disable is the single control). Core no longer touches the chip here.
 
+        // ---- app-icon system (#119) ---------------------------------------
+        // A single source of truth for the SVG "app icons" that replaced the
+        // per-app emoji. Two surfaces key off this: the (+) launch menu (each
+        // window-kind's menu.iconKey -> appMenuItems -> renderMenu's icon slot)
+        // and the Help window's section list (help.js resolves the SVG from the
+        // corpus's per-section owner/mod id). The canonical key is the mod id
+        // (control-panel is the one core built-in; clock/git/help are help-only
+        // — they have no launcher but own a Help section). Icons follow the same
+        // house conventions as the eyedropper/robot control glyphs above (24x24
+        // viewBox, round caps/joins, aria-hidden) but carry SIGNATURE COLORS
+        // (explicit fills) rather than monochrome currentColor — a deliberate
+        // #119 departure so the launch menu reads as a set of app icons. Every
+        // string here is HARDCODED + trusted, so the render sites may innerHTML
+        // it (the labels beside them stay textContent). A key without an entry
+        // returns '' so both surfaces degrade to the emoji fallback.
+        const APP_ICON_SVG = {
+            'editor':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path d="M4 20l1-4L16 5l3 3L8 19l-4 1z" fill="#f7c948" stroke="#7a5c00" stroke-width="1.2" stroke-linejoin="round"/>'
+                + '<path d="M14 7l3 3" stroke="#7a5c00" stroke-width="1.2"/>'
+                + '<path d="M4 20l1-4 3 3-4 1z" fill="#3a3a3a"/></svg>',
+            'sticky':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path d="M4 4h16v11l-5 5H4z" fill="#f5d90a" stroke="#b39a00" stroke-width="1.2" stroke-linejoin="round"/>'
+                + '<path d="M15 20v-5h5" fill="#e6c200" stroke="#b39a00" stroke-width="1.2" stroke-linejoin="round"/>'
+                + '<path d="M7 9h10M7 12h7" stroke="#8a7500" stroke-width="1.4" stroke-linecap="round"/></svg>',
+            'file-manager':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path d="M3 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="#4c8dff" stroke="#1c4b9c" stroke-width="1.2" stroke-linejoin="round"/>'
+                + '<path d="M3 9h18" stroke="#1c4b9c" stroke-width="1.2"/></svg>',
+            'task-manager':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<rect x="4" y="12" width="3.4" height="8" rx="1" fill="#2f9e5f"/>'
+                + '<rect x="10.3" y="7" width="3.4" height="13" rx="1" fill="#37b06c"/>'
+                + '<rect x="16.6" y="4" width="3.4" height="16" rx="1" fill="#59c98a"/>'
+                + '<path d="M3 20h18" stroke="#2f7d4f" stroke-width="1.4" stroke-linecap="round"/></svg>',
+            'clipboard':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<rect x="5" y="4" width="14" height="17" rx="2" fill="#eef1f8" stroke="#3a4a7a" stroke-width="1.2"/>'
+                + '<rect x="9" y="2.5" width="6" height="3.5" rx="1.2" fill="#5b6bb0" stroke="#3a4a7a" stroke-width="1.2"/>'
+                + '<path d="M8 11h8M8 14h8M8 17h5" stroke="#5b6bb0" stroke-width="1.4" stroke-linecap="round"/></svg>',
+            'aistatus':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<circle cx="12" cy="12" r="9" fill="#e6f7ee" stroke="#1f9d57" stroke-width="1.2"/>'
+                + '<path d="M5 12h3l2-4 3 8 2-4h4" fill="none" stroke="#1fb35f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+            'help':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<circle cx="12" cy="12" r="9" fill="#3d7bd6" stroke="#22508f" stroke-width="1.2"/>'
+                + '<path d="M9.2 9.4a2.9 2.9 0 0 1 5.6 1c0 2-2.8 2.3-2.8 4" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+                + '<circle cx="12" cy="17.2" r="1.2" fill="#fff"/></svg>',
+            'control-panel':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path d="M5 7h14M5 12h14M5 17h14" stroke="#7a8699" stroke-width="1.6" stroke-linecap="round"/>'
+                + '<circle cx="9" cy="7" r="2.4" fill="#eef1f6" stroke="#48566e" stroke-width="1.4"/>'
+                + '<circle cx="15" cy="12" r="2.4" fill="#eef1f6" stroke="#48566e" stroke-width="1.4"/>'
+                + '<circle cx="10" cy="17" r="2.4" fill="#eef1f6" stroke="#48566e" stroke-width="1.4"/></svg>',
+            'clock':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<circle cx="12" cy="12" r="9" fill="#eaf0f7" stroke="#3a5a8c" stroke-width="1.4"/>'
+                + '<path d="M12 7.5v5l3.2 2" fill="none" stroke="#2f4d78" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+            'git':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path d="M7 6v12M7 10a5 5 0 0 0 5 5h3" fill="none" stroke="#e8622c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+                + '<circle cx="7" cy="5" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/>'
+                + '<circle cx="7" cy="19" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/>'
+                + '<circle cx="17" cy="15" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/></svg>',
+        };
+        // Look up an app icon by canonical key (mod id). OWN-property lookup only
+        // (never an inherited member like 'constructor'/'toString'), so the return
+        // is ALWAYS either '' or one of our hardcoded SVG strings — the render
+        // sites can innerHTML it without a type check. Returns '' for an unknown
+        // key so callers fall back to the emoji / '•' they already had.
+        function appIconSvg(key) {
+            return Object.prototype.hasOwnProperty.call(APP_ICON_SVG, key)
+                ? APP_ICON_SVG[key] : '';
+        }
+
         // ---- start button label --------------------------------------------
         // The `+` launch button doubles as the Win-style Start button. The
         // visible label is set here; the tooltip's discoverability hint tracks

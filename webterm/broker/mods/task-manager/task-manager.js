@@ -599,7 +599,8 @@
                     appKind: 'task-manager',
                     factory: function (d) { return openTaskManagerWindow(d); },
                     menu: {
-                        label: '🧰 Task manager',
+                        label: 'Task manager',
+                        iconKey: 'task-manager',   // #119: SVG activity bars in the (+) menu
                         launch: function () { return launchTaskManager(); },
                     },
                 });

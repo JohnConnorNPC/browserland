@@ -49,6 +49,16 @@
             return Object.prototype.hasOwnProperty.call(HELP_SECTION_ICONS, slug)
                 ? HELP_SECTION_ICONS[slug] : '•';
         }
+        // #119: paint a section glyph into the rail button / header box. The icon
+        // is a TAGGED value: { svg } is a trusted APP_ICON_SVG string (injected as
+        // markup) and { text } is an emoji / '•' fallback (kept as textContent).
+        // Only registry output is ever tagged `svg`, so mod-supplied metadata
+        // (mod.json help.icon via secIcon) can never reach innerHTML even if it
+        // happened to look like markup.
+        function helpSetSectionIcon(el, icon) {
+            if (icon && icon.svg) el.innerHTML = icon.svg;
+            else el.textContent = (icon && icon.text) || '';
+        }
         // Append `text` to `el`, wrapping case-insensitive matches of `q` in a
         // <mark> so the user sees WHY a result matched. Text nodes only (never
         // innerHTML) so help prose can't inject markup.
@@ -159,14 +169,21 @@
             // Group by section SLUG (stable id), remembering each slug's display
             // label, preserving first-seen order.
             const order = []; const bySlug = new Map(); const labelOf = new Map();
-            // #113: a mod may declare its own section icon (e.secIcon); first-seen
-            // wins, falling back to the static HELP_SECTION_ICONS map for wiki /
-            // generated slugs. So a mod's glyph wins without editing that map.
+            // #119: prefer the trusted SVG app icon keyed by the section's owning
+            // mod id (e.owner, the corpus's per-section `mod` field), stored TAGGED
+            // as { svg } so only registry output is ever injected as markup. #113:
+            // else the mod's own declared glyph (e.secIcon); else the static
+            // HELP_SECTION_ICONS map for wiki / generated slugs — both kept as
+            // { text } (textContent). First-seen wins. appIconSvg returns '' for a
+            // wiki/un-owned section, so those take the text path.
             const iconOf = new Map();
             for (const e of entries) {
                 if (!bySlug.has(e.slug)) {
                     bySlug.set(e.slug, []); labelOf.set(e.slug, e.section || e.slug);
-                    iconOf.set(e.slug, e.secIcon || helpSectionIcon(e.slug));
+                    const svg = appIconSvg(e.owner);
+                    iconOf.set(e.slug, svg
+                        ? { svg: svg }
+                        : { text: e.secIcon || helpSectionIcon(e.slug) });
                     order.push(e.slug);
                 }
                 bySlug.get(e.slug).push(e);
@@ -197,7 +214,8 @@
                 rb.className = 'help-rail-btn';
                 rb.dataset.target = secId;
                 const ric = document.createElement('span');
-                ric.className = 'help-rail-ic'; ric.textContent = iconOf.get(slug);
+                ric.className = 'help-rail-ic';
+                helpSetSectionIcon(ric, iconOf.get(slug));   // #119: SVG or emoji
                 const rlab = document.createElement('span');
                 rlab.className = 'help-rail-label'; rlab.textContent = label;
                 const rcnt = document.createElement('span');
@@ -216,7 +234,8 @@
                 const head = document.createElement('div');
                 head.className = 'help-section-header';
                 const sic = document.createElement('div');
-                sic.className = 'help-section-icon'; sic.textContent = iconOf.get(slug);
+                sic.className = 'help-section-icon';
+                helpSetSectionIcon(sic, iconOf.get(slug));   // #119: SVG or emoji
                 const stitle = document.createElement('div');
                 stitle.className = 'help-section-title'; stitle.textContent = label;
                 const scount = document.createElement('div');
@@ -510,7 +529,8 @@
                 ctx.registerWindowKind({
                     appKind: 'help',
                     factory: function (d) { return openHelpWindow(d); },
-                    menu: { label: '❓ Help', launch: function () { return launchHelp(); } },
+                    menu: { label: 'Help', iconKey: 'help',   // #119: SVG ?-in-circle
+                            launch: function () { return launchHelp(); } },
                 });
 
                 // Build the "?" chip (was static #help-chip markup in 40_body.html).

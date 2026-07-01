@@ -2286,7 +2286,8 @@
                     factory: function (d) { return openNoteOrEditorWindow(d); },
                     serialize: serializeAppWindow,
                     menu: {
-                        label: '📄 Text editor',
+                        label: 'Text editor',
+                        iconKey: 'editor',   // #119: SVG pencil in the (+) menu
                         launch: function () { return launchTextEditor(); },
                     },
                 });

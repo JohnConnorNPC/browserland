@@ -845,6 +845,91 @@ def test_window_kind_sites_use_registry():
 
 
 # --------------------------------------------------------------------------- #
+# app-icon system (#119)
+# --------------------------------------------------------------------------- #
+
+def test_app_icon_registry_present_in_core():
+    # The single source of truth (APP_ICON_SVG) + its lookup helper live in core
+    # 65 (the home of the only other inline control SVGs), so they're lexically
+    # visible to 76/77 and the help mod once the page concatenates every fragment.
+    s65 = (BROKER_DIR / "65_js_display_theming.js").read_text(encoding="utf-8")
+    assert "const APP_ICON_SVG = {" in s65
+    assert "function appIconSvg(" in s65
+    # OWN-property lookup only, so an inherited key ('constructor'/'toString')
+    # can never leak a non-string into the innerHTML sinks (codex hardening).
+    assert "hasOwnProperty.call(APP_ICON_SVG, key)" in s65
+    # Every canonical key (mod id; control-panel is the core built-in; clock/git/
+    # help are help-only) has an SVG entry, quoted so hyphenated ids are valid.
+    for key in ("editor", "sticky", "file-manager", "task-manager", "clipboard",
+                "aistatus", "help", "control-panel", "clock", "git"):
+        assert f"'{key}':" in s65, f"APP_ICON_SVG missing key {key!r}"
+    # The icons carry signature fills (not just currentColor) — the #119 departure
+    # from the monochrome eyedropper/robot glyphs; the two focal fills are pinned.
+    assert 'fill="#f7c948"' in s65   # editor pencil body (yellow)
+    assert 'fill="#f5d90a"' in s65   # sticky note (yellow)
+    # And it all reaches the served page.
+    assert "const APP_ICON_SVG = {" in INDEX_HTML
+    assert "function appIconSvg(" in INDEX_HTML
+
+
+def test_launch_menu_items_carry_iconkey():
+    # Every launcher drops its emoji label and declares iconKey; appMenuItems()
+    # passes iconKey through untouched (renderMenu resolves it — the raw SVG never
+    # travels on the item object, codex hardening). The label strings themselves
+    # are NOT asserted (menu-order tests key on `id:` sentinels), so dropping the
+    # emoji is free — but the iconKey wiring is what makes the SVG show.
+    assert "iconKey: m.iconKey || ''" in INDEX_HTML
+    for key in ("editor", "sticky", "file-manager", "task-manager", "clipboard",
+                "aistatus", "help", "control-panel"):
+        assert f"iconKey: '{key}'" in INDEX_HTML, f"launcher missing iconKey {key!r}"
+    # The old emoji-in-label form is gone from the two focal launchers.
+    assert "'📄 Text editor'" not in INDEX_HTML
+    assert "'📝 Sticky note'" not in INDEX_HTML
+
+
+def test_render_menu_resolves_iconkey_to_trusted_svg():
+    # renderMenu resolves it.iconKey through appIconSvg (which returns '' for a key
+    # not in the registry) and injects ONLY that as innerHTML — no caller can route
+    # arbitrary/user markup through the shared menu renderer (codex hardening). The
+    # label stays textContent (the "labels are textContent only" rule).
+    s77 = (BROKER_DIR / "77_js_context_menu.js").read_text(encoding="utf-8")
+    assert "const iconSvg = it.iconKey ? appIconSvg(it.iconKey) : '';" in s77
+    assert "if (iconSvg) {" in s77
+    assert "ic.className = 'ctx-icon';" in s77
+    assert "ic.innerHTML = iconSvg;" in s77
+    assert "lab.textContent = it.label;" in s77
+    # renderMenu never injects a raw pre-resolved SVG — the only innerHTML value is
+    # appIconSvg(it.iconKey), so the generic-HTML-sink is closed.
+    assert "ic.innerHTML = it.icon" not in s77
+    # The ctx-menu CSS gained the flex layout + icon sizing.
+    css = (BROKER_DIR / "14_css_dragdrop.css").read_text(encoding="utf-8")
+    assert "#ctx-menu .ctx-icon svg" in css
+    assert "ctx-icon" in INDEX_HTML
+
+
+def test_help_toc_resolves_svg_app_icons():
+    # The Help window's rail + section headers prefer the SVG app icon keyed by the
+    # section's owning mod id (e.owner == the corpus per-section `mod` field). The
+    # icon is stored TAGGED as { svg } (trusted registry, innerHTML) vs { text }
+    # (emoji/'•' fallback, textContent), so mod-supplied secIcon can never reach
+    # innerHTML even if it looks like markup (codex hardening). Wiki/un-owned
+    # sections get '' from appIconSvg and take the text path.
+    src = (BROKER_DIR / "mods" / "help" / "help.js").read_text(encoding="utf-8")
+    assert "appIconSvg(e.owner)" in src
+    assert "{ svg: svg }" in src
+    assert "e.secIcon || helpSectionIcon(e.slug)" in src
+    assert "function helpSetSectionIcon(" in src
+    assert "el.innerHTML = icon.svg;" in src
+    assert "helpSetSectionIcon(ric," in src
+    assert "helpSetSectionIcon(sic," in src
+    assert "appIconSvg(e.owner)" in INDEX_HTML
+    # help.css sizes the injected SVG in both the rail column and header box.
+    hcss = (BROKER_DIR / "mods" / "help" / "help.css").read_text(encoding="utf-8")
+    assert ".help-rail-ic svg" in hcss
+    assert ".help-section-icon svg" in hcss
+
+
+# --------------------------------------------------------------------------- #
 # file-manager mod (#84 / S11)
 # --------------------------------------------------------------------------- #
 

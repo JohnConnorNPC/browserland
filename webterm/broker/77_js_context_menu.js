@@ -249,7 +249,29 @@
                 }
                 const el = document.createElement('div');
                 el.className = 'ctx-item' + (it.enabled ? '' : ' disabled');
-                el.textContent = it.label;
+                // #119: app-menu items carry an iconKey (a mod id). renderMenu
+                // resolves it HERE to the trusted, hardcoded SVG via appIconSvg —
+                // which returns '' for anything not in the APP_ICON_SVG registry —
+                // so the ONLY value ever injected as innerHTML is our own markup;
+                // no caller can route arbitrary/user text through this menu. The
+                // label stays textContent in its own span (the "labels are
+                // textContent only" rule, see showHostPicker). Every other menu
+                // (layout, host/profile pickers) leaves iconKey unset, so those
+                // items stay a bare textContent label.
+                const iconSvg = it.iconKey ? appIconSvg(it.iconKey) : '';
+                if (iconSvg) {
+                    const ic = document.createElement('span');
+                    ic.className = 'ctx-icon';
+                    ic.setAttribute('aria-hidden', 'true');
+                    ic.innerHTML = iconSvg;
+                    el.appendChild(ic);
+                    const lab = document.createElement('span');
+                    lab.className = 'ctx-label';
+                    lab.textContent = it.label;
+                    el.appendChild(lab);
+                } else {
+                    el.textContent = it.label;
+                }
                 if (it.enabled) {
                     el.addEventListener('click', () => {
                         hideCtxMenu();

@@ -67,8 +67,10 @@
                         const preview = String(a.content == null ? '' : a.content)
                             .replace(/\s+/g, ' ').trim();
                         const name = a.title || 'Sticky Note';
-                        const label = '📝 ' + (preview ? preview.slice(0, 28) : name);
-                        items.push({ label, enabled: true,
+                        const label = (preview ? preview.slice(0, 28) : name);
+                        // #119: the SVG note icon replaces the old '📝 ' prefix;
+                        // renderMenu resolves iconKey to the trusted registry glyph.
+                        items.push({ label, enabled: true, iconKey: 'sticky',
                                      action: () => openAppWindow(a) });
                     }
                     return items;
@@ -90,7 +92,8 @@
                         return true;
                     },
                     menu: {
-                        label: '📝 Sticky note',
+                        label: 'Sticky note',
+                        iconKey: 'sticky',   // #119: SVG yellow note in the (+) menu
                         launch: function () { return launchStickyNote(); },
                         closedItems: function () { return closedAppMenuItems(); },
                     },

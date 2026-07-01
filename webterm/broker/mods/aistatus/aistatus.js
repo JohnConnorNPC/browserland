@@ -424,7 +424,8 @@
                     appKind: 'aistatus',
                     factory: function (d) { return openAistatusWindow(d); },
                     menu: {
-                        label: '🩺 AI status',
+                        label: 'AI status',
+                        iconKey: 'aistatus',   // #119: SVG heartbeat pulse in the (+) menu
                         launch: function () { return launchAistatus(); },
                     },
                 });
