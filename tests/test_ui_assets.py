@@ -105,6 +105,8 @@ def test_index_html_served_sentinels_present():
         "_hosts",
         "hostHttpUrl",
         "host-status",
+        "set-profiles-list",     # #70 launch-profile editor markup
+        "renderProfilesEditor",  # #70 editor logic
     ):
         assert sentinel in INDEX_HTML, f"missing served-page sentinel: {sentinel!r}"
 

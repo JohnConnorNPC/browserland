@@ -391,6 +391,7 @@ def test_index_serves_windowed_page(broker_proc):
     assert 'rel="icon"' in body               # favicon shipped (todo2 14)
     assert "term-window" in body          # the windowed desktop shipped
     assert "btn-launch" in body
+    assert "set-profiles-list" in body    # #70 launch-profile editor shipped
     # Multi-host build markers: hosts model, per-host URL builders, status
     # chips — and the old persist-token-in-the-URL block must be gone
     # (tokens live in localStorage now).
@@ -443,7 +444,8 @@ def test_cors_preflight(broker_proc):
     """Explicit OPTIONS routes (route resolution precedes request
     middleware, so only a real route can answer a preflight)."""
     _, _, base = broker_proc
-    for path in ("/sessions", "/profiles", "/launch"):
+    for path in ("/sessions", "/profiles", "/launch",
+                 "/profiles/config", "/profiles/detect"):
         status, headers, _ = _request("OPTIONS", f"{base}{path}")
         assert status == 204, path
         assert headers.get("Access-Control-Allow-Origin") == "*"
@@ -540,6 +542,83 @@ def test_profiles_endpoint(broker_proc):
     # Issues #2/#10: the host OS so the UI only sends its default start path to
     # a host whose OS matches the broker the path was configured for.
     assert payload["os"] in ("windows", "posix")
+
+
+_JSON = {"Content-Type": "application/json"}
+
+
+def test_profiles_config_endpoint(broker_proc):
+    """Browser-realm profile editor (#70) against the REAL subprocess broker:
+    auth gate, full-objects shape, validation rejections, and a NON-destructive
+    live-swap that /profiles reflects WITHOUT a restart (then restores, so the
+    module-scoped broker keeps the default profiles the launch tests rely on)."""
+    _, _, base = broker_proc
+    status, _ = _http("GET", f"{base}/profiles/config")
+    assert status == 401                                   # browser-realm gate
+    status, cfg = _http("GET", f"{base}/profiles/config?token={TOKEN}")
+    assert status == 200 and cfg["ok"] is True
+    assert isinstance(cfg["profiles"], dict) and cfg["profiles"]
+    assert cfg["os"] in ("windows", "posix")
+    assert cfg["source"] in ("config", "sidecar")
+    assert isinstance(cfg["exists"], dict)
+    # Full command objects ARE visible here (browser realm) — unlike /profiles.
+    assert LAUNCH_PROFILE in cfg["profiles"]
+    assert isinstance(cfg["profiles"][LAUNCH_PROFILE]["command"], list)
+
+    # Validation rejections change nothing (400 + specific error).
+    for body, err in (
+        ({"profiles": {}}, "no_profiles"),
+        ({"profiles": {"a/b": {"command": ["x"]}}}, "bad_name"),
+        ({"profiles": {"a": {"command": []}}}, "bad_command"),
+        ({"profiles": {"a": {"command": "x"}}}, "bad_command"),
+        ({"profiles": {"a": {"command": ["x"]}}, "default_profile": "zzz"},
+         "default_not_member"),
+    ):
+        status, j = _http("POST", f"{base}/profiles/config?token={TOKEN}",
+                          json.dumps(body).encode(), _JSON)
+        assert status == 400 and j["error"] == err, (body, status, j)
+
+    # Live-swap: ADD a profile alongside the existing ones (non-destructive), so
+    # even if a later assert fails the launch profiles survive.
+    keep = {n: {"command": v["command"], "title": v.get("title"),
+                "cwd": v.get("cwd")} for n, v in cfg["profiles"].items()}
+    added = dict(keep)
+    added["p70probe"] = {"command": ["echo", "hi"], "title": "probe",
+                         "cwd": None}
+    try:
+        status, j = _http("POST", f"{base}/profiles/config?token={TOKEN}",
+                          json.dumps({"profiles": added,
+                                      "default_profile": cfg["default_profile"]
+                                      }).encode(), _JSON)
+        assert status == 200 and "p70probe" in j["profiles"]
+        # names-only /profiles reflects the new name live (no restart)
+        status, names = _http("GET", f"{base}/profiles?token={TOKEN}")
+        assert status == 200 and "p70probe" in names["profiles"]
+        # the write flips the source to the sidecar
+        status, cfg2 = _http("GET", f"{base}/profiles/config?token={TOKEN}")
+        assert cfg2["source"] == "sidecar"
+    finally:
+        _http("POST", f"{base}/profiles/config?token={TOKEN}",
+              json.dumps({"profiles": keep,
+                          "default_profile": cfg["default_profile"]}).encode(),
+              _JSON)
+    status, names = _http("GET", f"{base}/profiles?token={TOKEN}")
+    assert "p70probe" not in names["profiles"]
+    assert LAUNCH_PROFILE in names["profiles"]             # default set intact
+
+
+def test_profiles_detect_endpoint(broker_proc):
+    _, _, base = broker_proc
+    status, _ = _http("GET", f"{base}/profiles/detect")
+    assert status == 401
+    status, j = _http("GET", f"{base}/profiles/detect?token={TOKEN}")
+    assert status == 200 and j["ok"] is True
+    assert isinstance(j["suggestions"], list)              # possibly empty
+    for s in j["suggestions"]:
+        assert isinstance(s["name"], str) and s["name"]
+        assert isinstance(s["command"], list) and s["command"]
+        assert all(isinstance(p, str) and p for p in s["command"])
+        assert "exists" in s
 
 
 def test_title_broadcast(broker_proc):
