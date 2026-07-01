@@ -206,6 +206,21 @@ MAX_MCP_INPUT_BYTES = 256 * 1024
 # same ceiling.
 MAX_MCP_WAIT_MS = 15000
 
+# Launch-profile editor (#70, POST /profiles/config). A same-machine browser-
+# realm page can drive this (the accepted /file/* posture), and each profile is
+# a persistent shell recipe /launch will spawn by name — so hard-cap the write:
+# generous for any real shell menu, small enough a hostile page can't balloon
+# the sidecar or smuggle control chars/oversized names into the UI/logs.
+MAX_PROFILES_BYTES = 256 * 1024
+MAX_PROFILES = 200
+MAX_PROFILE_COMMAND = 64          # argv tokens per profile
+MAX_PROFILE_TOKEN = 4096          # chars per argv token / cwd
+MAX_PROFILE_TITLE = 256
+# Names key the sidecar, title windows, and show in the UI: a boring charset
+# (no control chars, quotes, slashes, HTML, or bidi) with a length cap. fullmatch
+# rejects a trailing newline that ``$`` would allow.
+_PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9 ._+-]{1,64}")
+
 
 def _norm_mcp_mode(value: Any, default: str = "off") -> str:
     """Coerce an arbitrary value to a valid MCP mode, else ``default``."""
@@ -355,6 +370,77 @@ def _load_profiles_cfg(path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         default_profile, profiles, seed_default)
     return {"profiles": profiles, "default_profile": default_profile,
             "source": source}
+
+
+def _validate_profile_command(command: Any) -> Optional[str]:
+    """Strictly validate one profile's ``command`` argv: a non-empty list of
+    non-empty, control-char-free, length-capped strings. Returns an error slug
+    or ``None``. Control chars (incl. NUL/newline/tab) are rejected — no legit
+    shell argv needs one, and NUL would make the spawn fail later anyway."""
+    if not isinstance(command, list) or not command:
+        return "bad_command"
+    if len(command) > MAX_PROFILE_COMMAND:
+        return "command_too_long"
+    for part in command:
+        if not isinstance(part, str) or not part:
+            return "bad_command"
+        if len(part) > MAX_PROFILE_TOKEN:
+            return "command_token_too_long"
+        if any(ord(c) < 0x20 for c in part):
+            return "bad_command"
+    return None
+
+
+def _validate_profiles_post(body: Dict[str, Any]):
+    """Validate a POST /profiles/config body into a clean ``{profiles,
+    default_profile}``, or return ``(None, error_slug)``. REPLACE semantics: the
+    body defines the WHOLE set, so it REJECTS (never coerces) — a bad field
+    changes nothing. Empty ``profiles`` is rejected (``no_profiles``) so an edit
+    can't leave zero shells and brick /launch; ``default_profile`` is resolved to
+    a real member so a no-explicit-profile launch always resolves."""
+    profiles_in = body.get("profiles")
+    if not isinstance(profiles_in, dict):
+        return None, "bad_profiles"
+    if not profiles_in:
+        return None, "no_profiles"
+    if len(profiles_in) > MAX_PROFILES:
+        return None, "too_many_profiles"
+    clean: Dict[str, Any] = {}
+    for name, value in profiles_in.items():
+        if not isinstance(name, str) or not _PROFILE_NAME_RE.fullmatch(name):
+            return None, "bad_name"
+        if not isinstance(value, dict):
+            return None, "bad_profile"
+        cmd_err = _validate_profile_command(value.get("command"))
+        if cmd_err:
+            return None, cmd_err
+        entry: Dict[str, Any] = {"command": list(value.get("command"))}
+        title = value.get("title")
+        if title is not None and not isinstance(title, str):
+            return None, "bad_title"
+        if isinstance(title, str) and len(title) > MAX_PROFILE_TITLE:
+            return None, "title_too_long"
+        entry["title"] = title or None
+        cwd = value.get("cwd")
+        if cwd is not None:
+            if not isinstance(cwd, str):
+                return None, "bad_cwd"
+            if len(cwd) > MAX_PROFILE_TOKEN:
+                return None, "cwd_too_long"
+            if any(ord(c) < 0x20 for c in cwd):
+                return None, "bad_cwd"
+        entry["cwd"] = cwd or None
+        clean[name] = entry
+    default_profile = body.get("default_profile", "")
+    if default_profile is None:
+        default_profile = ""
+    if not isinstance(default_profile, str):
+        return None, "bad_default"
+    if default_profile and default_profile not in clean:
+        return None, "default_not_member"
+    default_profile = _resolve_default_profile(
+        default_profile, clean, next(iter(clean)))
+    return {"profiles": clean, "default_profile": default_profile}, None
 
 
 def _load_state(path: Path) -> Dict[str, Any]:
@@ -2382,6 +2468,74 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.mcp_cfg = cfg
         return sanic_json(_mcp_cfg_public(cfg))
 
+    # ---- launch profiles config (browser-facing, #70) --------------------
+    # The Control Panel reads/writes the FULL profile objects here. Gated by the
+    # BROWSER token-or-loopback realm (_gated_auth_error), EXACTLY like /file/*,
+    # /state and /mcp/config — never the MCP-token realm. So the commands (the
+    # RCE-by-design half of the profiles-only model) only ever travel to an
+    # already-authenticated browser; /profiles and /mcp/profiles stay names-only,
+    # so an MCP/AI agent still can't read commands or define profiles. A same-
+    # machine tokenless page can drive this, the accepted /file/* posture — this
+    # write is no weaker than /file/write (both grant persistent host code-exec),
+    # so a tokenless broker must not run while the browser visits untrusted sites.
+    def _profiles_public_view() -> Dict[str, Any]:
+        launcher = app.ctx.launcher
+        profiles = launcher.profiles          # live dict; iterate, never mutate
+        out: Dict[str, Any] = {}
+        exists: Dict[str, bool] = {}
+        for name, entry in profiles.items():
+            cmd = list(entry.get("command") or [])
+            out[name] = {"command": cmd, "title": entry.get("title"),
+                         "cwd": entry.get("cwd")}
+            # Validate-executable-exists: does command[0] resolve on PATH now?
+            # A False marks a profile whose shell isn't installed (UI red flag).
+            exists[name] = bool(cmd) and shutil.which(cmd[0]) is not None
+        return {"ok": True, "default_profile": launcher.default_profile,
+                "profiles": out,
+                "os": "windows" if os.name == "nt" else "posix",
+                "source": app.ctx.profiles_source, "exists": exists}
+
+    async def _profiles_config_get(request: Request):
+        err = _gated_auth_error(request, "/profiles/config")
+        if err is not None:
+            return err
+        return sanic_json(_profiles_public_view())
+
+    async def _profiles_config_post(request: Request):
+        err = _gated_auth_error(request, "/profiles/config")
+        if err is not None:
+            return err
+        if request.body and len(request.body) > MAX_PROFILES_BYTES:
+            return sanic_json({"ok": False, "error": "too_large"}, status=413)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        # Validate the WHOLE set BEFORE the lock/write (mirrors _mcp_config_post):
+        # a bad field returns 400 and changes nothing.
+        result, verr = _validate_profiles_post(body)
+        if verr is not None:
+            return sanic_json({"ok": False, "error": verr}, status=400)
+        to_persist = {"profiles": result["profiles"],
+                      "default_profile": result["default_profile"]}
+        async with app.ctx.profiles_lock:
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.profiles_path,
+                    to_persist)
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+            # Disk is truth first; ONLY on a successful write do we live-swap the
+            # launcher, so a failed write never leaves runtime disagreeing with
+            # the sidecar. set_profiles rebinds fresh objects (atomic vs launch).
+            app.ctx.launcher.set_profiles(result["profiles"],
+                                          result["default_profile"])
+            app.ctx.profiles_source = "sidecar"
+        # Audit: this write persists shell recipes /launch will spawn by name.
+        LOGGER.info("launch profiles updated via /profiles/config: %d "
+                    "profiles (default=%r) from %s", len(result["profiles"]),
+                    result["default_profile"], request.ip)
+        return sanic_json(_profiles_public_view())
+
     # ---- broker identity (/info) -----------------------------------------
     # Non-secret stable id + build version (#64). Gated by the SAME
     # token-or-loopback policy as /state: the same-origin local probe passes via
@@ -2520,6 +2674,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
     app.add_route(_mcp_config_post, "/mcp/config", methods=["POST"])
+    # Launch-profile editor (browser realm; #70). Full objects, never the MCP
+    # realm — /profiles + /mcp/profiles stay names-only.
+    app.add_route(_profiles_config_get, "/profiles/config", methods=["GET"])
+    app.add_route(_profiles_config_post, "/profiles/config", methods=["POST"])
     # Explicit preflights (route resolution precedes request middleware, so
     # an unrouted OPTIONS would 405 before any middleware could answer).
     # Explicit name= per registration — auto-derived names collide.
@@ -2551,7 +2709,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/reset", "preflight_mcp_reset"),
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
-                             ("/mcp/config", "preflight_mcp_config")):
+                             ("/mcp/config", "preflight_mcp_config"),
+                             ("/profiles/config", "preflight_profiles_config")):
         app.add_route(_preflight, path, methods=["OPTIONS"], name=route_name)
     app.error_handler.add(NotFound, _handle_404)
 
