@@ -242,6 +242,10 @@ MAX_PROFILE_TITLE = 256
 # (no control chars, quotes, slashes, HTML, or bidi) with a length cap. fullmatch
 # rejects a trailing newline that ``$`` would allow.
 _PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9 ._+-]{1,64}")
+# Optional per-profile DEFAULT terminal color (#115): a strict ``#rrggbb`` hex
+# (the first hex validator on the Python side — host color #103 was browser-only).
+# Matched with ``.fullmatch`` so a trailing newline can't sneak in past ``$``.
+_PROFILE_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}$")
 
 
 def _norm_mcp_mode(value: Any, default: str = "off") -> str:
@@ -314,6 +318,12 @@ def _valid_profile_entry(value: Any) -> Optional[Dict[str, Any]]:
     entry["title"] = title[:256] if isinstance(title, str) and title else None
     cwd = value.get("cwd")
     entry["cwd"] = cwd if isinstance(cwd, str) and cwd else None
+    # #115: optional per-profile default color. Self-heal like cwd — keep it only
+    # if it is a clean #rrggbb, else drop it (a hand-edited/reloaded sidecar can
+    # never carry junk into the seed map or the UI); the profile itself survives.
+    color = value.get("color")
+    entry["color"] = (color if isinstance(color, str)
+                      and _PROFILE_COLOR_RE.fullmatch(color) else None)
     return entry
 
 
@@ -452,6 +462,14 @@ def _validate_profiles_post(body: Dict[str, Any]):
             if any(ord(c) < 0x20 for c in cwd):
                 return None, "bad_cwd"
         entry["cwd"] = cwd or None
+        # #115: optional per-profile default color. Absent/'' -> None (no
+        # default). REPLACE semantics: reject a non-#rrggbb value rather than
+        # coerce it, so a bad field changes nothing.
+        color = value.get("color")
+        if color is not None and color != "":
+            if not isinstance(color, str) or not _PROFILE_COLOR_RE.fullmatch(color):
+                return None, "bad_color"
+        entry["color"] = color or None
         clean[name] = entry
     default_profile = body.get("default_profile", "")
     if default_profile is None:
@@ -1231,9 +1249,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if token and not auth.request_token_ok(request, token):
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
+        profs = app.ctx.launcher.profiles
         return sanic_json({
             "default": app.ctx.launcher.default_profile,
-            "profiles": sorted(app.ctx.launcher.profiles.keys()),
+            "profiles": sorted(profs.keys()),
+            # #115: additive name -> #rrggbb side-map of the optional per-profile
+            # DEFAULT colors (only profiles that set one). The "profiles" array
+            # stays names-only, so the names-only invariant holds and no
+            # command/cwd ever rides this; the seed path reads it to color a new
+            # terminal by its launch profile.
+            "colors": {n: e["color"] for n, e in profs.items()
+                       if isinstance(e, dict) and e.get("color")},
             # OS of this broker's host so the UI can pick the matching per-OS
             # default start path (issue #2). "windows" | "posix" — never a
             # path or anything host-identifying.
@@ -2901,7 +2927,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         for name, entry in profiles.items():
             cmd = list(entry.get("command") or [])
             out[name] = {"command": cmd, "title": entry.get("title"),
-                         "cwd": entry.get("cwd")}
+                         "cwd": entry.get("cwd"),
+                         # #115: the editor reads this to paint each profile's
+                         # default-color dot; None = no default (palette auto).
+                         "color": entry.get("color")}
             # Validate-executable-exists: does command[0] resolve on PATH now?
             # A False marks a profile whose shell isn't installed (UI red flag).
             exists[name] = bool(cmd) and shutil.which(cmd[0]) is not None
