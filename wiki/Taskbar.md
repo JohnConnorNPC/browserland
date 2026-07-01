@@ -1,4 +1,4 @@
-The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar), the workspace pager, host status, a fullscreen button, and clock and help chips.
+The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar), the workspace pager, host status, a fullscreen button, and clock, AI status, and help chips.
 
 ## Anatomy
 
@@ -12,6 +12,7 @@ From left to right, the taskbar contains:
 | Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
+| AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
 ## Window buttons
@@ -41,7 +42,7 @@ The launch button doubles as a Start button.
 By default:
 
 - **Left-click** launches a terminal using the **local broker's** default profile.
-- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager — see [[Window-Types]]). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
+- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, and — when the AI status mod is enabled — an AI-provider status monitor; see [[Window-Types]]). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
 
 ### Swapping the click gestures
 

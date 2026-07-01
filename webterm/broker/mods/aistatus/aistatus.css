@@ -1,0 +1,65 @@
+        /* ---- mod: aistatus (#112) ------------------------------------------
+           App-window rows + the colored indicator dot. The taskbar chip itself
+           is styled inline in aistatus.js (theme-var border/fg, like the core
+           .host-chip), so only the window + dots live here. Indentation matches
+           the head <style> zone the mod-css splice lands in (ui.py:_mod_css). */
+        .term-window.app-ais .app-ais-body {
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+            background: var(--bg);
+            color: var(--fg);
+            padding: 6px 8px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .term-window.app-ais .app-ais-checked {
+            margin-left: 8px;
+            color: var(--fg-dim);
+            font-size: 11px;
+        }
+        .app-ais-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 2px 3px;
+            border-bottom: 1px solid var(--bg-2);
+        }
+        .app-ais-name {
+            font-weight: bold;
+            flex: 0 0 auto;
+            min-width: 120px;
+        }
+        .app-ais-desc {
+            color: var(--fg-dim);
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .app-ais-incident {
+            padding: 2px 2px 2px 24px;
+            color: var(--fg-dim);
+            font-size: 11px;
+        }
+        .app-ais-err { color: #e0a93a; }
+        .app-ais-note {
+            color: var(--fg-dim);
+            font-style: italic;
+            padding: 8px 2px;
+        }
+        /* Indicator dot — same status palette as the core host chips. */
+        .ais-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex: 0 0 auto;
+            box-sizing: border-box;
+            border: 1px solid rgba(0, 0, 0, 0.4);
+        }
+        .ais-dot.ais-none     { background: #5fbf7f; }
+        .ais-dot.ais-minor    { background: #e0a93a; }
+        .ais-dot.ais-major    { background: #e07b3a; }
+        .ais-dot.ais-critical { background: #e05050; }
+        .ais-dot.ais-unknown  { background: var(--fg-dim); }

@@ -1408,6 +1408,7 @@ _EXPECTED_TIERS = {
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
     "sticky": ["window"],
+    "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
 }
 
 
@@ -1468,11 +1469,11 @@ def test_loadmods_honors_per_mod_disabled_under_master_gate():
     # the master gate is on, so master-off means no mod UI at all.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     boot = loader[loader.index("async function loadMods"):]
-    # master gate returns BEFORE the pane mount + the per-mod skip.
+    # master gate returns BEFORE the pane mount + the per-mod skip. #112/#116: the
+    # boot now gates on the EFFECTIVE per-mod state (isModEnabled, which honors a
+    # mod's declared defaultEnabled) rather than raw disabled-set membership, so a
+    # default-off mod (aistatus #112, git #116) does not init at boot until opted in.
     assert boot.index("mods_enabled=false") < boot.index("_mountModsManagerPane()")
-    # #116: the per-mod skip now gates on the resolved enable state (default XOR
-    # override) instead of a raw disabled-set lookup, so a default-off mod stays
-    # off until opted in. The pane still mounts before the skip.
     assert boot.index("_mountModsManagerPane()") < boot.index("isModEnabled(decl.id)")
     # stale ids are pruned so the set can't grow junk.
     assert "pruned" in boot

@@ -134,6 +134,7 @@ _MODS = [
     "mods/editor/codemirror.js",  # S10 (#83) CodeMirror 6 lazy loader (was 69), helpers only
     "mods/editor/editor.js",   # S10 (#83) text-editor window kind via ctx.registerWindowKind + ctx.file
     "mods/sticky/sticky.js",   # S8 (#81) sticky-note window kind via ctx.registerWindowKind
+    "mods/aistatus/aistatus.js",  # #112 AI-provider status chip + window; ships default-off, polls /status/fetch; ships aistatus.css
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

@@ -20,7 +20,7 @@ You have three quick ways to get a terminal on screen:
 
 The quick-launch gesture and the shortcut always start on the **local broker**; to start a terminal on a remote host, pick its profile from the launch menu. Each terminal is a real shell on its broker's host. Type in it like any terminal; close the window later and the shell keeps running so you can reattach.
 
-From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, and a task manager. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
+From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, and a task manager. If you enable the **AI status** mod (Control Panel → Mods; it ships off by default), an **AI-provider status** monitor joins the menu too — enabling it lets the broker check each provider's public status page, so the broker's egress IP becomes visible to those hosts. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
 
 ## The Control Panel
 

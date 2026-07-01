@@ -55,4 +55,4 @@ If you open the desktop in a second browser (or a second tab) while another alre
 
 Click **Become active** to take over the lease. The previously active browser is deactivated and shows the same prompt, so it can take the lease back later.
 
-Note that terminals keep running regardless of which browser holds the lease — the shells live in the agents, not the browser. Taking over the lease only changes who is editing the layout, not what the terminals are doing. For what the terminals, notes, editors, and file managers actually are, see [[Window-Types]].
+Note that terminals keep running regardless of which browser holds the lease — the shells live in the agents, not the browser. Taking over the lease only changes who is editing the layout, not what the terminals are doing. For what the terminals, notes, editors, file managers, and the (off-by-default) AI-provider status monitor actually are, see [[Window-Types]].
