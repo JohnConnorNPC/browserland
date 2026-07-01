@@ -527,6 +527,18 @@
                     showNotice('source and destination are the same');
                     return false;
                 }
+                // Confirm before any move — a move deletes the source, so gate
+                // it (both same-host and cross-host) behind an explicit prompt.
+                // Copy is non-destructive and stays unprompted. The overwrite
+                // confirm downstream (:539 / transferTo :445) remains a second
+                // gate when the destination already exists.
+                if (move) {
+                    const ok = await openConfirmDialog({
+                        title: 'Move',
+                        message: 'Move ' + srcName + ' to ' + destPath + '?',
+                    });
+                    if (!ok || win.disposed) return false;
+                }
                 if (srcHost.id === destHost.id) {
                     // Same host: server-side op (files AND dirs, no size cap).
                     const op = (overwrite) => move
