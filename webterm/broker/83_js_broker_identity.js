@@ -275,10 +275,17 @@
             // user can remove the stale/duplicate one — the surgical fix the
             // reporter actually needed (removeHost preserves other tokens).
             const dupOf = computeHostDuplicates(hosts);
-            // #107: the host the START (+) button currently launches on (resolves
-            // '' / 'local' / a removed id to the local host), so exactly one row
-            // is marked + its Default button disabled.
+            // #107: `curId` = the host START actually launches on (resolves '' /
+            // 'local' / a stale-or-foreign id to the local host) — drives the
+            // badge. `storedDefault` = the RAW stored value, which drives each
+            // row's Default-button disabled state. They diverge when the stored
+            // id is unresolvable here (e.g. a non-'local' id synced from another
+            // browser, whose ids don't sync): the badge sits on local, but local's
+            // button must stay ENABLED so the user can clear the foreign id back
+            // to ''. Disabling off `curId` instead would strand it (the only row
+            // that could clear it is the one that appears already-selected).
             const curId = defaultLaunchHost().id;
+            const storedDefault = getSettings().defaultHost;
             for (const host of hosts) {
                 const row = document.createElement('div');
                 row.className = 'set-row host-row';
@@ -322,7 +329,14 @@
                         savePrefs();
                         renderHostsList();
                     });
-                defBtn.disabled = (host.id === curId);
+                // Disabled only when the STORED value already selects THIS row
+                // (clicking would be a no-op) — for local that's '' or the legacy
+                // 'local'. Comparing the raw stored value (not `curId`) keeps
+                // local clickable when the stored id is a foreign/stale one that
+                // merely resolves to local, so it can be cleared.
+                defBtn.disabled = host.id === 'local'
+                    ? (storedDefault === '' || storedDefault === 'local')
+                    : (storedDefault === host.id);
                 row.appendChild(defBtn);
                 if (host.id !== 'local') {
                     row.appendChild(hostRowButton('edit', null,
