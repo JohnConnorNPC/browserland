@@ -1608,6 +1608,80 @@ def test_default_enabled_capability_present():
 
 
 # --------------------------------------------------------------------------- #
+# `requires` mod-dependency primitive (#121 / S15)
+# --------------------------------------------------------------------------- #
+
+def test_requires_capability_present():
+    # #121: the loader's `requires` mod-dependency plumbing — registerMod
+    # normalization, the initMod precondition guard (a new structured `requires`
+    # reason, never a throw), the setModEnabled enable/disable cascades, the
+    # Mods-pane read-only `blocked` status, and the test-API surface. Static-checked
+    # here; runtime is verified manually via Playwright-MCP (no JS runner exists).
+    # Ordering correctness is guarded separately by
+    # test_requires_declared_before_dependency_in_mods_list.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for sym in (
+        # registerMod normalizes requires -> [] when omitted (every existing mod).
+        "requires: Array.isArray(decl.requires)",
+        # initMod precondition: a mod whose required deps are inactive is BLOCKED
+        # (structured result, never throws) — no slot claimed, no partial init.
+        "reason: 'requires'",
+        "return !window.__mods.active.has(dep);",
+        # setModEnabled cascades: a forward enable pass + a reverse disable pass.
+        "regs.indexOf(decl) + 1",       # enable: init later deps-satisfied mods
+        "const doomed = new Set([id]);",  # disable: transitive-dependent closure
+        # the Mods pane reflects a dependency block READ-ONLY (needs: <ids>).
+        "state = 'blocked'",
+        "'needs: '",
+        # the test API surfaces declared deps for the Playwright acceptance.
+        "requires: (m.requires || []).slice()",
+    ):
+        assert sym in loader, f"missing #121 requires loader symbol: {sym!r}"
+    # ctxVersion is unchanged — requires is additive plumbing.
+    assert "ctxVersion: 1" in loader
+    # And the key symbols reach the served page.
+    for sym in ("requires: Array.isArray(decl.requires)",
+                "reason: 'requires'",
+                "state = 'blocked'",
+                "requires: (m.requires || []).slice()"):
+        assert sym in INDEX_HTML, \
+            f"#121 requires symbol missing from served page: {sym!r}"
+
+
+def test_requires_declared_before_dependency_in_mods_list():
+    # #121: the static ordering guard that stands in for a runtime topological sort
+    # + cycle detection. For every in-repo mod that declares requires:[ids] in its
+    # registerMod, assert each listed id (i) is a KNOWN mod and (ii) is registered
+    # STRICTLY EARLIER in ui._MODS. This makes cycles, self-require, and missing
+    # dependencies unrepresentable, so boot's in-order loadMods loop is always
+    # deps-first and the loader needs no runtime cycle detection. With no consumer
+    # today this passes vacuously; it becomes load-bearing the moment #120 appends
+    # agent-docs (requires: ['editor']) after mods/editor/editor.js.
+    import re
+    # Map every mod id -> its load index. The registrant is the mods/<id>/<id>.js
+    # entry (a helper-only sibling like editor/codemirror.js registers nothing).
+    id_to_index = {}
+    for i, entry in enumerate(ui._MODS):
+        p = PurePosixPath(entry)
+        if p.stem == p.parent.name:
+            id_to_index[p.stem] = i
+    for mod_id, idx in id_to_index.items():
+        src = (BROKER_DIR / "mods" / mod_id / f"{mod_id}.js").read_text(
+            encoding="utf-8")
+        m = re.search(r"id:\s*'%s'.*?requires:\s*\[([^\]]*)\]" % re.escape(mod_id),
+                      src, re.S)
+        if not m:
+            continue  # no requires: declared -> nothing to order-check
+        for dep in re.findall(r"'([a-z0-9-]+)'", m.group(1)):
+            assert dep in id_to_index, (
+                f"mod {mod_id!r} requires unknown mod id {dep!r} "
+                f"(not a registrant in ui._MODS)")
+            assert id_to_index[dep] < idx, (
+                f"mod {mod_id!r} requires {dep!r} but it is not registered earlier "
+                f"in ui._MODS (dep at index {id_to_index[dep]}, dependent at {idx})")
+
+
+# --------------------------------------------------------------------------- #
 # clipboard mod + ctx.clipboard observer seam (#106)
 # --------------------------------------------------------------------------- #
 
