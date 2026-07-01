@@ -1,0 +1,126 @@
+/* scratchpad mod (#124): a tabbed, server-backed notes window. The tab strip
+   mirrors the editor's .app-tabs (11_css_apps.css); the CM host + History panel
+   are scoped by the .app-scratch window class so they never leak onto other
+   app windows. */
+
+.term-window.app-scratch .app-tabs {
+    display: flex; align-items: stretch; gap: 2px; flex-wrap: wrap;
+    padding: 3px 6px 0 6px;
+    background: #232323;
+    border-bottom: 1px solid #000;
+    flex: 0 0 auto;
+    font-family: Arial, sans-serif; font-size: 11px;
+}
+.term-window.app-scratch .app-tabs .app-tab {
+    background: #1b1b1b; border: 1px solid #3a3a3a; border-bottom: none;
+    border-radius: 5px 5px 0 0;
+    color: #bbb; font-size: 11px; padding: 3px 9px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; max-width: 180px;
+}
+.term-window.app-scratch .app-tabs .app-tab:hover {
+    background: #2a2a2a; color: #ddd;
+}
+.term-window.app-scratch .app-tabs .app-tab.active {
+    background: var(--sel-bg); border-color: var(--accent-default);
+    color: var(--fg);
+}
+.term-window.app-scratch .app-tabs .app-tab-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.term-window.app-scratch .app-tabs .app-tab-close {
+    color: #999; font-size: 12px; line-height: 1; padding: 0 1px;
+    border-radius: 3px;
+}
+.term-window.app-scratch .app-tabs .app-tab-close:hover {
+    color: #fff; background: #a33;
+}
+.term-window.app-scratch .app-tabs .app-tab-rename {
+    background: #111; border: 1px solid var(--accent-default); color: var(--fg);
+    font-size: 11px; padding: 1px 4px; width: 110px;
+}
+
+/* Toolbar: New-tab + History. */
+.term-window.app-scratch .app-scratch-toolbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 6px; background: #202020;
+    border-bottom: 1px solid #000; flex: 0 0 auto;
+}
+.term-window.app-scratch .app-scratch-toolbar .tb-btn {
+    background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+    color: #ddd; font-size: 11px; padding: 2px 9px; cursor: pointer;
+}
+.term-window.app-scratch .app-scratch-toolbar .tb-btn:hover {
+    background: #333; border-color: #2aa896;
+}
+.term-window.app-scratch .app-scratch-add { font-weight: bold; }
+
+/* Read-only banner (this browser isn't the active one). */
+.term-window.app-scratch .app-scratch-ro {
+    display: flex; align-items: center; gap: 10px; justify-content: space-between;
+    padding: 4px 8px; background: #3a2a12; color: #f2d49b;
+    border-bottom: 1px solid #000; font-size: 11px; flex: 0 0 auto;
+}
+.term-window.app-scratch .app-scratch-ro-retry {
+    background: #5a4420; border: 1px solid #b8892f; color: #ffe6b0;
+    border-radius: 3px; font-size: 11px; padding: 1px 8px; cursor: pointer;
+}
+.term-window.app-scratch .app-scratch-ro-retry:hover { background: #6d5528; }
+
+/* CM host: fills the remaining flex space and scrolls internally. */
+.term-window.app-scratch .app-scratch-body {
+    flex: 1 1 0; min-height: 0; overflow: hidden;
+    background: #1e1e1e; color: #888;
+    display: flex; flex-direction: column;
+}
+.term-window.app-scratch .app-scratch-body:not(:empty) { color: inherit; }
+.term-window.app-scratch .app-scratch-body .cm-editor { height: 100%; }
+
+/* History panel (shown in place of the body). */
+.term-window.app-scratch .app-scratch-history {
+    flex: 1 1 0; min-height: 0; overflow: auto;
+    background: #1e1e1e; color: #ddd;
+    font-family: Arial, sans-serif; font-size: 12px;
+    display: flex; flex-direction: column; gap: 6px; padding: 8px;
+}
+.term-window.app-scratch .app-scratch-hist-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; font-weight: bold;
+}
+.term-window.app-scratch .app-scratch-hist-bar .tb-btn {
+    background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
+    color: #ddd; font-size: 11px; padding: 2px 9px; cursor: pointer;
+    font-weight: normal;
+}
+.term-window.app-scratch .app-scratch-hist-bar .tb-btn:hover { background: #333; }
+.term-window.app-scratch .app-scratch-hist-list {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid #333; border-radius: 4px; padding: 4px;
+    max-height: 45%; overflow: auto;
+}
+.term-window.app-scratch .app-scratch-hist-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 3px 6px; border-radius: 3px; cursor: pointer;
+}
+.term-window.app-scratch .app-scratch-hist-row:hover { background: #2a2a2a; }
+.term-window.app-scratch .app-scratch-hist-label {
+    font-family: Consolas, 'Liberation Mono', monospace; font-size: 11px;
+    color: #cfcfcf;
+}
+.term-window.app-scratch .app-scratch-hist-restore {
+    background: #1e3a2e; border: 1px solid #2aa896; color: #b8f0e2;
+    border-radius: 3px; font-size: 11px; padding: 1px 8px; cursor: pointer;
+}
+.term-window.app-scratch .app-scratch-hist-restore:hover { background: #275045; }
+.term-window.app-scratch .app-scratch-hist-preview {
+    flex: 1 1 0; min-height: 0; overflow: auto;
+    border: 1px solid #333; border-radius: 4px; padding: 6px;
+    background: #171717; color: #aaa;
+}
+.term-window.app-scratch .app-scratch-hist-tabname {
+    color: #7fe3d0; font-weight: bold; font-size: 11px; margin: 4px 0 2px;
+}
+.term-window.app-scratch .app-scratch-hist-text {
+    margin: 0 0 6px; white-space: pre-wrap; word-break: break-word;
+    font-family: Consolas, 'Liberation Mono', monospace; font-size: 11px;
+    color: #ddd;
+}

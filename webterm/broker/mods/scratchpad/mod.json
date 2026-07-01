@@ -1,0 +1,11 @@
+{
+  "id": "scratchpad",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Scratchpad",
+  "description": "A singleton notes window whose content lives on the broker (via ctx.serverStore), so it is shared across every browser on this broker and survives a reload or cache clear. Notes are organized as internal tabs, each a CodeMirror editor built on the editor mod's single shared CM build (requires: ['editor']). Every save keeps a bounded server-side revision history, browsable + restorable from a History panel. Writes reuse the single-active-client lease: a non-active browser reads but is read-only until it becomes active.",
+  "entry": "scratchpad.js",
+  "styles": ["scratchpad.css"],
+  "author": "JohnConnorNPC",
+  "help": { "slug": "scratchpad", "label": "Scratchpad", "order": 2085, "icon": "🗒" }
+}

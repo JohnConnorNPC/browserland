@@ -85,6 +85,15 @@ def broker_proc():
     env["WEB_TERMINAL_TOKEN"] = TOKEN
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("BROWSERLAND_BROKER_URL", None)
+    # Start the /mod-store (#124) with a clean slate so the roundtrip / ring /
+    # lease tests see fresh ids regardless of a prior run's persisted store (the
+    # broker loads webterm_modstore.json from its cwd at startup). Unlike /state
+    # (whose tests are written rerun-independent), the mod-store tests assert
+    # empty-id + first-write-seeds-no-revision semantics.
+    try:
+        (REPO / "webterm_modstore.json").unlink()
+    except OSError:
+        pass
     proc = subprocess.Popen(
         [sys.executable, "-m", "webterm.broker",
          "--host", "127.0.0.1", "--port", str(port)],
@@ -797,6 +806,193 @@ def test_state_validation(broker_proc):
         body=json.dumps({"baseRev": 0, "settings": [], "layout": {}}).encode(),
         headers=auth)
     assert status == 400 and payload["error"] == "bad_state"
+
+
+# --------------------------------------------------------------------------- #
+# /mod-store/<modId> — the generic per-mod server KV + revision ring (#124).
+# These reuse the running broker's lease (None here, like the /state tests) and
+# distinct mod ids so their rev sequences are order-independent. The lease
+# not_active path claims + releases the lease itself (last, so it leaves the
+# in-memory lease as it found it — None).
+# --------------------------------------------------------------------------- #
+
+_MODSTORE_RING = 50   # == webterm.broker.app.MODSTORE_MAX_REVISIONS
+
+
+def test_mod_store_requires_token(broker_proc):
+    _, _, base = broker_proc
+    status, _ = _http("GET", f"{base}/mod-store/scratchpad")
+    assert status == 401
+    status, _ = _http("PUT", f"{base}/mod-store/scratchpad", body=b"{}")
+    assert status == 401
+
+
+def test_mod_store_bad_mod_id(broker_proc):
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    # Uppercase + underscore are outside the [a-z0-9-] id shape.
+    status, payload = _http("GET", f"{base}/mod-store/Bad_Id?token={TOKEN}")
+    assert status == 400 and payload["error"] == "bad_mod_id"
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/Bad_Id",
+        body=json.dumps({"baseRev": 0, "value": {}}).encode(), headers=auth)
+    assert status == 400 and payload["error"] == "bad_mod_id"
+
+
+def test_mod_store_validation_and_bytecap(broker_proc):
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    # Missing baseRev.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/e2e-val",
+        body=json.dumps({"value": {}}).encode(), headers=auth)
+    assert status == 400 and payload["error"] == "bad_baseRev"
+    # bool baseRev is rejected (bool is an int subclass in Python).
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/e2e-val",
+        body=json.dumps({"baseRev": True, "value": {}}).encode(), headers=auth)
+    assert status == 400 and payload["error"] == "bad_baseRev"
+    # Presence check: an ABSENT value key is 400 (a null value would be legal).
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/e2e-val",
+        body=json.dumps({"baseRev": 0}).encode(), headers=auth)
+    assert status == 400 and payload["error"] == "bad_value"
+    # Over the 1 MiB per-value byte cap -> 413.
+    big = json.dumps({"baseRev": 0,
+                      "value": {"t": "x" * (1024 * 1024 + 16)}}).encode()
+    status, payload = _http("PUT", f"{base}/mod-store/e2e-val", body=big,
+                            headers=auth)
+    assert status == 413 and payload["error"] == "too_large"
+
+
+def test_mod_store_roundtrip_dedupe_conflict(broker_proc):
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-round"
+    # A fresh id reads as empty.
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert status == 200
+    assert payload["rev"] == 0 and payload["value"] is None
+    assert payload["revisions"] == []
+    # First write (rev 0 -> 1). A brand-new id seeds NO revision entry.
+    v1 = {"v": 1, "tabs": [{"id": "a", "name": "Notes", "text": "hello"}]}
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 0, "value": v1}).encode(), headers=auth)
+    assert status == 200 and payload["ok"] is True and payload["rev"] == 1
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert payload["rev"] == 1 and payload["value"] == v1
+    assert payload["revisions"] == []
+    # No-op dedupe: resending the identical value does NOT bump rev / add a ring
+    # entry (an idle autosave mustn't churn history).
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 1, "value": v1}).encode(), headers=auth)
+    assert status == 200 and payload["ok"] is True and payload["rev"] == 1
+    # A distinct write -> rev 2, and the PRIOR value lands on the ring (metadata
+    # only in the default GET: rev + ts, never the body).
+    v2 = {"v": 1, "tabs": [{"id": "a", "name": "Notes", "text": "hello world"}]}
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 1, "value": v2}).encode(), headers=auth)
+    assert status == 200 and payload["rev"] == 2
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert payload["rev"] == 2 and payload["value"] == v2
+    assert [e["rev"] for e in payload["revisions"]] == [1]
+    assert "ts" in payload["revisions"][0] \
+        and "value" not in payload["revisions"][0]
+    # getRevision returns ONE full value: the prior rev, the current rev, or 404.
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=1")
+    assert status == 200 and payload["ok"] is True and payload["value"] == v1
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=2")
+    assert status == 200 and payload["value"] == v2
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=99")
+    assert status == 404 and payload["error"] == "no_such_rev"
+    # Stale baseRev -> 409 conflict with the live value inlined for a one-trip
+    # rebase.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 1, "value": {"v": 1, "tabs": []}}).encode(),
+        headers=auth)
+    assert status == 409 and payload["error"] == "conflict"
+    assert payload["rev"] == 2 and payload["value"] == v2
+
+
+def test_mod_store_ring_trims(broker_proc):
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-ring"
+    total = _MODSTORE_RING + 5   # enough DISTINCT writes to force a trim
+    rev = 0
+    for i in range(total):
+        status, payload = _http(
+            "PUT", f"{base}/mod-store/{mod}",
+            body=json.dumps({"baseRev": rev, "value": {"v": 1, "n": i}}
+                            ).encode(), headers=auth)
+        assert status == 200, payload
+        rev = payload["rev"]
+    assert rev == total   # one bump per distinct write
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    revs = [e["rev"] for e in payload["revisions"]]
+    # A new id seeds no revision for its first write, so before trimming there are
+    # (total - 1) entries; the ring trims to its depth, newest-first.
+    assert len(revs) == _MODSTORE_RING
+    assert revs == sorted(revs, reverse=True)
+    assert revs[0] == total - 1                 # newest prior rev
+    assert revs[-1] == total - _MODSTORE_RING   # oldest surviving prior rev
+    # The oldest surviving revision resolves; a trimmed-off one is gone.
+    oldest = total - _MODSTORE_RING
+    status, payload = _http(
+        "GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev={oldest}")
+    assert status == 200 and payload["value"] == {"v": 1, "n": oldest - 1}
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=1")
+    assert status == 404 and payload["error"] == "no_such_rev"
+
+
+def test_mod_store_lease_not_active(broker_proc):
+    """The /mod-store PUT lease gate (reused from /state): with an active client,
+    a differently-identified (or id-less) PUT is 409 not_active; the active
+    client writes fine; GET stays ungated so a non-active browser still reads."""
+    _, port, base = broker_proc
+
+    async def scenario():
+        # A fresh /control connection onto the (released) lease auto-activates.
+        ctrl, st = await _claim_lease(port, "MS")
+        assert st["active"] is True and st["activeClientId"] == "MS"
+        try:
+            auth = {"Authorization": f"Bearer {TOKEN}",
+                    "Content-Type": "application/json"}
+            mod = "e2e-lease"
+            # A different clientId is refused, with the current record inlined.
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                                 "clientId": "OTHER"}).encode(), headers=auth)
+            assert status == 409 and payload["error"] == "not_active"
+            assert "rev" in payload and "value" in payload
+            # An id-less PUT is likewise non-active.
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1}}).encode(),
+                headers=auth)
+            assert status == 409 and payload["error"] == "not_active"
+            # The active client writes.
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                                 "clientId": "MS"}).encode(), headers=auth)
+            assert status == 200 and payload["ok"] is True and payload["rev"] == 1
+            # GET is ungated by the lease — a non-active browser still reads.
+            status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+            assert status == 200 and payload["value"] == {"v": 1}
+        finally:
+            await ctrl.close()
+
+    asyncio.run(scenario())
 
 
 def test_file_upload_roundtrip(broker_proc, tmp_path):

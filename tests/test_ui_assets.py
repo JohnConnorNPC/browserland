@@ -880,6 +880,57 @@ def test_agent_docs_mod_packaged_and_requires_editor():
     assert INDEX_HTML.index("id: 'agent-docs'") < INDEX_HTML.index("id: 'sticky'")
 
 
+def test_scratchpad_mod_packaged_and_manifest_agrees():
+    # #124: the scratchpad — a singleton, server-backed (ctx.serverStore) notes
+    # window with internal CodeMirror tabs + a revision-history panel. It REQUIRES
+    # the editor mod (shares its single CM build via loadCodeMirror) and adds its
+    # own 'scratchpad' window kind. Content is server-only; the localStorage record
+    # carries view state only.
+    import json
+    mod_dir = BROKER_DIR / "mods" / "scratchpad"
+    js = mod_dir / "scratchpad.js"
+    css = mod_dir / "scratchpad.css"
+    manifest = mod_dir / "mod.json"
+    help_md = mod_dir / "help.md"
+    assert js.is_file() and css.is_file() and manifest.is_file() \
+        and help_md.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "scratchpad"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "scratchpad.js"
+    assert meta["styles"] == ["scratchpad.css"]
+    assert meta["help"]["slug"] == "scratchpad"
+    # Declared in _MODS, AFTER the editor it depends on (also enforced by the #121
+    # static ordering guard, test_requires_declared_before_dependency_...).
+    assert "mods/scratchpad/scratchpad.js" in ui._MODS
+    assert ui._MODS.index("mods/editor/editor.js") \
+        < ui._MODS.index("mods/scratchpad/scratchpad.js")
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'scratchpad'" in src
+    assert "ctxVersion: 1" in src
+    # The hard dependency on the editor mod (the #121 requires primitive).
+    assert "requires: ['editor']" in src
+    # Registers its own window kind; content rides ctx.serverStore, NOT the file
+    # API (a same-origin scratchpad has no business doing host /file/* I/O).
+    assert "ctx.registerWindowKind(" in src
+    assert "appKind: 'scratchpad'" in src
+    assert "ctx.serverStore" in src
+    assert "fileApiPost(" not in src
+    # Builds its CM editors on the editor's ONE shared build (never a 2nd import).
+    assert "loadCodeMirror()" in src
+    # serialize persists view state only — never note content (that lives on the
+    # server). The record must not carry a tabs/text/content field.
+    assert "appKind: 'scratchpad', open: true" in src
+    assert "text:" not in src.split("serialize: function")[1].split("}")[0]
+    # Ships in the served page, AFTER the editor mod (the CM-build dependency) and
+    # AFTER the clipboard mod (the last mod before it in _MODS).
+    assert "id: 'scratchpad'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'scratchpad'")
+    assert INDEX_HTML.index("id: 'clipboard'") \
+        < INDEX_HTML.index("id: 'scratchpad'")
+
+
 def test_editor_serialized_fields_preserved():
     # The hard #83 requirement: every editor serialized field round-trips. They
     # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
@@ -938,8 +989,8 @@ def test_app_icon_registry_present_in_core():
     assert "hasOwnProperty.call(APP_ICON_SVG, key)" in s65
     # Every canonical key (mod id; control-panel is the core built-in; clock/git/
     # help are help-only) has an SVG entry, quoted so hyphenated ids are valid.
-    for key in ("editor", "sticky", "file-manager", "task-manager", "clipboard",
-                "aistatus", "help", "control-panel", "clock", "git"):
+    for key in ("editor", "sticky", "scratchpad", "file-manager", "task-manager",
+                "clipboard", "aistatus", "help", "control-panel", "clock", "git"):
         assert f"'{key}':" in s65, f"APP_ICON_SVG missing key {key!r}"
     # The icons carry signature fills (not just currentColor) — the #119 departure
     # from the monochrome eyedropper/robot glyphs; the two focal fills are pinned.
@@ -957,8 +1008,8 @@ def test_launch_menu_items_carry_iconkey():
     # are NOT asserted (menu-order tests key on `id:` sentinels), so dropping the
     # emoji is free — but the iconKey wiring is what makes the SVG show.
     assert "iconKey: m.iconKey || ''" in INDEX_HTML
-    for key in ("editor", "sticky", "file-manager", "task-manager", "clipboard",
-                "aistatus", "help", "control-panel"):
+    for key in ("editor", "sticky", "scratchpad", "file-manager", "task-manager",
+                "clipboard", "aistatus", "help", "control-panel"):
         assert f"iconKey: '{key}'" in INDEX_HTML, f"launcher missing iconKey {key!r}"
     # The old emoji-in-label form is gone from the two focal launchers.
     assert "'📄 Text editor'" not in INDEX_HTML
@@ -1160,6 +1211,30 @@ def test_file_capability_present():
     # And it all reaches the served page.
     for sym in ("function _modFileApi", "file: {", "error: 'host_not_found'"):
         assert sym in INDEX_HTML, f"ctx.file missing from served page: {sym!r}"
+
+
+def test_server_store_capability_present():
+    # #124: the ctx.serverStore wrapper over /mod-store/<modId> + its transport
+    # helper ride in the served loader. The durable, cross-browser twin of
+    # ctx.storage; the scratchpad mod depends on it. ctxVersion stays 1 (additive).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    # The capability object + its three methods, on the per-mod ctx.
+    for sym in ("serverStore: {",
+                "get: function ()",
+                "set: function (value, baseRev)",
+                "getRevision: function (n)"):
+        assert sym in loader, f"missing ctx.serverStore method: {sym!r}"
+    # The transport helper targets /mod-store/<modId>, local host only, and
+    # set() auto-attaches the core lease id so the active browser's write passes.
+    for sym in ("function _modStoreApi", "'/mod-store/'",
+                "hostHttpUrl(localHost()", "clientId: CLIENT_ID"):
+        assert sym in loader, f"missing ctx.serverStore transport symbol: {sym!r}"
+    # ctxVersion is unchanged — ctx.serverStore is additive.
+    assert "ctxVersion: 1" in loader
+    # And it all reaches the served page.
+    for sym in ("function _modStoreApi", "serverStore: {", "'/mod-store/'"):
+        assert sym in INDEX_HTML, \
+            f"ctx.serverStore missing from served page: {sym!r}"
 
 
 def test_dialog_component_present():
@@ -1861,7 +1936,10 @@ def test_clipboard_mod_packaged_and_manifest_agrees():
 # loader) as the test's source of truth: a typo or a new unreviewed token trips
 # this guard. Mirrors the ctx-capability families a mod can use.
 _KNOWN_TIERS = {"settings", "taskbar", "file", "session", "window", "storage",
-                "clipboard"}   # #106: a mod that observes the clipboard seam
+                # "storage" was localStorage-only (ctx.storage) and unused until
+                # #124, which also lets it designate the DURABLE server store
+                # (ctx.serverStore); "clipboard" (#106) observes the clipboard seam.
+                "clipboard"}
 
 # What each shipped mod is reviewed to use, derived from its actual `ctx.` usage
 # (see each mod's registerMod). Hardcoded like the other drift sentinels so an
@@ -1879,6 +1957,7 @@ _EXPECTED_TIERS = {
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
     "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip
+    "scratchpad": ["storage", "window"],  # #124 durable server store (ctx.serverStore) + window kind
 }
 
 
