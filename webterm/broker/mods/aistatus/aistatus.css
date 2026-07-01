@@ -3,6 +3,9 @@
            is styled inline in aistatus.js (theme-var border/fg, like the core
            .host-chip), so only the window + dots live here. Indentation matches
            the head <style> zone the mod-css splice lands in (ui.py:_mod_css). */
+        /* #119: the app-icon heartbeat leading the chip. */
+        #aistatus-chip .aistatus-chip-ic { flex: 0 0 auto; display: inline-flex; }
+        #aistatus-chip .aistatus-chip-ic svg { width: 13px; height: 13px; display: block; }
         .term-window.app-ais .app-ais-body {
             flex: 1;
             min-height: 0;

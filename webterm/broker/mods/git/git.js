@@ -61,7 +61,10 @@
                     const gitBtn = document.createElement('button');
                     gitBtn.type = 'button';
                     gitBtn.className = 'tb-btn btn-git muted';
-                    gitBtn.textContent = '⎇';
+                    // #119: the app-icon git branch-nodes glyph (trusted, hardcoded
+                    // SVG from the APP_ICON_SVG registry) replaces the ⎇ character;
+                    // the .muted (not-a-repo) state still dims it via opacity.
+                    gitBtn.innerHTML = appIconSvg('git');
                     gitBtn.title = 'Git status';
                     const gitLabel = document.createElement('span');
                     gitLabel.className = 'git-label';

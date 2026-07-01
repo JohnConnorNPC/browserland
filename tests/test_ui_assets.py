@@ -929,6 +929,37 @@ def test_help_toc_resolves_svg_app_icons():
     assert ".help-section-icon svg" in hcss
 
 
+def test_chip_icons_use_registry():
+    # #119 follow-up: the aistatus + clipboard taskbar chips and git's title-bar
+    # button render the SAME registry SVGs (via appIconSvg) instead of an emoji /
+    # ⎇ glyph, so the chrome matches the (+) menu + Help TOC.
+    ais = (BROKER_DIR / "mods" / "aistatus" / "aistatus.js").read_text(encoding="utf-8")
+    assert "appIconSvg('aistatus')" in ais
+    # The status text rides in its own span so renderChip no longer clobbers the
+    # icon with chip.textContent.
+    assert "chipText.textContent = txt;" in ais
+    assert "chip.textContent = txt;" not in ais
+
+    clip = (BROKER_DIR / "mods" / "clipboard" / "clipboard.js").read_text(encoding="utf-8")
+    assert "appIconSvg('clipboard')" in clip
+    assert "chip.textContent = '📋'" not in clip   # the emoji glyph is gone
+
+    git = (BROKER_DIR / "mods" / "git" / "git.js").read_text(encoding="utf-8")
+    assert "appIconSvg('git')" in git
+    assert "gitBtn.textContent = '⎇'" not in git   # the ⎇ glyph is gone
+
+    # All three reach the served page.
+    for needle in ("appIconSvg('aistatus')", "appIconSvg('clipboard')", "appIconSvg('git')"):
+        assert needle in INDEX_HTML, f"chip icon missing from served page: {needle!r}"
+    # Each SVG is sized in its own mod stylesheet.
+    assert "#aistatus-chip .aistatus-chip-ic svg" in \
+        (BROKER_DIR / "mods" / "aistatus" / "aistatus.css").read_text(encoding="utf-8")
+    assert "#clipboard-chip svg" in \
+        (BROKER_DIR / "mods" / "clipboard" / "clipboard.css").read_text(encoding="utf-8")
+    assert ".btn-git svg" in \
+        (BROKER_DIR / "mods" / "git" / "git.css").read_text(encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # file-manager mod (#84 / S11)
 # --------------------------------------------------------------------------- #
@@ -1653,9 +1684,12 @@ def test_clipboard_mod_packaged_and_manifest_agrees():
     # Re-copy on row click, guarded so re-copying doesn't push a duplicate top entry.
     assert "copyTextToClipboard(entry.text)" in src
     assert "_selfCopy" in src
-    # Rows are built with textContent only — the ONLY innerHTML use is the clear.
-    assert src.count(".innerHTML") == 1
+    # Rows are built with textContent only. Exactly two innerHTML uses, neither
+    # carrying user data: the clipBody clear (''), and the #119 tray-chip icon
+    # (a trusted, hardcoded APP_ICON_SVG string). Row/entry TEXT is never innerHTML.
+    assert src.count(".innerHTML") == 2
     assert "clipBody.innerHTML = ''" in src
+    assert "chip.innerHTML = appIconSvg('clipboard')" in src
     # Teardown closes any live clipboard window WHILE the kind is still registered
     # (so saveAppWindow early-returns — no junk record), same as the task-manager.
     assert "closeWindow(w.id)" in src

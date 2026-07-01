@@ -44,3 +44,4 @@
             cursor: pointer; margin-left: 2px;
         }
         #clipboard-chip:hover { border-color: var(--accent-default); color: var(--fg); }
+        #clipboard-chip svg { width: 15px; height: 15px; display: block; }

@@ -125,7 +125,17 @@
                     'cursor:pointer',
                     'margin-left:2px',
                 ].join(';');
-                chip.textContent = 'AI …';
+                // #119: the app-icon heartbeat leads the chip; the status text
+                // rides in its own span so renderChip only rewrites the text (the
+                // icon is trusted, hardcoded SVG from the APP_ICON_SVG registry).
+                const chipIcon = document.createElement('span');
+                chipIcon.className = 'aistatus-chip-ic';
+                chipIcon.setAttribute('aria-hidden', 'true');
+                chipIcon.innerHTML = appIconSvg('aistatus');
+                const chipText = document.createElement('span');
+                chipText.textContent = 'AI …';
+                chip.appendChild(chipIcon);
+                chip.appendChild(chipText);
                 chip.addEventListener('click', openOrFocusWindow);
                 ctx.taskbar.addStatusItem(chip);   // before #help-chip; auto-removed
 
@@ -184,7 +194,7 @@
                         }).length;
                         txt = issues ? ('AI ⚠ ' + issues) : 'AI ✓';
                     }
-                    chip.textContent = txt;
+                    chipText.textContent = txt;
                     chip.title = chipTitle();
                 }
 

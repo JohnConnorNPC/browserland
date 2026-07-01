@@ -8,6 +8,9 @@
         /* Muted button when not-a-repo / unknown; the branch label rides to its
            right, turning amber when dirty. */
         .term-window .btn-git.muted { opacity: 0.4; }
+        /* #119: the app-icon git glyph replaces the ⎇ character; sized like the
+           sibling .mcp-btn svg. .muted opacity above still dims it not-a-repo. */
+        .term-window .btn-git svg { width: 14px; height: 14px; display: block; }
         .term-window .git-label {
             font-size: 10px;
             margin: 0 2px 0 1px;

@@ -267,7 +267,10 @@
                     const chip = document.createElement('div');
                     chip.id = 'clipboard-chip';
                     chip.title = 'Clipboard history';
-                    chip.textContent = '📋';
+                    chip.setAttribute('aria-label', 'Clipboard history');
+                    // #119: the app-icon clipboard glyph (trusted, hardcoded SVG
+                    // from the APP_ICON_SVG registry) replaces the 📋 emoji.
+                    chip.innerHTML = appIconSvg('clipboard');
                     chip.addEventListener('click', function () { launchClipboard(); });
                     ctx.taskbar.addStatusItem(chip);   // before #help-chip; auto-removed
                 }
