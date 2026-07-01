@@ -141,6 +141,11 @@
         }
 
         const FM_DRAG_MIME = 'application/x-webterm-file';
+        // Chunk size for the streamed cross-host transfer + in-app download (#108).
+        // Matches the server's MAX_CHUNK_BYTES (app.py) so a full read fills one
+        // chunk; the server clamps anything larger. One chunk (~5.3 MiB base64) is
+        // the most a broker or the browser holds in flight.
+        const FM_CHUNK_BYTES = 4 * 1024 * 1024;   // 4 MiB
         function openFileManagerWindow(appData) {
             const id = String(appData.id);
             const title = appData.title || 'Files';
@@ -402,22 +407,26 @@
                 reList(side);
             };
 
-            // ---- cross-pane copy / move (#46) ----
-            // Copy (or move) ONE file between panes — works ACROSS hosts: read
-            // the source broker's bytes as base64 (binary-safe, server-side
-            // encode), write them to the dest broker via /file/upload, and for
-            // a move delete the source afterwards. Each side is gated by its
-            // OWN per-host auth. The descriptor is captured at call time and
-            // never recomputed after a prompt/await, so navigating a pane
-            // mid-transfer can't redirect the write (codex review).
-            // Cross-host SINGLE-FILE byte path (the only transfer a single
-            // broker can't do server-side). Reached from doTransfer for a
-            // cross-host file. Returns true on a complete success, false
-            // otherwise (incl. the honest "copied but couldn't remove source"
-            // partial-move), so a cut-paste only clears its clipboard when the
-            // move actually completed.
+            // ---- cross-pane copy / move (#46, chunked #108) ----
+            // Copy (or move) ONE file between panes — works ACROSS hosts. There is
+            // no broker-to-broker relay, so the ONE browser STREAMS the file in
+            // bounded chunks: readChunk from the source broker -> uploadChunk into
+            // the dest broker's append session -> commit (atomic replace), and for
+            // a move delete the source afterwards. This lifts the old 5 MiB
+            // whole-file cap (#108); only ~one 4 MiB chunk is ever in flight. Each
+            // side is gated by its OWN per-host auth. The descriptor is captured at
+            // call time and never recomputed after a prompt/await, so navigating a
+            // pane mid-transfer can't redirect the write (codex review). Returns
+            // true on a complete success, false otherwise (incl. the honest
+            // "copied but couldn't remove source" partial-move), so a cut-paste
+            // only clears its clipboard when the move actually completed. opts
+            // (optional, wired by #109): {onProgress(done,total), signal} — a
+            // per-chunk progress callback + an AbortSignal cancellation point.
             const transferTo = async (destSide, srcHostId, srcPath, srcName,
-                                      move) => {
+                                      move, opts) => {
+                opts = opts || {};
+                const onProgress = opts.onProgress || function () {};
+                const aborted = () => !!(opts.signal && opts.signal.aborted);
                 const srcHost = hostById(srcHostId)
                     || ((!srcHostId || srcHostId === 'local')
                         ? localHost() : null);
@@ -438,62 +447,106 @@
                     showNotice('source and destination are the same file');
                     return false;
                 }
-                const r = await fmFile().read(srcPath,
-                    { b64: true, host: srcHost.id });
-                if (win.disposed) return false;
-                if (!r || !r.ok) {
-                    if (r && r.error === 'auth_required') {
-                        promptFileHostAuth(srcHost);
-                    }
-                    const err = (r && r.error) || '?';
-                    if (err === 'too_large') {
-                        showNotice(srcName + ': too large (>5 MiB)');
-                    } else {
-                        showNotice('transfer failed (read ' + srcName + '): '
-                            + err);
-                    }
-                    return false;
-                }
-                // The source broker accepted the read but returned no
-                // content_b64: it predates the binary-safe read (#46 review).
-                // Abort BEFORE any write/delete — an empty upload followed by a
-                // move's delete-source would silently lose the file. '' is a
-                // valid empty file (still a string), so check the TYPE, not
-                // truthiness.
-                if (typeof r.content_b64 !== 'string') {
-                    showNotice('transfer failed: ' + srcName + ' — source broker '
-                        + 'lacks binary read (upgrade it)');
-                    return false;
-                }
-                const b64 = r.content_b64;
-                let up = await uploadTo(destHost.id, destPath, b64, false);
-                if (win.disposed) return false;
-                // Existing dest file -> styled confirm + retry as an overwrite.
-                if (up && up.error === 'exists') {
+                // 1) Open the dest upload session. An existing dest -> styled
+                //    Overwrite confirm -> re-begin with overwrite (the #111 move
+                //    confirm already fired upstream in doTransfer). No session
+                //    exists on the 'exists'/confirm path, so a cancel there leaks
+                //    nothing; once a session IS open, every exit runs failAbort.
+                let ub = await fmFile().uploadBegin(destPath,
+                    { host: destHost.id, overwrite: false });
+                if (ub && ub.error === 'exists') {
                     const ok = await openConfirmDialog({
                         title: 'Overwrite',
                         message: 'Overwrite ' + srcName + ' on "'
                             + hostPickerLabel(destHost) + '"?',
                         okLabel: 'Overwrite', danger: true });
                     if (!ok || win.disposed) return false;
-                    up = await uploadTo(destHost.id, destPath, b64, true);
-                    if (win.disposed) return false;
+                    ub = await fmFile().uploadBegin(destPath,
+                        { host: destHost.id, overwrite: true });
                 }
-                if (!(up && up.ok)) {
-                    const err = (up && up.error) || 'error';
+                if (!(ub && ub.ok)) {
+                    const err = (ub && ub.error) || 'error';
                     if (err === 'auth_required') promptFileHostAuth(destHost);
-                    if (err === 'too_large') {
-                        showNotice(srcName + ': too large (>5 MiB)');
-                    } else {
-                        showNotice('transfer failed (write ' + srcName + '): '
-                            + err);
-                    }
+                    showNotice('transfer failed (open ' + srcName + '): ' + err);
                     return false;
                 }
-                // Move = copy succeeded, now delete the source. Best-effort and
-                // HONEST: the copy already landed, so a failed delete leaves the
-                // file on BOTH hosts — say so rather than claim a move (codex).
+                const uploadId = ub.upload_id;
+                // Best-effort teardown of the dest session (drops its temp) then
+                // surface the ORIGINAL error — abort is cleanup only, never the
+                // reported failure (codex review). msg omitted on disposal.
+                const failAbort = async (msg) => {
+                    await fmFile().uploadAbort(uploadId, { host: destHost.id });
+                    if (msg) showNotice(msg);
+                    return false;
+                };
+                if (win.disposed) return await failAbort();
+                // 2) Stream chunk by chunk. offset advances by the DECODED bytes
+                //    the server reports (rc.length) — never the base64 length or
+                //    the total size. Capture the source size from the first chunk
+                //    for the move-safety check below.
+                let offset = 0;
+                let srcSize = null;
+                while (true) {
+                    if (aborted()) return await failAbort('transfer cancelled');
+                    const rc = await fmFile().readChunk(srcPath,
+                        { host: srcHost.id, offset: offset,
+                          length: FM_CHUNK_BYTES });
+                    if (win.disposed) return await failAbort();
+                    if (!(rc && rc.ok) || typeof rc.content_b64 !== 'string') {
+                        if (rc && rc.error === 'auth_required') {
+                            promptFileHostAuth(srcHost);
+                        }
+                        return await failAbort('transfer failed (read ' + srcName
+                            + '): ' + ((rc && rc.error) || '?'));
+                    }
+                    if (srcSize === null) srcSize = rc.size;
+                    const uc = await fmFile().uploadChunk(uploadId, rc.content_b64,
+                        { host: destHost.id, offset: offset });
+                    if (win.disposed) return await failAbort();
+                    if (!(uc && uc.ok)) {
+                        if (uc && uc.error === 'auth_required') {
+                            promptFileHostAuth(destHost);
+                        }
+                        return await failAbort('transfer failed (write ' + srcName
+                            + '): ' + ((uc && uc.error) || '?'));
+                    }
+                    offset += rc.length;
+                    onProgress(offset, srcSize);
+                    // A 0-byte read that isn't EOF would loop forever (a stalled /
+                    // unreadable source) — bail instead of spinning.
+                    if (rc.length === 0 && !rc.eof) {
+                        return await failAbort('transfer failed: ' + srcName
+                            + ' stalled');
+                    }
+                    if (rc.eof) break;
+                }
+                // 3) Commit (atomic replace on the dest). On failure the server has
+                //    already dropped the temp + session, so no abort is needed.
+                const cm = await fmFile().uploadCommit(uploadId,
+                    { host: destHost.id });
+                if (win.disposed) return false;
+                if (!(cm && cm.ok)) {
+                    const err = (cm && cm.error) || 'error';
+                    if (err === 'auth_required') promptFileHostAuth(destHost);
+                    showNotice('transfer failed (finish ' + srcName + '): ' + err);
+                    return false;
+                }
+                // 4) Move = copy landed, now delete the source. SIZE-VERIFIED first
+                //    (belt-and-suspenders vs a truncated transfer; #110 upgrades
+                //    this to a SHA-256 match): if the committed size doesn't equal
+                //    the source size we first observed, the file changed under us —
+                //    keep BOTH copies rather than delete a good source for a
+                //    possibly-bad dest. Otherwise the existing honest best-effort
+                //    delete: a failed delete still reports "copied but couldn't
+                //    remove the source".
                 if (move) {
+                    if (srcSize !== null && cm.size !== srcSize) {
+                        showNotice('copied ' + srcName + ', but the source changed '
+                            + 'during transfer — source kept');
+                        reList('left');
+                        reList('right');
+                        return false;
+                    }
                     const d = await fmFile().delete(srcPath, { host: srcHost.id });
                     if (win.disposed) return false;
                     if (!(d && d.ok)) {
@@ -987,48 +1040,100 @@
                     showNotice('deleted ' + ent.name);
                     reList(side);
                 };
-                // Download a file to the local machine: read base64, decode to
-                // bytes, save via an anchor. Bounded by /file/read's 5 MiB cap —
-                // a larger file surfaces a clear notice (a streaming download GET
-                // is a future enhancement, #72 risks).
+                // Download a file to the local machine, STREAMED in chunks (#108)
+                // so it's no longer bounded by the old 5 MiB whole-file cap. The
+                // File System Access path (Chrome/Edge) writes each chunk straight
+                // to the chosen file — the whole file is never held in memory.
+                // Firefox (no showSaveFilePicker) falls back to buffering the
+                // chunks into a Blob + anchor download, which DOES hold the whole
+                // file in memory (an accepted tradeoff for that browser only).
                 const downloadRow = async (ent, child) => {
                     const host = paneHost(side);
                     if (!host) {
                         showNotice('download failed: host unavailable');
                         return;
                     }
-                    const r = await fmFile().read(child,
-                        { b64: true, host: host.id });
-                    if (win.disposed) return;
-                    if (!(r && r.ok) || typeof r.content_b64 !== 'string') {
-                        const err = (r && r.error) || '?';
-                        if (err === 'auth_required') promptFileHostAuth(host);
-                        if (err === 'too_large') {
-                            showNotice(ent.name
-                                + ': too large to download (>5 MiB)');
-                        } else {
-                            showNotice('download failed: ' + err);
+                    // Open the save dialog FIRST, before any network await, so the
+                    // click's user-activation is still live — showSaveFilePicker
+                    // after an await throws SecurityError.
+                    const hasFSA =
+                        typeof window.showSaveFilePicker === 'function';
+                    let writable = null;
+                    if (hasFSA) {
+                        let handle;
+                        try {
+                            handle = await window.showSaveFilePicker(
+                                { suggestedName: ent.name });
+                        } catch (_) {
+                            return;   // user dismissed the picker (AbortError)
                         }
-                        return;
+                        try {
+                            writable = await handle.createWritable();
+                        } catch (_) {
+                            showNotice('download failed: could not open '
+                                + ent.name);
+                            return;
+                        }
                     }
-                    try {
-                        const bin = atob(r.content_b64);
-                        const arr = new Uint8Array(bin.length);
-                        for (let i = 0; i < bin.length; i++) {
-                            arr[i] = bin.charCodeAt(i);
+                    const abortWritable = async () => {
+                        if (writable) {
+                            try { await writable.abort(); } catch (_) {}
                         }
-                        const url = URL.createObjectURL(
-                            new Blob([arr], { type: 'application/octet-stream' }));
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = ent.name;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        setTimeout(() => URL.revokeObjectURL(url), 10000);
+                    };
+                    if (win.disposed) { await abortWritable(); return; }
+                    // Shared chunked read loop. offset advances by the DECODED
+                    // bytes the server reports (rc.length), never the base64 length.
+                    const parts = [];
+                    let offset = 0;
+                    try {
+                        while (true) {
+                            const rc = await fmFile().readChunk(child,
+                                { host: host.id, offset: offset,
+                                  length: FM_CHUNK_BYTES });
+                            if (win.disposed) { await abortWritable(); return; }
+                            if (!(rc && rc.ok)
+                                || typeof rc.content_b64 !== 'string') {
+                                const err = (rc && rc.error) || '?';
+                                if (err === 'auth_required') {
+                                    promptFileHostAuth(host);
+                                }
+                                await abortWritable();
+                                showNotice('download failed: ' + err);
+                                return;
+                            }
+                            const bin = atob(rc.content_b64);
+                            const bytes = new Uint8Array(bin.length);
+                            for (let i = 0; i < bin.length; i++) {
+                                bytes[i] = bin.charCodeAt(i);
+                            }
+                            if (writable) await writable.write(bytes);
+                            else parts.push(bytes);
+                            offset += rc.length;
+                            // A 0-byte non-EOF read would spin forever — bail.
+                            if (rc.length === 0 && !rc.eof) {
+                                await abortWritable();
+                                showNotice('download failed: ' + ent.name
+                                    + ' stalled');
+                                return;
+                            }
+                            if (rc.eof) break;
+                        }
+                        if (writable) {
+                            await writable.close();
+                        } else {
+                            const url = URL.createObjectURL(new Blob(parts,
+                                { type: 'application/octet-stream' }));
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = ent.name;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            setTimeout(() => URL.revokeObjectURL(url), 10000);
+                        }
                     } catch (_) {
-                        showNotice('download failed: could not decode '
-                            + ent.name);
+                        await abortWritable();
+                        showNotice('download failed: could not save ' + ent.name);
                     }
                 };
                 // Zip a file/folder into a .zip in this dir (prompt for the name).
