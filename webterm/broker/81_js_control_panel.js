@@ -559,9 +559,12 @@
                     colorTarget, row, PALETTE.map((c) => ({ color: c })),
                     (sw) => applyProfileColor(host, name, normalizeHex(sw.color)));
                 colorBtn.title = 'default color for this profile';
-                // Dot shows the profile color, or the base accent when unset (auto).
+                // #122: dot previews the color a terminal launched from this profile
+                // would inherit — the per-profile color, else the host DEFAULT (#103),
+                // else the base accent (the auto palette pick at launch). Mirrors the
+                // resolution chain in 67_js_window_lifecycle.js.
                 row.style.setProperty('--accent',
-                    p.color || 'var(--accent-default)');
+                    p.color || hostDefaultColor(host.id) || 'var(--accent-default)');
                 acts.appendChild(colorBtn);
                 if (p.color) {
                     const clr = document.createElement('button');
