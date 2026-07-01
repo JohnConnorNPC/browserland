@@ -269,6 +269,38 @@
             if (deferReparent) requestRelayout();   // retry once selection ends
             reorderTaskbarItems();   // taskbar tracks the tiling order
         }
+        // Fast, cancelable viewport slide. Replaces native behavior:'smooth' (browser-
+        // timed, sluggish over long jumps). Animates strip.scrollLeft so onStripScroll
+        // keeps floating windows + the scrollbar thumb in sync every frame.
+        const SLIDE_MAX_MS = 240, SLIDE_MIN_MS = 110, SLIDE_PX_PER_MS = 2.4;
+        let _slideRaf = null;
+        let _slideExpected = 0;   // last scrollLeft we wrote; divergence => user took over
+        const _reducedMotionMql =
+            window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+        function cancelStripSlide() {
+            if (_slideRaf !== null) { cancelAnimationFrame(_slideRaf); _slideRaf = null; }
+        }
+        function slideStripTo(strip, to) {
+            cancelStripSlide();                       // retarget: kill any in-flight slide
+            const from = strip.scrollLeft;
+            const dist = Math.abs(to - from);
+            if (dist < 1) return;
+            // distance-scaled + clamped: short reveals stay snappy, long ones stay bounded
+            const dur = Math.min(SLIDE_MAX_MS, Math.max(SLIDE_MIN_MS, dist / SLIDE_PX_PER_MS));
+            let t0 = null;
+            _slideExpected = from;
+            function step(ts) {                        // ts = rAF DOMHighResTimeStamp
+                if (t0 === null) t0 = ts;
+                // scrollbar-thumb drag / wheel / drag-edge-scroll moved it -> yield to user
+                if (Math.abs(strip.scrollLeft - _slideExpected) > 2) { _slideRaf = null; return; }
+                const t = Math.min(1, (ts - t0) / dur);
+                const eased = 1 - Math.pow(1 - t, 3);  // ease-out cubic (snappy start, soft land)
+                strip.scrollLeft = Math.round(from + (to - from) * eased);
+                _slideExpected = strip.scrollLeft;     // read back (browser clamps to maxScroll)
+                _slideRaf = (t < 1) ? requestAnimationFrame(step) : null;
+            }
+            _slideRaf = requestAnimationFrame(step);
+        }
         // smooth=true only for explicit user focus changes; relayout-driven
         // scrolls use instant positioning so bursts (open/close) don't queue
         // janky smooth motion.
@@ -303,8 +335,12 @@
             }
             x = Math.max(0, x);
             if (Math.abs(x - viewLeft) < 1) return;
-            try { strip.scrollTo({ left: x, behavior: smooth ? 'smooth' : 'auto' }); }
-            catch (_) { strip.scrollLeft = x; }
+            if (smooth && !(_reducedMotionMql && _reducedMotionMql.matches)) {
+                slideStripTo(strip, x);
+            } else {
+                cancelStripSlide();          // relayout/reduced-motion supersedes any live slide
+                strip.scrollLeft = x;        // instant
+            }
         }
         function cssEscape(s) {
             if (window.CSS && CSS.escape) return CSS.escape(s);
