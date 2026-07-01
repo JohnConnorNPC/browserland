@@ -21,11 +21,17 @@
             version: '1.0.0',
             ctxVersion: 1,
             defaultEnabled: false,          // opt-in — clipboards carry secrets
-            tiers: ['clipboard', 'window'], // observes the clipboard (#106) + a window kind
+            tiers: ['clipboard', 'window', 'taskbar'], // observes the clipboard (#106) + a window kind + a tray chip (#118)
             init: function (ctx) {
                 // The capture seam is the whole point — without it the window would
                 // only ever show an empty ring, so no-op on an older loader lacking it.
                 if (!ctx.clipboard) return;
+
+                // Stable window id for the SINGLE clipboard window (#118). Passing a
+                // fixed id through openAppWindow makes it open-or-focus (it dedupes on
+                // id and un-minimizes) — one window, reached from both the (+) menu and
+                // the taskbar chip below.
+                const CLIP_WIN_ID = 'app:clip';
 
                 // ---- rolling history state (EPHEMERAL — in-memory only) --------
                 // Newest-first ring of the last N entries in both directions. Never
@@ -228,11 +234,13 @@
                     return win;
                 }
 
-                // The (+) launcher: open a clipboard window (a fresh id each time —
-                // like the task manager / sticky notes, so more than one can coexist,
-                // all sharing the one ring).
+                // The (+) launcher / taskbar chip: open the clipboard window —
+                // singleton (open-or-focus). The stable CLIP_WIN_ID routes through
+                // openAppWindow's id dedupe, so a second launch focuses (and un-
+                // minimizes) the existing window instead of stacking another. There's
+                // one shared ring, so one window is all that's wanted.
                 function launchClipboard() {
-                    openAppWindow({ id: newAppId('clip'), appKind: 'clipboard' });
+                    return openAppWindow({ id: CLIP_WIN_ID, appKind: 'clipboard' });
                 }
 
                 // Register the clipboard window kind with NO serialize — EPHEMERAL,
@@ -246,6 +254,22 @@
                         launch: function () { return launchClipboard(); },
                     },
                 });
+
+                // Taskbar tray chip (#118): a small 📋 next to the clock / aistatus /
+                // help chips that opens-or-focuses the single clipboard window — the
+                // SAME launchClipboard path as the (+) menu. Style lives in the mod
+                // CSS (#clipboard-chip), mirroring the help/clock/aistatus chips.
+                // addStatusItem auto-removes the chip on teardown (rec.unloads), so no
+                // onUnload change is needed. Lightly guarded for an older loader whose
+                // taskbar seam predates addStatusItem.
+                if (ctx.taskbar && ctx.taskbar.addStatusItem) {
+                    const chip = document.createElement('div');
+                    chip.id = 'clipboard-chip';
+                    chip.title = 'Clipboard history';
+                    chip.textContent = '📋';
+                    chip.addEventListener('click', function () { launchClipboard(); });
+                    ctx.taskbar.addStatusItem(chip);   // before #help-chip; auto-removed
+                }
 
                 // Teardown — registered AFTER registerWindowKind so LIFO runs it
                 // FIRST, closing live clipboard windows WHILE the kind is still

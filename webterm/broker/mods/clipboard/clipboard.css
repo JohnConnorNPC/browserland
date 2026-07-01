@@ -33,3 +33,14 @@
             flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
             white-space: nowrap; font-family: monospace;
         }
+        /* #118: taskbar tray chip — a small 📋 next to the clock that opens-or-
+           focuses the single clipboard window. Mirrors the shared chip recipe
+           (help/clock/aistatus): theme-var border/bg/fg + hover accent. */
+        #clipboard-chip {
+            flex: 0 0 auto; display: inline-flex; align-items: center;
+            font-size: 12px; padding: 2px 8px; border-radius: 3px;
+            border: 1px solid var(--bg-3); background: var(--bg);
+            color: var(--fg-dim); user-select: none; white-space: nowrap;
+            cursor: pointer; margin-left: 2px;
+        }
+        #clipboard-chip:hover { border-color: var(--accent-default); color: var(--fg); }

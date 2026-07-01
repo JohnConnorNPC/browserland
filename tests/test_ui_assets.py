@@ -1549,7 +1549,7 @@ def test_clipboard_mod_packaged_and_manifest_agrees():
     assert "id: 'clipboard'" in src
     assert "ctxVersion: 1" in src
     assert "defaultEnabled: false" in src
-    assert "tiers: ['clipboard', 'window']" in src
+    assert "tiers: ['clipboard', 'window', 'taskbar']" in src
     # Rides the additive ctx.clipboard observer seam, feature-detected — NOT a raw
     # monkey-patch of copyTextToClipboard.
     assert "if (!ctx.clipboard) return;" in src
@@ -1559,6 +1559,11 @@ def test_clipboard_mod_packaged_and_manifest_agrees():
     assert "appKind: 'clipboard'" in src
     assert "return openClipboardWindow(d)" in src
     assert "return launchClipboard()" in src
+    # #118: a taskbar tray chip (open-or-focus, same launchClipboard path), styled
+    # via the served page's #clipboard-chip rules.
+    assert "ctx.taskbar.addStatusItem(" in src
+    assert "clipboard-chip" in src
+    assert "#clipboard-chip" in INDEX_HTML
     assert "serialize:" not in src, "clipboard is ephemeral — no serialize key"
     # Re-copy on row click, guarded so re-copying doesn't push a duplicate top entry.
     assert "copyTextToClipboard(entry.text)" in src
@@ -1601,7 +1606,7 @@ _EXPECTED_TIERS = {
     "sticky": ["window"],
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
-    "clipboard": ["clipboard", "window"],  # #106 observes the clipboard seam + a window kind
+    "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip
 }
 
 
