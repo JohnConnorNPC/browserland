@@ -1109,6 +1109,12 @@
                     disableMod(id);
                 }
             }
+            // #113: a mod that ships help.md but registers no help CARDS (e.g.
+            // clock) has no teardown that refreshes Help, so toggling it wouldn't
+            // live-update an open Help window's enabled-filter. Nudge it here (a
+            // typeof-guarded no-op when Help is closed or the help mod is absent);
+            // harmless double-refresh for card-registering mods.
+            _refreshHelpIfOpen();
             return on;
         }
 

@@ -159,9 +159,14 @@
             // Group by section SLUG (stable id), remembering each slug's display
             // label, preserving first-seen order.
             const order = []; const bySlug = new Map(); const labelOf = new Map();
+            // #113: a mod may declare its own section icon (e.secIcon); first-seen
+            // wins, falling back to the static HELP_SECTION_ICONS map for wiki /
+            // generated slugs. So a mod's glyph wins without editing that map.
+            const iconOf = new Map();
             for (const e of entries) {
                 if (!bySlug.has(e.slug)) {
                     bySlug.set(e.slug, []); labelOf.set(e.slug, e.section || e.slug);
+                    iconOf.set(e.slug, e.secIcon || helpSectionIcon(e.slug));
                     order.push(e.slug);
                 }
                 bySlug.get(e.slug).push(e);
@@ -192,7 +197,7 @@
                 rb.className = 'help-rail-btn';
                 rb.dataset.target = secId;
                 const ric = document.createElement('span');
-                ric.className = 'help-rail-ic'; ric.textContent = helpSectionIcon(slug);
+                ric.className = 'help-rail-ic'; ric.textContent = iconOf.get(slug);
                 const rlab = document.createElement('span');
                 rlab.className = 'help-rail-label'; rlab.textContent = label;
                 const rcnt = document.createElement('span');
@@ -211,7 +216,7 @@
                 const head = document.createElement('div');
                 head.className = 'help-section-header';
                 const sic = document.createElement('div');
-                sic.className = 'help-section-icon'; sic.textContent = helpSectionIcon(slug);
+                sic.className = 'help-section-icon'; sic.textContent = iconOf.get(slug);
                 const stitle = document.createElement('div');
                 stitle.className = 'help-section-title'; stitle.textContent = label;
                 const scount = document.createElement('div');

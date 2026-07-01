@@ -24,6 +24,11 @@
                         slug: sec.slug, section: sec.label, title: card.title,
                         bodyFrags: Array.isArray(card.body) ? card.body : [],
                         search: card.search || '',
+                        // #113: mod-owned sections carry their owning mod id (so
+                        // buildHelpEntries can hide them when that mod is disabled)
+                        // and an optional per-section icon. Core wiki sections have
+                        // neither, so these stay '' and change nothing.
+                        owner: sec.mod || '', secIcon: sec.icon || '',
                     });
                 }
             }
@@ -53,7 +58,14 @@
         // Assemble the live corpus: wiki cards (once fetched) + generated entries,
         // then cache a lower-cased haystack on each for the substring filter.
         function buildHelpEntries() {
-            const entries = (helpCorpusEntries || []).slice();
+            // #113: hide a mod-owned section while its mod is disabled. The server
+            // emits every mod section (disabled state is per-browser localStorage),
+            // so the client filters here. isModEnabled is a hoisted fn declaration
+            // in the same concatenated <script> (86_js_mod_loader); typeof-guarded
+            // so an absent loader (or an un-owned wiki/generated entry) is untouched.
+            const entries = (helpCorpusEntries || []).filter(e => !(
+                e.owner && typeof isModEnabled === 'function'
+                && !isModEnabled(e.owner)));
             try {
                 const map = (getSettings().keybindings) || {};
                 for (const act of KEY_ACTIONS) {
