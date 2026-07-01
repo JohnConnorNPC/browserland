@@ -1089,6 +1089,46 @@ def test_file_capability_richer_ops_present():
         assert route in INDEX_HTML, f"#72 route missing from served page: {route!r}"
 
 
+def test_file_capability_chunked_ops_present():
+    # #108: ctx.file gains readChunk + the upload-session trio (uploadBegin/
+    # uploadChunk/uploadCommit/uploadAbort); ctxVersion stays 1 (additive). The
+    # SAME methods are mirrored in the file-manager fmFile() fallback so its I/O is
+    # identical mods on or off, and the transfer + download rewrites drive them.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
+        encoding="utf-8")
+    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
+        for sym in ("readChunk: function", "uploadBegin: function",
+                    "uploadChunk: function", "uploadCommit: function",
+                    "uploadAbort: function"):
+            assert sym in src, f"{label} missing #108 method: {sym!r}"
+        for route in ("'/file/read_chunk'", "'/file/upload_begin'",
+                      "'/file/upload_chunk'", "'/file/upload_commit'",
+                      "'/file/upload_abort'"):
+            assert route in src, f"{label} does not wrap route {route!r}"
+    # ctxVersion unchanged (additive capability).
+    assert "ctxVersion: 1" in loader
+    # The new routes reach the served page.
+    for route in ("'/file/read_chunk'", "'/file/upload_begin'",
+                  "'/file/upload_commit'"):
+        assert route in INDEX_HTML, \
+            f"#108 route missing from served page: {route!r}"
+    # The transfer + download rewrites actually DRIVE the session (not the old
+    # whole-file read/upload): the chunked calls appear in the mod, and the in-app
+    # download opens the File System Access save picker.
+    for sym in ("fmFile().uploadBegin(", "fmFile().readChunk(",
+                "fmFile().uploadChunk(", "fmFile().uploadCommit(",
+                "fmFile().uploadAbort(", "showSaveFilePicker"):
+        assert sym in fm, f"file manager missing #108 wiring: {sym!r}"
+    # The dead download >5 MiB special-casing is gone from the byte path (the
+    # OS-drop whole-file upload keeps its cap, out of scope for #108).
+    assert "too large to download" not in fm, \
+        "dead download >5 MiB copy remains on a #108 byte path"
+    # The mod still routes ALL I/O through the capability — no raw fetch snuck in
+    # with the streaming rewrite.
+    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+
+
 def test_filemanager_richer_menu_present():
     # #72: the file manager grows a full right-click menu set + clipboard + drag.
     # These symbol sentinels lock the wiring (the Playwright flow exercises the

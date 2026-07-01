@@ -5,6 +5,7 @@ browse the whole host (gated by the same auth as ``/launch``, which already
 grants shell-level filesystem access). These cover the resolution rules and the
 half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
+import base64
 import os
 import stat
 import sys
@@ -14,6 +15,8 @@ from pathlib import Path
 import pytest
 
 import gzip
+
+from sanic_testing.reusable import ReusableClient
 
 import webterm.broker.app as app_mod
 from webterm.broker.app import (_NotText, _decode_file_text, _encode_file_text,
@@ -804,3 +807,306 @@ def test_setattr_missing_404(tmp_path, monkeypatch):
         else {"path": "nope", "mode": 0o644}
     _, r = app.test_client.post("/file/setattr", json=body)
     assert r.status == 404 and r.json["error"] == "not_found"
+
+
+# --------------------------------------------------------------------------- #
+# #108 chunked transfer — /file/read_chunk + the upload-session endpoints
+# --------------------------------------------------------------------------- #
+# The upload session lives in-memory on app.ctx and spans several requests, but
+# sanic-testing's app.test_client runs the FULL server lifecycle per request
+# (so before_server_stop drains the table between calls). Stateful flows
+# therefore use ReusableClient (one server, many requests); single-request
+# cases keep the lighter app.test_client.
+
+
+def test_chunk_routes_registered(tmp_path, monkeypatch):
+    # The five #108 routes are wired (a rename would break the client wrappers);
+    # the existing OPTIONS+auth guard covers them from here (they're POST /file/*).
+    app = _make_file_app(tmp_path, monkeypatch)
+    paths = {"/" + r.path.lstrip("/") for r in app.router.routes}
+    for p in ("/file/read_chunk", "/file/upload_begin", "/file/upload_chunk",
+              "/file/upload_commit", "/file/upload_abort"):
+        assert p in paths, f"missing #108 route {p}"
+
+
+# ---- /file/read_chunk ----------------------------------------------------
+
+def test_read_chunk_ranged_reads_reconstruct(tmp_path, monkeypatch):
+    data = bytes((i * 31) % 256 for i in range(10000))
+    (tmp_path / "f.bin").write_bytes(data)
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 4096)   # force >1 read
+    out, off = b"", 0
+    while True:
+        _, r = app.test_client.post("/file/read_chunk",
+                                    json={"path": "f.bin", "offset": off,
+                                          "length": 4096})
+        assert r.status == 200 and r.json["ok"], r.json
+        j = r.json
+        chunk = base64.b64decode(j["content_b64"])
+        assert len(chunk) == j["length"]      # decoded length is authoritative
+        assert j["size"] == len(data)         # total file size every call
+        assert j["offset"] == off
+        out += chunk
+        off += j["length"]
+        if j["eof"]:
+            break
+    assert out == data
+
+
+def test_read_chunk_clamps_length_to_max(tmp_path, monkeypatch):
+    (tmp_path / "f.bin").write_bytes(b"x" * 5000)
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 1000)
+    _, r = app.test_client.post("/file/read_chunk",
+                                json={"path": "f.bin", "offset": 0,
+                                      "length": 10 ** 9})
+    assert r.status == 200 and r.json["length"] == 1000 and not r.json["eof"]
+
+
+def test_read_chunk_past_old_5mib_cap(tmp_path, monkeypatch):
+    # The whole point of #108: a read PAST the old 5 MiB cap succeeds (no
+    # too_large), unlike /file/read.
+    big = b"A" * (5 * 2 ** 20 + 4096)          # just over 5 MiB
+    (tmp_path / "big.bin").write_bytes(big)
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/read_chunk",
+                                json={"path": "big.bin",
+                                      "offset": 5 * 2 ** 20, "length": 4096})
+    assert r.status == 200 and r.json["ok"], r.json
+    assert r.json["size"] == len(big)
+    assert base64.b64decode(r.json["content_b64"]) == b"A" * 4096
+    assert r.json["eof"] is True
+    # And /file/read still rejects the same oversized file, unchanged.
+    _, r = app.test_client.post("/file/read", json={"path": "big.bin"})
+    assert r.status == 400 and r.json["error"] == "too_large"
+
+
+def test_read_chunk_empty_file(tmp_path, monkeypatch):
+    (tmp_path / "e.bin").write_bytes(b"")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/read_chunk", json={"path": "e.bin"})
+    assert r.status == 200 and r.json["length"] == 0
+    assert r.json["size"] == 0 and r.json["eof"] is True
+
+
+def test_read_chunk_bad_range(tmp_path, monkeypatch):
+    (tmp_path / "f.bin").write_bytes(b"x")
+    app = _make_file_app(tmp_path, monkeypatch)
+    for body in ({"path": "f.bin", "offset": -1},
+                 {"path": "f.bin", "length": 0},
+                 {"path": "f.bin", "offset": "x"},
+                 {"path": "f.bin", "length": True}):
+        _, r = app.test_client.post("/file/read_chunk", json=body)
+        assert r.status == 400 and r.json["error"] == "bad_range", body
+
+
+def test_read_chunk_not_a_file_and_missing(tmp_path, monkeypatch):
+    (tmp_path / "d").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/read_chunk", json={"path": "d"})
+    assert r.status == 400 and r.json["error"] == "not_a_file"
+    _, r = app.test_client.post("/file/read_chunk", json={"path": "nope"})
+    assert r.status == 404 and r.json["error"] == "not_found"
+
+
+# ---- /file/upload_begin (single-request cases) ---------------------------
+
+def test_upload_begin_ok_returns_id(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/upload_begin", json={"path": "new.bin"})
+    assert r.status == 200 and r.json["ok"]
+    assert isinstance(r.json["upload_id"], str) and r.json["upload_id"]
+
+
+def test_upload_begin_exists_then_overwrite(tmp_path, monkeypatch):
+    (tmp_path / "d.bin").write_bytes(b"old")
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/upload_begin", json={"path": "d.bin"})
+    assert r.status == 409 and r.json["error"] == "exists"
+    _, r = app.test_client.post("/file/upload_begin",
+                                json={"path": "d.bin", "overwrite": True})
+    assert r.status == 200 and r.json["ok"]
+
+
+def test_upload_begin_is_dir(tmp_path, monkeypatch):
+    (tmp_path / "sub").mkdir()
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/upload_begin", json={"path": "sub"})
+    assert r.status == 400 and r.json["error"] == "is_dir"
+
+
+def test_upload_begin_parent_missing(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/upload_begin",
+                                json={"path": "no/such/leaf"})
+    assert r.status == 400 and r.json["error"] == "parent_missing"
+
+
+def test_upload_commit_and_abort_no_session(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    _, r = app.test_client.post("/file/upload_commit",
+                                json={"upload_id": "deadbeef"})
+    assert r.status == 404 and r.json["error"] == "no_session"
+    # abort is idempotent: an unknown id is still {ok:true} (cleanup-only).
+    _, r = app.test_client.post("/file/upload_abort",
+                                json={"upload_id": "deadbeef"})
+    assert r.status == 200 and r.json["ok"] is True
+
+
+# ---- upload session (stateful; ReusableClient) ---------------------------
+
+def test_upload_session_roundtrip_over_5mib(tmp_path, monkeypatch):
+    # begin -> chunk*N -> commit reconstructs a file LARGER than the old 5 MiB
+    # cap, byte-identical, at the dest.
+    app = _make_file_app(tmp_path, monkeypatch)
+    payload = os.urandom(6 * 2 ** 20 + 321)    # > 5 MiB
+    step = 1 << 20                             # 1 MiB client chunks
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "out.bin"})
+        assert r.status == 200, r.json
+        uid = r.json["upload_id"]
+        off = 0
+        while off < len(payload):
+            piece = payload[off:off + step]
+            _, r = client.post("/file/upload_chunk",
+                               json={"upload_id": uid,
+                                     "content_b64": base64.b64encode(piece)
+                                     .decode(), "offset": off})
+            assert r.status == 200 and r.json["received"] == off + len(piece), \
+                r.json
+            off += len(piece)
+        _, r = client.post("/file/upload_commit", json={"upload_id": uid})
+        assert r.status == 200 and r.json["size"] == len(payload), r.json
+    assert (tmp_path / "out.bin").read_bytes() == payload
+
+
+def test_upload_empty_file_roundtrip(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "empty.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid, "content_b64": "",
+                                 "offset": 0})
+        assert r.status == 200 and r.json["received"] == 0
+        _, r = client.post("/file/upload_commit", json={"upload_id": uid})
+        assert r.status == 200 and r.json["size"] == 0
+    assert (tmp_path / "empty.bin").read_bytes() == b""
+
+
+def test_upload_chunk_bad_offset(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(b"abc")
+                                 .decode(), "offset": 5})
+        assert r.status == 409 and r.json["error"] == "bad_offset"
+        assert r.json["received"] == 0
+        client.post("/file/upload_abort", json={"upload_id": uid})
+
+
+def test_upload_chunk_bad_base64(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": "!!! not base64 !!!",
+                                 "offset": 0})
+        assert r.status == 400 and r.json["error"] == "bad_base64"
+        client.post("/file/upload_abort", json={"upload_id": uid})
+
+
+def test_upload_chunk_chunk_too_large(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 5)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(b"toolong")
+                                 .decode(), "offset": 0})
+        assert r.status == 400 and r.json["error"] == "chunk_too_large"
+        client.post("/file/upload_abort", json={"upload_id": uid})
+
+
+def test_upload_chunk_cumulative_too_large_drops_session(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_TRANSFER_BYTES", 10)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(b"x" * 20)
+                                 .decode(), "offset": 0})
+        assert r.status == 400 and r.json["error"] == "too_large"
+        # over the ceiling -> the whole session is dropped.
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(b"y")
+                                 .decode(), "offset": 0})
+        assert r.status == 404 and r.json["error"] == "no_session"
+
+
+def test_upload_commit_replaces_and_returns_size(tmp_path, monkeypatch):
+    (tmp_path / "d.bin").write_bytes(b"OLDOLDOLD")
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin",
+                           json={"path": "d.bin", "overwrite": True})
+        uid = r.json["upload_id"]
+        _, r = client.post("/file/upload_chunk",
+                           json={"upload_id": uid,
+                                 "content_b64": base64.b64encode(b"NEW")
+                                 .decode(), "offset": 0})
+        assert r.status == 200
+        _, r = client.post("/file/upload_commit", json={"upload_id": uid})
+        assert r.status == 200 and r.json["size"] == 3
+    assert (tmp_path / "d.bin").read_bytes() == b"NEW"
+
+
+def test_upload_abort_removes_temp_and_is_idempotent(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
+        uid = r.json["upload_id"]
+        tmp = app.ctx.uploads[uid]["tmp"]
+        assert os.path.exists(tmp)
+        _, r = client.post("/file/upload_abort", json={"upload_id": uid})
+        assert r.status == 200 and r.json["ok"] is True
+        assert not os.path.exists(tmp)
+        assert uid not in app.ctx.uploads
+        _, r = client.post("/file/upload_abort", json={"upload_id": uid})
+        assert r.status == 200 and r.json["ok"] is True     # idempotent
+
+
+def test_upload_begin_too_many_sessions(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_UPLOAD_SESSIONS", 1)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "a.bin"})
+        assert r.status == 200
+        _, r = client.post("/file/upload_begin", json={"path": "b.bin"})
+        assert r.status == 429 and r.json["error"] == "too_many_sessions"
+
+
+def test_upload_begin_sweeps_stale_session(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    with ReusableClient(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "a.bin"})
+        uid1 = r.json["upload_id"]
+        tmp1 = app.ctx.uploads[uid1]["tmp"]
+        # Age every session past the TTL, so the next begin sweeps uid1 + its temp.
+        monkeypatch.setattr(app_mod, "UPLOAD_SESSION_TTL", -1.0)
+        _, r = client.post("/file/upload_begin", json={"path": "b.bin"})
+        assert r.status == 200
+        assert uid1 not in app.ctx.uploads
+        assert not os.path.exists(tmp1)
+        client.post("/file/upload_abort", json={"upload_id": r.json["upload_id"]})
