@@ -217,6 +217,22 @@ MAX_ARCHIVE_ENTRIES = 50000        # member/entry count
 # balloon the on-disk store.
 MAX_STATE_BYTES = 2 * 2**20  # 2 MiB
 
+# /mod-store: a generic per-mod server-backed KV with a baked-in revision ring
+# (#124), the durable twin of the per-browser ctx.storage (localStorage). The
+# scratchpad mod is the first consumer — its note tabs live here so they survive
+# a reload / cache clear and read from every browser on this broker. Cap the
+# per-mod value like /state so a single hostile PUT can't balloon the store; the
+# ring keeps the last N *distinct* values (the no-op dedupe below means an idle
+# autosave never grows it). Worst case on disk is ~N * this per mod, acceptable
+# for a single-user loopback tool whose mods are code-reviewed (a mod that could
+# fill this could already write anywhere via ctx.file — same trust tier).
+MAX_MODSTORE_BYTES = 1 * 2**20      # 1 MiB per-mod value
+MODSTORE_MAX_REVISIONS = 50         # revision-ring depth (per mod)
+# A mod id is the path segment in /mod-store/<modId>; keep it to the same shape a
+# mod dir uses (lowercase, digits, hyphen) so it can never traverse or collide
+# with a JSON metadata key. Compiled once; used by the loader + both handlers.
+_MODSTORE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+
 # /session/* management RPCs: how long the broker waits for the producer's
 # reply before giving up with 504 (the agent does psutil/git work off its
 # event loop, so this is generous).
@@ -759,6 +775,65 @@ def _write_state_atomic(path: Path, state: Dict[str, Any]) -> None:
                 pass
 
 
+def _load_modstore(path: Path) -> Dict[str, Any]:
+    """Read+self-heal the /mod-store blob (#124): a dict of
+    ``modId -> {rev, value, revisions:[{rev, value, ts}]}`` (newest-first ring).
+
+    Self-healing mirrors _load_state: every field is coerced so a hand-edited or
+    truncated file can never break startup. Malformed mod ids / records are
+    DROPPED (not repaired) so a bad entry can't shadow a good one; ``rev`` is
+    clamped >=0; only well-formed revision entries survive, trimmed to the ring
+    depth. ``rev`` is persisted (like /state) so a restart preserves optimistic
+    ordering. Returns ``{}`` on any read/parse error (a corrupt file degrades to
+    an empty store rather than blocking boot — the same accepted degraded state
+    /state has)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    store: Dict[str, Any] = {}
+    for mod_id, rec in data.items():
+        if not isinstance(mod_id, str) or not _MODSTORE_ID_RE.fullmatch(mod_id):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        rev = rec.get("rev")
+        rev = rev if isinstance(rev, int) and not isinstance(rev, bool) \
+            and rev >= 0 else 0
+        revisions = []
+        raw = rec.get("revisions")
+        if isinstance(raw, list):
+            for ent in raw:
+                if not isinstance(ent, dict):
+                    continue
+                erev = ent.get("rev")
+                ets = ent.get("ts")
+                if not isinstance(erev, int) or isinstance(erev, bool) \
+                        or erev < 0:
+                    continue
+                if "value" not in ent:
+                    continue
+                revisions.append({
+                    "rev": erev,
+                    "value": ent["value"],
+                    "ts": ets if isinstance(ets, int)
+                    and not isinstance(ets, bool) else 0,
+                })
+        # Newest-first, trimmed. Order by rev (the durable ordering); ts is a
+        # display-only stamp and is never trusted for ordering/trimming.
+        revisions.sort(key=lambda e: e["rev"], reverse=True)
+        del revisions[MODSTORE_MAX_REVISIONS:]
+        store[mod_id] = {
+            "rev": rev,
+            "value": rec.get("value") if "value" in rec else None,
+            "revisions": revisions,
+        }
+    return store
+
+
 def _load_or_create_broker_id(path: Path) -> str:
     """This broker's stable identity (a uuid4 hex), persisted in a standalone
     file (``webterm_identity.json``) beside the state store. Minted + written on
@@ -1159,6 +1234,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # Generic per-mod server store for /mod-store (#124) — the durable, cross-
+    # browser twin of ctx.storage. Persisted in its own sidecar beside /state
+    # (override with "modstore_path"); rev lives in the file so a restart
+    # preserves optimistic ordering (same reasoning as /state). Its own lock
+    # serializes the read-rev / compare / write / bump on PUT (the file write
+    # awaits, so two PUTs could otherwise interleave on rev). Reuses the /state
+    # single-active-client lease: a non-active browser READS but can't write.
+    app.ctx.modstore_path = Path(
+        config.get("modstore_path")
+        or (app.ctx.state_path.parent / "webterm_modstore.json")
+    ).resolve()
+    app.ctx.modstore = _load_modstore(app.ctx.modstore_path)
+    app.ctx.modstore_lock = asyncio.Lock()
+    LOGGER.info("mod store: %s (%d mod%s)", app.ctx.modstore_path,
+                len(app.ctx.modstore),
+                "" if len(app.ctx.modstore) == 1 else "s")
     # Launch profiles (#70). The profiles-only allow-list the Control Panel edits
     # live. Persisted in a sidecar beside /state (override with
     # "profiles_state_path"), seeded from broker_config's agent.profiles. Once the
@@ -1254,8 +1345,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     app.register_middleware(_cors_headers, "response")
 
-    async def _preflight(request: Request):
-        # 204; the CORS response middleware decorates it.
+    async def _preflight(request: Request, **_params):
+        # 204; the CORS response middleware decorates it. **_params absorbs any
+        # route path parameter (e.g. /mod-store/<modId>) Sanic passes as a kwarg
+        # so this one shared handler serves parametric preflights too.
         return empty()
 
     async def _browser_ws(request: Request, ws: Websocket):
@@ -3345,6 +3438,122 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.state = new_state
         return sanic_json({"ok": True, "rev": new_state["rev"]})
 
+    # ---- /mod-store/<modId> (#124): generic per-mod server KV + rev ring ----
+    # The durable, cross-browser twin of ctx.storage. Same token-or-loopback gate
+    # and the SAME single-active-client lease as /state. GET is ungated by the
+    # lease (a non-active/reactivating browser can always READ); PUT is lease-
+    # gated (409 not_active) so a background tab can't clobber the active one.
+    def _modstore_bad_id(mod_id: str):
+        """Validate the <modId> path segment; a bad id -> 400 (else None)."""
+        if not _MODSTORE_ID_RE.fullmatch(mod_id or ""):
+            return sanic_json({"ok": False, "error": "bad_mod_id"}, status=400)
+        return None
+
+    async def _modstore_get(request: Request, modId: str):
+        err = _gated_auth_error(request, "/mod-store")
+        if err is not None:
+            return err
+        bad = _modstore_bad_id(modId)
+        if bad is not None:
+            return bad
+        rec = app.ctx.modstore.get(modId) \
+            or {"rev": 0, "value": None, "revisions": []}
+        # ?rev=<n>: return that ONE revision's full value — the current rev, or a
+        # ring entry. Absent from both -> 404 (it scrolled off the ring); a non-
+        # int -> 400. This is how History previews/restores a past value.
+        rev_q = request.args.get("rev")
+        if rev_q is not None:
+            try:
+                want = int(rev_q)
+            except (TypeError, ValueError):
+                return sanic_json({"ok": False, "error": "bad_rev"}, status=400)
+            if want == rec["rev"]:
+                return sanic_json({"ok": True, "rev": want, "value": rec["value"]})
+            for ent in rec["revisions"]:
+                if ent["rev"] == want:
+                    return sanic_json({"ok": True, "rev": want,
+                                       "value": ent["value"]})
+            return sanic_json({"ok": False, "error": "no_such_rev"}, status=404)
+        # Default: current value + revision METADATA only (rev + ts, no bodies —
+        # the ring can be large; History fetches a body on demand via ?rev=).
+        return sanic_json({
+            "rev": rec["rev"],
+            "value": rec["value"],
+            "revisions": [{"rev": e["rev"], "ts": e["ts"]}
+                          for e in rec["revisions"]],
+        })
+
+    async def _modstore_put(request: Request, modId: str):
+        err = _gated_auth_error(request, "/mod-store")
+        if err is not None:
+            return err
+        bad = _modstore_bad_id(modId)
+        if bad is not None:
+            return bad
+        if request.body and len(request.body) > MAX_MODSTORE_BYTES:
+            return sanic_json({"ok": False, "error": "too_large"}, status=413)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        base_rev = body.get("baseRev")
+        # Strict int: bool is an int subclass in Python, so reject True/False
+        # (they'd otherwise pass as 1/0 and silently mis-compare against rev).
+        if isinstance(base_rev, bool) or not isinstance(base_rev, int) \
+                or base_rev < 0:
+            return sanic_json({"ok": False, "error": "bad_baseRev"}, status=400)
+        # Presence check, not truthiness: value:null is a legal payload (clearing
+        # every note). _json_object_body maps an empty body to {} -> 400 here.
+        if "value" not in body:
+            return sanic_json({"ok": False, "error": "bad_value"}, status=400)
+        value = body["value"]
+        client_id = str(body.get("clientId") or "").strip()
+        # Lock the whole lease-check / read-rev / compare / dedupe / write / bump
+        # (identical reasoning to /state: the write awaits, so two PUTs could
+        # interleave on rev, and the lease check must live INSIDE the lock so a
+        # become_active that linearized while this PUT queued is seen).
+        async with app.ctx.modstore_lock:
+            existed = modId in app.ctx.modstore
+            rec = app.ctx.modstore.get(modId) \
+                or {"rev": 0, "value": None, "revisions": []}
+            active = app.ctx.active_client_id
+            if active is not None and client_id != active:
+                return sanic_json({
+                    "ok": False, "error": "not_active",
+                    "rev": rec["rev"], "value": rec["value"],
+                }, status=409)
+            if base_rev != rec["rev"]:
+                # Conflict — inline the live value so the client rebases in one
+                # round trip (no follow-up GET), matching /state.
+                return sanic_json({
+                    "ok": False, "error": "conflict",
+                    "rev": rec["rev"], "value": rec["value"],
+                }, status=409)
+            # No-op dedupe: an idle debounced autosave that resends the current
+            # value must NOT bump rev or push a revision (else the ring churns on
+            # every keystroke pause). Accept it as a success at the current rev.
+            if value == rec["value"]:
+                return sanic_json({"ok": True, "rev": rec["rev"]})
+            # Push the OUTGOING (soon-to-be-prior) value onto the newest-first
+            # ring, then trim. Skip the empty seed: a brand-new mod id has no real
+            # prior value (rev 0 / None), so don't record a meaningless {rev:0}
+            # entry — the ring starts once there's genuine history.
+            revisions = list(rec["revisions"])
+            if existed:
+                revisions.insert(0, {"rev": rec["rev"], "value": rec["value"],
+                                     "ts": int(time.time())})
+                del revisions[MODSTORE_MAX_REVISIONS:]
+            new_rec = {"rev": rec["rev"] + 1, "value": value,
+                       "revisions": revisions}
+            new_store = dict(app.ctx.modstore)
+            new_store[modId] = new_rec
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.modstore_path, new_store)
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+            app.ctx.modstore = new_store
+        return sanic_json({"ok": True, "rev": new_rec["rev"]})
+
     if app.ctx.serve_ui:
         # Import (and thus assemble) the UI constants here, gated on serve_ui, so
         # a headless broker never reads the NN_* fragments or the wiki. Assembly
@@ -3392,6 +3601,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
+    app.add_route(_modstore_get, "/mod-store/<modId>", methods=["GET"])
+    app.add_route(_modstore_put, "/mod-store/<modId>", methods=["PUT"])
     # MCP HTTP interface (external MCP server) + its browser-facing config.
     app.add_route(_mcp_info, "/mcp/info", methods=["GET"])
     app.add_route(_mcp_terminals, "/mcp/terminals", methods=["GET"])
@@ -3438,6 +3649,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/info", "preflight_info"),
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/state", "preflight_state"),
+                             ("/mod-store/<modId>", "preflight_mod_store"),
                              ("/mcp/info", "preflight_mcp_info"),
                              ("/mcp/terminals", "preflight_mcp_terminals"),
                              ("/mcp/read", "preflight_mcp_read"),

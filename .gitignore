@@ -12,6 +12,10 @@ broker_config.json
 webterm_state.json
 .webterm-state-*.tmp
 
+# Generic per-mod server store (/mod-store, #124) — sibling of the state store
+# (its atomic-write temp files reuse the .webterm-state-*.tmp glob above)
+webterm_modstore.json
+
 # Stable broker identity (/info, #64) — sibling of the state store
 webterm_identity.json
 
