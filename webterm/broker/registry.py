@@ -71,6 +71,7 @@ class WindowEntry:
         kind: str = "terminal",
         agent: str = "",
         cwd: str = "",
+        profile: str = "",
         version: str = "",
     ):
         self.id = int(window_id)
@@ -83,6 +84,9 @@ class WindowEntry:
         self.kind = kind
         self.agent = agent
         self.cwd = cwd
+        # The launch-profile name this session was spawned from (#115), from the
+        # hello. "" for a non-launcher/old producer. Immutable — no update frame.
+        self.profile = profile
         # The producer's self-reported build id (#22); "" for a pre-#22 agent
         # (which is itself a staleness signal).
         self.version = version
@@ -124,6 +128,7 @@ class WindowEntry:
             "kind": self.kind,
             "agent": self.agent,
             "cwd": self.cwd,
+            "profile": self.profile,
             "version": self.version,
             "app_cursor": self.app_cursor,
             "mcp": self.mcp_mode or mcp_default,
@@ -236,13 +241,17 @@ class BrokerRegistry:
         kind = str(hello.get("kind", "") or "").strip() or "terminal"
         agent = _whitelist_agent(hello.get("agent"))
         cwd = str(hello.get("cwd", "") or "")
+        # #115: the launch-profile name (self-reported, untrusted — a hint, not
+        # an attestation). Cap length like version; the UI only uses it as a key
+        # into that host's /profiles color map, so a junk value just misses.
+        profile = str(hello.get("profile", "") or "")[:64]
         # Self-reported + untrusted: cap length (a producer can send anything,
         # incl. a value matching the broker — it is a hint, not an attestation).
         version = str(hello.get("version", "") or "")[:64]
 
         entry = WindowEntry(window_id, pid, title, cols, rows, ws,
                             host=host, kind=kind, agent=agent, cwd=cwd,
-                            version=version)
+                            profile=profile, version=version)
         async with self._lock:
             old = self._entries.get(window_id)
             if old is not None:

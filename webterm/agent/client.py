@@ -146,7 +146,7 @@ class BrokerClient:
         await ws.send(protocol.hello_frame(
             s.window_id, s.pid, s.title, s.cols, s.rows,
             host=s.host, kind=s.kind, agent=s.agent, cwd=s.cwd,
-            version=s.version,
+            profile=s.profile, version=s.version,
         ))
         self._ws = ws
         self.connected = True

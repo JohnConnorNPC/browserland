@@ -49,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
                         default="raw")
     parser.add_argument("--cwd", default=None,
                         help="working directory for the child")
+    parser.add_argument("--profile", default=None,
+                        help="launch-profile name, echoed in the hello so the "
+                             "broker/UI can resolve a per-profile color (#115)")
     parser.add_argument("--pty-backend", choices=("auto", "conpty", "winpty"),
                         default="auto",
                         help="Windows only: auto = ConPTY when a console "
@@ -104,5 +107,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> AgentConfig:
         ring_bytes=max(4096, ns.ring_bytes),
         snapshot_mode=ns.snapshot_mode,
         cwd=ns.cwd,
+        profile=ns.profile,
         pty_backend=ns.pty_backend,
     )

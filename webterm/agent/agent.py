@@ -139,6 +139,10 @@ class SessionState:
     kind: str = "agent"
     agent: str = ""
     cwd: str = ""
+    # The launch-profile name (#115), echoed in every hello so the broker can
+    # surface it in /sessions and the UI can seed a per-profile color. Immutable
+    # for the life of the agent (unlike cwd, which the shell can change).
+    profile: str = ""
     # This agent's build id (webterm.build_version()), reported in the hello so
     # the broker can surface it and flag a stale deployment (#22).
     version: str = field(default_factory=build_version)
@@ -161,6 +165,7 @@ class Agent:
             cols=config.cols,
             rows=config.rows,
             cwd=_safe_cwd(config.cwd),
+            profile=config.profile or "",
         )
         self.ring = ByteRing(config.ring_bytes)
         self.sniffer = OscTitleSniffer()

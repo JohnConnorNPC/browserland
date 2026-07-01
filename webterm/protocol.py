@@ -54,6 +54,7 @@ def hello_frame(
     kind: Optional[str] = None,
     agent: Optional[str] = None,
     cwd: Optional[str] = None,
+    profile: Optional[str] = None,
     version: Optional[str] = None,
 ) -> str:
     """First frame on /browserland. Ints MUST be JSON numbers (the broker calls
@@ -79,6 +80,11 @@ def hello_frame(
         frame["agent"] = str(agent)
     if cwd:
         frame["cwd"] = str(cwd)
+    # "profile" carries the launch-profile name (#115) so the broker can surface
+    # it in /sessions and the UI can seed a per-profile default terminal color.
+    # Additive/optional, like cwd — omitted by non-launcher producers.
+    if profile:
+        frame["profile"] = str(profile)
     # "version" carries the producer's build id (webterm.build_version()) so the
     # broker can surface it and flag stale agents (issue #22).
     if version:

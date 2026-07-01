@@ -152,6 +152,11 @@ class Launcher:
         ]
         if cwd:
             argv += ["--cwd", str(cwd)]
+        # #115: pass the resolved profile NAME so the agent re-announces it in
+        # every hello (it survives a broker restart via the agent's reconnect,
+        # exactly like cwd/title). The browser resolves the per-profile default
+        # terminal color from it at seed time. Data, never a command.
+        argv += ["--profile", str(name)]
         argv += ["--"] + [str(part) for part in profile["command"]]
 
         # Start from a registry-fresh PATH (todo task 17) so the detached agent
