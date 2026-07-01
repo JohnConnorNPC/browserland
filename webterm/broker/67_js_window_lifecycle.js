@@ -1,3 +1,60 @@
+        // ---- per-terminal-window lifecycle hook (#116 / S14) ---------------
+        // A per-window title-bar control (the git status widget) is not a taskbar
+        // chip or an app window, so it needs a hook that fires once per TERMINAL
+        // window. registerTerminalCreate(cb) subscribes: cb is REPLAYED over every
+        // terminal already open (so enabling the git mod mid-session decorates the
+        // existing windows) and fired for every future openWindow. Returns an
+        // unsubscribe fn. The loader exposes this as ctx.windows.onTerminalCreate
+        // and auto-unsubscribes on the mod's teardown. `windows` is the cross-
+        // fragment core Map (64_js_sessions_poll_control.js); these live at the one
+        // shared top-level scope, so create-time + replay both reach them.
+        const termCreateCbs = [];
+        // Build the per-window context object and hand it to ONE subscriber. Used
+        // by both the create-time emit and the replay, so both see an identical
+        // shape. titleBar/minBtn are derived from win.dom so a replayed window
+        // (built before the subscriber existed) resolves them the same way the
+        // create-time call does. addTitleBarItem inserts BEFORE the min button —
+        // the established idiom (col: 221 / MCP: 226) — so a control lands left of
+        // min/close. onDispose reuses win.cleanups, which closeWindow (73) and the
+        // active-view rebuild (84) already drain on teardown — no new plumbing.
+        function _emitTerminalCreate(win, cb) {
+            const titleBar = win.dom && win.dom.querySelector('.title-bar');
+            if (!titleBar) return;
+            const minBtn = titleBar.querySelector('.btn-min');
+            try {
+                cb({
+                    win: win,
+                    titleBar: titleBar,
+                    host: hostById(win.hostId),
+                    wireId: win.sid,
+                    addTitleBarItem: function (node) {
+                        titleBar.insertBefore(node, minBtn);
+                    },
+                    onDispose: function (fn) {
+                        if (typeof fn === 'function') win.cleanups.push(fn);
+                    },
+                });
+            } catch (e) {
+                console.error('[windows] onTerminalCreate callback failed:', e);
+            }
+        }
+        function registerTerminalCreate(cb) {
+            if (typeof cb !== 'function') return function () {};
+            termCreateCbs.push(cb);
+            // Replay over the terminals open right now (app windows are excluded —
+            // this is a TERMINAL hook). A disposed-but-not-yet-removed window is
+            // skipped so a stale interval isn't started on a dead window.
+            for (const win of Array.from(windows.values())) {
+                if (win && win.type !== 'app' && !win.disposed) {
+                    _emitTerminalCreate(win, cb);
+                }
+            }
+            return function () {
+                const i = termCreateCbs.indexOf(cb);
+                if (i !== -1) termCreateCbs.splice(i, 1);
+            };
+        }
+
         // ---- window create / minimize / restore / close -------------------
         function openWindow(id, sess) {
             id = String(id);
@@ -189,6 +246,16 @@
                 locked: !!getPref(id).locked,
             };
             windows.set(id, win);
+            // #116: notify per-terminal-window mods (the git status widget) NOW —
+            // right after the map insert and BEFORE the color/MCP buttons are
+            // inserted below — so addTitleBarItem lands a control in its original
+            // slot (after AGENTS.md, before color/MCP/min), preserving today's
+            // title-bar order. Firing at the end of openWindow would place it to
+            // the RIGHT of color/MCP. termCreateCbs is snapshotted so a callback
+            // that (un)subscribes mid-emit can't skip or revisit a sibling.
+            if (win.type !== 'app') {
+                for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+            }
             // Restore-on-refresh: remember every open TERMINAL so a browser
             // reload can reattach it. openWindow only ever builds terminals,
             // but guard on the app flag for symmetry with closeWindow (app

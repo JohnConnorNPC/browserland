@@ -294,12 +294,48 @@
                         return _modSessionApi('/session/kill',
                             { id: id, pid: pid }, opts);
                     },
+                    // #116 (S14): per-terminal git status. POST /session/git
+                    // {id:<wireId>} — the agent runs git in its OWN live cwd, so
+                    // only the bare wire id is sent. Same host-resolution + fail-
+                    // open {status, json} envelope as procs/kill, byte-identical to
+                    // the git widget's old inline gitPost: a non-repo, a 404 on an
+                    // old broker, or a transport failure resolves (never rejects)
+                    // so a routine terminal never toasts. -> {status, json:{ok,
+                    // branch,detached,ahead,behind,staged,unstaged,untracked,
+                    // conflicts,dirty,dirty_count}} on a repo. opts.host is a host
+                    // id (win.hostId semantics), routed like every other session op.
+                    git: function (id, opts) {
+                        return _modSessionApi('/session/git', { id: id }, opts);
+                    },
                 },
                 taskbar: {
                     // Mount a status node in the taskbar (before #help-chip, so a
                     // mod keeps the old clock slot). Auto-removed on teardown.
                     addStatusItem: function (node) {
                         return _modAddStatusItem(rec, node);
+                    },
+                },
+                // #116 (S14): per-terminal-window lifecycle. onTerminalCreate(cb)
+                // subscribes a mod to EVERY terminal window — REPLAYED over those
+                // already open and fired for every future one — so a per-window
+                // title-bar control (the git status widget) rides the SAME core
+                // hook (registerTerminalCreate, 67_js_window_lifecycle.js) core
+                // uses, not a re-scope to a taskbar chip. cb receives
+                //   { win, titleBar, host, wireId, addTitleBarItem, onDispose }
+                // where addTitleBarItem(node) inserts the node before the window's
+                // min button (left of min/close) and onDispose(fn) registers a
+                // per-window teardown on win.cleanups (drained by closeWindow (73)
+                // and the active-view rebuild (84) — no new teardown plumbing).
+                // Returns an unsubscribe fn; ALSO auto-unsubscribed on the mod's
+                // teardown (rec.unloads), so a disabled mod stops decorating new
+                // windows (the mod tears down live widgets via its own onDispose
+                // set). Additive — ctxVersion stays 1; feature-detect
+                // `if (ctx.windows)` (same convention as `if (ctx.file)`).
+                windows: {
+                    onTerminalCreate: function (cb) {
+                        const off = registerTerminalCreate(cb);
+                        rec.unloads.push(off);
+                        return off;
                     },
                 },
                 settings: {
