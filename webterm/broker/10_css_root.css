@@ -181,11 +181,17 @@
         @container (max-width: 110px) {
             .taskbar-item .ti-id { display: none; }
         }
+        /* #123: the title is the SOLE shrink/ellipsis element (0 1 auto), so
+           trailing tokens (e.g. [pid]) stay adjacent to it; host/pid keep their
+           intrinsic width (0 0 auto), like .ti-id above. A very long hostname
+           therefore clips without ellipsis — only the title ellipsizes. */
+        .taskbar-item .ti-host,
+        .taskbar-item .ti-pid { flex: 0 0 auto; }
         .taskbar-item .ti-title {
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            flex: 1 1 auto;
+            flex: 0 1 auto;
             min-width: 0;
         }
         body.hide-ids .ti-id,

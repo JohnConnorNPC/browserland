@@ -1,4 +1,25 @@
         // ---- taskbar ------------------------------------------------------
+        // #123: render one ordered span per visible label part (id can now
+        // interleave), replacing the old fixed idSpan+titleSpan pair. Rebuild
+        // from composeLabelParts each call so a toggle/order change converges on
+        // the next tick. Each span keeps its per-part class (.ti-id dim color +
+        // <110px container auto-hide, .ti-title ellipsis anchor). Re-insert
+        // BEFORE the trailing .ti-ws workspace badge (added by 62_js_workspaces)
+        // so the badge + off-workspace dimming survive per-tick relabels. The
+        // .ti-ws badge carries no .ti-part class, so the clear pass never removes
+        // it and it never duplicates.
+        function renderChipLabel(el, sess) {
+            el.querySelectorAll('.ti-part').forEach(n => n.remove());
+            const frag = document.createDocumentFragment();
+            for (const p of composeLabelParts(sess)) {
+                const span = document.createElement('span');
+                span.className = 'ti-part ' + p.cls;      // e.g. "ti-part ti-host"
+                span.textContent = p.text;
+                frag.appendChild(span);
+            }
+            const ws = el.querySelector('.ti-ws');
+            if (ws) el.insertBefore(frag, ws); else el.appendChild(frag);
+        }
         // Single label/tooltip composer: only this function writes el.title,
         // so the stale suffix and the always-everything tooltip stay
         // consistent no matter who triggers the update.
@@ -8,8 +29,7 @@
             if (!el) return;
             const sess = sessions.get(key);
             if (!sess) return;
-            const titleSpan = el.querySelector('.ti-title');
-            if (titleSpan) titleSpan.textContent = formatTitle(sess);
+            renderChipLabel(el, sess);
             el.title = formatTooltip(sess)
                 + (sess.stale ? ' — not responding' : '');
         }
@@ -35,8 +55,9 @@
 
         function buildTaskbarItem(s) {
             // dataset.sessionId carries the session KEY; the visible chip
-            // shows the real window id. Label + tooltip are filled in by
-            // updateTaskbarLabel right after insertion.
+            // shows the real window id. Label + tooltip are refreshed by
+            // updateTaskbarLabel right after insertion (renderChipLabel here
+            // paints the initial label so a new chip is never momentarily blank).
             const key = s.key != null ? String(s.key) : String(s.id);
             const el = document.createElement('div');
             el.className = 'taskbar-item';
@@ -50,14 +71,7 @@
             el.style.setProperty('--accent',
                 pref.color || profileDefaultColor(hid, s.profile)
                 || hostDefaultColor(hid) || defaultColor(key));
-            const idSpan = document.createElement('span');
-            idSpan.className = 'ti-id';
-            idSpan.textContent = '#' + (s.sid != null ? s.sid : s.id);
-            const titleSpan = document.createElement('span');
-            titleSpan.className = 'ti-title';
-            titleSpan.textContent = formatTitle(s);
-            el.appendChild(idSpan);
-            el.appendChild(titleSpan);
+            renderChipLabel(el, s);   // #123: ordered .ti-part spans
             el.addEventListener('click', () => onTaskbarClick(key));
             return el;
         }
