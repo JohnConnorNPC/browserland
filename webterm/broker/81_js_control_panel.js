@@ -288,6 +288,7 @@
                 }).catch(() => {});
             }
             renderDefaultProfile();
+            renderProfilesEditor();
             renderMcpConfig();
             renderKeybindings();
         }
@@ -420,6 +421,258 @@
                 saveMcpConfig({ token: setMcpToken.value }));
             setMcpGenerate.addEventListener('click', () =>
                 saveMcpConfig({ generate: true }));
+        }
+
+        // ---- Launch profiles editor (#70) ----------------------------------
+        // Per-host, same pattern as the MCP section: fetch the FULL objects from
+        // this host's /profiles/config (browser realm — commands never travel via
+        // /profiles or /mcp/*), edit them, POST the whole set back (replace
+        // semantics), and live-swap without a restart. After every save we also
+        // invalidate the names-only profilesCache (76) so the right-click + launch
+        // picker and the Default-profile <select> refetch the live set.
+        function fetchProfilesConfig(host) {
+            return fetch(hostHttpUrl(host, '/profiles/config'))
+                .then(r => (r.ok ? r.json() : null))
+                .then(j => { if (j && j.ok) profilesConfigCache.set(host.id, j); })
+                .catch(() => {});
+        }
+        function commandPreview(cmd) {
+            const s = (Array.isArray(cmd) ? cmd : []).join(' ');
+            return s.length > 80 ? s.slice(0, 79) + '…' : s;
+        }
+        // The host the editor acts on = the settings-target host (local or the
+        // open remote tab), so every write lands on the right broker.
+        function profilesEditorHost() {
+            return settingsTarget ? hostById(settingsTarget.hostId) : null;
+        }
+        function renderProfilesEditor() {
+            const t = settingsTarget;
+            if (!t || !setProfilesListEl) return;
+            const host = hostById(t.hostId);
+            const cfg = host ? profilesConfigCache.get(host.id) : null;
+            setProfilesListEl.innerHTML = '';
+            if (!cfg) {
+                setProfilesListEl.textContent = 'loading…';
+                if (host && !profilesConfigFetching.has(host.id)) {
+                    profilesConfigFetching.add(host.id);
+                    const wantTab = currentSettingsTab;
+                    fetchProfilesConfig(host).then(() => {
+                        profilesConfigFetching.delete(host.id);
+                        if (currentSettingsTab === wantTab && settingsTarget === t)
+                            renderProfilesEditor();
+                    }).catch(() => { profilesConfigFetching.delete(host.id); });
+                }
+                return;
+            }
+            const names = Object.keys(cfg.profiles || {}).sort();
+            if (!names.length) { setProfilesListEl.textContent = 'no profiles'; return; }
+            for (const name of names) {
+                const p = cfg.profiles[name] || {};
+                const row = document.createElement('div');
+                row.className = 'set-profile-row';
+                const info = document.createElement('div');
+                info.className = 'set-profile-info';
+                const nm = document.createElement('div');
+                nm.className = 'set-profile-name';
+                nm.textContent = name;
+                if (name === cfg.default_profile) {
+                    const badge = document.createElement('span');
+                    badge.className = 'set-profile-badge';
+                    badge.textContent = 'default';
+                    nm.appendChild(badge);
+                }
+                if (cfg.exists && cfg.exists[name] === false) {
+                    const warn = document.createElement('span');
+                    warn.className = 'set-profile-warn';
+                    warn.textContent = '⚠ not found';
+                    warn.title = 'the command was not found on this host’s PATH';
+                    nm.appendChild(warn);
+                }
+                info.appendChild(nm);
+                const cmd = document.createElement('div');
+                cmd.className = 'set-profile-cmd';
+                cmd.textContent = commandPreview(p.command)
+                    + (p.title ? '  ·  ' + p.title : '');
+                info.appendChild(cmd);
+                row.appendChild(info);
+                const acts = document.createElement('div');
+                acts.className = 'set-profile-acts';
+                const mk = document.createElement('button');
+                mk.type = 'button'; mk.textContent = 'Default';
+                mk.disabled = (name === cfg.default_profile);
+                mk.addEventListener('click', () =>
+                    saveProfilesConfig(host, cfg.profiles, name));
+                const ed = document.createElement('button');
+                ed.type = 'button'; ed.textContent = 'Edit';
+                ed.addEventListener('click', () => openProfileDialog(host, name, null));
+                const del = document.createElement('button');
+                del.type = 'button'; del.textContent = 'Delete';
+                del.className = 'danger';
+                del.addEventListener('click', () => deleteProfile(host, name));
+                acts.appendChild(mk); acts.appendChild(ed); acts.appendChild(del);
+                row.appendChild(acts);
+                setProfilesListEl.appendChild(row);
+            }
+        }
+        function deleteProfile(host, name) {
+            const cfg = profilesConfigCache.get(host.id);
+            if (!cfg) return;
+            const np = Object.assign({}, cfg.profiles);
+            delete np[name];
+            // The broker rejects an empty set (it would brick /launch); guard
+            // here so the user gets a clear message instead of a 400.
+            if (!Object.keys(np).length) {
+                showNotice('cannot delete the last profile');
+                return;
+            }
+            const def = (cfg.default_profile === name) ? '' : cfg.default_profile;
+            saveProfilesConfig(host, np, def);
+        }
+        function saveProfilesConfig(host, profiles, defaultProfile) {
+            if (!host) return;
+            return fetch(hostHttpUrl(host, '/profiles/config'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ profiles: profiles,
+                                       default_profile: defaultProfile || '' }),
+            }).then(r => r.json().catch(() => null)).then(j => {
+                if (j && j.ok) {
+                    profilesConfigCache.set(host.id, j);
+                    // Drop the names-only cache (76) so the launch picker + the
+                    // Default-profile <select> refetch the live set — no restart.
+                    profilesCache.delete(host.id);
+                    const cur = profilesEditorHost();
+                    if (cur && cur.id === host.id) {
+                        renderProfilesEditor();
+                        renderDefaultProfile();
+                    }
+                } else {
+                    showNotice('profile save failed: ' + ((j && j.error) || 'error'));
+                }
+            }).catch(e => showNotice('profile save failed: ' + e));
+        }
+        // Add / Edit dialog. `editName` != null edits an existing profile (rename
+        // allowed); `preset` (from Detect) pre-fills a fresh Add. The command is a
+        // textarea, ONE argv token per line — avoids fragile quote-splitting: the
+        // array joins to lines and splits back on newlines.
+        function openProfileDialog(host, editName, preset) {
+            const cfg = profilesConfigCache.get(host.id)
+                || { profiles: {}, default_profile: '' };
+            const base = preset || (editName ? (cfg.profiles[editName] || {}) : {});
+            const initName = preset ? (preset.name || '') : (editName || '');
+            let nameInput, titleInput, cwdInput, cmdArea;
+            openDialog({
+                title: editName ? 'Edit profile' : 'Add profile',
+                body: function (c) {
+                    const mkRow = (labelText, el) => {
+                        const row = document.createElement('div');
+                        row.className = 'set-row app-dialog-field';
+                        const lab = document.createElement('label');
+                        lab.textContent = labelText;
+                        row.appendChild(lab); row.appendChild(el);
+                        c.appendChild(row);
+                    };
+                    nameInput = document.createElement('input');
+                    nameInput.type = 'text'; nameInput.value = initName;
+                    nameInput.placeholder = 'name (letters, digits, . _ + -)';
+                    mkRow('name', nameInput);
+                    titleInput = document.createElement('input');
+                    titleInput.type = 'text'; titleInput.value = base.title || '';
+                    titleInput.placeholder = '(optional) window title';
+                    mkRow('title', titleInput);
+                    cwdInput = document.createElement('input');
+                    cwdInput.type = 'text'; cwdInput.value = base.cwd || '';
+                    cwdInput.placeholder = '(optional) start directory';
+                    mkRow('cwd', cwdInput);
+                    const cmdRow = document.createElement('div');
+                    cmdRow.className = 'app-dialog-field set-profile-cmdfield';
+                    const cmdLab = document.createElement('label');
+                    cmdLab.textContent = 'command (one argument per line)';
+                    cmdArea = document.createElement('textarea');
+                    cmdArea.className = 'set-profile-cmdarea';
+                    cmdArea.rows = 6;
+                    cmdArea.value = (base.command || []).join('\n');
+                    cmdArea.placeholder = 'wsl.exe\n-d\nUbuntu\n--\nbash\n-l';
+                    cmdRow.appendChild(cmdLab); cmdRow.appendChild(cmdArea);
+                    c.appendChild(cmdRow);
+                },
+                buttons: [
+                    { label: 'Save', value: 'save', primary: true },
+                    { label: 'Cancel', value: false },
+                ],
+            }).then(function (r) {
+                if (!r || r.value !== 'save') return;
+                const name = (nameInput.value || '').trim();
+                const title = (titleInput.value || '').trim();
+                const cwd = (cwdInput.value || '').trim();
+                const command = (cmdArea.value || '').split('\n')
+                    .map(s => s.trim()).filter(Boolean);
+                if (!name) { showNotice('profile name is required'); return; }
+                if (!command.length) { showNotice('command cannot be empty'); return; }
+                const live = profilesConfigCache.get(host.id) || cfg;
+                const np = Object.assign({}, live.profiles);
+                if (editName && editName !== name) delete np[editName];
+                np[name] = { command: command, title: title || null,
+                             cwd: cwd || null };
+                // Renaming the default profile carries the default to the new name.
+                let def = live.default_profile || '';
+                if (editName && def === editName) def = name;
+                saveProfilesConfig(host, np, def);
+            });
+        }
+        // Detect: list the broker's environment scan; clicking a suggestion opens
+        // the Add dialog pre-filled (openDialog's singleton cancels this one), so
+        // nothing is saved until the user confirms.
+        function detectProfiles(host) {
+            fetch(hostHttpUrl(host, '/profiles/detect'))
+                .then(r => (r.ok ? r.json() : null))
+                .then(j => {
+                    const list = (j && j.ok && Array.isArray(j.suggestions))
+                        ? j.suggestions : [];
+                    openDialog({
+                        title: 'Detected shells',
+                        body: function (c) {
+                            if (!list.length) {
+                                const m = document.createElement('div');
+                                m.className = 'app-dialog-msg';
+                                m.textContent = 'No shells detected on this host.';
+                                c.appendChild(m);
+                                return;
+                            }
+                            const wrap = document.createElement('div');
+                            wrap.className = 'set-detect-list';
+                            for (const s of list) {
+                                const b = document.createElement('button');
+                                b.type = 'button'; b.className = 'set-detect-item';
+                                const nm = document.createElement('div');
+                                nm.className = 'set-profile-name';
+                                nm.textContent = s.title || s.name;
+                                const cm = document.createElement('div');
+                                cm.className = 'set-profile-cmd';
+                                cm.textContent = commandPreview(s.command);
+                                b.appendChild(nm); b.appendChild(cm);
+                                b.addEventListener('click', () =>
+                                    openProfileDialog(host, null, s));
+                                wrap.appendChild(b);
+                            }
+                            c.appendChild(wrap);
+                        },
+                        buttons: [{ label: 'Close', value: false }],
+                    });
+                })
+                .catch(e => showNotice('detect failed: ' + e));
+        }
+        if (setProfileAddBtn) {
+            setProfileAddBtn.addEventListener('click', () => {
+                const host = profilesEditorHost();
+                if (host) openProfileDialog(host, null, null);
+            });
+        }
+        if (setProfileDetectBtn) {
+            setProfileDetectBtn.addEventListener('click', () => {
+                const host = profilesEditorHost();
+                if (host) detectProfiles(host);
+            });
         }
 
         // The mode of a remote tab's cached layout ('tiling' default), so its

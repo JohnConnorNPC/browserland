@@ -54,6 +54,14 @@
         const setMcpUrlEl = document.getElementById('set-mcp-url');
         const mcpConfigCache = new Map();     // hostId -> {enabled,token,default_mode,allow_launch}
         const mcpConfigFetching = new Set();  // hostIds with an in-flight GET
+        // Launch-profile editor (#70; per-host, same posture as MCP). The cache
+        // holds the FULL /profiles/config objects (command/title/cwd + exists),
+        // browser-realm-only — /profiles stays names-only.
+        const setProfilesListEl = document.getElementById('set-profiles-list');
+        const setProfileAddBtn = document.getElementById('set-profile-add');
+        const setProfileDetectBtn = document.getElementById('set-profile-detect');
+        const profilesConfigCache = new Map();     // hostId -> /profiles/config
+        const profilesConfigFetching = new Set();  // hostIds with an in-flight GET
 
         // settingsTarget = the host whose settings the host-tab form edits.
         //   {hostId, isLocal, s (the settings object), save()}.

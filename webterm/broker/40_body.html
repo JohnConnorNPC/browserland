@@ -185,6 +185,19 @@
                         configured default.</div>
                 </div>
                 <div class="set-section">
+                    <div class="set-title">Launch profiles</div>
+                    <div id="set-profiles-list" class="set-profiles"></div>
+                    <div class="set-row">
+                        <button type="button" id="set-profile-add">Add profile</button>
+                        <button type="button" id="set-profile-detect">Detect&hellip;</button>
+                    </div>
+                    <div class="set-hint">the shell recipes new terminals on this
+                        host can launch: a profile <em>name</em> maps to an argv the
+                        broker spawns &mdash; clients never send a command. Stored in
+                        webterm_profiles.json; changes apply immediately (no
+                        restart). See docs/PROFILES.md for copyable recipes.</div>
+                </div>
+                <div class="set-section">
                     <div class="set-title">MCP access</div>
                     <label class="set-check"><input type="checkbox" id="set-mcp-enabled" />
                         Enable MCP access</label>

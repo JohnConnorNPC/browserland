@@ -166,6 +166,45 @@
         .app-dialog-row .app-dialog-v {
             flex: 1 1 auto; min-width: 0; word-break: break-all;
         }
+        /* #70: launch-profile editor rows + Add/Edit command textarea + Detect
+           list. Inputs/buttons inherit the shared #settings-modal / .app-dialog
+           groups above; only the row layout + textarea are new here. */
+        .set-profiles { display: flex; flex-direction: column; gap: 4px; }
+        .set-profile-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 6px; border: 1px solid var(--bg-3); border-radius: 3px;
+        }
+        .set-profile-info { flex: 1 1 auto; min-width: 0; }
+        .set-profile-name {
+            display: flex; align-items: center; gap: 6px;
+            font-family: monospace; font-size: 12px;
+        }
+        .set-profile-badge {
+            color: var(--accent-default); font-size: 10px;
+            text-transform: uppercase; letter-spacing: .04em;
+        }
+        .set-profile-warn { color: #e0a040; font-size: 11px; cursor: help; }
+        .set-profile-cmd {
+            color: var(--fg-dim); font-family: monospace; font-size: 11px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .set-profile-acts { flex: 0 0 auto; display: flex; gap: 4px; }
+        .app-dialog textarea.set-profile-cmdarea {
+            background: var(--bg); border: 1px solid var(--bg-3);
+            border-radius: 3px; color: var(--fg); font-family: monospace;
+            font-size: 13px; padding: 5px 7px; outline: none; resize: vertical;
+            width: 100%; box-sizing: border-box;
+        }
+        .app-dialog textarea.set-profile-cmdarea:focus {
+            border-color: var(--accent-default);
+        }
+        .set-profile-cmdfield { display: flex; flex-direction: column; gap: 4px; }
+        .set-profile-cmdfield label { color: var(--fg-dim); }
+        .set-detect-list { display: flex; flex-direction: column; gap: 4px; }
+        .set-detect-item {
+            display: flex; flex-direction: column; align-items: flex-start;
+            gap: 2px; text-align: left; width: 100%;
+        }
         /* Tabbed settings (tasks 13/14): a flex row of small tab buttons, the
            active one highlighted with the accent. Wraps when many hosts. */
         .set-tabs {
