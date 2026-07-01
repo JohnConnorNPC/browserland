@@ -347,6 +347,10 @@
         .set-mod-name { font-weight: 600; }
         .set-mod-status { font-size: 11px; color: var(--fg-dim); }
         .set-mod-status[data-state="active"] { color: #3fb950; }
+        /* #121: enabled but held back because a declared `requires` mod is inactive
+           (shows "needs: <ids>"). Muted amber — a soft "waiting", distinct from the
+           red init-FAILURE state below. */
+        .set-mod-status[data-state="blocked"] { color: #d29922; }
         .set-mod-status[data-state="failed"] { color: #f85149; }
         .set-mod-tiers { display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; }
         .set-mod-tier {

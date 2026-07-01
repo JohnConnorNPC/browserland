@@ -79,6 +79,18 @@
                 // TOGGLED AWAY from this default (see _modsDisabled below), so a
                 // default-off mod is absent from the set until enabled.
                 defaultEnabled: (decl.defaultEnabled !== false),
+                // #121 (S15): declared mod dependencies — ids of OTHER mods that
+                // must be ACTIVE for this mod to init. Omitted => [] (every existing
+                // mod is dependency-free, so its meaning is unchanged). The static
+                // ordering guard in tests/test_ui_assets.py asserts every listed id
+                // is a KNOWN mod appearing EARLIER in ui._MODS, which makes cycles,
+                // self-require, and missing ids unrepresentable — so boot's in-order
+                // loop is always deps-first and no runtime topological sort / cycle
+                // detection is needed. Non-strings (and empty strings) dropped,
+                // mirroring `tiers`.
+                requires: Array.isArray(decl.requires)
+                    ? decl.requires.filter(function (t) { return typeof t === 'string' && t; })
+                    : [],
                 init: decl.init,
             });
         }
@@ -1043,6 +1055,20 @@
                 console.error('[mods]', e.message);
                 return { ok: false, reason: 'invalid', error: e };
             }
+            // #121: dependency precondition. A mod may declare requires:[ids] —
+            // other mods that must be ACTIVE for it to init. With the static
+            // ordering guard (every required id is a KNOWN mod EARLIER in _MODS),
+            // boot's deps-first loop never trips this; it only fires for a direct
+            // __test.run()/live-enable of a dependent whose dependency is off,
+            // leaving the mod safely blocked (no slot claimed, no partial init).
+            // Default defensively — a raw test decl may skip registerMod's
+            // normalization — so the documented never-throws contract still holds.
+            const reqs = Array.isArray(decl.requires) ? decl.requires : [];
+            const missing = reqs.filter(function (dep) { return !window.__mods.active.has(dep); });
+            if (missing.length) {
+                console.info('[mods] "' + id + '" needs inactive mod(s): ' + missing.join(', '));
+                return { ok: false, reason: 'requires', missing: missing };
+            }
             // Claim the slot (the id) BEFORE init so addStatusItem etc. can find
             // the record; on any init throw we roll back and release it.
             const rec = { id: id, version: (decl.version || '0'), unloads: [] };
@@ -1145,9 +1171,48 @@
             if (on === _modDefault(id)) set.delete(id); else set.add(id);
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
+                const regs = window.__mods.registered;
                 if (on) {
+                    // #121 enable cascade. Bring THIS mod up, then a single FORWARD
+                    // pass over the mods registered AFTER it: any that is itself
+                    // enabled, not yet active, and whose every `requires` is now
+                    // active gets init'd. The ordering guard (a dependency is always
+                    // registered EARLIER than its dependents) makes this deps-first,
+                    // so one pass suffices even for a chain — no fixpoint loop.
                     if (!window.__mods.active.has(id)) initMod(decl);
+                    for (let i = regs.indexOf(decl) + 1; i < regs.length; i++) {
+                        const m = regs[i];
+                        if (window.__mods.active.has(m.id) || !isModEnabled(m.id)) continue;
+                        // Only mods that DECLARE a dependency participate — an
+                        // inactive mod with no `requires` is a boot init-FAILURE, not
+                        // a dependency block, so enabling something else must not
+                        // silently retry it (deps.every is vacuously true for []).
+                        const deps = m.requires || [];
+                        if (deps.length && deps.every(function (d) { return window.__mods.active.has(d); })) {
+                            initMod(m);
+                        }
+                    }
                 } else {
+                    // #121 disable cascade. Nothing still-active may be left
+                    // requiring `id`. First compute the transitive closure of active
+                    // mods that depend on it via a FORWARD pass (dependencies precede
+                    // dependents, so `id` and every already-doomed dep is seen before
+                    // the mods that require it — a single pass gets the full chain).
+                    // Then tear them down dependents-FIRST (reverse index order) and
+                    // `id` itself LAST, so no mod is unloaded while an active mod
+                    // still requires it. Each mod's own teardown stays per-mod LIFO
+                    // inside disableMod; sequencing the disableMod calls is what makes
+                    // the cross-mod teardown correct.
+                    const doomed = new Set([id]);
+                    for (const m of regs) {
+                        if (m.id === id || !window.__mods.active.has(m.id)) continue;
+                        const deps = m.requires || [];
+                        if (deps.some(function (d) { return doomed.has(d); })) doomed.add(m.id);
+                    }
+                    doomed.delete(id);
+                    for (let i = regs.length - 1; i >= 0; i--) {
+                        if (doomed.has(regs[i].id)) disableMod(regs[i].id);
+                    }
                     disableMod(id);
                 }
             }
@@ -1181,11 +1246,25 @@
                 for (const r of rows) {
                     const enabled = isModEnabled(r.id);   // default XOR override (#116)
                     r.cb.checked = enabled;
-                    let state;
-                    if (!enabled) state = 'off';
-                    else if (window.__mods.active.has(r.id)) state = 'active';
-                    else state = 'failed';
-                    r.status.textContent = state;
+                    let state, label;
+                    if (!enabled) { state = 'off'; label = state; }
+                    else if (window.__mods.active.has(r.id)) { state = 'active'; label = state; }
+                    else {
+                        // #121: enabled but not active. Distinguish a dependency
+                        // BLOCK (a declared `requires` mod is inactive) from an init
+                        // FAILURE (deps satisfied, init threw). READ-ONLY — this
+                        // reflects on every /state pull and must never init/teardown;
+                        // it only classifies + labels the row. `blocked` shows the
+                        // direct missing requires; a transitive root cause is visible
+                        // across the other rows (each shows its own missing deps).
+                        const rec = window.__mods.registered.find(
+                            function (m) { return m.id === r.id; });
+                        const missing = ((rec && rec.requires) || []).filter(
+                            function (d) { return !window.__mods.active.has(d); });
+                        if (missing.length) { state = 'blocked'; label = 'needs: ' + missing.join(', '); }
+                        else { state = 'failed'; label = state; }
+                    }
+                    r.status.textContent = label;
                     r.status.dataset.state = state;
                 }
             }
@@ -1321,7 +1400,10 @@
                     // #106: expose the declared boot default so an acceptance test
                     // can assert an opt-in mod (clipboard) ships defaultEnabled:false.
                     return { id: m.id, tiers: (m.tiers || []).slice(),
-                             defaultEnabled: (m.defaultEnabled !== false) };
+                             defaultEnabled: (m.defaultEnabled !== false),
+                             // #121: declared deps, so the Playwright acceptance can
+                             // assert a dependent (e.g. #120 agent-docs) requires: [...].
+                             requires: (m.requires || []).slice() };
                 });
             },
         };
