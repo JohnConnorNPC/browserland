@@ -5,5 +5,6 @@
   "title": "File manager",
   "description": "Dual-pane file-manager app window kind via ctx.registerWindowKind (extracted from core, #84). Per-pane host picker, list/preview, open-in-editor handoff, OS-file drop-to-upload, cross-pane copy/move straddling two hosts, removed-host/re-auth lifecycle. /file/* I/O (incl. destructive delete + upload) rides ctx.file. Persists byte-identical to webterm:appwindows:v1 incl. fmLeft/fmRight/fmLeftHostId/fmRightHostId/fileHostId.",
   "entry": "file-manager.js",
-  "author": "JohnConnorNPC"
+  "author": "JohnConnorNPC",
+  "help": { "slug": "file-manager", "label": "File manager", "order": 2030, "icon": "🗂" }
 }

@@ -1,0 +1,1 @@
+The file manager is a dual-pane file browser for moving around the filesystem and opening files into the text editor. Like the editor, it opens at the **active terminal's working directory and host**, so it follows where you are working.

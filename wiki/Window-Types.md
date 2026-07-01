@@ -26,28 +26,6 @@ Each terminal title bar carries a per-window **robot button** that sets that win
 
 A new terminal from the **+** button (left-click) or `Ctrl+Alt+Enter` always runs on the **local broker**; to start one on a remote host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts.
 
-## Sticky note
-
-A sticky note is a small, always-visible scratch pad for quick text. Notes stay out of the taskbar.
-
-If you close a sticky note that still has text in it, it is not lost: it appears under a **Closed notes** section at the bottom of the **+** (launch) menu. Click it there to reopen it. An empty note you close is simply discarded.
-
-## CodeMirror text editor
-
-The text editor is a CodeMirror-backed editor with syntax highlighting, used to view and edit files. It opens at the **active terminal's working directory and host**, so it follows wherever you currently are.
-
-The editor's content is backed by a real file on the host. Closing the editor with unsaved changes prompts you to save first; the editor window itself is not kept around, but your file on disk is safe once written.
-
-## File manager
-
-The file manager is a dual-pane file browser for moving around the filesystem and opening files into the text editor. Like the editor, it opens at the **active terminal's working directory and host**, so it follows where you are working.
-
-## Task manager
-
-The task manager is a live monitor — not a saved document. It lists every running terminal / agent session across all hosts, and each entry expands to its child-process tree. From there you can **End** an individual process, or **destroy** the whole session — which kills its shell and closes the window.
-
-Because it is a live monitor, the task manager is never saved: closing it just dismisses it.
-
 ## Control Panel
 
 The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **🎛 Control panel** item, the desktop / taskbar right-click menu, or the **Open control panel** shortcut (`Ctrl+Alt+p`).

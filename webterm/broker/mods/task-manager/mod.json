@@ -5,5 +5,6 @@
   "title": "Task manager",
   "description": "Live Task-manager app window kind via ctx.registerWindowKind (extracted from core, #85). Enumerates real terminal/agent sessions cross-host, each expandable to its process tree, with End-process + Destroy-window actions. Session RPC (/session/procs + the DESTRUCTIVE /session/kill, incl. the 409 session_gone destroy success path) rides the host-aware ctx.session capability. Ephemeral — never persisted across reloads.",
   "entry": "task-manager.js",
-  "author": "JohnConnorNPC"
+  "author": "JohnConnorNPC",
+  "help": { "slug": "task-manager", "label": "Task manager", "order": 2040, "icon": "🧰" }
 }

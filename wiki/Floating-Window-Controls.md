@@ -48,10 +48,6 @@ You can also minimize or close the focused window from the keyboard:
 
 These act on the focused window in either mode (floating or snapped), and they're rebindable — see [[Keyboard-Shortcuts]].
 
-### Reopening a closed note
-
-If you close a sticky note that has content, it isn't lost: a non-empty closed note is listed under a **"Closed notes"** section at the bottom of the **+** (launch) menu. Click it there to reopen it. For more on the launch menu, see [[Taskbar]].
-
 ## Pin a window (lock to screen)
 
 **Floating only.** Pinning applies to floating windows. A window that's snapped into the tiling strip doesn't scroll with the strip in the first place, so there's nothing to pin — the **Lock to screen** item only appears on a floating window's menu.

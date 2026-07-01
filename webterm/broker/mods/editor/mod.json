@@ -5,5 +5,6 @@
   "title": "Text editor",
   "description": "Text-editor app window kind via ctx.registerWindowKind (extracted from core, #83). CodeMirror, multi-tab AGENTS.md/CLAUDE.md docs, dirty-save, find, line numbers, host/folder pickers. /file/* I/O rides ctx.file. Persists byte-identical to webterm:appwindows:v1 incl. filePath/wrap/lineNums/startDir/docs/activeTab/agentsMdCwd/fileHostId.",
   "entry": "editor.js",
-  "author": "JohnConnorNPC"
+  "author": "JohnConnorNPC",
+  "help": { "slug": "editor", "label": "Text editor", "order": 2020, "icon": "📄" }
 }

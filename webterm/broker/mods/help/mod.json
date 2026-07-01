@@ -6,5 +6,6 @@
   "description": "In-app Help window + the taskbar ? chip + ctx.registerHelpCards (extracted from core, #78). Ships help.css.",
   "entry": "help.js",
   "styles": ["help.css"],
-  "author": "JohnConnorNPC"
+  "author": "JohnConnorNPC",
+  "help": { "slug": "help", "label": "Help", "order": 2060, "icon": "❓" }
 }

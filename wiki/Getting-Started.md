@@ -22,15 +22,6 @@ Left-click and the shortcut always launch on the **local broker**; to start a te
 
 From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, and a task manager. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
 
-## The in-app interface guide (the "?" chip)
-
-Browserland ships a searchable guide built into the app. Open it from the **"?" chip** at the bottom-right of the taskbar.
-
-- Type in the search box to filter every entry live.
-- The guide covers layout modes, snapping, tabs, splits, workspaces, the taskbar, MCP access, and more — the same topics as this wiki, available without leaving the desktop.
-
-You can also bind a key to open it: the guide is the **Toggle help** action, which is **unbound by default**. Assign a combo under **Control Panel → Keyboard shortcuts** (see [[Keyboard-Shortcuts]]).
-
 ## The Control Panel
 
 The **Control Panel** is where you configure the desktop. Open it any of these ways:
