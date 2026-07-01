@@ -77,6 +77,33 @@
                         { path: path, content_b64: contentB64,
                           overwrite: !!(opts && opts.overwrite) }, opts);
                 },
+                // #108 chunked transfer mirror (mods-off parity with ctx.file):
+                // ranged read + the append-and-atomic-replace upload session the
+                // cross-host transfer + in-app download loops drive.
+                readChunk: function (path, opts) {
+                    const body = { path: path,
+                                   offset: (opts && opts.offset) || 0 };
+                    if (opts && opts.length) body.length = opts.length;
+                    return _modFileApi('/file/read_chunk', body, opts);
+                },
+                uploadBegin: function (path, opts) {
+                    return _modFileApi('/file/upload_begin',
+                        { path: path,
+                          overwrite: !!(opts && opts.overwrite) }, opts);
+                },
+                uploadChunk: function (uploadId, contentB64, opts) {
+                    return _modFileApi('/file/upload_chunk',
+                        { upload_id: uploadId, content_b64: contentB64,
+                          offset: (opts && opts.offset) || 0 }, opts);
+                },
+                uploadCommit: function (uploadId, opts) {
+                    return _modFileApi('/file/upload_commit',
+                        { upload_id: uploadId }, opts);
+                },
+                uploadAbort: function (uploadId, opts) {
+                    return _modFileApi('/file/upload_abort',
+                        { upload_id: uploadId }, opts);
+                },
                 // #72 richer ops mirror (mods-off parity with ctx.file).
                 mkdir: function (path, opts) {
                     return _modFileApi('/file/mkdir', { path: path }, opts);

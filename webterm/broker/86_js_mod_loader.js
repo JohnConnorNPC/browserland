@@ -171,6 +171,40 @@
                             { path: path, content_b64: contentB64,
                               overwrite: !!(opts && opts.overwrite) }, opts);
                     },
+                    // #108 chunked transfer (additive — ctxVersion stays 1). Thin
+                    // wrappers over the streaming /file/* endpoints; the mod
+                    // orchestrates the loop (all fetch/token stays in core). Each
+                    // is one _modFileApi call, host-routed + fail-closed like the
+                    // rest. readChunk: ranged read -> {ok,content_b64,length,size,
+                    // offset,eof}. The upload trio is an append-and-atomic-replace
+                    // session: begin -> {ok,upload_id}; chunk -> {ok,received};
+                    // commit -> {ok,path,size}; abort -> {ok} (best-effort).
+                    readChunk: function (path, opts) {
+                        // Omit length when unset so the server clamps to its own
+                        // MAX_CHUNK_BYTES (0 would trip the length>=1 guard).
+                        const body = { path: path,
+                                       offset: (opts && opts.offset) || 0 };
+                        if (opts && opts.length) body.length = opts.length;
+                        return _modFileApi('/file/read_chunk', body, opts);
+                    },
+                    uploadBegin: function (path, opts) {
+                        return _modFileApi('/file/upload_begin',
+                            { path: path,
+                              overwrite: !!(opts && opts.overwrite) }, opts);
+                    },
+                    uploadChunk: function (uploadId, contentB64, opts) {
+                        return _modFileApi('/file/upload_chunk',
+                            { upload_id: uploadId, content_b64: contentB64,
+                              offset: (opts && opts.offset) || 0 }, opts);
+                    },
+                    uploadCommit: function (uploadId, opts) {
+                        return _modFileApi('/file/upload_commit',
+                            { upload_id: uploadId }, opts);
+                    },
+                    uploadAbort: function (uploadId, opts) {
+                        return _modFileApi('/file/upload_abort',
+                            { upload_id: uploadId }, opts);
+                    },
                     // #72 richer ops (additive — ctxVersion stays 1). Paths are
                     // host-wide native absolutes, same per-host routing.
                     // Create ONE directory (parent must exist). -> {ok,path}.
