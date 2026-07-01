@@ -266,6 +266,7 @@
             setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
             renderModSettingsToggles(t.isLocal);   // #71/#78: reflect mod toggles (clock, help, …)
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
+            setSwapLaunchEl.checked = !!ls.swapLaunchButtons;   // #114 (browser-global)
             // Default start path is PER-HOST (#17): read the target host's own
             // settings (local = live getSettings(); remote = its cached blob),
             // resolving any legacy per-OS map against THAT host's OS.
@@ -853,6 +854,14 @@
         };
         setStartLabelEl.addEventListener('input', commitStartLabel);
         setStartLabelEl.addEventListener('change', commitStartLabel);
+        // #114: swap the START (+) button's left/right-click gestures. Browser-
+        // local like the start label — write LIVE local getSettings(), persist,
+        // then re-apply so the tooltip's right-click hint tracks the new mapping.
+        setSwapLaunchEl.addEventListener('change', () => {
+            getSettings().swapLaunchButtons = setSwapLaunchEl.checked;
+            savePrefs();
+            applyStartButton();
+        });
         // Issue #10/#17: the default start path is PER-HOST. Write the target
         // host's settings blob then t.save() (savePrefs for local; the host
         // /state PUT for remote) — same pattern as the default-profile control.

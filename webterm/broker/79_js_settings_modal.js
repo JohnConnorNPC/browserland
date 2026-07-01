@@ -34,6 +34,7 @@
         // #78: the Help button "show ? chip" checkbox moved the same way (the help
         // mod mounts it into #set-mods via ctx.settings.boolean).
         const setStartLabelEl = document.getElementById('set-start-label');
+        const setSwapLaunchEl = document.getElementById('set-swap-launch');   // #114
         const setStartPathEl = document.getElementById('set-start-path');
         const setTermFontEl = document.getElementById('set-term-font');   // #18
         for (const f of TERM_FONTS) {           // #18: terminal font choices

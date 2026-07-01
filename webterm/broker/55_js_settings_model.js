@@ -102,6 +102,9 @@
             } else {
                 s.startLabel = s.startLabel.trim().slice(0, 24) || '+';
             }
+            // #114: swap the START (+) button's left/right-click behaviour.
+            // false = today's mapping (left = quick-launch, right = menu).
+            if (typeof s.swapLaunchButtons !== 'boolean') s.swapLaunchButtons = false;
             // Issue #10: single default start path for new terminals (collapses
             // the per-OS pair from #2). Browser-local (like startLabel) and
             // belongs to THIS broker's host; resolveStartPath only sends it to a

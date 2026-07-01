@@ -232,16 +232,16 @@
         }
 
         if (launchBtn) {
-            // Click: the LOCAL host's default profile (task 8 — its per-host
-            // defaultProfile, else the broker default). Right-click: pick a
-            // profile — grouped under disabled host-header rows when >1 host.
-            launchBtn.addEventListener('click', () => {
+            // Two gestures on the LOCAL host: quick-launch its default profile
+            // (task 8 — its per-host defaultProfile, else the broker default),
+            // and a picker menu — profiles grouped under disabled host-header
+            // rows when >1 host. Which gesture is which is decided at click time
+            // by #114's swapLaunchButtons: default OFF maps left = quick-launch,
+            // right = menu; ON swaps them. The listeners stay bound once and the
+            // contextmenu one always suppresses the native menu (see below).
+            const quickLaunch = () =>
                 launchProfile(localHost(), hostDefaultProfile(localHost()));
-            });
-            launchBtn.addEventListener('contextmenu', async (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const x = e.clientX, y = e.clientY;
+            async function openLaunchMenu(x, y) {
                 const hosts = allHosts();
                 if (hosts.length === 1) {
                     const d = await fetchProfiles(hosts[0]);
@@ -270,6 +270,20 @@
                 });
                 items.push(...appMenuItems());
                 renderMenu(items, x, y);
+            }
+            launchBtn.addEventListener('click', (e) => {
+                // e.clientX/e.clientY are valid on a plain click too, so the menu
+                // opens at the cursor when swapped.
+                if (getSettings().swapLaunchButtons) openLaunchMenu(e.clientX, e.clientY);
+                else quickLaunch();
+            });
+            launchBtn.addEventListener('contextmenu', (e) => {
+                // Suppress the native menu unconditionally (before branching), so
+                // it never shows regardless of which action right-click runs.
+                e.preventDefault();
+                e.stopPropagation();
+                if (getSettings().swapLaunchButtons) quickLaunch();
+                else openLaunchMenu(e.clientX, e.clientY);
             });
         }
 

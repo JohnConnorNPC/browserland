@@ -391,6 +391,7 @@ def test_index_serves_windowed_page(broker_proc):
     assert 'rel="icon"' in body               # favicon shipped (todo2 14)
     assert "term-window" in body          # the windowed desktop shipped
     assert "btn-launch" in body
+    assert "set-swap-launch" in body      # #114 swap-launch-buttons toggle shipped
     assert "set-profiles-list" in body    # #70 launch-profile editor shipped
     # Multi-host build markers: hosts model, per-host URL builders, status
     # chips — and the old persist-token-in-the-URL block must be gone
