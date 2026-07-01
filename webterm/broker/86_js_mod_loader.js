@@ -1,6 +1,7 @@
         // ---- frontend mod loader (#71) ------------------------------------
         // Phase-1 extension surface. A "mod" is in-repo, reviewed, first-party
-        // JS that registers itself with registerMod({id, ctxVersion, init}) and
+        // JS that registers itself with registerMod({id, ctxVersion,
+        // defaultEnabled?, init}) and
         // is handed a scoped `ctx` at init. This is conflict-avoidance + review
         // hygiene for TRUSTED code, NOT a security sandbox: a same-origin mod
         // already holds the auth token and could call /file, /launch, /state and
@@ -21,7 +22,7 @@
         // `undefined`, never a TDZ ReferenceError) before guarding — keep it so.
         window.__mods = window.__mods || {
             ctxVersion: 1,            // bump when the ctx/win contract changes
-            registered: [],           // [{id, version, ctxVersion, init}] in decl order
+            registered: [],           // [{id, version, ctxVersion, defaultEnabled, tiers, init}] in decl order
             active: new Map(),        // id -> { id, version, unloads:[] }  (the "slot")
             settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
             helpCards: [],            // #78: mod-contributed Help cards (ctx.registerHelpCards), sanitized typed entries the Help mod merges with the core corpus
@@ -61,6 +62,13 @@
                 version: (typeof decl.version === 'string') ? decl.version : '0',
                 // null = "pin nothing" (still init); a number must match exactly.
                 ctxVersion: (typeof decl.ctxVersion === 'number') ? decl.ctxVersion : null,
+                // #112: the mod's DECLARED default enable state. Only an explicit
+                // `defaultEnabled: false` ships a mod OFF (nothing happens until the
+                // operator opts in via the Mods pane); every other value — including
+                // the field being omitted, as every mod but aistatus does — defaults
+                // ON, so the persisted `webterm:mods:disabled` set keeps its exact
+                // pre-#112 meaning (see isModEnabled / _modDefault below).
+                defaultEnabled: (decl.defaultEnabled === false) ? false : true,
                 // #86 (S13): declared trust tiers, the ctx-capability families a
                 // reviewed mod uses (settings / taskbar / file / session / window).
                 // Display + review only — the "Mods" pane shows them so the operator
@@ -990,14 +998,21 @@
         // Operator enable/disable PER MOD, layered on the broker's mods_enabled
         // master gate (master off => loadMods returns before any of this, so every
         // mod is off regardless of per-mod state — the gate stays absolute). State
-        // is stored loader-private in localStorage as a DISABLED set of ids, NOT in
+        // is stored loader-private in localStorage as an OVERRIDE set of ids, NOT in
         // the synced /state settings blob: a /state pull from another browser would
         // otherwise live-tear-down a mod you are actively using (e.g. an open file
-        // manager). So this is deliberately PER-BROWSER. "Disabled list" (not an
-        // "enabled list") semantics means a NEWLY shipped mod defaults ON — it is
-        // simply absent from the set — matching the pre-#86 "init every registered
-        // mod" behavior. localStorage failures are swallowed: the toggle then has no
-        // durable effect but never throws, and reflect() re-reads the real state.
+        // manager). So this is deliberately PER-BROWSER.
+        //
+        // #112 reinterprets the set as "ids toggled AWAY from their declared default"
+        // (decl.defaultEnabled): for a default-ON mod, membership still means DISABLED
+        // exactly as before, so this is a zero-migration change (every pre-#112 mod
+        // omits defaultEnabled => default ON => the set keeps its old "disabled list"
+        // meaning). For a default-OFF mod (aistatus, #112) membership instead means
+        // ENABLED — the operator opted in — so a newly shipped default-off mod is off
+        // until toggled, and a default-on mod still defaults on (absent from the set).
+        // isModEnabled() is the single source of truth (override XOR default); every
+        // reader goes through it. localStorage failures are swallowed: the toggle then
+        // has no durable effect but never throws, and reflect() re-reads the real state.
         const MODS_DISABLED_KEY = 'webterm:mods:disabled';
         function _modsDisabled() {
             let raw = null;
@@ -1019,7 +1034,22 @@
                     JSON.stringify(Array.from(set)));
             } catch (_) {}
         }
-        function isModEnabled(id) { return !_modsDisabled().has(id); }
+        // The registered mod's declared default enable state (#112). Fallback true
+        // for an unknown id so a stale/renamed entry behaves like a default-on mod.
+        function _modDefault(id) {
+            const decl = window.__mods.registered.find(
+                function (m) { return m.id === id; });
+            return decl ? decl.defaultEnabled !== false : true;
+        }
+        // Single source of truth (#112): the persisted set holds ids toggled AWAY
+        // from their declared default, so the effective state is default XOR override.
+        // A default-on mod not in the set stays on (pre-#112 behavior); a default-off
+        // mod not in the set stays off until the operator opts in.
+        function isModEnabled(id) {
+            const overridden = _modsDisabled().has(id);
+            const def = _modDefault(id);
+            return overridden ? !def : def;
+        }
         // Persist the per-mod choice AND apply it live, reusing the SAME isolated
         // initMod/disableMod paths boot uses (so a live toggle exercises production
         // code, not a parallel harness). Only a KNOWN (registered) id is accepted
@@ -1033,7 +1063,12 @@
             if (!decl) return null;
             on = !!on;
             const set = _modsDisabled();
-            if (on) set.delete(id); else set.add(id);
+            // #112: the set records only a departure from the declared default, so a
+            // toggle BACK to the default drops the id (keeping the set minimal + the
+            // pre-#112 "default-on absent from set" invariant) and a toggle away adds
+            // it — for a default-on mod this is byte-identical to the old
+            // `if (on) delete else add`.
+            if (on === _modDefault(id)) set.delete(id); else set.add(id);
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
                 if (on) {
@@ -1063,9 +1098,10 @@
             const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
             const rows = [];
             function _reflectManager() {
-                const disabled = _modsDisabled();
                 for (const r of rows) {
-                    const enabled = !disabled.has(r.id);
+                    // #112: reflect the EFFECTIVE state (default XOR override), so a
+                    // default-off mod (aistatus) shows unchecked until opted in.
+                    const enabled = isModEnabled(r.id);
                     r.cb.checked = enabled;
                     let state;
                     if (!enabled) state = 'off';
@@ -1168,8 +1204,13 @@
             }
             if (pruned) _writeModsDisabled(disabled);
             for (const decl of window.__mods.registered.slice()) {
-                if (disabled.has(decl.id)) {
-                    console.info('[mods] "' + decl.id + '" disabled by operator');
+                // #112: gate on the EFFECTIVE state, not raw set membership, so a
+                // default-off mod (defaultEnabled:false, e.g. aistatus) does NOT init
+                // at boot — no outbound request until the operator opts in. For every
+                // default-on mod this is byte-identical to the old `disabled.has(id)`
+                // (override XOR default reduces to !membership when default is on).
+                if (!isModEnabled(decl.id)) {
+                    console.info('[mods] "' + decl.id + '" not enabled (per-mod)');
                     continue;
                 }
                 initMod(decl);
@@ -1202,7 +1243,10 @@
             masterEnabled: function () { return window.__mods.masterEnabled; },
             registered: function () {
                 return window.__mods.registered.map(function (m) {
-                    return { id: m.id, tiers: (m.tiers || []).slice() };
+                    // #112: expose defaultEnabled so the acceptance can assert a mod
+                    // ships default-off (aistatus) vs the default-on majority.
+                    return { id: m.id, tiers: (m.tiers || []).slice(),
+                             defaultEnabled: m.defaultEnabled !== false };
                 });
             },
         };

@@ -1424,9 +1424,12 @@ def test_loadmods_honors_per_mod_disabled_under_master_gate():
     # the master gate is on, so master-off means no mod UI at all.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     boot = loader[loader.index("async function loadMods"):]
-    # master gate returns BEFORE the pane mount + the per-mod skip.
+    # master gate returns BEFORE the pane mount + the per-mod skip. #112: the boot
+    # now gates on the EFFECTIVE per-mod state (isModEnabled, which honors a mod's
+    # declared defaultEnabled) rather than raw disabled-set membership, so a
+    # default-off mod (aistatus) doesn't init at boot.
     assert boot.index("mods_enabled=false") < boot.index("_mountModsManagerPane()")
-    assert boot.index("_mountModsManagerPane()") < boot.index("disabled.has(decl.id)")
+    assert boot.index("_mountModsManagerPane()") < boot.index("!isModEnabled(decl.id)")
     # stale ids are pruned so the set can't grow junk.
     assert "pruned" in boot
 
