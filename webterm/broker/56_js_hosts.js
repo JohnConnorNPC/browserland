@@ -1,5 +1,5 @@
         // ---- hosts ----------------------------------------------------------
-        // prefs._hosts = [{id, label, url, token}], reserved key like
+        // prefs._hosts = [{id, label, url, token, hidden, color}], reserved key
         // _settings. Entry 0 is always the implicit local host (id 'local',
         // url '' = same-origin) — non-removable, its token slot replaces the
         // old ?token= URL persistence. Remote ids are random strings minted
@@ -18,6 +18,7 @@
                 if (typeof h.label !== 'string' || !h.label) h.label = h.url;
                 if (typeof h.token !== 'string') h.token = '';
                 if (typeof h.hidden !== 'boolean') h.hidden = false;
+                if (typeof h.color !== 'string') h.color = '';
                 clean.push(h);
             }
             if (!local) local = { id: 'local' };
@@ -25,6 +26,7 @@
             local.url = '';
             if (typeof local.token !== 'string') local.token = '';
             if (typeof local.hidden !== 'boolean') local.hidden = false;
+            if (typeof local.color !== 'string') local.color = '';
             clean.unshift(local);
             prefs._hosts = clean;
             return clean;
@@ -34,6 +36,16 @@
         function hostById(id) {
             for (const h of getHosts()) { if (h.id === id) return h; }
             return null;
+        }
+        // Optional per-host DEFAULT accent (#103): the color a new terminal on
+        // this host seeds from when it has no saved per-window color, instead of
+        // the palette auto-pick. '' (or junk) = no default. strictHex rejects a
+        // hand-edited/corrupted blob (never coerces to blue like normalizeHex),
+        // so an invalid stored value cleanly falls through to the auto-pick.
+        function hostDefaultColor(id) {
+            const h = hostById(id);
+            const c = h && h.color;
+            return (typeof c === 'string' && strictHex(c)) ? c : '';
         }
 
         // ---- per-broker hide toggle ("focus mode") ------------------------
