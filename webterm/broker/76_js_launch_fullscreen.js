@@ -232,11 +232,13 @@
         }
 
         if (launchBtn) {
-            // Click: the LOCAL host's default profile (task 8 — its per-host
-            // defaultProfile, else the broker default). Right-click: pick a
-            // profile — grouped under disabled host-header rows when >1 host.
+            // Click: the DEFAULT host's default profile (#107 — its per-host
+            // defaultProfile, else the broker default). The target host is
+            // s.defaultHost (unset/removed → local, prior behavior). Right-click:
+            // pick a profile — grouped under disabled host-header rows when >1 host.
             launchBtn.addEventListener('click', () => {
-                launchProfile(localHost(), hostDefaultProfile(localHost()));
+                const h = defaultLaunchHost();
+                launchProfile(h, hostDefaultProfile(h));
             });
             launchBtn.addEventListener('contextmenu', async (e) => {
                 e.preventDefault();
