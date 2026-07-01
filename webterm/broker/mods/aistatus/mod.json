@@ -1,0 +1,10 @@
+{
+  "id": "aistatus",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "AI status",
+  "description": "Taskbar chip + window monitoring the major AI providers' health via the broker's allowlisted /status/fetch proxy. Ships disabled — no outbound request until you opt in.",
+  "entry": "aistatus.js",
+  "author": "JohnConnorNPC",
+  "styles": ["aistatus.css"]
+}

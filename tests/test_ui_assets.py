@@ -1364,6 +1364,7 @@ _EXPECTED_TIERS = {
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
     "sticky": ["window"],
+    "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
 }
 
 
