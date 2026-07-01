@@ -59,7 +59,7 @@ The clock chip shows the date and time at the bottom-right of the taskbar. It ap
 
 ## Help chip
 
-The **?** chip at the bottom-right opens the in-app interface guide, with a live search box that filters every entry as you type. You can also bind a key to the **Toggle help** action (unbound by default). See [[Getting-Started]].
+The **?** chip at the bottom-right opens the in-app interface guide, with a live search box that filters every entry as you type. It appears whenever the Help mod is enabled — there is no separate toggle; turn it on or off from Control Panel → Mods. You can also bind a key to the **Toggle help** action (unbound by default). See [[Getting-Started]].
 
 ## Pager dots
 
