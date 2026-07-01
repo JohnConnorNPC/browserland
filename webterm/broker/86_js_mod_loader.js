@@ -281,6 +281,53 @@
                         return _modFileApi('/file/setattr', body, opts);
                     },
                 },
+                // #124: ctx.serverStore — a generic, DURABLE, cross-browser per-mod
+                // key/value store backed by the server (/mod-store/<modId>), the
+                // persistent twin of the per-browser ctx.storage (localStorage).
+                // A value saved here survives a reload / cache clear and reads from
+                // every browser on THIS broker (cross-host is out of scope — a
+                // server store is per-broker). SCOPED to this mod's id: the mod
+                // never names the store key, so one mod can neither read nor write
+                // another's. Writes reuse the /state single-active-client lease
+                // (set() auto-attaches the core CLIENT_ID), so a NON-ACTIVE browser
+                // can get()/getRevision() but its set() resolves 409
+                // {error:'not_active'} — it must become the active browser to
+                // write. Every call resolves to a parsed result object — never a
+                // rejected promise. Like ctx.file this is operator-granted REVIEW
+                // HYGIENE, NOT a permission boundary: a same-origin mod already
+                // holds the page token and could POST /mod-store/* itself; the seam
+                // just funnels durable server storage through one reviewed, mod-
+                // scoped choke point. Additive — ctxVersion stays 1; feature-detect
+                // `if (ctx.serverStore)`.
+                serverStore: {
+                    // Current value + revision METADATA (rev + ts, NO bodies — the
+                    // ring can be large). -> {rev, value, revisions:[{rev,ts}]}
+                    // (rev 0 / value null when the mod has never written). Ungated
+                    // by the lease, so a non-active / reactivating browser always
+                    // reads.
+                    get: function () {
+                        return _modStoreApi('GET', modId).then(r => r.json);
+                    },
+                    // Optimistic write: PUT {baseRev, value, clientId}. clientId is
+                    // the core lease id (CLIENT_ID), so the ACTIVE browser's write
+                    // passes the lease. Resolves {status, ok, rev, error?, value?}:
+                    // 200 {ok:true, rev}; 409 {error:'conflict'|'not_active', rev,
+                    // value} with the LIVE value inlined (rebase in one round trip);
+                    // 400/413/500 {ok:false, error}.
+                    set: function (value, baseRev) {
+                        return _modStoreApi('PUT', modId, {
+                            baseRev: baseRev, value: value, clientId: CLIENT_ID,
+                        }).then(r => Object.assign({ status: r.status }, r.json));
+                    },
+                    // Fetch ONE past (or current) revision's FULL value. -> {ok,
+                    // rev, value} or {ok:false, error:'no_such_rev'} (404 — it
+                    // scrolled off the ring) / 'bad_rev'. Drives History preview +
+                    // restore.
+                    getRevision: function (n) {
+                        return _modStoreApi('GET', modId, undefined,
+                            '?rev=' + encodeURIComponent(n)).then(r => r.json);
+                    },
+                },
                 // #85 (S12): host session RPC — ONE reviewed wrapper over the
                 // existing /session/procs (enumerate a session's process tree) and
                 // the DESTRUCTIVE /session/kill (end a pid; killing the shell pid
@@ -947,6 +994,32 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             }).then(r => r.json()
+                .then(j => ({ status: r.status, json: j }))
+                .catch(() => ({ status: r.status,
+                                json: { ok: false, error: 'HTTP ' + r.status } })))
+             .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
+        }
+
+        // ---- ctx.serverStore transport (#124) ------------------------------
+        // The /mod-store twin of _modSessionApi: fetch the generic per-mod server
+        // KV (GET current+metadata / one revision, PUT an optimistic write) on the
+        // LOCAL broker ONLY — a server store is per-broker, so cross-host routing
+        // is deliberately out of scope. Resolves to {status, json} on EVERY
+        // outcome (never rejects): the parsed body with its HTTP status, an
+        // HTTP-<status> stub when the body isn't JSON, or a status-0
+        // {error:String(e)} on a transport failure — so a caller honors the
+        // broker's status contract verbatim (a 409 not_active / conflict is data
+        // to rebase on, NOT an exception). `query` is an optional pre-built
+        // querystring ('?rev=3'); `body` omitted -> a bodyless GET.
+        function _modStoreApi(method, modId, body, query) {
+            const url = hostHttpUrl(localHost(),
+                '/mod-store/' + encodeURIComponent(modId) + (query || ''));
+            const opts = { method: method };
+            if (body !== undefined) {
+                opts.headers = { 'Content-Type': 'application/json' };
+                opts.body = JSON.stringify(body);
+            }
+            return fetch(url, opts).then(r => r.json()
                 .then(j => ({ status: r.status, json: j }))
                 .catch(() => ({ status: r.status,
                                 json: { ok: false, error: 'HTTP ' + r.status } })))
