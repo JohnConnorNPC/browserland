@@ -273,7 +273,7 @@
         // timed, sluggish over long jumps). Animates strip.scrollLeft so onStripScroll
         // keeps floating windows + the scrollbar thumb in sync every frame.
         // #125: constant-velocity slide. The per-broker `slideScreenMs` setting
-        // (Control Panel; default 500, 0 = instant) is the time to travel ONE
+        // (Control Panel; default 350, 0 = instant) is the time to travel ONE
         // viewport width; every jump moves at that same rate, so duration is
         // proportional to distance (short reveal = quick, long jump = longer).
         let _slideRaf = null;

@@ -85,12 +85,12 @@
             // slideStripTo). Stored/synced per-broker like snapHoldMs above; the
             // slide is a single LOCAL viewport motion, so scrollColumnIntoView
             // reads THIS broker's value. 0 disables the animation (instant jump);
-            // otherwise clamp to [120, 2000]. Missing/invalid -> the 500ms default.
+            // otherwise clamp to [120, 2000]. Missing/invalid -> the 350ms default.
             // (Superseded the pre-constant-velocity `slideDurationMs` fixed-duration
             // cap; its different semantics aren't migrated — a fresh blob defaults.)
             if (s.slideScreenMs !== 0) {
                 if (typeof s.slideScreenMs !== 'number' || !isFinite(s.slideScreenMs)) {
-                    s.slideScreenMs = 500;
+                    s.slideScreenMs = 350;
                 } else {
                     s.slideScreenMs = Math.max(120, Math.min(2000, Math.round(s.slideScreenMs)));
                 }

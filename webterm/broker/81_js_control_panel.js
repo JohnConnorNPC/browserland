@@ -251,7 +251,7 @@
             setSnapHold.value = (typeof s.snapHoldMs === 'number') ? s.snapHoldMs : 3000;
             // #125: per-broker viewport-slide rate (ms/screen). s is normalized
             // (0 or a clamped number), so reflect verbatim; 0 shows as "0".
-            setSlideMs.value = (typeof s.slideScreenMs === 'number') ? s.slideScreenMs : 500;
+            setSlideMs.value = (typeof s.slideScreenMs === 'number') ? s.slideScreenMs : 350;
 
             // Restore-on-refresh governs THIS browser's startup (not a remote
             // host), so it always reflects the LOCAL setting on every host tab.
@@ -964,7 +964,7 @@
         // #125: per-broker viewport-slide rate (ms per screen-width). Like snapHold
         // there's no live side effect — scrollColumnIntoView reads getSettings()
         // fresh on each switch — so we just normalize (0 = instant; else clamp
-        // [120,2000]; blank/NaN -> the 500 default), persist to the target's blob,
+        // [120,2000]; blank/NaN -> the 350 default), persist to the target's blob,
         // and echo the clamped value back so the field shows what was stored.
         setSlideMs.addEventListener('change', () => {
             const t = settingsTarget;
@@ -972,10 +972,10 @@
             const raw = setSlideMs.value.trim();
             let v;
             if (raw === '') {
-                v = 500;
+                v = 350;
             } else {
                 v = Math.round(Number(raw));
-                if (!isFinite(v)) v = 500;
+                if (!isFinite(v)) v = 350;
                 else if (v <= 0) v = 0;                     // explicit instant
                 else v = Math.max(120, Math.min(2000, v));
             }
