@@ -20,7 +20,13 @@
             if (!el) return;
             const win = windows.get(id);
             const pref = prefs[String(id)] || {};
-            const color = (win && win.color) || pref.color || defaultColor(id);
+            // #103: mirror openWindow's seed so a chip without an open window
+            // still reflects the host default — live win.color, saved pref.color,
+            // host default, then the palette auto-pick.
+            const ci = String(id).indexOf(':');
+            const hid = ci !== -1 ? String(id).slice(0, ci) : 'local';
+            const color = (win && win.color) || pref.color
+                || hostDefaultColor(hid) || defaultColor(id);
             el.style.setProperty('--accent', color);
         }
 
@@ -33,7 +39,12 @@
             el.className = 'taskbar-item';
             el.dataset.sessionId = key;
             const pref = prefs[key] || {};
-            el.style.setProperty('--accent', pref.color || defaultColor(key));
+            // #103: seed from the host default when there is no saved per-window
+            // color, so the chip matches a would-be terminal on that host.
+            const ci = key.indexOf(':');
+            const hid = ci !== -1 ? key.slice(0, ci) : 'local';
+            el.style.setProperty('--accent',
+                pref.color || hostDefaultColor(hid) || defaultColor(key));
             const idSpan = document.createElement('span');
             idSpan.className = 'ti-id';
             idSpan.textContent = '#' + (s.sid != null ? s.sid : s.id);
@@ -156,6 +167,17 @@
                 const chip = document.createElement('span');
                 chip.className = 'host-chip ' + states[i]
                     + (host.hidden ? ' off' : '');
+                // #103: the per-host identity color paints this broker chip's
+                // BORDER, thicker. Inline style beats the .host-chip.<state>
+                // class's border-color (inline > class), so the identity color
+                // wins the border — while the state classes' TEXT color (down=red,
+                // auth=amber, lease=blue, ok=green) stays untouched and legible.
+                // strictHex rejects a corrupted value → the status border as today.
+                const chipColor = strictHex(host.color);
+                if (chipColor) {
+                    chip.style.borderColor = chipColor;
+                    chip.style.borderWidth = '2px';
+                }
                 chip.textContent = host.label;
                 let tip = host.id === 'local'
                     ? 'this broker' : host.url;
