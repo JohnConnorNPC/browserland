@@ -86,6 +86,13 @@
                     if (opts && opts.length) body.length = opts.length;
                     return _modFileApi('/file/read_chunk', body, opts);
                 },
+                // #110: SHA-256 of a file, streamed server-side (bounded, NOT
+                // capped at 5 MiB). A cross-host MOVE hashes the SOURCE with this,
+                // then hands the digest to uploadCommit as expected_sha256 to gate
+                // the source delete. -> {ok,path,sha256,size}.
+                hash: function (path, opts) {
+                    return _modFileApi('/file/hash', { path: path }, opts);
+                },
                 uploadBegin: function (path, opts) {
                     return _modFileApi('/file/upload_begin',
                         { path: path,
@@ -97,8 +104,15 @@
                           offset: (opts && opts.offset) || 0 }, opts);
                 },
                 uploadCommit: function (uploadId, opts) {
-                    return _modFileApi('/file/upload_commit',
-                        { upload_id: uploadId }, opts);
+                    const body = { upload_id: uploadId };
+                    // #110: a cross-host MOVE passes the source digest so the
+                    // server verifies the dest BEFORE its atomic replace and
+                    // refuses on mismatch. Absent/null (copy) -> field omitted
+                    // -> server skips verification (unchanged fast path).
+                    if (opts && opts.expected_sha256) {
+                        body.expected_sha256 = opts.expected_sha256;
+                    }
+                    return _modFileApi('/file/upload_commit', body, opts);
                 },
                 uploadAbort: function (uploadId, opts) {
                     return _modFileApi('/file/upload_abort',
