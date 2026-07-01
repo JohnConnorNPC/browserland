@@ -479,6 +479,16 @@
                     if (msg) showNotice(msg);
                     return false;
                 };
+                // #109: Cancel exit — drop the dest session (removes the partial
+                // .part, awaited before we re-list) then refresh both panes so
+                // they reflect the true post-cancel state. A cancelled MOVE never
+                // reaches the source-delete below, so the source stays put.
+                const cancelExit = async () => {
+                    await failAbort('transfer cancelled');
+                    reList('left');
+                    reList('right');
+                    return false;
+                };
                 if (win.disposed) return await failAbort();
                 // 2) Stream chunk by chunk. offset advances by the DECODED bytes
                 //    the server reports (rc.length) — never the base64 length or
@@ -487,7 +497,7 @@
                 let offset = 0;
                 let srcSize = null;
                 while (true) {
-                    if (aborted()) return await failAbort('transfer cancelled');
+                    if (aborted()) return await cancelExit();
                     const rc = await fmFile().readChunk(srcPath,
                         { host: srcHost.id, offset: offset,
                           length: FM_CHUNK_BYTES });
@@ -520,6 +530,11 @@
                     }
                     if (rc.eof) break;
                 }
+                // A Cancel during the FINAL chunk breaks the loop on eof before
+                // the loop-top check can fire again — re-check here so a late
+                // Cancel still drops the dest temp and (crucially, for a move)
+                // never reaches the source-delete below. (#109)
+                if (aborted()) return await cancelExit();
                 // 3) Commit (atomic replace on the dest). On failure the server has
                 //    already dropped the temp + session, so no abort is needed.
                 const cm = await fmFile().uploadCommit(uploadId,
@@ -655,8 +670,23 @@
                     showNotice('cross-host folder copy isn’t supported yet');
                     return false;
                 }
-                return await transferTo(destSide, src.hostId, src.path,
-                                        srcName, move);
+                // #109: show a live progress window for the whole streamed
+                // transfer + hand its AbortController signal into transferTo's
+                // chunk loop (Cancel). The finally covers every exit — success,
+                // failure, cancel, a thrown path, or a mid-transfer win.disposed
+                // (the overlay lives on document.body, so it's removed regardless
+                // of the fm window's own teardown).
+                const progress = openProgressDialog({
+                    title: move ? 'Moving' : 'Copying', name: srcName,
+                    from: hostPickerLabel(srcHost) + ' — ' + src.path,
+                    to: hostPickerLabel(destHost) + ' — ' + destPath });
+                try {
+                    return await transferTo(destSide, src.hostId, src.path,
+                        srcName, move,
+                        { onProgress: progress.update, signal: progress.signal });
+                } finally {
+                    progress.close();
+                }
             };
             const transferFromPayload = (payload, destSide, move) => {
                 if (!payload || !payload.path) return;
