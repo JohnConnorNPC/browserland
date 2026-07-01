@@ -1,0 +1,35 @@
+        /* ---- mod: clipboard (#106) — rolling copy/paste history window ------
+           A default-off (opt-in) mod: a small app window listing the last N
+           clipboard entries in both directions (→ copied out of a terminal /
+           ← pasted in), each re-copyable with one click. Ephemeral (in-memory) —
+           a reload clears it. Styled to mirror the task-manager (.app-tm) list;
+           theme-aware via the shared vars + the window's own --accent. Routed
+           into the head <style> by ui.py's S4 mod-css splice (mod.json `styles`). */
+        .term-window.app-clip .clip-body {
+            flex: 1 1 0; overflow: auto; min-height: 0;
+            background: var(--bg-2, #1b1b1b); color: var(--fg, #ddd);
+        }
+        .term-window.app-clip .clip-empty {
+            padding: 14px 10px; color: var(--fg-dim, #888);
+            font: 12px Arial, sans-serif;
+        }
+        .term-window.app-clip .clip-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 8px; cursor: pointer; user-select: none;
+            border-bottom: 1px solid var(--bg-3, #000);
+            font: 12px Arial, sans-serif;
+        }
+        .term-window.app-clip .clip-row:hover { background: var(--bg-3, #262626); }
+        .term-window.app-clip .clip-dir {
+            flex: 0 0 auto; width: 14px; text-align: center; font-weight: bold;
+        }
+        .term-window.app-clip .clip-dir-in { color: #6ac36a; }   /* pasted in */
+        .term-window.app-clip .clip-dir-out { color: #4aa3ff; }  /* copied out */
+        .term-window.app-clip .clip-time {
+            flex: 0 0 auto; color: var(--fg-dim, #888);
+            font-family: monospace; font-size: 10px;
+        }
+        .term-window.app-clip .clip-text {
+            flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; font-family: monospace;
+        }

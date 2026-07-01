@@ -1,0 +1,10 @@
+{
+  "id": "clipboard",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Clipboard",
+  "description": "Rolling in-memory history of the last 20 clipboard entries in both directions — text copied out of a terminal and text pasted in — in a small app window where any entry re-copies with one click. Ships disabled (opt-in) because clipboards carry secrets; captures nothing until enabled. Ephemeral — a reload clears it, and a Clear-history button empties it on demand. Rides the core ctx.clipboard observer seam + ctx.registerWindowKind.",
+  "entry": "clipboard.js",
+  "styles": ["clipboard.css"],
+  "author": "JohnConnorNPC"
+}
