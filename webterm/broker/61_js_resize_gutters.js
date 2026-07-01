@@ -272,7 +272,11 @@
         // Fast, cancelable viewport slide. Replaces native behavior:'smooth' (browser-
         // timed, sluggish over long jumps). Animates strip.scrollLeft so onStripScroll
         // keeps floating windows + the scrollbar thumb in sync every frame.
-        const SLIDE_MAX_MS = 240, SLIDE_MIN_MS = 110, SLIDE_PX_PER_MS = 2.4;
+        // #125: slide speed. The cap is the per-broker `slideDurationMs` setting
+        // (Control Panel; default 500, 0 = instant), passed in per call; distance
+        // sets the actual duration at ~SLIDE_PX_PER_MS px/ms so short reveals stay
+        // proportionally quicker, clamped to [half the cap, the cap].
+        const SLIDE_PX_PER_MS = 1.5;
         let _slideRaf = null;
         let _slideExpected = 0;   // last scrollLeft we wrote; divergence => user took over
         const _reducedMotionMql =
@@ -280,13 +284,20 @@
         function cancelStripSlide() {
             if (_slideRaf !== null) { cancelAnimationFrame(_slideRaf); _slideRaf = null; }
         }
-        function slideStripTo(strip, to) {
+        function slideStripTo(strip, to, maxMs) {
             cancelStripSlide();                       // retarget: kill any in-flight slide
+            // The only caller gates on a normalized [120,2000] cap, but keep the
+            // helper self-contained: a non-finite or <=0 cap means "no slide", so
+            // jump instantly rather than animate with a NaN/Infinity duration.
+            if (!(maxMs > 0) || !isFinite(maxMs)) { strip.scrollLeft = to; return; }
             const from = strip.scrollLeft;
             const dist = Math.abs(to - from);
             if (dist < 1) return;
-            // distance-scaled + clamped: short reveals stay snappy, long ones stay bounded
-            const dur = Math.min(SLIDE_MAX_MS, Math.max(SLIDE_MIN_MS, dist / SLIDE_PX_PER_MS));
+            // distance-scaled + clamped: short reveals stay snappy, long ones stay
+            // bounded by the user's cap. minMs = half the cap keeps the clamp well-
+            // ordered (minMs <= maxMs) even when the cap is set very low.
+            const minMs = maxMs * 0.5;
+            const dur = Math.min(maxMs, Math.max(minMs, dist / SLIDE_PX_PER_MS));
             let t0 = null;
             _slideExpected = from;
             function step(ts) {                        // ts = rAF DOMHighResTimeStamp
@@ -335,11 +346,14 @@
             }
             x = Math.max(0, x);
             if (Math.abs(x - viewLeft) < 1) return;
-            if (smooth && !(_reducedMotionMql && _reducedMotionMql.matches)) {
-                slideStripTo(strip, x);
+            // #125: cap from the per-broker slideDurationMs setting; 0 = instant
+            // (an explicit user opt-out, treated like reduced-motion).
+            const slideMs = getSettings().slideDurationMs;
+            if (smooth && slideMs > 0 && !(_reducedMotionMql && _reducedMotionMql.matches)) {
+                slideStripTo(strip, x, slideMs);
             } else {
-                cancelStripSlide();          // relayout/reduced-motion supersedes any live slide
-                strip.scrollLeft = x;        // instant
+                cancelStripSlide();          // instant supersedes any live slide
+                strip.scrollLeft = x;        // relayout / reduced-motion / slideMs=0
             }
         }
         function cssEscape(s) {

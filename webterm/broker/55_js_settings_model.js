@@ -78,6 +78,21 @@
                     s.snapHoldMs = Math.max(250, Math.min(20000, Math.round(s.snapHoldMs)));
                 }
             }
+            // #125: max viewport-slide duration (ms) when switching to an
+            // off-screen tiled window (keyboard focus, taskbar chip, column
+            // move). Stored/synced per-broker like snapHoldMs above; the slide is
+            // a single LOCAL viewport motion, so scrollColumnIntoView reads THIS
+            // broker's value. 0 disables the animation (instant jump, like
+            // reduced-motion); otherwise clamp to [120, 2000]. Missing/invalid ->
+            // the 500ms default. (Actual per-switch duration scales with distance
+            // and floors at half this value — see slideStripTo.)
+            if (s.slideDurationMs !== 0) {
+                if (typeof s.slideDurationMs !== 'number' || !isFinite(s.slideDurationMs)) {
+                    s.slideDurationMs = 500;
+                } else {
+                    s.slideDurationMs = Math.max(120, Math.min(2000, Math.round(s.slideDurationMs)));
+                }
+            }
             // Hide (vs. dim) taskbar items for windows on other workspaces.
             // Browser-global UI-chrome preference; default off (today's behavior).
             if (typeof s.hideTaskbarOtherWs !== 'boolean') s.hideTaskbarOtherWs = false;
