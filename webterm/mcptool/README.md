@@ -117,7 +117,7 @@ drives the endpoint (or the client) directly.
 
 **`send_keys` — control/escape keys.** `send_input` types literal text;
 `send_keys(id, keys)` sends the byte sequences for keys that text can't express.
-`keys` is a list of tokens: a named key (`Enter`, `Tab`, `Esc`, `Space`,
+`keys` is a list of tokens: a named key (`Enter`, `LF`, `Tab`, `Esc`, `Space`,
 `Backspace`, `Delete`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `PageUp`,
 `PageDown`, `Insert`, `F1`–`F12`), a Ctrl chord `C-<char>` (`C-c` → `0x03`,
 `C-Space` → NUL, `C-h` → `0x08`), an Alt chord `M-<char>` (ESC + char), or a
@@ -125,6 +125,12 @@ single literal character — e.g. `["C-c"]`, `["Esc"]`, `["Up","Up","Enter"]`. I
 **emits the byte sequences** a keyboard would send; it does not synthesise OS
 key events. Tokens go out verbatim (no newline→Enter rewrite). Whether `C-c`
 interrupts depends on the target's PTY backend/mode.
+
+`Enter`/`Return` emit a carriage return (CR, `0x0D`) — what cooked-mode shells
+expect. A raw-mode ncurses/PDCurses TUI that reads the keypad directly may
+ignore CR and act only on a line-feed (LF, `0x0A`); for those send `LF`
+(identical to the `C-j` chord) instead of `Enter` — e.g. Dwarf Fortress's
+per-dwarf Labor screen (#127).
 
 **`send_keys` cursor keys (#23).** Arrows / Home / End are sent as SS3
 (`ESC O x`) when the terminal has DECCKM (application-cursor-key mode) on — which

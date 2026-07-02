@@ -239,6 +239,7 @@ def test_tool_normalizes_but_client_is_verbatim():
     (["C-?"], "\x7f"),                       # DEL
     (["C-h"], "\x08"),                       # BS (distinct from Backspace->DEL)
     (["Enter"], "\r"), (["return"], "\r"),
+    (["LF"], "\n"), (["lf"], "\n"), (["linefeed"], "\n"),  # #127: LF (0x0A)
     (["Tab"], "\t"), (["Esc"], "\x1b"), (["escape"], "\x1b"),
     (["Space"], " "),
     (["Backspace"], "\x7f"), (["BS"], "\x7f"),
@@ -265,6 +266,19 @@ def test_keys_to_text_rejects(bad):
     from webterm.mcptool import server
     with pytest.raises(ValueError):
         server._keys_to_text(bad)
+
+
+def test_lf_token_distinct_from_enter():
+    """#127: LF/linefeed emit a bare line-feed (0x0A) for raw-mode
+    ncurses/PDCurses TUIs, while Enter/Return keep sending CR (0x0D). LF is
+    byte-for-byte the C-j chord, just discoverable by name."""
+    from webterm.mcptool import server
+    assert server._keys_to_text(["LF"]) == "\n"
+    assert server._keys_to_text(["linefeed"]) == "\n"
+    assert server._keys_to_text(["LF"]) == server._keys_to_text(["C-j"])  # same byte
+    # The CR-only Enter policy is unchanged.
+    assert server._keys_to_text(["Enter"]) == "\r"
+    assert server._keys_to_text(["return"]) == "\r"
 
 
 def test_send_keys_posts_translated_bytes_verbatim():

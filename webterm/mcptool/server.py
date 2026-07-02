@@ -156,6 +156,11 @@ def _newlines_to_enter(data: str) -> str:
 # depends on DECCKM (see send_keys), which a stateless map can't encode.
 _NAMED_KEYS = {
     "enter": "\r", "return": "\r",
+    # LF (0x0A): a "logical Enter" for raw-mode ncurses/PDCurses TUIs that read
+    # the keypad directly and act on line-feed, ignoring the CR that
+    # "enter"/"return" send (e.g. Dwarf Fortress's Labor screen, #127). Same
+    # byte as the ``C-j`` chord, but discoverable by name.
+    "lf": "\n", "linefeed": "\n",
     "tab": "\t",
     "esc": "\x1b", "escape": "\x1b",
     "space": " ",
@@ -181,7 +186,7 @@ _CURSOR_KEYS = {"up": "A", "down": "B", "right": "C", "left": "D",
 # 0x1b-0x1f. ``?`` is the lone exception (DEL, 0x7f).
 _CTRL_SYMBOLS = "@[\\]^_"
 
-_KEY_HELP = ("use a named key (Enter, Tab, Esc, Space, Backspace, Delete, "
+_KEY_HELP = ("use a named key (Enter, LF, Tab, Esc, Space, Backspace, Delete, "
              "Up/Down/Left/Right, Home, End, PageUp, PageDown, Insert, F1-F12), "
              "a C-<char> or M-<char> chord (e.g. C-c for Ctrl-C, C-Space for "
              "NUL, M-x for Alt-x), or a single literal character")
@@ -397,12 +402,18 @@ def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
     Use this for keys that aren't plain text — Ctrl-C, Esc, arrows, function
     keys — which `send_input` can't express. `keys` is a list of tokens, each
     one of:
-      - a named key: Enter, Tab, Esc, Space, Backspace, Delete, Up, Down,
+      - a named key: Enter, LF, Tab, Esc, Space, Backspace, Delete, Up, Down,
         Left, Right, Home, End, PageUp, PageDown, Insert, F1-F12;
       - a Ctrl chord `C-<char>` (e.g. `C-c` -> 0x03 / Ctrl-C, `C-d`, `C-[`,
         `C-Space` -> NUL, `C-h` -> 0x08), or an Alt chord `M-<char>` (ESC + char);
       - a single literal character (sent as its UTF-8 bytes).
     e.g. `["C-c"]` to interrupt, `["Esc"]`, `["Up","Up","Enter"]`.
+
+    Enter emits a carriage return (CR, 0x0D) — what a real Enter key sends and
+    what cooked-mode shells expect. A raw-mode ncurses/PDCurses TUI that reads
+    the keypad directly may ignore CR and act only on a line-feed (LF, 0x0A);
+    for those send `LF` (identical to the `C-j` chord) instead of `Enter` — e.g.
+    Dwarf Fortress's per-dwarf Labor screen (#127).
 
     This **emits the byte sequences** a keyboard would send (Ctrl-C -> 0x03); it
     does not synthesize OS key events. Whether 0x03 actually interrupts depends
