@@ -107,9 +107,9 @@
                     tabBar.className = 'app-tabs';
                     const toolbar = document.createElement('div');
                     toolbar.className = 'app-toolbar app-scratch-toolbar';
-                    const addBtn = btn('+', 'tb-btn app-scratch-add',
+                    const addBtn = btn('+', 'app-scratch-add',
                         'new tab', () => addTab());
-                    const histBtn = btn('History', 'tb-btn app-scratch-hist-btn',
+                    const histBtn = btn('History', 'app-scratch-hist-btn',
                         'browse + restore past revisions', () => toggleHistory());
                     toolbar.appendChild(addBtn);
                     toolbar.appendChild(histBtn);
@@ -439,7 +439,7 @@
                         const label = document.createElement('span');
                         label.textContent = 'Revision history';
                         bar.appendChild(label);
-                        bar.appendChild(btn('Close', 'tb-btn',
+                        bar.appendChild(btn('Close', 'app-scratch-hist-close',
                             'close history', closeHistory));
                         histPanel.appendChild(bar);
 

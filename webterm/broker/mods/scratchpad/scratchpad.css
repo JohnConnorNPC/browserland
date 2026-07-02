@@ -45,14 +45,10 @@
     padding: 4px 6px; background: #202020;
     border-bottom: 1px solid #000; flex: 0 0 auto;
 }
-.term-window.app-scratch .app-scratch-toolbar .tb-btn {
-    background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
-    color: #ddd; font-size: 11px; padding: 2px 9px; cursor: pointer;
+.term-window.app-scratch .app-scratch-toolbar button:hover {
+    border-color: #2aa896;
 }
-.term-window.app-scratch .app-scratch-toolbar .tb-btn:hover {
-    background: #333; border-color: #2aa896;
-}
-.term-window.app-scratch .app-scratch-add { font-weight: bold; }
+.term-window.app-scratch .app-scratch-add { font-weight: bold; min-width: 24px; }
 
 /* Read-only banner (this browser isn't the active one). */
 .term-window.app-scratch .app-scratch-ro {
@@ -86,12 +82,12 @@
     display: flex; align-items: center; justify-content: space-between;
     gap: 8px; font-weight: bold;
 }
-.term-window.app-scratch .app-scratch-hist-bar .tb-btn {
+.term-window.app-scratch .app-scratch-hist-bar .app-scratch-hist-close {
     background: #1e1e1e; border: 1px solid #3a3a3a; border-radius: 3px;
     color: #ddd; font-size: 11px; padding: 2px 9px; cursor: pointer;
     font-weight: normal;
 }
-.term-window.app-scratch .app-scratch-hist-bar .tb-btn:hover { background: #333; }
+.term-window.app-scratch .app-scratch-hist-bar .app-scratch-hist-close:hover { background: #333; }
 .term-window.app-scratch .app-scratch-hist-list {
     display: flex; flex-direction: column; gap: 2px;
     border: 1px solid #333; border-radius: 4px; padding: 4px;
