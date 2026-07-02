@@ -13,6 +13,7 @@ startup never blocks on a network probe. The first tool call surfaces a clean
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -190,6 +191,12 @@ _KEY_HELP = ("use a named key (Enter, LF, Tab, Esc, Space, Backspace, Delete, "
              "Up/Down/Left/Right, Home, End, PageUp, PageDown, Insert, F1-F12), "
              "a C-<char> or M-<char> chord (e.g. C-c for Ctrl-C, C-Space for "
              "NUL, M-x for Alt-x), or a single literal character")
+
+# send_keys inter-key pacing cap (#129): the largest PER-TOKEN pause `delay_ms`
+# may request, so any one inter-key pause is bounded. It caps per token, not the
+# whole call (a long token list can still pace for a while — total ~= cap x
+# tokens). A negative/zero delay disables pacing entirely (single-burst).
+_MAX_KEY_DELAY_MS = 1000
 
 
 def _ctrl_byte(ch: str) -> str:
@@ -411,7 +418,7 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
+def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
     r"""Send terminal KEY SEQUENCES (control/escape keys) to a terminal. The
     window must be in 'readwrite' mode.
 
@@ -448,13 +455,34 @@ def send_keys(id: str, keys: List[str]) -> Dict[str, Any]:
     render; to wipe a corrupted buffer regardless of the app, use
     `reset_terminal`. (Neither un-freezes a hung app — kill it.)
 
+    Pacing (#129): by default the whole token list is written in ONE burst. A
+    frame-polling raw-input TUI — one that reads input once per render frame,
+    like Dwarf Fortress — drops keys that arrive faster than it polls, so a
+    burst of arrows or spaces can advance only partially. Pass `delay_ms` (per
+    token, capped 1000) to write each token in its own POST with that pause
+    between them, so every keypress lands on a separate frame; the default `0`
+    keeps the single-burst write (back-compat). Pacing only kicks in with more
+    than one token, and a bad token still raises before any byte is sent.
+
     Pass a namespaced window id ("<host>:<int>")."""
     # Validate + translate up front (atomic, CSI form): a bad token raises here,
     # before any routing, DECCKM lookup or send.
     text = _keys_to_text(keys)
     client, int_id = _route(id)
-    if _keys_have_cursor(keys) and _terminal_app_cursor(client, int_id):
+    app_cursor = _keys_have_cursor(keys) and _terminal_app_cursor(client, int_id)
+    if app_cursor:
         text = _keys_to_text(keys, app_cursor=True)   # re-encode arrows as SS3
+    pace = min(max(int(delay_ms), 0), _MAX_KEY_DELAY_MS)
+    if pace and len(keys) > 1:
+        # #129: write one token per POST with a pause between, so a frame-polling
+        # TUI sees each keypress on its own frame instead of dropping a burst.
+        # Tokens are already validated above, so this can't half-type a line.
+        result: Dict[str, Any] = {}
+        for i, tok in enumerate(keys):
+            if i:
+                time.sleep(pace / 1000.0)
+            result = client.send_input(int_id, _token_to_text(str(tok), app_cursor))
+        return result
     return client.send_input(int_id, text)
 
 

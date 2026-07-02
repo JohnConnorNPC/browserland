@@ -354,6 +354,111 @@ def test_send_keys_invalid_token_sends_nothing():
     assert calls == []   # atomic: nothing was sent
 
 
+# ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
+
+def _paced_capture(monkeypatch):
+    """Install a single 'default' host, stub out server.time.sleep (recording
+    the pauses), and capture each /mcp/input body. Returns (inputs, sleeps),
+    both live lists filled as send_keys runs."""
+    from webterm.mcptool import server
+    inputs: list = []
+    sleeps: list = []
+    monkeypatch.setattr(server.time, "sleep", lambda s: sleeps.append(s))
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/mcp/terminals":       # DECCKM cache (cursor keys)
+            return httpx.Response(200, json=[{"id": 9, "app_cursor": True}])
+        inputs.append(json.loads(req.content))
+        return httpx.Response(200, json={"ok": True})
+
+    _install({"default": handler})
+    return inputs, sleeps
+
+
+def test_send_keys_paces_tokens_with_delay(monkeypatch):
+    """A positive delay_ms writes each token in its OWN POST with a time.sleep
+    pause between them (never before the first / after the last), so a
+    frame-polling TUI sees one keypress per frame."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)
+    try:
+        assert server.send_keys("default:9", ["Space", "Space", "Space"],
+                                delay_ms=5) == {"ok": True}
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": " "},
+                      {"id": 9, "data": " "},
+                      {"id": 9, "data": " "}]     # one token per write
+    assert sleeps == [5 / 1000.0, 5 / 1000.0]     # a pause only BETWEEN tokens
+
+
+def test_send_keys_default_delay_is_single_burst(monkeypatch):
+    """Back-compat: the default delay_ms=0 keeps the whole list in one POST and
+    never sleeps — the pre-#129 behavior, unchanged."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)
+    try:
+        server.send_keys("default:9", ["Space", "Space", "Space"])
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "   "}]   # single burst
+    assert sleeps == []                           # no pacing
+
+
+def test_send_keys_delay_single_token_not_paced(monkeypatch):
+    """A single token has nothing to pace: one POST, no sleep, even with a
+    delay_ms (pacing needs >1 token)."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)
+    try:
+        server.send_keys("default:9", ["Enter"], delay_ms=50)
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "\r"}]
+    assert sleeps == []
+
+
+def test_send_keys_delay_capped_and_negative_ignored(monkeypatch):
+    """delay_ms is clamped to _MAX_KEY_DELAY_MS; a negative value disables pacing
+    (single burst, back-compat)."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)
+    try:
+        server.send_keys("default:9", ["a", "b"], delay_ms=999999)   # over the cap
+        server.send_keys("default:9", ["a", "b"], delay_ms=-5)       # negative
+    finally:
+        _reset_server()
+    assert sleeps == [server._MAX_KEY_DELAY_MS / 1000.0]   # clamped, one pause
+    assert inputs == [{"id": 9, "data": "a"}, {"id": 9, "data": "b"},  # paced pair
+                      {"id": 9, "data": "ab"}]                          # burst (neg)
+
+
+def test_send_keys_paced_arrows_keep_ss3_under_decckm(monkeypatch):
+    """#129 + #23: paced writes still honor DECCKM — each arrow token goes out as
+    SS3 in its own POST when the terminal has application-cursor mode on."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)   # handler reports app_cursor=True
+    try:
+        server.send_keys("default:9", ["Down", "Down"], delay_ms=5)
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "\x1bOB"}, {"id": 9, "data": "\x1bOB"}]
+    assert sleeps == [5 / 1000.0]
+
+
+def test_send_keys_paced_bad_token_sends_nothing(monkeypatch):
+    """Atomicity holds under pacing too: a bad token raises before any POST or
+    sleep, leaving no half-typed sequence."""
+    from webterm.mcptool import server
+    inputs, sleeps = _paced_capture(monkeypatch)
+    try:
+        with pytest.raises(ValueError):
+            server.send_keys("default:9", ["Space", "Bogus", "Space"], delay_ms=5)
+    finally:
+        _reset_server()
+    assert inputs == [] and sleeps == []
+
+
 # ---- #23: DECCKM-aware cursor keys ----------------------------------------
 
 def test_token_to_text_cursor_mode():
