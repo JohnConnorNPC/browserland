@@ -3029,6 +3029,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         since = body.get("since")
         if not isinstance(since, str) or not since:
             since = None
+        # attrs (#128): opt-in styled-run map (fg/bg/reverse), so a color-only
+        # menu selection the plain text drops is visible. Orthogonal to the wait
+        # and delta modes (it shapes the reply, not when it fires).
+        attrs = bool(body.get("attrs", False))
         try:
             timeout_ms = int(body.get("timeout_ms", 0) or 0)
         except (TypeError, ValueError):
@@ -3042,7 +3046,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             lambda req: protocol.screen_text_please_frame(
                 req, view, lines, wait_for_change, timeout_ms,
                 wait_for_text=wait_for_text, wait_for_regex=wait_for_regex,
-                wait_absent=wait_absent, since=since),
+                wait_absent=wait_absent, since=since, attrs=attrs),
             "screen_text", timeout=rpc_timeout)
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
@@ -3069,6 +3073,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         out["delta"] = bool(payload.get("delta", False))
         if out["delta"]:
             out["changed_rows"] = payload.get("changed_rows") or []
+        # attr_runs (#128): present only for an attrs read the agent could answer
+        # (its pyte path); an older agent or the raw fallback omits it.
+        if payload.get("attr_runs") is not None:
+            out["attr_runs"] = payload.get("attr_runs")
         if payload.get("degraded"):
             out["degraded"] = True
         return sanic_json(out)

@@ -147,6 +147,39 @@ def test_read_screen_scrollback_params_and_fields():
     assert out["history_lines"] == 7 and out["cursor"] == {"row": 2, "col": 5}
 
 
+def test_read_screen_attrs_param_and_field():
+    """#128: attrs=true puts `attrs` in the body and surfaces `attr_runs`; the
+    default read omits the key entirely (back-compat)."""
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={
+            "ok": True, "id": 3, "cols": 80, "rows": 24, "text": "menu",
+            "attr_runs": [{"row": 1, "col": 0, "len": 7, "fg": "default",
+                           "bg": "default", "reverse": True}]})
+
+    with _client(handler) as c:
+        out = c.read_screen(3, attrs=True)
+    assert seen["body"] == {"id": 3, "attrs": True}
+    assert out["attr_runs"] == [{"row": 1, "col": 0, "len": 7, "fg": "default",
+                                 "bg": "default", "reverse": True}]
+
+
+def test_read_screen_default_omits_attrs():
+    """No attrs -> no `attrs` key on the wire (unchanged from before #128)."""
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True, "id": 3, "cols": 80,
+                                         "rows": 24, "text": "hi"})
+
+    with _client(handler) as c:
+        c.read_screen(3)
+    assert "attrs" not in seen["body"]
+
+
 def test_send_input_posts_id_and_data():
     seen = {}
 
@@ -1058,3 +1091,26 @@ def test_tools_round_trip_through_http():
         ("/mcp/read", {"id": 5}),
         ("/mcp/input", {"id": 5, "data": "ls\r"}),
     ]
+
+
+def test_read_screen_tool_passes_attrs_and_returns_runs():
+    """#128: the read_screen tool forwards attrs=true to the wire and returns the
+    agent's attr_runs unchanged, so a color-only selection is visible."""
+    from webterm.mcptool import server
+
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={
+            "ok": True, "id": 5, "cols": 80, "rows": 24, "text": "menu",
+            "attr_runs": [{"row": 2, "col": 0, "len": 20, "fg": "default",
+                           "bg": "default", "reverse": True}]})
+
+    _install({"default": handler})
+    try:
+        out = server.read_screen("default:5", attrs=True)
+    finally:
+        _reset_server()
+    assert seen["body"] == {"id": 5, "attrs": True}   # int id + attrs on the wire
+    assert out["attr_runs"][0]["reverse"] is True

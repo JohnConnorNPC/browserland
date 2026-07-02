@@ -76,3 +76,64 @@ def test_render_without_pyte_raises_helpful_error(monkeypatch):
     assert pyte_snap.available() is False
     with pytest.raises(RuntimeError, match="pip install pyte"):
         pyte_snap.render(b"", 80, 24)
+
+
+# ---- #128: attr_runs — surface the color/reverse-video the text drops -------
+
+def test_attr_runs_reverse_video():
+    # A reverse-video run (a color-only menu selection marker, e.g. Dwarf
+    # Fortress) with default fg/bg — invisible in the plain text — is surfaced.
+    screen = _rerender(b"\x1b[7mABANDON\x1b[0m", 20, 3)
+    assert pyte_snap.attr_runs(screen, 20, 3) == [
+        {"row": 0, "col": 0, "len": 7,
+         "fg": "default", "bg": "default", "reverse": True}]
+
+
+def test_attr_runs_color_without_reverse():
+    # A fg/bg colour swap with NO reverse flag is caught too (some TUIs mark the
+    # selection that way), so the run map isn't reverse-only.
+    screen = _rerender(b"\x1b[31;44mHI\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 2,
+         "fg": "red", "bg": "blue", "reverse": False}]
+
+
+def test_attr_runs_unstyled_screen_is_empty():
+    # A plain screen has no styled cells -> an empty list (baseline read from the
+    # screen's own default_char, not a hardcoded constant).
+    screen = _rerender(b"plain line\r\nsecond row", 20, 3)
+    assert pyte_snap.attr_runs(screen, 20, 3) == []
+
+
+def test_attr_runs_group_adjacent_and_split_on_default():
+    # Adjacent same-style cells coalesce into one run; an unstyled cell splits.
+    screen = _rerender(b"\x1b[7mAA\x1b[0m  \x1b[7mCC\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 2,
+         "fg": "default", "bg": "default", "reverse": True},
+        {"row": 0, "col": 4, "len": 2,
+         "fg": "default", "bg": "default", "reverse": True}]
+
+
+def test_attr_runs_bounded_by_cap():
+    # One styled cell per row; the cap truncates, keeping the top rows (walked
+    # top-to-bottom) so a real menu's selection near the top survives.
+    raw = b"".join(b"\x1b[7mX\x1b[0m\r\n" for _ in range(5))
+    screen = _rerender(raw, 10, 6)
+    runs = pyte_snap.attr_runs(screen, 10, 6, cap=2)
+    assert len(runs) == 2
+    assert [r["row"] for r in runs] == [0, 1]
+
+
+def test_render_screen_text_attrs_opt_in():
+    # The agent render exposes attr_runs only when attrs=True; the default read
+    # is byte-for-byte unchanged (no attr_runs key, same text) — back-compat.
+    from webterm.agent.agent import _render_screen_text
+    raw = b"\x1b[7mSEL\x1b[0m\r\nplain"
+    on = _render_screen_text(raw, 20, 4, attrs=True)
+    assert on["attr_runs"] == [
+        {"row": 0, "col": 0, "len": 3,
+         "fg": "default", "bg": "default", "reverse": True}]
+    off = _render_screen_text(raw, 20, 4)
+    assert "attr_runs" not in off
+    assert off["text"] == on["text"]

@@ -56,10 +56,12 @@ def _content_hash(text: str) -> str:
 
 def _render_screen_text(data: bytes, cols: int, rows: int,
                         view: str = "screen", lines: int = 0,
-                        alt_screen: bool = False, evicted: bool = False):
+                        alt_screen: bool = False, evicted: bool = False,
+                        attrs: bool = False):
     """Render the ring for an MCP read; return a dict
-    ``{text, degraded, alt_screen, cursor, view, history_lines}``. Runs in a
-    worker thread; never raises (#15, #21).
+    ``{text, degraded, alt_screen, cursor, view, history_lines}`` (plus
+    ``attr_runs`` when ``attrs`` and the pyte path ran). Runs in a worker
+    thread; never raises (#15, #21).
 
     pyte is the high-fidelity renderer for the CURRENT screen (trimmed to the
     last restart so it's bounded — #21 B). The dependency-free :mod:`textgrid`
@@ -70,7 +72,12 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     actually produced. ``evicted`` (the ring dropped its head) lets the
     head-trim resync a cut leading escape sequence instead of mis-decoding it
     into ghost glyphs (#28). ``degraded=True`` (``view="raw"``, ``cursor=None``)
-    is the last-ditch raw decode when no grid could be produced (#15 symptom)."""
+    is the last-ditch raw decode when no grid could be produced (#15 symptom).
+
+    ``attrs`` (#128) adds ``attr_runs`` — the styled fg/bg/reverse cell runs, so
+    a color-only menu selection the plain text drops is visible. It rides the
+    pyte path only (the dependency-free fallback carries no SGR) and is
+    best-effort: a failure to compute it just omits the key, never the text."""
     try:
         cols = max(1, int(cols))
         rows = max(1, int(rows))
@@ -90,9 +97,18 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
             stream.feed(_trim_for_screen(data, evicted))
             cur = {"row": min(max(screen.cursor.y, 0), rows - 1),
                    "col": min(max(screen.cursor.x, 0), cols - 1)}
-            return {"text": "\n".join(screen.display), "degraded": False,
-                    "alt_screen": alt_screen, "cursor": cur,
-                    "view": "screen", "history_lines": 0}
+            result = {"text": "\n".join(screen.display), "degraded": False,
+                      "alt_screen": alt_screen, "cursor": cur,
+                      "view": "screen", "history_lines": 0}
+            if attrs:
+                # Best-effort: a failed attr extraction drops the key only, never
+                # the (already-computed) text — so an odd grid can't blank a read.
+                try:
+                    from .snapshot import pyte_snap
+                    result["attr_runs"] = pyte_snap.attr_runs(screen, cols, rows)
+                except Exception as exc:
+                    LOGGER.debug("attr_runs failed (%s); omitting", exc)
+            return result
         except Exception as exc:  # ImportError or any pyte parse error
             LOGGER.debug("screen_text pyte render failed (%s); built-in grid",
                          exc)
@@ -482,7 +498,8 @@ class Agent:
                            wait_for_text: Optional[str] = None,
                            wait_for_regex: Optional[str] = None,
                            wait_absent: bool = False,
-                           since: Optional[str] = None) -> None:
+                           since: Optional[str] = None,
+                           attrs: bool = False) -> None:
         # MCP /mcp/read: render the live screen as plain text. Each render
         # snapshots the ring + dims + live alt-screen state synchronously on the
         # loop (an immutable, consistent view), then renders off-loop (pyte can
@@ -522,7 +539,7 @@ class Agent:
             cols, rows = self.state.cols, self.state.rows
             r = await loop.run_in_executor(
                 None, _render_screen_text, data, cols, rows, view, lines,
-                self.state.alt_screen, evicted)
+                self.state.alt_screen, evicted, attrs)
             r["cols"], r["rows"] = cols, rows
             return r
 
@@ -559,7 +576,8 @@ class Agent:
                 cursor=r["cursor"], view=r["view"],
                 history_lines=r["history_lines"],
                 app_cursor=self.state.app_cursor, content_hash=content_hash,
-                matched=matched, delta=delta, changed_rows=changed_rows))
+                matched=matched, delta=delta, changed_rows=changed_rows,
+                attr_runs=r.get("attr_runs")))
 
         async def _run() -> None:
             try:

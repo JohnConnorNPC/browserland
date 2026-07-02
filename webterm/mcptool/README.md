@@ -94,7 +94,7 @@ on the host prefix:
 | `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version`. Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
 | `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag) and `app_cursor` (cached DECCKM) |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
-| `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, timeout_ms?, since?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`; `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false` |
+| `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, timeout_ms?, since?, attrs?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`; `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false`. `attrs=true` adds `attr_runs` — the styled fg/bg/reverse cell runs — so a color-only menu selection the plain text drops is visible (#128) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
 | `send_keys(id, keys)` | `POST /mcp/input` | control/escape keys plain text can't express |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced |
@@ -161,6 +161,18 @@ screen view.
 > repaints, the `screen` view may be blank/stale (the `alt_screen` flag is
 > already correct). Scrollback returns lines that scrolled off the primary
 > screen — it never includes a TUI's internal scrolling.
+
+**`read_screen` — color / reverse-video selection (#128).** The default text
+mode drops cell color, so a menu row marked by color or reverse-video *alone* —
+its text identical to the other rows (e.g. a Dwarf Fortress menu) — is invisible.
+Pass `attrs=true` to also get `attr_runs`: the styled cell runs `[{row, col,
+len, fg, bg, reverse}, …]` (0-based; `len` is a cell count), so the highlighted
+row shows up as a run whose `reverse` is true or whose `fg`/`bg` differs. It's
+the full current list (never a delta) and rides the high-fidelity pyte renderer,
+so it's absent on the rare `degraded` raw read. Note `cursor` is the *hardware*
+cursor — often parked in a corner unrelated to the selection — not the menu row;
+and `content_hash`/`wait_for_change` track text only, so a color-only selection
+*move* (same text) won't trip them: read with `attrs=true` after the keypress.
 
 ## Layout
 

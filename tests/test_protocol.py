@@ -175,7 +175,7 @@ def test_screen_text_please_frame_view_lines():
                  "view": "scrollback", "lines": 200,
                  "wait_for_change": None, "timeout_ms": 0,
                  "wait_for_text": None, "wait_for_regex": None,
-                 "wait_absent": False, "since": None}
+                 "wait_absent": False, "since": None, "attrs": False}
     d = json.loads(protocol.screen_text_please_frame(5))
     assert d["view"] == "screen" and d["lines"] == 0
     assert d["wait_for_change"] is None and d["timeout_ms"] == 0
@@ -244,3 +244,28 @@ def test_screen_text_frame_alt_cursor_view_fields():
     d = json.loads(protocol.screen_text_frame(
         7, "raw", 80, 24, degraded=True, cursor=None, view="raw"))
     assert d["degraded"] is True and d["cursor"] is None and d["view"] == "raw"
+
+
+def test_screen_text_please_frame_attrs():
+    # #128: attrs rides the request; default is False (older agents ignore it).
+    f = json.loads(protocol.screen_text_please_frame(9, attrs=True))
+    assert f["attrs"] is True
+    assert json.loads(protocol.screen_text_please_frame(9))["attrs"] is False
+
+
+def test_screen_text_frame_attr_runs():
+    # #128: attr_runs is present ONLY for an attrs read, and each run is
+    # normalized to {row, col, len, fg, bg, reverse}; a plain read omits it.
+    plain = json.loads(protocol.screen_text_frame(1, "hi", 80, 24))
+    assert "attr_runs" not in plain
+    f = json.loads(protocol.screen_text_frame(
+        1, "hi", 80, 24, attr_runs=[
+            {"row": 2, "col": 0, "len": 7, "fg": "default",
+             "bg": "default", "reverse": True}]))
+    assert f["attr_runs"] == [
+        {"row": 2, "col": 0, "len": 7, "fg": "default",
+         "bg": "default", "reverse": True}]
+    # An empty attrs read (no styled cells) still carries an (empty) list, so the
+    # caller can tell "asked, none found" from "didn't ask" (key absent).
+    empty = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, attr_runs=[]))
+    assert empty["attr_runs"] == []

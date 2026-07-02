@@ -326,16 +326,31 @@ def list_profiles(host: Optional[str] = None) -> Dict[str, Any]:
 def read_screen(id: str, view: str = "screen", lines: int = 0,
                 wait_for_change: str = "", timeout_ms: int = 0,
                 wait_for_text: str = "", wait_for_regex: str = "",
-                wait_absent: bool = False, since: str = "") -> Dict[str, Any]:
+                wait_absent: bool = False, since: str = "",
+                attrs: bool = False) -> Dict[str, Any]:
     """Render a terminal's current screen as plain text. Pass a namespaced window
     id ("<host>:<int>") from list_terminals.
 
     The result includes `content_hash` (a stable digest of the screen text),
     `alt_screen` (true for a full-screen TUI like mc/btop/vim — the grid is the
-    whole story, so scrollback is meaningless) and `cursor` {row, col}. For a
+    whole story, so scrollback is meaningless) and `cursor` {row, col}. Note
+    `cursor` is the terminal's HARDWARE cursor, not the highlighted menu row — a
+    full-screen menu often parks it in a corner unrelated to the selection. For a
     shell, pass `view="scrollback"` with `lines=N` to get up to N lines of
     history above the current grid (`history_lines` reports how many were
     included; ignored when `alt_screen` is true).
+
+    COLOR / SELECTION — the default text mode drops cell color, so a menu row
+    marked by color or reverse-video ALONE (its text identical to the others —
+    e.g. a Dwarf Fortress menu) is invisible here. Pass `attrs=true` to also get
+    `attr_runs`: the styled cell runs [{row, col, len, fg, bg, reverse}, ...]
+    (0-based; `len` is a cell count) — the selected row shows up as a run whose
+    `reverse` is true or whose `fg`/`bg` differ from the rest, so you can tell
+    which row is highlighted before pressing an activate key. `attr_runs` is the
+    full current list (never a delta) and rides the high-fidelity renderer; it is
+    absent on the rare `degraded` raw read. `content_hash`/`wait_for_change`
+    track text only, so a color-only selection MOVE (same text) won't trip them —
+    read with `attrs=true` after a cursor keypress rather than waiting on it.
 
     WAITING (one call, no polling) — all bounded by `timeout_ms` (capped 15000):
     - wait for ANY change: pass the previous read's `content_hash` as
@@ -368,7 +383,8 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
                               wait_for_text=wait_for_text or None,
                               wait_for_regex=wait_for_regex or None,
                               wait_absent=wait_absent,
-                              since=since or None)
+                              since=since or None,
+                              attrs=attrs)
 
 
 @mcp.tool()

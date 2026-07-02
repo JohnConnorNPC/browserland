@@ -168,7 +168,8 @@ def screen_text_please_frame(req: int, view: str = "screen",
                              wait_for_text: Optional[str] = None,
                              wait_for_regex: Optional[str] = None,
                              wait_absent: bool = False,
-                             since: Optional[str] = None) -> str:
+                             since: Optional[str] = None,
+                             attrs: bool = False) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
     producers have no handler, so the request times out -> 502). ``view``
@@ -191,7 +192,12 @@ def screen_text_please_frame(req: int, view: str = "screen",
     ``since`` (a prior ``content_hash``, #52) asks for a DELTA: if the agent
     still holds that frame and this is a clean same-size current-screen render,
     the reply carries ``changed_rows`` (only the rows that differ) + ``delta``:
-    true, instead of the full grid. Misses fall back to a full read."""
+    true, instead of the full grid. Misses fall back to a full read.
+
+    ``attrs`` (#128) asks the agent to also return ``attr_runs`` — the styled
+    fg/bg/reverse cell runs — so a color-only menu selection the plain text
+    drops is visible. Orthogonal to the wait/delta modes; older agents ignore
+    the key. Always the full current run list (never deltaed)."""
     return json.dumps({"type": "screen_text_please", "req": int(req),
                        "view": str(view), "lines": int(lines),
                        "wait_for_change": wait_for_change,
@@ -199,7 +205,7 @@ def screen_text_please_frame(req: int, view: str = "screen",
                        "wait_for_text": wait_for_text,
                        "wait_for_regex": wait_for_regex,
                        "wait_absent": bool(wait_absent),
-                       "since": since})
+                       "since": since, "attrs": bool(attrs)})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -255,7 +261,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       app_cursor: bool = False, content_hash: str = "",
                       matched: Optional[bool] = None,
                       delta: bool = False,
-                      changed_rows: Optional[list] = None) -> str:
+                      changed_rows: Optional[list] = None,
+                      attr_runs: Optional[list] = None) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -265,9 +272,14 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     DECCKM (application cursor keys) — when true, send_keys must emit SS3 arrows.
     ``cursor`` is ``{row, col}`` 0-based within the grid (``None`` when degraded).
     ``content_hash`` (#26) is a stable digest of ``text`` so a caller can detect
-    change across reads (the empty string means the agent didn't compute one).
-    ``degraded`` is the rare last-ditch raw decode (``view="raw"``), so the
-    caller knows the text is not a clean grid render."""
+    change across reads (the empty string means the agent didn't compute one) —
+    it stays text-only, so a color-only selection move (identical text) doesn't
+    change it. ``attr_runs`` (#128), present only when the read asked for
+    ``attrs``, is the styled fg/bg/reverse cell runs (``{row, col, len, fg, bg,
+    reverse}``) so a color-only menu selection the plain text drops is visible;
+    it is always the full current list, alongside any text delta. ``degraded``
+    is the rare last-ditch raw decode (``view="raw"``), so the caller knows the
+    text is not a clean grid render."""
     frame: Dict[str, Any] = {
         "type": "screen_text",
         "req": int(req),
@@ -300,6 +312,17 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         frame["changed_rows"] = [
             {"row": int(c.get("row", 0)), "text": str(c.get("text", ""))}
             for c in changed_rows]
+    # attr_runs (#128): present ONLY for an attrs read — the styled fg/bg/reverse
+    # cell runs, so a color-only selection the plain text drops is visible. The
+    # helper re-projects each run to its canonical shape (never trusts the caller
+    # to have supplied every key / the right types).
+    if attr_runs is not None:
+        frame["attr_runs"] = [
+            {"row": int(a.get("row", 0)), "col": int(a.get("col", 0)),
+             "len": int(a.get("len", 0)), "fg": str(a.get("fg", "default")),
+             "bg": str(a.get("bg", "default")),
+             "reverse": bool(a.get("reverse", False))}
+            for a in attr_runs]
     return json.dumps(frame)
 
 

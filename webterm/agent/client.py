@@ -217,8 +217,9 @@ class BrokerClient:
                 if self._on_screen_request is not None:
                     # view/lines drive scrollback (#21); wait_for_change/
                     # timeout_ms drive wait-for-change (#26); wait_for_text/
-                    # wait_for_regex/wait_absent drive wait-for-content (#51).
-                    # All absent for older brokers -> an immediate single read.
+                    # wait_for_regex/wait_absent drive wait-for-content (#51);
+                    # attrs adds the styled-run map (#128). All absent for older
+                    # brokers -> an immediate single plain-text read.
                     wfc = data.get("wait_for_change")
                     wft = data.get("wait_for_text")
                     wfr = data.get("wait_for_regex")
@@ -232,7 +233,8 @@ class BrokerClient:
                         wait_for_text=wft if isinstance(wft, str) and wft else None,
                         wait_for_regex=wfr if isinstance(wfr, str) and wfr else None,
                         wait_absent=bool(data.get("wait_absent", False)),
-                        since=since if isinstance(since, str) and since else None)
+                        since=since if isinstance(since, str) and since else None,
+                        attrs=bool(data.get("attrs", False)))
             else:
                 LOGGER.debug("unknown broker frame type %r", mtype)
 

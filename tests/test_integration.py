@@ -510,3 +510,20 @@ async def test_reset_wakes_wait_for_change(running_agent, broker):
     r = await asyncio.wait_for(waiter, 5)
     assert r["content_hash"] != h0
     assert "before reset" not in r["text"]
+
+
+# ---- #128: read_screen attrs -> styled fg/bg/reverse run map ---------------
+
+async def test_read_screen_attrs_surfaces_reverse_video(running_agent, broker):
+    # A reverse-video run (a color-only selection marker) is invisible in the
+    # plain text but comes back in attr_runs when the read asks for attrs.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[7mABANDON\x1b[0m\r\nkeep\r\n")
+    await broker.wait_binary(lambda b: b"ABANDON" in b)
+    r = await _read_screen(broker, 1, attrs=True)
+    assert "ABANDON" in r["text"]
+    assert {"row": 0, "col": 0, "len": 7, "fg": "default",
+            "bg": "default", "reverse": True} in r["attr_runs"]
+    # A default read (no attrs) omits the key entirely — unchanged behavior.
+    plain = await _read_screen(broker, 2)
+    assert "attr_runs" not in plain
