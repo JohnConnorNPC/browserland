@@ -24,6 +24,7 @@ webterm_identity.json
 
 # Broker runtime logs
 *.log
+*.log.err
 
 # Scratch (Codex review prompts/output, test upload artifact)
 .codex_*.txt
