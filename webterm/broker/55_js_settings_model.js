@@ -125,13 +125,10 @@
             // night / none) WITHOUT rewriting the synced blob, so core no longer
             // normalizes them here or references the palette / PATTERNS list. The
             // defaults stay night/none via the mods' fallbacks + the :root CSS.
-            // Issue #18: terminal font. Whitelist to the offered TERM_FONTS
-            // values ('' = built-in default) so an unknown/hand-edited value
-            // can't leave the picker blank while a stray font silently applies.
-            if (typeof s.termFont !== 'string'
-                || !TERM_FONTS.some(f => f.value === s.termFont)) {
-                s.termFont = '';
-            }
+            // #126: `termFont` is owned by mods/termfont/ now — its select does the
+            // read-through validation (unknown -> the built-in default) WITHOUT
+            // rewriting the synced blob, so core no longer normalizes it here or
+            // references the TERM_FONTS list, exactly like `theme`/`pattern` above.
             if (typeof s.clock !== 'boolean') s.clock = false;
             // #40/#101: a one-time first-run nudge flag for the Help "?" chip (flipped
             // true once the hint shows or Help is first opened, so it never repeats).

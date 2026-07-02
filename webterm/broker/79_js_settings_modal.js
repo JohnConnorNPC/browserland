@@ -23,13 +23,11 @@
         const setDefaultProfile = document.getElementById('set-default-profile');
         const setKeybindingsEl = document.getElementById('set-keybindings');
         // Appearance controls (browser-local; bound to the LIVE local
-        // getSettings(), like restore-on-refresh — NOT settingsTarget). The font
-        // <option>s are injected from the shared TERM_FONTS constant so the modal
-        // stays in sync with applyThemeSettings() at boot / on /state pull.
-        // #75/#76: the color-scheme radio and the background-pattern select are no
-        // longer fixed core controls — mods/theme/theme.js and mods/pattern/
-        // pattern.js mount them into #set-mods via ctx.settings.radio /
-        // ctx.settings.select (like the clock checkbox below).
+        // getSettings(), like restore-on-refresh — NOT settingsTarget).
+        // #75/#76/#126: the color-scheme radio, the background-pattern select, and
+        // the terminal-font select are no longer fixed core controls — mods/theme/,
+        // mods/pattern/, and mods/termfont/ mount them into #set-mods via
+        // ctx.settings.radio / ctx.settings.select (like the clock checkbox below).
         // #71: the clock's "Show date & time" checkbox is no longer a fixed core
         // control — the clock mod mounts it into #set-mods via ctx.settings.
         // #78: the Help button "show ? chip" checkbox moved the same way (the help
@@ -37,13 +35,6 @@
         const setStartLabelEl = document.getElementById('set-start-label');
         const setSwapLaunchEl = document.getElementById('set-swap-launch');   // #114
         const setStartPathEl = document.getElementById('set-start-path');
-        const setTermFontEl = document.getElementById('set-term-font');   // #18
-        for (const f of TERM_FONTS) {           // #18: terminal font choices
-            const opt = document.createElement('option');
-            opt.value = f.value;
-            opt.textContent = f.label;
-            setTermFontEl.appendChild(opt);
-        }
         // MCP access section (per-broker; NOT part of the synced /state blob —
         // fetched/saved via /mcp/config on the settings-target host, mirroring
         // renderDefaultProfile's per-host pattern). The token is a secret, so it

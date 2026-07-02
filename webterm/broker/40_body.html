@@ -56,19 +56,12 @@
                      immediately, so renderSettings() shows the `.set-browser-global`
                      sections ONLY on the local ('this broker') tab — a remote host
                      tab shows just that host's own settings (#17). -->
-                <!-- #75/#76: the Color scheme radio and the Background pattern
-                     select moved to mods/theme/theme.js and mods/pattern/
-                     pattern.js; they mount into #set-mods (below) via
-                     ctx.settings.radio / ctx.settings.select, like the clock
-                     checkbox. -->
-                <div class="set-section set-browser-global">
-                    <div class="set-title">Terminal font</div>
-                    <div class="set-row"><label>font</label>
-                        <select id="set-term-font"></select></div>
-                    <div class="set-hint">applies to your terminals (an appearance
-                        setting, like the color scheme); an uninstalled font falls
-                        back to Consolas / monospace.</div>
-                </div>
+                <!-- #75/#76/#126: the Color scheme radio, the Background pattern
+                     select, and the Terminal font select all moved to mods
+                     (mods/theme/, mods/pattern/, mods/termfont/); they mount into
+                     #set-mods (below) via ctx.settings.radio / ctx.settings.select,
+                     like the clock checkbox. -->
+
                 <!-- #71/#74: mod-contributed Control Panel controls mount here
                      (boolean/radio/select toggles + registerSettingsPane panes).
                      Each mounted section carries its OWN .set-browser-global per

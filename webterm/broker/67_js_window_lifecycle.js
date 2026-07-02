@@ -17,6 +17,14 @@
         // win and RE-EMITS a fresh create for the rebuilt one; the widget is torn
         // down and re-decorated, never silently lost or double-mounted.
         const termCreateCbs = [];
+        // #126: core constructs every terminal with this self-contained baseline
+        // monospace stack and knows NOTHING about the (now mod-owned) terminal-font
+        // feature. The termfont mod (mods/termfont/) overrides it PER terminal via
+        // ctx.windows.onTerminalCreate when enabled, and resets terminals to THIS
+        // exact family on disable — so this literal MUST stay equal to the mod's
+        // TERM_FONT_DEFAULT (guarded by test_termfont_symbols_removed_from_core_
+        // fragments). When the mod is off, terminals use this baseline.
+        const TERM_FONT_BASELINE = 'Consolas, "Liberation Mono", monospace';
         // Build the per-window context object and hand it to ONE subscriber. Used
         // by both the create-time emit and the replay, so both see an identical
         // shape. titleBar/minBtn are derived from win.dom so a replayed window
@@ -198,7 +206,7 @@
                 cursorBlink: true,
                 cols: 80,
                 rows: 24,
-                fontFamily: terminalFontFamily(),   // #18: configurable
+                fontFamily: TERM_FONT_BASELINE,   // #126: mod overrides per terminal
                 fontSize: 14,
                 theme: { background: '#000000' }
             });

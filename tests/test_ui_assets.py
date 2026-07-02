@@ -505,6 +505,97 @@ def test_pattern_mod_packaged_and_manifest_agrees():
     assert INDEX_HTML.index("id: 'theme'") < INDEX_HTML.index("id: 'pattern'")
 
 
+# --------------------------------------------------------------------------- #
+# termfont mod (#126)
+# --------------------------------------------------------------------------- #
+
+# The baseline monospace stack core constructs terminals with (67) MUST equal the
+# termfont mod's TERM_FONT_DEFAULT (the family the mod resets to on disable). Both
+# fragments carry this exact literal; the parity check below guards the coupling.
+_TERM_FONT_BASELINE_LITERAL = "'Consolas, \"Liberation Mono\", monospace'"
+
+
+def test_termfont_symbols_removed_from_core_fragments():
+    # The terminal font is now a mod (#126): its TERM_FONTS list, terminalFontFamily,
+    # the applyTerminalFont painter, the #set-term-font markup, the core
+    # normalization, its Control Panel option-population + reflect + change handler,
+    # and the construction-time reader are all gone from core. Scope the check to the
+    # CORE fragments it was extracted from (the mod script + surviving core PROSE
+    # legitimately still name the symbols); the sentinels are the actual CODE, chosen
+    # specific enough not to match the comments that remain.
+    core = {
+        "65_js_display_theming.js": (
+            "const TERM_FONTS", "function terminalFontFamily",
+            "function applyTerminalFont",
+        ),
+        "55_js_settings_model.js": ("TERM_FONTS.some",),
+        "40_body.html": ('id="set-term-font"',),
+        "79_js_settings_modal.js": ("setTermFontEl", "of TERM_FONTS"),
+        "81_js_control_panel.js": ("setTermFontEl",),
+        # The construction-time reader is replaced by a self-contained baseline; no
+        # mod symbol survives in the terminal factory.
+        "67_js_window_lifecycle.js": ("terminalFontFamily",),
+    }
+    for name, symbols in core.items():
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        for sym in symbols:
+            assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
+    # Core constructs terminals with its own baseline (the decoupling), and that
+    # literal MUST match the mod's TERM_FONT_DEFAULT so a disabled mod's terminals
+    # land on the same font as a fresh core-only terminal. Parse the ACTUAL const
+    # assignments (not mere literal presence) and assert they are byte-equal, so a
+    # dead string / comment can't satisfy the coupling and a real drift is caught.
+    import re
+    core67 = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "fontFamily: TERM_FONT_BASELINE" in core67, \
+        "core must construct terminals with the baseline, not a mod symbol"
+    mod_src = (BROKER_DIR / "mods" / "termfont" / "termfont.js").read_text(encoding="utf-8")
+    m_core = re.search(r"const\s+TERM_FONT_BASELINE\s*=\s*('[^']*'|\"[^\"]*\");", core67)
+    m_mod = re.search(r"const\s+TERM_FONT_DEFAULT\s*=\s*('[^']*'|\"[^\"]*\");", mod_src)
+    assert m_core, "core 67 must assign const TERM_FONT_BASELINE = <string literal>"
+    assert m_mod, "the mod must assign const TERM_FONT_DEFAULT = <string literal>"
+    assert m_core.group(1) == m_mod.group(1) == _TERM_FONT_BASELINE_LITERAL, (
+        "core TERM_FONT_BASELINE and mod TERM_FONT_DEFAULT must be the SAME literal; "
+        f"core={m_core.group(1)!r} mod={m_mod.group(1)!r}")
+
+
+def test_termfont_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "termfont"
+    js = mod_dir / "termfont.js"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and manifest.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "termfont"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "termfont.js"
+    assert "mods/termfont/termfont.js" in ui._MODS
+    src = js.read_text(encoding="utf-8")
+    # Registers the termfont mod, default-OFF, with the reviewed tiers, owning the
+    # synced `termFont` key through the #74 select API + the moved list/painter.
+    assert "registerMod(" in src
+    assert "id: 'termfont'" in src
+    assert "ctxVersion: 1" in src
+    assert "defaultEnabled: false" in src
+    assert "tiers: ['settings', 'window']" in src
+    assert "ctx.settings.select('termFont'" in src
+    assert "const TERM_FONTS" in src
+    assert "function applyTerminalFont" in src
+    # The default stays the built-in (empty value): it is the first option AND the
+    # select's `def`, so the visual default survives with no core normalization.
+    assert "def: ''" in src
+    # Rides the per-terminal-window hook, feature-detected — NOT a construction-time
+    # core read (that decoupling is the whole point); tears down on disable.
+    assert "if (!ctx.windows) return;" in src
+    assert "ctx.windows.onTerminalCreate(" in src
+    assert "ctx.onUnload(" in src
+    # And the mod ships in the served page (present in the mod / gone from core),
+    # appended AFTER the scratchpad mod (last in _MODS).
+    assert "ctx.settings.select('termFont'" in INDEX_HTML
+    assert "id: 'termfont'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'scratchpad'") < INDEX_HTML.index("id: 'termfont'")
+
+
 def test_clock_tz_selector_packaged_and_manifest_agrees():
     import json
     mod_dir = BROKER_DIR / "mods" / "clock"
@@ -1958,6 +2049,7 @@ _EXPECTED_TIERS = {
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
     "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip
     "scratchpad": ["storage", "window"],  # #124 durable server store (ctx.serverStore) + window kind
+    "termfont": ["settings", "window"],  # #126 synced termFont select (ctx.settings.select) + per-terminal apply (ctx.windows.onTerminalCreate)
 }
 
 

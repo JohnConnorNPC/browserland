@@ -1,0 +1,9 @@
+{
+  "id": "termfont",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Terminal font",
+  "description": "Terminal-font Control Panel select + the xterm font applicator (extracted from core, #126). Owns the synced `termFont` key via ctx.settings.select and applies it to every terminal via ctx.windows.onTerminalCreate. Ships disabled by default.",
+  "entry": "termfont.js",
+  "author": "JohnConnorNPC"
+}

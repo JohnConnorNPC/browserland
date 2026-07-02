@@ -139,6 +139,7 @@ _MODS = [
     "mods/git/git.js",         # S14 (#116) per-terminal git status widget via ctx.windows.onTerminalCreate + ctx.session.git; default-off; ships git.css
     "mods/clipboard/clipboard.js",  # #106 rolling copy/paste history window via ctx.clipboard.observe + ctx.registerWindowKind; default-off (secrets); ephemeral; ships clipboard.css
     "mods/scratchpad/scratchpad.js",  # #124 singleton server-backed notes window (ctx.serverStore + revision ring) via ctx.registerWindowKind; requires:['editor'] (MUST load after editor.js — shares its single CM build); ships scratchpad.css
+    "mods/termfont/termfont.js",  # #126 terminal-font Control Panel select (ctx.settings.select) + xterm applicator via ctx.windows.onTerminalCreate (extracted from core; last core appearance setting); default-off
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

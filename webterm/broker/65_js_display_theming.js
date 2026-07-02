@@ -17,25 +17,17 @@
         // (below). applyPattern stays a hoisted global (now declared in the mod),
         // so the theme mod's theme<->pattern coupling keeps repainting it.
 
-        // Issue #18: selectable terminal font. Each entry's `value` is the full
-        // CSS font-family stack (so an uninstalled choice falls back to Consolas/
-        // monospace); '' = the built-in default. Browser-global (xterm renders
-        // client-side), persisted as getSettings().termFont and synced via /state
-        // like theme/pattern. TERM_FONT_DEFAULT mirrors the Terminal() default.
-        const TERM_FONT_DEFAULT = 'Consolas, "Liberation Mono", monospace';
-        const TERM_FONTS = [
-            { label: 'Default (Consolas)', value: '' },
-            { label: 'Cascadia Code', value: '"Cascadia Code", "Cascadia Mono", Consolas, monospace' },
-            { label: 'Fira Code', value: '"Fira Code", Consolas, monospace' },
-            { label: 'JetBrains Mono', value: '"JetBrains Mono", Consolas, monospace' },
-            { label: 'Source Code Pro', value: '"Source Code Pro", Consolas, monospace' },
-            { label: 'Courier New', value: '"Courier New", Courier, monospace' },
-            { label: 'System monospace', value: 'monospace' },
-        ];
-        function terminalFontFamily() {
-            const f = (getSettings().termFont || '').trim();
-            return f || TERM_FONT_DEFAULT;
-        }
+        // ---- terminal font: EXTRACTED to a mod (#126) ----------------------
+        // The selectable terminal font (originally #18) moved to mods/termfont/
+        // termfont.js, which owns the TERM_FONTS list, terminalFontFamily(), the
+        // per-terminal applyTerminalFont painter and the #set-mods <select> via
+        // ctx.settings.select — plus the per-terminal apply via ctx.windows.
+        // onTerminalCreate (#116). Core no longer reads `termFont`; convergence
+        // reaches the mod via notifyModSettings() at the end of applyThemeSettings
+        // (below). Core constructs terminals with a self-contained baseline monospace
+        // stack (67_js_window_lifecycle.js) and knows nothing about the font feature
+        // — when the mod is off, terminals use that baseline.
+
         // ---- live clock (bottom-right of the taskbar) ----------------------
         // EXTRACTED to a mod (#71): the clock is now mods/clock/clock.js, which
         // owns the chip, the 1s interval, and the synced `clock` setting through
@@ -164,7 +156,10 @@
                 // unconditionally while the mod is enabled (no synced setting to
                 // converge — #101 dropped the per-setting toggle).
                 applyStartButton();
-                applyTerminalFont();        // #18: configurable terminal font
+                // #126: the terminal font is mod-owned now (mods/termfont/). It
+                // converges via notifyModSettings() below — a `termFont` change
+                // re-fires the mod's onChange over every live terminal. Core no
+                // longer applies it directly.
                 // #71: fire mod-owned settings (the clock, etc.) LAST so every
                 // /state pull converges them too. No-op until loadMods() runs and
                 // before any toggle registers (guarded inside).
@@ -172,34 +167,10 @@
             } catch (_) {}
         }
 
-        // Issue #18: push the configured terminal font onto every live terminal
-        // (no-op for app windows, which have no xterm). Idempotent — only the
-        // terminals whose family actually differs are re-fit (local xterm resize
-        // + an agent resize), so the convergence call in applyThemeSettings (run
-        // on every settings change / /state pull) is cheap when nothing changed.
-        function applyTerminalFont() {
-            const fam = terminalFontFamily();
-            for (const [, win] of windows) {
-                if (!win || win.disposed || !win.term) continue;
-                if (win.term.options.fontFamily === fam) continue;
-                try {
-                    win.term.options.fontFamily = fam;
-                } catch (_) { continue; }   // assign failed -> don't refit
-                // Re-fit only a ready, VISIBLE terminal: fitAddon.fit() on a
-                // hidden/zero-size element (minimized, parked, other-workspace)
-                // clamps it to 2x1 and corrupts the buffer until it's restored —
-                // and restoring already re-fits it, so the new font lands then.
-                if (win.termReady && isResizable(win)) {
-                    try { if (win.fitAddon) win.fitAddon.fit(); } catch (_) {}
-                    refitSoon(win);                          // tell the agent
-                }
-            }
-        }
-
         // #88: keep every open TERMINAL's × affordance (tooltip + destructive
-        // hover) in step with the terminalCloseTerminates setting. Mirrors
-        // applyTerminalFont's windows walk; `!win.term` skips app windows (their
-        // × is the unchanged soft-close). Called from applyDisplaySettings so it
+        // hover) in step with the terminalCloseTerminates setting. Walks `windows`
+        // like the termfont mod's applyTerminalFont; `!win.term` skips app windows
+        // (their × is the unchanged soft-close). Called from applyDisplaySettings so it
         // converges on the local toggle AND every /state pull / boot / view
         // rebuild — matching how onCloseClick reads the same LOCAL getSettings().
         function applyTerminalCloseAffordance() {

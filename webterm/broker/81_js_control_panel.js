@@ -260,11 +260,10 @@
 
             // Appearance is browser-global — reflect the LIVE local settings
             // (these controls are hidden on remote tabs, shown only on local).
-            // #75/#76: the color-scheme radio and the background-pattern select
-            // reflect themselves through their mods (renderModSettingsToggles
-            // below); core only reflects the terminal font.
+            // #75/#76/#126: the color-scheme radio, the background-pattern select,
+            // and the terminal-font select all reflect themselves through their mods
+            // (renderModSettingsToggles below); core reflects none of them.
             const ls = getSettings();
-            setTermFontEl.value = ls.termFont || '';   // #18 (browser-global)
             renderModSettingsToggles(t.isLocal);   // #71/#78: reflect mod toggles (clock, help, …)
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
             setSwapLaunchEl.checked = !!ls.swapLaunchButtons;   // #114 (browser-global)
@@ -1027,20 +1026,16 @@
             applyTaskbarWorkspace();
         });
 
-        // Appearance (terminal font / start label): browser-local like restore-
-        // on-refresh — write the LIVE local getSettings() directly (NOT
-        // settingsTarget, which may point at a remote host), persist, then apply
-        // to this browser immediately. This is why the Control Panel window (#59)
-        // can host a remote host's tab without appearance edits leaking to it.
-        // #75/#76: the color-scheme radio's and background-pattern select's change
-        // handlers now live in their mods (ctx.settings.radio / ctx.settings.
-        // select wire #set-mods -> savePrefs + applyTheme / applyPattern; the
-        // theme mod's apply also re-applies the theme-var-aware pattern).
-        setTermFontEl.addEventListener('change', () => {   // #18: terminal font
-            getSettings().termFont = setTermFontEl.value;
-            savePrefs();
-            applyTerminalFont();
-        });
+        // Appearance (start label): browser-local like restore-on-refresh — write
+        // the LIVE local getSettings() directly (NOT settingsTarget, which may point
+        // at a remote host), persist, then apply to this browser immediately. This is
+        // why the Control Panel window (#59) can host a remote host's tab without
+        // appearance edits leaking to it.
+        // #75/#76/#126: the color-scheme radio's, background-pattern select's, and
+        // terminal-font select's change handlers now live in their mods (ctx.settings.
+        // radio / ctx.settings.select wire #set-mods -> savePrefs + applyTheme /
+        // applyPattern / applyTerminalFont; the theme mod's apply also re-applies the
+        // theme-var-aware pattern).
         // #71/#78: the clock and Help-button toggle change handlers now live in
         // their mods (ctx.settings.boolean wires each #set-mods checkbox to
         // savePrefs + re-apply). Core only reflects them on render
