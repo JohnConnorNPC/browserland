@@ -180,9 +180,9 @@ one-time paint from the ring — can prepend the keyframe to the surviving tail
 and reconstruct the full screen. When even that isn't possible (the keyframe was
 itself evicted, the terminal resized, or none exists yet), the result carries
 `partial: true` — distinct from `degraded`: the grid + cursor are valid, but
-some statically-painted panels may be missing. Treat it as possibly incomplete
-(force a repaint with `send_keys(id, ["C-l"])`); it self-heals on the next
-in-window read or any app repaint, after which `partial` is absent.
+some statically-painted panels may be missing. Treat it as possibly incomplete;
+it self-heals on the next in-window read or any app repaint, after which
+`partial` is absent.
 
 **`read_screen` — color / reverse-video selection (#128).** The default text
 mode drops cell color, so a menu row marked by color or reverse-video *alone* —

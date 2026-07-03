@@ -369,6 +369,47 @@ def test_send_keys_invalid_token_sends_nothing():
     assert calls == []   # atomic: nothing was sent
 
 
+# ---- #131: recovery guidance must not over-recommend C-l as a repaint key --
+
+def test_recovery_docstrings_drop_generic_ctrl_l_repaint():
+    """#131: no recovery docstring may steer agents to the bare `["C-l"]` keypress
+    as a generic repaint. Ctrl-L is a live keybinding in full-screen TUIs (Dwarf
+    Fortress fires a game action, not a redraw), so the guidance must not present
+    it as an app-agnostic fix."""
+    from webterm.mcptool import server
+    for tool in (server.send_keys, server.send_input, server.reset_terminal,
+                 server.read_screen):
+        assert '["C-l"]' not in (tool.__doc__ or ""), (
+            f"{tool.__name__} still recommends the bare [\"C-l\"] repaint keypress")
+    # The specific pre-#131 send_keys steer is gone.
+    assert "to make the app repaint" not in server.send_keys.__doc__
+
+
+def test_recovery_docstrings_caveat_any_ctrl_l_mention():
+    """Where a docstring still *names* Ctrl-L it must be flagged as a shell-only
+    convention that collides with full-screen TUIs — never a bare recommendation —
+    and `reset_terminal` must stay the app-agnostic Browserland-side fallback."""
+    from webterm.mcptool import server
+    for tool in (server.send_keys, server.send_input, server.reset_terminal):
+        doc = tool.__doc__ or ""
+        if "c-l" in doc.lower():
+            assert "full-screen" in doc.lower(), (
+                f"{tool.__name__}: a Ctrl-L mention must carry the full-screen-TUI "
+                "caveat, not recommend it as a generic repaint")
+            assert "readline/shell" in doc.lower(), (
+                f"{tool.__name__}: Ctrl-L must be scoped to the readline/shell case")
+    assert "reset_terminal" in server.send_keys.__doc__   # fallback still offered
+
+
+def test_ctrl_l_token_translation_unchanged():
+    """#131 is docs-only: `C-l` stays a valid Ctrl chord (form-feed, 0x0C), so an
+    agent that genuinely wants it (for a shell) can still send it — only the
+    guidance changed, not the key translation."""
+    from webterm.mcptool import server
+    assert server._keys_to_text(["C-l"]) == "\x0c"
+    assert server._keys_to_text(["C-L"]) == "\x0c"   # case-insensitive, unchanged
+
+
 # ---- #129: send_keys inter-key pacing (frame-polling TUIs drop bursts) -----
 
 def _paced_capture(monkeypatch):

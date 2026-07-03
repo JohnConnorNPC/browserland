@@ -352,8 +352,8 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
     only streams diffs, and so much output has scrolled by that the original
     full-frame paint was lost before it could be captured, so some
     statically-painted panels may be missing. It's distinct from `degraded` (a
-    raw non-grid fallback). It self-heals — read again, or force a repaint with
-    `send_keys(id, ["C-l"])` — after which `partial` is absent.
+    raw non-grid fallback). It self-heals — read again, or trigger any repaint
+    from the app — after which `partial` is absent.
 
     COLOR / SELECTION — the default text mode drops cell color, so a menu row
     marked by color or reverse-video ALONE (its text identical to the others —
@@ -419,8 +419,11 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
     `POST /mcp/input` endpoint directly.
 
     If read_screen looks corrupted, this tool can't fix it — bytes in `data`
-    reach the app, not Browserland's renderer. Send `send_keys(id, ["C-l"])` to
-    redraw a live app, or `reset_terminal(id)` to wipe the screen buffer."""
+    reach the app, not Browserland's renderer. To redraw a live app you must
+    trigger the app's own repaint (there's no app-agnostic repaint key — `C-l`
+    is only a readline/shell convention and a live keybinding in some full-screen
+    TUIs); or `reset_terminal(id)` to wipe Browserland's screen buffer regardless
+    of the app."""
     client, int_id = _route(id)
     return client.send_input(int_id, _newlines_to_enter(data))
 
@@ -457,11 +460,15 @@ def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
     newline->Enter rewrite); use `send_input` for ordinary text.
 
     Recovery: if read_screen shows ghost text or a corrupted screen but the app
-    is still responding, send `["C-l"]` (Ctrl-L) to make the app repaint — that
-    fresh output is what the renderer reads. A raw reset sequence sent as input
-    is just keystrokes to the app and does NOT reset Browserland's own screen
-    render; to wipe a corrupted buffer regardless of the app, use
-    `reset_terminal`. (Neither un-freezes a hung app — kill it.)
+    is still responding, the app itself has to repaint — that fresh output is
+    what the renderer reads. There is no app-agnostic repaint key: `C-l` (Ctrl-L)
+    is only a readline/shell redraw convention and is a live keybinding in many
+    full-screen TUIs (Dwarf Fortress fires a game action on Ctrl-L, not a
+    redraw), so prefer the app's own refresh key. A raw reset sequence sent as
+    input is just keystrokes to the app and does NOT reset Browserland's own
+    screen render; to wipe a corrupted buffer regardless of the app, use
+    `reset_terminal` (it clears Browserland's side but won't make the app
+    redraw). None of these un-freeze a hung app — kill it.
 
     Pacing (#129): by default the whole token list is written in ONE burst. A
     frame-polling raw-input TUI — one that reads input once per render frame,
@@ -505,9 +512,11 @@ def reset_terminal(id: str) -> Dict[str, Any]:
     screen renderer actually reads — so the NEXT read_screen starts blank,
     regardless of what the app does. It does NOT touch the running app (it sends
     nothing to the app's stdin) and can't un-freeze a hung process — kill that
-    instead. After a reset the screen repopulates as the app emits output, so
-    for a live app prefer `send_keys(id, ["C-l"])` first to force a redraw;
-    reach for reset_terminal when even that won't clear the corruption."""
+    instead. After a reset the screen repopulates as the app emits output, so for
+    a live app first trigger the app's own repaint (there's no app-agnostic
+    repaint key — `C-l` is only a readline/shell convention and a live keybinding
+    in some full-screen TUIs); reach for reset_terminal when the app won't redraw
+    or the corruption is on Browserland's side."""
     client, int_id = _route(id)
     return client.reset_terminal(int_id)
 
