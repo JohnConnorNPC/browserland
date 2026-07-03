@@ -164,6 +164,48 @@ async def test_exit_code_without_interaction(broker):
             await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_flush_input_clears_pending_write_buffer():
+    """#133: flush_input drops our queued write bytes AND disarms the writer, then
+    flushes the slave's unread input via a transient reopen — on a REAL openpty.
+
+    We seed the state _flush_writes leaves behind when the PTY input buffer is
+    full (bytes still buffered, writer armed on the master fd) and assert
+    flush_input clears both. The transient tcflush(TCIFLUSH) on the reopened
+    slave must run without raising on a live pty (cat keeps the child alive)."""
+    from webterm.agent.backends.linux_pty import LinuxPtyBackend
+
+    loop = asyncio.get_running_loop()
+    backend = LinuxPtyBackend()
+    # cat blocks reading stdin, so the child stays alive (not EOF) through flush.
+    backend.spawn(("cat",), 80, 24)
+    backend.start(loop, lambda d: None, lambda c: None)
+    master = backend._master
+    assert master is not None
+    try:
+        # No await between arming and flush, so the writer callback can't fire
+        # first — the seeded backpressure state survives into flush_input.
+        backend._write_buf += b"unconsumed keystrokes"
+        loop.add_writer(master, backend._on_writable)
+        backend._writer_armed = True
+
+        backend.flush_input()
+
+        assert bytes(backend._write_buf) == b""        # our queue dropped
+        assert backend._writer_armed is False          # writer disarmed
+    finally:
+        try:
+            loop.remove_reader(master)
+        except Exception:
+            pass
+        backend.kill()
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        if backend._proc is not None:
+            await loop.run_in_executor(None, backend._proc.wait)
+
+
 async def test_huge_paste_backpressure(broker):
     """One ~404 KB send_input overflows the PTY input buffer and exercises
     BlockingIOError -> add_writer -> _on_writable. cat (no shell, raw-ish

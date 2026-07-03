@@ -59,6 +59,7 @@ class BrokerClient:
         on_git_request: Optional[Callable[[int], None]] = None,
         on_screen_request: Optional[Callable[..., None]] = None,
         on_reset_request: Optional[Callable[[int], None]] = None,
+        on_flush_request: Optional[Callable[[int], None]] = None,
     ) -> None:
         self._url = url
         self._token = token
@@ -72,6 +73,7 @@ class BrokerClient:
         self._on_git_request = on_git_request
         self._on_screen_request = on_screen_request
         self._on_reset_request = on_reset_request
+        self._on_flush_request = on_flush_request
         self.connected = False
         self._stopping = False
         self._stop_event: Optional[asyncio.Event] = None
@@ -210,6 +212,9 @@ class BrokerClient:
             elif mtype == "reset_please":
                 if self._on_reset_request is not None:
                     self._on_reset_request(_int(data.get("req"), -1))
+            elif mtype == "flush_input_please":
+                if self._on_flush_request is not None:
+                    self._on_flush_request(_int(data.get("req"), -1))
             elif mtype == "git_status_please":
                 if self._on_git_request is not None:
                     self._on_git_request(_int(data.get("req"), -1))

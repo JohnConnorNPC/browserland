@@ -130,6 +130,8 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
 | `send_keys(id, keys)` | `POST /mcp/input` | send control/escape **keys** — `["C-c"]`, `["Esc"]`, `["Up","Enter"]` — that plain text can't express |
+| `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
+| `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` required when multiple hosts are configured |
 
 **Multi-host.** Pass `--hosts` (or `$BROWSERLAND_MCP_HOSTS`) a JSON array of

@@ -512,6 +512,82 @@ async def test_reset_wakes_wait_for_change(running_agent, broker):
     assert "before reset" not in r["text"]
 
 
+# ---- #133: flush_input drops pending INPUT (mirror of reset for output) -----
+
+async def _flush(broker, req):
+    """Drive one flush_input_please RPC and return the matching flush_input_done."""
+    await broker.send({"type": "flush_input_please", "req": req})
+    return await broker.wait_text(
+        lambda f: f.get("type") == "flush_input_done" and f.get("req") == req)
+
+
+async def test_flush_input_acks_and_leaves_output_untouched(running_agent,
+                                                            broker):
+    # flush_input is the INPUT-side mirror of reset: the agent acks, but because
+    # flushing input changes no OUTPUT it must NOT clear the ring, NOT wake
+    # wait_for_change waiters, and NOT touch the keyframe (unlike _reset). The
+    # FakeBackend has no input-flush primitive, so it inherits the base no-op —
+    # this test pins the agent-side wiring + the "output is untouched" contract.
+    agent, backend, _ = running_agent
+    backend.feed(b"on the screen\r\n")
+    await broker.wait_binary(lambda b: b"on the screen" in b)
+    len_before = len(agent.ring)
+    gen_before = agent._output_gen
+
+    done = await _flush(broker, 5)
+    assert done["ok"] is True
+    # OUTPUT state is entirely undisturbed: ring kept, no waiter wakeup.
+    assert len(agent.ring) == len_before
+    assert agent._output_gen == gen_before
+    # The next read still renders the pre-flush screen (nothing was cleared).
+    r = await _read_screen(broker, 6)
+    assert "on the screen" in r["text"]
+
+
+async def test_flush_input_forwards_to_backend(broker):
+    # The RPC reaches the backend's flush_input(): a backend that records the
+    # call proves the client dispatch + agent handler wiring end to end.
+    class FlushRecordingBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.flushed = 0
+
+        def flush_input(self):
+            self.flushed += 1
+
+    backend = FlushRecordingBackend()
+    agent = Agent(make_config(broker), backend=backend)
+    task = asyncio.create_task(agent.run())
+    try:
+        await broker.wait_connected()
+        done = await _flush(broker, 1)
+        assert done["ok"] is True
+        assert backend.flushed == 1
+    finally:
+        backend.exit_child(0)
+        await asyncio.wait_for(task, 5)
+
+
+async def test_flush_input_reports_backend_failure(broker):
+    # A backend whose flush_input raises must still be acked — with ok=False and
+    # the error string — so the broker never waits out the RPC timeout.
+    class BoomBackend(FakeBackend):
+        def flush_input(self):
+            raise RuntimeError("flush boom")
+
+    backend = BoomBackend()
+    agent = Agent(make_config(broker), backend=backend)
+    task = asyncio.create_task(agent.run())
+    try:
+        await broker.wait_connected()
+        done = await _flush(broker, 1)
+        assert done["ok"] is False
+        assert "flush boom" in done["error"]
+    finally:
+        backend.exit_child(0)
+        await asyncio.wait_for(task, 5)
+
+
 # ---- #128: read_screen attrs -> styled fg/bg/reverse run map ---------------
 
 async def test_read_screen_attrs_surfaces_reverse_video(running_agent, broker):

@@ -184,6 +184,40 @@ def test_hello_profile_field_seeds_summary():
     asyncio.run(scenario())
 
 
+def test_flush_input_done_reply_resolves_pending_rpc():
+    """#133: a producer 'flush_input_done' reply must be on the management-RPC
+    allow-list so run_producer_session routes it to resolve_rpc — the broker half
+    of the /mcp/flush round-trip. A req that matches a pending flush RPC resolves
+    its Future; the same reply for an unknown req is dropped, never crashing."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 1, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24,
+                            "kind": "agent"}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+
+        # Park a flush RPC (as /mcp/flush does) and feed the matching reply.
+        allocated = entry.new_rpc("flush_input_done")
+        assert allocated is not None
+        req, future = allocated
+        ws.feed(json.dumps({"type": "flush_input_done", "req": req, "ok": True}))
+        payload = await asyncio.wait_for(future, 5)
+        assert payload["ok"] is True
+        assert req not in entry.pending_rpc          # resolved + cleared
+
+        # A reply for a stale/unknown req is dropped without error.
+        ws.feed(json.dumps({"type": "flush_input_done", "req": 999, "ok": True}))
+        await asyncio.sleep(0.05)                    # let the loop process it
+
+        ws.feed(None)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
 def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"

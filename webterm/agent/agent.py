@@ -265,6 +265,7 @@ class Agent:
             on_git_request=self._on_git_request,
             on_screen_request=self._on_screen_request,
             on_reset_request=self._on_reset_request,
+            on_flush_request=self._on_flush_request,
         )
         self._exit_fut: Optional[asyncio.Future] = None
         # read_screen wait-for-change (#26): a monotonic counter bumped on every
@@ -579,6 +580,23 @@ class Agent:
         except Exception as exc:
             ok, err = False, str(exc)[:200]
         self._enqueue("txt", protocol.reset_done_frame(req, ok, error=err))
+
+    def _on_flush_request(self, req: int) -> None:
+        # MCP flush_input (#133): discard keystrokes queued toward the app but
+        # not yet consumed — the INPUT-side mirror of reset_terminal. Where reset
+        # wipes our OUTPUT ring, this drops the pending INPUT backlog (e.g. a
+        # runaway send_keys burst a frame-polling TUI hasn't drained). Flushing
+        # input changes no OUTPUT, so — unlike _on_reset_request — we deliberately
+        # do NOT clear the ring, do NOT wake wait_for_change waiters, and do NOT
+        # touch the keyframe: the rendered screen is unaffected. The backend does
+        # the platform-specific flush (a no-op where none exists) and is built
+        # never to raise; we guard anyway so the ack always goes out.
+        try:
+            self.backend.flush_input()
+            ok, err = True, None
+        except Exception as exc:
+            ok, err = False, str(exc)[:200]
+        self._enqueue("txt", protocol.flush_input_done_frame(req, ok, error=err))
 
     def _on_git_request(self, req: int) -> None:
         loop = asyncio.get_running_loop()

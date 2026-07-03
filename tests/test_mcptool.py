@@ -229,6 +229,36 @@ def test_reset_terminal_posts_id():
     assert out == {"ok": True}
 
 
+def test_flush_input_posts_id():
+    # #133: flush_input is a thin POST /mcp/flush {id} that discards the app's
+    # queued-but-unread input; the broker enforces readwrite, not the client.
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True, "id": 42})
+
+    with _client(handler) as c:
+        out = c.flush_input(42)
+    assert seen["path"] == "/mcp/flush"
+    assert seen["body"] == {"id": 42}
+    assert out == {"ok": True, "id": 42}
+
+
+def test_flush_failed_error_message_is_readable():
+    # #133: the broker's flush_failed (502) surfaces as a readable tool error,
+    # not the raw code — it's in the client's _ERROR_MESSAGES table.
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json={"error": "flush_failed"})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as excinfo:
+            c.flush_input(42)
+    assert excinfo.value.code == "flush_failed"
+    assert "pending input" in str(excinfo.value)
+
+
 # ---- #13: MCP tool maps newlines -> Enter (CR); client stays verbatim -----
 
 @pytest.mark.parametrize("data,expected", [
@@ -1296,9 +1326,9 @@ async def test_tools_registered():
 
     tools = await server.mcp.list_tools()
     names = sorted(t.name for t in tools)
-    assert names == ["launch_terminal", "list_profiles", "list_terminals",
-                     "mcp_info", "read_screen", "reset_terminal", "send_input",
-                     "send_keys"]
+    assert names == ["flush_input", "launch_terminal", "list_profiles",
+                     "list_terminals", "mcp_info", "read_screen",
+                     "reset_terminal", "send_input", "send_keys"]
 
 
 def test_tools_round_trip_through_http():
@@ -1352,3 +1382,25 @@ def test_read_screen_tool_passes_attrs_and_returns_runs():
         _reset_server()
     assert seen["body"] == {"id": 5, "attrs": True}   # int id + attrs on the wire
     assert out["attr_runs"][0]["reverse"] is True
+
+
+def test_flush_input_tool_routes_to_wire():
+    """#133: the flush_input tool unwraps the namespaced id and POSTs the bare
+    int to /mcp/flush, returning the broker's reply."""
+    from webterm.mcptool import server
+
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True, "id": 5})
+
+    _install({"default": handler})
+    try:
+        out = server.flush_input("default:5")
+    finally:
+        _reset_server()
+    assert seen["path"] == "/mcp/flush"
+    assert seen["body"] == {"id": 5}                  # namespaced id -> bare int
+    assert out == {"ok": True, "id": 5}

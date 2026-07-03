@@ -121,6 +121,8 @@ def test_management_rpc_request_frames():
         "type": "git_status_please", "req": 9}
     assert json.loads(protocol.reset_please_frame(11)) == {
         "type": "reset_please", "req": 11}
+    assert json.loads(protocol.flush_input_please_frame(13)) == {
+        "type": "flush_input_please", "req": 13}
 
 
 def test_management_rpc_reply_frames():
@@ -144,6 +146,12 @@ def test_management_rpc_reply_frames():
         "type": "reset_done", "req": 11, "ok": True}
     assert json.loads(protocol.reset_done_frame(11, False, error="boom")) == {
         "type": "reset_done", "req": 11, "ok": False, "error": "boom"}
+    # flush_input_done (#133): same shape as reset_done, INPUT-side mirror.
+    assert json.loads(protocol.flush_input_done_frame(13, True)) == {
+        "type": "flush_input_done", "req": 13, "ok": True}
+    assert json.loads(protocol.flush_input_done_frame(13, False,
+                                                      error="boom")) == {
+        "type": "flush_input_done", "req": 13, "ok": False, "error": "boom"}
 
 
 def test_parse_round_trip():

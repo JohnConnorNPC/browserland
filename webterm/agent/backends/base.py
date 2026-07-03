@@ -73,6 +73,17 @@ class PtyBackend(ABC):
     def exitcode(self) -> Optional[int]:
         """Child exit code, or None while still running."""
 
+    def flush_input(self) -> None:
+        """Discard keystrokes queued toward the child but not yet consumed.
+
+        The default is a documented best-effort **no-op**: a backend with no
+        input-flush primitive (e.g. Windows/ConPTY, which exposes no way to drop
+        its input queue) inherits this and simply does nothing. Platform backends
+        that DO have one (the POSIX PTY's ``tcflush``) override it. Called on the
+        event loop like ``write``, and — like the other control hooks — it must
+        **never raise**: a failed flush is swallowed, not surfaced."""
+        return None
+
     def foreground_command(self) -> Optional[str]:
         """Best-effort: name of the agent ('claude'/'grok'/'codex') currently
         running in this PTY, or None. Must NEVER raise — it runs on a periodic

@@ -32,6 +32,8 @@ _ERROR_MESSAGES = {
     "too_large": "Input payload exceeds the broker's 256 KiB limit.",
     "no_producer_rpc": "Terminal did not answer the screen-read request "
                        "(a non-agent producer or a timeout).",
+    "reset_failed": "The terminal's agent failed to clear its screen buffer.",
+    "flush_failed": "The terminal's agent failed to flush its pending input.",
     "launch_disabled": "Launching is disabled on the broker "
                        "(enable 'allow_launch' in Control Panel → MCP access).",
     "unknown_profile": "No such launch profile (see list_profiles).",
@@ -202,6 +204,15 @@ class BrowserlandClient:
         mode. Wipes the agent's PTY-output ring so the next ``read_screen``
         starts from a clean slate; does not touch the running app."""
         return self._post("/mcp/reset", {"id": id})
+
+    def flush_input(self, id: int) -> Dict[str, Any]:
+        """Discard keystrokes queued to a terminal's app but not yet consumed
+        (#133). Requires ``readwrite`` mode. The INPUT-side mirror of
+        :meth:`reset_terminal`: reset clears the screen-render buffer, this drops
+        a pending input backlog (e.g. a runaway ``send_keys`` burst) so the app
+        can settle. Does not touch the app's already-drawn screen; a best-effort
+        no-op on a Windows/ConPTY agent (no input-queue flush primitive)."""
+        return self._post("/mcp/flush", {"id": id})
 
     def launch_terminal(self, profile: Optional[str] = None, cols: int = 80,
                         rows: int = 24, title: Optional[str] = None,

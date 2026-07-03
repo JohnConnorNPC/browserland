@@ -547,6 +547,27 @@ def reset_terminal(id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def flush_input(id: str) -> Dict[str, Any]:
+    """Discard keystrokes queued to a terminal's app but NOT yet consumed, so the
+    next read_screen reflects the settled state. Pass a namespaced window id
+    ("<host>:<int>"); the window must be in 'readwrite' mode.
+
+    Use this when you've sent input faster than the app drains it and a backlog
+    is still being chewed through — e.g. a burst of send_keys on a frame-polling
+    TUI like Dwarf Fortress, where queued keypresses keep advancing menus after
+    you meant to stop. Flushing drops that unread backlog so the app stops
+    reacting to stale keys and you can read a stable screen before the next move.
+
+    It clears the INPUT queue only. It does NOT clear Browserland's screen buffer
+    (that is reset_terminal) and does NOT touch the app's already-drawn screen or
+    send it anything — already-consumed keystrokes have had their effect and
+    can't be recalled. On a Windows/ConPTY agent it is a best-effort no-op (that
+    backend exposes no input-queue flush)."""
+    client, int_id = _route(id)
+    return client.flush_input(int_id)
+
+
+@mcp.tool()
 def launch_terminal(profile: Optional[str] = None, cols: int = 80,
                     rows: int = 24, title: Optional[str] = None,
                     cwd: Optional[str] = None,

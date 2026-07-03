@@ -223,6 +223,14 @@ def reset_please_frame(req: int) -> str:
     return json.dumps({"type": "reset_please", "req": int(req)})
 
 
+def flush_input_please_frame(req: int) -> str:
+    """Broker -> producer: discard keystrokes queued toward the app but not yet
+    consumed — the INPUT-side mirror of reset_please (#133). Where reset clears
+    the OUTPUT ring, this drops the pending input backlog. Only agents answer it
+    (a non-agent producer has no handler -> the RPC times out -> 502)."""
+    return json.dumps({"type": "flush_input_please", "req": int(req)})
+
+
 # Producer -> broker: the matching replies.
 def procs_frame(req: int, procs) -> str:
     return json.dumps({"type": "procs", "req": int(req),
@@ -242,6 +250,15 @@ def killed_frame(req: int, ok: bool, error: Optional[str] = None,
 def reset_done_frame(req: int, ok: bool, error: Optional[str] = None) -> str:
     """Producer -> broker: ack for reset_please (#27)."""
     frame: Dict[str, Any] = {"type": "reset_done", "req": int(req),
+                             "ok": bool(ok)}
+    if error:
+        frame["error"] = str(error)
+    return json.dumps(frame)
+
+
+def flush_input_done_frame(req: int, ok: bool, error: Optional[str] = None) -> str:
+    """Producer -> broker: ack for flush_input_please (#133)."""
+    frame: Dict[str, Any] = {"type": "flush_input_done", "req": int(req),
                              "ok": bool(ok)}
     if error:
         frame["error"] = str(error)

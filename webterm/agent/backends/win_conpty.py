@@ -176,6 +176,14 @@ class WinConPtyBackend(PtyBackend):
         except Exception:
             pass  # racing child exit; reader thread reports it
 
+    def flush_input(self) -> None:
+        """No-op: ConPTY/WinPTY expose no input-queue flush primitive (#133).
+
+        Made an explicit override rather than inherited so the best-effort
+        behavior is discoverable here — flush_input on a Windows agent silently
+        does nothing (there is no pty API to drop the app's unread input)."""
+        return None
+
     # -- control ----------------------------------------------------------
 
     def resize(self, cols: int, rows: int) -> None:

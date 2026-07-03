@@ -213,6 +213,68 @@ class LinuxPtyBackend(PtyBackend):
     def _on_writable(self) -> None:
         self._flush_writes()
 
+    def flush_input(self) -> None:
+        """Discard keystrokes queued toward the child but not yet read (#133).
+
+        The INPUT-direction mirror of reset_terminal: reset clears our OUTPUT
+        ring, this drops the pending INPUT backlog — e.g. a runaway send_keys
+        burst a frame-polling TUI hasn't drained yet. Two queues hold that
+        backlog, cleared in order:
+
+        1. **Our own write buffer** — bytes we accepted but have not handed to
+           the kernel yet (a backpressured huge paste parked for ``add_writer``).
+           We clear it and disarm the writer: the buffer is now empty, so a
+           still-armed writer would only wake to do nothing.
+        2. **The slave's kernel input queue** — bytes the kernel holds that the
+           app has not ``read()`` yet. ``tcflush(fd, TCIFLUSH)`` is the
+           POSIX-defined "discard data received but not read", so it targets the
+           keystroke backlog the app hasn't consumed. It is best-effort by
+           nature: bytes the app has ALREADY read into its own event queue are
+           out of the kernel and cannot be recalled. It must be issued on a
+           SLAVE fd, but we deliberately closed the slave at spawn so EOF (EIO on
+           the master) arrives after the child exits — so we reopen it transiently
+           BY NAME. This stays EOF-safe: EOF needs child-exit AND zero open slave
+           fds, and we open then immediately close, so the microsecond overlap at
+           most defers EOF until that close. ``O_NOCTTY`` so the reopen never
+           steals a controlling tty; ``O_NONBLOCK`` so the open can't stall.
+
+        Never raises (backend contract): if the ptsname/open path fails we fall
+        back to a best-effort ``tcflush(master, TCOFLUSH)``. TCOFLUSH on the
+        master flushes the master's OUTPUT queue — the bytes WE wrote heading to
+        the slave (keystrokes), not the app's output back to us — so even this
+        fallback only ever discards input and never loses screen content. Any
+        error is swallowed.
+        """
+        # Step 1: drop our own queued bytes and disarm the now-pointless writer.
+        self._write_buf.clear()
+        if (self._writer_armed and self._loop is not None
+                and self._master is not None):
+            try:
+                self._loop.remove_writer(self._master)
+            except Exception:
+                pass          # loop torn down: honor the never-raises contract
+            self._writer_armed = False
+        # Nothing more to flush on a closed / already-EOF'd PTY.
+        if self._master is None or self._eof:
+            return
+        # Step 2: flush the slave's unread input via a transient reopen by name.
+        master = self._master
+        try:
+            slave = os.ptsname(master)
+            fd = os.open(slave, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            finally:
+                os.close(fd)
+        except (OSError, termios.error):
+            # ptsname/open/tcflush unusable (rare): best-effort flush on the
+            # master. termios.error is NOT an OSError subclass, so it must be
+            # named explicitly or the "never raises" contract above would leak.
+            try:
+                termios.tcflush(master, termios.TCOFLUSH)
+            except (OSError, termios.error):
+                pass
+
     # -- control ----------------------------------------------------------
 
     def resize(self, cols: int, rows: int) -> None:

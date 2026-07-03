@@ -218,8 +218,8 @@ mouse not forwarded.
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
 server wraps as MCP tools so an AI agent can list, observe, drive, and launch
 terminals. A ready-to-run server ships in [`webterm/mcptool/`](webterm/mcptool/)
-(stdio transport; `pip install -e ".[mcp]"`). Six token-gated endpoints make up
-the contract:
+(stdio transport; `pip install -e ".[mcp]"`). Eight token-gated endpoints make
+up the contract:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -227,6 +227,8 @@ the contract:
 | GET | `/mcp/terminals` | list MCP-visible terminals |
 | POST | `/mcp/read` | render a terminal's screen as plain text |
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
+| POST | `/mcp/reset` | clear a terminal's screen-render buffer (`readwrite` only) |
+| POST | `/mcp/flush` | discard a terminal's unread queued input (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
 
@@ -289,6 +291,8 @@ effective mode to permit them.
 | `GET /mcp/terminals` | token | visible terminals |
 | `POST /mcp/read` | mode ≥ `read` | screen as text |
 | `POST /mcp/input` | mode `readwrite` | send keystrokes |
+| `POST /mcp/reset` | mode `readwrite` | clear the screen-render buffer |
+| `POST /mcp/flush` | mode `readwrite` | discard unread queued input |
 | `GET /mcp/profiles` | token | profile names |
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
@@ -339,6 +343,24 @@ return before calling this endpoint, so a command submits on PowerShell/PSReadLi
 the endpoint itself is byte-exact, so drive it directly for a literal LF or
 raw-mode bytes.
 
+**`POST /mcp/reset`** — body `{"id": <int>}` → `{"ok":true,"id":<int>}`. Requires
+effective mode `readwrite` (else **403 `read_only`**). A correlated producer
+round-trip (like `/mcp/read`): the agent clears its PTY-output ring so the next
+`read_screen` renders from a clean slate, then acks. Only **agent** producers
+answer; a non-agent producer times out → **502 `no_producer_rpc`** (and a rare
+agent-side failure → **502 `reset_failed`**). It touches Browserland's render
+buffer only — it sends nothing to the running app.
+
+**`POST /mcp/flush`** — body `{"id": <int>}` → `{"ok":true,"id":<int>}`. Requires
+effective mode `readwrite` (else **403 `read_only`**). The **input-side mirror**
+of `/mcp/reset`: where reset clears the OUTPUT ring, this discards keystrokes
+queued toward the app but not yet consumed (a runaway `send_keys` backlog a
+frame-polling TUI hasn't drained), so the next `read_screen` reflects the settled
+state. Same correlated round-trip — only **agent** producers answer, so a
+non-agent producer times out → **502 `no_producer_rpc`** (a rare agent-side
+failure → **502 `flush_failed`**). On a Windows/ConPTY agent it is a best-effort
+no-op (that backend exposes no input-queue flush primitive) and still acks `ok`.
+
 **`GET /mcp/profiles`** → `{"default":"cmd","profiles":["cmd","powershell"]}`
 (the broker's configured `agent.profiles`; `bash`/`sh` on Linux).
 
@@ -367,7 +389,9 @@ not said `hello` yet (`"registered":false`).
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
 | 413 | `too_large` | `/mcp/input` payload > 256 KiB |
-| 502 | `no_producer_rpc` | `/mcp/read` producer did not answer (non-agent / timeout) |
+| 502 | `no_producer_rpc` | `/mcp/read` · `/mcp/reset` · `/mcp/flush` producer did not answer (non-agent / timeout) |
+| 502 | `reset_failed` | `/mcp/reset` agent could not clear its render buffer |
+| 502 | `flush_failed` | `/mcp/flush` agent could not flush its pending input |
 | 403 | `launch_disabled` | `/mcp/launch` with `allow_launch:false` |
 | 400 | `unknown_profile` | `/mcp/launch` profile not in config |
 | 400 | `bad_dims` / `bad_cwd` / `cwd_not_dir` | `/mcp/launch` bad `cols`/`rows`/`cwd` |
