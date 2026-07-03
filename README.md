@@ -125,7 +125,7 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 | Tool | Endpoint | Notes |
 |---|---|---|
 | `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`). Omit `host` → dict keyed by host name |
-| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without sinking the rest |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without sinking the rest. Each terminal carries a `pyte` flag — `false` = the agent lacks pyte, so `attr_runs`/keyframe-repair are unavailable and sparse alt-screen frames are flagged `partial` only (#134) |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback); result carries `idle_ms` (best-effort ms since the last PTY output — absent from older agents, unreliable for a perpetually-animating app) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |

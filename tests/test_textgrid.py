@@ -270,6 +270,55 @@ def test_render_screen_text_degraded_cursor_null(monkeypatch):
     assert r["view"] == "raw" and r["cursor"] is None
 
 
+# ---- #134: the no-pyte textgrid fallback flags sparse alt-screen reads -------
+# The pyte path reconstructs an evicted alt-screen frame from an immutable
+# keyframe (#130); the textgrid fallback has NO such repair, so under the same
+# bug condition (evicted + alt-screen + no surviving restart marker) it is always
+# possibly-incomplete and must honestly return `partial` — otherwise a pyte-less
+# agent silently returns a sparse frame. `_NO_MARKER_TAIL` is a diff-only tail (no
+# ?1049h / 2J), so no restart marker survives the trim (best < 0).
+_NO_MARKER_TAIL = b"\x1b[3;1Hstatus-update-line"
+
+
+def test_render_screen_text_partial_when_evicted_alt_no_marker_no_pyte(monkeypatch):
+    from webterm.agent import agent as agent_mod
+    monkeypatch.setitem(sys.modules, "pyte", None)   # force the textgrid path
+    r = agent_mod._render_screen_text(_NO_MARKER_TAIL, 40, 6,
+                                      alt_screen=True, evicted=True)
+    assert r["degraded"] is False                    # still a real grid render
+    assert r["cursor"] is not None
+    assert r["partial"] is True                      # can't reconstruct -> honest
+
+
+def test_render_screen_text_partial_absent_when_marker_present_no_pyte(monkeypatch):
+    # A surviving restart marker anchors a COMPLETE replay, so even evicted+alt is
+    # NOT flagged partial (mirrors the pyte path's best>=0 rationale).
+    from webterm.agent import agent as agent_mod
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    data = b"\x1b[?1049h\x1b[2J\x1b[1;1HPANEL" + _NO_MARKER_TAIL
+    r = agent_mod._render_screen_text(data, 40, 6, alt_screen=True, evicted=True)
+    assert r.get("partial") is not True
+
+
+def test_render_screen_text_partial_absent_when_not_evicted_no_pyte(monkeypatch):
+    # Not evicted: the ring head is the true start, nothing was lost.
+    from webterm.agent import agent as agent_mod
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    r = agent_mod._render_screen_text(_NO_MARKER_TAIL, 40, 6,
+                                      alt_screen=True, evicted=False)
+    assert r.get("partial") is not True
+
+
+def test_render_screen_text_partial_absent_when_not_alt_no_pyte(monkeypatch):
+    # A primary-screen (non-alt) read is never flagged partial — no static paint
+    # to lose, and scrollback owns its own history.
+    from webterm.agent import agent as agent_mod
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    r = agent_mod._render_screen_text(_NO_MARKER_TAIL, 40, 6,
+                                      alt_screen=False, evicted=True)
+    assert r.get("partial") is not True
+
+
 # ---- #21: render_screen (cursor + scrollback + alt-aware history) ----------
 
 def test_render_screen_basic_cursor():

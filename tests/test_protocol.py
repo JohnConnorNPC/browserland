@@ -38,6 +38,18 @@ def test_hello_optional_fields():
             and "profile" not in bare and "version" not in bare)
 
 
+def test_hello_pyte_field():
+    """#134: `pyte` rides the hello only when provided, and False (pyte absent)
+    is a real value that MUST be sent — guarded by `is not None`, not truthiness,
+    so the very signal worth reporting isn't dropped."""
+    on = json.loads(protocol.hello_frame(1, 2, "t", 80, 24, pyte=True))
+    assert on["pyte"] is True
+    off = json.loads(protocol.hello_frame(1, 2, "t", 80, 24, pyte=False))
+    assert off["pyte"] is False                  # False must survive, not be culled
+    bare = json.loads(protocol.hello_frame(1, 2, "t", 80, 24))
+    assert "pyte" not in bare                     # omitted when unspecified
+
+
 def test_build_version_starts_with_package_version():
     import webterm
     v = webterm.build_version()

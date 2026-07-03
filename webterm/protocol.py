@@ -8,7 +8,7 @@ https://github.com/JohnConnorNPC/xterm-py.
 
 Producer -> broker (text JSON):
     {"type": "hello",   "window_id": <int>, "pid": <int>, "title": "...",
-     "cols": N, "rows": M}    # + optional "host", "kind", "agent", "cwd", "version"
+     "cols": N, "rows": M}    # + optional "host", "kind", "agent", "cwd", "version", "pyte"
     {"type": "title",   "data": "..."}
     {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir of the shell
@@ -56,6 +56,7 @@ def hello_frame(
     cwd: Optional[str] = None,
     profile: Optional[str] = None,
     version: Optional[str] = None,
+    pyte: Optional[bool] = None,
 ) -> str:
     """First frame on /browserland. Ints MUST be JSON numbers (the broker calls
     int() on them; the picker compares ids numerically in JS, so ids must
@@ -89,6 +90,15 @@ def hello_frame(
     # broker can surface it and flag stale agents (issue #22).
     if version:
         frame["version"] = str(version)
+    # "pyte" (#134) reports whether the producer has pyte installed, so the broker
+    # (and MCP list_terminals) can flag that a pyte-less agent's read_screen falls
+    # back to the dependency-free textgrid renderer — no attr_runs (#128), no
+    # keyframe repair (#130); a sparse alt-screen frame after ring eviction is
+    # flagged `partial` only. Additive/optional like version, BUT tested with
+    # ``is not None`` rather than truthiness: False (pyte absent) is the very value
+    # worth reporting, so it MUST ride the frame — a truthy guard would drop it.
+    if pyte is not None:
+        frame["pyte"] = bool(pyte)
     return json.dumps(frame)
 
 

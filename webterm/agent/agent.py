@@ -27,6 +27,7 @@ from .client import BrokerClient
 from .config import AgentConfig
 from .env_util import spawn_env
 from .ringbuf import ByteRing
+from .snapshot import pyte_snap
 from .snapshot import raw as raw_snapshot
 from .titles import OscTitleSniffer
 
@@ -181,11 +182,30 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     # textgrid: scrollback (it owns history) OR the no-pyte screen fallback.
     try:
         from .snapshot import textgrid
+        from .snapshot.textgrid import _RESTART_MARKERS
         r = textgrid.render_screen(data, cols, rows, eff_view, lines,
                                    evicted=evicted)
-        return {"text": r["text"], "degraded": False, "alt_screen": alt_screen,
-                "cursor": r["cursor"], "view": eff_view,
-                "history_lines": r["history_lines"]}
+        result = {"text": r["text"], "degraded": False,
+                  "alt_screen": alt_screen, "cursor": r["cursor"],
+                  "view": eff_view, "history_lines": r["history_lines"]}
+        # Honest signal WITHOUT pyte (#134): the textgrid path has NO keyframe
+        # reconstruction — that repair is pyte-only (#130) — so under the SAME
+        # condition the pyte path calls ``bug_condition`` (the ring evicted its
+        # head, we're in an alt-screen TUI, and no restart marker survives the
+        # trim), a fresh replay lands diffs on a blank grid and the static paint
+        # is GONE. There's nothing to reconstruct from, so such a frame is ALWAYS
+        # possibly-incomplete and is flagged ``partial`` — otherwise a pyte-less
+        # agent (the deployed DF agent) silently returns a sparse frame with no
+        # sign it lacks the repair. ``best < 0`` (marker absent), NOT ``<= 0``:
+        # a marker sitting at index 0 is a valid trim anchor whose replay is
+        # COMPLETE (see the pyte path's best==0 rationale), so flagging it would
+        # be a false alarm. Scrollback (alt_screen False) can't reach here —
+        # eff_view is "screen" whenever alt_screen is True — so history reads and
+        # the degraded raw-decode path below are unaffected.
+        best = max(data.rfind(m) for m in _RESTART_MARKERS)
+        if evicted and alt_screen and best < 0:
+            result["partial"] = True
+        return result
     except Exception as exc:  # defensive: textgrid is built never to raise
         LOGGER.warning("screen_text grid render failed (%s); raw decode", exc)
         # Bounded raw decode: cap to the tail so a degraded read can never blow
@@ -228,6 +248,13 @@ class SessionState:
     # This agent's build id (webterm.build_version()), reported in the hello so
     # the broker can surface it and flag a stale deployment (#22).
     version: str = field(default_factory=build_version)
+    # Whether this agent has pyte installed (#134), reported in the hello so the
+    # broker / MCP list_terminals can flag that a pyte-less agent's read_screen
+    # uses the dependency-free textgrid fallback (no attr_runs #128, no keyframe
+    # repair #130; a sparse alt-screen frame after eviction is flagged `partial`
+    # only). Set from pyte_snap.available() in Agent.__init__; defaults True so a
+    # field-less/older hello parses as pyte-capable, not falsely degraded.
+    pyte: bool = True
     # Live DEC private-mode state, tracked off the PTY stream so it survives ring
     # eviction. alt_screen (#21): screen-vs-scrollback for read_screen.
     # app_cursor / DECCKM (#23): whether send_keys must send SS3 arrows.
@@ -248,6 +275,9 @@ class Agent:
             rows=config.rows,
             cwd=_safe_cwd(config.cwd),
             profile=config.profile or "",
+            # #134: cheap probe (pyte_snap already tried the import at import
+            # time) so the hello can honestly report render capability.
+            pyte=pyte_snap.available(),
         )
         self.ring = ByteRing(config.ring_bytes)
         self.sniffer = OscTitleSniffer()
@@ -320,6 +350,16 @@ class Agent:
         LOGGER.info("spawned %s (pid %s) as window %d",
                     " ".join(self.config.command), self.state.pid,
                     self.state.window_id)
+        if not self.state.pyte:
+            # #134: a pyte-less agent's read_screen silently uses the
+            # dependency-free textgrid fallback. Warn ONCE at spawn so the
+            # degradation is visible instead of surfacing only as mystery-sparse
+            # alt-screen reads (the deployed DF agent runs without pyte).
+            LOGGER.warning(
+                "pyte not installed -> read_screen uses the dependency-free "
+                "textgrid fallback (no attr_runs #128, no keyframe repair #130; "
+                "sparse alt-screen frames flagged partial only #134); install "
+                "with pip install 'webterm[pyte]'")
         self.backend.start(loop, self._on_pty_data, self._on_pty_exit)
 
         client_task = asyncio.create_task(self.client.run())

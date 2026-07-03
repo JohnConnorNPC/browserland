@@ -9,6 +9,7 @@ test_conpty.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
 
 import pytest
@@ -107,6 +108,36 @@ async def test_hello_first_with_identity(running_agent, broker):
     assert hello["cols"] == 80 and hello["rows"] == 24
     assert hello["kind"] == "agent"
     assert hello["host"]  # gethostname is always non-empty
+
+
+async def test_hello_carries_pyte_flag(running_agent, broker):
+    # #134: the hello reports pyte availability so the broker / MCP list_terminals
+    # can flag the no-pyte textgrid fallback. The flag mirrors pyte_snap.available()
+    # (True in the test env, where pyte is installed).
+    from webterm.agent.snapshot import pyte_snap
+    agent, _, _ = running_agent
+    hello = broker.hellos[0]
+    assert "pyte" in hello
+    assert hello["pyte"] is pyte_snap.available()
+    assert agent.state.pyte is pyte_snap.available()
+
+
+async def test_startup_warns_when_pyte_absent(broker, monkeypatch, caplog):
+    # #134: a pyte-less agent WARNs once at spawn so the read_screen degradation is
+    # visible (the deployed DF agent runs without pyte), and its hello reports the
+    # flag False so the broker/MCP surface it too.
+    import webterm.agent.agent as agent_mod
+    monkeypatch.setattr(agent_mod.pyte_snap, "available", lambda: False)
+    backend = FakeBackend()
+    agent = Agent(make_config(broker, window_id=777334), backend=backend)
+    assert agent.state.pyte is False              # __init__ read the probe
+    with caplog.at_level(logging.WARNING):
+        task = asyncio.create_task(agent.run())
+        await broker.wait_connected()
+    backend.exit_child(0)
+    await asyncio.wait_for(task, 5)
+    assert broker.hellos[0]["pyte"] is False       # reported on the wire
+    assert any("pyte not installed" in r.getMessage() for r in caplog.records)
 
 
 async def test_output_relayed_as_binary(running_agent, broker):

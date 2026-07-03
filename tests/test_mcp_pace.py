@@ -93,6 +93,20 @@ def test_pace_http_surfaces_in_terminals(tmp_path, monkeypatch):
     assert next(t for t in after.json if t["id"] == 6)["pace_ms"] == 75
 
 
+def test_terminals_surfaces_pyte_flag(tmp_path, monkeypatch):
+    # #134: /mcp/terminals surfaces the per-terminal `pyte` flag. Default True (a
+    # WindowEntry constructed without a pyte-less hello); a pyte-less agent
+    # surfaces as False so a client can warn that read_screen degraded.
+    app = _make_app(tmp_path, monkeypatch, default_mode="readwrite")
+    up = _register(app, 30, _WS())            # WindowEntry defaults pyte=True
+    down = _register(app, 31, _WS())
+    down.pyte = False                          # as a pyte-less hello would set it
+    _, resp = _get_terminals(app)
+    got = {t["id"]: t["pyte"] for t in resp.json}
+    assert got[30] is True
+    assert got[31] is False
+
+
 def test_pace_http_clamps_over_cap_and_negative(tmp_path, monkeypatch):
     # An out-of-range integer is CLAMPED (not rejected): over-cap pins to the cap,
     # a negative disables (0). Both 200 — pins the exact implemented behavior.

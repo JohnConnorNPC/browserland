@@ -2951,7 +2951,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          # Per-terminal DEFAULT send_keys pacing (#133, set via
                          # /mcp/pace); the MCP server reads it so a no-delay_ms
                          # send auto-paces. 0 = single-burst.
-                         "pace_ms": int(s.get("pace_ms", 0) or 0)}
+                         "pace_ms": int(s.get("pace_ms", 0) or 0),
+                         # #134: whether the agent has pyte. False -> read_screen
+                         # uses the dependency-free textgrid fallback (no
+                         # attr_runs #128 / keyframe repair #130; sparse alt-screen
+                         # frames flagged partial only). Default True for a
+                         # pre-#134 agent that predates the signal.
+                         "pyte": bool(s.get("pyte", True))}
             # ``stale`` = this producer's build differs from the broker's (incl. a
             # pre-#22 agent reporting no version) → a deploy predating a fix, so a
             # client can warn without comparing strings (#22). Only meaningful for

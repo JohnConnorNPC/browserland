@@ -313,12 +313,17 @@ build differing from this broker's (a deploy predating a fix — reliable when
 builds carry a git hash). `app_cursor` is the cached DECCKM (application-cursor
 mode) the MCP `send_keys` reads to pick CSI vs SS3 arrows (#23); `pace_ms` is the
 window's default `send_keys` inter-key pacing (#133, `0` = single-burst, set via
-`/mcp/pace`) the MCP server reads so a no-`delay_ms` send auto-paces:
+`/mcp/pace`) the MCP server reads so a no-`delay_ms` send auto-paces. `pyte` (#134)
+is whether the agent has pyte installed: `false` means its `read_screen` uses the
+dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repair
+(#130), so a sparse alt-screen frame after ring eviction comes back flagged
+`partial` only. It defaults `true` for a pre-#134 agent that omits the field:
 
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
-  "version":"0.1.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0}]
+  "version":"0.1.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
+  "pyte":true}]
 ```
 
 **`POST /mcp/read`** — body `{"id": <int>}`:
@@ -340,9 +345,13 @@ grid; without pyte it falls back to a dependency-free in-house emulator
 grid — so a full-screen TUI reads as a clean grid (box-drawing/braille intact),
 not an unbounded raw-ANSI dump (#15). Both paths are real grid renders, so
 **`"degraded": true`** is now reserved for the rare last-ditch raw decode (it
-no longer appears for ordinary TUIs). Only **agent** producers answer; a
-non-agent terminal producer has no handler, so the request times out → **502
-`{"error":"no_producer_rpc"}`**.
+no longer appears for ordinary TUIs). The textgrid fallback has no keyframe
+repair (that is pyte-only, #130), so a sparse alt-screen frame after ring
+eviction comes back flagged **`"partial": true`** (#134) — the grid is a real
+render, just possibly incomplete; the per-terminal `pyte` flag on
+`/mcp/terminals` tells a caller up front which path an agent is on. Only
+**agent** producers answer; a non-agent terminal producer has no handler, so the
+request times out → **502 `{"error":"no_producer_rpc"}`**.
 
 **`POST /mcp/input`** — body `{"id": <int>, "data": "<str>"}` → `{"ok":true}`.
 Requires effective mode `readwrite` (else **403 `read_only`**); `data` must be a

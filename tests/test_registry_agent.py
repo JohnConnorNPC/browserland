@@ -162,6 +162,36 @@ def test_hello_version_field_seeds_summary():
     asyncio.run(scenario())
 
 
+def test_hello_pyte_field_seeds_summary():
+    """#134: the hello's optional 'pyte' seeds entry.pyte + summary(); absence
+    defaults True — a pre-#134 agent predates the signal, and assuming it is
+    pyte-less would raise a false 'degraded' alarm. An explicit False sticks (the
+    agent's read_screen uses the dependency-free textgrid fallback)."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        # Explicit False -> pyte-less.
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 21, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "pyte": False})
+        assert entry.pyte is False
+        assert entry.summary()["pyte"] is False
+        # Absent -> default True (older agent / non-signal producer).
+        entry2 = await reg.register(ws, {
+            "type": "hello", "window_id": 22, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24})
+        assert entry2.pyte is True
+        assert entry2.summary()["pyte"] is True
+        # Explicit True.
+        entry3 = await reg.register(ws, {
+            "type": "hello", "window_id": 23, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "pyte": True})
+        assert entry3.pyte is True
+        assert entry3.summary()["pyte"] is True
+
+    asyncio.run(scenario())
+
+
 def test_hello_profile_field_seeds_summary():
     """The hello's optional 'profile' (launch-profile name) seeds entry.profile +
     summary(), and is absent ('') for a non-launcher / old producer (#115). This

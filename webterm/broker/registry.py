@@ -73,6 +73,7 @@ class WindowEntry:
         cwd: str = "",
         profile: str = "",
         version: str = "",
+        pyte: bool = True,
     ):
         self.id = int(window_id)
         self.pid = int(pid)
@@ -90,6 +91,13 @@ class WindowEntry:
         # The producer's self-reported build id (#22); "" for a pre-#22 agent
         # (which is itself a staleness signal).
         self.version = version
+        # Whether the producer has pyte (#134). True for a pre-#134 agent that
+        # omits the hello field — absence means "unknown/old" (the signal
+        # postdates it), so defaulting True avoids a false pyte-less alarm. A
+        # reported False means read_screen uses the dependency-free textgrid
+        # fallback: no attr_runs (#128) / keyframe repair (#130); a sparse
+        # alt-screen frame after ring eviction is flagged `partial` only.
+        self.pyte = bool(pyte)
         # Live DECCKM / application-cursor-key state (#23), pushed by the agent
         # via `mode` frames; lets send_keys pick CSI vs SS3 arrows cheaply (no
         # screen render). False until the agent reports otherwise.
@@ -139,6 +147,7 @@ class WindowEntry:
             "cwd": self.cwd,
             "profile": self.profile,
             "version": self.version,
+            "pyte": self.pyte,
             "app_cursor": self.app_cursor,
             "pace_ms": self.pace_ms,
             "mcp": self.mcp_mode or mcp_default,
@@ -258,10 +267,14 @@ class BrokerRegistry:
         # Self-reported + untrusted: cap length (a producer can send anything,
         # incl. a value matching the broker — it is a hint, not an attestation).
         version = str(hello.get("version", "") or "")[:64]
+        # #134: whether the agent has pyte. Absent -> True (a pre-#134 agent
+        # predates the signal; assuming pyte-less would raise a false 'degraded'
+        # alarm). An explicit False means read_screen uses the textgrid fallback.
+        pyte = bool(hello.get("pyte", True))
 
         entry = WindowEntry(window_id, pid, title, cols, rows, ws,
                             host=host, kind=kind, agent=agent, cwd=cwd,
-                            profile=profile, version=version)
+                            profile=profile, version=version, pyte=pyte)
         async with self._lock:
             old = self._entries.get(window_id)
             if old is not None:

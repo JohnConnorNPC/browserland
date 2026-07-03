@@ -97,6 +97,33 @@ def test_list_terminals_surfaces_version_and_stale():
     assert out[1]["version"] == "" and out[1]["stale"] is True
 
 
+def test_list_terminals_passes_through_pyte_flag():
+    """#134: the per-terminal `pyte` flag flows through the client verbatim (the
+    server tool just copies each dict), so a caller sees which agents lack pyte."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"id": 1, "mode": "read", "pyte": True},
+            {"id": 2, "mode": "read", "pyte": False}])
+    with _client(handler) as c:
+        out = c.list_terminals()
+    assert out[0]["pyte"] is True
+    assert out[1]["pyte"] is False
+
+
+def test_list_terminals_server_merge_preserves_pyte_flag():
+    """The server-side merge (`dict(t)` + host/id rewrite) must keep the `pyte`
+    flag alongside the namespacing (#134)."""
+    def h(req):
+        return httpx.Response(200, json=[{"id": 1, "mode": "read", "pyte": False}])
+    server = _install({"local": h})
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    t = out["terminals"][0]
+    assert t["id"] == "local:1" and t["pyte"] is False
+
+
 def test_list_terminals_and_profiles_paths():
     paths = []
 
