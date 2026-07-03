@@ -3079,6 +3079,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             out["attr_runs"] = payload.get("attr_runs")
         if payload.get("degraded"):
             out["degraded"] = True
+        # partial (#130): distinct from degraded — a valid grid that may be
+        # missing statically-painted panels because ring eviction lost a
+        # long-running alt-screen TUI's one-time full-frame paint. Surfaced only
+        # when true so a clean read stays uncluttered; the agent self-heals it.
+        if payload.get("partial"):
+            out["partial"] = True
         return sanic_json(out)
 
     async def _mcp_input(request: Request):

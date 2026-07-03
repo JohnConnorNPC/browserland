@@ -172,6 +172,18 @@ screen view.
 > already correct). Scrollback returns lines that scrolled off the primary
 > screen — it never includes a TUI's internal scrolling.
 
+**`read_screen` — partial alt-screen reads (#130).** A long-running full-screen
+TUI paints its whole frame once, then streams only diffs. The agent keeps an
+immutable *keyframe* (a re-emit of the last trustworthy full frame) so a read
+after >256 KiB of diffs — which evicts the `\x1b[?1049h` marker *and* that
+one-time paint from the ring — can prepend the keyframe to the surviving tail
+and reconstruct the full screen. When even that isn't possible (the keyframe was
+itself evicted, the terminal resized, or none exists yet), the result carries
+`partial: true` — distinct from `degraded`: the grid + cursor are valid, but
+some statically-painted panels may be missing. Treat it as possibly incomplete
+(force a repaint with `send_keys(id, ["C-l"])`); it self-heals on the next
+in-window read or any app repaint, after which `partial` is absent.
+
 **`read_screen` — color / reverse-video selection (#128).** The default text
 mode drops cell color, so a menu row marked by color or reverse-video *alone* —
 its text identical to the other rows (e.g. a Dwarf Fortress menu) — is invisible.

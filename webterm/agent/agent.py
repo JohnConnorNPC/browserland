@@ -57,11 +57,33 @@ def _content_hash(text: str) -> str:
 def _render_screen_text(data: bytes, cols: int, rows: int,
                         view: str = "screen", lines: int = 0,
                         alt_screen: bool = False, evicted: bool = False,
-                        attrs: bool = False):
+                        attrs: bool = False,
+                        keyframe: bytes = b"", keyframe_k: int = 0,
+                        keyframe_dims: tuple = (0, 0),
+                        evicted_total: int = 0, total_appended: int = 0):
     """Render the ring for an MCP read; return a dict
     ``{text, degraded, alt_screen, cursor, view, history_lines}`` (plus
-    ``attr_runs`` when ``attrs`` and the pyte path ran). Runs in a worker
-    thread; never raises (#15, #21).
+    ``attr_runs`` when ``attrs`` and the pyte path ran, ``partial`` on an
+    unreconstructable evicted alt-screen read, and ``keyframe``/``keyframe_k``
+    for the agent to re-stash). Runs in a worker thread; never raises (#15, #21).
+
+    ALT-SCREEN KEYFRAME (#130): a long-running full-screen TUI paints its whole
+    frame once, then streams only diffs. Once >256 KiB of diffs evict the
+    ``\\x1b[?1049h`` marker AND that one-time paint, a fresh replay of the
+    surviving ring lands diffs on a blank grid and the static panels vanish. To
+    survive that, a trustworthy full frame is re-emitted as an IMMUTABLE byte
+    ``keyframe`` tagged with ``keyframe_k`` = the absolute ``total_appended`` it
+    represents. On a later read that hits the bug (``evicted`` and ``alt_screen``
+    and no restart marker survives the trim), the keyframe is prepended to the
+    surviving ring tail sliced at ``off = keyframe_k - evicted_total`` — a chunk
+    boundary, since appends and whole-chunk eviction both move in chunk units —
+    reproducing keyframe-state + all post-keyframe diffs = the correct full
+    screen. Only immutable bytes cross to this worker; there is no shared mutable
+    pyte screen. When reconstruction is impossible (the keyframe was itself
+    evicted: ``off < 0``; dims changed; or none exists), the read is flagged
+    ``partial`` (distinct from ``degraded`` — the grid + cursor are still valid,
+    just possibly incomplete) so the agent stops fully trusting it and can
+    trigger a repaint. Self-heals on the next in-window read or any app repaint.
 
     pyte is the high-fidelity renderer for the CURRENT screen (trimmed to the
     last restart so it's bounded — #21 B). The dependency-free :mod:`textgrid`
@@ -91,15 +113,58 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
         # mis-decode into top-left ghost glyphs (#28).
         try:
             import pyte  # type: ignore
-            from .snapshot.textgrid import _trim_for_screen
+            from .snapshot.textgrid import _trim_for_screen, _RESTART_MARKERS
+            # The bug condition (#130): the ring evicted its head, we're in an
+            # alt-screen TUI, and no restart marker survives — so the trim can't
+            # anchor on a repaint and a fresh replay would drop the static paint.
+            # ``best < 0`` (marker absent), NOT ``best <= 0``: a marker sitting
+            # exactly at index 0 is a valid trim anchor — _trim_for_screen keeps
+            # the full ring (best==0 branch), so the normal replay already yields
+            # a COMPLETE frame with everything after the clear present. Flagging
+            # that partial (and skipping its keyframe) would be a false alarm and
+            # a chain stall; best==0 must take the normal, keyframe-emitting path.
+            best = max(data.rfind(m) for m in _RESTART_MARKERS)
+            bug_condition = bool(evicted and alt_screen and best < 0)
             screen = pyte.Screen(cols, rows)
             stream = pyte.ByteStream(screen)
-            stream.feed(_trim_for_screen(data, evicted))
+            reconstructed = False
+            if bug_condition and keyframe and keyframe_dims == (cols, rows):
+                # off is a chunk boundary: keyframe_k and evicted_total are both
+                # sums of whole chunk lengths. off in [0, len(data)] means the
+                # keyframe point still lies within (or at the head of) the ring.
+                off = keyframe_k - evicted_total
+                if 0 <= off <= len(data):
+                    try:
+                        stream.feed(keyframe
+                                    + _trim_for_screen(data[off:], evicted=True))
+                        reconstructed = True
+                    except Exception as exc:
+                        LOGGER.debug("keyframe reconstruction failed (%s); "
+                                     "plain replay", exc)
+                        screen = pyte.Screen(cols, rows)
+                        stream = pyte.ByteStream(screen)
+            if not reconstructed:
+                stream.feed(_trim_for_screen(data, evicted))
             cur = {"row": min(max(screen.cursor.y, 0), rows - 1),
                    "col": min(max(screen.cursor.x, 0), cols - 1)}
             result = {"text": "\n".join(screen.display), "degraded": False,
                       "alt_screen": alt_screen, "cursor": cur,
                       "view": "screen", "history_lines": 0}
+            # Honest signal: a bug read we could NOT reconstruct is possibly
+            # incomplete. A trustworthy full frame (normal replay OR a successful
+            # reconstruction) is re-emitted as a fresh keyframe while alt-screen
+            # is active, so the chain stays ahead of eviction; never emit one on
+            # the partial path (it would encode a known-incomplete grid).
+            trustworthy = not (bug_condition and not reconstructed)
+            if not trustworthy:
+                result["partial"] = True
+            elif alt_screen:
+                try:
+                    from .snapshot import pyte_snap
+                    result["keyframe"] = pyte_snap.emit_screen(screen, cols, rows)
+                    result["keyframe_k"] = int(total_appended)
+                except Exception as exc:
+                    LOGGER.debug("keyframe emit failed (%s); omitting", exc)
             if attrs:
                 # Best-effort: a failed attr extraction drops the key only, never
                 # the (already-computed) text — so an odd grid can't blank a read.
@@ -214,6 +279,16 @@ class Agent:
         # the rows that changed since a prior hash (`since`) instead of the
         # whole grid. Bounded against memory; misses fall back to a full grid.
         self._frame_cache: "OrderedDict[str, List[str]]" = OrderedDict()
+        # Alt-screen keyframe (#130): an IMMUTABLE byte re-emit of the last
+        # trustworthy full frame, plus the absolute ring offset (total_appended)
+        # it represents and the dims it was captured at. Stashed on the loop from
+        # a read's result and passed by value into the render worker, so a read
+        # after >256 KiB eviction can reconstruct the static paint the ring lost.
+        # Nulled on reset/resize so a cleared ring or new dims can't reconstruct
+        # a stale grid. Never a live pyte.Screen crosses threads — only bytes.
+        self._screen_keyframe: Optional[bytes] = None
+        self._keyframe_k = 0
+        self._keyframe_dims = (0, 0)
         # Set when a /session/kill RPC targets the session-root shell itself: a
         # deliberate UI Terminate, not a crash. run() then returns 0 so a
         # supervisor with Restart=on-failure does NOT respawn the shell, while a
@@ -292,8 +367,24 @@ class Agent:
         self.ring.append(chunk)
         self._wake_output_waiters()              # wake read_screen waiters (#26)
         # Track DEC modes live (#21/#23): survives ring eviction, unlike a re-scan.
+        prev_alt = self.state.alt_screen
         self._mode_sniffer.feed(chunk)
         self.state.alt_screen = self._mode_sniffer.alt_screen
+        if self.state.alt_screen != prev_alt:
+            # Alt-screen transition (#130): drop the keyframe on EITHER edge.
+            # Entering alt starts a NEW full-frame session whose one-time paint we
+            # have not captured yet; leaving alt ends the session. A keyframe from
+            # a different (or ended) alt session must never reconstruct onto the
+            # current one (that silently bleeds the previous app's static panels
+            # across, worse than a missed panel), so it can't wait for a read to
+            # clear it -- the failing case has no read between the old app's exit
+            # and the new app's post-eviction read. Cheap and on the loop; the
+            # bool compare + three assignments can't raise into byte delivery, so
+            # no guard is needed. The next trustworthy read re-seeds; until then a
+            # bug read honestly returns `partial` (see _render_screen_text #130).
+            self._screen_keyframe = None
+            self._keyframe_k = 0
+            self._keyframe_dims = (0, 0)
         app_cursor = self._mode_sniffer.app_cursor
         if app_cursor != self.state.app_cursor:
             # Push DECCKM changes so the broker caches them (#23): send_keys
@@ -386,6 +477,13 @@ class Agent:
         else:
             self.state.cols = cols
             self.state.rows = rows
+            # Drop the alt-screen keyframe (#130): it was captured at the old
+            # dims, so its per-row CUP moves would misposition on the new grid.
+            # The TUI repaints on SIGWINCH and the chain re-seeds from the next
+            # trustworthy read; until then a bug read returns partial.
+            self._screen_keyframe = None
+            self._keyframe_k = 0
+            self._keyframe_dims = (0, 0)
         # Always reply `resized` — on failure it echoes the current dims.
         self._enqueue("txt", protocol.resized_frame(
             self.state.cols, self.state.rows))
@@ -470,6 +568,12 @@ class Agent:
         # inline on the loop — ByteRing.clear() is O(1), never blocking.
         try:
             self.ring.clear()
+            # Drop the alt-screen keyframe (#130): the ring (and its
+            # total_appended) is zeroed, so a retained keyframe would reconstruct
+            # a stale grid onto the clean slate reset promises.
+            self._screen_keyframe = None
+            self._keyframe_k = 0
+            self._keyframe_dims = (0, 0)
             self._wake_output_waiters()      # a parked wait_for_change re-renders
             ok, err = True, None
         except Exception as exc:
@@ -537,10 +641,27 @@ class Agent:
             data = self.ring.get()
             evicted = self.ring.evicted          # head may start mid-seq (#28)
             cols, rows = self.state.cols, self.state.rows
+            # Snapshot the keyframe machinery on the loop (immutable bytes/ints
+            # only) alongside the ring, so the worker never touches live state or
+            # a mutable pyte screen (#130). evicted_total is derivable from the
+            # monotonic counter; both it and keyframe_k sit on chunk boundaries.
+            evicted_total = self.ring.total_appended - len(self.ring)
+            total_appended = self.ring.total_appended
+            keyframe = self._screen_keyframe or b""
+            keyframe_k = self._keyframe_k
+            keyframe_dims = self._keyframe_dims
             r = await loop.run_in_executor(
                 None, _render_screen_text, data, cols, rows, view, lines,
-                self.state.alt_screen, evicted, attrs)
+                self.state.alt_screen, evicted, attrs,
+                keyframe, keyframe_k, keyframe_dims, evicted_total,
+                total_appended)
             r["cols"], r["rows"] = cols, rows
+            # Re-stash a freshly-emitted keyframe on the loop (serialized with
+            # every other loop mutation of it — race-free, no locks).
+            if "keyframe" in r:
+                self._screen_keyframe = r["keyframe"]
+                self._keyframe_k = int(r.get("keyframe_k", 0))
+                self._keyframe_dims = (cols, rows)
             return r
 
         def _reply(r: dict, content_hash: str,
@@ -577,7 +698,7 @@ class Agent:
                 history_lines=r["history_lines"],
                 app_cursor=self.state.app_cursor, content_hash=content_hash,
                 matched=matched, delta=delta, changed_rows=changed_rows,
-                attr_runs=r.get("attr_runs")))
+                attr_runs=r.get("attr_runs"), partial=r.get("partial", False)))
 
         async def _run() -> None:
             try:

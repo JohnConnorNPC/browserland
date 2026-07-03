@@ -262,7 +262,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       matched: Optional[bool] = None,
                       delta: bool = False,
                       changed_rows: Optional[list] = None,
-                      attr_runs: Optional[list] = None) -> str:
+                      attr_runs: Optional[list] = None,
+                      partial: bool = False) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -279,7 +280,13 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     reverse}``) so a color-only menu selection the plain text drops is visible;
     it is always the full current list, alongside any text delta. ``degraded``
     is the rare last-ditch raw decode (``view="raw"``), so the caller knows the
-    text is not a clean grid render."""
+    text is not a clean grid render. ``partial`` (#130) is distinct from
+    ``degraded``: the grid + cursor ARE valid, but the read couldn't fully
+    reconstruct a long-running alt-screen TUI after ring eviction lost its
+    static full-frame paint, so some statically-painted panels may be missing —
+    the caller should treat the frame as possibly incomplete (force a repaint)
+    rather than trust it. It self-heals on the next in-window read or any app
+    repaint."""
     frame: Dict[str, Any] = {
         "type": "screen_text",
         "req": int(req),
@@ -287,6 +294,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         "cols": int(cols),
         "rows": int(rows),
         "degraded": bool(degraded),
+        "partial": bool(partial),
         "alt_screen": bool(alt_screen),
         "app_cursor": bool(app_cursor),
         "view": str(view),

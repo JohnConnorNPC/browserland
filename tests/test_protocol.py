@@ -215,6 +215,17 @@ def test_screen_text_frame_delta():
     assert d["text"] == ""
 
 
+def test_screen_text_frame_partial():
+    # #130: partial is always present as a bool (distinct from degraded), so a
+    # caller can tell a possibly-incomplete alt-screen grid from a clean read.
+    plain = json.loads(protocol.screen_text_frame(1, "grid", 80, 24))
+    assert plain["partial"] is False
+    p = json.loads(protocol.screen_text_frame(1, "grid", 80, 24, partial=True))
+    assert p["partial"] is True
+    # partial and degraded are independent signals.
+    assert p["degraded"] is False
+
+
 def test_screen_text_please_frame_wait_for_change():
     # #26: a baseline hash + timeout ride the frame to the agent.
     f = json.loads(protocol.screen_text_please_frame(

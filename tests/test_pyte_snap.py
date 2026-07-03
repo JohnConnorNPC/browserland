@@ -78,6 +78,136 @@ def test_render_without_pyte_raises_helpful_error(monkeypatch):
         pyte_snap.render(b"", 80, 24)
 
 
+# ---- #130: emit_screen keyframe materializer --------------------------------
+
+def test_emit_screen_round_trips_grid_and_cursor():
+    # Feed content into a screen, emit it, feed the emitted bytes into a fresh
+    # screen: the grid + cursor must reproduce (the keyframe is a faithful,
+    # self-contained redraw of the settled grid).
+    src = pyte.Screen(20, 5)
+    pyte.ByteStream(src).feed(
+        b"line-one\r\nline-two\r\n\x1b[31mred\x1b[0m\x1b[4;7H")
+    out = pyte_snap.emit_screen(src, 20, 5)
+    dst = _rerender(out, 20, 5)
+    assert dst.display == src.display
+    assert (dst.cursor.x, dst.cursor.y) == (src.cursor.x, src.cursor.y)
+
+
+def test_render_delegates_to_emit_screen():
+    # render() is now emit_screen() over a freshly-fed screen — the public
+    # output is byte-identical to feeding+emitting by hand.
+    raw = b"hello\r\nworld"
+    direct = pyte_snap.render(raw, 20, 5)
+    screen = pyte.Screen(20, 5)
+    pyte.ByteStream(screen).feed(raw)
+    assert direct == pyte_snap.emit_screen(screen, 20, 5)
+
+
+# ---- #130: _render_screen_text keyframe reconstruction ----------------------
+
+# An alt-screen enter + one-time full paint carrying a unique panel token. A
+# real TUI paints this once, then streams only diffs.
+_ALT_PAINT = b"\x1b[?1049h\x1b[2J\x1b[1;1HLEGENDPANEL\x1b[2;1Hstatus"
+
+
+def test_reconstruct_restores_panel_after_eviction():
+    from webterm.agent.agent import _render_screen_text
+    # First read seeds the keyframe from the full paint (marker present).
+    r0 = _render_screen_text(_ALT_PAINT, 40, 6, alt_screen=True, evicted=False,
+                             total_appended=len(_ALT_PAINT))
+    assert "LEGENDPANEL" in r0["text"]
+    assert "partial" not in r0
+    assert r0["degraded"] is False
+    assert "keyframe" in r0 and r0["keyframe_k"] == len(_ALT_PAINT)
+
+    # Now the paint (incl. the ?1049h marker) has been evicted; only a later
+    # diff survives in the ring, which does NOT repaint the panel.
+    diffs = b"\x1b[4;1Hupdated-line"
+    r1 = _render_screen_text(
+        diffs, 40, 6, alt_screen=True, evicted=True,
+        keyframe=r0["keyframe"], keyframe_k=r0["keyframe_k"],
+        keyframe_dims=(40, 6),
+        evicted_total=len(_ALT_PAINT),          # off = keyframe_k - evicted = 0
+        total_appended=len(_ALT_PAINT) + len(diffs))
+    # The statically-painted panel SURVIVES (reconstructed from the keyframe)
+    # and the later diff is applied on top.
+    assert "LEGENDPANEL" in r1["text"]
+    assert "updated-line" in r1["text"]
+    assert "partial" not in r1              # a full reconstruction, not partial
+    assert r1["degraded"] is False
+    # A fresh keyframe is re-stashed, tagged at the new absolute offset.
+    assert "keyframe" in r1
+    assert r1["keyframe_k"] == len(_ALT_PAINT) + len(diffs)
+
+
+def test_stale_keyframe_falls_back_to_partial():
+    from webterm.agent.agent import _render_screen_text
+    diffs = b"\x1b[4;1Honly-a-diff"
+    # keyframe_k < evicted_total -> off < 0: eviction overtook the keyframe, so
+    # the middle diffs are gone and we cannot reconstruct -> partial, no keyframe.
+    r = _render_screen_text(
+        diffs, 40, 6, alt_screen=True, evicted=True,
+        keyframe=_ALT_PAINT, keyframe_k=10, keyframe_dims=(40, 6),
+        evicted_total=5000, total_appended=6000)
+    assert r.get("partial") is True
+    assert r["degraded"] is False
+    assert "keyframe" not in r
+
+
+def test_dim_mismatched_keyframe_falls_back_to_partial():
+    from webterm.agent.agent import _render_screen_text
+    diffs = b"\x1b[4;1Honly-a-diff"
+    # Keyframe captured at other dims -> its per-row CUP would misposition, so
+    # reconstruction is skipped and the read is flagged partial.
+    r = _render_screen_text(
+        diffs, 40, 6, alt_screen=True, evicted=True,
+        keyframe=_ALT_PAINT, keyframe_k=100, keyframe_dims=(80, 24),
+        evicted_total=0, total_appended=100 + len(diffs))
+    assert r.get("partial") is True
+    assert "keyframe" not in r
+
+
+def test_no_partial_when_marker_survives():
+    from webterm.agent.agent import _render_screen_text
+    # Evicted + alt-screen, but the ring still carries a restart marker + repaint
+    # (best > 0): the normal trim path handles it, no partial, no keyframe needed
+    # from reconstruction — and a fresh keyframe is still emitted for the chain.
+    data = b"leading-noise\x1b[2J\x1b[1;1HFULLREPAINT"
+    r = _render_screen_text(data, 40, 6, alt_screen=True, evicted=True,
+                            total_appended=len(data))
+    assert "FULLREPAINT" in r["text"]
+    assert "partial" not in r
+    assert "keyframe" in r
+
+
+def test_marker_at_index_zero_is_complete_not_partial():
+    from webterm.agent.agent import _render_screen_text
+    # Evicted + alt-screen where the surviving ring begins EXACTLY at a restart
+    # marker (best == 0): _trim_for_screen keeps the full ring, so the normal
+    # replay reproduces a COMPLETE frame — everything after the clear survived
+    # eviction from the front. This must NOT be flagged partial (false alarm),
+    # and a fresh keyframe MUST still be emitted so the chain doesn't stall.
+    # No keyframe is supplied, to prove the complete frame stands on its own.
+    data = b"\x1b[2J\x1b[1;1HFULLREPAINT-COMPLETE"
+    r = _render_screen_text(data, 40, 6, alt_screen=True, evicted=True,
+                            total_appended=len(data))
+    assert "FULLREPAINT-COMPLETE" in r["text"]
+    assert "partial" not in r
+    assert r["degraded"] is False
+    assert "keyframe" in r and r["keyframe_k"] == len(data)
+
+
+def test_non_alt_read_emits_no_keyframe():
+    from webterm.agent.agent import _render_screen_text
+    # A primary-screen (non-alt) read never participates in the keyframe chain,
+    # so no keyframe is emitted and it can never be flagged partial.
+    r = _render_screen_text(b"just a shell line\r\n", 40, 6,
+                            alt_screen=False, evicted=True,
+                            total_appended=19)
+    assert "keyframe" not in r
+    assert "partial" not in r
+
+
 # ---- #128: attr_runs — surface the color/reverse-video the text drops -------
 
 def test_attr_runs_reverse_video():

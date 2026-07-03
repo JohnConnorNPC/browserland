@@ -159,8 +159,11 @@ class BrowserlandClient:
         requests a delta: the reply carries ``changed_rows`` + ``delta`` instead
         of the full grid when the agent can diff it (#52). ``attrs`` adds
         ``attr_runs`` — the styled fg/bg/reverse cell runs — so a color-only menu
-        selection the plain text drops is visible (#128). The HTTP read timeout
-        is stretched past the broker's wait so it doesn't give up early."""
+        selection the plain text drops is visible (#128). ``partial`` (present
+        and true only when it applies, #130) flags a valid but possibly
+        incomplete alt-screen grid whose one-time full-frame paint was lost to
+        ring eviction; distinct from ``degraded`` and self-healing. The HTTP read
+        timeout is stretched past the broker's wait so it doesn't give up early."""
         body: Dict[str, Any] = {"id": id}
         if view and view != "screen":
             body["view"] = view

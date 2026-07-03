@@ -527,3 +527,162 @@ async def test_read_screen_attrs_surfaces_reverse_video(running_agent, broker):
     # A default read (no attrs) omits the key entirely — unchanged behavior.
     plain = await _read_screen(broker, 2)
     assert "attr_runs" not in plain
+
+
+# ---- #130: alt-screen keyframe survives ring eviction ----------------------
+
+try:
+    import pyte as _pyte_probe  # noqa: F401
+    _HAS_PYTE = True
+except ImportError:
+    _HAS_PYTE = False
+
+requires_pyte = pytest.mark.skipif(
+    not _HAS_PYTE, reason="keyframe reconstruction needs pyte")
+
+# Alt-screen enter + a one-time full paint carrying a unique panel token. A real
+# TUI paints this once, then streams only diffs (which never repaint the panel).
+_ALT_PAINT = b"\x1b[?1049h\x1b[2J\x1b[1;1HLEGENDPANEL"
+# A diff chunk that overwrites the SAME spot on row 3 (no wrap, no scroll, so the
+# panel on row 1 is never disturbed). ~1440 bytes -> a few chunks evict the 4096
+# ring, dropping the initial paint + its ?1049h/2J markers.
+_DIFF_CHUNK = b"\x1b[3;1Hstatus-update-line" * 60
+
+
+@requires_pyte
+async def test_alt_screen_panel_survives_eviction(running_agent, broker):
+    # The load-bearing #130 repro: a panel painted once must still read back
+    # after >256 KiB (here >4 KiB) of diff-only output evicts the original paint.
+    agent, backend, _ = running_agent
+    req = 1
+    backend.feed(_ALT_PAINT)
+    r = await _read_screen(broker, req); req += 1
+    assert "LEGENDPANEL" in r["text"]
+    assert r["alt_screen"] is True                 # ?1049h sniffed live
+    last = None
+    for _ in range(20):                            # feed diffs, reading between
+        backend.feed(_DIFF_CHUNK)
+        r = await _read_screen(broker, req); req += 1
+        if agent.ring.evicted:
+            break
+        last = r                                   # last pre-eviction read
+    assert agent.ring.evicted                      # the paint chunk is gone
+    # The statically-painted panel SURVIVES the eviction (reconstructed from the
+    # immutable keyframe chain), and the read is a full frame, not partial.
+    assert "LEGENDPANEL" in r["text"]
+    assert "status-update-line" in r["text"]
+    assert not r.get("partial")
+    assert r.get("degraded") is not True
+    # content_hash is stable across the eviction boundary (same settled screen).
+    assert last is not None
+    assert r["content_hash"] == last["content_hash"]
+
+
+@requires_pyte
+async def test_partial_flag_fires_for_sparse_read_under_flood(running_agent,
+                                                              broker):
+    # Sparse reads: the client floods WITHOUT reading, so no keyframe is ever
+    # seeded and eviction overtakes the paint. The one read after the flood can't
+    # reconstruct -> honest partial (a valid grid, just possibly incomplete).
+    agent, backend, _ = running_agent
+    backend.feed(_ALT_PAINT)
+    for _ in range(6):
+        backend.feed(_DIFF_CHUNK)                  # ~8.6 KiB, no reads between
+    r = await _read_screen(broker, 1)
+    assert agent.ring.evicted
+    assert r["alt_screen"] is True
+    assert r.get("partial") is True                # could not reconstruct
+    assert r.get("degraded") is not True           # still a real grid + cursor
+
+
+async def test_primary_screen_flood_never_seeds_keyframe(running_agent, broker):
+    # A non-alt shell flood keeps the hardened off-loop path untouched: no
+    # keyframe is ever seeded (so nothing can be reconstructed or flagged
+    # partial), regardless of pyte.
+    agent, backend, _ = running_agent
+    backend.feed(b"\x1b[2J\x1b[H")                  # primary screen, no alt-enter
+    backend.feed(b"".join(b"shell-line-%04d\r\n" % i for i in range(600)))
+    await asyncio.wait_for(_poll_until(lambda: agent.ring.evicted), 5)
+    r = await _read_screen(broker, 1)
+    assert r["alt_screen"] is False
+    assert r["partial"] is False                    # never flagged on the shell path
+    assert agent._screen_keyframe is None          # non-alt never seeds it
+
+
+@requires_pyte
+async def test_reset_nulls_the_keyframe(running_agent, broker):
+    # reset_terminal must drop the keyframe alongside the ring, or the next read
+    # would reconstruct a stale grid onto the clean slate reset promises.
+    agent, backend, _ = running_agent
+    backend.feed(_ALT_PAINT)
+    await _read_screen(broker, 1)                   # seeds the keyframe
+    assert agent._screen_keyframe is not None
+    done = await _reset(broker, 2)
+    assert done["ok"] is True
+    assert agent._screen_keyframe is None
+    r = await _read_screen(broker, 3)
+    assert "LEGENDPANEL" not in r["text"]           # no stale bleed
+    assert r["text"].strip() == ""
+
+
+@requires_pyte
+async def test_resize_nulls_the_keyframe(running_agent, broker):
+    # A resize invalidates the keyframe (its per-row CUP would misposition at the
+    # new dims); the chain re-seeds from the next trustworthy read.
+    agent, backend, _ = running_agent
+    backend.feed(_ALT_PAINT)
+    await _read_screen(broker, 1)
+    assert agent._screen_keyframe is not None
+    await broker.send_resize(100, 30)
+    await broker.wait_text(lambda f: f.get("type") == "resized")
+    assert agent._screen_keyframe is None
+
+
+# App A's one-time paint carrying a token that only App A ever writes, so any
+# read that surfaces it after App B took over is proof of stale cross-app bleed.
+_APP_A_PAINT = b"\x1b[?1049h\x1b[2J\x1b[1;1HAPP_A_ONLY_PANEL"
+# App B enters alt via DEC private mode 47 (CSI ?47h). The live sniffer counts 47
+# as an alt mode (state.alt_screen -> True), but ?47h is NOT one of textgrid's
+# _RESTART_MARKERS, so App B's enter can't anchor a trim. App B then streams only
+# a row-3 diff (no 2J), so once App A's ?1049h/2J head has evicted, NO restart
+# marker survives (the bug_condition) while App A's keyframe_k still sits in the
+# ring -- exactly the window in which a STALE App A keyframe would reconstruct
+# onto App B's brand-new session unless the transition invalidated it.
+_APP_B_ENTER = b"\x1b[?47h"
+
+
+@requires_pyte
+async def test_alt_transition_invalidates_stale_keyframe(running_agent, broker):
+    # #130 cross-app corruption: App A's keyframe must never reconstruct onto a
+    # DIFFERENT alt session. App A seeds+keeps a keyframe carrying a unique panel;
+    # App A leaves alt and App B enters a new alt session streaming only diffs. A
+    # read after eviction must NOT bleed App A's panel through the stale keyframe.
+    agent, backend, _ = running_agent
+    req = 1
+    # App A: paint the unique panel on row 1, then flood row-3 diffs (reading
+    # between) so the head paint + its ?1049h/2J evict while the keyframe chain
+    # keeps App A's panel alive -- mirroring test_alt_screen_panel_survives_evict.
+    backend.feed(_APP_A_PAINT)
+    r = await _read_screen(broker, req); req += 1
+    assert "APP_A_ONLY_PANEL" in r["text"]
+    for _ in range(20):
+        backend.feed(_DIFF_CHUNK)
+        r = await _read_screen(broker, req); req += 1
+        if agent.ring.evicted:
+            break
+    assert agent.ring.evicted                       # App A's head paint is gone
+    assert "APP_A_ONLY_PANEL" in r["text"]          # keyframe kept it alive...
+    assert agent._screen_keyframe is not None       # ...via a live App A keyframe
+    # App A exits its alt session; App B enters a NEW one (mode 47) and paints a
+    # single diff-only frame. No read happens in between, so nothing re-seeds a
+    # keyframe for App B before the post-transition read below.
+    backend.feed(b"\x1b[?1049l")                     # App A leaves alt (True->False)
+    backend.feed(_APP_B_ENTER)                       # App B enters alt (False->True)
+    backend.feed(b"\x1b[3;1HAPP_B_status_line")      # App B: diff only, no repaint
+    r = await _read_screen(broker, req); req += 1
+    assert r["alt_screen"] is True                   # App B's ?47h sniffed live
+    # The load-bearing assertion: App A's panel is ABSENT. Before the fix the
+    # stale keyframe reconstructs and returns a CONFIDENT frame still showing
+    # APP_A_ONLY_PANEL; after the fix the transition dropped the keyframe, so this
+    # read honestly returns App B content (a partial flag is fine) with no bleed.
+    assert "APP_A_ONLY_PANEL" not in r["text"]

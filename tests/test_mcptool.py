@@ -180,6 +180,21 @@ def test_read_screen_default_omits_attrs():
     assert "attrs" not in seen["body"]
 
 
+def test_read_screen_surfaces_partial_flag():
+    """#130: a `partial` flag on the broker reply (an alt-screen grid that lost
+    its full-frame paint to ring eviction and couldn't be reconstructed) is
+    passed through to the tool result verbatim."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "ok": True, "id": 5, "cols": 80, "rows": 24, "text": "grid",
+            "alt_screen": True, "partial": True})
+
+    with _client(handler) as c:
+        out = c.read_screen(5)
+    assert out["partial"] is True
+    assert out["alt_screen"] is True
+
+
 def test_send_input_posts_id_and_data():
     seen = {}
 

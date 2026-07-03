@@ -111,15 +111,16 @@ class _Sgr:
             out += b"\x1b[" + ";".join(str(p) for p in params).encode() + b"m"
 
 
-def render(ring_bytes: bytes, cols: int, rows: int) -> bytes:
-    if pyte is None:
-        raise RuntimeError(
-            "--snapshot-mode pyte requires the 'pyte' package "
-            "(pip install pyte, or install webterm[pyte])")
-    screen = pyte.Screen(cols, rows)
-    stream = pyte.ByteStream(screen)
-    stream.feed(ring_bytes)
+def emit_screen(screen, cols: int, rows: int) -> bytes:
+    """Re-emit a fed :class:`pyte.Screen`'s settled grid as one idempotent,
+    self-contained full redraw: the shared PREAMBLE, then per-row 1-based cursor
+    moves + SGR-diffed cells, and a postamble restoring the cursor.
 
+    Factored out of :func:`render` so the same materializer backs the #130
+    keyframe: feeding these bytes into a fresh screen reproduces the grid +
+    cursor, so a statically-painted alt-screen frame can be captured as an
+    immutable byte keyframe and later prepended to the surviving ring tail to
+    survive >256 KiB eviction of the original full-frame paint."""
     out = bytearray(PREAMBLE)
     state = _Sgr()
     for r in range(rows):
@@ -139,6 +140,17 @@ def render(ring_bytes: bytes, cols: int, rows: int) -> bytes:
     cur_col = min(max(screen.cursor.x, 0), cols - 1) + 1
     out += b"\x1b[0m\x1b[%d;%dH" % (cur_row, cur_col)
     return bytes(out)
+
+
+def render(ring_bytes: bytes, cols: int, rows: int) -> bytes:
+    if pyte is None:
+        raise RuntimeError(
+            "--snapshot-mode pyte requires the 'pyte' package "
+            "(pip install pyte, or install webterm[pyte])")
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    stream.feed(ring_bytes)
+    return emit_screen(screen, cols, rows)
 
 
 # read_screen attrs (#128): cap the styled-run list so an opt-in attribute read

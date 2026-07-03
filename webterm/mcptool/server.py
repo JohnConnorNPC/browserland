@@ -347,6 +347,14 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
     history above the current grid (`history_lines` reports how many were
     included; ignored when `alt_screen` is true).
 
+    `partial` (present and true only when it applies) flags a valid but possibly
+    INCOMPLETE grid: a long-running alt-screen TUI painted its frame once and
+    only streams diffs, and so much output has scrolled by that the original
+    full-frame paint was lost before it could be captured, so some
+    statically-painted panels may be missing. It's distinct from `degraded` (a
+    raw non-grid fallback). It self-heals — read again, or force a repaint with
+    `send_keys(id, ["C-l"])` — after which `partial` is absent.
+
     COLOR / SELECTION — the default text mode drops cell color, so a menu row
     marked by color or reverse-video ALONE (its text identical to the others —
     e.g. a Dwarf Fortress menu) is invisible here. Pass `attrs=true` to also get
