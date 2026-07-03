@@ -280,7 +280,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       delta: bool = False,
                       changed_rows: Optional[list] = None,
                       attr_runs: Optional[list] = None,
-                      partial: bool = False) -> str:
+                      partial: bool = False,
+                      idle_ms: int = 0) -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -303,7 +304,10 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     static full-frame paint, so some statically-painted panels may be missing —
     the caller should treat the frame as possibly incomplete (force a repaint)
     rather than trust it. It self-heals on the next in-window read or any app
-    repaint."""
+    repaint. ``idle_ms`` (#133) is a best-effort count of milliseconds since the
+    terminal last emitted PTY output, computed at reply time; it is additive (an
+    older agent omits it) and unreliable for a perpetually-animating app that
+    paints every frame."""
     frame: Dict[str, Any] = {
         "type": "screen_text",
         "req": int(req),
@@ -317,6 +321,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         "view": str(view),
         "history_lines": int(history_lines),
         "content_hash": str(content_hash),
+        "idle_ms": int(idle_ms),
     }
     # cursor is null on the degraded raw path (no grid to locate it in) — the
     # helper enforces the invariant regardless of what the caller passed.

@@ -165,8 +165,13 @@ class BrowserlandClient:
         selection the plain text drops is visible (#128). ``partial`` (present
         and true only when it applies, #130) flags a valid but possibly
         incomplete alt-screen grid whose one-time full-frame paint was lost to
-        ring eviction; distinct from ``degraded`` and self-healing. The HTTP read
-        timeout is stretched past the broker's wait so it doesn't give up early."""
+        ring eviction; distinct from ``degraded`` and self-healing. ``idle_ms``
+        (#133) is ms since the terminal last emitted output — best-effort, absent
+        from older agents, and UNRELIABLE for a perpetually-animating app (Dwarf
+        Fortress paints every frame, so its idle_ms never grows); for those,
+        pacing/flush and a semantic screen check are the real settle signals. The
+        HTTP read timeout is stretched past the broker's wait so it doesn't give
+        up early."""
         body: Dict[str, Any] = {"id": id}
         if view and view != "screen":
             body["view"] = view

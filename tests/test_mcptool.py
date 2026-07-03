@@ -195,6 +195,20 @@ def test_read_screen_surfaces_partial_flag():
     assert out["alt_screen"] is True
 
 
+def test_read_screen_surfaces_idle_ms():
+    """#133: idle_ms on the broker reply (best-effort ms since the last PTY
+    output) is passed through to the tool result verbatim — read_screen returns
+    the broker dict as-is, so no client-side handling is needed."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "ok": True, "id": 5, "cols": 80, "rows": 24, "text": "grid",
+            "idle_ms": 250})
+
+    with _client(handler) as c:
+        out = c.read_screen(5)
+    assert out["idle_ms"] == 250
+
+
 def test_send_input_posts_id_and_data():
     seen = {}
 

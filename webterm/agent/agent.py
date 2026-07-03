@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import socket
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -275,6 +276,9 @@ class Agent:
         # shared Event/clear can swallow a wakeup across concurrent waiters.
         self._output_gen = 0
         self._output_waiters: List[asyncio.Future] = []
+        # Best-effort wall-time of the last PTY output, for read_screen's idle_ms
+        # (#133); monotonic so it's immune to clock steps.
+        self._last_output_ts: float = time.monotonic()
         # Delta read_screen (#52): a small LRU of recently-returned frames,
         # content_hash -> list[str] rows, so a follow-up read can ask for only
         # the rows that changed since a prior hash (`since`) instead of the
@@ -366,6 +370,7 @@ class Agent:
 
     def _on_pty_data(self, chunk: bytes) -> None:
         self.ring.append(chunk)
+        self._last_output_ts = time.monotonic()  # for read_screen idle_ms (#133)
         self._wake_output_waiters()              # wake read_screen waiters (#26)
         # Track DEC modes live (#21/#23): survives ring eviction, unlike a re-scan.
         prev_alt = self.state.alt_screen
@@ -684,6 +689,11 @@ class Agent:
 
         def _reply(r: dict, content_hash: str,
                    matched: Optional[bool] = None) -> None:
+            # Best-effort staleness (#133): ms since the last PTY output, computed
+            # at reply time (not render time) so a wait_for_change that woke on
+            # new output honestly reports ~0, while a timed-out wait reports the
+            # real idle gap. monotonic -> immune to clock steps.
+            idle_ms = int(max(0.0, time.monotonic() - self._last_output_ts) * 1000)
             rows_list = r["text"].split("\n")
             changed_rows = None
             delta = False
@@ -716,7 +726,8 @@ class Agent:
                 history_lines=r["history_lines"],
                 app_cursor=self.state.app_cursor, content_hash=content_hash,
                 matched=matched, delta=delta, changed_rows=changed_rows,
-                attr_runs=r.get("attr_runs"), partial=r.get("partial", False)))
+                attr_runs=r.get("attr_runs"), partial=r.get("partial", False),
+                idle_ms=idle_ms))
 
         async def _run() -> None:
             try:
@@ -777,7 +788,9 @@ class Agent:
                     req, "", self.state.cols, self.state.rows, degraded=True,
                     alt_screen=self.state.alt_screen, cursor=None, view="raw",
                     history_lines=0, app_cursor=self.state.app_cursor,
-                    content_hash=""))
+                    content_hash="",
+                    idle_ms=int(max(0.0, time.monotonic()
+                                    - self._last_output_ts) * 1000)))
 
         loop.create_task(_run())
 

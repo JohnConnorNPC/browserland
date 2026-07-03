@@ -288,3 +288,13 @@ def test_screen_text_frame_attr_runs():
     # caller can tell "asked, none found" from "didn't ask" (key absent).
     empty = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, attr_runs=[]))
     assert empty["attr_runs"] == []
+
+
+def test_screen_text_frame_idle_ms():
+    # #133: idle_ms (best-effort ms since the last PTY output) rides the reply;
+    # a current agent always carries it, defaulting to 0 (output just now), and a
+    # passed value is coerced to an int.
+    default = json.loads(protocol.screen_text_frame(1, "hi", 80, 24))
+    assert default["idle_ms"] == 0
+    f = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, idle_ms=1234))
+    assert f["idle_ms"] == 1234

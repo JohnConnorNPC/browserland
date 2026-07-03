@@ -3086,6 +3086,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # (its pyte path); an older agent or the raw fallback omits it.
         if payload.get("attr_runs") is not None:
             out["attr_runs"] = payload.get("attr_runs")
+        # idle_ms (#133): best-effort ms since the terminal last emitted PTY
+        # output. Relayed only when the producer sent it (mirrors matched/
+        # attr_runs): a CURRENT agent always reports it (0 == output just now),
+        # an OLDER agent omits it (unknown, not a misleading 0). It is UNRELIABLE
+        # for a perpetually-animating app whose idle_ms never grows.
+        if payload.get("idle_ms") is not None:
+            out["idle_ms"] = int(payload.get("idle_ms"))
         if payload.get("degraded"):
             out["degraded"] = True
         # partial (#130): distinct from degraded — a valid grid that may be

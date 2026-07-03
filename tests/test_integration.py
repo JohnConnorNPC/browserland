@@ -605,6 +605,34 @@ async def test_read_screen_attrs_surfaces_reverse_video(running_agent, broker):
     assert "attr_runs" not in plain
 
 
+# ---- #133: read_screen idle_ms (ms since the last PTY output) --------------
+
+async def test_read_screen_reports_idle_ms(running_agent, broker, monkeypatch):
+    # _on_pty_data stamps the last-output time and the read reply reports the ms
+    # since it. Drive the agent's time.monotonic through a controlled clock (patch
+    # the module attribute, not the global module, so only the agent's calls are
+    # affected) so idle_ms is exact and the test stays deterministic.
+    import types
+    from webterm.agent import agent as agent_mod
+    agent, backend, _ = running_agent
+    clock = [1000.0]
+    monkeypatch.setattr(agent_mod, "time",
+                        types.SimpleNamespace(monotonic=lambda: clock[0]))
+    # Output lands "now": _on_pty_data stamps _last_output_ts to the clock value.
+    backend.feed(b"tick\r\n")
+    await broker.wait_binary(lambda b: b"tick" in b)
+    assert agent._last_output_ts == 1000.0            # _on_pty_data updated it
+    # 0.5 s of silence, then a read: idle_ms is the exact gap.
+    clock[0] = 1000.5
+    r = await _read_screen(broker, 1)
+    assert r["idle_ms"] == 500
+    # A read right after fresh output reports ~0 (output just landed).
+    backend.feed(b"tock\r\n")
+    await broker.wait_binary(lambda b: b"tock" in b)
+    r2 = await _read_screen(broker, 2)
+    assert r2["idle_ms"] == 0
+
+
 # ---- #130: alt-screen keyframe survives ring eviction ----------------------
 
 try:

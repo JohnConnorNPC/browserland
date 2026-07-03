@@ -324,8 +324,15 @@ window's default `send_keys` inter-key pacing (#133, `0` = single-burst, set via
 **`POST /mcp/read`** — body `{"id": <int>}`:
 
 ```json
-{"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n..."}
+{"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n...","idle_ms":0}
 ```
+
+`idle_ms` is a best-effort count of ms since the terminal last emitted PTY output
+(a current agent always reports it — `0` means output landed just now; an older
+agent omits it, so it reads as unknown rather than a misleading `0`). It is
+unreliable for a perpetually-animating app that paints every frame (its `idle_ms`
+never grows), so pacing/flush and a semantic content wait are the real settle
+signals there, not `idle_ms`.
 
 The agent renders the screen off its event loop. With pyte it returns the full
 grid; without pyte it falls back to a dependency-free in-house emulator

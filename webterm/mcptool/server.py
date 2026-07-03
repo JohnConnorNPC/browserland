@@ -379,6 +379,12 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
     raw non-grid fallback). It self-heals — read again, or trigger any repaint
     from the app — after which `partial` is absent.
 
+    `idle_ms` is ms since the terminal last emitted output — best-effort, and
+    absent from older agents. It is UNRELIABLE for a perpetually-animating app
+    (Dwarf Fortress paints every frame, so its `idle_ms` never grows): for those,
+    pacing/flush and a semantic screen check (`wait_for_text`/`wait_for_regex`)
+    are the real settle signals, not `idle_ms`.
+
     COLOR / SELECTION — the default text mode drops cell color, so a menu row
     marked by color or reverse-video ALONE (its text identical to the others —
     e.g. a Dwarf Fortress menu) is invisible here. Pass `attrs=true` to also get
