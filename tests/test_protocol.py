@@ -195,7 +195,8 @@ def test_screen_text_please_frame_view_lines():
                  "view": "scrollback", "lines": 200,
                  "wait_for_change": None, "timeout_ms": 0,
                  "wait_for_text": None, "wait_for_regex": None,
-                 "wait_absent": False, "since": None, "attrs": False}
+                 "wait_absent": False, "since": None, "attrs": False,
+                 "wait_for_idle": 0}
     d = json.loads(protocol.screen_text_please_frame(5))
     assert d["view"] == "screen" and d["lines"] == 0
     assert d["wait_for_change"] is None and d["timeout_ms"] == 0
@@ -310,3 +311,21 @@ def test_screen_text_frame_idle_ms():
     assert default["idle_ms"] == 0
     f = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, idle_ms=1234))
     assert f["idle_ms"] == 1234
+
+
+def test_screen_text_please_frame_wait_for_idle():
+    # #135: wait_for_idle (a settle window in ms) rides the request; default 0.
+    f = json.loads(protocol.screen_text_please_frame(9, wait_for_idle=500))
+    assert f["wait_for_idle"] == 500
+    assert json.loads(
+        protocol.screen_text_please_frame(9))["wait_for_idle"] == 0
+
+
+def test_screen_text_frame_stable_hash():
+    # #135: stable_hash (the cursor-blind digest) ALWAYS rides the reply, like
+    # content_hash; default is the empty string.
+    default = json.loads(protocol.screen_text_frame(1, "hi", 80, 24))
+    assert default["stable_hash"] == ""
+    f = json.loads(protocol.screen_text_frame(
+        1, "hi", 80, 24, stable_hash="cafef00ddeadbeef"))
+    assert f["stable_hash"] == "cafef00ddeadbeef"

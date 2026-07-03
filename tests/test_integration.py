@@ -438,6 +438,132 @@ async def test_wait_for_regex_invalid_is_safe(running_agent, broker):
     assert "matched" not in r                # no predicate was in effect
 
 
+# ---- #135: cursor-blind stable_hash + wait_for_idle settle wait -------------
+
+def test_stable_hash_blind_to_cursor_blink_but_content_hash_sees_it():
+    from webterm.agent.agent import _content_hash, _stable_hash
+    # A hardware cursor blinking IN PLACE toggles its own cell between the block
+    # glyph and the underlying char. content_hash flips every blink; stable_hash
+    # (which masks the cursor cell to a sentinel) does not — so a lone blinking
+    # cursor reads as a settled screen, not perpetual change.
+    cur = {"row": 0, "col": 1}
+    on = "a█c\ndef"                       # cursor block baked in at row 0 col 1
+    off = "abc\ndef"                           # same cell now showing its char
+    assert _content_hash(on) != _content_hash(off)          # blink flips content_hash
+    assert _stable_hash(on, cur) == _stable_hash(off, cur)  # ...but not stable_hash
+
+
+def test_stable_hash_and_content_hash_both_change_on_cursor_move():
+    from webterm.agent.agent import _content_hash, _stable_hash
+    # A cursor MOVE lands the block on a different cell (revealing the char it
+    # vacated) — a real screen change, so BOTH hashes differ. The mask only ever
+    # hides the ONE current cursor cell, never a genuine change elsewhere.
+    a_text, a_cur = "a█c\ndef", {"row": 0, "col": 1}   # cursor at col 1
+    b_text, b_cur = "ab█\ndef", {"row": 0, "col": 2}   # cursor moved to col 2
+    assert _content_hash(a_text) != _content_hash(b_text)
+    assert _stable_hash(a_text, a_cur) != _stable_hash(b_text, b_cur)
+
+
+def test_stable_hash_degraded_equals_content_hash():
+    from webterm.agent.agent import _content_hash, _stable_hash
+    # No cursor (a degraded/no-cursor read) -> stable_hash IS content_hash, so the
+    # two fields stay comparable. Out-of-range / malformed cursors are bounds-safe
+    # and also fall back to the plain digest (never raise).
+    assert _stable_hash("grid", None) == _content_hash("grid")
+    assert _stable_hash("grid", {}) == _content_hash("grid")
+    assert _stable_hash("grid", {"row": 99, "col": 99}) == _content_hash("grid")
+    assert _stable_hash("grid", {"row": 0}) == _content_hash("grid")   # missing col
+
+
+def test_stable_hash_row_offset_masks_grid_cursor_past_history():
+    from webterm.agent.agent import _stable_hash
+    # On a view=scrollback read the text has `history_lines` prepended above the
+    # grid, but `cursor` is grid-relative — so the mask must shift DOWN by that
+    # offset to hit the live cursor cell, not a static history cell (#135). Two
+    # history rows sit above a grid whose cursor blinks at grid row 0 col 1.
+    on = "h0\nh1\na█c\ndef"     # 2 history rows, then the grid; block at grid (0,1)
+    off = "h0\nh1\nabc\ndef"    # same, the cursor cell now showing its char
+    cur = {"row": 0, "col": 1}                              # grid-relative
+    assert _stable_hash(on, cur, 2) == _stable_hash(off, cur, 2)   # offset -> blind
+    assert _stable_hash(on, cur, 0) != _stable_hash(off, cur, 0)   # no offset -> leaks
+
+
+async def test_read_screen_returns_stable_hash(running_agent, broker):
+    # The reply surfaces a non-empty cursor-blind digest end to end, alongside
+    # content_hash. Both are strings; both present.
+    _, backend, _ = running_agent
+    backend.feed(b"hello screen\r\n")
+    await broker.wait_binary(lambda b: b"hello screen" in b)
+    r = await _read_screen(broker, 1)
+    assert isinstance(r["stable_hash"], str) and r["stable_hash"]
+    assert isinstance(r["content_hash"], str) and r["content_hash"]
+
+
+async def test_wait_for_idle_settles_after_quiet_window(running_agent, broker):
+    # After output stops, a settle wait holds for ~wait_for_idle ms of stability
+    # then returns matched=True — well before the generous timeout_ms.
+    _, backend, _ = running_agent
+    backend.feed(b"settled screen\r\n")
+    await broker.wait_binary(lambda b: b"settled screen" in b)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    r = await asyncio.wait_for(
+        _read_screen(broker, 2, wait_for_idle=300, timeout_ms=5000), 5)
+    assert r.get("matched") is True
+    assert "settled screen" in r["text"]
+    elapsed = loop.time() - t0
+    assert elapsed >= 0.25            # actually held ~the idle window
+    assert elapsed < 3.0             # settled, did NOT wait out the 5s timeout
+
+
+async def test_wait_for_idle_resets_timer_on_output(running_agent, broker):
+    # Output arriving mid-window resets the settle timer, so the read does NOT
+    # settle early — it keeps holding until a FRESH quiet window elapses.
+    _, backend, _ = running_agent
+    backend.feed(b"line 1\r\n")
+    await broker.wait_binary(lambda b: b"line 1" in b)
+    waiter = asyncio.create_task(
+        _read_screen(broker, 2, wait_for_idle=300, timeout_ms=5000))
+    await asyncio.sleep(0.15)                     # ~halfway into the first window
+    assert not waiter.done()
+    backend.feed(b"line 2\r\n")                   # resets the settle timer
+    await broker.wait_binary(lambda b: b"line 2" in b)
+    await asyncio.sleep(0.15)                     # would have settled sans the reset
+    assert not waiter.done()                      # ...but the reset pushed it out
+    r = await asyncio.wait_for(waiter, 5)
+    assert r.get("matched") is True               # settles after the new quiet run
+    assert "line 2" in r["text"]
+
+
+async def test_wait_for_idle_times_out_matched_false_on_constant_output(
+        running_agent, broker):
+    # A screen that changes faster than the idle window never settles: the read
+    # waits out timeout_ms and returns matched=False (not a hang, not an error).
+    _, backend, _ = running_agent
+    backend.feed(b"busy\r\n")
+    await broker.wait_binary(lambda b: b"busy" in b)
+    stop = False
+
+    async def _ticker() -> None:
+        i = 0
+        while not stop:
+            i += 1
+            backend.feed(b"\x1b[2J\x1b[Htick %d\r\n" % i)   # a fresh screen each tick
+            await asyncio.sleep(0.05)
+
+    tk = asyncio.create_task(_ticker())
+    try:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        r = await asyncio.wait_for(
+            _read_screen(broker, 2, wait_for_idle=300, timeout_ms=700), 5)
+        assert r.get("matched") is False
+        assert loop.time() - t0 >= 0.6            # actually waited out ~timeout_ms
+    finally:
+        stop = True
+        await asyncio.wait_for(tk, 2)
+
+
 # ---- #52: read_screen delta mode (changed rows since a prior hash) ----------
 
 async def test_delta_returns_only_changed_rows(running_agent, broker):

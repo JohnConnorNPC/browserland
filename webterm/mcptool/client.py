@@ -150,7 +150,8 @@ class BrowserlandClient:
                     wait_for_regex: Optional[str] = None,
                     wait_absent: bool = False,
                     since: Optional[str] = None,
-                    attrs: bool = False) -> Dict[str, Any]:
+                    attrs: bool = False,
+                    wait_for_idle: int = 0) -> Dict[str, Any]:
         """Render a terminal's screen as plain text. ``view="scrollback"`` with
         ``lines>0`` prepends that many lines of history above the grid (#21).
 
@@ -158,7 +159,11 @@ class BrowserlandClient:
         read until the screen changes or the timeout elapses (#26).
         ``wait_for_text`` / ``wait_for_regex`` (+ ``wait_absent``) instead hold
         until the screen contains (or no longer contains) the match (#51), and
-        the reply carries ``matched``. ``since`` (a prior ``content_hash``)
+        the reply carries ``matched``. ``wait_for_idle`` (ms) instead holds until
+        the CURSOR-BLIND screen hash (``stable_hash``) has been unchanged for that
+        many ms — output went quiet — or the timeout elapses; the reply carries
+        ``matched`` and every reply carries ``stable_hash`` (the blink-insensitive
+        digest) (#135). ``since`` (a prior ``content_hash``)
         requests a delta: the reply carries ``changed_rows`` + ``delta`` instead
         of the full grid when the agent can diff it (#52). ``attrs`` adds
         ``attr_runs`` — the styled fg/bg/reverse cell runs — so a color-only menu
@@ -180,13 +185,16 @@ class BrowserlandClient:
         if attrs:
             body["attrs"] = True
         req_timeout = self._read_timeout
-        waiting = bool(wait_for_change or wait_for_text or wait_for_regex)
+        waiting = bool(wait_for_change or wait_for_text or wait_for_regex
+                       or wait_for_idle)
         if wait_for_change:
             body["wait_for_change"] = wait_for_change
         if wait_for_text:
             body["wait_for_text"] = wait_for_text
         if wait_for_regex:
             body["wait_for_regex"] = wait_for_regex
+        if wait_for_idle:
+            body["wait_for_idle"] = int(wait_for_idle)
         if wait_absent:
             body["wait_absent"] = True
         if since:

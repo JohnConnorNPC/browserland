@@ -358,13 +358,16 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
                 wait_for_change: str = "", timeout_ms: int = 0,
                 wait_for_text: str = "", wait_for_regex: str = "",
                 wait_absent: bool = False, since: str = "",
-                attrs: bool = False) -> Dict[str, Any]:
+                attrs: bool = False, wait_for_idle: int = 0) -> Dict[str, Any]:
     """Render a terminal's current screen as plain text. Pass a namespaced window
     id ("<host>:<int>") from list_terminals.
 
     The result includes `content_hash` (a stable digest of the screen text),
-    `alt_screen` (true for a full-screen TUI like mc/btop/vim — the grid is the
-    whole story, so scrollback is meaningless) and `cursor` {row, col}. Note
+    `stable_hash` (the same digest with the hardware-cursor cell masked, so a
+    cursor BLINK in place doesn't change it while a cursor MOVE does — see
+    `wait_for_idle`), `alt_screen` (true for a full-screen TUI like mc/btop/vim —
+    the grid is the whole story, so scrollback is meaningless) and `cursor`
+    {row, col}. Note
     `cursor` is the terminal's HARDWARE cursor, not the highlighted menu row — a
     full-screen menu often parks it in a corner unrelated to the selection. For a
     shell, pass `view="scrollback"` with `lines=N` to get up to N lines of
@@ -410,7 +413,24 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
         send_keys(id, ["Enter"])
         read_screen(id, wait_for_text="Ready", timeout_ms=5000)   # -> matched
     Note the search surface is the newline-joined grid, so a value wrapped
-    across two rows won't match. Omit all wait_* params for an immediate read.
+    across two rows won't match.
+    - wait for the screen to SETTLE: pass `wait_for_idle=<ms>` to block until the
+      screen has stopped changing for that many ms (measured on `stable_hash`, so
+      a bare cursor blink doesn't reset it), then return with `matched`: true (or
+      false if it never settled before `timeout_ms`). Pass a `timeout_ms`
+      comfortably LARGER than `wait_for_idle` (e.g. `wait_for_idle=300`,
+      `timeout_ms=5000`) — with no `timeout_ms` (or one <= `wait_for_idle`) the
+      settle window can't fit before the deadline, so it returns `matched: false`
+      at once. Use it after firing an action to wait for the app to finish
+      redrawing. CAVEAT: it only settles a
+      CALMER TUI — a fully-animating app (Dwarf Fortress animates creatures,
+      water and the *PAUSED* marquee off the cursor every frame) never reaches
+      output-idle, so `wait_for_idle`/`stable_hash` never fire there; for those,
+      use input pacing/flush (`set_pace`/`flush_input`) plus a semantic
+      `wait_for_text`/`wait_for_regex` on the menu text, not idle.
+    The wait modes are mutually exclusive (one signal decides `matched`) — pass
+    only one of wait_for_change / wait_for_text / wait_for_regex / wait_for_idle.
+    Omit all wait_* params for an immediate read.
 
     DELTA (less to read) — to avoid re-reading the whole grid every call when
     driving a TUI, pass the previous read's `content_hash` as `since`: if the
@@ -429,7 +449,8 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
                               wait_for_regex=wait_for_regex or None,
                               wait_absent=wait_absent,
                               since=since or None,
-                              attrs=attrs)
+                              attrs=attrs,
+                              wait_for_idle=wait_for_idle)
 
 
 @mcp.tool()

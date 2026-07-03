@@ -329,8 +329,16 @@ dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repa
 **`POST /mcp/read`** — body `{"id": <int>}`:
 
 ```json
-{"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n...","idle_ms":0}
+{"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n...","content_hash":"…","stable_hash":"…","idle_ms":0}
 ```
+
+`content_hash` is a stable 128-bit digest of the rendered text (#26).
+`stable_hash` (#135) is the same digest with the HARDWARE-cursor cell masked to a
+sentinel, so a cursor BLINK in place (the cell toggling between the block glyph
+and the character under it) leaves it unchanged while a cursor MOVE — which
+exposes a different underlying cell — still changes it. It is always present
+(empty string for a degraded read or an older agent) and equals `content_hash`
+when there is no cursor.
 
 `idle_ms` is a best-effort count of ms since the terminal last emitted PTY output
 (a current agent always reports it — `0` means output landed just now; an older
@@ -338,6 +346,20 @@ agent omits it, so it reads as unknown rather than a misleading `0`). It is
 unreliable for a perpetually-animating app that paints every frame (its `idle_ms`
 never grows), so pacing/flush and a semantic content wait are the real settle
 signals there, not `idle_ms`.
+
+The read can also BLOCK for one bounded round-trip instead of returning
+immediately, on any ONE of four mutually-exclusive wait signals (combining two →
+**400 `conflicting_wait`**), all capped by `timeout_ms` (≤ 15000):
+`wait_for_change` (a prior `content_hash` — wake when the screen differs, #26),
+`wait_for_text` / `wait_for_regex` (+ `wait_absent` — wake when the grid contains
+or no longer contains a match, #51), and `wait_for_idle` (a settle window in ms —
+wake once `stable_hash` has held steady for that many ms, i.e. output went quiet,
+#135). The predicate and idle waits set `matched` (true when satisfied, false on
+timeout); the RPC timeout is stretched by `timeout_ms` so the agent's hold
+outlives it. `wait_for_idle` settles only a CALMER TUI — a fully-animating app
+(Dwarf Fortress animates creatures/water/the `*PAUSED*` marquee off the cursor
+every frame) never reaches output-idle, so there use pacing/flush plus a semantic
+`wait_for_text` check, not idle.
 
 The agent renders the screen off its event loop. With pyte it returns the full
 grid; without pyte it falls back to a dependency-free in-house emulator

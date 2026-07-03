@@ -179,7 +179,8 @@ def screen_text_please_frame(req: int, view: str = "screen",
                              wait_for_regex: Optional[str] = None,
                              wait_absent: bool = False,
                              since: Optional[str] = None,
-                             attrs: bool = False) -> str:
+                             attrs: bool = False,
+                             wait_for_idle: int = 0) -> str:
     """Broker -> producer: render the live screen and reply with plain text.
     Backs the MCP /mcp/read endpoint; only agents answer it (non-agent
     producers have no handler, so the request times out -> 502). ``view``
@@ -207,7 +208,18 @@ def screen_text_please_frame(req: int, view: str = "screen",
     ``attrs`` (#128) asks the agent to also return ``attr_runs`` — the styled
     fg/bg/reverse cell runs — so a color-only menu selection the plain text
     drops is visible. Orthogonal to the wait/delta modes; older agents ignore
-    the key. Always the full current run list (never deltaed)."""
+    the key. Always the full current run list (never deltaed).
+
+    ``wait_for_idle`` (#135, ms; ``0`` = unset) is a settle wait: the agent holds
+    the reply until the CURSOR-BLIND screen hash (``stable_hash`` — the text with
+    the hardware-cursor cell masked, so a bare cursor blink doesn't count) has
+    been unchanged for that many ms — i.e. output has gone quiet — or
+    ``timeout_ms`` elapses. Like the content predicate the reply carries
+    ``matched`` (true once it settled, false on timeout). It is a DISTINCT wait
+    signal, so the broker rejects combining it with wait_for_change/text/regex;
+    older agents ignore the key. It settles only CALMER TUIs — a fully-animating
+    app (Dwarf Fortress paints creatures/water/the ``*PAUSED*`` marquee off the
+    cursor every frame) never reaches output-idle."""
     return json.dumps({"type": "screen_text_please", "req": int(req),
                        "view": str(view), "lines": int(lines),
                        "wait_for_change": wait_for_change,
@@ -215,7 +227,8 @@ def screen_text_please_frame(req: int, view: str = "screen",
                        "wait_for_text": wait_for_text,
                        "wait_for_regex": wait_for_regex,
                        "wait_absent": bool(wait_absent),
-                       "since": since, "attrs": bool(attrs)})
+                       "since": since, "attrs": bool(attrs),
+                       "wait_for_idle": int(wait_for_idle)})
 
 
 def kill_frame(req: int, pid: int) -> str:
@@ -291,7 +304,8 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
                       changed_rows: Optional[list] = None,
                       attr_runs: Optional[list] = None,
                       partial: bool = False,
-                      idle_ms: int = 0) -> str:
+                      idle_ms: int = 0,
+                      stable_hash: str = "") -> str:
     """Producer -> broker: the rendered plain-text screen for a screen_text
     request. ``text`` is a bounded ``rows``x``cols`` grid (plus ``history_lines``
     of scrollback above it when ``view="scrollback"``), rendered via pyte or the
@@ -303,7 +317,12 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     ``content_hash`` (#26) is a stable digest of ``text`` so a caller can detect
     change across reads (the empty string means the agent didn't compute one) —
     it stays text-only, so a color-only selection move (identical text) doesn't
-    change it. ``attr_runs`` (#128), present only when the read asked for
+    change it. ``stable_hash`` (#135) is the same digest with the HARDWARE-cursor
+    cell masked to a sentinel, so a cursor BLINK in place doesn't change it while
+    a cursor MOVE does — the settle signal ``wait_for_idle`` rides. Always present
+    (empty string when the agent computed none, e.g. a degraded read); it equals
+    ``content_hash`` when there is no cursor. ``attr_runs`` (#128), present only
+    when the read asked for
     ``attrs``, is the styled fg/bg/reverse cell runs (``{row, col, len, fg, bg,
     reverse}``) so a color-only menu selection the plain text drops is visible;
     it is always the full current list, alongside any text delta. ``degraded``
@@ -331,6 +350,7 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         "view": str(view),
         "history_lines": int(history_lines),
         "content_hash": str(content_hash),
+        "stable_hash": str(stable_hash),
         "idle_ms": int(idle_ms),
     }
     # cursor is null on the degraded raw path (no grid to locate it in) — the

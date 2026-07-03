@@ -3025,17 +3025,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             except re.error as exc:
                 return sanic_json({"error": "bad_regex", "detail": str(exc)},
                                   status=400)
-        # The wait modes are exclusive (#51): wait_for_change, wait_for_text and
-        # wait_for_regex each pick a different signal, and combining them has no
-        # well-defined meaning (which one decides `matched`?). Reject up front so
-        # a caller never gets a silently-wrong wait.
+        # wait-for-idle (#135): a settle window in ms. The agent holds the reply
+        # until the CURSOR-BLIND screen hash (stable_hash) has been unchanged for
+        # this many ms (output went quiet), or timeout_ms elapses. Clamped like
+        # timeout_ms; 0 == unset.
+        try:
+            wait_for_idle = int(body.get("wait_for_idle", 0) or 0)
+        except (TypeError, ValueError):
+            wait_for_idle = 0
+        wait_for_idle = max(0, min(wait_for_idle, MAX_MCP_WAIT_MS))
+        # The wait modes are exclusive (#51/#135): wait_for_change, wait_for_text,
+        # wait_for_regex and wait_for_idle each pick a different signal, and
+        # combining them has no well-defined meaning (which one decides
+        # `matched`?). Reject up front so a caller never gets a silently-wrong
+        # wait.
         n_wait = sum(bool(x) for x in
-                     (wait_for_change, wait_for_text, wait_for_regex))
+                     (wait_for_change, wait_for_text, wait_for_regex,
+                      wait_for_idle))
         if n_wait > 1:
             return sanic_json(
                 {"error": "conflicting_wait",
                  "detail": "use only one of wait_for_change / wait_for_text / "
-                           "wait_for_regex"}, status=400)
+                           "wait_for_regex / wait_for_idle"}, status=400)
         wait_absent = bool(body.get("wait_absent", False))
         # delta (#52): a prior content_hash; the agent returns only changed rows
         # since that frame when it can, else a full grid. Orthogonal to the wait
@@ -3054,14 +3065,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             timeout_ms = 0
         timeout_ms = max(0, min(timeout_ms, MAX_MCP_WAIT_MS))
         rpc_timeout = RPC_TIMEOUT
-        if wait_for_change or wait_for_text or wait_for_regex:
+        if wait_for_change or wait_for_text or wait_for_regex or wait_for_idle:
             rpc_timeout = RPC_TIMEOUT + timeout_ms / 1000.0
         payload, error = await _session_rpc(
             entry,
             lambda req: protocol.screen_text_please_frame(
                 req, view, lines, wait_for_change, timeout_ms,
                 wait_for_text=wait_for_text, wait_for_regex=wait_for_regex,
-                wait_absent=wait_absent, since=since, attrs=attrs),
+                wait_absent=wait_absent, since=since, attrs=attrs,
+                wait_for_idle=wait_for_idle),
             "screen_text", timeout=rpc_timeout)
         if error is not None:
             return sanic_json({"error": "no_producer_rpc"}, status=502)
@@ -3076,6 +3088,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                "view": payload.get("view", "screen"),
                "history_lines": int(payload.get("history_lines", 0) or 0),
                "content_hash": str(payload.get("content_hash", "") or ""),
+               # stable_hash (#135): the cursor-blind digest (blink-insensitive),
+               # the settle signal wait_for_idle rides. Always present (empty for
+               # a degraded read or an older agent), mirroring content_hash.
+               "stable_hash": str(payload.get("stable_hash", "") or ""),
                "cursor": payload.get("cursor")}
         # matched (#51): present only for a content-predicate read — true if the
         # text/regex matched, false if the wait timed out first.

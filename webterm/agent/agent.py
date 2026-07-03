@@ -48,12 +48,53 @@ _FRAME_CACHE_MAX = 16
 _DELTA_MAX_CHANGED_RATIO = 0.6
 
 
+def _digest(text: str) -> str:
+    """The one 128-bit blake2b both _content_hash and _stable_hash render text
+    through — small on the wire, collision-safe for change detection (#26/#135).
+    Factored out so the plain and cursor-masked hashes are guaranteed identical
+    for identical text (a degraded/no-cursor _stable_hash MUST equal the plain
+    _content_hash, or a caller couldn't compare the two)."""
+    return hashlib.blake2b(text.encode("utf-8", "replace"),
+                           digest_size=16).hexdigest()
+
+
 def _content_hash(text: str) -> str:
     """A stable, process-independent digest of the rendered screen text, so a
     caller can detect change across reads without diffing full text (#26). 128
     bits — small on the wire, collision-safe for change detection."""
-    return hashlib.blake2b(text.encode("utf-8", "replace"),
-                           digest_size=16).hexdigest()
+    return _digest(text)
+
+
+def _stable_hash(text: str, cursor, row_offset: int = 0) -> str:
+    """A CURSOR-BLIND digest of the rendered screen (#135): the same blake2b as
+    _content_hash, but with the HARDWARE-cursor cell masked to a sentinel so a
+    cursor BLINK in place — the cell toggling between the block glyph and the
+    character underneath it — does NOT change the hash, while a cursor MOVE still
+    does (it exposes a different underlying cell = a real screen change). This is
+    the settle signal ``wait_for_idle`` rides: a lone blinking cursor on an
+    otherwise static screen must read as idle, not as perpetual change.
+
+    ``cursor`` is the render's ``{row, col}`` (0-based within the grid); falsy (a
+    degraded/no-cursor read) returns the plain _content_hash. ``row_offset`` is
+    the number of lines PREPENDED above the grid in ``text`` (``history_lines`` on
+    a ``view="scrollback"`` read): ``cursor`` is grid-relative while ``text``
+    carries that history on top, so without the shift the mask would land on a
+    static history cell instead of the live cursor. Bounds-safe and never raises:
+    an out-of-range or malformed cursor falls through to the unmasked digest
+    (identical to _content_hash), so the mask can only ever make the hash blind to
+    the one real cursor cell — never wrong."""
+    if not cursor:
+        return _content_hash(text)
+    try:
+        r = int(cursor["row"]) + int(row_offset)
+        c = int(cursor["col"])
+        rows = text.split("\n")
+        if 0 <= r < len(rows) and 0 <= c < len(rows[r]):
+            rows[r] = rows[r][:c] + "\x00" + rows[r][c + 1:]
+            return _digest("\n".join(rows))
+    except (KeyError, TypeError, ValueError, IndexError):
+        pass
+    return _content_hash(text)
 
 
 def _render_screen_text(data: bytes, cols: int, rows: int,
@@ -666,7 +707,8 @@ class Agent:
                            wait_for_regex: Optional[str] = None,
                            wait_absent: bool = False,
                            since: Optional[str] = None,
-                           attrs: bool = False) -> None:
+                           attrs: bool = False,
+                           wait_for_idle: int = 0) -> None:
         # MCP /mcp/read: render the live screen as plain text. Each render
         # snapshots the ring + dims + live alt-screen state synchronously on the
         # loop (an immutable, consistent view), then renders off-loop (pyte can
@@ -675,9 +717,18 @@ class Agent:
         # PTY-output nudge until the screen hash differs from the baseline; with
         # wait_for_text / wait_for_regex (#51) it instead waits until the screen
         # CONTAINS (or, with wait_absent, no longer contains) the match — waking
-        # once on the awaited event instead of on every noisy TUI frame. Either
-        # way the hold is bounded by timeout_ms — one round-trip, no busy-poll.
+        # once on the awaited event instead of on every noisy TUI frame; with
+        # wait_for_idle (#135) it holds until the CURSOR-BLIND hash (stable_hash)
+        # has held steady for that many ms (output went quiet). Either way the
+        # hold is bounded by timeout_ms — one round-trip, no busy-poll.
         loop = asyncio.get_running_loop()
+        # Normalize the settle window here (the broker already clamps it, but a
+        # direct/older-broker call might not): a non-int or negative would make
+        # the settle check below trip on pass one. 0 == unset.
+        try:
+            wait_for_idle = max(0, min(int(wait_for_idle or 0), MAX_WAIT_MS))
+        except (TypeError, ValueError):
+            wait_for_idle = 0
         # Precompile the content predicate once. The broker validates the regex
         # up front (bad_regex 400), so a compile error here is belt-and-braces:
         # treat it as "no predicate" rather than waiting out the whole timeout.
@@ -728,7 +779,8 @@ class Agent:
             return r
 
         def _reply(r: dict, content_hash: str,
-                   matched: Optional[bool] = None) -> None:
+                   matched: Optional[bool] = None,
+                   stable_hash: str = "") -> None:
             # Best-effort staleness (#133): ms since the last PTY output, computed
             # at reply time (not render time) so a wait_for_change that woke on
             # new output honestly reports ~0, while a timed-out wait reports the
@@ -767,16 +819,34 @@ class Agent:
                 app_cursor=self.state.app_cursor, content_hash=content_hash,
                 matched=matched, delta=delta, changed_rows=changed_rows,
                 attr_runs=r.get("attr_runs"), partial=r.get("partial", False),
-                idle_ms=idle_ms))
+                idle_ms=idle_ms, stable_hash=stable_hash))
 
         async def _run() -> None:
             try:
                 wait_ms = max(0, min(int(timeout_ms or 0), MAX_WAIT_MS))
                 deadline = loop.time() + wait_ms / 1000.0
+                # wait_for_idle settle timer (#135): idle_baseline is the last
+                # cursor-blind hash we saw; idle_since is when it last changed. A
+                # screen that HOLDS that hash for wait_for_idle ms has gone
+                # output-idle. Seeded from the read's start so a screen already
+                # quiet still has to hold for the full window before settling.
+                idle_baseline = None
+                idle_since = loop.time()
                 while True:
                     observed = self._output_gen
                     r = await _render()
                     h = _content_hash(r["text"])
+                    # Cursor-BLIND hash (#135): a bare cursor blink in place must
+                    # not read as a change (it would reset the settle timer
+                    # forever), while a cursor MOVE (different underlying text)
+                    # legitimately does. Reset the settle window whenever it
+                    # changes; it also rides the reply so a caller can settle
+                    # client-side too.
+                    sh = _stable_hash(r["text"], r["cursor"],
+                                      r["history_lines"])
+                    if idle_baseline is None or sh != idle_baseline:
+                        idle_baseline = sh
+                        idle_since = loop.time()
                     # Evaluate the content predicate OFF the event loop: a
                     # catastrophic-backtracking regex must not block the loop
                     # (input/output/other RPCs). The gen-recheck below still
@@ -787,25 +857,47 @@ class Agent:
                     # Decide whether this render satisfies the request. An
                     # immediate read (no wait mode) always replies on pass one.
                     matched: Optional[bool] = None
-                    done = not wait_for_change and not has_predicate
+                    done = (not wait_for_change and not has_predicate
+                            and not wait_for_idle)
                     if pred:
                         done, matched = True, True
                     if wait_for_change and h != wait_for_change:
                         done = True
+                    # Settled (#135): the cursor-blind screen held steady for the
+                    # whole idle window -> report it like a met predicate (matched
+                    # True). Checked BEFORE the timeout branch so a settle that
+                    # lands exactly on the deadline still counts as a settle, not
+                    # a miss.
+                    if wait_for_idle and (loop.time() - idle_since) * 1000 >= wait_for_idle:
+                        done = True
+                        matched = True
                     if timed_out:
                         done = True
-                        if has_predicate and matched is None:
-                            matched = False        # waited out, never matched
+                        # A predicate OR an idle wait that never fired reports
+                        # matched=False (waited out); an immediate / wait_for_change
+                        # read leaves matched None (unambiguous, no `matched` key).
+                        if (has_predicate or wait_for_idle) and matched is None:
+                            matched = False        # waited out, never settled
                     if done:
-                        _reply(r, h, matched)
+                        _reply(r, h, matched, stable_hash=sh)
                         return
                     # New output during the render/predicate await? Re-render
                     # before parking so we never miss a frame.
                     if self._output_gen != observed:
                         continue
                     remaining = deadline - loop.time()
+                    # Bound the park by the remaining idle window (#135) so a
+                    # settle can be CONFIRMED with NO new output at all: with the
+                    # screen quiet the timer fires after idle_left, we re-render,
+                    # the hash is still stable, and the settle check above trips.
+                    # Without this the park would sleep to the full deadline and
+                    # only settle by luck of a late frame.
+                    if wait_for_idle:
+                        idle_left = (wait_for_idle / 1000.0
+                                     - (loop.time() - idle_since))
+                        remaining = min(remaining, max(0.0, idle_left))
                     if remaining <= 0:
-                        continue                 # deadline -> reply next pass
+                        continue                 # deadline/idle window -> next pass
                     # No await between the gen-check above and this append, so
                     # _on_pty_data can't slip a nudge past us (loop atomicity).
                     fut = loop.create_future()
