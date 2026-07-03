@@ -388,16 +388,18 @@ def read_screen(id: str, view: str = "screen", lines: int = 0,
     pacing/flush and a semantic screen check (`wait_for_text`/`wait_for_regex`)
     are the real settle signals, not `idle_ms`.
 
-    COLOR / SELECTION — the default text mode drops cell color, so a menu row
-    marked by color or reverse-video ALONE (its text identical to the others —
-    e.g. a Dwarf Fortress menu) is invisible here. Pass `attrs=true` to also get
-    `attr_runs`: the styled cell runs [{row, col, len, fg, bg, reverse}, ...]
-    (0-based; `len` is a cell count) — the selected row shows up as a run whose
-    `reverse` is true or whose `fg`/`bg` differ from the rest, so you can tell
+    COLOR / SELECTION — the default text mode drops cell attributes, so a menu row
+    marked by color, reverse-video, bold, or underline ALONE (its text identical
+    to the others — e.g. a Dwarf Fortress menu) is invisible here. Pass
+    `attrs=true` to also get
+    `attr_runs`: the styled cell runs [{row, col, len, fg, bg, reverse, bold,
+    underscore}, ...] (0-based; `len` is a cell count) — the selected row shows up
+    as a run whose `reverse`/`bold`/`underscore` is true or whose `fg`/`bg` differ
+    from the rest, so you can tell
     which row is highlighted before pressing an activate key. `attr_runs` is the
     full current list (never a delta) and rides the high-fidelity renderer; it is
     absent on the rare `degraded` raw read. `content_hash`/`wait_for_change`
-    track text only, so a color-only selection MOVE (same text) won't trip them —
+    track text only, so a style-only selection MOVE (same text) won't trip them —
     read with `attrs=true` after a cursor keypress rather than waiting on it.
 
     WAITING (one call, no polling) — all bounded by `timeout_ms` (capped 15000):

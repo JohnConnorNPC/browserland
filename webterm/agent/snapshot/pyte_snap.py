@@ -162,25 +162,29 @@ _MAX_ATTR_RUNS = 2000
 
 def attr_runs(screen, cols: int, rows: int, cap: int = _MAX_ATTR_RUNS) -> list:
     """The screen's styled horizontal runs — maximal same-style cell spans whose
-    fg/bg/reverse differs from the terminal default — as ``{row, col, len, fg,
-    bg, reverse}`` dicts (0-based ``row``/``col``; ``len`` is a CELL count).
+    fg/bg/reverse/bold/underscore differs from the terminal default — as
+    ``{row, col, len, fg, bg, reverse, bold, underscore}`` dicts (0-based
+    ``row``/``col``; ``len`` is a CELL count).
 
-    This surfaces the color / reverse-video signal that the plain-text render
-    drops, so an agent can tell which menu row is selected when the selection is
-    marked by color alone — identical row text otherwise (#128). ``screen`` is a
-    fed :class:`pyte.Screen`; the "unstyled" baseline is read from its own
-    ``default_char`` (not a hardcoded ``"default"``) so it tracks pyte. Style is
-    limited to fg/bg/reverse — enough to locate a selection, not a full SGR
-    model — and the list is bounded to ``cap`` runs."""
+    This surfaces the color / reverse-video / bold / underline signal that the
+    plain-text render drops, so an agent can tell which menu row is selected when
+    the selection is marked by an attribute alone — identical row text otherwise
+    (#128, #136). ``screen`` is a fed :class:`pyte.Screen`; the "unstyled"
+    baseline is read from its own ``default_char`` (not a hardcoded ``"default"``)
+    so it tracks pyte — including its default bold/underscore. Style now includes
+    the bold/underscore flags alongside fg/bg/reverse — enough to locate a bold-
+    or underline-marked selection, not a full SGR model — so a run splits on the
+    finer style; the list is still bounded to ``cap`` runs."""
     dc = screen.default_char
-    base = (dc.fg, dc.bg, bool(dc.reverse))
+    base = (dc.fg, dc.bg, bool(dc.reverse), bool(dc.bold), bool(dc.underscore))
     runs: list = []
     for r in range(rows):
         row = screen.buffer[r]        # a defaultdict: a gap yields default_char
         c = 0
         while c < cols:
             ch = row[c]
-            style = (ch.fg, ch.bg, bool(ch.reverse))
+            style = (ch.fg, ch.bg, bool(ch.reverse),
+                     bool(ch.bold), bool(ch.underscore))
             if style == base:                        # unstyled cell: skip
                 c += 1
                 continue
@@ -188,11 +192,13 @@ def attr_runs(screen, cols: int, rows: int, cap: int = _MAX_ATTR_RUNS) -> list:
             c += 1
             while c < cols:                          # extend the same-style run
                 nxt = row[c]
-                if (nxt.fg, nxt.bg, bool(nxt.reverse)) != style:
+                if (nxt.fg, nxt.bg, bool(nxt.reverse),
+                        bool(nxt.bold), bool(nxt.underscore)) != style:
                     break
                 c += 1
             runs.append({"row": r, "col": start, "len": c - start,
-                         "fg": style[0], "bg": style[1], "reverse": style[2]})
+                         "fg": style[0], "bg": style[1], "reverse": style[2],
+                         "bold": style[3], "underscore": style[4]})
             if len(runs) >= cap:
                 return runs
     return runs

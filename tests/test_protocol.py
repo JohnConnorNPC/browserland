@@ -286,21 +286,40 @@ def test_screen_text_please_frame_attrs():
 
 
 def test_screen_text_frame_attr_runs():
-    # #128: attr_runs is present ONLY for an attrs read, and each run is
-    # normalized to {row, col, len, fg, bg, reverse}; a plain read omits it.
+    # #128/#136: attr_runs is present ONLY for an attrs read, and each run is
+    # normalized to {row, col, len, fg, bg, reverse, bold, underscore}; a plain
+    # read omits it.
     plain = json.loads(protocol.screen_text_frame(1, "hi", 80, 24))
     assert "attr_runs" not in plain
     f = json.loads(protocol.screen_text_frame(
         1, "hi", 80, 24, attr_runs=[
             {"row": 2, "col": 0, "len": 7, "fg": "default",
-             "bg": "default", "reverse": True}]))
+             "bg": "default", "reverse": True, "bold": True,
+             "underscore": False}]))
     assert f["attr_runs"] == [
         {"row": 2, "col": 0, "len": 7, "fg": "default",
-         "bg": "default", "reverse": True}]
+         "bg": "default", "reverse": True, "bold": True,
+         "underscore": False}]
     # An empty attrs read (no styled cells) still carries an (empty) list, so the
     # caller can tell "asked, none found" from "didn't ask" (key absent).
     empty = json.loads(protocol.screen_text_frame(1, "hi", 80, 24, attr_runs=[]))
     assert empty["attr_runs"] == []
+
+
+def test_screen_text_frame_attr_runs_bold_underscore():
+    # #136: bold/underscore ride the wire — a present value is coerced to bool,
+    # and an entry omitting them defaults BOTH to False (not dropped), so a run
+    # marked by weight/underline alone survives the re-projection and an older
+    # agent's fg/bg/reverse-only run stays well-formed.
+    f = json.loads(protocol.screen_text_frame(
+        1, "hi", 80, 24, attr_runs=[
+            {"row": 0, "col": 0, "len": 4, "underscore": 1},   # coerced to bool
+            {"row": 1, "col": 0, "len": 4}]))                  # omitted -> False
+    assert f["attr_runs"] == [
+        {"row": 0, "col": 0, "len": 4, "fg": "default", "bg": "default",
+         "reverse": False, "bold": False, "underscore": True},
+        {"row": 1, "col": 0, "len": 4, "fg": "default", "bg": "default",
+         "reverse": False, "bold": False, "underscore": False}]
 
 
 def test_screen_text_frame_idle_ms():

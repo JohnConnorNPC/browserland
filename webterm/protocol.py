@@ -205,10 +205,11 @@ def screen_text_please_frame(req: int, view: str = "screen",
     the reply carries ``changed_rows`` (only the rows that differ) + ``delta``:
     true, instead of the full grid. Misses fall back to a full read.
 
-    ``attrs`` (#128) asks the agent to also return ``attr_runs`` — the styled
-    fg/bg/reverse cell runs — so a color-only menu selection the plain text
-    drops is visible. Orthogonal to the wait/delta modes; older agents ignore
-    the key. Always the full current run list (never deltaed).
+    ``attrs`` (#128, #136) asks the agent to also return ``attr_runs`` — the
+    styled fg/bg/reverse/bold/underscore cell runs — so a menu selection the plain
+    text drops (marked by color, reverse-video, bold, or underline alone) is
+    visible. Orthogonal to the wait/delta modes; older agents ignore the key.
+    Always the full current run list (never deltaed).
 
     ``wait_for_idle`` (#135, ms; ``0`` = unset) is a settle wait: the agent holds
     the reply until the CURSOR-BLIND screen hash (``stable_hash`` — the text with
@@ -321,11 +322,12 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
     cell masked to a sentinel, so a cursor BLINK in place doesn't change it while
     a cursor MOVE does — the settle signal ``wait_for_idle`` rides. Always present
     (empty string when the agent computed none, e.g. a degraded read); it equals
-    ``content_hash`` when there is no cursor. ``attr_runs`` (#128), present only
+    ``content_hash`` when there is no cursor. ``attr_runs`` (#128, #136), present only
     when the read asked for
-    ``attrs``, is the styled fg/bg/reverse cell runs (``{row, col, len, fg, bg,
-    reverse}``) so a color-only menu selection the plain text drops is visible;
-    it is always the full current list, alongside any text delta. ``degraded``
+    ``attrs``, is the styled cell runs (``{row, col, len, fg, bg, reverse, bold,
+    underscore}``) so a menu selection the plain text drops — marked by color,
+    reverse-video, bold, or underline alone — is visible; it is always the full
+    current list, alongside any text delta. ``degraded``
     is the rare last-ditch raw decode (``view="raw"``), so the caller knows the
     text is not a clean grid render. ``partial`` (#130) is distinct from
     ``degraded``: the grid + cursor ARE valid, but the read couldn't fully
@@ -372,16 +374,20 @@ def screen_text_frame(req: int, text: str, cols: int, rows: int,
         frame["changed_rows"] = [
             {"row": int(c.get("row", 0)), "text": str(c.get("text", ""))}
             for c in changed_rows]
-    # attr_runs (#128): present ONLY for an attrs read — the styled fg/bg/reverse
-    # cell runs, so a color-only selection the plain text drops is visible. The
+    # attr_runs (#128/#136): present ONLY for an attrs read — the styled
+    # fg/bg/reverse/bold/underscore cell runs, so a selection the plain text drops
+    # (marked by color, reverse-video, bold, or underline alone) is visible. The
     # helper re-projects each run to its canonical shape (never trusts the caller
-    # to have supplied every key / the right types).
+    # to have supplied every key / the right types); bold/underscore default to
+    # False so an older agent's fg/bg/reverse-only run stays well-formed.
     if attr_runs is not None:
         frame["attr_runs"] = [
             {"row": int(a.get("row", 0)), "col": int(a.get("col", 0)),
              "len": int(a.get("len", 0)), "fg": str(a.get("fg", "default")),
              "bg": str(a.get("bg", "default")),
-             "reverse": bool(a.get("reverse", False))}
+             "reverse": bool(a.get("reverse", False)),
+             "bold": bool(a.get("bold", False)),
+             "underscore": bool(a.get("underscore", False))}
             for a in attr_runs]
     return json.dumps(frame)
 

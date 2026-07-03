@@ -166,8 +166,9 @@ class BrowserlandClient:
         digest) (#135). ``since`` (a prior ``content_hash``)
         requests a delta: the reply carries ``changed_rows`` + ``delta`` instead
         of the full grid when the agent can diff it (#52). ``attrs`` adds
-        ``attr_runs`` — the styled fg/bg/reverse cell runs — so a color-only menu
-        selection the plain text drops is visible (#128). ``partial`` (present
+        ``attr_runs`` — the styled fg/bg/reverse/bold/underscore cell runs — so a
+        menu selection the plain text drops (marked by color, reverse-video, bold,
+        or underline alone) is visible (#128, #136). ``partial`` (present
         and true only when it applies, #130) flags a valid but possibly
         incomplete alt-screen grid whose one-time full-frame paint was lost to
         ring eviction; distinct from ``degraded`` and self-healing. ``idle_ms``

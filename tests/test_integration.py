@@ -756,7 +756,8 @@ async def test_read_screen_attrs_surfaces_reverse_video(running_agent, broker):
     r = await _read_screen(broker, 1, attrs=True)
     assert "ABANDON" in r["text"]
     assert {"row": 0, "col": 0, "len": 7, "fg": "default",
-            "bg": "default", "reverse": True} in r["attr_runs"]
+            "bg": "default", "reverse": True, "bold": False,
+            "underscore": False} in r["attr_runs"]
     # A default read (no attrs) omits the key entirely — unchanged behavior.
     plain = await _read_screen(broker, 2)
     assert "attr_runs" not in plain

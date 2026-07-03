@@ -216,7 +216,8 @@ def test_attr_runs_reverse_video():
     screen = _rerender(b"\x1b[7mABANDON\x1b[0m", 20, 3)
     assert pyte_snap.attr_runs(screen, 20, 3) == [
         {"row": 0, "col": 0, "len": 7,
-         "fg": "default", "bg": "default", "reverse": True}]
+         "fg": "default", "bg": "default", "reverse": True,
+         "bold": False, "underscore": False}]
 
 
 def test_attr_runs_color_without_reverse():
@@ -225,7 +226,8 @@ def test_attr_runs_color_without_reverse():
     screen = _rerender(b"\x1b[31;44mHI\x1b[0m", 20, 2)
     assert pyte_snap.attr_runs(screen, 20, 2) == [
         {"row": 0, "col": 0, "len": 2,
-         "fg": "red", "bg": "blue", "reverse": False}]
+         "fg": "red", "bg": "blue", "reverse": False,
+         "bold": False, "underscore": False}]
 
 
 def test_attr_runs_unstyled_screen_is_empty():
@@ -240,9 +242,11 @@ def test_attr_runs_group_adjacent_and_split_on_default():
     screen = _rerender(b"\x1b[7mAA\x1b[0m  \x1b[7mCC\x1b[0m", 20, 2)
     assert pyte_snap.attr_runs(screen, 20, 2) == [
         {"row": 0, "col": 0, "len": 2,
-         "fg": "default", "bg": "default", "reverse": True},
+         "fg": "default", "bg": "default", "reverse": True,
+         "bold": False, "underscore": False},
         {"row": 0, "col": 4, "len": 2,
-         "fg": "default", "bg": "default", "reverse": True}]
+         "fg": "default", "bg": "default", "reverse": True,
+         "bold": False, "underscore": False}]
 
 
 def test_attr_runs_bounded_by_cap():
@@ -263,7 +267,65 @@ def test_render_screen_text_attrs_opt_in():
     on = _render_screen_text(raw, 20, 4, attrs=True)
     assert on["attr_runs"] == [
         {"row": 0, "col": 0, "len": 3,
-         "fg": "default", "bg": "default", "reverse": True}]
+         "fg": "default", "bg": "default", "reverse": True,
+         "bold": False, "underscore": False}]
     off = _render_screen_text(raw, 20, 4)
     assert "attr_runs" not in off
     assert off["text"] == on["text"]
+
+
+# ---- #136: attr_runs also surfaces BOLD- / UNDERLINE-only selections --------
+
+def test_attr_runs_bold_only():
+    # A bold-only run (default fg/bg, not reverse) — a menu row marked by weight
+    # alone, invisible in the plain text — surfaces with bold=True and the other
+    # flags False, so it no longer matches the default and produces a run (#136).
+    screen = _rerender(b"\x1b[1mBOLD\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 4,
+         "fg": "default", "bg": "default", "reverse": False,
+         "bold": True, "underscore": False}]
+
+
+def test_attr_runs_underline_only():
+    # An underline-only run (default fg/bg, not reverse) surfaces with
+    # underscore=True and the other flags False (#136).
+    screen = _rerender(b"\x1b[4mLINK\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 4,
+         "fg": "default", "bg": "default", "reverse": False,
+         "bold": False, "underscore": True}]
+
+
+def test_attr_runs_color_run_also_carries_style_flags():
+    # An existing colour run now ALSO carries the bold/underscore keys — both
+    # False when unset — so the run shape is stable regardless of weight/underline
+    # and older color/reverse consumers keep working (#136).
+    screen = _rerender(b"\x1b[31;44mHI\x1b[0m", 20, 2)
+    run = pyte_snap.attr_runs(screen, 20, 2)[0]
+    assert run["bold"] is False and run["underscore"] is False
+
+
+def test_attr_runs_bold_plus_color():
+    # A bold + coloured run carries both the colour and bold=True (a bold-marked
+    # coloured selection), splitting on the finer combined style (#136).
+    screen = _rerender(b"\x1b[1;32mGO\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 2,
+         "fg": "green", "bg": "default", "reverse": False,
+         "bold": True, "underscore": False}]
+
+
+def test_attr_runs_splits_on_bold_between_same_color_cells():
+    # Two adjacent cells with the SAME colour but different WEIGHT must not merge:
+    # the run splits on the bold flag (the finer combined style, #136). Pre-#136
+    # the (fg,bg,reverse)-only key would have coalesced them into one red run —
+    # this pins that a bold boundary between identically-coloured cells splits.
+    screen = _rerender(b"\x1b[31mA\x1b[1mB\x1b[0m", 20, 2)
+    assert pyte_snap.attr_runs(screen, 20, 2) == [
+        {"row": 0, "col": 0, "len": 1,
+         "fg": "red", "bg": "default", "reverse": False,
+         "bold": False, "underscore": False},
+        {"row": 0, "col": 1, "len": 1,
+         "fg": "red", "bg": "default", "reverse": False,
+         "bold": True, "underscore": False}]

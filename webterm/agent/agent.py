@@ -139,10 +139,11 @@ def _render_screen_text(data: bytes, cols: int, rows: int,
     into ghost glyphs (#28). ``degraded=True`` (``view="raw"``, ``cursor=None``)
     is the last-ditch raw decode when no grid could be produced (#15 symptom).
 
-    ``attrs`` (#128) adds ``attr_runs`` — the styled fg/bg/reverse cell runs, so
-    a color-only menu selection the plain text drops is visible. It rides the
-    pyte path only (the dependency-free fallback carries no SGR) and is
-    best-effort: a failure to compute it just omits the key, never the text."""
+    ``attrs`` (#128, #136) adds ``attr_runs`` — the styled
+    fg/bg/reverse/bold/underscore cell runs, so a menu selection the plain text
+    drops (marked by color, reverse-video, bold, or underline alone) is visible.
+    It rides the pyte path only (the dependency-free fallback carries no SGR) and
+    is best-effort: a failure to compute it just omits the key, never the text."""
     try:
         cols = max(1, int(cols))
         rows = max(1, int(rows))
