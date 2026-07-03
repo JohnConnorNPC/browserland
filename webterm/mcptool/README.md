@@ -120,7 +120,8 @@ drives the endpoint (or the client) directly.
 `keys` is a list of tokens: a named key (`Enter`, `LF`, `Tab`, `Esc`, `Space`,
 `Backspace`, `Delete`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `PageUp`,
 `PageDown`, `Insert`, `F1`–`F12`), a Ctrl chord `C-<char>` (`C-c` → `0x03`,
-`C-Space` → NUL, `C-h` → `0x08`), an Alt chord `M-<char>` (ESC + char), or a
+`C-Space` → NUL, `C-h` → `0x08`), an Alt chord `M-<char>` (ESC + char), a Shift
+chord `S-<key>` for Tab or a cursor key (see below), or a
 single literal character — e.g. `["C-c"]`, `["Esc"]`, `["Up","Up","Enter"]`. It
 **emits the byte sequences** a keyboard would send; it does not synthesise OS
 key events. Tokens go out verbatim (no newline→Enter rewrite). Whether `C-c`
@@ -131,6 +132,17 @@ expect. A raw-mode ncurses/PDCurses TUI that reads the keypad directly may
 ignore CR and act only on a line-feed (LF, `0x0A`); for those send `LF`
 (identical to the `C-j` chord) instead of `Enter` — e.g. Dwarf Fortress's
 per-dwarf Labor screen (#127).
+
+**`send_keys` Shift chords (#132).** A `S-<key>` token reaches the keys that
+have a *distinct* shifted terminal encoding: `S-Tab` sends back-tab (`ESC [ Z`,
+what a real Shift+Tab emits), and the shifted cursor keys take the CSI
+modifier-parameter form `ESC [ 1;2 <final>` (`S-Up` → `ESC [ 1;2A`, likewise
+`S-Down`/`S-Left`/`S-Right`/`S-Home`/`S-End`) — always the CSI form, independent
+of DECCKM, since a modified cursor key is never sent as SS3. Keys with no
+standard shifted form (Shift+Enter, Shift+Esc, a shifted letter, …) raise a
+clear "no shifted form" error rather than silently sending the unshifted bytes;
+for a shifted letter just type the uppercase character. Combined modifiers
+(`C-S-…`, `M-S-…`) are not supported.
 
 **`send_keys` pacing (#129).** By default the token list is written in **one
 burst**. A frame-polling raw-input TUI — one that reads input once per render

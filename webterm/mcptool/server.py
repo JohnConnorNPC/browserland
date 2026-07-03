@@ -190,7 +190,8 @@ _CTRL_SYMBOLS = "@[\\]^_"
 _KEY_HELP = ("use a named key (Enter, LF, Tab, Esc, Space, Backspace, Delete, "
              "Up/Down/Left/Right, Home, End, PageUp, PageDown, Insert, F1-F12), "
              "a C-<char> or M-<char> chord (e.g. C-c for Ctrl-C, C-Space for "
-             "NUL, M-x for Alt-x), or a single literal character")
+             "NUL, M-x for Alt-x), an S-<key> Shift chord for Tab or a cursor "
+             "key (S-Tab for back-tab, S-Up), or a single literal character")
 
 # send_keys inter-key pacing cap (#129): the largest PER-TOKEN pause `delay_ms`
 # may request, so any one inter-key pause is bounded. It caps per token, not the
@@ -208,6 +209,24 @@ def _ctrl_byte(ch: str) -> str:
     if ch.isascii() and (ch.isalpha() or ch in _CTRL_SYMBOLS):
         return chr(ord(ch.upper()) & 0x1F)
     raise ValueError(f"unsupported Ctrl chord 'C-{ch}'")
+
+
+def _shift_seq(rest: str, tok: str) -> str:
+    r"""The byte sequence for a Shift chord ``S-<key>``. Only keys with a
+    distinct shifted terminal encoding are supported: a cursor key folds to the
+    CSI modifier-parameter form ``ESC [ 1;2 <final>`` (used regardless of DECCKM
+    — a modified cursor key always takes the CSI form, never SS3), and Tab
+    becomes back-tab ``ESC [ Z``. Any other key has no standard shifted encoding,
+    so it raises rather than silently sending the unshifted bytes."""
+    cursor = _CURSOR_KEYS.get(rest.lower())
+    if cursor is not None:
+        return "\x1b[1;2" + cursor
+    if rest.lower() == "tab":
+        return "\x1b[Z"
+    raise ValueError(
+        f"no shifted form for {tok!r}; a Shift chord covers only Tab "
+        "(S-Tab -> back-tab) and the cursor keys (S-Up/Down/Left/Right, "
+        "S-Home, S-End)")
 
 
 def _keys_have_cursor(keys: List[str]) -> bool:
@@ -243,7 +262,7 @@ def _token_to_text(tok: str, app_cursor: bool = False) -> str:
     named = _NAMED_KEYS.get(tok.lower())
     if named is not None:
         return named
-    if len(tok) >= 2 and tok[1] == "-" and tok[0] in "cCmM":
+    if len(tok) >= 2 and tok[1] == "-" and tok[0] in "cCmMsS":
         kind, rest = tok[0].lower(), tok[2:]
         if kind == "c":  # Ctrl chord
             if rest.lower() == "space":
@@ -251,6 +270,8 @@ def _token_to_text(tok: str, app_cursor: bool = False) -> str:
             if len(rest) == 1:
                 return _ctrl_byte(rest)
             raise ValueError(f"a Ctrl chord takes one character: {tok!r}")
+        if kind == "s":  # Shift chord (Tab / cursor keys only)
+            return _shift_seq(rest, tok)
         # Meta/Alt chord -> ESC prefix + the (single) character's UTF-8.
         if len(rest) == 1:
             return "\x1b" + rest
@@ -440,8 +461,12 @@ def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
         Left, Right, Home, End, PageUp, PageDown, Insert, F1-F12;
       - a Ctrl chord `C-<char>` (e.g. `C-c` -> 0x03 / Ctrl-C, `C-d`, `C-[`,
         `C-Space` -> NUL, `C-h` -> 0x08), or an Alt chord `M-<char>` (ESC + char);
+      - a Shift chord `S-<key>` for the keys with a distinct shifted encoding:
+        `S-Tab` (back-tab, `ESC [ Z`) and the cursor keys (`S-Up`/`Down`/`Left`/
+        `Right`, `S-Home`, `S-End` -> `ESC [ 1;2 <final>`, always the CSI form).
+        A key with no standard shifted form (Enter, Esc, a letter, ...) raises;
       - a single literal character (sent as its UTF-8 bytes).
-    e.g. `["C-c"]` to interrupt, `["Esc"]`, `["Up","Up","Enter"]`.
+    e.g. `["C-c"]` to interrupt, `["Esc"]`, `["Up","Up","Enter"]`, `["S-Tab"]`.
 
     Enter emits a carriage return (CR, 0x0D) — what a real Enter key sends and
     what cooked-mode shells expect. A raw-mode ncurses/PDCurses TUI that reads

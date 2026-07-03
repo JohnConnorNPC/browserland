@@ -298,9 +298,14 @@ def test_tool_normalizes_but_client_is_verbatim():
     (["PageUp"], "\x1b[5~"), (["PageDown"], "\x1b[6~"), (["Insert"], "\x1b[2~"),
     (["F1"], "\x1bOP"), (["F5"], "\x1b[15~"), (["F12"], "\x1b[24~"),
     (["M-x"], "\x1bx"),                       # Alt-x = ESC prefix
+    (["S-Tab"], "\x1b[Z"), (["s-tab"], "\x1b[Z"),  # #132: Shift+Tab = back-tab
+    (["S-Up"], "\x1b[1;2A"), (["S-Down"], "\x1b[1;2B"),  # shifted cursor keys
+    (["S-Right"], "\x1b[1;2C"), (["S-Left"], "\x1b[1;2D"),
+    (["S-Home"], "\x1b[1;2H"), (["S-End"], "\x1b[1;2F"),
     (["a"], "a"), (["^"], "^"), (["é"], "é"),  # single literal chars (UTF-8)
     (["C-c", "Enter"], "\x03\r"),            # sequence
     (["Up", "Up", "Enter"], "\x1b[A\x1b[A\r"),
+    (["S-Tab", "S-Tab"], "\x1b[Z\x1b[Z"),    # #132: Shift chord in a sequence
 ])
 def test_keys_to_text(keys, expected):
     from webterm.mcptool import server
@@ -309,6 +314,7 @@ def test_keys_to_text(keys, expected):
 
 @pytest.mark.parametrize("bad", [
     [], "C-c", ["Retun"], ["Ctrl-C"], ["C-"], ["M-Enter"], ["Up arrow"],
+    ["S-Enter"], ["S-Return"], ["S-Esc"], ["S-x"], ["S-"],  # #132: no shifted form
 ])
 def test_keys_to_text_rejects(bad):
     from webterm.mcptool import server
@@ -327,6 +333,77 @@ def test_lf_token_distinct_from_enter():
     # The CR-only Enter policy is unchanged.
     assert server._keys_to_text(["Enter"]) == "\r"
     assert server._keys_to_text(["return"]) == "\r"
+
+
+# ---- #132: Shift (S-) chord for keys with a distinct shifted encoding ------
+
+def test_shift_chord_tab_and_cursor_encodings():
+    """#132: S-Tab is back-tab (CSI Z) and the shifted cursor keys take the CSI
+    modifier-parameter form (CSI 1;2 <final>). Case-insensitive like the other
+    chords."""
+    from webterm.mcptool import server
+    assert server._keys_to_text(["S-Tab"]) == "\x1b[Z"
+    assert server._keys_to_text(["s-tab"]) == "\x1b[Z"      # case-insensitive
+    assert server._keys_to_text(["S-Up"]) == "\x1b[1;2A"
+    assert server._keys_to_text(["S-Down"]) == "\x1b[1;2B"
+    assert server._keys_to_text(["S-Right"]) == "\x1b[1;2C"
+    assert server._keys_to_text(["S-Left"]) == "\x1b[1;2D"
+    assert server._keys_to_text(["S-Home"]) == "\x1b[1;2H"
+    assert server._keys_to_text(["S-End"]) == "\x1b[1;2F"
+
+
+def test_shift_cursor_ignores_decckm():
+    """A modified cursor key always uses the CSI form — never SS3 — so the shifted
+    encoding is identical whether or not application-cursor mode (DECCKM) is on,
+    unlike the plain cursor keys (#23)."""
+    from webterm.mcptool import server
+    assert server._token_to_text("S-Up") == "\x1b[1;2A"
+    assert server._token_to_text("S-Up", True) == "\x1b[1;2A"   # DECCKM ignored
+    assert server._token_to_text("S-End", True) == "\x1b[1;2F"
+    # The plain cursor key still flips to SS3 under DECCKM (unchanged from #23).
+    assert server._token_to_text("Up", True) == "\x1bOA"
+
+
+@pytest.mark.parametrize("tok", ["S-Enter", "S-Return", "S-Esc", "S-Space",
+                                 "S-F1", "S-a", "S-"])
+def test_shift_chord_no_shifted_form_raises(tok):
+    """A key with no distinct shifted terminal encoding raises a clear error
+    rather than silently sending the unshifted bytes (option 3)."""
+    from webterm.mcptool import server
+    with pytest.raises(ValueError, match="no shifted form"):
+        server._keys_to_text([tok])
+
+
+def test_shift_chord_leaves_other_chords_unchanged():
+    """Adding S- must not perturb the existing C-/M- chords or single literals."""
+    from webterm.mcptool import server
+    assert server._keys_to_text(["C-c"]) == "\x03"
+    assert server._keys_to_text(["M-x"]) == "\x1bx"
+    assert server._keys_to_text(["Tab"]) == "\t"          # plain Tab still HT
+    assert server._keys_to_text(["s"]) == "s"             # bare 's' is a literal
+
+
+def test_send_keys_posts_shift_tab_verbatim():
+    """#132 end-to-end: S-Tab reaches the wire as back-tab (ESC [ Z), and a shift
+    chord needs no DECCKM lookup (it's not a bare cursor key)."""
+    from webterm.mcptool import server
+
+    seen = {"body": None, "paths": []}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["paths"].append(req.url.path)
+        if req.url.path == "/mcp/terminals":
+            return httpx.Response(200, json=[{"id": 9, "app_cursor": True}])
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True})
+
+    _install({"default": handler})
+    try:
+        assert server.send_keys("default:9", ["S-Tab", "S-Up"]) == {"ok": True}
+    finally:
+        _reset_server()
+    assert seen["body"] == {"id": 9, "data": "\x1b[Z\x1b[1;2A"}
+    assert "/mcp/terminals" not in seen["paths"]   # no cursor token -> no lookup
 
 
 def test_send_keys_posts_translated_bytes_verbatim():
