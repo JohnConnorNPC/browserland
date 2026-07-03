@@ -259,6 +259,36 @@ def test_flush_failed_error_message_is_readable():
     assert "pending input" in str(excinfo.value)
 
 
+def test_set_pace_posts_id_and_pace():
+    # #133: set_pace is a thin POST /mcp/pace {id, pace_ms}; the broker enforces
+    # readwrite + clamps, not the client. The reply echoes the clamped value.
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True, "id": 42, "pace_ms": 40})
+
+    with _client(handler) as c:
+        out = c.set_pace(42, 40)
+    assert seen["path"] == "/mcp/pace"
+    assert seen["body"] == {"id": 42, "pace_ms": 40}
+    assert out == {"ok": True, "id": 42, "pace_ms": 40}
+
+
+def test_bad_pace_error_message_is_readable():
+    # #133: the broker's bad_pace (400) surfaces as a readable tool error, not the
+    # raw code — it's in the client's _ERROR_MESSAGES table.
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad_pace"})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as excinfo:
+            c.set_pace(42, "fast")
+    assert excinfo.value.code == "bad_pace"
+    assert "integer" in str(excinfo.value)
+
+
 # ---- #13: MCP tool maps newlines -> Enter (CR); client stays verbatim -----
 
 @pytest.mark.parametrize("data,expected", [
@@ -414,8 +444,11 @@ def test_shift_chord_leaves_other_chords_unchanged():
 
 
 def test_send_keys_posts_shift_tab_verbatim():
-    """#132 end-to-end: S-Tab reaches the wire as back-tab (ESC [ Z), and a shift
-    chord needs no DECCKM lookup (it's not a bare cursor key)."""
+    """#132 end-to-end: S-Tab reaches the wire as back-tab (ESC [ Z) and S-Up as
+    the CSI modifier-parameter form (ESC [ 1;2A) — a shift chord's encoding is
+    independent of DECCKM, even though the app_cursor the cache reports here is
+    True. (Under #133 the multi-key default send does consult the cache — for a
+    pace default — but with none configured it stays a single burst.)"""
     from webterm.mcptool import server
 
     seen = {"body": None, "paths": []}
@@ -432,8 +465,9 @@ def test_send_keys_posts_shift_tab_verbatim():
         assert server.send_keys("default:9", ["S-Tab", "S-Up"]) == {"ok": True}
     finally:
         _reset_server()
+    # One burst (no pace_ms configured), CSI form for the shifted cursor despite
+    # the reported DECCKM.
     assert seen["body"] == {"id": 9, "data": "\x1b[Z\x1b[1;2A"}
-    assert "/mcp/terminals" not in seen["paths"]   # no cursor token -> no lookup
 
 
 def test_send_keys_posts_translated_bytes_verbatim():
@@ -556,8 +590,8 @@ def test_send_keys_paces_tokens_with_delay(monkeypatch):
 
 
 def test_send_keys_default_delay_is_single_burst(monkeypatch):
-    """Back-compat: the default delay_ms=0 keeps the whole list in one POST and
-    never sleeps — the pre-#129 behavior, unchanged."""
+    """Back-compat: omitting delay_ms keeps the whole list in one POST and
+    never sleeps (no per-terminal default set) — the pre-#129 behavior."""
     from webterm.mcptool import server
     inputs, sleeps = _paced_capture(monkeypatch)
     try:
@@ -622,6 +656,123 @@ def test_send_keys_paced_bad_token_sends_nothing(monkeypatch):
     assert inputs == [] and sleeps == []
 
 
+# ---- #133: per-terminal DEFAULT send_keys pace (set once via set_pace) ------
+
+def _pace_default_capture(monkeypatch, terminal_pace, app_cursor=False):
+    """Like _paced_capture but the mock /mcp/terminals reports a per-terminal
+    ``pace_ms`` (#133) so send_keys can auto-pace off the terminal default even
+    with no explicit delay_ms. Returns (inputs, sleeps, paths) — all live lists
+    filled as send_keys runs."""
+    from webterm.mcptool import server
+    inputs: list = []
+    sleeps: list = []
+    paths: list = []
+    monkeypatch.setattr(server.time, "sleep", lambda s: sleeps.append(s))
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        paths.append(req.url.path)
+        if req.url.path == "/mcp/terminals":
+            return httpx.Response(200, json=[{"id": 9, "app_cursor": app_cursor,
+                                              "pace_ms": terminal_pace}])
+        inputs.append(json.loads(req.content))
+        return httpx.Response(200, json={"ok": True})
+
+    _install({"default": handler})
+    return inputs, sleeps, paths
+
+
+def test_send_keys_auto_paces_from_terminal_default(monkeypatch):
+    """#133: omitting delay_ms, a multi-key send to a terminal whose
+    list_terminals reports pace_ms>0 auto-paces — one token per POST with a pause
+    between — WITHOUT the caller ever passing delay_ms."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=7)
+    try:
+        assert server.send_keys(
+            "default:9", ["Space", "Space", "Space"]) == {"ok": True}
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": " "},
+                      {"id": 9, "data": " "},
+                      {"id": 9, "data": " "}]     # one token per write
+    assert sleeps == [7 / 1000.0, 7 / 1000.0]     # paced at the terminal default
+    assert "/mcp/terminals" in paths              # the default was fetched
+
+
+def test_send_keys_single_key_ignores_terminal_default(monkeypatch):
+    """A single-token send never paces, even with a per-terminal pace_ms set: one
+    POST, no sleep, and no fetch (pacing needs >1 token, no cursor to re-encode)."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=7)
+    try:
+        server.send_keys("default:9", ["Enter"])
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "\r"}]
+    assert sleeps == []
+    assert "/mcp/terminals" not in paths          # nothing to pace -> no fetch
+
+
+def test_send_keys_zero_terminal_default_is_single_burst(monkeypatch):
+    """A terminal default of 0 (the default) keeps the single-burst write even for
+    a multi-key no-delay send — the fetch happens but resolves to no pacing."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=0)
+    try:
+        server.send_keys("default:9", ["Space", "Space", "Space"])
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "   "}]   # single burst
+    assert sleeps == []
+    assert "/mcp/terminals" in paths              # consulted, but pace_ms=0
+
+
+def test_send_keys_explicit_delay_overrides_terminal_default(monkeypatch):
+    """An explicit delay_ms>0 wins over the per-terminal default and, being
+    non-zero, skips the default fetch entirely (delay_ms already decides pace)."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=7)
+    try:
+        server.send_keys("default:9", ["a", "b"], delay_ms=3)
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "a"}, {"id": 9, "data": "b"}]
+    assert sleeps == [3 / 1000.0]                 # the explicit delay, not 7
+    assert "/mcp/terminals" not in paths          # non-zero delay -> no default fetch
+
+
+def test_send_keys_explicit_zero_forces_burst_on_paced_terminal(monkeypatch):
+    """#133: an explicit delay_ms=0 forces a single burst even when the terminal
+    has a pace_ms default set, and skips the default fetch (0 is an explicit
+    override — 'burst this one' — not the 'unspecified' None that uses the
+    default)."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=7)
+    try:
+        server.send_keys("default:9", ["Space", "Space", "Space"], delay_ms=0)
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "   "}]   # single burst despite pace_ms=7
+    assert sleeps == []
+    assert "/mcp/terminals" not in paths          # explicit 0 -> no default fetch
+
+
+def test_send_keys_terminal_default_paces_arrows_ss3(monkeypatch):
+    """#133 + #23: a per-terminal default paces cursor keys too, and each arrow
+    still goes out as SS3 — decoded from the SAME single fetch that carried
+    pace_ms — when the terminal has DECCKM on."""
+    from webterm.mcptool import server
+    inputs, sleeps, paths = _pace_default_capture(monkeypatch, terminal_pace=4,
+                                                  app_cursor=True)
+    try:
+        server.send_keys("default:9", ["Down", "Down"])
+    finally:
+        _reset_server()
+    assert inputs == [{"id": 9, "data": "\x1bOB"}, {"id": 9, "data": "\x1bOB"}]
+    assert sleeps == [4 / 1000.0]
+    assert paths.count("/mcp/terminals") == 1     # ONE fetch backs both lookups
+
+
 # ---- #23: DECCKM-aware cursor keys ----------------------------------------
 
 def test_token_to_text_cursor_mode():
@@ -673,10 +824,13 @@ def test_send_keys_arrows_ss3_under_decckm():
     assert body == {"id": 9, "data": "\x1bOA\x1bOH"}
 
 
-def test_send_keys_no_cursor_keys_skips_lookup():
-    body, paths = _send_keys_capturing(True, ["C-c", "Enter"])
-    assert body == {"id": 9, "data": "\x03\r"}
-    assert "/mcp/terminals" not in paths  # no DECCKM lookup without cursor keys
+def test_send_keys_no_cursor_single_key_skips_lookup():
+    # A single non-cursor key has nothing to pace (pacing needs >1 token) and no
+    # cursor to re-encode, so send_keys skips the list_terminals fetch entirely.
+    # (A MULTI-key default send now consults it for a pace default — see #133.)
+    body, paths = _send_keys_capturing(True, ["C-c"])
+    assert body == {"id": 9, "data": "\x03"}
+    assert "/mcp/terminals" not in paths  # nothing to pace or re-encode -> no lookup
 
 
 def test_send_keys_arrows_fall_back_to_csi_on_lookup_error():
@@ -1328,7 +1482,7 @@ async def test_tools_registered():
     names = sorted(t.name for t in tools)
     assert names == ["flush_input", "launch_terminal", "list_profiles",
                      "list_terminals", "mcp_info", "read_screen",
-                     "reset_terminal", "send_input", "send_keys"]
+                     "reset_terminal", "send_input", "send_keys", "set_pace"]
 
 
 def test_tools_round_trip_through_http():
@@ -1404,3 +1558,25 @@ def test_flush_input_tool_routes_to_wire():
     assert seen["path"] == "/mcp/flush"
     assert seen["body"] == {"id": 5}                  # namespaced id -> bare int
     assert out == {"ok": True, "id": 5}
+
+
+def test_set_pace_tool_routes_to_wire():
+    """#133: the set_pace tool unwraps the namespaced id and POSTs
+    {id, pace_ms} to /mcp/pace, returning the broker's (clamped) reply."""
+    from webterm.mcptool import server
+
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"ok": True, "id": 5, "pace_ms": 40})
+
+    _install({"default": handler})
+    try:
+        out = server.set_pace("default:5", 40)
+    finally:
+        _reset_server()
+    assert seen["path"] == "/mcp/pace"
+    assert seen["body"] == {"id": 5, "pace_ms": 40}   # namespaced id -> bare int
+    assert out == {"ok": True, "id": 5, "pace_ms": 40}

@@ -29,6 +29,7 @@ _ERROR_MESSAGES = {
     "bad_data": "Input 'data' must be a string.",
     "read_only": "Terminal is not in 'readwrite' mode "
                  "(promote it via the window's MCP access menu).",
+    "bad_pace": "'pace_ms' must be an integer.",
     "too_large": "Input payload exceeds the broker's 256 KiB limit.",
     "no_producer_rpc": "Terminal did not answer the screen-read request "
                        "(a non-agent producer or a timeout).",
@@ -213,6 +214,15 @@ class BrowserlandClient:
         can settle. Does not touch the app's already-drawn screen; a best-effort
         no-op on a Windows/ConPTY agent (no input-queue flush primitive)."""
         return self._post("/mcp/flush", {"id": id})
+
+    def set_pace(self, id: int, pace_ms: int) -> Dict[str, Any]:
+        """Set a terminal's DEFAULT inter-key send_keys pacing (#133). Requires
+        ``readwrite`` mode. Broker-LOCAL state (no producer round-trip, unlike
+        reset/flush): the broker stamps it on the window and surfaces it via
+        ``list_terminals``, and the MCP server's send_keys reads it so a call
+        with no explicit ``delay_ms`` auto-paces. 0 disables (single burst); the
+        broker clamps to its cap. Ephemeral per-connection (resets on relaunch)."""
+        return self._post("/mcp/pace", {"id": id, "pace_ms": pace_ms})
 
     def launch_terminal(self, profile: Optional[str] = None, cols: int = 80,
                         rows: int = 24, title: Optional[str] = None,

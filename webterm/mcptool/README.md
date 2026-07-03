@@ -92,11 +92,12 @@ on the host prefix:
 | Tool | Endpoint | Notes |
 |---|---|---|
 | `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version`. Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
-| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag) and `app_cursor` (cached DECCKM) |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), and `pace_ms` (the default `send_keys` pacing, `0` = single-burst) |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, timeout_ms?, since?, attrs?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`; `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false`. `attrs=true` adds `attr_runs` — the styled fg/bg/reverse cell runs — so a color-only menu selection the plain text drops is visible (#128) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
-| `send_keys(id, keys, delay_ms?)` | `POST /mcp/input` | control/escape keys plain text can't express; `delay_ms` paces multi-token bursts (#129) |
+| `send_keys(id, keys, delay_ms?)` | `POST /mcp/input` | control/escape keys plain text can't express; `delay_ms` (or a per-terminal `set_pace` default) paces multi-token bursts (#129/#133) |
+| `set_pace(id, pace_ms)` | `POST /mcp/pace` | **`readwrite`**; set a per-terminal DEFAULT `send_keys` pacing (ms, capped 1000, `0` disables) so multi-key sends auto-pace without passing `delay_ms` (#133). Broker-local + ephemeral (resets on agent reconnect) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
@@ -153,6 +154,17 @@ between them, so every keypress lands on a separate frame. The default `0` keeps
 the single-burst write (back-compat), pacing only applies with more than one
 token, and DECCKM re-encoding (SS3 arrows) is preserved per token. An invalid
 token still raises before any byte is sent.
+
+**`set_pace` — per-terminal default pacing (#133).** Rather than pass `delay_ms`
+on every call, set a per-terminal default once with `set_pace(id, pace_ms)`
+(readwrite, capped 1000 ms, `0` disables); then any multi-token `send_keys` that
+passes no explicit `delay_ms` auto-paces at that default. An explicit `delay_ms`
+still wins for that one call, and a single-token send never paces. `send_keys`
+reads the default from the same cached `list_terminals` metadata it already
+consults for DECCKM (`pace_ms` rides alongside `app_cursor`), so a no-delay
+multi-key send costs one cheap fetch, not a second round-trip. The default is
+**ephemeral per-connection** — it resets if the agent reconnects, so re-set it
+after a relaunch (there is no persistence layer).
 
 **`send_keys` cursor keys (#23).** Arrows / Home / End are sent as SS3
 (`ESC O x`) when the terminal has DECCKM (application-cursor-key mode) on — which

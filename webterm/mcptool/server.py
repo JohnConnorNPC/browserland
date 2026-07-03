@@ -237,17 +237,20 @@ def _keys_have_cursor(keys: List[str]) -> bool:
     return any(isinstance(t, str) and t.lower() in _CURSOR_KEYS for t in keys)
 
 
-def _terminal_app_cursor(client, id: int) -> bool:
-    """The terminal's cached DECCKM (application cursor keys), read cheaply from
-    list_terminals (registry metadata — no screen render). Best-effort: any
-    failure, or a producer that doesn't report it, reads as False (CSI form)."""
+def _terminal_meta(client, id: int) -> Dict[str, Any]:
+    """The terminal's registry metadata dict (from list_terminals — no screen
+    render): the matching terminal, or ``{}`` on any failure / a producer that
+    doesn't report it. ONE cheap fetch backs BOTH the cached DECCKM (``app_cursor``,
+    #23 — CSI vs SS3 arrows) and the per-terminal default pacing (``pace_ms``,
+    #133), so send_keys never pays two round-trips. Best-effort: a missing field
+    reads as its neutral default (app_cursor=False -> CSI, pace_ms=0 -> burst)."""
     try:
         for t in client.list_terminals():
             if t.get("id") == id:
-                return bool(t.get("app_cursor"))
+                return t
     except Exception:
         pass
-    return False
+    return {}
 
 
 def _token_to_text(tok: str, app_cursor: bool = False) -> str:
@@ -450,7 +453,8 @@ def send_input(id: str, data: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
+def send_keys(id: str, keys: List[str],
+              delay_ms: Optional[int] = None) -> Dict[str, Any]:
     r"""Send terminal KEY SEQUENCES (control/escape keys) to a terminal. The
     window must be in 'readwrite' mode.
 
@@ -500,23 +504,59 @@ def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
     like Dwarf Fortress — drops keys that arrive faster than it polls, so a
     burst of arrows or spaces can advance only partially. Pass `delay_ms` (per
     token, capped 1000) to write each token in its own POST with that pause
-    between them, so every keypress lands on a separate frame; the default `0`
-    keeps the single-burst write (back-compat). Pacing only kicks in with more
-    than one token, and a bad token still raises before any byte is sent.
+    between them, so every keypress lands on a separate frame; omitting it keeps
+    the single-burst write (back-compat). Pacing only kicks in with more than one
+    token, and a bad token still raises before any byte is sent.
+
+    Per-terminal default (#133): instead of threading `delay_ms` through every
+    call, set a per-terminal default once with `set_pace(id, pace_ms)` — then a
+    multi-token send that OMITS `delay_ms` (leaves it null) auto-paces at that
+    default. Passing `delay_ms` explicitly overrides the default for that one
+    call: a positive value is that pace, and `0` forces a single burst even on a
+    paced terminal. A single-token send never paces, and with no per-terminal
+    default set, omitting `delay_ms` behaves exactly like #129's burst.
 
     Pass a namespaced window id ("<host>:<int>")."""
     # Validate + translate up front (atomic, CSI form): a bad token raises here,
-    # before any routing, DECCKM lookup or send.
+    # before any routing, metadata lookup or send.
     text = _keys_to_text(keys)
     client, int_id = _route(id)
-    app_cursor = _keys_have_cursor(keys) and _terminal_app_cursor(client, int_id)
+    # ONE list_terminals fetch (#133) backs BOTH the DECCKM re-encode and the
+    # per-terminal default pace, so neither costs a separate round-trip. Fetch
+    # only when it can matter: a cursor token needs DECCKM, and a no-delay_ms
+    # multi-key send needs the terminal's pace_ms (a single-key send has nothing
+    # to pace, and an explicit delay_ms already decides the pace itself).
+    multi = len(keys) > 1
+    want_cursor = _keys_have_cursor(keys)
+    # Fetch the terminal metadata ONLY when it can matter: a cursor token needs
+    # DECCKM, and an UNSPECIFIED delay_ms (None) on a multi-key send needs the
+    # terminal's pace_ms default. An explicit delay_ms (incl. 0) decides the pace
+    # itself, so it needs no lookup — a caller can pass 0 to force a single burst
+    # (and skip the fetch) even on a paced terminal.
+    want_pace = delay_ms is None and multi
+    meta = _terminal_meta(client, int_id) if (want_cursor or want_pace) else {}
+    app_cursor = want_cursor and bool(meta.get("app_cursor"))
     if app_cursor:
         text = _keys_to_text(keys, app_cursor=True)   # re-encode arrows as SS3
-    pace = min(max(int(delay_ms), 0), _MAX_KEY_DELAY_MS)
-    if pace and len(keys) > 1:
-        # #129: write one token per POST with a pause between, so a frame-polling
-        # TUI sees each keypress on its own frame instead of dropping a burst.
-        # Tokens are already validated above, so this can't half-type a line.
+    # #133: an unspecified delay_ms (None) uses the terminal's configured pace_ms
+    # default (itself 0 = single-burst until set_pace sets it). An explicit
+    # delay_ms overrides for this call: >0 is that pace, 0 (or a stray negative)
+    # forces a single burst even on a paced terminal. All clamped to [0, cap].
+    if delay_ms is None:
+        try:
+            resolved = int(meta.get("pace_ms", 0) or 0)
+        except (TypeError, ValueError):
+            resolved = 0
+    else:
+        try:
+            resolved = int(delay_ms)
+        except (TypeError, ValueError):
+            resolved = 0
+    pace = min(max(resolved, 0), _MAX_KEY_DELAY_MS)
+    if pace and multi:
+        # #129/#133: write one token per POST with a pause between, so a frame-
+        # polling TUI sees each keypress on its own frame instead of dropping a
+        # burst. Tokens are already validated above, so this can't half-type.
         result: Dict[str, Any] = {}
         for i, tok in enumerate(keys):
             if i:
@@ -524,6 +564,25 @@ def send_keys(id: str, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
             result = client.send_input(int_id, _token_to_text(str(tok), app_cursor))
         return result
     return client.send_input(int_id, text)
+
+
+@mcp.tool()
+def set_pace(id: str, pace_ms: int) -> Dict[str, Any]:
+    """Set a per-terminal DEFAULT inter-key pacing (ms) so subsequent `send_keys`
+    calls that DON'T pass `delay_ms` auto-pace — for a frame-polling raw-input TUI
+    like Dwarf Fortress that reads input once per render frame and drops a burst
+    arriving faster than it polls. Set it once instead of threading `delay_ms`
+    through every call: `send_keys` then writes each token in its own POST with
+    this pause between them, so every keypress lands on a separate frame.
+
+    `0` disables it (single-burst, the default); the value is capped at 1000 ms.
+    An explicit `delay_ms` on a `send_keys` call still overrides this default for
+    that one call. The default is PER-TERMINAL and EPHEMERAL — it lives on the
+    live connection and resets if the agent reconnects, so re-set it after a
+    relaunch. Requires the window be in 'readwrite' mode. Pass a namespaced window
+    id ("<host>:<int>")."""
+    client, int_id = _route(id)
+    return client.set_pace(int_id, pace_ms)
 
 
 @mcp.tool()

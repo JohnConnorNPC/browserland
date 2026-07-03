@@ -101,6 +101,15 @@ class WindowEntry:
         # a live per-window override). WindowEntry stays ignorant of app.ctx:
         # the effective mode is resolved by the handlers that know the default.
         self.mcp_mode: Optional[str] = None
+        # Per-terminal DEFAULT inter-key pacing for send_keys (#133): the ms an
+        # MCP send_keys with no explicit delay_ms auto-paces at, so a frame-
+        # polling raw-input TUI (e.g. Dwarf Fortress) auto-paces once an agent
+        # sets it, instead of every call passing delay_ms. 0 = single-burst (the
+        # default, back-compat). Set via POST /mcp/pace and surfaced by
+        # /mcp/terminals; the pacing itself is done client-side in the MCP
+        # server. EPHEMERAL per-connection like app_cursor/mcp_mode above — it
+        # resets if the agent reconnects (acceptable for v1; no persistence).
+        self.pace_ms = 0
         self.subscribers: Set[Any] = set()
         # Parallel map subscriber-ws -> the browser clientId that opened it (""
         # for a legacy/id-less /ws). Keeps `subscribers` a plain Set so
@@ -131,6 +140,7 @@ class WindowEntry:
             "profile": self.profile,
             "version": self.version,
             "app_cursor": self.app_cursor,
+            "pace_ms": self.pace_ms,
             "mcp": self.mcp_mode or mcp_default,
         }
 

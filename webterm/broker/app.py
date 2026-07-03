@@ -374,6 +374,11 @@ MAX_MCP_INPUT_BYTES = 256 * 1024
 # same ceiling.
 MAX_MCP_WAIT_MS = 15000
 
+# /mcp/pace (#133): cap a terminal's DEFAULT inter-key pacing (ms). Same ceiling
+# as the MCP server's per-call delay_ms cap (_MAX_KEY_DELAY_MS) so a per-terminal
+# default can never pace slower than an explicit delay could.
+MAX_MCP_PACE_MS = 1000
+
 # Launch-profile editor (#70, POST /profiles/config). A same-machine browser-
 # realm page can drive this (the accepted /file/* posture), and each profile is
 # a persistent shell recipe /launch will spawn by name — so hard-cap the write:
@@ -2942,7 +2947,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          "version": version,
                          # DECCKM, cached from the agent's `mode` pushes (#23);
                          # send_keys reads it to pick CSI vs SS3 arrows.
-                         "app_cursor": bool(s.get("app_cursor", False))}
+                         "app_cursor": bool(s.get("app_cursor", False)),
+                         # Per-terminal DEFAULT send_keys pacing (#133, set via
+                         # /mcp/pace); the MCP server reads it so a no-delay_ms
+                         # send auto-paces. 0 = single-burst.
+                         "pace_ms": int(s.get("pace_ms", 0) or 0)}
             # ``stale`` = this producer's build differs from the broker's (incl. a
             # pre-#22 agent reporting no version) → a deploy predating a fix, so a
             # client can warn without comparing strings (#22). Only meaningful for
@@ -3161,6 +3170,35 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"error": "flush_failed",
                                "detail": payload.get("error")}, status=502)
         return sanic_json({"ok": True, "id": entry.id})
+
+    async def _mcp_pace(request: Request):
+        # #133: set the terminal's DEFAULT inter-key pacing (ms) so a subsequent
+        # send_keys that passes no delay_ms auto-paces — for a frame-polling TUI
+        # (Dwarf Fortress) that drops a burst read faster than it renders. Unlike
+        # /mcp/reset this is broker-LOCAL state with NO producer round-trip: it
+        # just stamps entry.pace_ms, which /mcp/terminals surfaces for the MCP
+        # server's client-side send_keys pacer to read. A mutating knob (it
+        # changes how writes are delivered to every MCP caller of this window),
+        # so it needs readwrite — like /mcp/input. The value is EPHEMERAL
+        # per-connection (WindowEntry), so it resets on agent relaunch.
+        err = _mcp_auth_error(request)
+        if err is not None:
+            return err
+        entry, mode, resp = _mcp_entry(request)
+        if resp is not None:
+            return resp
+        if mode != "readwrite":
+            return sanic_json({"error": "read_only"}, status=403)
+        body = _json_object_body(request) or {}
+        # Reject a missing/non-numeric value (400 bad_pace, mirroring bad_id);
+        # an in-range-or-not integer is CLAMPED to [0, MAX_MCP_PACE_MS] rather
+        # than rejected, so 0 disables and an over-cap value pins to the cap.
+        try:
+            pace_ms = int(body.get("pace_ms"))
+        except (TypeError, ValueError):
+            return sanic_json({"error": "bad_pace"}, status=400)
+        entry.pace_ms = max(0, min(pace_ms, MAX_MCP_PACE_MS))
+        return sanic_json({"ok": True, "id": entry.id, "pace_ms": entry.pace_ms})
 
     async def _mcp_profiles(request: Request):
         err = _mcp_auth_error(request)
@@ -3649,6 +3687,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mcp_input, "/mcp/input", methods=["POST"])
     app.add_route(_mcp_reset, "/mcp/reset", methods=["POST"])
     app.add_route(_mcp_flush, "/mcp/flush", methods=["POST"])
+    app.add_route(_mcp_pace, "/mcp/pace", methods=["POST"])
     app.add_route(_mcp_profiles, "/mcp/profiles", methods=["GET"])
     app.add_route(_mcp_launch, "/mcp/launch", methods=["POST"])
     app.add_route(_mcp_config_get, "/mcp/config", methods=["GET"])
@@ -3696,6 +3735,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mcp/input", "preflight_mcp_input"),
                              ("/mcp/reset", "preflight_mcp_reset"),
                              ("/mcp/flush", "preflight_mcp_flush"),
+                             ("/mcp/pace", "preflight_mcp_pace"),
                              ("/mcp/profiles", "preflight_mcp_profiles"),
                              ("/mcp/launch", "preflight_mcp_launch"),
                              ("/mcp/config", "preflight_mcp_config"),

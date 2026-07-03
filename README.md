@@ -129,7 +129,8 @@ namespaced `"<host>:<int>"` strings so one server can front several brokers (see
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode; newlines are sent as **Enter** (CR) so commands run (incl. on PowerShell) |
-| `send_keys(id, keys)` | `POST /mcp/input` | send control/escape **keys** — `["C-c"]`, `["Esc"]`, `["Up","Enter"]` — that plain text can't express |
+| `send_keys(id, keys, delay_ms?)` | `POST /mcp/input` | send control/escape **keys** — `["C-c"]`, `["Esc"]`, `["Up","Enter"]` — that plain text can't express; `delay_ms` (or a per-terminal `set_pace` default) writes one key per POST for a frame-polling TUI |
+| `set_pace(id, pace_ms)` | `POST /mcp/pace` | **`readwrite`**; set a per-terminal DEFAULT send_keys pacing (ms, capped 1000, `0` disables) so multi-key sends auto-pace without passing `delay_ms` — for a frame-polling TUI (Dwarf Fortress). Broker-local + ephemeral (resets on agent reconnect) |
 | `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
 | `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
 | `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` required when multiple hosts are configured |

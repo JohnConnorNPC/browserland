@@ -218,7 +218,7 @@ mouse not forwarded.
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
 server wraps as MCP tools so an AI agent can list, observe, drive, and launch
 terminals. A ready-to-run server ships in [`webterm/mcptool/`](webterm/mcptool/)
-(stdio transport; `pip install -e ".[mcp]"`). Eight token-gated endpoints make
+(stdio transport; `pip install -e ".[mcp]"`). Nine token-gated endpoints make
 up the contract:
 
 | Method | Path | Purpose |
@@ -229,6 +229,7 @@ up the contract:
 | POST | `/mcp/input` | type into a terminal (`readwrite` only) |
 | POST | `/mcp/reset` | clear a terminal's screen-render buffer (`readwrite` only) |
 | POST | `/mcp/flush` | discard a terminal's unread queued input (`readwrite` only) |
+| POST | `/mcp/pace` | set a terminal's default send_keys pacing (`readwrite` only) |
 | GET | `/mcp/profiles` | launchable profile names |
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
 
@@ -293,6 +294,7 @@ effective mode to permit them.
 | `POST /mcp/input` | mode `readwrite` | send keystrokes |
 | `POST /mcp/reset` | mode `readwrite` | clear the screen-render buffer |
 | `POST /mcp/flush` | mode `readwrite` | discard unread queued input |
+| `POST /mcp/pace` | mode `readwrite` | set the default send_keys pacing |
 | `GET /mcp/profiles` | token | profile names |
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
@@ -308,12 +310,15 @@ the producer kind (`"agent"` vs a non-agent `"terminal"`), `mode` the effective
 access mode. `version` is the producer's reported build id (`""` for a pre-#22
 agent / a non-agent producer); for **agent** producers a `stale` boolean flags a
 build differing from this broker's (a deploy predating a fix — reliable when
-builds carry a git hash):
+builds carry a git hash). `app_cursor` is the cached DECCKM (application-cursor
+mode) the MCP `send_keys` reads to pick CSI vs SS3 arrows (#23); `pace_ms` is the
+window's default `send_keys` inter-key pacing (#133, `0` = single-burst, set via
+`/mcp/pace`) the MCP server reads so a no-`delay_ms` send auto-paces:
 
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
-  "version":"0.1.0+ba4b62e","stale":false}]
+  "version":"0.1.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0}]
 ```
 
 **`POST /mcp/read`** — body `{"id": <int>}`:
@@ -361,6 +366,19 @@ non-agent producer times out → **502 `no_producer_rpc`** (a rare agent-side
 failure → **502 `flush_failed`**). On a Windows/ConPTY agent it is a best-effort
 no-op (that backend exposes no input-queue flush primitive) and still acks `ok`.
 
+**`POST /mcp/pace`** — body `{"id": <int>, "pace_ms": <int>}` →
+`{"ok":true,"id":<int>,"pace_ms":<clamped int>}`. Requires effective mode
+`readwrite` (else **403 `read_only`**). Sets the window's **default** `send_keys`
+inter-key pacing so a subsequent MCP `send_keys` that passes no `delay_ms`
+auto-paces (one key per POST) — for a frame-polling raw-input TUI (Dwarf Fortress)
+that drops a burst read faster than it renders. `pace_ms` must be an integer (else
+**400 `bad_pace`**) and is **clamped** to `[0, 1000]` (`0` disables → single-burst;
+an over-cap value pins to `1000`). Unlike `/mcp/reset`/`/mcp/flush` this is
+**broker-local** with **no producer round-trip** — it just stamps the window's
+in-memory `pace_ms`, which `/mcp/terminals` surfaces for the MCP server's
+client-side pacer. The value is **ephemeral per-connection** (resets on agent
+relaunch, like a per-window mode override).
+
 **`GET /mcp/profiles`** → `{"default":"cmd","profiles":["cmd","powershell"]}`
 (the broker's configured `agent.profiles`; `bash`/`sh` on Linux).
 
@@ -389,6 +407,7 @@ not said `hello` yet (`"registered":false`).
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
 | 413 | `too_large` | `/mcp/input` payload > 256 KiB |
+| 400 | `bad_pace` | `/mcp/pace` `pace_ms` missing or not an integer |
 | 502 | `no_producer_rpc` | `/mcp/read` · `/mcp/reset` · `/mcp/flush` producer did not answer (non-agent / timeout) |
 | 502 | `reset_failed` | `/mcp/reset` agent could not clear its render buffer |
 | 502 | `flush_failed` | `/mcp/flush` agent could not flush its pending input |

@@ -218,6 +218,25 @@ def test_flush_input_done_reply_resolves_pending_rpc():
     asyncio.run(scenario())
 
 
+def test_summary_includes_pace_ms_default_zero():
+    """#133: WindowEntry.summary() carries pace_ms (the per-terminal default
+    send_keys pacing), defaulting to 0 (single-burst). It is EPHEMERAL
+    per-connection like app_cursor/mcp_mode — set directly, not via a hello."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 12, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "kind": "agent"})
+        assert entry.pace_ms == 0
+        assert entry.summary()["pace_ms"] == 0
+        # A set (as POST /mcp/pace does) surfaces in the next summary.
+        entry.pace_ms = 60
+        assert entry.summary()["pace_ms"] == 60
+
+    asyncio.run(scenario())
+
+
 def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"
