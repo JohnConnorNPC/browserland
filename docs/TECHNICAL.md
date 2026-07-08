@@ -213,7 +213,12 @@ re-assert postamble (`?2004h/l` + `?1h/l` per the agent's live sniffer,
 #138) so a reloaded xterm.js recovers bracketed-paste and
 application-cursor state. The browser→broker `paste` frame type is a
 legacy alias for `input` (#138), kept only for tabs served before the UI
-switched to xterm's `paste()`.
+switched to xterm's `paste()`. Windows caveat: ConPTY never forwards an
+app's `?2004h` request to the terminal side (verified live on Server
+2022), so for a detected foreground Claude Code — which parses
+`ESC[200~` regardless — the UI hand-brackets pastes when xterm's own
+bracketed-paste mode is off (`pasteTextToTerm` in the window lifecycle
+fragment).
 
 Known limits: no scrollback replay, no alt-screen modeling in snapshots,
 mouse not forwarded.

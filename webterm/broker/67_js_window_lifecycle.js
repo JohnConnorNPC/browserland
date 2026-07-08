@@ -375,6 +375,40 @@
                 }
             };
 
+            // ---- ConPTY bracketed-paste gap (#138) ----------------------
+            // Windows ConPTY does not forward an app's DECSET 2004 request
+            // to the terminal-side stream (verified live), so xterm never
+            // learns that Claude Code wants bracketed pastes — term.paste()
+            // then submits a multiline block at the first CR. Claude Code
+            // parses ESC[200~ regardless (it asked for the mode; the request
+            // just died inside ConPTY), so when it is the detected foreground
+            // agent (/sessions poll) and xterm says the mode is off, wrap the
+            // paste by hand. An xterm that DID see ?2004h (POSIX agents, a
+            // ConPTY that forwards it) always wins — term.paste() brackets
+            // natively and the wrap stays out of the way. Empirical
+            // workaround scoped to agents VERIFIED to parse brackets
+            // unconditionally — do not add one untested.
+            const BRACKET_GAP_AGENTS = { claude: true };
+            const needsConptyPasteWrap = () => {
+                if (term.modes.bracketedPasteMode) return false;
+                const sess = sessions.get(String(win.id));
+                return !!(sess && BRACKET_GAP_AGENTS[sess.agent]);
+            };
+            const pasteTextToTerm = (text) => {
+                if (needsConptyPasteWrap()) {
+                    // Strip paste terminators (ESC[201~ and the C1-CSI form)
+                    // so pasted content can't break out of the bracket, and
+                    // normalize newlines to CR — same prep xterm's paste()
+                    // applies natively.
+                    const safe = String(text)
+                        .replace(/\x1b\[201~|\x9b201~/g, '')
+                        .replace(/\r\n|\n/g, '\r');
+                    sendChunked('input', '\x1b[200~' + safe + '\x1b[201~');
+                    return;
+                }
+                term.paste(text);
+            };
+
             // ---- clipboard-image paste (#137) ---------------------------
             // An image on the BROWSER's clipboard can't reach the PTY app
             // directly (the agent's S4U window station has its own, empty
@@ -441,7 +475,7 @@
                     // user types next; bracketed paste (when the app asked
                     // for it) keeps the injection from submitting.
                     const injected = quotePathForPrompt(data.path) + ' ';
-                    term.paste(injected);
+                    pasteTextToTerm(injected);
                     _notifyClipboard('in', injected);   // #106 history
                 } catch (err) {
                     showNotice('image paste failed: '
@@ -484,7 +518,7 @@
                     try {
                         const text = await navigator.clipboard.readText();
                         if (text) {
-                            term.paste(text);
+                            pasteTextToTerm(text);
                             _notifyClipboard('in', text);   // #106 history
                         }
                     } catch (err) {
@@ -510,7 +544,20 @@
             const onClipPaste = (e) => {
                 try {
                     const t = e.clipboardData && e.clipboardData.getData('text');
-                    if (t) { _notifyClipboard('in', t); return; }
+                    if (t) {
+                        _notifyClipboard('in', t);
+                        // ConPTY 2004 gap (#138): when the wrap applies, take
+                        // the paste over so it goes out hand-bracketed —
+                        // xterm's own textarea handler would send it raw and
+                        // Claude Code would submit at the first CR. Everywhere
+                        // else the event falls through to xterm untouched.
+                        if (needsConptyPasteWrap()) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            pasteTextToTerm(t);
+                        }
+                        return;
+                    }
                     // No text on the clipboard: look for an image file (#137).
                     // The gesture-scoped clipboardData carries it even on
                     // plain http — the one image path needing no secure

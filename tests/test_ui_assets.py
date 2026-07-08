@@ -1977,6 +1977,24 @@ def test_right_click_paste_routes_through_xterm_paste():
     assert "sendChunked('paste'" not in INDEX_HTML
 
 
+def test_conpty_bracket_gap_wrap_present():
+    # #138 live finding: Windows ConPTY never forwards an app's DECSET 2004
+    # request, so xterm can't bracket natively while Claude Code runs — every
+    # paste path must route through pasteTextToTerm, which hand-brackets
+    # exactly when the gap applies (verified agent foreground + xterm mode
+    # off) and defers to term.paste() everywhere else.
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "const needsConptyPasteWrap" in life
+    assert "const pasteTextToTerm" in life
+    assert "const BRACKET_GAP_AGENTS = { claude: true };" in life
+    assert "'\\x1b[200~' + safe + '\\x1b[201~'" in life
+    # All three text-injection sites ride the wrap: right-click, Ctrl+V
+    # takeover inside onClipPaste, and the #137 image-path injection.
+    assert life.count("pasteTextToTerm(") >= 3   # the 3 call sites
+    assert "const needsConptyPasteWrap" in INDEX_HTML
+    assert "const pasteTextToTerm" in INDEX_HTML
+
+
 def test_image_paste_wired_into_page():
     # #137: clipboard-image paste. Capture helpers live in 63 (secure-context
     # gate, text-wins image read, base64, prompt quoting); the upload/injection
