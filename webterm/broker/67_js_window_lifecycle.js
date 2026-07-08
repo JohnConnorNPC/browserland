@@ -375,6 +375,84 @@
                 }
             };
 
+            // ---- clipboard-image paste (#137) ---------------------------
+            // An image on the BROWSER's clipboard can't reach the PTY app
+            // directly (the agent's S4U window station has its own, empty
+            // clipboard): upload the blob to this terminal's HOST broker and
+            // paste the returned file path — Claude Code attaches a pasted
+            // image path exactly like drag-and-drop. One in-flight upload
+            // per window; the busy flag clears in finally and the POST aborts
+            // after 30 s, so a hung upload can never wedge the paste paths.
+            const pasteImageBlob = async (blob) => {
+                if (win._pasteImageBusy) {
+                    showNotice('image paste already in progress');
+                    return;
+                }
+                if (blob.size > 5 * 1024 * 1024) {
+                    showNotice('image too large to paste (max 5 MiB)',
+                        { sticky: true, type: 'error' });
+                    return;
+                }
+                win._pasteImageBusy = true;
+                showNotice('Uploading image…', 2000);
+                try {
+                    const b64 = await blobToBase64(blob);
+                    const ac = new AbortController();
+                    const tid = setTimeout(() => ac.abort(), 30000);
+                    let resp;
+                    try {
+                        resp = await fetch(
+                            hostHttpUrl(hostById(win.hostId),
+                                '/file/paste_image'),
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ content_b64: b64 }),
+                                signal: ac.signal,
+                            });
+                    } finally {
+                        clearTimeout(tid);
+                    }
+                    if (resp.status === 401) {
+                        // Same heal path as a window-runtime 4401: flag the
+                        // host and pop the login (or its amber chip).
+                        showNotice("image paste needs this broker's password",
+                            { sticky: true, type: 'error' });
+                        try {
+                            pollStateFor(win.hostId).authNeeded = true;
+                            showAuthOverlay(hostById(win.hostId));
+                        } catch (_) {}
+                        return;
+                    }
+                    if (resp.status === 404) {
+                        showNotice('this broker predates image paste — '
+                            + 'update it', { sticky: true, type: 'error' });
+                        return;
+                    }
+                    let data = null;
+                    try { data = await resp.json(); } catch (_) {}
+                    if (!resp.ok || !data || !data.ok || !data.path) {
+                        showNotice('image paste failed: '
+                            + ((data && data.error) || ('HTTP ' + resp.status)),
+                            { sticky: true, type: 'error' });
+                        return;
+                    }
+                    // Trailing space separates the path from whatever the
+                    // user types next; bracketed paste (when the app asked
+                    // for it) keeps the injection from submitting.
+                    const injected = quotePathForPrompt(data.path) + ' ';
+                    term.paste(injected);
+                    _notifyClipboard('in', injected);   // #106 history
+                } catch (err) {
+                    showNotice('image paste failed: '
+                        + (err && err.name === 'AbortError'
+                            ? 'upload timed out' : err),
+                        { sticky: true, type: 'error' });
+                } finally {
+                    win._pasteImageBusy = false;
+                }
+            };
+
             // right-click paste — only hijack the native menu when we can
             // actually serve a paste from this context. On http://<LAN-IP>
             // navigator.clipboard.readText() is blocked, so leaving the
@@ -392,6 +470,17 @@
                 const onContext = async (e) => {
                     e.preventDefault();
                     if (!win.ws || win.ws.readyState !== WebSocket.OPEN) return;
+                    // Image-aware read first (#137) where clipboard.read()
+                    // exists. TEXT WINS (readClipboardImageBlob returns null
+                    // whenever a text/plain item is present), so the text
+                    // path below stays the common case; a failed read() falls
+                    // back to the plain readText path unchanged.
+                    if (canReadClipboardItems()) {
+                        let blob = null;
+                        try { blob = await readClipboardImageBlob(); }
+                        catch (_) { blob = null; }
+                        if (blob) { pasteImageBlob(blob); return; }
+                    }
                     try {
                         const text = await navigator.clipboard.readText();
                         if (text) {
@@ -421,7 +510,27 @@
             const onClipPaste = (e) => {
                 try {
                     const t = e.clipboardData && e.clipboardData.getData('text');
-                    if (t) _notifyClipboard('in', t);
+                    if (t) { _notifyClipboard('in', t); return; }
+                    // No text on the clipboard: look for an image file (#137).
+                    // The gesture-scoped clipboardData carries it even on
+                    // plain http — the one image path needing no secure
+                    // context. preventDefault so xterm never sees the (empty)
+                    // text paste; text-bearing events fall through untouched.
+                    const items = (e.clipboardData && e.clipboardData.items)
+                        || [];
+                    for (let i = 0; i < items.length; i++) {
+                        const it = items[i];
+                        if (it.kind === 'file'
+                                && it.type.indexOf('image/') === 0) {
+                            const f = it.getAsFile();
+                            if (f) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                pasteImageBlob(f);
+                            }
+                            return;
+                        }
+                    }
                 } catch (_) {}
             };
             term.element.addEventListener('paste', onClipPaste, true);
@@ -467,19 +576,43 @@
                 catch (_) {}
             });
 
-            // Ctrl+Shift+C explicit copy. Returning false prevents xterm from
-            // forwarding the chord (which would otherwise reach the producer
-            // as ^C on most layouts). Plain Ctrl+C falls through unchanged.
+            // Combined custom key handler — xterm keeps only ONE, so every
+            // chord lives here.
+            // Ctrl+Shift+C: explicit copy. Returning false prevents xterm
+            // from forwarding the chord (which would otherwise reach the
+            // producer as ^C on most layouts). Plain Ctrl+C falls through
+            // unchanged.
+            // Alt+V (#137): probe the clipboard for an image and upload it.
+            // clipboard.read() needs a secure context, so elsewhere the chord
+            // falls through to xterm untouched (status quo — the app gets
+            // ESC v). With no image, or a failed read, the async path sends
+            // the byte-identical ESC v itself, so Claude Code's own image
+            // hotkey still fires — just a beat later.
+            const handleAltVPaste = async () => {
+                let blob = null;
+                try { blob = await readClipboardImageBlob(); }
+                catch (_) { blob = null; }
+                if (blob) pasteImageBlob(blob);
+                else sendChunked('input', '\x1bv');
+            };
             term.attachCustomKeyEventHandler(ev => {
                 if (ev.type !== 'keydown') return true;
-                if (!(ev.ctrlKey && ev.shiftKey)) return true;
                 const key = (ev.key || '').toLowerCase();
-                if (key !== 'c') return true;
-                const sel = term.getSelection();
-                if (sel) copyTextToClipboard(sel);
-                ev.preventDefault();
-                ev.stopPropagation();
-                return false;
+                if (ev.ctrlKey && ev.shiftKey && key === 'c') {
+                    const sel = term.getSelection();
+                    if (sel) copyTextToClipboard(sel);
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    return false;
+                }
+                if (ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey
+                        && key === 'v' && canReadClipboardItems()) {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    handleAltVPaste();
+                    return false;
+                }
+                return true;
             });
 
             // term -> server (xterm.js delivers a Ctrl+V paste as one

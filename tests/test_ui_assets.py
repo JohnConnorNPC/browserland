@@ -1977,6 +1977,31 @@ def test_right_click_paste_routes_through_xterm_paste():
     assert "sendChunked('paste'" not in INDEX_HTML
 
 
+def test_image_paste_wired_into_page():
+    # #137: clipboard-image paste. Capture helpers live in 63 (secure-context
+    # gate, text-wins image read, base64, prompt quoting); the upload/injection
+    # seam lives in 67 (pasteImageBlob + the Ctrl+V / right-click / Alt+V
+    # branches); and the whole seam must reach the served page.
+    clip = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    for sym in ("function canReadClipboardItems",
+                "function readClipboardImageBlob",
+                "function blobToBase64",
+                "function quotePathForPrompt"):
+        assert sym in clip, f"missing #137 clipboard helper in 63: {sym!r}"
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    for sym in ("const pasteImageBlob",
+                "/file/paste_image",
+                "const handleAltVPaste",
+                "sendChunked('input', '\\x1bv')"):
+        assert sym in life, f"missing #137 image-paste seam in 67: {sym!r}"
+    for sym in ("function canReadClipboardItems",
+                "function readClipboardImageBlob",
+                "/file/paste_image",
+                "pasteImageBlob"):
+        assert sym in INDEX_HTML, \
+            f"#137 image paste missing from served page: {sym!r}"
+
+
 def test_clipboard_mod_packaged_and_manifest_agrees():
     import json
     mod_dir = BROKER_DIR / "mods" / "clipboard"

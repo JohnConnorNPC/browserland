@@ -13,6 +13,55 @@
                 && navigator.clipboard
                 && navigator.clipboard.writeText);
         }
+        // ---- clipboard images (#137) ----------------------------------------
+        // clipboard.read() (unlike readText) can return image/* items — the
+        // capture side of image paste. Secure contexts only; on plain http the
+        // Ctrl+V DOM-paste path still carries images via the gesture-scoped
+        // clipboardData, which needs no API permission.
+        function canReadClipboardItems() {
+            return !!(window.isSecureContext
+                && navigator.clipboard
+                && navigator.clipboard.read);
+        }
+        async function readClipboardImageBlob() {
+            // First image/* blob on the clipboard, or null. TEXT WINS: any
+            // text/plain item -> null, so copying from apps that put both text
+            // and a rendered bitmap on the clipboard (Word, browsers) pastes
+            // the text, as a terminal user expects. Throws propagate to the
+            // caller (permission denied / unsupported browser).
+            const items = await navigator.clipboard.read();
+            for (const item of items) {
+                if (item.types.indexOf('text/plain') !== -1) return null;
+            }
+            for (const item of items) {
+                for (const type of item.types) {
+                    if (type.indexOf('image/') === 0) {
+                        return await item.getType(type);
+                    }
+                }
+            }
+            return null;
+        }
+        function blobToBase64(blob) {
+            // FileReader dataURL with the data:...;base64, prefix stripped —
+            // same idiom as the file manager's readB64.
+            return new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => {
+                    const s = String(fr.result || '');
+                    const i = s.indexOf(',');
+                    resolve(i === -1 ? '' : s.slice(i + 1));
+                };
+                fr.onerror = () => reject(fr.error || new Error('read failed'));
+                fr.readAsDataURL(blob);
+            });
+        }
+        function quotePathForPrompt(p) {
+            // Double-quote only when whitespace forces it: Claude Code (and
+            // shells) take a bare path fine, and quoting matches what its own
+            // drag-and-drop inserts on Windows.
+            return /\s/.test(p) ? '"' + p + '"' : p;
+        }
         // ---- clipboard observers (#106) -----------------------------------
         // An explicit, reviewable notify registry so a mod (the #106 clipboard
         // history mod) can watch every copy-OUT / paste-IN WITHOUT monkey-patching
