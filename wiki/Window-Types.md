@@ -26,6 +26,8 @@ Each terminal title bar carries a per-window **robot button** that sets that win
 
 A new terminal from the **+** button (left-click) or `Ctrl+Alt+Enter` always runs on the **local broker**; to start one on a remote host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts.
 
+**Pasting images**: paste a screenshot (e.g. `Win+Shift+S`) straight into a terminal with `Ctrl+V`, `Alt+V`, or a right-click. The image itself cannot cross into the remote shell's clipboard, so the desktop uploads it to that terminal's broker host and pastes the resulting **file path** instead — AI agents like Claude Code read a pasted image path just like a drag-and-dropped file. Pasted images are kept for a few hours in the host's temp area and swept automatically. If the clipboard carries both text and an image, the text wins. `Alt+V` and right-click image capture need an https (or localhost) page; `Ctrl+V` image paste works everywhere.
+
 ## Control Panel
 
 The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **🎛 Control panel** item, the desktop / taskbar right-click menu, or the **Open control panel** shortcut (`Ctrl+Alt+p`).

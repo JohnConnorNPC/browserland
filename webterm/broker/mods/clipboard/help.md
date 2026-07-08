@@ -12,6 +12,7 @@ While enabled, it records each copy and paste as you work:
 
 - Text **copied out** of a terminal — by selecting it (auto-copy) or with `Ctrl+Shift+C`.
 - Text **pasted in** — with `Ctrl+V`, a right-click, or the context-menu **Paste**.
+- An **image pasted in** (`Ctrl+V`, `Alt+V`, or right-click) is recorded as the uploaded file path that lands in the prompt, not the image itself.
 
 Each entry shows a direction arrow (**→** copied out, **←** pasted in), the time it was captured, and a one-line preview of the text. Repeating an identical copy or paste just refreshes the existing entry's time instead of adding a duplicate, and only the most recent 20 entries are kept.
 

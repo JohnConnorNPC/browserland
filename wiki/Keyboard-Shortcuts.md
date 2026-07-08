@@ -11,6 +11,10 @@ The in-app guide (the "?" chip at the bottom-right of the taskbar) also injects 
 
 > **Toggle help is unbound by default.** The "Toggle help" action has no default key. Assign your own combo under **Control Panel → Keyboard shortcuts** if you want to open the in-app guide from the keyboard. (You can always open it by clicking the "?" chip at the bottom-right of the taskbar.)
 
+## Fixed terminal keys
+
+A few keys inside a terminal are fixed rather than rebindable: `Ctrl+Shift+C` copies the current selection, and on an https (or localhost) page `Alt+V` checks the clipboard for an image and pastes it into the terminal as an uploaded file path — with no image on the clipboard the keypress reaches the app unchanged, so Claude Code keeps its own `Alt+V` hotkey. See [[Window Types|Window-Types]] for how image paste works.
+
 <!-- help:ignore-start -->
 <!-- The in-app Help guide already injects one live "Keyboard shortcuts" entry
      per bindable action showing the user's CURRENT combo (or "Unbound"); a
