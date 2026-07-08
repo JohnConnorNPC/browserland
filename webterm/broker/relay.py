@@ -79,6 +79,9 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
                 LOGGER.debug("browser bad json: %r", message[:200])
                 continue
             mtype = data.get("type")
+            # 'paste' is a legacy alias for 'input' (#138): kept for tabs
+            # served before the UI switched to xterm's paste(); pinned by
+            # test_broker_e2e.py::test_large_frame_relay.
             if mtype in ("input", "paste"):
                 if not active:
                     continue

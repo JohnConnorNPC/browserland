@@ -208,7 +208,12 @@ snapshots as unframed binary. Broker → producer: `input`, `resize` (reply
 `resized`), `snapshot_please` (reply one binary full redraw). Browser
 attach: broker sends `resized` *before* requesting the snapshot. Snapshots
 start `ESC[0m ESC[2J ESC[H` — deliberately no `ESC c`/`ESC[3J`, since
-already-attached browsers receive them too.
+already-attached browsers receive them too — and end with a DEC-mode
+re-assert postamble (`?2004h/l` + `?1h/l` per the agent's live sniffer,
+#138) so a reloaded xterm.js recovers bracketed-paste and
+application-cursor state. The browser→broker `paste` frame type is a
+legacy alias for `input` (#138), kept only for tabs served before the UI
+switched to xterm's `paste()`.
 
 Known limits: no scrollback replay, no alt-screen modeling in snapshots,
 mouse not forwarded.

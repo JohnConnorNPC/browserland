@@ -32,6 +32,10 @@ Broker -> browser (text JSON):
 Broker -> browser (binary): producer bytes, verbatim.
 
 Browser -> broker (text JSON): input / paste / resize (mouse ignored).
+``paste`` is a LEGACY ALIAS for ``input`` (#138): the UI now routes clipboard
+text through xterm's paste() and sends plain ``input`` frames; the relay keeps
+accepting ``paste`` verbatim only so tabs served before the change keep
+working until they reload.
 """
 
 from __future__ import annotations
