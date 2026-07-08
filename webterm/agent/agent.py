@@ -269,6 +269,17 @@ def _safe_cwd(configured: Optional[str]) -> str:
         return ""
 
 
+def _mode_reassert(sniffer: DecModeSniffer) -> bytes:
+    """DEC private-mode re-assert postamble for snapshots (#138): bracketed
+    paste (2004) + DECCKM (1) in their live-sniffed direction. A snapshot
+    replays only screen content, so a reloaded xterm.js would otherwise sit
+    with both modes off until the app happens to re-emit them — multiline
+    pastes submit line-by-line and TUI arrow keys go dead. Idempotent for a
+    viewer whose state already matches."""
+    return (b"\x1b[?2004" + (b"h" if sniffer.bracketed_paste else b"l")
+            + b"\x1b[?1" + (b"h" if sniffer.app_cursor else b"l"))
+
+
 @dataclass
 class SessionState:
     """Live session identity. The hello is always built from this, so a
@@ -591,6 +602,17 @@ class Agent:
                                "raw", exc)
         if payload is None:
             payload = raw_snapshot.render(data, self.ring.evicted)
+        # Re-assert live-sniffed DEC modes after the grid (#138): a snapshot
+        # otherwise carries only screen content, so a reloaded/reattached
+        # xterm.js loses bracketed-paste (2004 — multiline pastes then submit
+        # line-by-line) and DECCKM (1 — arrows stop working in TUIs). Appended
+        # HERE, not in the renderers, so one seam covers pyte, raw and the
+        # pyte-failure fallback while the renderers' pinned unit contracts and
+        # the ring (read_screen) stay untouched. Both directions on purpose:
+        # a fresh xterm starts with both modes off, so the l-case is a no-op
+        # there and heals a stale mode on a reattach. Snapshot bytes flow only
+        # agent -> broker -> browser; they never re-enter the PTY.
+        payload += _mode_reassert(self._mode_sniffer)
         self._enqueue("snap", payload)
 
     # -- management RPCs (task manager / git button) -------------------------

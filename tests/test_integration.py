@@ -200,6 +200,65 @@ async def test_snapshot_pyte_mode_renders_settled_screen(broker):
         await asyncio.wait_for(task, 5)
 
 
+async def test_snapshot_reasserts_bracketed_paste(running_agent, broker):
+    # #138: every snapshot ends with a DEC-mode postamble so a reloaded /
+    # reattached xterm.js recovers the app's bracketed-paste request — without
+    # it a multiline paste after F5 submits line-by-line until the app happens
+    # to re-emit ?2004h.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[?2004hready")
+    await broker.wait_binary(lambda b: b"ready" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    assert snap.endswith(b"\x1b[?2004h\x1b[?1l")
+
+
+async def test_snapshot_postamble_modes_never_set(running_agent, broker):
+    # Never-set modes re-assert OFF: a no-op for a fresh xterm (its default
+    # state), and it heals a stale mode on a reattach into a live terminal.
+    _, backend, _ = running_agent
+    backend.feed(b"plain output")
+    await broker.wait_binary(lambda b: b"plain output" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1l")
+
+
+async def test_snapshot_postamble_decckm_on(running_agent, broker):
+    # DECCKM rides the same postamble (#138): arrows keep working in a TUI
+    # after a reload, not just bracketed paste.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[?1happ-cursor")
+    await broker.wait_binary(lambda b: b"app-cursor" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1h")
+
+
+async def test_snapshot_pyte_mode_carries_postamble(broker):
+    # The postamble is appended at the _on_snapshot_request seam, so the
+    # pyte-rendered path carries it too (renderers stay untouched).
+    pytest.importorskip("pyte")
+    backend = FakeBackend()
+    agent = Agent(make_config(broker, snapshot_mode="pyte", cols=40, rows=5),
+                  backend=backend)
+    task = asyncio.create_task(agent.run())
+    try:
+        await broker.wait_connected()
+        backend.feed(b"\x1b[?2004hhello pyte")
+        await broker.wait_binary(lambda b: b"hello pyte" in b)
+        await broker.request_snapshot()
+        snap = await broker.wait_binary(
+            lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+        assert snap.endswith(b"\x1b[?2004h\x1b[?1l")
+    finally:
+        backend.exit_child(0)
+        await asyncio.wait_for(task, 5)
+
+
 async def test_title_sniffed_and_forwarded(running_agent, broker):
     _, backend, _ = running_agent
     backend.feed(b"\x1b]0;my new title\x07")
