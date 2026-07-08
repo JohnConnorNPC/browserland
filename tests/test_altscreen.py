@@ -37,6 +37,43 @@ def test_app_cursor_decckm():
     assert s.app_cursor is False
 
 
+def test_bracketed_paste_set_and_reset():
+    # #138: DECSET 2004 — snapshots re-assert it so a reloaded xterm recovers
+    # the app's bracketed-paste request.
+    s = DecModeSniffer()
+    assert s.bracketed_paste is False
+    s.feed(b"\x1b[?2004h")
+    assert s.bracketed_paste is True
+    s.feed(b"\x1b[?2004l")
+    assert s.bracketed_paste is False
+
+
+def test_bracketed_paste_combined_with_alt():
+    # Shells commonly bundle modes: ?1049;2004h sets both in one sequence.
+    s = _feed(b"\x1b[?1049;2004h")
+    assert s.alt_screen is True and s.bracketed_paste is True
+    s.feed(b"\x1b[?1049;2004l")
+    assert s.alt_screen is False and s.bracketed_paste is False
+
+
+def test_bracketed_paste_split_across_chunks():
+    assert _feed(b"\x1b[?20", b"04h").bracketed_paste is True
+    assert _feed(b"\x1b[?2004", b"h").bracketed_paste is True
+
+
+def test_bracketed_paste_substring_not_false_positive():
+    # 12004 / 20040 contain "2004" as a substring but are different modes.
+    assert _feed(b"\x1b[?12004h").bracketed_paste is False
+    assert _feed(b"\x1b[?20040h").bracketed_paste is False
+
+
+def test_bracketed_paste_survives_later_output():
+    s = _feed(b"\x1b[?2004h")
+    for _ in range(50):
+        s.feed(b"prompt output " * 100)
+    assert s.bracketed_paste is True
+
+
 def test_alt_and_app_cursor_independent():
     # A TUI commonly toggles both in one combined sequence.
     s = _feed(b"\x1b[?1049;1h")

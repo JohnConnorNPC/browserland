@@ -1,13 +1,16 @@
-"""Live DEC private-mode tracker for the PTY output stream (#21, #23).
+"""Live DEC private-mode tracker for the PTY output stream (#21, #23, #138).
 
-read_screen / send_keys need to know two things about the terminal that only
-the running output stream can tell them:
+read_screen / send_keys / snapshot need to know three things about the
+terminal that only the running output stream can tell them:
 
 - **alt_screen** — is a full-screen alternate buffer showing (mc/btop/vim)?
   Then the grid is the whole story and scrollback is meaningless (#21).
 - **app_cursor** (DECCKM) — is application-cursor-key mode on? Then arrow /
   Home / End keys must be sent as SS3 (``ESC O x``), not CSI (``ESC [ x``), or
   the TUI ignores them (#23).
+- **bracketed_paste** (DECSET 2004) — did the app ask for ``ESC[200~``-framed
+  pastes? Snapshots re-assert it so a reloaded xterm.js recovers the state and
+  a multiline paste isn't submitted line-by-line (#138).
 
 Both are DEC private modes toggled by ``CSI ? <modes> h`` (set) / ``l`` (reset),
 so one sniffer tracks them. The authoritative signal is the live stream, NOT a
@@ -31,6 +34,7 @@ from typing import Iterator
 _MODE_RE = re.compile(rb"\x1b\[\?([0-9;]*)([hl])")
 _ALT_MODES = frozenset((47, 1047, 1049))   # alt-screen
 _DECCKM = 1                                 # application cursor keys
+_BRACKETED_PASTE = 2004                     # ESC[200~ / ESC[201~ paste framing
 # Stitch a sequence split across feeds by carrying any trailing partial escape
 # (from the last ESC to the end), capped so a lone ESC can't grow the carry.
 _MAX_CARRY = 64
@@ -45,13 +49,15 @@ def _mode_ints(params: bytes) -> Iterator[int]:
 
 
 class DecModeSniffer:
-    """Feed raw PTY bytes; query the latest alt-screen / DECCKM state. The last
-    toggle of a mode wins (matching real terminal behaviour), tracked per
-    concept so alt-screen and DECCKM stay independent. Never raises."""
+    """Feed raw PTY bytes; query the latest alt-screen / DECCKM / bracketed-
+    paste state. The last toggle of a mode wins (matching real terminal
+    behaviour), tracked per concept so the modes stay independent. Never
+    raises."""
 
     def __init__(self) -> None:
         self._alt = False
         self._app_cursor = False
+        self._bracketed_paste = False
         self._tail = b""
 
     def feed(self, chunk: bytes) -> None:
@@ -65,6 +71,8 @@ class DecModeSniffer:
                 self._alt = on            # last alt toggle wins (any alt mode)
             if _DECCKM in modes:
                 self._app_cursor = on     # last DECCKM toggle wins
+            if _BRACKETED_PASTE in modes:
+                self._bracketed_paste = on  # last 2004 toggle wins
         # Carry a trailing, possibly-incomplete escape so it completes next feed.
         esc = buf.rfind(b"\x1b")
         self._tail = (buf[esc:] if esc != -1 and len(buf) - esc <= _MAX_CARRY
@@ -78,6 +86,11 @@ class DecModeSniffer:
     def app_cursor(self) -> bool:
         """DECCKM (application cursor keys) — arrows go out as SS3 when set."""
         return self._app_cursor
+
+    @property
+    def bracketed_paste(self) -> bool:
+        """DECSET 2004 — the app wants pastes framed in ESC[200~/201~ (#138)."""
+        return self._bracketed_paste
 
 
 class AltScreenSniffer(DecModeSniffer):
