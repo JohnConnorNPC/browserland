@@ -380,7 +380,14 @@
             // navigator.clipboard.readText() is blocked, so leaving the
             // listener unbound lets the browser's own context menu (with a
             // working Paste entry) appear instead. Loopback / https keep
-            // the seamless one-click paste.
+            // the seamless one-click paste. The text goes through xterm's
+            // paste() (#138) — CRLF/LF -> CR, plus ESC[200~ bracketing iff
+            // the app enabled DECSET 2004 — and exits via the onData ->
+            // sendChunked('input', ...) path below, so a multiline block
+            // lands as ONE paste instead of raw newlines that submit at the
+            // first line. paste() fires no DOM paste event, so the inline
+            // notify here stays this path's only #106 count (no double count
+            // with the capture-phase onClipPaste listener).
             if (canReadClipboard()) {
                 const onContext = async (e) => {
                     e.preventDefault();
@@ -388,7 +395,7 @@
                     try {
                         const text = await navigator.clipboard.readText();
                         if (text) {
-                            sendChunked('paste', text);
+                            term.paste(text);
                             _notifyClipboard('in', text);   // #106 history
                         }
                     } catch (err) {

@@ -1964,6 +1964,19 @@ def test_clipboard_capability_present():
         assert sym in INDEX_HTML, f"#106 clipboard seam missing from served page: {sym!r}"
 
 
+def test_right_click_paste_routes_through_xterm_paste():
+    # #138: the right-click seamless paste must go through xterm's paste()
+    # (CRLF/LF -> CR + ESC[200~ bracketing iff the app enabled DECSET 2004,
+    # exiting via onData -> sendChunked('input', ...)), NEVER raw ws 'paste'
+    # frames that bypass xterm — those submit a multiline block at the first
+    # newline instead of inserting it whole.
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "term.paste(text);" in life
+    assert "sendChunked('paste'" not in life
+    assert "term.paste(text);" in INDEX_HTML
+    assert "sendChunked('paste'" not in INDEX_HTML
+
+
 def test_clipboard_mod_packaged_and_manifest_agrees():
     import json
     mod_dir = BROKER_DIR / "mods" / "clipboard"
