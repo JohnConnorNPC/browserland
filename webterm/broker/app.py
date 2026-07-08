@@ -106,6 +106,13 @@ _SHA256_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
 MAX_UPLOAD_SESSIONS = 32
 UPLOAD_SESSION_TTL = 3600.0        # seconds since begin before a sweep drops it
 
+# Clipboard-image paste (#137): pasted images land in a dedicated paste dir
+# under generated names and are swept lazily on each upload — expired by age
+# first, then trimmed oldest-first to the count cap — so screenshots can't
+# accumulate forever.
+PASTE_IMAGE_TTL = 6 * 3600.0       # seconds a pasted image stays on disk
+PASTE_IMAGE_MAX_FILES = 64         # cap on retained paste-* files
+
 
 # Non-UTF-8 editor support (#97). The broker ships only sanic+websockets, so
 # detection is STDLIB-only (no chardet) and BOM-based for the multibyte
@@ -1113,6 +1120,55 @@ def _sweep_orphan_parts(parent: Path, now: float) -> None:
             pass
 
 
+def _sniff_image_kind(data: bytes) -> Optional[str]:
+    """Magic-byte sniff for the clipboard-image formats browsers hand out
+    (#137), used to pick the file extension. A format hint, NOT security
+    validation — the file is only ever read back by tools the same user
+    points at it (the same trust /file/upload already extends to arbitrary
+    bytes at arbitrary paths)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _sweep_paste_images(paste_dir: Path, now: float) -> None:
+    """Best-effort retention sweep of ``paste-*`` files (#137): unlink those
+    older than PASTE_IMAGE_TTL, then trim oldest-first so that after the
+    caller writes its new file at most PASTE_IMAGE_MAX_FILES remain. Runs
+    synchronously in the (single-process) upload handler BEFORE the new file
+    is written, so the just-uploaded image is never the one trimmed. Any
+    error is swallowed — a file we can't stat or unlink simply isn't swept."""
+    try:
+        fresh = []
+        for child in paste_dir.glob("paste-*"):
+            try:
+                mtime = child.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime > PASTE_IMAGE_TTL:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+            else:
+                fresh.append((mtime, child))
+    except OSError:
+        return
+    fresh.sort()                       # oldest first
+    excess = len(fresh) - (PASTE_IMAGE_MAX_FILES - 1)
+    for _, child in fresh[:max(0, excess)]:
+        try:
+            child.unlink()
+        except OSError:
+            pass
+
+
 def _json_object_body(request: "Request") -> Optional[Dict[str, Any]]:
     """Parsed JSON object body, or None on malformed / non-object JSON. An
     empty body is treated as ``{}`` (mirrors the /launch handler)."""
@@ -1222,6 +1278,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # swept (lazily on begin + on shutdown) so an abandoned transfer's temp file
     # never lingers. Single_process => this one dict is the source of truth.
     app.ctx.uploads = {}
+    # Clipboard-image paste dir (#137): where /file/paste_image lands blobs
+    # under generated paste-* names. Config "paste_dir" overrides; the default
+    # is a dedicated subdir of the host temp dir so the retention sweep only
+    # ever touches our own files. Created lazily per upload (an OS temp
+    # cleaner may remove it between uploads), 0o700 on POSIX.
+    app.ctx.paste_dir = Path(
+        config.get("paste_dir")
+        or (Path(tempfile.gettempdir()) / "webterm-paste"))
     # AI-provider status cache (#112): provider id -> {"at": loop.time(),
     # "data": normalized}. Populated lazily by GET /status/fetch and re-fetched
     # after STATUS_CACHE_TTL. Single-process => this one dict is the source of
@@ -1850,6 +1914,77 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True,
                            "path": str(p),       # absolute, host-wide (#35)
                            "size": len(data)})
+
+    async def _file_paste_image(request: Request):
+        # Clipboard-image paste (#137): the UI uploads the browser-side image
+        # blob here and pastes the returned path into the terminal — the only
+        # way an image can cross from the browser's clipboard (possibly on
+        # another machine) into a PTY app on this host, whose own S4U window
+        # station has no clipboard worth reading. Unlike /file/upload the
+        # caller names no path: blobs land ONLY in paste_dir under a generated
+        # name and are TTL+count swept, so this is strictly narrower than the
+        # write-anywhere /file/upload living under the same auth gate.
+        err = _file_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        b64 = body.get("content_b64")
+        if not isinstance(b64, str) or not b64:
+            return sanic_json({"ok": False, "error": "bad_content"},
+                              status=400)
+        # Cheap pre-decode cap (codex): an oversized payload is rejectable
+        # from the base64 length alone (4/3 expansion) before buying the
+        # decode; the decoded-size check below stays authoritative.
+        if len(b64) > (MAX_FILE_BYTES * 4) // 3 + 8:
+            return sanic_json({"ok": False, "error": "too_large"}, status=400)
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return sanic_json({"ok": False, "error": "bad_base64"},
+                              status=400)
+        if len(data) > MAX_FILE_BYTES:
+            return sanic_json({"ok": False, "error": "too_large"}, status=400)
+        kind = _sniff_image_kind(data)
+        if kind is None:
+            return sanic_json({"ok": False, "error": "not_an_image"},
+                              status=400)
+        paste_dir = app.ctx.paste_dir
+        try:
+            if os.name == "posix":
+                paste_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            else:
+                paste_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        _sweep_paste_images(paste_dir, time.time())
+        name = "paste-%s-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"),
+                                   secrets.token_hex(4), kind)
+        p = paste_dir / name
+        # Same atomic mkstemp + close + os.replace shape as /file/upload: a
+        # reader never sees a half-written file, and the fd is closed before
+        # replace (Windows can't replace an open file).
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(paste_dir), prefix=".webterm-",
+                                       suffix=".tmp")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, str(p))
+            tmp = None
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return sanic_json({"ok": True,
+                           "path": str(p),
+                           "size": len(data),
+                           "kind": kind})
 
     async def _file_delete(request: Request):
         # Destructive sibling of /file/write (#46), extended for the file manager
@@ -3691,6 +3826,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_file_upload_chunk, "/file/upload_chunk", methods=["POST"])
     app.add_route(_file_upload_commit, "/file/upload_commit", methods=["POST"])
     app.add_route(_file_upload_abort, "/file/upload_abort", methods=["POST"])
+    app.add_route(_file_paste_image, "/file/paste_image", methods=["POST"])
     app.add_route(_file_delete, "/file/delete", methods=["POST"])
     app.add_route(_file_mkdir, "/file/mkdir", methods=["POST"])
     app.add_route(_file_copy, "/file/copy", methods=["POST"])
@@ -3742,6 +3878,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/file/upload_chunk", "preflight_file_upload_chunk"),
                              ("/file/upload_commit", "preflight_file_upload_commit"),
                              ("/file/upload_abort", "preflight_file_upload_abort"),
+                             ("/file/paste_image", "preflight_file_paste_image"),
                              ("/file/delete", "preflight_file_delete"),
                              ("/file/mkdir", "preflight_file_mkdir"),
                              ("/file/copy", "preflight_file_copy"),

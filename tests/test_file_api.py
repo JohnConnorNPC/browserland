@@ -8,6 +8,7 @@ half-absolute / ADS rejections an adversarial review (codex) flagged."""
 import base64
 import hashlib
 import os
+import re
 import stat
 import sys
 import zipfile
@@ -37,7 +38,7 @@ WIN = sys.platform == "win32"
 _app_seq = 0
 
 
-def _make_file_app(tmp_path, monkeypatch, token=None):
+def _make_file_app(tmp_path, monkeypatch, token=None, paste_dir=None):
     global _app_seq
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
@@ -45,6 +46,8 @@ def _make_file_app(tmp_path, monkeypatch, token=None):
            "state_path": str(tmp_path / "webterm_state.json")}
     if token:
         cfg["auth_token"] = token
+    if paste_dir:
+        cfg["paste_dir"] = str(paste_dir)   # keep #137 uploads in the sandbox
     return create_app(cfg, name=f"webterm-file-test-{_app_seq}")
 
 
@@ -1112,6 +1115,99 @@ def test_upload_begin_sweeps_stale_session(tmp_path, monkeypatch):
         assert uid1 not in app.ctx.uploads
         assert not os.path.exists(tmp1)
         client.post("/file/upload_abort", json={"upload_id": r.json["upload_id"]})
+
+
+# ---- /file/paste_image (#137) ---------------------------------------------
+# Clipboard-image drop point: pathless (server picks the name inside
+# paste_dir), magic-sniffed, TTL+count swept. Auth + OPTIONS ride the
+# router-enumerating guard above. All single-request => plain test_client.
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def _paste_image(app, raw):
+    return app.test_client.post(
+        "/file/paste_image",
+        json={"content_b64": base64.b64encode(raw).decode()})[1]
+
+
+def test_paste_image_png_happy_path(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    r = _paste_image(app, _PNG)
+    assert r.status == 200 and r.json["ok"] is True, r.json
+    p = Path(r.json["path"])
+    assert p.parent == tmp_path / "paste"      # inside paste_dir, nowhere else
+    assert re.fullmatch(r"paste-\d{8}-\d{6}-[0-9a-f]{8}\.png", p.name)
+    assert p.read_bytes() == _PNG
+    assert r.json["size"] == len(_PNG) and r.json["kind"] == "png"
+
+
+@pytest.mark.parametrize("magic,ext", [
+    (b"\xff\xd8\xff\xe0" + b"\x00" * 8, "jpg"),
+    (b"GIF89a" + b"\x00" * 8, "gif"),
+    (b"GIF87a" + b"\x00" * 8, "gif"),
+    (b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 8, "webp"),
+])
+def test_paste_image_sniffs_kind_to_extension(tmp_path, monkeypatch, magic, ext):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    r = _paste_image(app, magic)
+    assert r.status == 200 and r.json["kind"] == ext, r.json
+    assert Path(r.json["path"]).suffix == "." + ext
+
+
+def test_paste_image_rejects_non_image(tmp_path, monkeypatch):
+    # Valid base64 of non-image bytes -> not_an_image; nothing written.
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    r = _paste_image(app, b"plain text, not an image")
+    assert r.status == 400 and r.json["error"] == "not_an_image"
+    assert not (tmp_path / "paste").exists()
+
+
+def test_paste_image_bad_base64_and_bad_content(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    _, r = app.test_client.post("/file/paste_image",
+                                json={"content_b64": "!!not-base64!!"})
+    assert r.status == 400 and r.json["error"] == "bad_base64"
+    _, r = app.test_client.post("/file/paste_image", json={})
+    assert r.status == 400 and r.json["error"] == "bad_content"
+    _, r = app.test_client.post("/file/paste_image", json={"content_b64": 7})
+    assert r.status == 400 and r.json["error"] == "bad_content"
+
+
+def test_paste_image_too_large_decoded_and_predecode(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    monkeypatch.setattr(app_mod, "MAX_FILE_BYTES", 64)
+    # Decoded size over the cap.
+    r = _paste_image(app, _PNG + b"\x00" * 64)
+    assert r.status == 400 and r.json["error"] == "too_large"
+    # Pre-decode guard (codex): base64 LENGTH alone rejects before decoding.
+    _, r = app.test_client.post("/file/paste_image",
+                                json={"content_b64": "A" * 4096})
+    assert r.status == 400 and r.json["error"] == "too_large"
+
+
+def test_paste_image_ttl_sweep(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    old = Path(_paste_image(app, _PNG).json["path"])
+    # Age it past the TTL; the next upload's sweep unlinks it.
+    past = app_mod.PASTE_IMAGE_TTL + 60
+    os.utime(old, (old.stat().st_atime - past, old.stat().st_mtime - past))
+    fresh = Path(_paste_image(app, _PNG).json["path"])
+    assert not old.exists() and fresh.exists()
+
+
+def test_paste_image_count_cap_trims_oldest(tmp_path, monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
+    monkeypatch.setattr(app_mod, "PASTE_IMAGE_MAX_FILES", 3)
+    paths = [Path(_paste_image(app, _PNG).json["path"]) for _ in range(5)]
+    # Same-second timestamps: stagger mtimes so oldest-first is deterministic.
+    for i, p in enumerate(paths):
+        if p.exists():
+            os.utime(p, (p.stat().st_atime, p.stat().st_mtime - (50 - i)))
+    final = Path(_paste_image(app, _PNG).json["path"])
+    survivors = sorted(q.name for q in (tmp_path / "paste").glob("paste-*"))
+    assert len(survivors) == 3                 # cap holds AFTER the new write
+    assert final.name in survivors             # newest is never the one trimmed
 
 
 # --------------------------------------------------------------------------- #
