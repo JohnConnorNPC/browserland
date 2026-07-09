@@ -42,6 +42,7 @@ class AgentConfig:
     # #115: the launch-profile name this agent was spawned from, echoed in the
     # hello so the broker/UI can seed a per-profile default terminal color.
     profile: Optional[str] = None
-    # Windows only: "auto" picks ConPTY with a visible console, WinPTY
-    # headless (ConPTY drops ^C translation without a console window).
+    # Windows only: "auto" acquires a hidden console + re-enables Ctrl-C so
+    # ConPTY's ^C works even when detached (#25), falling back to WinPTY if
+    # acquisition fails; "winpty" forces the legacy backend.
     pty_backend: str = "auto"

@@ -14,14 +14,17 @@ pywinpty 3.x is str-based: ``read()`` returns str (decoded by winpty from
 the ConPTY UTF-8 stream), ``write()`` takes str. We re-encode reads to
 UTF-8 bytes and decode input bytes back to str at the boundary.
 
-Backend choice (verified empirically on Server 2022, pywinpty 3.0.3): the
-ConPTY backend silently drops the ``0x03`` -> CTRL_C_EVENT translation when
-the hosting process has no console *window* — i.e. exactly the headless
-cases this agent exists for (broker-launched with DETACHED_PROCESS or
-CREATE_NO_WINDOW, services). The legacy WinPTY backend translates ^C
-correctly in every configuration. So: ConPTY when we have a visible
-console (interactive runs — better VT fidelity), WinPTY when headless.
-``backend="conpty"|"winpty"`` overrides.
+Backend choice (verified empirically on Server 2022, pywinpty 3.0.3): a
+broker-launched agent is spawned DETACHED_PROCESS with no console, so
+``_auto_backend()`` used to pick WinPTY — which interrupts running processes
+but mistranslates a bare ^C into a literal ``c`` at a PSReadLine edit prompt.
+ConPTY cancels the edit buffer cleanly and supports live resize, so on the
+"auto" path we now ``_ensure_hidden_console()`` first: give the detached agent
+a hidden console (flips auto to ConPTY) AND re-enable Ctrl-C for its process
+group (see that function for the two levers and the #25 story). If acquisition
+fails we stay on WinPTY and keep its working interrupt — safe degradation,
+never a regression. ``backend="conpty"|"winpty"`` overrides; ``"winpty"`` skips
+acquisition (no pointless flash; its interrupt works headless anyway).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import logging
 import shutil
 import subprocess
 import threading
+from ctypes import wintypes
 from typing import Callable, Mapping, Optional, Sequence
 
 from winpty import PTY  # type: ignore
@@ -49,13 +53,101 @@ def _auto_backend() -> int:
     return Backend.WinPTY
 
 
+# Kept alive for the process lifetime once installed: a ctypes callback that is
+# GC'd would leave a dangling pointer in the console handler list.
+_CTRL_GUARD = None
+
+
+def _install_agent_ctrl_guard() -> bool:
+    """Install a console-control handler that swallows CTRL_C/CTRL_BREAK for the
+    AGENT process, so re-enabling group Ctrl-C (below, for the pty child) can't
+    terminate the agent itself. Handler *routines* are per-process and are NOT
+    inherited by children (only the NULL-handler "ignore" attribute is), so the
+    pty child still receives normal Ctrl-C. Idempotent; never raises."""
+    global _CTRL_GUARD
+    if _CTRL_GUARD is not None:
+        return True
+    try:
+        proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+        def _guard(ctrl_type: int) -> bool:
+            # CTRL_C_EVENT=0, CTRL_BREAK_EVENT=1 -> handled (swallow); other
+            # events (close/logoff/shutdown) fall through to default handling.
+            return ctrl_type in (0, 1)
+
+        cb = proto(_guard)
+        if ctypes.windll.kernel32.SetConsoleCtrlHandler(cb, True):
+            _CTRL_GUARD = cb  # keep the callback alive
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ensure_hidden_console() -> bool:
+    """Make a detached agent able to run ConPTY with a working ^C (#25); returns
+    True iff a hidden console is now present AND the pty child will be
+    interruptible (so it is safe to select ConPTY).
+
+    A broker-launched agent is spawned DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP
+    (launcher.py ``_spawn_detached``). Two consequences, two levers:
+
+    1. No console -> ``_auto_backend()`` picks WinPTY. ``AllocConsole()`` +
+       ``ShowWindow(SW_HIDE)`` gives it a hidden console (nothing flashes on the
+       streamed desktop), flipping auto to ConPTY (clean edit-buffer cancel +
+       live resize). AllocConsole's canonical success case is exactly a process
+       with no console; it fails ERROR_ACCESS_DENIED only when one already
+       exists (interactive / ConPTY-hosted), which the first check short-circuits
+       so we never disturb an existing console.
+    2. ``CREATE_NEW_PROCESS_GROUP`` DISABLES Ctrl-C for the group, inherited by
+       the pty child. Without undoing it, ConPTY delivers 0x03 to apps that READ
+       input (PSReadLine, cmdlets, raw TUIs) but the CTRL_C_EVENT never reaches a
+       cooked child that doesn't read stdin (ping, npm, builds) — the interrupt
+       WinPTY does today. ``SetConsoleCtrlHandler(None, FALSE)`` clears that
+       disable BEFORE the pty child is spawned, so the child inherits normal
+       Ctrl-C and a running process is interrupted. We first install an agent-only
+       guard (above) so this re-enable can't terminate the agent.
+
+    If the re-enable fails we ``FreeConsole()`` and return False, so ConPTY is
+    never chosen with a dead interrupt: ``_auto_backend()`` reverts to WinPTY and
+    keeps its working interrupt — safe degradation, never a regression. Never
+    raises."""
+    kernel32 = ctypes.windll.kernel32
+    if kernel32.GetConsoleWindow():
+        return True
+    try:
+        if not kernel32.AllocConsole():
+            return False
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        _install_agent_ctrl_guard()
+        if not kernel32.SetConsoleCtrlHandler(None, 0):  # (NULL, FALSE)
+            kernel32.FreeConsole()  # couldn't re-enable child ^C -> revert
+            return False
+        return bool(kernel32.GetConsoleWindow())
+    except Exception:
+        try:
+            kernel32.FreeConsole()
+        except Exception:
+            pass
+        return False
+
+
 class WinConPtyBackend(PtyBackend):
     def __init__(self, backend: str = "auto") -> None:
         if backend == "conpty":
+            # Forced ConPTY: still acquire the hidden console + re-enable Ctrl-C
+            # so a forced-ConPTY detached agent gets a working interrupt too.
+            _ensure_hidden_console()
             self._backend = Backend.ConPTY
         elif backend == "winpty":
+            # Explicit WinPTY: skip acquisition (no pointless flash; WinPTY's
+            # interrupt works headless).
             self._backend = Backend.WinPTY
-        else:
+        else:  # "auto": acquire a hidden console + re-enable Ctrl-C, then let
+            # _auto_backend() re-check — ConPTY only if a console exists now.
+            _ensure_hidden_console()
             self._backend = _auto_backend()
         self._backend_name = (
             "ConPTY" if self._backend == Backend.ConPTY else "WinPTY")
@@ -100,9 +192,10 @@ class WinConPtyBackend(PtyBackend):
         self._pty = PTY(cols, rows, backend=self._backend)
         self._pty.spawn(exe, cmdline=cmdline, cwd=cwd, env=env_block)
         self.pid = self._pty.pid
-        # Confirms in production which branch _auto_backend took: a detached
-        # broker-launched agent has no console window, so "auto" lands on
-        # WinPTY (resize ✗) — the live-resize bug's signature.
+        # Confirms in production which branch we took. With #25's hidden-console
+        # acquisition, a detached broker-launched agent on "auto" should now log
+        # backend=ConPTY console_window=True; a fallback to WinPTY (AllocConsole
+        # failed) logs console_window=False and loses live resize.
         LOGGER.info(
             "win pty backend=%s console_window=%s pid=%s",
             self._backend_name,

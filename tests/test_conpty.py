@@ -75,6 +75,46 @@ async def test_cmd_exe_round_trip(broker):
             await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_conpty_with_console_ctrl_c_interrupts(broker):
+    """#25: when a hidden console can be acquired, the auto/ConPTY backend must
+    still interrupt a running child. Skips where the mechanism is unavailable
+    (e.g. a ConPTY-hosted test host where AllocConsole is denied) so the suite
+    never hangs — the detached-agent spike carries the full proof."""
+    from webterm.agent.backends.win_conpty import _ensure_hidden_console
+
+    if not _ensure_hidden_console():
+        pytest.skip("hidden console unavailable here (already console-attached)")
+
+    config = AgentConfig(
+        command=(os.environ.get("COMSPEC", "cmd.exe"),),
+        broker_url=broker.url,
+        cols=80,
+        rows=24,
+        title="cmd",
+        window_id=777004,
+        pty_backend="conpty",
+    )
+    agent = Agent(config)
+    assert agent.backend._backend_name == "ConPTY"
+    task = asyncio.create_task(agent.run())
+    try:
+        await broker.wait_connected(timeout=15)
+        await broker.wait_binary(lambda b: b">" in b, timeout=15)
+        await broker.send_input("ping -t 127.0.0.1\r\n")
+        await broker.wait_binary(
+            lambda b: b"Reply from 127.0.0.1" in b, timeout=15)
+        await broker.send_input("\x03")
+        await broker.wait_binary(lambda b: b"Control-C" in b, timeout=15)
+        await broker.send_input("exit 0\r\n")
+        code = await asyncio.wait_for(task, 20)
+        assert code == 0
+    finally:
+        if not task.done():
+            agent.backend.kill()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_winpty_backend_ctrl_c_interrupts(broker):
     """WinPTY is the auto-selected backend for headless agents (ConPTY drops
     the ^C translation without a console window) — verify the wiring and

@@ -54,9 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "broker/UI can resolve a per-profile color (#115)")
     parser.add_argument("--pty-backend", choices=("auto", "conpty", "winpty"),
                         default="auto",
-                        help="Windows only: auto = ConPTY when a console "
-                             "window exists, WinPTY headless (ConPTY drops "
-                             "Ctrl-C without one); ignored on POSIX")
+                        help="Windows only: auto acquires a hidden console + "
+                             "re-enables Ctrl-C so ConPTY works when detached "
+                             "(#25), falling back to WinPTY if that fails; "
+                             "winpty forces the legacy backend; ignored on POSIX")
     parser.add_argument("command", nargs="*",
                         help="command to run in the PTY")
     return parser
