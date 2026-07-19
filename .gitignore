@@ -19,6 +19,9 @@ webterm_modstore.json
 # Stable broker identity (/info, #64) — sibling of the state store
 webterm_identity.json
 
+# Session recordings (#140) — durable user data beside the state store
+webterm_recordings/
+
 # Playwright verification screenshots (test artifacts)
 /*.png
 
