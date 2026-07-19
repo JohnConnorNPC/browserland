@@ -820,10 +820,17 @@ def test_sticky_mod_packaged_and_manifest_agrees():
     assert "ctx.registerWindowKind(" in src
     assert "appKind: 'sticky-note'" in src
     assert "serialize: serializeAppWindow" in src
-    assert "return openNoteOrEditorWindow(d)" in src
+    # #141: the factory delegates to the shared builder through a wrapper that
+    # adds a taskbar chip when the stickyTaskbar toggle is on.
+    assert "openNoteOrEditorWindow(d)" in src
+    assert "ctx.settings.boolean(" in src
+    assert "'stickyTaskbar'" in src
+    assert "tiers: ['settings', 'window']" in src
     # The retain trim + Closed-notes menu rode along with the kind.
     assert "retainOnClose: function (rec)" in src
     assert "Closed notes" in src
+    # The toggle ships in the served page too.
+    assert "'stickyTaskbar'" in INDEX_HTML
     # And the mod ships in the served page (present in the mod / gone from core),
     # registered AFTER the help mod (its position in _MODS).
     assert "id: 'sticky'" in INDEX_HTML
@@ -2100,7 +2107,7 @@ _EXPECTED_TIERS = {
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
     "agent-docs": ["file", "window"],  # #120 AGENTS.md/CLAUDE.md openers do host /file/* I/O + open a window
-    "sticky": ["window"],
+    "sticky": ["settings", "window"],  # #141 stickyTaskbar toggle (ctx.settings.boolean) + the sticky-note window kind
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
     "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip

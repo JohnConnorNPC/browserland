@@ -1,4 +1,4 @@
-The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar), the workspace pager, host status, a fullscreen button, and clock, AI status, clipboard, and help chips.
+The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar unless you opt them in), the workspace pager, host status, a fullscreen button, and clock, AI status, clipboard, and help chips.
 
 ## Anatomy
 
@@ -7,7 +7,7 @@ From left to right, the taskbar contains:
 | Element | What it does |
 |---|---|
 | Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
-| Window buttons | One per open window (except sticky notes) — click to focus, right-click for per-window actions |
+| Window buttons | One per open window (sticky notes only when opted in — see below) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
 | Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
@@ -18,7 +18,7 @@ From left to right, the taskbar contains:
 
 ## Window buttons
 
-Each open window has a button on the taskbar — except sticky notes, which deliberately stay off the taskbar and are reached from the **+** menu instead.
+Each open window has a button on the taskbar — except sticky notes, which by default stay off the taskbar and are reached from the **+** menu instead. If you'd rather have them there, the Sticky mod's **show sticky-note windows on the taskbar** setting (Control Panel → Mods) gives every open note a button too, applied live to notes already open.
 
 - **Click** a button to focus and raise that window. If the window is minimized, clicking it restores it; if it lives on another workspace, Browserland switches to that workspace first. Clicking the button of the window that is **already focused and on top minimizes it** — so the same button toggles a window in and out of view.
 - **Right-click** a button for per-window actions:

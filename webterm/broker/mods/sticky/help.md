@@ -1,4 +1,8 @@
-A sticky note is a small, always-visible scratch pad for quick text. Notes stay out of the taskbar.
+A sticky note is a small, always-visible scratch pad for quick text. Notes stay out of the taskbar by default.
+
+## Notes on the taskbar
+
+Prefer a taskbar button per note? Turn on **show sticky-note windows on the taskbar** under **Control Panel → Mods** (the *Sticky notes* setting). Every open note then gets a taskbar button like any other window — click to focus or restore, click the active one to minimize — and the button tracks the note's title and color. Flipping the setting applies immediately to notes already open. The default (off) keeps today's behavior.
 
 ## Reopening a closed note
 

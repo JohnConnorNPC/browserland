@@ -2112,13 +2112,15 @@
             const appSess = { key: id, sid, id, title, stale: false,
                               kind: 'app', hostId: 'app' };
             sessions.set(id, appSess);
-            // Sticky notes stay OFF the taskbar (todo2 task 9): they default
-            // always-on-top (#95) so a chip is noise, and an UNPINNED note that
-            // gets covered is still retrievable via the desktop right-click
-            // Cascade/Tile menu (floatingWindowsOrdered includes notes) — no
-            // lost-note trap. The synthetic session entry above is kept
-            // (formatTitle / applyDisplaySettings rely on it); only the chip is
-            // skipped.
+            // Sticky notes stay OFF the taskbar BY DEFAULT (todo2 task 9):
+            // they default always-on-top (#95) so a chip is usually noise, and
+            // an UNPINNED note that gets covered is still retrievable via the
+            // desktop right-click Cascade/Tile menu (floatingWindowsOrdered
+            // includes notes) — no lost-note trap. The synthetic session entry
+            // above is kept (formatTitle / applyDisplaySettings rely on it);
+            // only the chip is skipped HERE — the sticky mod's stickyTaskbar
+            // toggle (#141) opts notes back in by adding the chip in its own
+            // factory wrapper, riding this very session entry.
             if (!isNote) {
                 const itemsHost = document.getElementById('taskbar-items');
                 // Idempotent: reuse a chip already in the DOM rather than

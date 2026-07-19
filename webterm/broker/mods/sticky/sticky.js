@@ -34,7 +34,7 @@
             id: 'sticky',
             version: '1.0.0',
             ctxVersion: 1,
-            tiers: ['window'],   // #86: registers the sticky-note window kind (ctx.registerWindowKind)
+            tiers: ['settings', 'window'],   // #86: the #141 taskbar toggle (ctx.settings.boolean) + the sticky-note window kind (ctx.registerWindowKind)
             init: function (ctx) {
                 // The (+) launch-menu "Sticky note" entry: a new, empty, pinned
                 // note (moved verbatim from 76_js_launch_fullscreen.js).
@@ -43,9 +43,10 @@
                                     appKind: 'sticky-note', content: '' });
                 }
                 // Closed app docs (open:false, no live window) — the way to get a
-                // closed sticky note back without it squatting on the taskbar. Each
-                // entry reopens straight from its stored record (moved verbatim from
-                // 76_js_launch_fullscreen.js).
+                // closed sticky note back without it needing a taskbar chip (notes
+                // stay off the taskbar unless the #141 toggle below opts them in).
+                // Each entry reopens straight from its stored record (moved
+                // verbatim from 76_js_launch_fullscreen.js).
                 function closedAppMenuItems() {
                     // Issue #11: the closed-docs list holds ONLY non-empty sticky
                     // notes. closeWindow discards every other kind on close, so this
@@ -75,12 +76,101 @@
                     }
                     return items;
                 }
+                // ---- notes on the taskbar (#141) --------------------------
+                // Sticky notes are the one window kind whose chip the shared
+                // builder skips (editor.js gates on isNote — notes default
+                // always-on-top, so a chip is usually noise). This toggle opts
+                // them back in. The builder already creates the synthetic
+                // kind:'app' session entry for notes (which is also what
+                // shields a chip from the poll reaper), and the rename/color
+                // paths already call updateTaskbarLabel/Color unconditionally
+                // — so a chip added here tracks title + color with no extra
+                // wiring, and closeWindow's app branch removes it on close.
+                function noteWindows() {
+                    return Array.from(windows.values()).filter(function (w) {
+                        return w && w.type === 'app'
+                            && w.appKind === 'sticky-note' && !w.disposed;
+                    });
+                }
+                // The same idempotent add recipe every app-window kind uses
+                // (clipboard/task-manager/...): append-if-absent, then fix the
+                // accent + label (buildTaskbarItem colors from prefs, which
+                // app windows don't use).
+                function addChip(id) {
+                    const sess = sessions.get(id);
+                    if (!sess) return;
+                    const itemsHost = document.getElementById('taskbar-items');
+                    if (!itemsHost) return;
+                    if (!itemsHost.querySelector(
+                            '.taskbar-item[data-session-id="'
+                            + cssEscape(id) + '"]')) {
+                        itemsHost.appendChild(buildTaskbarItem(sess));
+                    }
+                    updateTaskbarColor(id);
+                    updateTaskbarLabel(id);
+                    // Sync active/minimized classes NOW — a chip added right
+                    // after the builder focused the note would otherwise read
+                    // inactive until the next taskbar refresh (codex).
+                    updateTaskbarActive();
+                    const emptyMsg = document.getElementById('taskbar-empty');
+                    if (emptyMsg) emptyMsg.remove();
+                }
+                // Remove ONLY the chip — the synthetic session entry stays
+                // (formatTitle / applyDisplaySettings rely on it, exactly the
+                // pre-#141 posture of an open note). A note minimized via its
+                // chip is un-minimized FIRST: with the chip gone there is no
+                // taskbar affordance to restore it, and a minimized-but-open
+                // window is invisible everywhere else (not in Closed notes) —
+                // the stranded-note trap (codex).
+                function removeChip(id) {
+                    const w = windows.get(id);
+                    if (w && w.minimized) restoreWindow(id);
+                    const el = document.querySelector(
+                        '.taskbar-item[data-session-id="'
+                        + cssEscape(id) + '"]');
+                    if (el) el.remove();
+                }
+                // Default OFF = the key absent from the synced blob = today's
+                // behavior. onChange fires on a local toggle AND on a
+                // cross-browser /state convergence, so every browser viewing
+                // this broker applies the flip to its open notes live.
+                const taskbarSetting = ctx.settings.boolean(
+                    'stickyTaskbar', false, {
+                        title: 'Sticky notes',
+                        label: 'show sticky-note windows on the taskbar',
+                        isBrowserGlobal: true,
+                    });
+                taskbarSetting.onChange(function (on) {
+                    for (const w of noteWindows()) {
+                        if (on) addChip(w.id);
+                        else removeChip(w.id);
+                    }
+                    updateTaskbarActive();
+                });
+                // Notes already open when this init runs get their chips NOW:
+                // restoreAppWindows runs BEFORE loadMods on a reload (restored
+                // notes go through the unknown-kind fallback, never this mod's
+                // factory), and a mid-session re-enable replays here too. The
+                // add-only pass (no remove) keeps init side-effect-free when
+                // the toggle is off.
+                if (taskbarSetting.get()) {
+                    for (const w of noteWindows()) addChip(w.id);
+                }
+
                 // Register the sticky-note window kind through ctx (the same core
                 // registry the built-ins use; a duplicate appKind throws -> initMod
                 // rolls the mod back; teardown removes exactly THIS registration).
+                // The factory wrapper is the ONE seam every note-open path funnels
+                // through — (+) launch, restore-on-reload, Closed-notes reopen,
+                // and a chip click on a closed note — so chip creation here
+                // covers them all.
                 ctx.registerWindowKind({
                     appKind: 'sticky-note',
-                    factory: function (d) { return openNoteOrEditorWindow(d); },
+                    factory: function (d) {
+                        const win = openNoteOrEditorWindow(d);
+                        if (win && taskbarSetting.get()) addChip(win.id);
+                        return win;
+                    },
                     serialize: serializeAppWindow,
                     retainOnClose: function (rec) {
                         // Issue #11: keep ONLY a non-empty sticky note, content
@@ -97,6 +187,16 @@
                         launch: function () { return launchStickyNote(); },
                         closedItems: function () { return closedAppMenuItems(); },
                     },
+                });
+
+                // Mod disable: open notes deliberately stay open (they always
+                // have — the kind unregisters, the windows remain), but the
+                // chips are this mod's feature, so take them with us. The
+                // settings control removes itself via the ctx primitive's own
+                // unload; the stored value is inert until re-enable.
+                ctx.onUnload(function () {
+                    for (const w of noteWindows()) removeChip(w.id);
+                    updateTaskbarActive();
                 });
             },
         });
