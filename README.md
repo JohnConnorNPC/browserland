@@ -69,14 +69,23 @@ The desktop with tiled and floating terminals
 - **Nested tabs and splits**: any tile can hold a tab group, and tabs can hold
   splits, via a recursive cell model. Build the layout you want by dragging.
 - **More than terminals**: sticky notes, a [CodeMirror 6](https://codemirror.net/)
-  text editor, a file manager, and a task manager — backed by a sandboxed
-  `/file/*` API.
+  text editor, a file manager, a task manager, a synced scratchpad, a clipboard
+  history, and a session recorder — each a bundled **mod** (see
+  [Mods](#mods)) over the broker's token-gated `/file/*` and per-mod store APIs.
+- **Session recording & replay**: hit **⏺** on any terminal to record it
+  byte-faithfully, then play it back at the original size — pause, 0.25×–8×
+  speed, **continuous rewind**, and notes pinned to timestamps.
+- **A bundled mod system**: the desktop's app windows and widgets are mods
+  over a small, versioned `ctx` API — a mod is one folder with a manifest and
+  an entry script, and it can add window kinds, per-terminal title-bar
+  widgets, taskbar chips, Control-Panel settings, and in-app help pages.
 - **Cross-platform PTY**: Linux `pty.openpty`; Windows auto-selects ConPTY or
   WinPTY (ConPTY when a console window exists for correct Ctrl-C handling,
   WinPTY for headless processes).
 - **AI agent fleet**: detects the foreground coding agent in each window
-  (`claude` / `codex` / `grok` / `opencode`), tracks live OSC title + working
-  directory, and surfaces per-window git status.
+  (`claude` / `codex` / `grok` / `opencode`) and tracks live OSC title +
+  working directory, with an opt-in per-window git-status widget (the `git`
+  mod).
 - **Multi-host**: attach the same UI to additional brokers (e.g. another machine
   over [Tailscale](https://tailscale.com/)), with per-host status chips in the
   taskbar.
@@ -93,6 +102,47 @@ The desktop with tiled and floating terminals
   **Control Panel → Launch profiles** (one-click WSL-distro / shell **Detect…**),
   applied live with no restart — still profiles-only. See
   **[docs/PROFILES.md](docs/PROFILES.md)** for recipes and the security model.
+
+## Mods
+
+The desktop's app windows and most of its optional chrome ship as **mods** —
+the terminal pipeline, window manager, multi-host, and MCP surfaces stay
+core. A mod is a self-contained folder under `webterm/broker/mods/<id>/`
+holding a manifest (`mod.json`), one entry script, and optional CSS + an
+in-app help page. Mods are trusted first-party code: the broker splices an
+explicit allow-list of them into the single served page (there is no runtime
+plugin install). Each registers through a versioned `ctx` API that exposes
+per-terminal-window hooks, app-window kinds (which appear in the **+** launch
+menu), taskbar chips, Control-Panel settings, a durable per-mod server store
+with revision history, an in-desktop copy/paste observer, and help cards.
+
+A mod's *settings* sync across your browsers via the broker's shared state;
+its *enable/disable* toggle is deliberately per-browser — flip it in
+**Control Panel → Mods**. A broker-side `mods_enabled` master switch gates
+the whole system. The desktop ships with fifteen:
+
+| Mod | What it adds | Default |
+|---|---|---|
+| `theme` | color-scheme picker for the desktop chrome | on |
+| `pattern` | desktop background patterns | on |
+| `clock` | taskbar clock with timezone picker | on |
+| `help` | the in-app help window + **?** chip | on |
+| `sticky` | sticky notes | on |
+| `editor` | CodeMirror 6 text editor | on |
+| `file-manager` | dual-pane file manager | on |
+| `task-manager` | live per-host process list | on |
+| `scratchpad` | server-backed notes, synced across browsers with revision history | on |
+| `agent-docs` | AGENTS.md / CLAUDE.md one-click openers on terminal title bars | on |
+| `recorder` | terminal session recorder + fixed-size player (speed, continuous rewind, timestamped notes) | on |
+| `git` | per-terminal git branch + dirty-state widget | off |
+| `aistatus` | AI-provider status chip + window | off |
+| `clipboard` | rolling history of copies/pastes made through the desktop | off |
+| `termfont` | terminal font picker | off |
+
+`clipboard` and `aistatus` are off by default on principle — clipboards carry
+secrets, and status polling talks to third-party endpoints; `git` and
+`termfont` are simply opt-in preferences. Enabling any of them is one click
+in the Mods pane.
 
 ## MCP & AI agent access
 
@@ -259,6 +309,7 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 |---|---|
 | `webterm/agent/` | Headless producer: PTY backends, output ring buffer, OSC-title sniffer, reconnecting WebSocket client |
 | `webterm/broker/` | Web server: desktop UI (`ui.py` assembles the served page from ordered `*.html`/`*.css`/`*.js` fragments), `/ws` relay, producer WS, session list, profiles-only launch |
+| `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, entry script, optional CSS + in-app help page |
 | `webterm/mcptool/` | The shipped stdio MCP server wrapping the broker's `/mcp/*` API |
 | `webterm/protocol.py` | The single source of truth for the JSON frame shapes |
 | `launchers/` | venv-bootstrapping run scripts (and systemd units) for both OSes |
