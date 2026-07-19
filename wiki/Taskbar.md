@@ -6,7 +6,7 @@ From left to right, the taskbar contains:
 
 | Element | What it does |
 |---|---|
-| Launch button (**+**) | By default, left-click launches the local broker's default terminal and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
+| Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (except sticky notes) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
 | Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
@@ -45,7 +45,7 @@ Each window button — and the matching window title bar — shows a label built
 
 By default the label reads **`#id host: title [pid]`** with the pid hidden — for example `#42 myhost: claude`.
 
-To change it, open **Control Panel → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and if a ticked component has no value for a given window (for example the host on an app window that has none), the title is shown instead so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
+To change it, open **Control Panel → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and a ticked component that has no value for a given window (for example the host on an app window that has none) is simply left out — if that would leave the label empty, the title is shown instead, so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
 
 ### Items for other workspaces
 
@@ -57,12 +57,12 @@ The launch button doubles as a Start button.
 
 By default:
 
-- **Left-click** launches a terminal using the **local broker's** default profile.
-- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, and — when the AI status mod is enabled — an AI-provider status monitor; see [[Window-Types]]). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
+- **Left-click** launches a terminal using your **default host's** default profile. The default host is the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]).
+- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, scratchpad, session recorder, control panel, and help — with more entries, such as an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
 
 ### Swapping the click gestures
 
-If you open the picker more often than you use the one-click default, turn on **Control Panel → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches the local broker's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
+If you open the picker more often than you use the one-click default, turn on **Control Panel → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches your default host's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
 
 ### Open in folder…
 

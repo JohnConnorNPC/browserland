@@ -43,10 +43,10 @@ Linux:
 | `webterm/protocol.py` | the ONLY place the JSON frame shapes live |
 | `webterm/agent/` | headless producer: PTY backend + ring buffer + OSC title sniffer + reconnecting WS client |
 | `webterm/agent/backends/linux_pty.py` | `pty.openpty` + `Popen` + `loop.add_reader`; TIOCSCTTY so Ctrl-C works |
-| `webterm/agent/backends/win_conpty.py` | Windows PTY via low-level `winpty.PTY` + reader thread (Proactor loop has no `add_reader` for pipes). **Backend auto-selection:** ConPTY silently drops the `0x03` → `CTRL_C_EVENT` translation when the hosting process has no console window (verified empirically — exactly the headless cases this agent exists for), so `--pty-backend auto` picks ConPTY only when a console window exists and WinPTY otherwise; `conpty`/`winpty` force it. |
+| `webterm/agent/backends/win_conpty.py` | Windows PTY via low-level `winpty.PTY` + reader thread (Proactor loop has no `add_reader` for pipes). **Backend auto-selection:** ConPTY silently drops the `0x03` → `CTRL_C_EVENT` translation when the hosting process has no console (verified empirically — exactly the headless cases this agent exists for), so on `auto` (and forced `conpty`) the agent first acquires a hidden console (`AllocConsole` + `SW_HIDE`) and re-enables Ctrl-C (`SetConsoleCtrlHandler(None, FALSE)`, undoing `CREATE_NEW_PROCESS_GROUP`'s disable — #25), and detached agents then run ConPTY; `auto` falls back to WinPTY only when acquisition or the re-enable fails, and `winpty` forces the legacy backend without acquiring a console. |
 | `webterm/agent/snapshot/raw.py` | tier-1 snapshot: `ESC[0m ESC[2J ESC[H` + ring replay |
 | `webterm/agent/snapshot/pyte_snap.py` | tier-2 (optional, `--snapshot-mode pyte`): replay ring through pyte, render the settled grid |
-| `webterm/broker/` | Sanic app: picker page, `/ws` relay, `/browserland` producer WS, `/sessions`, profiles-only `POST /launch` |
+| `webterm/broker/` | Sanic app: desktop UI page, `/ws` relay, `/browserland` producer WS, `/sessions`, profiles-only `POST /launch` |
 | `launchers/` | venv-bootstrapping run scripts for both OSes |
 
 ## Agent
@@ -143,15 +143,22 @@ passwords live per-browser in localStorage. Requirements:
 
 * the remote broker must have an `auth_token` configured (CORS is
   token-gated, so a tokenless remote is unreachable by design — the add
-  form requires a password) and a non-loopback bind;
+  form requires a password) and a way in: either a non-loopback bind
+  (plain http), or — recommended — a loopback bind fronted by
+  `tailscale serve` / an https reverse proxy (note the proxy makes
+  requests arrive *from loopback*, so keep the token set regardless);
 * **both brokers must run this webterm version** — a pre-CORS remote shows
   up as a red "down" chip even when it's running;
-* serve the page over plain http when remotes are http (an https page
-  fetching an http remote is blocked as mixed content).
+* one scheme for the whole fleet — an https page fetching an http remote
+  is blocked as mixed content, so cockpit + hosts must be all-https
+  (preferred: unlocks secure-context features like clipboard image paste)
+  or all-plain-http (see SETUP.md → Multiple machines over Tailscale).
 
-Per-host status chips appear in the taskbar (green ok / red down / amber
-password-needed, click to log in) only when >1 host is configured or some
-host is unhealthy — the single-host UI is unchanged. Window prefs are
+One status chip per broker is always shown in the taskbar — even for a
+single healthy local broker, so the per-broker hide toggle is always
+reachable. Four states: green ok / red down / amber password-needed /
+blue lease; ok/down chips toggle that host's window visibility, while
+auth and lease chips are click-to-log-in / take-over. Window prefs are
 keyed per host; a down host never closes or re-dials another host's
 windows.
 
@@ -194,8 +201,8 @@ Caveats: the `bash -l` profile sources the service user's login profile
 agents are session leaders that survive broker restarts — they
 re-register within ~10 s of the broker coming back.
 
-**Tests on Linux**: `python -m pytest tests -q` → expect
-**126 passed, 2 skipped** (the skips are the Windows-ConPTY e2e). This
+**Tests on Linux**: `python -m pytest tests -q` → the full suite passes;
+the Windows-ConPTY e2e suites skip on Linux. This
 includes a real-POSIX-PTY suite (`tests/test_linux_pty.py`) that was
 written blind on Windows and verified against a real Linux PTY before
 deploying.
@@ -227,7 +234,7 @@ mouse not forwarded.
 
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
 server wraps as MCP tools so an AI agent can list, observe, drive, and launch
-terminals. A ready-to-run server ships in [`webterm/mcptool/`](webterm/mcptool/)
+terminals. A ready-to-run server ships in [`webterm/mcptool/`](../webterm/mcptool/)
 (stdio transport; `pip install -e ".[mcp]"`). Nine token-gated endpoints make
 up the contract:
 
@@ -244,8 +251,8 @@ up the contract:
 | POST | `/mcp/launch` | spawn a new terminal from a profile |
 
 The interface is **disabled by default** — nothing under `/mcp/*` answers until
-an admin both enables it and sets a token (below). The broker serves the picker
-page and this API, not this README, so editing these docs needs no restart.
+an admin both enables it and sets a token (below). The broker serves the desktop
+UI and this API, not this document, so editing these docs needs no restart.
 
 ### Enabling MCP & the token
 
@@ -336,7 +343,13 @@ dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repa
   "pyte":true}]
 ```
 
-**`POST /mcp/read`** — body `{"id": <int>}`:
+**`POST /mcp/read`** — body `{"id": <int>}` plus optional fields:
+`view: "scrollback"` + `lines` reads scrollback history instead of the live
+screen (`lines` is hard-capped at 1000, #21; the reply echoes `view` and
+`history_lines`); `since` (a prior `content_hash`) asks for a delta reply —
+the response always carries a `delta` boolean, with `changed_rows` present
+only for a real delta (#52); `attrs: true` opts into an `attr_runs` styled-run
+map (fg/bg/reverse) so a color-only change is observable (#128).
 
 ```json
 {"ok":true,"id":4503603655475937,"cols":80,"rows":24,"text":"<screen lines>\n...","content_hash":"…","stable_hash":"…","idle_ms":0}
@@ -581,18 +594,18 @@ curl -s -X POST $B/mcp/launch -H "Authorization: Bearer $TOK" \
 
 ### The shipped MCP server
 
-A ready-to-run MCP server lives in [`webterm/mcptool/`](webterm/mcptool/) — a
+A ready-to-run MCP server lives in [`webterm/mcptool/`](../webterm/mcptool/) — a
 thin stdio wrapper that maps each endpoint above to an MCP tool (`mcp_info`,
-`list_terminals`, `list_profiles`, `read_screen`, `send_input`,
-`launch_terminal`). It connects to the broker over HTTP and authenticates with
-the MCP token.
+`list_terminals`, `list_profiles`, `read_screen`, `send_input`, `send_keys`,
+`set_pace`, `reset_terminal`, `flush_input`, `launch_terminal`). It connects to
+the broker over HTTP and authenticates with the MCP token.
 
 ```bash
 pip install -e ".[mcp]"                      # needs Python >=3.10 (the mcp SDK)
 claude mcp add browserland --env BROWSERLAND_MCP_TOKEN=… -- python -m webterm.mcptool
 ```
 
-See [`webterm/mcptool/README.md`](webterm/mcptool/) for config (env/flags), the
+See [`webterm/mcptool/README.md`](../webterm/mcptool/README.md) for config (env/flags), the
 tool list, and how access modes / `allow_launch` still govern behavior.
 
 ## Tests
@@ -601,21 +614,26 @@ tool list, and how access modes / `allow_launch` still govern behavior.
 python -m pytest tests -q
 ```
 
-128 tests collected (124 run on Windows, 126 on Linux — the platform PTY
-e2e suites skip on the other OS): protocol shapes, ring eviction, OSC
-sniffer split at every byte index, raw/pyte snapshot rendering,
-agent↔fake-broker integration (reconnect, snapshot ordering, title
-re-hello), real-ConPTY round trip on Windows, real-POSIX-PTY round trip
-on Linux (bash echo/resize/`stty size`/OSC title/exit code, Ctrl-C via
-TIOCSCTTY, huge-paste backpressure), broker e2e as a subprocess (auth
-gates, CORS with/without a token incl. error paths and preflights,
-sanic-ext neutralized, relay invariants, `/launch` → detached agent on
-both platforms), and non-loopback auth negatives + CORS positives via
-the box's LAN IP.
+The full suite passes (the platform PTY e2e suites skip on the other
+OS): protocol shapes, ring eviction, OSC sniffer split at every byte
+index, raw/pyte snapshot rendering, agent↔fake-broker integration
+(reconnect, snapshot ordering, title re-hello), real-ConPTY round trip
+on Windows, real-POSIX-PTY round trip on Linux (bash
+echo/resize/`stty size`/OSC title/exit code, Ctrl-C via TIOCSCTTY,
+huge-paste backpressure), broker e2e as a subprocess (auth gates, CORS
+with/without a token incl. error paths and preflights, sanic-ext
+neutralized, relay invariants, `/launch` → detached agent on both
+platforms), non-loopback auth negatives + CORS positives via the box's
+LAN IP, plus the newer surfaces: the MCP tools (read/reset/flush/pace),
+the file API, session recording, the status-fetch proxy, the textgrid
+fallback renderer, and UI asset assembly.
 
-`pyte` is optional: `pip install pyte` (only needed for
-`--snapshot-mode pyte`; `raw` works without it). Windows agents need
-`pywinpty>=2`.
+`pyte` is optional: `pip install pyte`. It is required only for
+`--snapshot-mode pyte` (`raw` starts without it), but installing it also
+upgrades MCP `read_screen` regardless of snapshot mode — attr_runs (#128)
+and keyframe repair (#130); without it the dependency-free textgrid
+fallback is used and a sparse alt-screen frame after ring eviction comes
+back flagged `partial` (#134). Windows agents need `pywinpty>=2`.
 
 ## Relationship to xterm-py
 

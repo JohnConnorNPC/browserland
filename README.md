@@ -120,8 +120,10 @@ The desktop with tiled and floating terminals
   an entry script, and it can add window kinds, per-terminal title-bar
   widgets, taskbar chips, Control-Panel settings, and in-app help pages.
 - **Cross-platform PTY**: Linux `pty.openpty`; Windows auto-selects ConPTY or
-  WinPTY (ConPTY when a console window exists for correct Ctrl-C handling,
-  WinPTY for headless processes).
+  WinPTY — even headless/detached agents acquire a hidden console and re-enable
+  Ctrl-C so they run ConPTY with a working interrupt and live resize, falling
+  back to WinPTY only if console acquisition fails (or when forced via
+  `--pty-backend winpty`).
 - **AI agent fleet**: detects the foreground coding agent in each window
   (`claude` / `codex` / `grok` / `opencode`) and tracks live OSC title +
   working directory, with an opt-in per-window git-status widget (the `git`

@@ -9,7 +9,7 @@ An MCP client (such as an AI coding agent) connects to your broker and can attac
 The agent can only see and touch the terminals you allow. There are three layers of control, all opt-in:
 
 1. **Master enable** for the host (Control Panel → MCP).
-2. **Per-window access** — `off`, `read`, or `read-write` — set on each terminal.
+2. **Per-window access** — `off`, `read`, or `readwrite` — set on each terminal.
 3. A separate gate for whether the agent may **launch new terminals**.
 
 ## Per-window access (the robot button)
@@ -20,7 +20,7 @@ Every terminal window has a **robot button** that sets that window's MCP access 
 |---|---|
 | `off` | Nothing — the window is hidden from MCP entirely |
 | `read` | Observe only — read the current screen |
-| `read-write` | Observe **and** type into the terminal (`send_input`) |
+| `readwrite` | Observe **and** type into the terminal (`send_input`) — shown as "Read-write" in the UI |
 
 When an agent reads the screen or types into a terminal, that window's **robot icon briefly flashes**, so you can see at a glance when a harness is touching a session.
 
@@ -33,7 +33,7 @@ The robot button is specific to **terminals**. For the full list of window types
 MCP is configured per host in **Control Panel → MCP**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
-- **default mode** — the per-window access (`off` / `read` / `read-write`) that new terminals start with.
+- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with.
 - **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones).
 - **token** — a secret that authenticates the agent (set it yourself or hit **generate**). This is a **bearer secret distinct from the browser/UI password** you use to log in; granting MCP access does not hand out your login.
 
@@ -62,8 +62,11 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode) |
 | `list_profiles(host?)` | Lists launchable profile names and the default |
 | `read_screen(id)` | Returns the terminal's current screen as a bounded plain-text grid |
-| `send_input(id, data)` | Types text into a window (window must be `read-write`; newlines are sent as Enter) |
+| `send_input(id, data)` | Types text into a window (window must be `readwrite`; newlines are sent as Enter) |
 | `send_keys(id, keys)` | Sends control/escape keys, e.g. `["C-c"]`, `["Esc"]`, `["Up","Enter"]` |
+| `set_pace(id, pace_ms)` | Sets a per-terminal default inter-key pacing for `send_keys` (window must be `readwrite`; ephemeral, `0` disables, capped at 1000 ms) |
+| `reset_terminal(id)` | Wipes Browserland's screen buffer for the window so the next `read_screen` starts clean (window must be `readwrite`; does not touch the running app) |
+| `flush_input(id)` | Discards keystrokes queued to the app but not yet consumed (window must be `readwrite`; a no-op on a Windows/ConPTY agent) |
 | `launch_terminal(profile?, cols, rows, title?, cwd?, host?)` | Launches a new terminal (broker must have `allow_launch` enabled) |
 
 ### Window ids

@@ -106,9 +106,10 @@ Goal: one browser tab showing terminals from every machine.
    (cross-origin `fetch` + WebSocket); hosts and passwords live per-browser in
    `localStorage`, never in any config file.
 
-Per-host status chips appear in the taskbar (green ok / red down / amber
-password-needed) once more than one host is configured. Requirements worth
-knowing:
+Per-host status chips appear in the taskbar — one per broker, always, even
+for a single local broker (green ok / red down / amber password-needed / blue
+lease-inactive); each chip doubles as that broker's hide toggle. Requirements
+worth knowing:
 
 - **Both brokers must run the same webterm version** — a too-old remote shows up
   as a red "down" chip even while it's running (CORS is version-gated).

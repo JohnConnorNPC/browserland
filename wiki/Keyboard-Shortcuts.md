@@ -2,14 +2,14 @@ Browserland ships a set of default keyboard shortcuts for the actions you use mo
 
 ## How to rebind a shortcut
 
-All shortcuts are user-rebindable in **Control Panel → Keyboard shortcuts**. Open the [[Control Panel|Getting-Started]] (right-click the + button or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), find the action you want, and record a new combo for it.
+All shortcuts are user-rebindable in **Control Panel → Keybindings**. Open the [[Control Panel|Getting-Started]] (right-click the + button or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), find the action you want, and record a new combo for it.
 
 - To change a binding, select the action and press the key combination you want to assign.
 - Keyboard shortcuts are part of the per-host settings (a tab per broker), so a host can carry its own bindings.
 
 The in-app guide (the "?" chip at the bottom-right of the taskbar) also injects one **Keyboard shortcuts** entry per bindable action, showing its current combo or "Unbound" — handy for checking what is mapped right now.
 
-> **Toggle help is unbound by default.** The "Toggle help" action has no default key. Assign your own combo under **Control Panel → Keyboard shortcuts** if you want to open the in-app guide from the keyboard. (You can always open it by clicking the "?" chip at the bottom-right of the taskbar.)
+> **Toggle help is unbound by default.** The "Toggle help" action has no default key. Assign your own combo under **Control Panel → Keybindings** if you want to open the in-app guide from the keyboard. (You can always open it by clicking the "?" chip at the bottom-right of the taskbar.)
 
 ## Fixed terminal keys
 

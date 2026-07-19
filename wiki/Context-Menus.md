@@ -50,7 +50,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 - **Minimize** / **Restore** — hide the window to the taskbar, or bring it back.
 - **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with a save prompt for unsaved changes); a file manager / task manager just closes.
 - **Terminate** (terminals only) — hard-kill the shell process tree (asks to confirm).
-- **Delete note** / **Delete file** (note, editor, and file-manager windows — not the task manager, Control Panel, or help) — permanently discard that window and its stored document (asks to confirm).
+- **Delete note** / **Delete file** (note and editor windows — not the file manager, task manager, Control Panel, or help) — permanently discard that window and its stored document (asks to confirm).
 
 Close, terminate, delete, and pinning are detailed on [[Floating-Window-Controls]].
 
@@ -110,11 +110,11 @@ Both modes also offer **🎛 Control panel**. The arrange and lock-size actions 
 
 ## Launch (+) button
 
-Left-click the `+` to launch the local broker's default terminal. Right-click it for the full launch menu:
+Left-click the `+` to launch the default host's default terminal — the local broker unless you've picked another default in Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]). Right-click it for the full launch menu:
 
 - **Terminal profiles** — each launchable profile for the host (the default is marked `(default)`). With more than one host, profiles are grouped under per-host headers.
 - **Open in folder…** — a directory picker (per host) that starts the host's default profile rooted at the folder you choose.
-- **App windows** — **📝 Sticky note**, **📄 Text editor**, **🗂 File manager**, **🧰 Task manager**, **🎛 Control panel**, and **❓ Help**. See [[Window-Types]].
+- **App windows** — **📝 Sticky note**, **📄 Text editor**, **🗂 File manager**, **🧰 Task manager**, **🎛 Control panel**, **❓ Help**, **Scratchpad**, and **⏺ Session recorder**. See [[Window-Types]].
 - **Closed notes** — at the bottom, any non-empty sticky note you've closed; click one to reopen it.
 
 The launch button and start-button label are covered on [[Taskbar]].

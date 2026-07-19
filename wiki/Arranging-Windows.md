@@ -6,7 +6,7 @@ These gestures apply to the tiling strip. For the float/tile hold gestures (snap
 
 Tabbed windows share a single tile and show a **tab strip**; only one is visible at a time.
 
-- **Alt-drag** one window onto another to stack them as tabs sharing one tile.
+- Drag a window onto another window's **top band** to stack them as tabs sharing one tile. (A *floating* window can also be Alt-dragged onto a target to dock as a tab in its column — see [[Snapping-and-Pop-out]].)
 - Click a tab in the tile's tab strip to switch between the tabbed windows.
 
 The title-bar menu offers the same thing without dragging:
@@ -35,8 +35,9 @@ A split places two windows next to each other inside one tile.
 
 ### Un-splitting
 
-- Use the window context menu to merge a split back together, or just drag a pane somewhere else.
-- `Un-split row (split to rows)` instead explodes a split row into stacked rows.
+- `Un-split row (split to rows)` in the window context menu explodes a split row into stacked rows.
+- `Untab cell (side by side)` appears only when the pane is a nested tab-group cell, dropping its tabs out side by side.
+- There is no menu item that merges a split back into one pane — to dissolve a split differently, just drag a pane somewhere else.
 
 ## Stacks: rows in a column
 

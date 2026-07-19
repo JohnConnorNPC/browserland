@@ -1,7 +1,7 @@
 """Thin HTTP client over the Browserland broker's ``/mcp/*`` interface.
 
-One method per endpoint (mirrors the broker contract documented in the root
-README's "MCP HTTP interface" section). Authenticates with the **MCP token**
+One method per endpoint (mirrors the broker contract documented in
+docs/TECHNICAL.md's "MCP HTTP interface" section). Authenticates with the **MCP token**
 (the secret in ``webterm_mcp.json``) via an ``Authorization: Bearer`` header on
 a persistent :class:`httpx.Client`.
 
@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 # Broker error codes -> human-readable messages. Source of truth is the error
-# table in the root README ("MCP HTTP interface" > "Error reference"). Codes not
+# table in docs/TECHNICAL.md ("MCP HTTP interface" error reference). Codes not
 # listed here fall back to the raw code so a new broker error is never swallowed.
 _ERROR_MESSAGES = {
     "mcp_disabled": "MCP interface is disabled on the broker "

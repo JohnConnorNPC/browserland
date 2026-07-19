@@ -11,7 +11,7 @@ Most of the controls on this page live on a window's **title-bar right-click men
 | **Recolor** (color button) | Yes |
 | Minimize / close shortcuts (`Ctrl+Alt+m` / `Ctrl+Alt+w`) | Yes — they act on the focused window in either mode |
 | Move / resize by dragging | Floating only — a snapped window is sized by its column width and arranged in the strip (see [[Columns-and-Widths]]) |
-| **Lock to screen (pin)** | Floating only — snapped windows don't scroll with the strip, so there's nothing to pin |
+| **Lock to screen (pin)** | Floating only — a snapped window is part of the strip and always scrolls with it; the pin exempts a floating window from following the strip's scroll |
 | Cascade / Tile / Minimize All / Lock Size | Floating only — these arrange the floating layer |
 
 ## Move and resize
@@ -35,7 +35,7 @@ A window's title-bar menu lets you get a window out of the way or close it. It's
 | **Restore** | Brings a minimized window back (same menu item, when the window is minimized). |
 | **Close** | Soft close. A **terminal**'s shell keeps running so you can reattach later. A **non-empty sticky note** is retained and reopens from *Closed notes* in the **+** menu (an empty note is discarded). A **text editor**'s content is a file on the host, so closing it (after a save prompt for unsaved changes) leaves your file intact. A **file manager**, the **task manager**, and the Control Panel/help are ephemeral — Close just dismisses them. |
 | **Terminate** | Terminals only. Hard-kills the shell process tree. You're asked to confirm first. |
-| **Delete note** / **Delete file** | App windows other than the task manager, Control Panel, and help (notes, the text editor, the file manager). Permanently discards that window and its stored document. You're asked to confirm first. |
+| **Delete note** / **Delete file** | App windows other than the task manager, Control Panel, help, and file manager (notes and the text editor). Permanently discards that window and its stored document. You're asked to confirm first. |
 
 Because a closed terminal keeps its shell alive, **Terminate** is the only way to actually kill the process tree. For a sticky note or an editor file, **Close** preserves the content (a note in *Closed notes*, a file on disk), while **Delete** is the one path that throws it away.
 
@@ -50,7 +50,7 @@ These act on the focused window in either mode (floating or snapped), and they'r
 
 ## Pin a window (lock to screen)
 
-**Floating only.** Pinning applies to floating windows. A window that's snapped into the tiling strip doesn't scroll with the strip in the first place, so there's nothing to pin — the **Lock to screen** item only appears on a floating window's menu.
+**Floating only.** Pinning applies to floating windows. A window that's snapped into the tiling strip is part of the strip and always scrolls with it; the pin exists to exempt a floating window from following the strip's scroll — so the **Lock to screen** item only appears on a floating window's menu.
 
 By default a floating window scrolls away with the tiling strip. To keep it put, use the title-bar right-click menu:
 

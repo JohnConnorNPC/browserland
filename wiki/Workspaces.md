@@ -38,6 +38,8 @@ Right-click a window's **title bar** to move it elsewhere (the [[Taskbar]]-item 
 - **Send to new workspace** — appends a new workspace and moves the window there.
 - **On all workspaces** — keeps a **floating** window visible on every workspace. (The menu shows it as `Show on all workspaces`, with a `✓ On all workspaces` once it is enabled.)
 
+The **Send to** items appear only on **tiled** windows' title-bar menus. A floating window's menu offers **Tile this window** instead — tile it first, then send it — or use **Show on all workspaces** to make it visible everywhere.
+
 ## Renaming, removing, and labeling workspaces
 
 Right-click a **pager dot** for that workspace's options:

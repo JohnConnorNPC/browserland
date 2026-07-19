@@ -15,12 +15,12 @@ When the page loads you get the desktop: an empty work area with a **taskbar** a
 You have three quick ways to get a terminal on screen:
 
 - **Click an existing session** — if any terminals are already running, their buttons appear in the taskbar. Click one to focus and raise it (or restore it if it was minimized).
-- **The launch button (+)** — by default, left-click the **+** at the left of the taskbar to launch the local broker's default terminal, and right-click it for the full profile / app menu (other profiles, app windows, and "Open in folder…"). If you have added remote hosts, the menu groups profiles per host. A Control Panel toggle can swap these two gestures (see [[Taskbar]]).
+- **The launch button (+)** — by default, left-click the **+** at the left of the taskbar to launch a default terminal on your default host (the local broker unless you pick another under **Control Panel → Hosts** — see [[Hosts-and-Multi-Browser]]), and right-click it for the full profile / app menu (other profiles, app windows, and "Open in folder…"). If you have added remote hosts, the menu groups profiles per host. A Control Panel toggle can swap these two gestures (see [[Taskbar]]).
 - **The "New terminal" shortcut** — press `Ctrl+Alt+Enter`.
 
-The quick-launch gesture and the shortcut always start on the **local broker**; to start a terminal on a remote host, pick its profile from the launch menu. Each terminal is a real shell on its broker's host. Type in it like any terminal; close the window later and the shell keeps running so you can reattach.
+The shortcut always starts on the **local broker**; the quick-launch gesture follows the default-host setting. To start a terminal on any other host, pick its profile from the launch menu. Each terminal is a real shell on its broker's host. Type in it like any terminal; close the window later and the shell keeps running so you can reattach.
 
-From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, and a task manager. If you enable the **AI status** mod (Control Panel → Mods; it ships off by default), an **AI-provider status** monitor joins the menu too — enabling it lets the broker check each provider's public status page, so the broker's egress IP becomes visible to those hosts. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
+From the **+** menu you can also open other window types — a sticky note, a text editor, a file manager, a task manager, a scratchpad, and the session recorder. If you enable the **AI status** mod (Control Panel → Mods; it ships off by default), an **AI-provider status** monitor joins the menu too — enabling it lets the broker check each provider's public status page, so the broker's egress IP becomes visible to those hosts. See [[Window-Types]] for what each one does, and [[Taskbar]] for the rest of the launch menu.
 
 ## The Control Panel
 
