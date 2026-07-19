@@ -137,7 +137,30 @@
                     const now = function () {
                         return Math.max(0, Math.round(performance.now() - t0));
                     };
+                    // Seed with the CURRENT screen so playback starts from
+                    // what the terminal looked like at ⏺, not a blank grid.
+                    // Degrades to a blank start if the serialize addon didn't
+                    // load (same fallback as the playback keyframes).
+                    try {
+                        const SerCls = (typeof SerializeAddon !== 'undefined'
+                                        && SerializeAddon
+                                        && SerializeAddon.SerializeAddon)
+                                       || null;
+                        if (SerCls) {
+                            const ser = new SerCls();
+                            win.term.loadAddon(ser);
+                            const snap = ser.serialize({ scrollback: 0 });
+                            ser.dispose();
+                            if (snap) {
+                                rec.events.push({ t: 0, k: 'o',
+                                                  d: bytesToB64(
+                                                      encoder.encode(snap)) });
+                                rec.bytes += snap.length;
+                            }
+                        }
+                    } catch (_) {}
                     const pushOut = function (u8) {
+                        if (rec.stopped) return;
                         // A ws swap since the last chunk = a disconnect healed
                         // by a reattach snapshot — mark the gap on the timeline.
                         if (win.ws !== rec.ws) {
@@ -166,9 +189,15 @@
                         return rec.rawWrite.call(win.term, data, cb);
                     };
                     rec.wrapResize = function (cols, rows) {
+                        // rec.stopped guard (also in pushOut): if ANOTHER
+                        // patcher stacked on top of ours after start, stop
+                        // can't unhook us — the wrapper must at least go
+                        // inert instead of capturing into a dead recording.
                         try {
-                            rec.events.push({ t: now(), k: 'r',
-                                              c: cols, r: rows });
+                            if (!rec.stopped) {
+                                rec.events.push({ t: now(), k: 'r',
+                                                  c: cols, r: rows });
+                            }
                         } catch (_) {}
                         return rec.rawResize.call(win.term, cols, rows);
                     };
@@ -556,10 +585,18 @@
                     }
 
                     function apply(ev) {
+                        // Everything rides xterm's single write queue so
+                        // output and resizes land IN ORDER: a bare resize
+                        // would apply immediately, ahead of still-queued
+                        // output, corrupting TUIs — so resizes are queued as
+                        // write callbacks instead.
                         if (ev.k === 'o' && ev.bytes) term.write(ev.bytes);
                         else if (ev.k === 'r') {
-                            term.resize(ev.c || term.cols, ev.r || term.rows);
-                            sizeToGrid();
+                            term.write('', function () {
+                                term.resize(ev.c || term.cols,
+                                            ev.r || term.rows);
+                                sizeToGrid();
+                            });
                         }
                     }
                     function eventIndexAt(t) {
@@ -578,27 +615,36 @@
                     // seek always wins, a stale async completion never paints.
                     function renderAt(target) {
                         if (closed || !recData) return;
+                        // Bump gen on every REQUEST (not just render start):
+                        // an in-flight render's completion must never commit
+                        // evIdx once a newer target exists.
+                        gen++;
                         if (rendering) { pendingSeek = target; return; }
                         rendering = true;
-                        const myGen = ++gen;
+                        const myGen = gen;
                         const targetIdx = eventIndexAt(target);
                         let kf = kfs[0];
                         for (let i = kfs.length - 1; i >= 0; i--) {
                             if (kfs[i].idx <= targetIdx) { kf = kfs[i]; break; }
                         }
-                        term.reset();
-                        if (term.cols !== kf.c || term.rows !== kf.r) {
-                            term.resize(kf.c, kf.r);
-                            sizeToGrid();
-                        }
+                        // Drain any still-queued playback writes BEFORE the
+                        // reset (both queued as write callbacks), so stale
+                        // output can never flush into the freshly-rendered
+                        // frame; the keyframe + delta writes queue after.
+                        term.write('', function () {
+                            term.reset();
+                            if (term.cols !== kf.c || term.rows !== kf.r) {
+                                term.resize(kf.c, kf.r);
+                                sizeToGrid();
+                            }
+                        });
                         if (kf.data) term.write(kf.data);
                         for (let i = kf.idx + 1; i <= targetIdx; i++) {
                             apply(recData.events[i]);
                         }
                         term.write('', function () {
                             rendering = false;
-                            if (myGen !== gen) return;
-                            evIdx = targetIdx + 1;
+                            if (myGen === gen) evIdx = targetIdx + 1;
                             if (pendingSeek !== null) {
                                 const p = pendingSeek;
                                 pendingSeek = null;
@@ -642,11 +688,16 @@
                             if (pos <= 0) { renderAt(0); setPlaying(false); }
                         } else {
                             pos = Math.min(duration, pos + dt);
-                            const evs = recData.events;
-                            while (evIdx < evs.length
-                                   && evs[evIdx].t <= pos) {
-                                apply(evs[evIdx]);
-                                evIdx++;
+                            // A seek render owns the write queue + evIdx —
+                            // stepping from a stale evIdx mid-render would
+                            // interleave; the clock advances, events wait.
+                            if (!rendering) {
+                                const evs = recData.events;
+                                while (evIdx < evs.length
+                                       && evs[evIdx].t <= pos) {
+                                    apply(evs[evIdx]);
+                                    evIdx++;
+                                }
                             }
                             if (pos >= duration) setPlaying(false);
                         }
@@ -820,12 +871,24 @@
                         }
                         renderNotes();
                     }
-                    async function saveNotes() {
+                    // Saves are CHAINED: two quick edits would otherwise race
+                    // on the same baseRev and the loser's 409 would silently
+                    // drop an edit. Each queued save snapshots the CURRENT
+                    // list at execution time, so a coalesced save carries
+                    // every local edit under a fresh rev.
+                    let notesChain = Promise.resolve();
+                    function saveNotes() {
+                        notesChain = notesChain.then(doSaveNotes,
+                                                     doSaveNotes);
+                        return notesChain;
+                    }
+                    async function doSaveNotes() {
                         const j = await recPost('/recording/notes', {
                             id: recId, baseRev: notesRev, notes: notes,
                         });
                         if (j.ok) {
                             notesRev = j.rev;
+                            setStatus('');
                         } else if (j.error === 'conflict') {
                             // Another player window changed the notes — adopt
                             // the live copy (the user re-applies their edit).
@@ -834,8 +897,10 @@
                             setStatus('notes changed elsewhere — reloaded');
                             setTimeout(function () { setStatus(''); }, 4000);
                         } else {
-                            setStatus('note save failed');
-                            setTimeout(function () { setStatus(''); }, 4000);
+                            // Sticky (no timeout): the list on screen holds
+                            // edits the broker does NOT have — don't let the
+                            // warning quietly vanish while that's true.
+                            setStatus('note save failed — edits not saved');
                         }
                         renderNotes();
                         if (libRender) libRender();

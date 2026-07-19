@@ -43,6 +43,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1182,6 +1183,10 @@ def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
         v = meta.get(key)
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             continue
+        # json.loads accepts NaN/Infinity — int() on those raises, so a
+        # malicious/buggy payload must never reach the conversion.
+        if isinstance(v, float) and not math.isfinite(v):
+            continue
         iv = int(v)
         if 0 <= iv <= 2**53:
             out[key] = iv
@@ -1219,6 +1224,8 @@ def _rec_load_notes(path: Path) -> Dict[str, Any]:
             t = n.get("t")
             text = n.get("text")
             if isinstance(t, bool) or not isinstance(t, (int, float)):
+                continue
+            if isinstance(t, float) and not math.isfinite(t):
                 continue
             if not isinstance(text, str):
                 continue
@@ -4041,28 +4048,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         blrec, meta_path, _notes = paths
         meta = _rec_sanitize_meta(body.get("meta"))
         tmp = session["tmp"]
+        # Meta sidecar FIRST, .blrec replace SECOND: listing keys off .blrec
+        # presence, so this order means a listed recording always has its
+        # sidecar — a crash between the two leaves only an orphan sidecar
+        # (invisible, harmless), never a half-registered recording.
         try:
             size = os.path.getsize(tmp)
+            meta["size"] = size
+            meta["savedAt"] = int(time.time())
+            await asyncio.get_running_loop().run_in_executor(
+                None, _write_state_atomic, meta_path, meta)
             os.replace(tmp, str(blrec))
         except OSError as exc:
             app.ctx.rec_uploads.pop(rec_id, None)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            for leftover in (tmp, str(meta_path)):
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         app.ctx.rec_uploads.pop(rec_id, None)
-        meta["size"] = size
-        meta["savedAt"] = int(time.time())
-        try:
-            await asyncio.get_running_loop().run_in_executor(
-                None, _write_state_atomic, meta_path, meta)
-        except OSError as exc:
-            try:
-                os.unlink(str(blrec))
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": str(exc)}, status=500)
         return sanic_json({"ok": True, "recording_id": rec_id, "size": size})
 
     async def _recording_abort(request: Request):
@@ -4177,6 +4182,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(request.args.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        if not paths[0].exists():
+            # A deleted/never-saved recording must not look note-valid via an
+            # orphan sidecar — mirror the PUT's existence check.
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
         notes = _rec_load_notes(paths[2])
         return sanic_json({"ok": True, "rev": notes["rev"],
                            "notes": notes["notes"]})
@@ -4217,7 +4226,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             t = n.get("t")
             text = n.get("text")
             if isinstance(t, bool) or not isinstance(t, (int, float)) \
-                    or not isinstance(text, str):
+                    or not isinstance(text, str) \
+                    or (isinstance(t, float) and not math.isfinite(t)):
                 return sanic_json({"ok": False, "error": "bad_notes"},
                                   status=400)
             if len(text) > MAX_RECORDING_NOTE_TEXT:

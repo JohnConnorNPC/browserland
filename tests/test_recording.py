@@ -80,6 +80,9 @@ def test_meta_sanitizer_whitelists_and_clamps():
     # non-dict / bool-typed numerics degrade instead of raising
     assert _rec_sanitize_meta(None) == {}
     assert "cols" not in _rec_sanitize_meta({"cols": True})
+    # NaN/Infinity pass json.loads but must never reach int() (500)
+    assert "cols" not in _rec_sanitize_meta({"cols": float("nan")})
+    assert "rows" not in _rec_sanitize_meta({"rows": float("inf")})
 
 
 # ---- save flow (stateful; ReusableClient) ----------------------------------
@@ -181,6 +184,10 @@ def test_get_delete_missing_recording_404(tmp_path, monkeypatch):
     assert r.status == 404
     _, r = app.test_client.post("/recording/delete", json={"id": good_shape})
     assert r.status == 404
+    # notes GET mirrors the PUT existence check — an orphan sidecar must not
+    # make a deleted recording look note-valid
+    _, r = app.test_client.get(f"/recording/notes?id={good_shape}")
+    assert r.status == 404
 
 
 def test_delete_removes_file_and_sidecars(tmp_path, monkeypatch):
@@ -222,6 +229,8 @@ def test_notes_roundtrip_clamp_and_conflict(tmp_path, monkeypatch):
         assert r.status == 409 and r.json["error"] == "conflict"
         assert r.json["rev"] == 1 and len(r.json["notes"]) == 2
         # malformed notes -> 400, nothing written
+        # (a NaN t is guarded in the handler too, but httpx refuses to encode
+        # NaN — the loader-level case below covers the parse path instead)
         for bad in ([{"t": "x", "text": "a"}], [{"t": 1}], ["nope"],
                     [{"t": 1, "text": "y" * 5000}]):
             _, r = client.post("/recording/notes",
@@ -241,6 +250,10 @@ def test_notes_corrupt_sidecar_degrades(tmp_path):
     assert _rec_load_notes(p) == {"rev": 0, "notes": []}
     p.write_text(json.dumps({"rev": -3, "notes": "nope"}), encoding="utf-8")
     assert _rec_load_notes(p) == {"rev": 0, "notes": []}
+    # NaN survives python json round-trips but must never reach int()
+    p.write_text('{"rev": 1, "notes": [{"t": NaN, "text": "x"},'
+                 ' {"t": 5, "text": "ok"}]}', encoding="utf-8")
+    assert _rec_load_notes(p) == {"rev": 1, "notes": [{"t": 5, "text": "ok"}]}
 
 
 # ---- sweeps (pure) ---------------------------------------------------------
