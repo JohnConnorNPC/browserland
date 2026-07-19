@@ -1,0 +1,153 @@
+/* ---- mod: session recorder (#140) ---------------------------------- */
+/* per-terminal ⏺ record button + elapsed label */
+.btn-rec { color: #c33; }
+.btn-rec.recording {
+    color: #fff;
+    background: #c22;
+    animation: rec-pulse 1.2s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+.rec-label {
+    font-size: 11px;
+    color: #e66;
+    margin: 0 4px;
+    white-space: nowrap;
+}
+
+/* ---- player window -------------------------------------------------- */
+.app-recplay .recplay-term {
+    padding: 4px;
+    background: #000;
+    overflow: hidden;
+}
+.recplay-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    flex-wrap: nowrap;
+}
+.recplay-btn {
+    min-width: 30px;
+    padding: 2px 6px;
+}
+.recplay-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+.recplay-speed { padding: 1px 2px; }
+.recplay-scrubwrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 120px;
+    display: flex;
+    align-items: center;
+}
+.recplay-scrub { width: 100%; }
+.recplay-markers {
+    position: absolute;
+    left: 0; right: 0; top: 0; bottom: 0;
+    pointer-events: none;
+}
+.recplay-mark {
+    position: absolute;
+    top: 1px;
+    width: 4px;
+    height: 7px;
+    margin-left: -2px;
+    border-radius: 1px;
+}
+.recplay-mark-note {
+    background: #f5c518;
+    pointer-events: auto;
+    cursor: pointer;
+}
+.recplay-mark-gap { background: #d33; }
+.recplay-time {
+    font-size: 11px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.recplay-status {
+    font-size: 11px;
+    opacity: 0.8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+}
+.recplay-notes {
+    max-height: 140px;
+    overflow-y: auto;
+    padding: 2px 6px 4px;
+}
+.recplay-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 2px;
+    font-size: 12px;
+}
+.recplay-note.flash { background: rgba(245, 197, 24, 0.25); }
+.recplay-note-t {
+    color: #f5c518;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
+}
+.recplay-note-text {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.recplay-note-btn {
+    flex: 0 0 auto;
+    padding: 0 4px;
+    font-size: 11px;
+}
+.recplay-note-input { flex: 1 1 auto; font-size: 12px; }
+
+/* ---- library window ------------------------------------------------- */
+.reclib-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+}
+.reclib-status { font-size: 11px; opacity: 0.8; }
+.reclib-body {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    padding: 2px 4px;
+}
+.reclib-empty {
+    padding: 12px;
+    opacity: 0.7;
+    font-size: 12px;
+}
+.reclib-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+.reclib-main { flex: 1 1 auto; min-width: 0; }
+.reclib-name {
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.reclib-info { font-size: 11px; opacity: 0.75; }
+.reclib-btns {
+    display: flex;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+.reclib-btn { padding: 2px 6px; }
+.reclib-btn.armed { background: #c22; color: #fff; }

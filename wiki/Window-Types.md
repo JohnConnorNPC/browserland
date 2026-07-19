@@ -15,6 +15,7 @@ The **+** button at the left of the taskbar is how you create windows:
 | `🧰 Task manager` | A task manager |
 | `🎛 Control panel` | The Control Panel (settings) |
 | `❓ Help` | The in-app help guide |
+| `⏺ Session recorder` | The session-recording library (play back recorded terminals) |
 
 You can also open a terminal with the **New terminal** shortcut (`Ctrl+Alt+Enter` — see [[Keyboard-Shortcuts]]). See [[Taskbar]] for the rest of the + menu, including "Open in folder…" and the configurable Start button label.
 
@@ -27,6 +28,10 @@ Each terminal title bar carries a per-window **robot button** that sets that win
 A new terminal from the **+** button (left-click) or `Ctrl+Alt+Enter` always runs on the **local broker**; to start one on a remote host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts.
 
 **Pasting images**: paste a screenshot (e.g. `Win+Shift+S`) straight into a terminal with `Ctrl+V`, `Alt+V`, or a right-click. The image itself cannot cross into the remote shell's clipboard, so the desktop uploads it to that terminal's broker host and pastes the resulting **file path** instead — AI agents like Claude Code read a pasted image path just like a drag-and-dropped file. Pasted images are kept for a few hours in the host's temp area and swept automatically. If the clipboard carries both text and an image, the text wins. `Alt+V` and right-click image capture need an https (or localhost) page; `Ctrl+V` image paste works everywhere.
+
+## Session recorder
+
+Every terminal title bar carries a **⏺ record button**: click to record that session, click again to stop and save it to the broker. The **Session recorder** window from the **+** menu lists saved recordings and plays them back in a window fixed at the original recorded size, with pause, speed, continuous reverse, and timestamped notes. See the **Session recorder** section of the in-app help for details.
 
 ## Control Panel
 

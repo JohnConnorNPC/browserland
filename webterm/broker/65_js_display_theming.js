@@ -112,6 +112,10 @@
                 + '<circle cx="7" cy="5" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/>'
                 + '<circle cx="7" cy="19" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/>'
                 + '<circle cx="17" cy="15" r="2.2" fill="#f26b3a" stroke="#b8461c" stroke-width="1.2"/></svg>',
+            'recorder':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<circle cx="12" cy="12" r="9" fill="#2b2b2b" stroke="#8a1f1f" stroke-width="1.4"/>'
+                + '<circle cx="12" cy="12" r="4.2" fill="#d92b2b"/></svg>',
         };
         // Look up an app icon by canonical key (mod id). OWN-property lookup only
         // (never an inherited member like 'constructor'/'toString'), so the return

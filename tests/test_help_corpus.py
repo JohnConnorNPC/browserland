@@ -400,12 +400,12 @@ def test_full_corpus_includes_mod_sections():
     assert "taskbar" in slugs                    # a surviving wiki section
     for mod_slug in ("sticky", "editor", "agent-docs", "file-manager",
                      "task-manager", "clock", "help", "aistatus", "git",
-                     "clipboard", "scratchpad"):
+                     "clipboard", "scratchpad", "recorder"):
         assert mod_slug in slugs
     # every mod section is tagged and sorts AFTER every wiki section.
     mod_orders = [s["order"] for s in full["sections"] if "mod" in s]
     wiki_orders = [s["order"] for s in full["sections"] if "mod" not in s]
-    assert len(mod_orders) == 11   # +git (#116) +clipboard (#106) +agent-docs (#120) +scratchpad (#124)
+    assert len(mod_orders) == 12   # +git (#116) +clipboard (#106) +agent-docs (#120) +scratchpad (#124) +recorder (#140)
     assert min(mod_orders) > max(wiki_orders)
 
 

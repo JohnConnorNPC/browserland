@@ -1,0 +1,11 @@
+{
+  "id": "recorder",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Session recorder",
+  "description": "Record a terminal session from the per-terminal ⏺ title-bar button and play it back later at the original recorded size. The library window (the (+) menu) lists broker-stored recordings; playback offers pause, 0.25×–8× speed, continuous reverse, a scrubber timeline, and timestamped notes. Output is captured byte-faithfully; input is recorded as markers only (never keystroke content). Recordings persist server-side beside the state store until deleted.",
+  "entry": "recorder.js",
+  "styles": ["recorder.css"],
+  "author": "JohnConnorNPC",
+  "help": { "slug": "recorder", "label": "Session recorder", "order": 2090, "icon": "⏺" }
+}
