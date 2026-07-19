@@ -3,13 +3,17 @@
 
 # Browserland
 
-**A web-based terminal desktop that launches, streams, and recovers a fleet of
-headless shells — and the AI coding agents running inside them.**
+**A remote control plane for every machine you own: install Browserland on
+each one, and a single browser tab becomes a desktop of live terminals across
+all of them — including the AI coding agents running inside.**
 
-Point a browser at the broker and you get a full windowed desktop of live
+Point a browser at one broker and you get a full windowed desktop of live
 terminals: tile them, tab them, split them, and drag them across virtual
 desktops. Each terminal is a real PTY running on some machine, streamed to the
-browser over a WebSocket.
+browser over a WebSocket. Add your other machines as hosts (token-auth'd, e.g.
+over [Tailscale](https://tailscale.com/)) and their terminals appear in the
+same desktop — launch a shell on the laptop, the desktop, and the server from
+one **+** menu, side by side.
 
 The shells keep running even when no browser is attached. Close the tab, come
 back tomorrow, and the screen heals from a snapshot — exactly where you left it.
@@ -52,6 +56,42 @@ Because the PTY lives in the agent, not the browser, terminals survive browser
 reloads and even broker restarts — the agent reconnects with backoff and the
 browser's attach triggers a snapshot redraw from the ring buffer.
 
+## One tab, every machine
+
+The part people miss: Browserland is a **remote control plane**, not just a
+terminal for the machine it runs on. Run a broker on each of your machines,
+then register them as **hosts** in the UI (**Control Panel → Hosts** — a name,
+a URL, and that broker's token; a [Tailscale](https://tailscale.com/) address
+works great). One browser tab then fronts the whole fleet:
+
+```
+                       one browser tab
+                             │
+          ┌──────────────────┼──────────────────┐
+          ▼                  ▼                  ▼
+     ┌─────────┐        ┌─────────┐        ┌─────────┐
+     │ broker  │        │ broker  │        │ broker  │   one per machine
+     │ laptop  │        │ desktop │        │ server  │   (LAN / Tailscale)
+     └─┬─────┬─┘        └─┬─────┬─┘        └─┬─────┬─┘
+       ▼     ▼            ▼     ▼            ▼     ▼
+     shell  claude      shell  build       shell  claude   your PTYs + agents
+```
+
+- The right-click **+** menu groups launch profiles **per host** — open a
+  PowerShell on the Windows box and a zsh on the Linux server from the same
+  menu, and tile them next to each other.
+- Every window is badged with its host; per-host status chips in the taskbar
+  show at a glance which brokers are reachable.
+- Each host keeps its own token, profiles, and file API — the UI fans out,
+  the brokers stay independent. A machine going down takes its windows
+  stale, not the desktop.
+- The MCP server speaks the same multi-host language: one `--hosts` list lets
+  an AI harness enumerate and drive terminals across **all** brokers through
+  a single tool surface.
+
+**[`docs/SETUP.md`](docs/SETUP.md)** walks through joining machines step by
+step.
+
 ## Screenshots 
 
 The desktop with tiled and floating terminals
@@ -86,9 +126,10 @@ The desktop with tiled and floating terminals
   (`claude` / `codex` / `grok` / `opencode`) and tracks live OSC title +
   working directory, with an opt-in per-window git-status widget (the `git`
   mod).
-- **Multi-host**: attach the same UI to additional brokers (e.g. another machine
-  over [Tailscale](https://tailscale.com/)), with per-host status chips in the
-  taskbar.
+- **Multi-host — the control plane**: attach the same UI to the brokers on all
+  your other machines (e.g. over [Tailscale](https://tailscale.com/)) and run
+  their terminals side by side in one tab, with per-host status chips in the
+  taskbar. See [One tab, every machine](#one-tab-every-machine).
 - **Single active-browser lease**: exactly one browser drives input at a time,
   so two open tabs never fight over the keyboard.
 - **Opt-in MCP / AI agent access**: an MCP client or AI harness can list,
