@@ -69,9 +69,28 @@ Goal: one browser tab showing terminals from every machine.
      connections by design, and the UI's add-host form requires the password.
      Set it in `broker_config.json` (`"auth_token": "…"`) or via
      `$WEB_TERMINAL_TOKEN`.
-   - **A non-loopback bind.** Set `"host"` to the machine's Tailscale IP (or
-     `0.0.0.0` if you trust the tailnet) instead of `127.0.0.1`, so the other
-     machine can reach it. Keep `"port": 4445` unless you have a reason.
+   - **A way for the other machines' browsers to reach it.** Two options:
+
+     - **Recommended — keep the loopback bind and front it with
+       [`tailscale serve`](https://tailscale.com/kb/1312/serve)** (or your own
+       https reverse proxy, e.g. Caddy/nginx):
+
+       ```bash
+       tailscale serve --bg 4445
+       ```
+
+       That publishes `https://<machine>.<tailnet>.ts.net/` — real TLS with
+       zero certificate management, reachable only inside your tailnet — and
+       proxies it (WebSockets included) to the broker still bound to
+       `127.0.0.1:4445`. Note that proxied requests reach the broker *from
+       loopback*, so the loopback auth exemption applies — set the
+       `auth_token` anyway (the add-host form wants it, and it keeps you safe
+       if the bind ever widens).
+
+     - **Plain http directly**: set `"host"` to the machine's Tailscale IP (or
+       `0.0.0.0` if you trust the tailnet) instead of `127.0.0.1`, so the
+       other machines can reach `http://<tailscale-ip>:4445/`. Keep
+       `"port": 4445` unless you have a reason.
 
    Treat your home machine as just another broker — it can stay on `127.0.0.1`
    if you only ever drive it from its own browser, but give it a token + tailnet
@@ -81,10 +100,11 @@ Goal: one browser tab showing terminals from every machine.
    "cockpit" — it doesn't have to be special, any broker's UI can host the view.
 
 4. **Add the other brokers as hosts.** Control Panel → **Hosts** → add each
-   remote broker by `http://<tailscale-ip>:4445/` and its token/password. The
-   **browser connects directly** to each host (cross-origin `fetch` + WebSocket);
-   hosts and passwords live per-browser in `localStorage`, never in any config
-   file.
+   remote broker by its URL — `https://<machine>.<tailnet>.ts.net/` if you
+   fronted it with `tailscale serve`, else `http://<tailscale-ip>:4445/` — and
+   its token/password. The **browser connects directly** to each host
+   (cross-origin `fetch` + WebSocket); hosts and passwords live per-browser in
+   `localStorage`, never in any config file.
 
 Per-host status chips appear in the taskbar (green ok / red down / amber
 password-needed) once more than one host is configured. Requirements worth
@@ -92,9 +112,15 @@ knowing:
 
 - **Both brokers must run the same webterm version** — a too-old remote shows up
   as a red "down" chip even while it's running (CORS is version-gated).
-- **Serve plain http to plain-http remotes** — an https page fetching an http
-  broker is blocked by the browser as mixed content. Over a tailnet, plain http
-  between machines is normal.
+- **Pick ONE scheme for the whole fleet — and prefer https.** An https page
+  fetching an http broker is blocked by the browser as **mixed content**, so a
+  half-and-half fleet breaks: the cockpit and every host must all be https, or
+  all be plain http. `tailscale serve` on every machine is the easy all-https
+  answer (an https proxy of your own works too). Https also makes the page a
+  *secure context*, which some browser features require — clipboard **image
+  paste** into a terminal (`Alt+V` / right-click) only works on an https or
+  localhost page. All-plain-http over a trusted tailnet still works; you just
+  forfeit those.
 
 Full auth/CORS details: **[TECHNICAL.md → Multiple hosts](TECHNICAL.md#multiple-hosts)**.
 
