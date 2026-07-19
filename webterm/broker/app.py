@@ -61,7 +61,7 @@ from typing import Any, Dict, List, Optional
 
 from sanic import Request, Sanic, Websocket
 from sanic.exceptions import NotFound
-from sanic.response import empty, html, json as sanic_json
+from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
 from . import auth, relay
@@ -112,6 +112,20 @@ UPLOAD_SESSION_TTL = 3600.0        # seconds since begin before a sweep drops it
 # accumulate forever.
 PASTE_IMAGE_TTL = 6 * 3600.0       # seconds a pasted image stays on disk
 PASTE_IMAGE_MAX_FILES = 64         # cap on retained paste-* files
+
+# Terminal session recordings (#140): the recorder mod streams a finished
+# recording into a broker-side recordings dir via its own begin/chunk/commit
+# trio (server-generated ids, never a client-named path), then lists/fetches/
+# deletes them and keeps timestamped notes in a per-recording sidecar. Unlike
+# paste images these are DURABLE user data: no TTL sweep ever deletes a
+# committed recording — only POST /recording/delete does. Only abandoned
+# in-flight .part temps are swept.
+_RECORDING_ID_RE = re.compile(r"rec-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
+MAX_RECORDING_BYTES = 256 * 2**20   # cap per committed recording file
+MAX_RECORDING_SESSIONS = 4          # concurrent in-flight recording saves
+RECORDING_SESSION_TTL = 3600.0      # seconds before an abandoned save is swept
+MAX_RECORDING_NOTES = 500           # notes per recording
+MAX_RECORDING_NOTE_TEXT = 4096      # chars per note
 
 
 # Non-UTF-8 editor support (#97). The broker ships only sanic+websockets, so
@@ -1120,6 +1134,98 @@ def _sweep_orphan_parts(parent: Path, now: float) -> None:
             pass
 
 
+def _sweep_rec_sessions(sessions: Dict[str, Dict[str, Any]],
+                        now: float) -> None:
+    """Drop in-flight recording-save sessions older than RECORDING_SESSION_TTL
+    and unlink their temp files (#140). Committed recordings are NEVER swept —
+    they are durable user data; only abandoned begins are."""
+    for rec_id in list(sessions.keys()):
+        session = sessions.get(rec_id)
+        if session is None or now - session["created"] <= RECORDING_SESSION_TTL:
+            continue
+        sessions.pop(rec_id, None)
+        try:
+            os.unlink(session["tmp"])
+        except OSError:
+            pass
+
+
+def _sweep_rec_orphan_parts(rec_dir: Path, now: float) -> None:
+    """Best-effort removal of stale ``.webterm-rec-*.part`` temps under the
+    recordings dir (#140) — a crash orphans a save session's temp exactly like
+    the upload case (_sweep_orphan_parts). Committed *.blrec files and the
+    meta/notes sidecars are never candidates."""
+    try:
+        candidates = list(rec_dir.glob(".webterm-rec-*.part"))
+    except OSError:
+        return
+    for child in candidates:
+        try:
+            if now - child.stat().st_mtime > RECORDING_SESSION_TTL:
+                child.unlink()
+        except OSError:
+            pass
+
+
+def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
+    """Whitelist + type-check the client-supplied recording meta (#140). Only
+    known scalar fields survive, each clamped/coerced, so the meta sidecar can
+    be listed and inlined without trusting the client shape."""
+    out: Dict[str, Any] = {}
+    if not isinstance(meta, dict):
+        return out
+    title = meta.get("title")
+    if isinstance(title, str) and title:
+        out["title"] = title[:300]
+    for key in ("cols", "rows", "startedAt", "durationMs",
+                "events", "bytes", "fontSize"):
+        v = meta.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        iv = int(v)
+        if 0 <= iv <= 2**53:
+            out[key] = iv
+    font = meta.get("fontFamily")
+    if isinstance(font, str) and font:
+        out["fontFamily"] = font[:200]
+    return out
+
+
+def _rec_load_json(path: Path) -> Optional[Dict[str, Any]]:
+    """A recording sidecar (meta/notes) parsed as a dict, or None when missing
+    or corrupt — a broken sidecar degrades to defaults, never a 500."""
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _rec_load_notes(path: Path) -> Dict[str, Any]:
+    """The notes sidecar normalized to {rev:int, notes:[{t,text}]} — missing /
+    corrupt / wrong-shaped content degrades to an empty rev-0 record."""
+    parsed = _rec_load_json(path)
+    if parsed is None:
+        return {"rev": 0, "notes": []}
+    rev = parsed.get("rev")
+    if isinstance(rev, bool) or not isinstance(rev, int) or rev < 0:
+        rev = 0
+    notes = []
+    raw_notes = parsed.get("notes")
+    if isinstance(raw_notes, list):
+        for n in raw_notes[:MAX_RECORDING_NOTES]:
+            if not isinstance(n, dict):
+                continue
+            t = n.get("t")
+            text = n.get("text")
+            if isinstance(t, bool) or not isinstance(t, (int, float)):
+                continue
+            if not isinstance(text, str):
+                continue
+            notes.append({"t": int(t), "text": text})
+    return {"rev": rev, "notes": notes}
+
+
 def _sniff_image_kind(data: bytes) -> Optional[str]:
     """Magic-byte sniff for the clipboard-image formats browsers hand out
     (#137), used to pick the file extension. A format hint, NOT security
@@ -1303,6 +1409,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # Terminal session recordings (#140): durable user data, so the default
+    # lives BESIDE the state store (not the temp dir an OS cleaner may wipe).
+    # Config "recordings_dir" overrides. Created lazily on first save.
+    # app.ctx.rec_uploads holds the in-flight begin/chunk/commit save sessions,
+    # keyed by server-generated recording id (same in-memory single_process
+    # posture as app.ctx.uploads); its lock serializes the notes read-rev /
+    # compare / write / bump like the state/modstore locks.
+    app.ctx.recordings_dir = Path(
+        config.get("recordings_dir")
+        or (app.ctx.state_path.parent / "webterm_recordings")).resolve()
+    app.ctx.rec_uploads = {}
+    app.ctx.rec_notes_lock = asyncio.Lock()
     # Generic per-mod server store for /mod-store (#124) — the durable, cross-
     # browser twin of ctx.storage. Persisted in its own sidecar beside /state
     # (override with "modstore_path"); rev lives in the file so a restart
@@ -3795,6 +3913,347 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.modstore = new_store
         return sanic_json({"ok": True, "rev": new_rec["rev"]})
 
+    # ---- terminal session recordings (/recording/*, #140) ----------------
+    # The recorder mod's storage: a finished recording streams in through the
+    # begin/chunk/commit trio below (server-generated rec-* ids — the client
+    # never names a path, strictly narrower than /file/upload_* exactly like
+    # /file/paste_image), lands atomically as <id>.blrec in recordings_dir,
+    # with a whitelisted meta sidecar (<id>.meta.json) so listing never parses
+    # the big event file, and a revisioned notes sidecar (<id>.notes.json).
+    # Same token-or-loopback gate as /file/*.
+    def _rec_auth_error(request: Request):
+        return _gated_auth_error(request, "/recording")
+
+    def _rec_paths(rec_id: str):
+        """(blrec, meta, notes) paths for a VALIDATED id, or None on a bad id.
+        The strict id regex is the whole traversal defense: every file touched
+        is <recordings_dir>/<id><fixed suffix>."""
+        if not isinstance(rec_id, str) or not _RECORDING_ID_RE.fullmatch(rec_id):
+            return None
+        d = app.ctx.recordings_dir
+        return (d / (rec_id + ".blrec"), d / (rec_id + ".meta.json"),
+                d / (rec_id + ".notes.json"))
+
+    async def _recording_begin(request: Request):
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rec_dir = app.ctx.recordings_dir
+        try:
+            if os.name == "posix":
+                rec_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            else:
+                rec_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        now = time.time()
+        _sweep_rec_sessions(app.ctx.rec_uploads, now)
+        _sweep_rec_orphan_parts(rec_dir, now)
+        if len(app.ctx.rec_uploads) >= MAX_RECORDING_SESSIONS:
+            return sanic_json({"ok": False, "error": "too_many_sessions"},
+                              status=429)
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(rec_dir),
+                                       prefix=".webterm-rec-", suffix=".part")
+            os.close(fd)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        rec_id = "rec-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"),
+                                secrets.token_hex(4))
+        app.ctx.rec_uploads[rec_id] = {
+            "tmp": tmp, "received": 0, "created": now,
+        }
+        return sanic_json({"ok": True, "recording_id": rec_id})
+
+    async def _recording_chunk(request: Request):
+        # Append ONE chunk to an in-flight save — the same sequential-offset /
+        # size-cap / drop-on-error contract as /file/upload_chunk, with the
+        # recording-specific MAX_RECORDING_BYTES ceiling.
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rec_id = body.get("recording_id")
+        b64 = body.get("content_b64")
+        offset = body.get("offset", 0)
+        if not isinstance(rec_id, str) or not isinstance(b64, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            return sanic_json({"ok": False, "error": "bad_offset"}, status=400)
+        session = app.ctx.rec_uploads.get(rec_id)
+        if session is None:
+            return sanic_json({"ok": False, "error": "no_session"}, status=404)
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return sanic_json({"ok": False, "error": "bad_base64"}, status=400)
+        if len(data) > MAX_CHUNK_BYTES:
+            return sanic_json({"ok": False, "error": "chunk_too_large"},
+                              status=400)
+        if offset != session["received"]:
+            return sanic_json({"ok": False, "error": "bad_offset",
+                               "received": session["received"]}, status=409)
+        if session["received"] + len(data) > MAX_RECORDING_BYTES:
+            app.ctx.rec_uploads.pop(rec_id, None)
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": "too_large"}, status=400)
+        try:
+            with open(session["tmp"], "ab") as fh:
+                fh.write(data)
+        except OSError as exc:
+            app.ctx.rec_uploads.pop(rec_id, None)
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        session["received"] += len(data)
+        return sanic_json({"ok": True, "received": session["received"]})
+
+    async def _recording_commit(request: Request):
+        # Finalize: atomic os.replace of the temp onto <id>.blrec, then the
+        # whitelisted meta sidecar (with the authoritative on-disk size). A
+        # failed sidecar write rolls the .blrec back off disk so list/get
+        # never see a half-registered recording.
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rec_id = body.get("recording_id")
+        if not isinstance(rec_id, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        session = app.ctx.rec_uploads.get(rec_id)
+        if session is None:
+            return sanic_json({"ok": False, "error": "no_session"}, status=404)
+        paths = _rec_paths(rec_id)
+        if paths is None:
+            return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        blrec, meta_path, _notes = paths
+        meta = _rec_sanitize_meta(body.get("meta"))
+        tmp = session["tmp"]
+        try:
+            size = os.path.getsize(tmp)
+            os.replace(tmp, str(blrec))
+        except OSError as exc:
+            app.ctx.rec_uploads.pop(rec_id, None)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        app.ctx.rec_uploads.pop(rec_id, None)
+        meta["size"] = size
+        meta["savedAt"] = int(time.time())
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, _write_state_atomic, meta_path, meta)
+        except OSError as exc:
+            try:
+                os.unlink(str(blrec))
+            except OSError:
+                pass
+            return sanic_json({"ok": False, "error": str(exc)}, status=500)
+        return sanic_json({"ok": True, "recording_id": rec_id, "size": size})
+
+    async def _recording_abort(request: Request):
+        # Idempotent cleanup, mirroring /file/upload_abort.
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        rec_id = body.get("recording_id")
+        if not isinstance(rec_id, str):
+            return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        session = app.ctx.rec_uploads.pop(rec_id, None)
+        if session is not None:
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+        return sanic_json({"ok": True})
+
+    async def _recordings_list(request: Request):
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        rec_dir = app.ctx.recordings_dir
+
+        def _scan():
+            out = []
+            try:
+                files = list(rec_dir.glob("rec-*.blrec"))
+            except OSError:
+                return out
+            for f in files:
+                rec_id = f.name[:-len(".blrec")]
+                if not _RECORDING_ID_RE.fullmatch(rec_id):
+                    continue
+                meta = _rec_load_json(
+                    rec_dir / (rec_id + ".meta.json")) or {}
+                notes = _rec_load_notes(rec_dir / (rec_id + ".notes.json"))
+                try:
+                    size = f.stat().st_size
+                except OSError:
+                    size = meta.get("size", 0)
+                entry = {"id": rec_id, "size": size,
+                         "notesCount": len(notes["notes"]),
+                         "notesRev": notes["rev"]}
+                for key in ("title", "cols", "rows", "startedAt",
+                            "durationMs", "events", "fontFamily", "fontSize",
+                            "savedAt"):
+                    if key in meta:
+                        entry[key] = meta[key]
+                out.append(entry)
+            out.sort(key=lambda e: e.get("startedAt", 0), reverse=True)
+            return out
+
+        recordings = await asyncio.get_running_loop().run_in_executor(
+            None, _scan)
+        return sanic_json({"ok": True, "recordings": recordings})
+
+    async def _recording_get(request: Request):
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        paths = _rec_paths(request.args.get("id"))
+        if paths is None:
+            return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        blrec = paths[0]
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(
+                None, blrec.read_bytes)
+        except FileNotFoundError:
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        return sanic_raw(data, content_type="application/octet-stream",
+                         headers={"Content-Disposition":
+                                  'attachment; filename="%s.blrec"'
+                                  % blrec.stem})
+
+    async def _recording_delete(request: Request):
+        # The ONLY deletion path for a committed recording (no sweep ever).
+        # Unlinks the event file first, then the sidecars best-effort, so a
+        # partial failure can orphan a sidecar but never a listed recording.
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        paths = _rec_paths(body.get("id"))
+        if paths is None:
+            return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        blrec, meta_path, notes_path = paths
+        try:
+            os.unlink(str(blrec))
+        except FileNotFoundError:
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        for side in (meta_path, notes_path):
+            try:
+                os.unlink(str(side))
+            except OSError:
+                pass
+        return sanic_json({"ok": True})
+
+    async def _recording_notes_get(request: Request):
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        paths = _rec_paths(request.args.get("id"))
+        if paths is None:
+            return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        notes = _rec_load_notes(paths[2])
+        return sanic_json({"ok": True, "rev": notes["rev"],
+                           "notes": notes["notes"]})
+
+    async def _recording_notes_put(request: Request):
+        # Whole-list replace under optimistic concurrency (baseRev), matching
+        # /state and /mod-store: a stale writer gets 409 with the live value so
+        # a second player window can't silently drop the first one's notes.
+        # Note times are clamped to [0, durationMs] when the meta knows it.
+        err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        paths = _rec_paths(body.get("id"))
+        if paths is None:
+            return sanic_json({"ok": False, "error": "bad_id"}, status=400)
+        blrec, meta_path, notes_path = paths
+        base_rev = body.get("baseRev")
+        if isinstance(base_rev, bool) or not isinstance(base_rev, int) \
+                or base_rev < 0:
+            return sanic_json({"ok": False, "error": "bad_baseRev"},
+                              status=400)
+        raw_notes = body.get("notes")
+        if not isinstance(raw_notes, list) \
+                or len(raw_notes) > MAX_RECORDING_NOTES:
+            return sanic_json({"ok": False, "error": "bad_notes"}, status=400)
+        if not blrec.exists():
+            return sanic_json({"ok": False, "error": "not_found"}, status=404)
+        meta = _rec_load_json(meta_path) or {}
+        duration = meta.get("durationMs")
+        clean = []
+        for n in raw_notes:
+            if not isinstance(n, dict):
+                return sanic_json({"ok": False, "error": "bad_notes"},
+                                  status=400)
+            t = n.get("t")
+            text = n.get("text")
+            if isinstance(t, bool) or not isinstance(t, (int, float)) \
+                    or not isinstance(text, str):
+                return sanic_json({"ok": False, "error": "bad_notes"},
+                                  status=400)
+            if len(text) > MAX_RECORDING_NOTE_TEXT:
+                return sanic_json({"ok": False, "error": "note_too_long"},
+                                  status=400)
+            t = max(0, int(t))
+            if isinstance(duration, int) and duration >= 0:
+                t = min(t, duration)
+            clean.append({"t": t, "text": text})
+        clean.sort(key=lambda n: n["t"])
+        async with app.ctx.rec_notes_lock:
+            current = _rec_load_notes(notes_path)
+            if base_rev != current["rev"]:
+                return sanic_json({"ok": False, "error": "conflict",
+                                   "rev": current["rev"],
+                                   "notes": current["notes"]}, status=409)
+            new_rec = {"rev": current["rev"] + 1, "notes": clean}
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, notes_path, new_rec)
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
+        return sanic_json({"ok": True, "rev": new_rec["rev"]})
+
+    @app.before_server_stop
+    async def _drain_rec_sessions(app_, loop):
+        # Unlink every in-flight recording-save temp on shutdown, mirroring
+        # _drain_upload_sessions. Committed recordings are untouched.
+        for session in list(app_.ctx.rec_uploads.values()):
+            try:
+                os.unlink(session["tmp"])
+            except OSError:
+                pass
+        app_.ctx.rec_uploads.clear()
+
     if app.ctx.serve_ui:
         # Import (and thus assemble) the UI constants here, gated on serve_ui, so
         # a headless broker never reads the NN_* fragments or the wiki. Assembly
@@ -3845,6 +4304,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_state_put, "/state", methods=["PUT"])
     app.add_route(_modstore_get, "/mod-store/<modId>", methods=["GET"])
     app.add_route(_modstore_put, "/mod-store/<modId>", methods=["PUT"])
+    # Terminal session recordings (#140).
+    app.add_route(_recording_begin, "/recording/begin", methods=["POST"])
+    app.add_route(_recording_chunk, "/recording/chunk", methods=["POST"])
+    app.add_route(_recording_commit, "/recording/commit", methods=["POST"])
+    app.add_route(_recording_abort, "/recording/abort", methods=["POST"])
+    app.add_route(_recordings_list, "/recordings", methods=["GET"])
+    app.add_route(_recording_get, "/recording", methods=["GET"])
+    app.add_route(_recording_delete, "/recording/delete", methods=["POST"])
+    app.add_route(_recording_notes_get, "/recording/notes", methods=["GET"])
+    app.add_route(_recording_notes_put, "/recording/notes", methods=["POST"])
     # MCP HTTP interface (external MCP server) + its browser-facing config.
     app.add_route(_mcp_info, "/mcp/info", methods=["GET"])
     app.add_route(_mcp_terminals, "/mcp/terminals", methods=["GET"])
@@ -3895,6 +4364,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),
+                             ("/recording/begin", "preflight_rec_begin"),
+                             ("/recording/chunk", "preflight_rec_chunk"),
+                             ("/recording/commit", "preflight_rec_commit"),
+                             ("/recording/abort", "preflight_rec_abort"),
+                             ("/recordings", "preflight_recordings"),
+                             ("/recording", "preflight_recording"),
+                             ("/recording/delete", "preflight_rec_delete"),
+                             ("/recording/notes", "preflight_rec_notes"),
                              ("/mcp/info", "preflight_mcp_info"),
                              ("/mcp/terminals", "preflight_mcp_terminals"),
                              ("/mcp/read", "preflight_mcp_read"),
