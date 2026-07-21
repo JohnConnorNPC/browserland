@@ -57,3 +57,6 @@ AGENTS.md
 every_feature.md
 feature_loop.md
 status.md
+# setuptools build output (a stray `pip wheel .` leaves a full tree copy here)
+build/
+dist/

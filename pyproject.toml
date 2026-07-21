@@ -41,9 +41,13 @@ include = ["webterm*"]
 # scripts into INDEX_HTML, so the wheel must carry the nested mod files too.
 # mods/*/*.md ships each mod's optional wiki-format help.md (#113) — help_corpus
 # bakes it into the packaged help_corpus.json, but a wheel carries the source too.
+# vendor/* ships the vendored xterm (#143) that the broker serves at /vendor/*.
+# It is NOT optional: without it the page loads with no terminal at all, since
+# there is no CDN fallback any more -- that is the point.
 "webterm.broker" = ["*.html", "*.json", "*.css", "*.js",
                     "mods/*/*.js", "mods/*/*.css", "mods/*/*.json",
-                    "mods/*/*.md"]
+                    "mods/*/*.md",
+                    "vendor/*.js", "vendor/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

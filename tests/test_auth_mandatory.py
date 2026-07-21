@@ -155,10 +155,19 @@ TOKEN = "route-policy-token"
 #:                        page. Neither response carries host- or
 #:                        session-derived data.
 #:
+#: ``/vendor/<name>``      vendored xterm (#143). The browser fetches these to
+#:                         render the login page itself, before any token
+#:                         exists, and a <script src>/<link> cannot carry an
+#:                         Authorization header. Static bytes from the wheel,
+#:                         byte-pinned in tests/test_vendor_assets.py, with
+#:                         nothing host- or session-derived in them. Served from
+#:                         an allowlist dict, so an arbitrary name cannot reach
+#:                         the filesystem.
+#:
 #: OPTIONS preflights are also public — they carry no credentials by design and
 #: route resolution happens before request middleware, so they must be their own
 #: routes. They are filtered out below rather than listed here.
-PUBLIC_PATHS = {"/", "/help-corpus.json"}
+PUBLIC_PATHS = {"/", "/help-corpus.json", "/vendor/<name:str>"}
 
 _seq = 0
 
@@ -230,6 +239,17 @@ def test_the_public_pair_answers_without_a_token(tmp_path):
     assert "<title>Browserland</title>" in page.body.decode("utf-8")
     _, corpus = app.test_client.get("/help-corpus.json")
     assert corpus.status == 200
+    # Vendored xterm (#143): same reasoning -- the page cannot render its own
+    # login overlay without it, and no token exists yet at that point.
+    _, js = app.test_client.get("/vendor/xterm.js")
+    assert js.status == 200
+    assert js.body.startswith(b"!function") or len(js.body) > 100_000
+    # ...but the allowlist still bounds it: an unknown name is a plain 404,
+    # never a filesystem read.
+    _, miss = app.test_client.get("/vendor/../app.py")
+    assert miss.status in (400, 404), miss.status
+    _, miss2 = app.test_client.get("/vendor/nope.js")
+    assert miss2.status == 404
 
 
 def test_headless_root_still_answers_for_health_probes(tmp_path):

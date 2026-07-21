@@ -12,3 +12,10 @@ webterm/broker/help_corpus.json text eol=lf
 webterm/broker/[0-9][0-9]_*.html text eol=lf
 webterm/broker/*.css text eol=lf
 webterm/broker/*.js text eol=lf
+
+# Issue #143: the vendored third-party assets are byte-pinned by sha384 in
+# tests/test_vendor_assets.py -- they are the exact published npm files. Mark
+# them BINARY so git never translates line endings on checkout: a CRLF
+# conversion on a Windows clone would change every byte-count and fail those
+# pins (and any future SRI hash) for a file nobody edited.
+webterm/broker/vendor/** -text

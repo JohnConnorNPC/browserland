@@ -900,12 +900,14 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
-# Origins allowed to execute script (#143). jsdelivr serves xterm as classic
-# <script src> tags, all SRI-pinned; esm.sh serves CodeMirror as ES modules via
-# dynamic import() -- which CSP governs under script-src, not connect-src, and
-# esm.sh's stubs re-import via ROOT-RELATIVE paths so the whole module graph
-# stays on this one origin.
-_SCRIPT_ORIGINS = ("https://cdn.jsdelivr.net", "https://esm.sh")
+# Origins allowed to execute script (#143). 'self' covers the vendored xterm
+# under /vendor/ -- it used to come from cdn.jsdelivr.net, which is now gone
+# from the page entirely. esm.sh is the one remaining third party: it serves
+# CodeMirror as ES modules via dynamic import(), which CSP governs under
+# script-src (NOT connect-src), and its stubs re-import via ROOT-RELATIVE paths
+# so the whole module graph stays on that single origin. It cannot be SRI-
+# pinned (its URLs are range-resolved on purpose) and so remains trusted.
+_SCRIPT_ORIGINS = ("'self'", "https://esm.sh")
 
 
 def _csp_header(inline_hash: Optional[str] = None) -> str:
@@ -1435,6 +1437,22 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
 async def _index(request: Request):
     return html(request.app.ctx.index_html)
+
+
+async def _vendor_asset(request: Request, name: str):
+    """Vendored xterm (#143). Public like "/" — the browser fetches these to
+    render the login page itself, before any token exists, and a <script src>
+    cannot carry an Authorization header. Static bytes from the wheel: nothing
+    host- or session-derived. Served from an in-memory allowlist dict, so a
+    client-supplied name can only ever hit a known key (no traversal)."""
+    asset = request.app.ctx.vendor.get(name)
+    if asset is None:
+        return sanic_json({"ok": False, "error": "not_found"}, status=404)
+    body, ctype = asset
+    # Immutable: the filename is version-pinned by what we vendored, and the
+    # bytes only change in a commit that also changes the wheel.
+    return sanic_raw(body, content_type=ctype,
+                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 async def _help_corpus(request: Request):
@@ -4434,14 +4452,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # 500 on the first GET /. sys.modules caches the assembled values.
         from .ui import INDEX_HTML, inline_script_hash
         from .help_corpus import HELP_CORPUS
+        from . import vendor
         app.ctx.index_html = INDEX_HTML
         app.ctx.help_corpus = HELP_CORPUS
         # #143: authorize OUR bundle by hash so script-src needs no
         # 'unsafe-inline'. Computed from the assembled page, here rather than at
         # module scope so a headless broker still never imports .ui (#87).
         app.ctx.csp = _csp_header(inline_script_hash(INDEX_HTML))
+        # Vendored xterm, read eagerly for the same loud-at-startup reason the
+        # UI is assembled here (#87 keeps both out of a headless broker).
+        app.ctx.vendor = vendor.load()
+        LOGGER.info("vendored assets: %d (%s)", len(app.ctx.vendor),
+                    vendor.URL_PREFIX)
         app.add_route(_index, "/", methods=["GET"])
         app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
+        app.add_route(_vendor_asset, vendor.URL_PREFIX + "<name:str>",
+                      methods=["GET"])
     else:
         app.add_route(_index_headless, "/", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")

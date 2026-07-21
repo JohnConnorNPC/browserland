@@ -301,19 +301,12 @@
         </div>
     </div>
 
-    <!-- #143: integrity + crossorigin on every pinned CDN script; see the
-         note in 00_head.html for why and how to regenerate the hashes. -->
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"
-            integrity="sha384-/nfmYPUzWMS6v2atn8hbljz7NE0EI1iGx34lJaNzyVjWGDzMv+ciUZUeJpKA3Glc"
-            crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"
-            integrity="sha384-AQLWHRKAgdTxkolJcLOELg4E9rE89CPE2xMy3tIRFn08NcGKPTsELdvKomqji+DL"
-            crossorigin="anonymous"></script>
+    <!-- #143: vendored + same-origin; see the note in 00_head.html. -->
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/xterm-addon-fit.js"></script>
     <!-- #140: buffer serializer for the session-recorder mod's playback
          keyframes (seek + continuous reverse). 0.11.x pairs with xterm 5.3.
          The mod feature-detects the global and degrades to replay-from-start
          seeks if this fails to load. -->
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-serialize@0.11.0/lib/xterm-addon-serialize.js"
-            integrity="sha384-7roHFPP+/ZPshuYVlciTYFLzsCOAkjdrjVTZwWpc3QrCVZKJWYC38IZpuKbwQLbv"
-            crossorigin="anonymous"></script>
+    <script src="/vendor/xterm-addon-serialize.js"></script>
     <script>

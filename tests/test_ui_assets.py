@@ -219,52 +219,41 @@ def _external_asset_tags():
             yield m.group(1), m.group(0)
 
 
-def test_every_external_asset_has_sri_and_crossorigin():
-    """Third-party JS/CSS runs in the origin that holds every host's token.
+def test_page_loads_no_third_party_asset_tags():
+    """xterm is vendored (#143), so the page must fetch NO script or stylesheet
+    from another origin.
 
-    prefs._hosts = [{id, label, url, token, ...}] lives in localStorage, so a
-    script from a compromised CDN package reads EVERY configured host's token --
-    not just this broker's -- and those tokens gate /launch (shell spawn) and
-    host-wide /file/*. Subresource Integrity is what stops a tampered response
-    executing; ``crossorigin`` is REQUIRED with it, because without it the
-    response is opaque and the browser cannot verify the hash at all.
+    This is stricter than the SRI check it replaces, and deliberately so: SRI
+    only helps while the hashes are right, and it left the app unusable offline.
+    Same-origin means there is no CDN to compromise at all.
 
-    Hashes were generated from the CDN bytes and cross-checked against unpkg
-    (two independent CDNs serving identical bytes). Regeneration command is in
-    the comment at the top of 00_head.html -- a stale hash BLOCKS the asset, so
-    any version bump must update it.
-
-    Note this test cannot verify a hash is *correct*, only that one is present:
-    a wrong hash fails closed (asset blocked, terminal doesn't load), which is
-    loud rather than silent, and is caught by actually opening the page.
+    The one remaining third party is CodeMirror from esm.sh -- loaded by dynamic
+    import() from JS, never as a tag, so it is out of scope here and covered by
+    the CSP origin test below.
     """
-    tags = list(_external_asset_tags())
-    assert tags, "expected at least one external CDN asset in the page"
-    missing = []
-    for url, tag in tags:
-        if "integrity=" not in tag or "crossorigin=" not in tag:
-            missing.append(url)
-    assert not missing, (
-        "external assets without integrity+crossorigin (a compromised CDN "
-        "package would execute in the token's origin):\n  "
-        + "\n  ".join(missing))
+    external = [url for url, _tag in _external_asset_tags()]
+    assert not external, (
+        "third-party asset tags in the page -- vendor them under "
+        "webterm/broker/vendor/ instead (see #143): " + ", ".join(external))
 
 
-def test_external_assets_are_version_pinned():
-    """SRI is only meaningful on an immutable URL. A range/latest/tag URL can
-    legitimately change content, which would turn a pinned hash into a random
-    outage -- so an unpinned URL must never acquire an integrity attribute
-    instead of being fixed properly.
+def test_vendored_assets_are_referenced_and_present_on_disk():
+    """The flip side: the page must reference the vendored files, and every
+    file it references must actually ship. A typo'd path is a blank terminal."""
+    from webterm.broker import vendor
 
-    (This is exactly why the CodeMirror esm.sh imports carry no SRI: they use
-    semver RANGES on purpose -- see the comment at mods/editor/codemirror.js
-    -- because CodeMirror 6 needs one shared @codemirror/state instance and an
-    exact pin that drifts silently breaks syntax highlighting. Those are loaded
-    by dynamic import() from JS, not as tags, so they are not matched here.)
-    """
-    for url, _tag in _external_asset_tags():
-        assert re.search(r"@\d+\.\d+\.\d+", url), \
-            f"external asset is not version-pinned, so SRI cannot hold: {url}"
+    referenced = set(re.findall(r"[\"'](/vendor/[^\"']+)[\"']", INDEX_HTML))
+    assert referenced, "page references no vendored assets"
+    for url in sorted(referenced):
+        name = url[len(vendor.URL_PREFIX):]
+        assert name in vendor._ASSETS, \
+            f"{url} is referenced but not in the vendor allowlist"
+        assert (BROKER_DIR / "vendor" / name).is_file(), \
+            f"{url} is referenced but the file is missing from the wheel"
+    # And nothing ships that the page never asks for (dead weight in the wheel).
+    for name in vendor._ASSETS:
+        assert vendor.URL_PREFIX + name in referenced, \
+            f"vendored {name} is never referenced by the page"
 
 
 def test_csp_hash_matches_the_inline_script_actually_served():
@@ -309,7 +298,10 @@ def test_csp_authorizes_exactly_the_cdn_origins_the_page_uses():
     cm = (BROKER_DIR / "mods/editor/codemirror.js").read_text(encoding="utf-8")
     for m in re.finditer(r"CM_CDN\s*=\s*'(https://[^/']+)", cm):
         used.add(m.group(1))
-    allowed = set(_SCRIPT_ORIGINS)
+    # 'self' is not a URL -- it covers the vendored /vendor/* scripts, which are
+    # same-origin and therefore never appear as an absolute URL anywhere.
+    allowed = set(_SCRIPT_ORIGINS) - {"'self'"}
+    assert "'self'" in _SCRIPT_ORIGINS,         "vendored xterm is same-origin, so script-src must allow 'self'"
     assert used <= allowed, f"origins the page uses but CSP omits: {used - allowed}"
     assert allowed <= used, f"origins in CSP the page never uses: {allowed - used}"
 
