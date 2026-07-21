@@ -186,7 +186,7 @@ def test_control_lease(broker_proc):
 
         # A live producer to gate input against.
         producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await producer.send(json.dumps({
             "type": "hello", "window_id": 555900, "pid": 5,
             "title": "lease", "cols": 80, "rows": 24}))
@@ -278,7 +278,7 @@ def test_fake_producer_relay(broker_proc):
     async def scenario():
         # Loopback producer: no token needed (exemption under test).
         producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await producer.send(json.dumps({
             "type": "hello", "window_id": 555001, "pid": 99,
             "title": "fake", "cols": 80, "rows": 24}))
@@ -351,7 +351,7 @@ def test_large_frame_relay(broker_proc):
 
     async def scenario():
         producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await producer.send(json.dumps({
             "type": "hello", "window_id": 555004, "pid": 7,
             "title": "big", "cols": 80, "rows": 24}))
@@ -647,7 +647,7 @@ def test_title_broadcast(broker_proc):
 
     async def scenario():
         producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await producer.send(json.dumps({
             "type": "hello", "window_id": 555002, "pid": 42,
             "title": "before", "cols": 80, "rows": 24}))
@@ -686,7 +686,7 @@ def test_reregister_closes_old_subscribers(broker_proc):
 
     async def scenario():
         prod_a = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await prod_a.send(json.dumps({
             "type": "hello", "window_id": 555003, "pid": 1,
             "title": "a", "cols": 80, "rows": 24}))
@@ -706,7 +706,7 @@ def test_reregister_closes_old_subscribers(broker_proc):
         # entry is replaced and its subscribers closed with 1012 so the page
         # can auto-reattach instead of sitting on a frozen socket.
         prod_b = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await prod_b.send(json.dumps({
             "type": "hello", "window_id": 555003, "pid": 2,
             "title": "b", "cols": 100, "rows": 30}))
@@ -1345,7 +1345,7 @@ def test_session_rpc_roundtrip(broker_proc):
 
     async def scenario():
         producer = await websockets.connect(
-            f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
         await producer.send(json.dumps({
             "type": "hello", "window_id": sid, "pid": 11,
             "title": "rpc", "cols": 80, "rows": 24}))

@@ -29,7 +29,6 @@ query string.
 from __future__ import annotations
 
 import hmac
-import ipaddress
 import json
 import os
 import secrets
@@ -192,28 +191,9 @@ def provided_token(request) -> Optional[str]:
 def request_token_ok(request, expected: Optional[str]) -> bool:
     return token_matches(provided_token(request), expected)
 
-
-def is_loopback_request(request) -> bool:
-    """True if the connection arrived on a loopback listener.
-
-    Checks the transport's sockname (the local address the client dialed),
-    same as the bridge's _is_loopback_sockname: a connection to the box's
-    LAN IP is non-loopback even when it originates locally."""
-    sockname = None
-    transport = getattr(request, "transport", None)
-    if transport is not None:
-        try:
-            sockname = transport.get_extra_info("sockname")
-        except Exception:
-            sockname = None
-    if sockname:
-        try:
-            return ipaddress.ip_address(sockname[0]).is_loopback
-        except (ValueError, IndexError):
-            return False
-    # Transport unavailable (some post-upgrade WS paths) — fall back to the
-    # peer address; loopback peers can only exist on loopback listeners.
-    try:
-        return ipaddress.ip_address(request.ip).is_loopback
-    except (TypeError, ValueError):
-        return False
+# is_loopback_request() lived here until #142. It is gone rather than merely
+# unused: as an auth input it was a loaded gun. It answered "did this connection
+# arrive on a loopback listener", which is NOT "is this the same machine" — a
+# request proxied by `tailscale serve` (the topology docs/SETUP.md recommends)
+# arrives from loopback no matter which machine sent it, and any web page the
+# user opens can reach loopback as well. Every gate now takes the token.

@@ -194,6 +194,82 @@ def test_sessions_401s_over_the_lan_with_cors_intact():
         proc.wait(timeout=5)
 
 
+def test_producer_ws_requires_a_token_on_loopback_too():
+    """#142: /browserland was exempt for loopback even WITH a token configured
+    — the one gate the token never covered.
+
+    WebSockets are not CORS-gated, so any web page the user had open could dial
+    ws://127.0.0.1:<port>/browserland, re-register a LIVE window_id (kicking the
+    real agent off with close 1012) and inject fabricated terminal output into a
+    window the user trusts. A loopback producer now needs the token like
+    everyone else."""
+    port = _free_port()
+    proc = _spawn_broker(port, token=TOKEN)
+    try:
+        async def scenario():
+            ws = await websockets.connect(
+                f"ws://127.0.0.1:{port}/browserland", max_size=None)
+            try:
+                # Post-upgrade 4401, not an opaque 1006: the agent has to be
+                # able to tell "wrong token" from "network died".
+                with pytest.raises(websockets.ConnectionClosed):
+                    await asyncio.wait_for(ws.recv(), 5)
+                assert ws.close_code == 4401
+            finally:
+                await ws.close()
+
+            # ...and the same dial WITH the token registers normally, so this
+            # is a gate and not a broken endpoint.
+            ws = await websockets.connect(
+                f"ws://127.0.0.1:{port}/browserland?token={TOKEN}",
+                max_size=None)
+            try:
+                await ws.send(json.dumps({
+                    "type": "hello", "window_id": 555003, "pid": 1,
+                    "title": "local", "cols": 80, "rows": 24,
+                    "kind": "agent"}))
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/sessions?token={TOKEN}")
+                for _ in range(50):
+                    with urllib.request.urlopen(request, timeout=5) as r:
+                        sessions = json.loads(r.read())
+                    if any(s["id"] == 555003 for s in sessions):
+                        break
+                    await asyncio.sleep(0.1)
+                assert any(s["id"] == 555003 for s in sessions)
+            finally:
+                await ws.close()
+
+        asyncio.run(scenario())
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_browser_and_control_ws_require_a_token_on_loopback():
+    """The other two WS surfaces, same policy: an unauthenticated /ws could
+    attach to any PTY and /control could steal the single-active-browser lease
+    out from under the real client."""
+    port = _free_port()
+    proc = _spawn_broker(port, token=TOKEN)
+    try:
+        async def scenario():
+            for path in ("/ws?id=1", "/control?clientId=probe"):
+                ws = await websockets.connect(
+                    f"ws://127.0.0.1:{port}{path}", max_size=None)
+                try:
+                    with pytest.raises(websockets.ConnectionClosed):
+                        await asyncio.wait_for(ws.recv(), 5)
+                    assert ws.close_code == 4401, path
+                finally:
+                    await ws.close()
+
+        asyncio.run(scenario())
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 def test_producer_ws_token_gate_on_nonloopback():
     port = _free_port()
     proc = _spawn_broker(port, token=TOKEN)

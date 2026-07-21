@@ -261,6 +261,24 @@ def test_loopback_is_not_an_exemption(tmp_path):
         assert r.json.get("error") == "auth_required", path
 
 
+def test_security_headers_ride_on_every_response(tmp_path):
+    """GET / is public so the login overlay can bootstrap — but public must not
+    mean embeddable or Referer-leaking.
+
+    The desktop URL carries the token in its query string, so ``no-referrer``
+    stops an outbound link handing the credential to a third party; the frame
+    headers stop an attacker page iframing the real UI and clickjacking a
+    browser that already holds a token. Asserted on the 401 too: response
+    middleware has to cover the error paths, not just the happy one."""
+    app = _make_app(tmp_path)
+    for path in ("/", f"/sessions?token={TOKEN}", "/sessions"):
+        _, r = app.test_client.get(path)
+        assert r.headers.get("Referrer-Policy") == "no-referrer", path
+        assert r.headers.get("X-Frame-Options") == "DENY", path
+        assert r.headers.get("Content-Security-Policy") == \
+            "frame-ancestors 'none'", path
+
+
 def test_a_valid_token_gets_through(tmp_path):
     """The negative tests above would also pass if every route were broken."""
     app = _make_app(tmp_path)

@@ -8,30 +8,30 @@ closing with code 4401: rejecting the upgrade from HTTP middleware surfaces
 in the browser as an opaque close code 1006, indistinguishable from a
 network failure (a lesson carried over from an earlier broker).
 
+Auth (#142): a token is REQUIRED on every route and every interface, always.
+There is no loopback exemption and no opt-out; with nothing configured the
+broker mints one into ``webterm_token.json`` beside the state store. The ONLY
+unauthenticated responses are ``GET /`` (the token is typed into that page, and
+auth is query/header-only with no cookies, so gating the document would 401
+every reload, bookmark and new tab forever), ``GET /help-corpus.json``, and the
+OPTIONS preflights. ``/mcp/*`` is a separate realm with its own token.
+
 CORS posture: the UI's multi-host mode has the BROWSER fetch /sessions and
 dial /ws directly on every configured broker, so the JSON API needs CORS.
-ACAO is ``*`` emitted UNCONDITIONALLY on EVERY response (including 401/404/405
-and on a tokenless broker) — auth is token-in-query/header, never cookies, so
-``*`` introduces no ambient-credential risk and needs no Vary/origin-echo. It
-was previously gated on a token being configured, but that left a tokenless
-broker reachable over the LAN/Tailscale unable to answer the UI's cross-origin
-/sessions fetch (the reported bug) even though any non-browser client could
-already read it; CORS only ever governs *browser* reads, and the real gate is
-network reachability plus the token on every mutation/data endpoint (/launch,
-/file/*, /state are token-or-loopback gated). With a token configured a
-cross-origin page cannot drive them (it carries no token). With NO token the
-gate is loopback-only: a same-machine cross-origin page CAN reach them over
-loopback and, because ACAO is ``*``, read the response — the accepted
-single-user-loopback exposure (same as /launch). NOTE since #35 that exposure
-is host-wide for /file/* (full host read/write, the same trust /launch already
-grants by spawning shells), so a tokenless broker must not run while the same
-browser visits untrusted sites. The header must ride on error responses too or a
-cross-origin login probe surfaces as a fetch TypeError ("wrong password"
-indistinguishable from "host down"). Preflights are explicit OPTIONS routes
-(route resolution happens before request middleware, so middleware can't answer
-them) and unauthenticated by design (they carry no credentials). AUTO_EXTEND is
-pinned off: sanic-ext, when merely installed, silently injects its own CORS
-middleware plus an unauthenticated /docs + /openapi.json.
+ACAO is ``*`` emitted UNCONDITIONALLY on EVERY response (including the 401 an
+unauthenticated request now gets everywhere) — auth is token-in-query/header,
+never cookies, so ``*`` introduces no ambient-credential risk and needs no
+Vary/origin-echo. It must ride on error responses too or a cross-origin login
+probe surfaces as a fetch TypeError ("wrong password" indistinguishable from
+"host down") and the taskbar's amber auth chip never appears. CORS only ever
+governs *browser* reads; the real gate is the token on every route. Preflights
+are explicit OPTIONS routes (route resolution happens before request middleware,
+so middleware can't answer them) and unauthenticated by design (they carry no
+credentials). ``GET /`` is public but must not be embeddable — X-Frame-Options
+and frame-ancestors are set below so an attacker page cannot iframe the real UI
+and clickjack a browser that already holds a token. AUTO_EXTEND is pinned off:
+sanic-ext, when merely installed, silently injects its own CORS middleware plus
+an unauthenticated /docs + /openapi.json.
 """
 
 from __future__ import annotations
@@ -78,6 +78,13 @@ LOGGER = logging.getLogger(__name__)
 
 CONFIG_ENV = "WEB_TERMINAL_CONFIG"
 DEFAULT_PORT = 4445
+
+# After this many /browserland upgrades refused for a missing token, log the
+# one-time "your old terminals cannot reconnect" hint instead of another
+# per-connection warning, and drop the rest to DEBUG. Agents reconnect roughly
+# every 10s once backed off, so a handful of rejections is the point at which
+# this stops being a blip and starts being the stranded-agent symptom (#142).
+_PRODUCER_REJECT_HINT_AT = 5
 
 # Editor file-API: a single read/write is capped at this many bytes (the cap
 # is enforced on the ENCODED payload, not the character count — correct for
@@ -1517,6 +1524,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          / "webterm_identity.json").exists())
     app.ctx.auth_token, app.ctx.auth_token_source = auth.resolve_or_mint_token(
         config, app.ctx.auth_state_path)
+    # Count of /browserland upgrades refused for a missing token, so the warning
+    # can rate-limit itself and, at the threshold, explain the symptom once
+    # (agents from a previous tokenless broker retry forever). Old-code agents
+    # hammer regardless of the fix on our side.
+    app.ctx.producer_rejects = 0
     # Terminal session recordings (#140): durable user data, so the default
     # lives BESIDE the state store (not the temp dir an OS cleaner may wipe).
     # Config "recordings_dir" overrides. Created lazily on first save.
@@ -1620,6 +1632,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # paths too (401/404/405), which the cross-origin login probe depends
         # on — pinned by tests.
         response.headers["Access-Control-Allow-Origin"] = "*"
+        # The token rides in the query string, so the desktop URL IS a
+        # credential. Without this, any outbound link the user follows from the
+        # UI (or from recorded terminal output) hands the full ?token= URL to a
+        # third party in the Referer header.
+        response.headers["Referrer-Policy"] = "no-referrer"
+        # GET / is deliberately public so the login overlay can bootstrap — but
+        # public must not mean embeddable. An attacker page that iframes the
+        # real UI cannot READ across origins, yet it can still clickjack a
+        # browser that already holds a token into launching a shell, pasting
+        # into a terminal or writing a file. X-Frame-Options for older browsers,
+        # frame-ancestors for the rest.
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
@@ -1738,15 +1763,35 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     await _send(rws, cid)
 
     async def _producer_ws(request: Request, ws: Websocket):
-        # Producers: loopback OR token (remote agents need the token; local
-        # terminals/agents connect unchanged).
-        if not auth.is_loopback_request(request):
-            token = app.ctx.auth_token
-            if not (token and auth.request_token_ok(request, token)):
+        # Producers need the token too (#142). Loopback used to be exempt here
+        # even WITH a token configured — the one gate the token never covered —
+        # and WebSockets are not CORS-gated, so any web page could dial
+        # ws://127.0.0.1:<port>/browserland, re-register a live window_id
+        # (kicking the real agent off with 1012) and inject fabricated terminal
+        # output. Agents get the token from the Launcher via $WEB_TERMINAL_TOKEN
+        # and append it to this dial themselves.
+        if not auth.request_token_ok(request, app.ctx.auth_token):
+            app.ctx.producer_rejects += 1
+            rejects = app.ctx.producer_rejects
+            if rejects == _PRODUCER_REJECT_HINT_AT:
+                # Rate-limits the warning AND explains the symptom: an agent
+                # spawned by a previous tokenless broker retries forever and its
+                # window never comes back. Nothing server-side can rescue it —
+                # an env var cannot be injected into a live process.
                 LOGGER.warning(
-                    "rejected non-loopback /browserland from %s", request.ip)
-                await ws.close(code=4401, reason="auth required")
-                return
+                    "%d producer connections rejected for a missing token - "
+                    "terminals launched by a previous tokenless broker cannot "
+                    "reconnect and must be relaunched (see docs/UPGRADING.md). "
+                    "Further rejections are logged at DEBUG.",
+                    rejects)
+            elif rejects < _PRODUCER_REJECT_HINT_AT:
+                LOGGER.warning(
+                    "rejected unauthenticated /browserland from %s", request.ip)
+            else:
+                LOGGER.debug(
+                    "rejected unauthenticated /browserland from %s", request.ip)
+            await ws.close(code=4401, reason="auth required")
+            return
         await run_producer_session(ws, app.ctx.registry)
 
     async def _sessions(request: Request):
