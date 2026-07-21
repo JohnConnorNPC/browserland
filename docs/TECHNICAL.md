@@ -54,8 +54,8 @@ Linux:
 ```
 python -m webterm.agent [opts] [--] command...
   --broker-url URL     $BROWSERLAND_BROKER_URL > flag > ws://127.0.0.1:4445/browserland
-  --auth-token TOK     $WEB_TERMINAL_TOKEN; appended as ?token= (only needed
-                       for non-loopback brokers)
+  --auth-token TOK     $WEB_TERMINAL_TOKEN; appended as ?token= (REQUIRED
+                       for every broker since #142, loopback included)
   --cols/--rows        initial PTY size (default 80x24)
   --title T            initial title (default: command basename)
   --window-id N        pin the session id (default: random 48-bit)
@@ -105,21 +105,50 @@ too many pending, `500` agent exited early.
 
 ### Auth model
 
-Token from `$WEB_TERMINAL_TOKEN` (env wins) or config `auth_token`;
-compared with `hmac.compare_digest`.
+**A token is required on every surface, on every interface, always** (#142) —
+no loopback exemption, no opt-out. Resolution (never returns nothing):
+`$WEB_TERMINAL_TOKEN` → config `auth_token` → the `webterm_token.json` sidecar
+beside the state store → **mint** `secrets.token_urlsafe(32)` into it. Compared
+with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
+without minting or starting a server.
+
+Loopback was never a sound exemption: `tailscale serve` in front of a
+`127.0.0.1` bind (the topology [SETUP.md](SETUP.md) recommends) makes every
+tailnet request arrive *from* loopback, and any page in the user's browser
+reaches loopback too. Upgrading a tokenless install is a **breaking change** —
+see [UPGRADING.md](UPGRADING.md).
+
+The mint is `O_CREAT|O_EXCL` (0600 on POSIX; Windows inherits the directory
+ACL), not an atomic replace: two brokers racing on one state dir both see no
+file, and last-writer-wins would leave the loser running a token that is not
+the one on disk. The O_EXCL loser re-reads and adopts the winner. An unwritable
+directory yields an *ephemeral* token — the broker still starts, but warns on
+every boot that it changes on restart and `--print-token` cannot recover it.
 
 | Surface | Rule |
 |---|---|
-| `WS /browserland` (producers) | loopback exempt; non-loopback needs `?token=` (or `?auth=`). No token configured → non-loopback refused. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
-| `POST /launch` | token required whenever configured; without a token only loopback is allowed (403 `launch_disabled_no_token`) — never an open RCE on a non-loopback bind. |
-| `WS /ws`, `GET /sessions` | gated by the token only when one is configured (`?token=`, `?auth=`, or `Authorization: Bearer`). |
-| `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token-or-loopback, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
-| `GET /status/fetch` (AI-provider status proxy, #112) | browser token-or-loopback, same as `/info` and `/state`. The broker's **only outbound HTTP**: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
-| CORS (JSON API) | emitted **only when a token is configured** (`Access-Control-Allow-Origin: *` on every response incl. 401/404, explicit OPTIONS preflights on `/sessions` `/profiles` `/launch` `/profiles/config` `/profiles/detect` `/status/fetch` …) — lets the multi-host UI on another broker's origin read this one. A tokenless loopback-only broker emits no CORS headers and stays unreadable to arbitrary websites. |
+| `GET /`, `GET /help-corpus.json` | **the only unauthenticated responses.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. |
+| `OPTIONS` preflights | unauthenticated by design (they carry no credentials). Explicit routes, because route resolution happens before request middleware. |
+| `WS /browserland` (producers) | token required, loopback included. Was the one gate the token never covered — and WebSockets are not CORS-gated, so any website could dial `ws://127.0.0.1:4445/browserland`, re-register a live `window_id` (kicking the real agent off with 1012) and inject fabricated terminal output. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
+| `POST /launch` | token required — never an open RCE on any bind. |
+| `WS /ws`, `WS /control`, `GET /sessions`, `GET /profiles` | token required (`?token=`, `?auth=`, or `Authorization: Bearer`). Always **401 `auth_required`**, never 403: the login overlay and the taskbar host chips pop on 401 only. |
+| `GET`/`POST /profiles/config`, `GET /profiles/detect` (profile editor, #70) | browser token, same as `/file/*` and `/mcp/config`. Full commands are browser-realm only; `/profiles` and `/mcp/profiles` stay names-only. |
+| `GET /status/fetch` (AI-provider status proxy, #112) | browser token, same as `/info` and `/state`. The broker's **only outbound HTTP**: an allowlist of AI-provider Atlassian Statuspage hosts, reached by provider **id** (the client passes ids, never a URL — unknown ids are dropped, an all-unknown request is `400`). Each fetch is **https-only, no-redirect, no-proxy, `200`-only, 512 KiB-capped, 4 s timeout**, with a 60 s per-id cache; any failure degrades to an `unknown` row (never blocks the UI). **Privacy**: enabling the (default-off) `aistatus` mod is what turns this on — the broker's egress IP then becomes visible to those status hosts, so it ships disabled until you opt in. |
+| CORS (JSON API) | `Access-Control-Allow-Origin: *` **unconditionally on every response**, including the 401 — lets the multi-host UI on another broker's origin read this one, and without it a cross-origin login probe surfaces as a fetch TypeError ("wrong password" indistinguishable from "host down"). Auth is token-in-query/header and never cookies, so `*` grants no ambient credential; the real gate is the token on every route. |
+| Response headers | `Referrer-Policy: no-referrer` (the desktop URL carries the token, so an outbound link must not leak it in `Referer`), `X-Frame-Options: DENY` + `Content-Security-Policy: frame-ancestors 'none'` (`GET /` is public so login can bootstrap, but an attacker page must not be able to iframe the real UI and clickjack a browser that already holds a token). |
 
 Tokens are passed to spawned agents via **env only** (never argv — visible
 in process lists), and auth failures log only path + client IP (the token
-rides in query strings).
+rides in query strings — Sanic's access log is pinned off for the same
+reason). The agent then **removes** `WEB_TERMINAL_TOKEN` before spawning the
+user's shell, so a terminal cannot `echo` the credential that gates host-wide
+file access and shell spawning.
+
+An agent refused with 4401 backs off to the 10 s cap (the rejection arrives
+*post*-upgrade, after the backoff has already reset, so the naive loop retries
+at ~1 Hz forever) and logs one error naming `$WEB_TERMINAL_TOKEN`. It keeps
+retrying rather than giving up: the token can come back without the process
+restarting.
 
 **Browser login**: the token doubles as the UI's password. The page is
 served ungated; a login overlay probes `/sessions` and stores the token in
@@ -141,12 +170,12 @@ Control Panel → Hosts lets the UI attach to sessions on additional brokers
 host (cross-origin `fetch /sessions` + `ws://host/ws`); hosts and their
 passwords live per-browser in localStorage. Requirements:
 
-* the remote broker must have an `auth_token` configured (CORS is
-  token-gated, so a tokenless remote is unreachable by design — the add
-  form requires a password) and a way in: either a non-loopback bind
-  (plain http), or — recommended — a loopback bind fronted by
-  `tailscale serve` / an https reverse proxy (note the proxy makes
-  requests arrive *from loopback*, so keep the token set regardless);
+* you need the remote broker's token (every broker has one — either
+  configured or minted; `python -m webterm.broker --print-token` prints it)
+  and a way in: either a non-loopback bind (plain http), or — recommended —
+  a loopback bind fronted by `tailscale serve` / an https reverse proxy.
+  Setting `auth_token` explicitly is worth it across a fleet so every host
+  shares one password instead of a per-machine minted value;
 * **both brokers must run this webterm version** — a pre-CORS remote shows
   up as a red "down" chip even when it's running;
 * one scheme for the whole fleet — an https page fetching an http remote
@@ -188,9 +217,10 @@ but they don't install pytest, so use the editable install for testing.
 **Config**: copy `broker_config.linux.example.json` to
 `broker_config.json` (or point `$WEB_TERMINAL_CONFIG` at it). Default
 profiles are `bash` (`bash -l`, the default) and `sh` (plain `sh` — the
-escape hatch when login-shell rc noise is unwanted). Set `auth_token`
-(or `$WEB_TERMINAL_TOKEN`) **before** binding to anything non-loopback —
-without a token the broker refuses non-loopback producers and `/launch`.
+escape hatch when login-shell rc noise is unwanted). A token is required on
+every bind including loopback; set `auth_token` (or `$WEB_TERMINAL_TOKEN`)
+to choose the value yourself, or let the broker mint one into
+`webterm_token.json` and read it back with `--print-token`.
 
 **systemd**: installable units live in `launchers/systemd/`
 (`webterm-broker.service`, `webterm-agent.service`). Copy to
@@ -274,8 +304,9 @@ time). A missing/invalid token while the feature is enabled is **401
 `{"error":"auth_required"}`**.
 
 This MCP token is a **separate secret from the browser `auth_token`** and gates
-**only** the `/mcp/*` data plane — there is **no loopback exemption** (MCP is
-opt-in, so even a local caller needs the token). CORS preflights exist for
+**only** the `/mcp/*` data plane. Like every other surface it has **no
+loopback exemption** (MCP is opt-in, so even a local caller needs the token).
+CORS preflights exist for
 browser callers; a server-side MCP client makes ordinary requests and is not
 subject to CORS.
 
@@ -481,9 +512,9 @@ not said `hello` yet (`"registered":false`).
 ### Admin surface (browser `auth_token`-gated)
 
 These configure MCP and are **not** part of the MCP token's surface. They use
-the browser **`auth_token`** (the same token-or-loopback gate as `/state` and
-`/file/*`): when an `auth_token` is configured they require it (`Authorization:
-Bearer` / `?token=`); on a tokenless broker only loopback is allowed.
+the browser **`auth_token`** (the same mandatory-token gate as `/state` and
+`/file/*`): always required, on every interface, as `Authorization: Bearer` or
+`?token=`.
 
 **`GET /mcp/config`** →
 `{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
@@ -518,8 +549,8 @@ only these broker-wide knobs are.
 
 ### Launch-profile editor (browser `auth_token`-gated) — #70
 
-The Control Panel edits the launch-profile allow-list here. Same browser
-token-or-loopback gate as `/mcp/config` above — **never** the MCP token, so the
+The Control Panel edits the launch-profile allow-list here. Same mandatory
+browser-token gate as `/mcp/config` above — **never** the MCP token, so the
 commands (the RCE-by-design half of profiles-only) only ever travel to an
 already-authenticated browser. `/profiles` and `/mcp/profiles` stay **names
 only**, so an MCP/AI agent still can't read a command or define a profile.
@@ -566,7 +597,7 @@ catalog + the security rationale: **[PROFILES.md](PROFILES.md)**.
 ```bash
 B=http://127.0.0.1:4445
 
-# Admin (loopback, or add -H "Authorization: Bearer $AUTH" on a token broker):
+# Admin (add -H "Authorization: Bearer $AUTH" — a token is always required):
 # enable MCP, mint a token, default new windows to read, allow launching.
 curl -s -X POST $B/mcp/config -H 'content-type: application/json' \
   -d '{"enabled":true,"generate":true,"default_mode":"read","allow_launch":true}'
@@ -620,11 +651,13 @@ index, raw/pyte snapshot rendering, agent↔fake-broker integration
 (reconnect, snapshot ordering, title re-hello), real-ConPTY round trip
 on Windows, real-POSIX-PTY round trip on Linux (bash
 echo/resize/`stty size`/OSC title/exit code, Ctrl-C via TIOCSCTTY,
-huge-paste backpressure), broker e2e as a subprocess (auth gates, CORS
-with/without a token incl. error paths and preflights, sanic-ext
-neutralized, relay invariants, `/launch` → detached agent on both
-platforms), non-loopback auth negatives + CORS positives via the box's
-LAN IP, plus the newer surfaces: the MCP tools (read/reset/flush/pace),
+huge-paste backpressure), broker e2e as a subprocess (auth gates, CORS on
+error paths and preflights, sanic-ext neutralized, relay invariants,
+`/launch` → detached agent on both platforms), the mandatory-token policy
+(token bootstrap/mint/adopt, a router-enumerating guard that every non-public
+route answers 401 `auth_required`, and the WS 4401 gates on loopback),
+non-loopback auth negatives + CORS positives via the box's LAN IP, plus the
+newer surfaces: the MCP tools (read/reset/flush/pace),
 the file API, session recording, the status-fetch proxy, the textgrid
 fallback renderer, and UI asset assembly.
 

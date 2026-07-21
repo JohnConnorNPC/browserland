@@ -75,8 +75,8 @@ Every save **applies immediately** — the live launcher swaps and the next laun
 ## Security model
 
 Editing profiles means defining commands the host will run, so the editor is
-**browser-realm only**, gated exactly like `/file/*` and `/state`
-(token-or-loopback). The endpoints:
+**browser-realm only**, gated exactly like `/file/*` and `/state` — a valid
+token, on every interface, no exceptions. The endpoints:
 
 - `GET /profiles/config` / `POST /profiles/config` — the **full** objects
   (commands included). Browser realm only.
@@ -86,10 +86,11 @@ Editing profiles means defining commands the host will run, so the editor is
   define a new profile.
 
 Writing a profile is **no more powerful than `/file/write`**, which the same gate
-already grants (both let a same-machine caller make the host run code). The
-standing caveat therefore applies: **do not run a tokenless broker while the same
-browser visits untrusted sites.** Configure an `auth_token` and a cross-origin
-page carries none, so it cannot reach these endpoints at all.
+already grants (both let an authenticated caller make the host run code). Since
+#142 there is no tokenless broker and no loopback exemption, so a cross-origin
+page — which carries no token — cannot reach these endpoints at all. That closes
+the old caveat about running a tokenless broker while the same browser visits
+untrusted sites.
 
 ## Recipe catalog
 

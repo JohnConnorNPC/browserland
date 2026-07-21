@@ -138,9 +138,11 @@ The desktop with tiled and floating terminals
   observe, drive, and launch terminals — including live interactive TUIs and the
   console you're working in — under per-window access modes you control.
   See **[MCP & AI agent access](#mcp--ai-agent-access)** below.
-- **Token auth, no open RCE**: one token gates non-loopback access and doubles
-  as the UI password; launching is **profiles-only** (the client can never
-  supply a raw command), with a loopback exemption for local use.
+- **Token auth, no open RCE**: one token gates **every** connection — every
+  route, every interface, loopback included — and doubles as the UI password.
+  Nothing to set up: a broker with no token configured mints one and prints the
+  URL to open. Launching is **profiles-only** (the client can never supply a raw
+  command).
 - **Launch profiles you can edit in the UI**: add WSL/zsh/PowerShell shells from
   **Control Panel → Launch profiles** (one-click WSL-distro / shell **Detect…**),
   applied live with no restart — still profiles-only. See
@@ -366,6 +368,12 @@ browser mental model, joining machines over Tailscale via Control Panel → Host
 what *not* to hand-edit, and running the broker unattended in the background
 (Windows Task Scheduler / Linux systemd). It's written to be followed by a human
 or a coding agent.
+
+Upgrading an existing install? **[`docs/UPGRADING.md`](docs/UPGRADING.md)** is
+the breaking-change record — what changed, whether it affects you, and how to
+recover. Most recently: **a token is now required on every connection,
+including loopback (#142)**, which strands terminals launched by a previously
+tokenless broker.
 
 Adding or editing launch profiles (WSL / zsh / PowerShell / Git-Bash) is covered
 in **[`docs/PROFILES.md`](docs/PROFILES.md)** — the recipe catalog, the three

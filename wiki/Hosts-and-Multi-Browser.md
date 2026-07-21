@@ -6,7 +6,7 @@ By default the UI talks to the broker it was served from (`http://127.0.0.1:4445
 
 1. Enter a **label** (how the host appears in the UI).
 2. Enter the broker **URL**.
-3. Enter the broker's **password** — the broker's configured auth token, which doubles as its browser login.
+3. Enter the broker's **password** — the broker's auth token, which doubles as its browser login. Every broker has one: either the `auth_token` its owner configured, or one it minted for itself on first run. Print it on that machine with `python -m webterm.broker --print-token`.
 
 **Serve remote brokers over https** — the easy way is [`tailscale serve`](https://tailscale.com/kb/1312/serve) on each machine (real TLS inside your tailnet, no certificates to manage, the broker stays bound to loopback), or any https reverse proxy of your own. Two reasons: a browser blocks an **https page from talking to an http host** (mixed content), so the cockpit page and every added host must share one scheme — all https or all plain http, never a mix; and only an https (or localhost) page is a *secure context*, which clipboard **image paste** into a terminal (`Alt+V` / right-click) requires. All-plain-http over a trusted tailnet works too, minus those features.
 

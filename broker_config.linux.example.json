@@ -1,6 +1,7 @@
 {
     "host": "127.0.0.1",
     "port": 4445,
+    "_auth_token_note": "null means MINT one: the broker generates a token into webterm_token.json beside its state store and prints the URL to open. It never means no auth - a token is required on every connection, loopback included (#142). Set a string here to choose the value yourself (recommended across a fleet, so every host shares one password). Read it back with: python -m webterm.broker --print-token",
     "auth_token": null,
     "serve_ui": true,
     "mcp_token": null,

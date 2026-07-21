@@ -50,7 +50,20 @@ So the canonical two-machine setup is:
 
 Follow the **[Quick start](../README.md#quick-start)** in the README: install,
 run the broker, open `http://127.0.0.1:4445/`, click **new terminal**. On a
-single loopback machine you need no token and no config file — the defaults work.
+single loopback machine you need no config file — the defaults work.
+
+A **token is required on every connection**, including loopback, but you do not
+have to create one: with nothing configured the broker mints its own into
+`webterm_token.json` beside its state store and prints the URL to open,
+token included. Need it again later:
+
+```bash
+python -m webterm.broker --print-token
+```
+
+> **Upgrading an existing tokenless install?** Read
+> **[UPGRADING.md](UPGRADING.md)** first — terminals launched by the old broker
+> cannot reconnect and must be relaunched once.
 
 You only need the rest of this page once a second machine, a network bind, or an
 unattended broker enters the picture.
@@ -65,10 +78,12 @@ Goal: one browser tab showing terminals from every machine.
 2. **On *every* machine, run a broker** — one each, not a broker-plus-remote-
    agent. Two things every non-loopback broker needs:
 
-   - **An `auth_token`.** Without a token the broker refuses non-loopback
-     connections by design, and the UI's add-host form requires the password.
-     Set it in `broker_config.json` (`"auth_token": "…"`) or via
-     `$WEB_TERMINAL_TOKEN`.
+   - **A token you chose yourself.** Every broker requires one, but a broker
+     left to mint its own picks a different value per machine — workable, just
+     more URLs to keep track of. Setting `"auth_token"` in
+     `broker_config.json` (or `$WEB_TERMINAL_TOKEN`) means you know the value
+     up front and can reuse it across the fleet. Either way the UI's add-host
+     form asks for it.
    - **A way for the other machines' browsers to reach it.** Two options:
 
      - **Recommended — keep the loopback bind and front it with
@@ -82,10 +97,10 @@ Goal: one browser tab showing terminals from every machine.
        That publishes `https://<machine>.<tailnet>.ts.net/` — real TLS with
        zero certificate management, reachable only inside your tailnet — and
        proxies it (WebSockets included) to the broker still bound to
-       `127.0.0.1:4445`. Note that proxied requests reach the broker *from
-       loopback*, so the loopback auth exemption applies — set the
-       `auth_token` anyway (the add-host form wants it, and it keeps you safe
-       if the bind ever widens).
+       `127.0.0.1:4445`. Proxied requests reach the broker *from loopback* —
+       which used to mean they skipped auth entirely, handing the whole tailnet
+       an exempt path. Since #142 there is no loopback exemption, so this
+       topology is gated by the token like any other.
 
      - **Plain http directly**: set `"host"` to the machine's Tailscale IP (or
        `0.0.0.0` if you trust the tailnet) instead of `127.0.0.1`, so the
