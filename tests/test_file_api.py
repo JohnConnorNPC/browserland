@@ -21,6 +21,7 @@ import gzip
 from sanic_testing.reusable import ReusableClient
 
 import webterm.broker.app as app_mod
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable
 from webterm.broker.app import (_NotText, _decode_file_text, _encode_file_text,
                                 _looks_binary, _resolve_host_path, create_app)
 
@@ -33,8 +34,8 @@ WIN = sys.platform == "win32"
 # Each create_app needs a UNIQUE Sanic name (Sanic refuses two same-named apps
 # in one process). editor_root points at tmp_path so a relative body path
 # resolves into the test's sandbox; state_path keeps the identity/state files
-# out of the repo. No token => a loopback request (the test client dials
-# 127.0.0.1) passes the gate.
+# out of the repo. auth_token is ALWAYS explicit (#142): a token is required
+# on every surface now, and an unset one would mint a sidecar.
 _app_seq = 0
 
 
@@ -44,8 +45,7 @@ def _make_file_app(tmp_path, monkeypatch, token=None, paste_dir=None):
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"editor_root": str(tmp_path),
            "state_path": str(tmp_path / "webterm_state.json")}
-    if token:
-        cfg["auth_token"] = token
+    cfg["auth_token"] = token or TEST_TOKEN
     if paste_dir:
         cfg["paste_dir"] = str(paste_dir)   # keep #137 uploads in the sandbox
     return create_app(cfg, name=f"webterm-file-test-{_app_seq}")
@@ -143,7 +143,7 @@ def test_encode_legacy_cant_store_emoji_raises():
 
 def test_mkdir_creates_dir(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/mkdir", json={"path": "newdir"})
+    _, r = authed(app).post("/file/mkdir", json={"path": "newdir"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "newdir").is_dir()
 
@@ -151,14 +151,14 @@ def test_mkdir_creates_dir(tmp_path, monkeypatch):
 def test_mkdir_existing_is_conflict(tmp_path, monkeypatch):
     (tmp_path / "d").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/mkdir", json={"path": "d"})
+    _, r = authed(app).post("/file/mkdir", json={"path": "d"})
     assert r.status == 409 and r.json["error"] == "exists"
 
 
 def test_mkdir_parent_missing(tmp_path, monkeypatch):
     # os.mkdir, not makedirs: the missing intermediate parents are NOT created.
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/mkdir",
+    _, r = authed(app).post("/file/mkdir",
                                 json={"path": "no/such/parent/leaf"})
     assert r.status == 400 and r.json["error"] == "parent_missing"
     assert not (tmp_path / "no").exists()
@@ -166,7 +166,7 @@ def test_mkdir_parent_missing(tmp_path, monkeypatch):
 
 def test_mkdir_bad_path(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/mkdir", json={"path": ""})
+    _, r = authed(app).post("/file/mkdir", json={"path": ""})
     assert r.status == 400 and r.json["error"] == "bad_path"
 
 
@@ -191,6 +191,8 @@ def test_every_file_route_has_options_and_enforces_auth(tmp_path, monkeypatch):
     assert posts, "no /file/* POST routes discovered"
     missing = posts - options
     assert not missing, f"/file/* routes without an OPTIONS preflight: {sorted(missing)}"
+    # RAW client throughout: the whole point is that an UNAUTHENTICATED request
+    # is refused, so authed() would append the very token that must be missing.
     for path in sorted(posts):
         _, r = app.test_client.post(path, json={"path": "x"})
         assert r.status == 401, f"{path} skipped the auth gate (got {r.status})"
@@ -304,7 +306,7 @@ def test_follow_leaf_preserves_symlink_leaf(tmp_path):
 def test_copy_file_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "a.txt", "dst": "b.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "hello"
@@ -316,7 +318,7 @@ def test_copy_dir_ok(tmp_path, monkeypatch):
     (src / "sub").mkdir(parents=True)
     (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "tree", "dst": "tree2"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "tree2" / "sub" / "f.txt").read_text(encoding="utf-8") == "x"
@@ -326,7 +328,7 @@ def test_copy_exists_without_overwrite_409(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "b.txt").write_text("b", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "a.txt", "dst": "b.txt"})
     assert r.status == 409 and r.json["error"] == "exists"
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b"   # untouched
@@ -336,7 +338,7 @@ def test_copy_overwrite_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "b.txt").write_text("b", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/copy", json={"src": "a.txt", "dst": "b.txt", "overwrite": True})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "a"
@@ -347,7 +349,7 @@ def test_copy_dest_in_source_rejected_no_500(tmp_path, monkeypatch):
     # 400, never a 500 / RecursionError + half-built litter.
     (tmp_path / "tree").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "tree", "dst": "tree/inner"})
     assert r.status == 400 and r.json["error"] == "dest_in_source"
 
@@ -355,7 +357,7 @@ def test_copy_dest_in_source_rejected_no_500(tmp_path, monkeypatch):
 def test_copy_same_rejected(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "a.txt", "dst": "a.txt"})
     assert r.status == 400 and r.json["error"] == "same"
 
@@ -364,14 +366,14 @@ def test_copy_type_mismatch(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "d").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/copy", json={"src": "a.txt", "dst": "d", "overwrite": True})
     assert r.status == 400 and r.json["error"] == "type_mismatch"
 
 
 def test_copy_source_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/copy",
+    _, r = authed(app).post("/file/copy",
                                 json={"src": "nope", "dst": "x"})
     assert r.status == 404 and r.json["error"] == "not_found"
 
@@ -383,7 +385,7 @@ def test_copy_source_missing_404(tmp_path, monkeypatch):
 def test_move_file_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/move",
+    _, r = authed(app).post("/file/move",
                                 json={"src": "a.txt", "dst": "b.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "a.txt").exists()
@@ -395,7 +397,7 @@ def test_move_dir_ok(tmp_path, monkeypatch):
     (src / "sub").mkdir(parents=True)
     (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/move",
+    _, r = authed(app).post("/file/move",
                                 json={"src": "tree", "dst": "tree2"})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "tree").exists()
@@ -406,7 +408,7 @@ def test_move_exists_without_overwrite_409(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "b.txt").write_text("b", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/move",
+    _, r = authed(app).post("/file/move",
                                 json={"src": "a.txt", "dst": "b.txt"})
     assert r.status == 409 and r.json["error"] == "exists"
     assert (tmp_path / "a.txt").exists()          # source untouched
@@ -416,7 +418,7 @@ def test_move_overwrite_file_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "b.txt").write_text("b", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/move", json={"src": "a.txt", "dst": "b.txt", "overwrite": True})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "a.txt").exists()
@@ -432,7 +434,7 @@ def test_move_overwrite_dir_ok(tmp_path, monkeypatch):
     dst.mkdir()
     (dst / "old.txt").write_text("old", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/move", json={"src": "tree", "dst": "dest", "overwrite": True})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "tree").exists()
@@ -444,7 +446,7 @@ def test_move_overwrite_dir_ok(tmp_path, monkeypatch):
 
 def test_move_source_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/move",
+    _, r = authed(app).post("/file/move",
                                 json={"src": "nope", "dst": "x"})
     assert r.status == 404 and r.json["error"] == "not_found"
 
@@ -458,7 +460,7 @@ def test_move_symlink_to_dir_moves_link_not_target(tmp_path, monkeypatch):
     link = tmp_path / "link"
     _symlink_or_skip(target, link)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/move",
+    _, r = authed(app).post("/file/move",
                                 json={"src": "link", "dst": "moved"})
     assert r.status == 200 and r.json["ok"] is True
     moved = tmp_path / "moved"
@@ -475,7 +477,7 @@ def test_move_symlink_to_dir_moves_link_not_target(tmp_path, monkeypatch):
 def test_delete_file_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete", json={"path": "a.txt"})
+    _, r = authed(app).post("/file/delete", json={"path": "a.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "a.txt").exists()
 
@@ -485,7 +487,7 @@ def test_delete_dir_without_recursive_is_400(tmp_path, monkeypatch):
     (d / "child.txt").parent.mkdir()
     (d / "child.txt").write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete", json={"path": "d"})
+    _, r = authed(app).post("/file/delete", json={"path": "d"})
     assert r.status == 400 and r.json["error"] == "is_a_directory"
     assert d.is_dir()                             # untouched without recursive
 
@@ -495,7 +497,7 @@ def test_delete_dir_recursive_ok(tmp_path, monkeypatch):
     (d / "sub").mkdir(parents=True)
     (d / "sub" / "f.txt").write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete",
+    _, r = authed(app).post("/file/delete",
                                 json={"path": "d", "recursive": True})
     assert r.status == 200 and r.json["ok"] is True
     assert not d.exists()
@@ -503,7 +505,7 @@ def test_delete_dir_recursive_ok(tmp_path, monkeypatch):
 
 def test_delete_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete", json={"path": "nope"})
+    _, r = authed(app).post("/file/delete", json={"path": "nope"})
     assert r.status == 404 and r.json["error"] == "not_found"
 
 
@@ -516,7 +518,7 @@ def test_delete_symlink_to_dir_unlinks_link_keeps_target(tmp_path, monkeypatch):
     link = tmp_path / "link"
     _symlink_or_skip(target, link)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete",
+    _, r = authed(app).post("/file/delete",
                                 json={"path": "link", "recursive": True})
     assert r.status == 200 and r.json["ok"] is True
     assert not os.path.lexists(str(link))         # link gone
@@ -530,7 +532,7 @@ def test_delete_symlink_to_file_unlinks_link_keeps_target(tmp_path, monkeypatch)
     link = tmp_path / "link.txt"
     _symlink_or_skip(target, link)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/delete", json={"path": "link.txt"})
+    _, r = authed(app).post("/file/delete", json={"path": "link.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert not os.path.lexists(str(link))
     assert target.read_text(encoding="utf-8") == "precious"
@@ -543,13 +545,13 @@ def test_delete_symlink_to_file_unlinks_link_keeps_target(tmp_path, monkeypatch)
 def test_zip_file_then_unzip_roundtrip(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/zip",
+    _, r = authed(app).post("/file/zip",
                                 json={"src": "a.txt", "dest": "a.zip"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "a.zip").is_file()
     with zipfile.ZipFile(tmp_path / "a.zip") as zf:
         assert zf.namelist() == ["a.txt"]
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "a.zip", "dest": "out"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "out" / "a.txt").read_text(encoding="utf-8") == "hello"
@@ -561,14 +563,14 @@ def test_zip_dir_then_unzip_roundtrip(tmp_path, monkeypatch):
     (src / "sub" / "f.txt").write_text("x", encoding="utf-8")
     (src / "top.txt").write_text("t", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/zip",
+    _, r = authed(app).post("/file/zip",
                                 json={"src": "tree", "dest": "tree.zip"})
     assert r.status == 200 and r.json["ok"] is True
     # the archive carries the top folder name
     with zipfile.ZipFile(tmp_path / "tree.zip") as zf:
         names = set(zf.namelist())
     assert any(n.startswith("tree/") for n in names)
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "tree.zip", "dest": "out"})
     assert r.status == 200 and r.json["ok"] is True
     assert (tmp_path / "out" / "tree" / "sub" / "f.txt").read_text(
@@ -581,7 +583,7 @@ def test_zip_dest_exists_409(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "a.zip").write_text("not really a zip", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/zip",
+    _, r = authed(app).post("/file/zip",
                                 json={"src": "a.txt", "dest": "a.zip"})
     assert r.status == 409 and r.json["error"] == "exists"
 
@@ -590,7 +592,7 @@ def test_zip_dest_overwrite_ok(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "a.zip").write_text("stale", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/zip", json={"src": "a.txt", "dest": "a.zip", "overwrite": True})
     assert r.status == 200 and r.json["ok"] is True
     with zipfile.ZipFile(tmp_path / "a.zip") as zf:   # a real archive now
@@ -604,7 +606,7 @@ def test_zip_too_many_entries_rejected(tmp_path, monkeypatch):
     (src / "b.txt").write_text("b", encoding="utf-8")
     monkeypatch.setattr(app_mod, "MAX_ARCHIVE_ENTRIES", 1)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/zip",
+    _, r = authed(app).post("/file/zip",
                                 json={"src": "tree", "dest": "out.zip"})
     assert r.status == 400 and r.json["error"] == "too_many_entries"
     assert not (tmp_path / "out.zip").exists()       # no partial archive
@@ -613,7 +615,7 @@ def test_zip_too_many_entries_rejected(tmp_path, monkeypatch):
 def test_zip_dest_in_source_rejected(tmp_path, monkeypatch):
     (tmp_path / "tree").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/zip",
+    _, r = authed(app).post("/file/zip",
                                 json={"src": "tree", "dest": "tree/inner.zip"})
     assert r.status == 400 and r.json["error"] == "dest_in_source"
 
@@ -623,7 +625,7 @@ def test_unzip_dest_exists_409(tmp_path, monkeypatch):
         zf.writestr("x.txt", "x")
     (tmp_path / "out").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "a.zip", "dest": "out"})
     assert r.status == 409 and r.json["error"] == "exists"
 
@@ -631,7 +633,7 @@ def test_unzip_dest_exists_409(tmp_path, monkeypatch):
 def test_unzip_bad_zip(tmp_path, monkeypatch):
     (tmp_path / "a.zip").write_text("not a zip at all", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "a.zip", "dest": "out"})
     assert r.status == 400 and r.json["error"] == "bad_zip"
     assert not (tmp_path / "out").exists()
@@ -642,7 +644,7 @@ def test_unzip_zip_bomb_rejected(tmp_path, monkeypatch):
         zf.writestr("a.txt", "x" * 1000)
     monkeypatch.setattr(app_mod, "MAX_ARCHIVE_BYTES", 10)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "big.zip", "dest": "out"})
     assert r.status == 400 and r.json["error"] == "archive_too_large"
     assert not (tmp_path / "out").exists()           # nothing extracted
@@ -654,7 +656,7 @@ def test_unzip_traversal_member_stays_in_dest(tmp_path, monkeypatch):
     with zipfile.ZipFile(tmp_path / "evil.zip", "w") as zf:
         zf.writestr("../escape.txt", "pwned")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/unzip",
+    _, r = authed(app).post("/file/unzip",
                                 json={"path": "evil.zip", "dest": "out"})
     assert r.status == 200 and r.json["ok"] is True
     assert not (tmp_path / "escape.txt").exists()    # did NOT escape
@@ -669,7 +671,7 @@ def test_unzip_traversal_member_stays_in_dest(tmp_path, monkeypatch):
 def test_stat_file(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    _, r = authed(app).post("/file/stat", json={"path": "a.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert r.json["type"] == "file"
     assert r.json["size"] == 5
@@ -685,7 +687,7 @@ def test_stat_dir_has_child_count(tmp_path, monkeypatch):
     (d / "b").write_text("b", encoding="utf-8")
     (d / "sub").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/stat", json={"path": "d"})
+    _, r = authed(app).post("/file/stat", json={"path": "d"})
     assert r.status == 200 and r.json["ok"] is True
     assert r.json["type"] == "dir"
     assert r.json["children"] == 3
@@ -693,7 +695,7 @@ def test_stat_dir_has_child_count(tmp_path, monkeypatch):
 
 def test_stat_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/stat", json={"path": "nope"})
+    _, r = authed(app).post("/file/stat", json={"path": "nope"})
     assert r.status == 404 and r.json["error"] == "not_found"
 
 
@@ -701,7 +703,7 @@ def test_stat_reports_os(tmp_path, monkeypatch):
     # #96: the platform discriminator that picks the dialog's editor branch.
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    _, r = authed(app).post("/file/stat", json={"path": "a.txt"})
     assert r.status == 200 and r.json["ok"] is True
     assert r.json["os"] == ("windows" if WIN else "posix")
 
@@ -711,7 +713,7 @@ def test_stat_windows_attributes(tmp_path, monkeypatch):
     # #96: stat exposes the READONLY/HIDDEN/ARCHIVE booleans the dialog pre-checks.
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/stat", json={"path": "a.txt"})
+    _, r = authed(app).post("/file/stat", json={"path": "a.txt"})
     assert r.status == 200 and r.json["ok"] is True
     attrs = r.json["attributes"]
     assert set(attrs) == {"readonly", "hidden", "archive"}
@@ -727,12 +729,12 @@ def test_setattr_chmod_posix(tmp_path, monkeypatch):
     f = tmp_path / "s.sh"
     f.write_text("#!/bin/sh\n", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/setattr",
+    _, r = authed(app).post("/file/setattr",
                                 json={"path": "s.sh", "mode": 0o640})
     assert r.status == 200 and r.json["ok"] is True
     assert stat.S_IMODE(f.stat().st_mode) == 0o640
     # The headline +x case: flip the execute bits on.
-    _, r = app.test_client.post("/file/setattr",
+    _, r = authed(app).post("/file/setattr",
                                 json={"path": "s.sh", "mode": 0o755})
     assert r.status == 200 and r.json["ok"] is True
     m = f.stat().st_mode
@@ -748,7 +750,7 @@ def test_setattr_posix_preserves_special_bits(tmp_path, monkeypatch):
     f.write_text("x", encoding="utf-8")
     os.chmod(str(f), 0o2755)                       # setgid + rwxr-xr-x
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/setattr",
+    _, r = authed(app).post("/file/setattr",
                                 json={"path": "g.sh", "mode": 0o644})
     assert r.status == 200 and r.json["ok"] is True
     assert stat.S_IMODE(f.stat().st_mode) == 0o2644   # setgid survived
@@ -760,14 +762,14 @@ def test_setattr_posix_requires_mode(tmp_path, monkeypatch):
     f.write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
     # Missing mode.
-    _, r = app.test_client.post("/file/setattr", json={"path": "m.txt"})
+    _, r = authed(app).post("/file/setattr", json={"path": "m.txt"})
     assert r.status == 400 and r.json["error"] == "bad_mode"
     # Non-int mode (would make os.chmod raise TypeError -> 500 if not guarded).
-    _, r = app.test_client.post("/file/setattr",
+    _, r = authed(app).post("/file/setattr",
                                 json={"path": "m.txt", "mode": "755"})
     assert r.status == 400 and r.json["error"] == "bad_mode"
     # A bool is an int subclass — still rejected.
-    _, r = app.test_client.post("/file/setattr",
+    _, r = authed(app).post("/file/setattr",
                                 json={"path": "m.txt", "mode": True})
     assert r.status == 400 and r.json["error"] == "bad_mode"
 
@@ -777,13 +779,13 @@ def test_setattr_windows_readonly(tmp_path, monkeypatch):
     f = tmp_path / "w.txt"
     f.write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/setattr",
         json={"path": "w.txt", "attributes": {"readonly": True}})
     assert r.status == 200 and r.json["ok"] is True
     assert f.stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
     # Clear it again — also lets the tmp_path teardown delete the file.
-    _, r = app.test_client.post(
+    _, r = authed(app).post(
         "/file/setattr",
         json={"path": "w.txt", "attributes": {"readonly": False}})
     assert r.status == 200 and r.json["ok"] is True
@@ -795,13 +797,13 @@ def test_setattr_windows_requires_attributes(tmp_path, monkeypatch):
     f = tmp_path / "w.txt"
     f.write_text("x", encoding="utf-8")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/setattr", json={"path": "w.txt"})
+    _, r = authed(app).post("/file/setattr", json={"path": "w.txt"})
     assert r.status == 400 and r.json["error"] == "bad_attrs"
 
 
 def test_setattr_bad_path(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/setattr", json={"path": ""})
+    _, r = authed(app).post("/file/setattr", json={"path": ""})
     assert r.status == 400 and r.json["error"] == "bad_path"
 
 
@@ -809,7 +811,7 @@ def test_setattr_missing_404(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     body = {"path": "nope", "attributes": {"readonly": True}} if WIN \
         else {"path": "nope", "mode": 0o644}
-    _, r = app.test_client.post("/file/setattr", json=body)
+    _, r = authed(app).post("/file/setattr", json=body)
     assert r.status == 404 and r.json["error"] == "not_found"
 
 
@@ -843,7 +845,7 @@ def test_read_chunk_ranged_reads_reconstruct(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 4096)   # force >1 read
     out, off = b"", 0
     while True:
-        _, r = app.test_client.post("/file/read_chunk",
+        _, r = authed(app).post("/file/read_chunk",
                                     json={"path": "f.bin", "offset": off,
                                           "length": 4096})
         assert r.status == 200 and r.json["ok"], r.json
@@ -863,7 +865,7 @@ def test_read_chunk_clamps_length_to_max(tmp_path, monkeypatch):
     (tmp_path / "f.bin").write_bytes(b"x" * 5000)
     app = _make_file_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 1000)
-    _, r = app.test_client.post("/file/read_chunk",
+    _, r = authed(app).post("/file/read_chunk",
                                 json={"path": "f.bin", "offset": 0,
                                       "length": 10 ** 9})
     assert r.status == 200 and r.json["length"] == 1000 and not r.json["eof"]
@@ -875,7 +877,7 @@ def test_read_chunk_past_old_5mib_cap(tmp_path, monkeypatch):
     big = b"A" * (5 * 2 ** 20 + 4096)          # just over 5 MiB
     (tmp_path / "big.bin").write_bytes(big)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/read_chunk",
+    _, r = authed(app).post("/file/read_chunk",
                                 json={"path": "big.bin",
                                       "offset": 5 * 2 ** 20, "length": 4096})
     assert r.status == 200 and r.json["ok"], r.json
@@ -883,14 +885,14 @@ def test_read_chunk_past_old_5mib_cap(tmp_path, monkeypatch):
     assert base64.b64decode(r.json["content_b64"]) == b"A" * 4096
     assert r.json["eof"] is True
     # And /file/read still rejects the same oversized file, unchanged.
-    _, r = app.test_client.post("/file/read", json={"path": "big.bin"})
+    _, r = authed(app).post("/file/read", json={"path": "big.bin"})
     assert r.status == 400 and r.json["error"] == "too_large"
 
 
 def test_read_chunk_empty_file(tmp_path, monkeypatch):
     (tmp_path / "e.bin").write_bytes(b"")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/read_chunk", json={"path": "e.bin"})
+    _, r = authed(app).post("/file/read_chunk", json={"path": "e.bin"})
     assert r.status == 200 and r.json["length"] == 0
     assert r.json["size"] == 0 and r.json["eof"] is True
 
@@ -902,16 +904,16 @@ def test_read_chunk_bad_range(tmp_path, monkeypatch):
                  {"path": "f.bin", "length": 0},
                  {"path": "f.bin", "offset": "x"},
                  {"path": "f.bin", "length": True}):
-        _, r = app.test_client.post("/file/read_chunk", json=body)
+        _, r = authed(app).post("/file/read_chunk", json=body)
         assert r.status == 400 and r.json["error"] == "bad_range", body
 
 
 def test_read_chunk_not_a_file_and_missing(tmp_path, monkeypatch):
     (tmp_path / "d").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/read_chunk", json={"path": "d"})
+    _, r = authed(app).post("/file/read_chunk", json={"path": "d"})
     assert r.status == 400 and r.json["error"] == "not_a_file"
-    _, r = app.test_client.post("/file/read_chunk", json={"path": "nope"})
+    _, r = authed(app).post("/file/read_chunk", json={"path": "nope"})
     assert r.status == 404 and r.json["error"] == "not_found"
 
 
@@ -919,7 +921,7 @@ def test_read_chunk_not_a_file_and_missing(tmp_path, monkeypatch):
 
 def test_upload_begin_ok_returns_id(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/upload_begin", json={"path": "new.bin"})
+    _, r = authed(app).post("/file/upload_begin", json={"path": "new.bin"})
     assert r.status == 200 and r.json["ok"]
     assert isinstance(r.json["upload_id"], str) and r.json["upload_id"]
 
@@ -927,9 +929,9 @@ def test_upload_begin_ok_returns_id(tmp_path, monkeypatch):
 def test_upload_begin_exists_then_overwrite(tmp_path, monkeypatch):
     (tmp_path / "d.bin").write_bytes(b"old")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/upload_begin", json={"path": "d.bin"})
+    _, r = authed(app).post("/file/upload_begin", json={"path": "d.bin"})
     assert r.status == 409 and r.json["error"] == "exists"
-    _, r = app.test_client.post("/file/upload_begin",
+    _, r = authed(app).post("/file/upload_begin",
                                 json={"path": "d.bin", "overwrite": True})
     assert r.status == 200 and r.json["ok"]
 
@@ -937,24 +939,24 @@ def test_upload_begin_exists_then_overwrite(tmp_path, monkeypatch):
 def test_upload_begin_is_dir(tmp_path, monkeypatch):
     (tmp_path / "sub").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/upload_begin", json={"path": "sub"})
+    _, r = authed(app).post("/file/upload_begin", json={"path": "sub"})
     assert r.status == 400 and r.json["error"] == "is_dir"
 
 
 def test_upload_begin_parent_missing(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/upload_begin",
+    _, r = authed(app).post("/file/upload_begin",
                                 json={"path": "no/such/leaf"})
     assert r.status == 400 and r.json["error"] == "parent_missing"
 
 
 def test_upload_commit_and_abort_no_session(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/upload_commit",
+    _, r = authed(app).post("/file/upload_commit",
                                 json={"upload_id": "deadbeef"})
     assert r.status == 404 and r.json["error"] == "no_session"
     # abort is idempotent: an unknown id is still {ok:true} (cleanup-only).
-    _, r = app.test_client.post("/file/upload_abort",
+    _, r = authed(app).post("/file/upload_abort",
                                 json={"upload_id": "deadbeef"})
     assert r.status == 200 and r.json["ok"] is True
 
@@ -967,7 +969,7 @@ def test_upload_session_roundtrip_over_5mib(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     payload = os.urandom(6 * 2 ** 20 + 321)    # > 5 MiB
     step = 1 << 20                             # 1 MiB client chunks
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "out.bin"})
         assert r.status == 200, r.json
         uid = r.json["upload_id"]
@@ -988,7 +990,7 @@ def test_upload_session_roundtrip_over_5mib(tmp_path, monkeypatch):
 
 def test_upload_empty_file_roundtrip(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "empty.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1002,7 +1004,7 @@ def test_upload_empty_file_roundtrip(tmp_path, monkeypatch):
 
 def test_upload_chunk_bad_offset(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1016,7 +1018,7 @@ def test_upload_chunk_bad_offset(tmp_path, monkeypatch):
 
 def test_upload_chunk_bad_base64(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1030,7 +1032,7 @@ def test_upload_chunk_bad_base64(tmp_path, monkeypatch):
 def test_upload_chunk_chunk_too_large(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 5)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1044,7 +1046,7 @@ def test_upload_chunk_chunk_too_large(tmp_path, monkeypatch):
 def test_upload_chunk_cumulative_too_large_drops_session(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_TRANSFER_BYTES", 10)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1063,7 +1065,7 @@ def test_upload_chunk_cumulative_too_large_drops_session(tmp_path, monkeypatch):
 def test_upload_commit_replaces_and_returns_size(tmp_path, monkeypatch):
     (tmp_path / "d.bin").write_bytes(b"OLDOLDOLD")
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin",
                            json={"path": "d.bin", "overwrite": True})
         uid = r.json["upload_id"]
@@ -1079,7 +1081,7 @@ def test_upload_commit_replaces_and_returns_size(tmp_path, monkeypatch):
 
 def test_upload_abort_removes_temp_and_is_idempotent(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "z.bin"})
         uid = r.json["upload_id"]
         tmp = app.ctx.uploads[uid]["tmp"]
@@ -1095,7 +1097,7 @@ def test_upload_abort_removes_temp_and_is_idempotent(tmp_path, monkeypatch):
 def test_upload_begin_too_many_sessions(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_UPLOAD_SESSIONS", 1)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "a.bin"})
         assert r.status == 200
         _, r = client.post("/file/upload_begin", json={"path": "b.bin"})
@@ -1104,7 +1106,7 @@ def test_upload_begin_too_many_sessions(tmp_path, monkeypatch):
 
 def test_upload_begin_sweeps_stale_session(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "a.bin"})
         uid1 = r.json["upload_id"]
         tmp1 = app.ctx.uploads[uid1]["tmp"]
@@ -1126,7 +1128,7 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
 def _paste_image(app, raw):
-    return app.test_client.post(
+    return authed(app).post(
         "/file/paste_image",
         json={"content_b64": base64.b64encode(raw).decode()})[1]
 
@@ -1165,12 +1167,12 @@ def test_paste_image_rejects_non_image(tmp_path, monkeypatch):
 
 def test_paste_image_bad_base64_and_bad_content(tmp_path, monkeypatch):
     app = _make_file_app(tmp_path, monkeypatch, paste_dir=tmp_path / "paste")
-    _, r = app.test_client.post("/file/paste_image",
+    _, r = authed(app).post("/file/paste_image",
                                 json={"content_b64": "!!not-base64!!"})
     assert r.status == 400 and r.json["error"] == "bad_base64"
-    _, r = app.test_client.post("/file/paste_image", json={})
+    _, r = authed(app).post("/file/paste_image", json={})
     assert r.status == 400 and r.json["error"] == "bad_content"
-    _, r = app.test_client.post("/file/paste_image", json={"content_b64": 7})
+    _, r = authed(app).post("/file/paste_image", json={"content_b64": 7})
     assert r.status == 400 and r.json["error"] == "bad_content"
 
 
@@ -1181,7 +1183,7 @@ def test_paste_image_too_large_decoded_and_predecode(tmp_path, monkeypatch):
     r = _paste_image(app, _PNG + b"\x00" * 64)
     assert r.status == 400 and r.json["error"] == "too_large"
     # Pre-decode guard (codex): base64 LENGTH alone rejects before decoding.
-    _, r = app.test_client.post("/file/paste_image",
+    _, r = authed(app).post("/file/paste_image",
                                 json={"content_b64": "A" * 4096})
     assert r.status == 400 and r.json["error"] == "too_large"
 
@@ -1225,7 +1227,7 @@ def test_file_hash_matches_hashlib(tmp_path, monkeypatch):
     data = bytes((i * 31) % 256 for i in range(10000))
     (tmp_path / "f.bin").write_bytes(data)
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/hash", json={"path": "f.bin"})
+    _, r = authed(app).post("/file/hash", json={"path": "f.bin"})
     assert r.status == 200 and r.json["ok"], r.json
     assert r.json["sha256"] == hashlib.sha256(data).hexdigest()
     assert r.json["size"] == len(data)
@@ -1238,12 +1240,12 @@ def test_file_hash_beats_5mib_cap(tmp_path, monkeypatch):
     (tmp_path / "big.bin").write_bytes(big)
     app = _make_file_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_CHUNK_BYTES", 4096)   # force many blocks
-    _, r = app.test_client.post("/file/hash", json={"path": "big.bin"})
+    _, r = authed(app).post("/file/hash", json={"path": "big.bin"})
     assert r.status == 200 and r.json["ok"], r.json
     assert r.json["sha256"] == hashlib.sha256(big).hexdigest()
     assert r.json["size"] == len(big)
     # /file/read still rejects the same oversized file, unchanged.
-    _, r = app.test_client.post("/file/read", json={"path": "big.bin"})
+    _, r = authed(app).post("/file/read", json={"path": "big.bin"})
     assert r.status == 400 and r.json["error"] == "too_large"
 
 
@@ -1252,7 +1254,7 @@ def test_file_hash_empty_file(tmp_path, monkeypatch):
     # session accumulates, so an empty-file move verifies cleanly.
     (tmp_path / "e.bin").write_bytes(b"")
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/hash", json={"path": "e.bin"})
+    _, r = authed(app).post("/file/hash", json={"path": "e.bin"})
     assert r.status == 200 and r.json["ok"], r.json
     assert r.json["sha256"] == hashlib.sha256(b"").hexdigest()
     assert r.json["size"] == 0
@@ -1261,11 +1263,11 @@ def test_file_hash_empty_file(tmp_path, monkeypatch):
 def test_file_hash_missing_and_dir_errors(tmp_path, monkeypatch):
     (tmp_path / "d").mkdir()
     app = _make_file_app(tmp_path, monkeypatch)
-    _, r = app.test_client.post("/file/hash", json={"path": "nope"})
+    _, r = authed(app).post("/file/hash", json={"path": "nope"})
     assert r.status == 404 and r.json["error"] == "not_found"
-    _, r = app.test_client.post("/file/hash", json={"path": "d"})
+    _, r = authed(app).post("/file/hash", json={"path": "d"})
     assert r.status == 400 and r.json["error"] == "not_a_file"
-    _, r = app.test_client.post("/file/hash", json={"path": ""})
+    _, r = authed(app).post("/file/hash", json={"path": ""})
     assert r.status == 400 and r.json["error"] == "bad_path"
 
 
@@ -1274,7 +1276,7 @@ def test_upload_commit_returns_sha256(tmp_path, monkeypatch):
     # accumulated sha256 (additive) — matching a direct hashlib of the payload.
     payload = bytes((i * 17) % 256 for i in range(3000))
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "c.bin"})
         uid = r.json["upload_id"]
         _, r = client.post("/file/upload_chunk",
@@ -1294,7 +1296,7 @@ def test_upload_commit_verifies_sha256_match(tmp_path, monkeypatch):
     # dest replaced.
     payload = b"move me exactly"
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "m.bin"})
         uid = r.json["upload_id"]
         client.post("/file/upload_chunk",
@@ -1315,7 +1317,7 @@ def test_upload_commit_rejects_sha256_mismatch(tmp_path, monkeypatch):
     # bytes (the os.replace is REFUSED, never overwriting good data with bad).
     (tmp_path / "d.bin").write_bytes(b"ORIGINAL-GOOD-DEST")
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin",
                            json={"path": "d.bin", "overwrite": True})
         uid = r.json["upload_id"]
@@ -1341,7 +1343,7 @@ def test_upload_commit_rejects_malformed_sha256(tmp_path, monkeypatch):
     # a verified move to an unverified one, nor 500 on a non-string). The session
     # survives so a correct re-commit (or abort) is still possible.
     app = _make_file_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/file/upload_begin", json={"path": "bad.bin"})
         uid = r.json["upload_id"]
         client.post("/file/upload_chunk",

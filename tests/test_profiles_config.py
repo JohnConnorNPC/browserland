@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker import app as brokerapp
 from webterm.broker.app import (
     _detect_posix_shells,
@@ -39,14 +40,13 @@ def _make_app(tmp_path, monkeypatch, token=None):
     _seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json")}
-    if token:
-        cfg["auth_token"] = token
+    cfg["auth_token"] = token or TEST_TOKEN
     return create_app(cfg, name=f"webterm-profiles-test-{_seq}")
 
 
 def _post(app, body, token=None):
     path = "/profiles/config" + (f"?token={token}" if token else "")
-    _, r = app.test_client.post(path, data=json.dumps(body).encode(),
+    _, r = authed(app).post(path, data=json.dumps(body).encode(),
                                 headers={"Content-Type": "application/json"})
     return r
 
@@ -132,7 +132,7 @@ def test_post_persists_and_swaps_live(tmp_path, monkeypatch):
     assert r.json["source"] == "sidecar" and r.json["default_profile"] == "pwsh"
     # The live launcher swapped WITHOUT a restart: /profiles (names-only)
     # reflects the new set immediately.
-    _, names = app.test_client.get("/profiles")
+    _, names = authed(app).get("/profiles")
     assert set(names.json["profiles"]) == {"wsl-ubuntu", "pwsh"}
     assert names.json["default"] == "pwsh"
     # ...and it was persisted to the sidecar beside the state store.
@@ -161,7 +161,7 @@ def test_post_persists_color_and_exposes_map(tmp_path, monkeypatch):
     assert persisted["profiles"]["red"]["color"] == "#ff0000"
     # Names-only /profiles: names stay an array, colors ride the side-map (only
     # profiles that set one appear).
-    _, names = app.test_client.get("/profiles")
+    _, names = authed(app).get("/profiles")
     assert set(names.json["profiles"]) == {"red", "plain"}
     assert names.json["colors"] == {"red": "#ff0000"}
 
@@ -175,7 +175,7 @@ def test_post_clears_color_with_empty_string(tmp_path, monkeypatch):
     r = _post(app, {"profiles": {"a": {"command": ["a"], "color": ""}},
                     "default_profile": "a"})
     assert r.status == 200 and r.json["profiles"]["a"]["color"] is None
-    _, names = app.test_client.get("/profiles")
+    _, names = authed(app).get("/profiles")
     assert names.json["colors"] == {}            # no colored profiles remain
 
 
@@ -202,7 +202,7 @@ def test_post_delete_via_replace(tmp_path, monkeypatch):
                     "default_profile": ""})
     assert r.status == 200 and set(r.json["profiles"]) == {"b"}
     assert r.json["default_profile"] == "b"
-    _, names = app.test_client.get("/profiles")
+    _, names = authed(app).get("/profiles")
     assert names.json["profiles"] == ["b"]
 
 
@@ -213,15 +213,16 @@ def test_post_rename_via_replace(tmp_path, monkeypatch):
     r = _post(app, {"profiles": {"new": {"command": ["sh"]}},
                     "default_profile": "new"})
     assert r.status == 200 and set(r.json["profiles"]) == {"new"}
-    _, names = app.test_client.get("/profiles")
+    _, names = authed(app).get("/profiles")
     assert names.json["profiles"] == ["new"]
 
 
 def test_post_auth_gate_with_token(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
-    _, r = app.test_client.get("/profiles/config")     # loopback but token set
+    # RAW client on purpose: this asserts the UNauthenticated 401.
+    _, r = app.test_client.get("/profiles/config")
     assert r.status == 401
-    _, r = app.test_client.get("/profiles/config?token=sekrit")
+    _, r = authed(app).get("/profiles/config?token=sekrit")
     assert r.status == 200 and r.json["ok"] is True
     # A rejected POST changes nothing.
     r = _post(app, {"profiles": {"a/b": {"command": ["x"]}}}, token="sekrit")
@@ -231,7 +232,7 @@ def test_post_auth_gate_with_token(tmp_path, monkeypatch):
 def test_post_rejects_too_large(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     big = "x" * (brokerapp.MAX_PROFILES_BYTES + 1)
-    _, r = app.test_client.post("/profiles/config", data=big.encode(),
+    _, r = authed(app).post("/profiles/config", data=big.encode(),
                                 headers={"Content-Type": "application/json"})
     assert r.status == 413 and r.json["error"] == "too_large"
 
@@ -246,7 +247,7 @@ def test_mcp_profiles_stays_names_only_after_edit(tmp_path, monkeypatch):
     _post(app, {"profiles": {"secret": {"command": ["donotshow", "--flag"],
                                         "color": "#abcdef"}},
                 "default_profile": "secret"})
-    _, r = app.test_client.get("/mcp/profiles?token=mtok")
+    _, r = authed(app).get("/mcp/profiles?token=mtok")
     assert r.status == 200
     assert r.json["profiles"] == ["secret"]      # names only, never commands
     blob = json.dumps(r.json)
@@ -254,7 +255,7 @@ def test_mcp_profiles_stays_names_only_after_edit(tmp_path, monkeypatch):
     assert "color" not in blob and "#abcdef" not in blob   # #115: no color leak
     # The BROWSER-realm names-only /profiles DOES carry the additive color map,
     # while its "profiles" stays a plain name array (the seed path reads both).
-    _, pr = app.test_client.get("/profiles")
+    _, pr = authed(app).get("/profiles")
     assert pr.json["profiles"] == ["secret"]
     assert pr.json["colors"] == {"secret": "#abcdef"}
     assert "command" not in json.dumps(pr.json)  # still no command leak
@@ -343,6 +344,6 @@ def test_detect_endpoint_wired(tmp_path, monkeypatch):
     fake = [{"name": "Ubuntu", "title": "Ubuntu (WSL)",
              "command": ["wsl.exe", "-d", "Ubuntu"], "exists": True}]
     monkeypatch.setattr(brokerapp, "_detect_profile_suggestions", lambda: fake)
-    _, r = app.test_client.get("/profiles/detect")
+    _, r = authed(app).get("/profiles/detect")
     assert r.status == 200 and r.json["ok"] is True
     assert r.json["suggestions"] == fake

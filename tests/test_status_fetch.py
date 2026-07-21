@@ -5,7 +5,7 @@ filter: the client passes allowlist IDs, never URLs; an unknown ID is dropped, a
 request that names providers but validates NONE is a 400, a stray ?url= is
 ignored, and the upstream fetch itself is https-only + no-redirect + size-capped.
 
-These cover the token-or-loopback gate + CORS preflight (mirroring
+These cover the (mandatory, #142) token gate + CORS preflight (mirroring
 test_broker_info.py), the allowlist/400 SSRF proof, the Statuspage normalization,
 the https/no-redirect/200-only/size-cap fetch path, and the TTL cache. NO real
 network I/O: the module-level _fetch_status_blocking (for route tests) and the
@@ -19,6 +19,7 @@ import urllib.request
 
 import pytest
 
+from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker import app as broker_app
 from webterm.broker.app import (STATUS_ALLOWLIST, STATUS_MAX_BYTES, create_app,
                                 _fetch_status_blocking, _normalize_statuspage)
@@ -167,8 +168,7 @@ def _make_app(tmp_path, monkeypatch, token=None):
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json")}
-    if token:
-        cfg["auth_token"] = token
+    cfg["auth_token"] = token or TEST_TOKEN
     return create_app(cfg, name=f"webterm-status-test-{_app_seq}")
 
 
@@ -188,10 +188,10 @@ def _patch_fetch(monkeypatch):
     return calls
 
 
-def test_status_loopback_ok_no_token_returns_all(tmp_path, monkeypatch):
+def test_status_with_token_returns_all(tmp_path, monkeypatch):
     _patch_fetch(monkeypatch)
     app = _make_app(tmp_path, monkeypatch, token=None)
-    _, r = app.test_client.get("/status/fetch")
+    _, r = authed(app).get("/status/fetch")
     assert r.status == 200
     assert r.json["ok"] is True
     assert isinstance(r.json["fetchedAt"], int)
@@ -201,11 +201,13 @@ def test_status_loopback_ok_no_token_returns_all(tmp_path, monkeypatch):
 def test_status_requires_token_when_configured(tmp_path, monkeypatch):
     _patch_fetch(monkeypatch)
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    # RAW client on purpose: authed() would append the very token this
+    # test needs to be missing.
     _, r = app.test_client.get("/status/fetch")
     assert r.status == 401
     _, r = app.test_client.get("/status/fetch?token=nope")
     assert r.status == 401
-    _, r = app.test_client.get("/status/fetch?token=sekrit")
+    _, r = authed(app).get("/status/fetch?token=sekrit")
     assert r.status == 200
     assert r.json["ok"] is True
 
@@ -213,7 +215,7 @@ def test_status_requires_token_when_configured(tmp_path, monkeypatch):
 def test_status_empty_provider_returns_all(tmp_path, monkeypatch):
     _patch_fetch(monkeypatch)
     app = _make_app(tmp_path, monkeypatch, token=None)
-    _, r = app.test_client.get("/status/fetch?provider=")
+    _, r = authed(app).get("/status/fetch?provider=")
     assert r.status == 200
     assert [p["id"] for p in r.json["providers"]] == list(STATUS_ALLOWLIST.keys())
 
@@ -224,26 +226,26 @@ def test_status_unknown_dropped_and_all_unknown_is_400(tmp_path, monkeypatch):
     _patch_fetch(monkeypatch)
     app = _make_app(tmp_path, monkeypatch, token=None)
 
-    _, r = app.test_client.get("/status/fetch?provider=anthropic,evil,openai")
+    _, r = authed(app).get("/status/fetch?provider=anthropic,evil,openai")
     assert r.status == 200
     assert [p["id"] for p in r.json["providers"]] == ["anthropic", "openai"]
 
-    _, r = app.test_client.get("/status/fetch?provider=evil")
+    _, r = authed(app).get("/status/fetch?provider=evil")
     assert r.status == 400
     assert r.json["ok"] is False
 
     # A path-traversal-ish token is just an unknown id -> 400, never a fetch.
-    _, r = app.test_client.get("/status/fetch?provider=../secrets")
+    _, r = authed(app).get("/status/fetch?provider=../secrets")
     assert r.status == 400
 
     # ?url= alone is ignored -> treated as "no provider" -> all providers.
-    _, r = app.test_client.get(
+    _, r = authed(app).get(
         "/status/fetch?url=http://169.254.169.254/latest/meta-data/")
     assert r.status == 200
     assert [p["id"] for p in r.json["providers"]] == list(STATUS_ALLOWLIST.keys())
 
     # ...and a url can never rescue an all-unknown provider list.
-    _, r = app.test_client.get(
+    _, r = authed(app).get(
         "/status/fetch?provider=evil&url=http://169.254.169.254/")
     assert r.status == 400
 
@@ -252,9 +254,9 @@ def test_status_caches_within_ttl(tmp_path, monkeypatch):
     # Two calls inside STATUS_CACHE_TTL -> the blocking fetch runs ONCE per id.
     calls = _patch_fetch(monkeypatch)
     app = _make_app(tmp_path, monkeypatch, token=None)
-    _, r1 = app.test_client.get("/status/fetch?provider=anthropic")
+    _, r1 = authed(app).get("/status/fetch?provider=anthropic")
     assert r1.status == 200
-    _, r2 = app.test_client.get("/status/fetch?provider=anthropic")
+    _, r2 = authed(app).get("/status/fetch?provider=anthropic")
     assert r2.status == 200
     assert calls == ["anthropic"]            # second served from cache, no refetch
 
@@ -263,7 +265,7 @@ def test_status_options_preflight_cors(tmp_path, monkeypatch):
     # Even with a token configured the preflight is answered ACAO:* (the browser
     # cross-origin fetch depends on it), exactly like /info and /state.
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
-    _, r = app.test_client.options("/status/fetch")
+    _, r = authed(app).options("/status/fetch")
     assert r.status == 204
     assert r.headers.get("Access-Control-Allow-Origin") == "*"
     assert r.headers.get("Access-Control-Allow-Methods") == \

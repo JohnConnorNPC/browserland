@@ -489,18 +489,24 @@ def test_auto_extend_disabled(broker_proc):
     assert status == 404
 
 
-def test_cors_without_token():
-    """A tokenless broker now ALSO emits ACAO:* (the posture changed: see
-    app.py module docstring). Token-gating CORS left a tokenless broker
-    reachable over the LAN/Tailscale unable to answer the multi-host UI's
-    cross-origin /sessions fetch — even though any non-browser client could
-    already read it, since CORS only governs browser reads. Security still
-    rests on network reachability plus the token on every mutation/data
-    endpoint (/launch, /file/*, /state stay token-or-loopback gated, so a
-    cross-origin page still cannot drive them)."""
+def test_cors_rides_on_the_401_and_the_preflight():
+    """CORS must NOT be gated on the auth outcome (#142).
+
+    ACAO:* is emitted unconditionally on EVERY response, including the 401 an
+    unauthenticated request now gets on every surface. Without it the UI's
+    cross-origin login probe surfaces as a fetch TypeError — "wrong password"
+    becomes indistinguishable from "host down" — and the multi-host taskbar
+    can never show an amber auth chip. Auth is token-in-query/header and never
+    cookies, so `*` grants no ambient credential.
+
+    (This test used to assert a TOKENLESS broker answered /sessions with 200.
+    Tokenless brokers no longer exist: a token is required on every surface and
+    every interface, and one is minted if nothing is configured.)"""
     port = _free_port()
     env = dict(os.environ)
-    env.pop("WEB_TERMINAL_TOKEN", None)
+    # Explicit token: with cwd=REPO an unset one would MINT webterm_token.json
+    # into the real repo root — a live secret beside the source tree.
+    env["WEB_TERMINAL_TOKEN"] = TOKEN
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("BROWSERLAND_BROKER_URL", None)
     proc = subprocess.Popen(
@@ -514,7 +520,8 @@ def test_cors_without_token():
         deadline = time.time() + 20
         while True:
             try:
-                status, headers, _ = _request("GET", f"{base}/sessions")
+                status, headers, _ = _request(
+                    "GET", f"{base}/sessions?token={TOKEN}")
                 if status == 200:
                     break
             except OSError:
@@ -525,7 +532,11 @@ def test_cors_without_token():
                 raise RuntimeError("broker did not come up")
             time.sleep(0.2)
         assert headers.get("Access-Control-Allow-Origin") == "*"
-        # The preflight grants the same regardless of token config.
+        # ...and on the 401 an unauthenticated LOOPBACK request now gets.
+        status, headers, _ = _request("GET", f"{base}/sessions")
+        assert status == 401
+        assert headers.get("Access-Control-Allow-Origin") == "*"
+        # The preflight is unauthenticated by design (it carries no credentials).
         status, headers, _ = _request("OPTIONS", f"{base}/sessions")
         assert status == 204
         assert headers.get("Access-Control-Allow-Origin") == "*"
@@ -1498,10 +1509,15 @@ def test_headless_subprocess_serves_api_not_page():
     """Headless mode end-to-end (#87): spawn the broker with --headless and
     confirm GET / is the self-describing {"ui": false} (not the windowed page),
     /help-corpus.json 404s, but the JSON API (/sessions) still answers. The
-    readiness probe stays on /sessions — / no longer serves the page."""
+    readiness probe stays on /sessions — / no longer serves the page.
+
+    GET / keeps answering 200 unauthenticated even headless (#142), so existing
+    health probes are untouched by the mandatory-token change."""
     port = _free_port()
     env = dict(os.environ)
-    env.pop("WEB_TERMINAL_TOKEN", None)
+    # Explicit token: with cwd=REPO an unset one would MINT webterm_token.json
+    # into the real repo root.
+    env["WEB_TERMINAL_TOKEN"] = TOKEN
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("BROWSERLAND_BROKER_URL", None)
     proc = subprocess.Popen(
@@ -1515,7 +1531,7 @@ def test_headless_subprocess_serves_api_not_page():
         deadline = time.time() + 20
         while True:
             try:
-                status, _ = _http("GET", f"{base}/sessions")
+                status, _ = _http("GET", f"{base}/sessions?token={TOKEN}")
                 if status == 200:
                     break
             except OSError:
@@ -1525,19 +1541,20 @@ def test_headless_subprocess_serves_api_not_page():
             if time.time() > deadline:
                 raise RuntimeError("broker did not come up")
             time.sleep(0.2)
-        # GET / is JSON {"ui": false}, NOT the <title>Browserland</title> page.
+        # GET / is JSON {"ui": false}, NOT the <title>Browserland</title> page —
+        # and it answers UNAUTHENTICATED, so health probes keep working (#142).
         status, payload = _http("GET", f"{base}/")
         assert status == 200
         assert payload == {"ui": False}
         # /help-corpus.json route is not registered -> falls through to 404.
         status, _, _ = _request("GET", f"{base}/help-corpus.json")
         assert status == 404
-        # The JSON API is unaffected.
-        status, sessions = _http("GET", f"{base}/sessions")
+        # The JSON API is unaffected (with the token).
+        status, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
         assert status == 200
         assert isinstance(sessions, list)
         # /info surfaces the mode.
-        status, info = _http("GET", f"{base}/info")
+        status, info = _http("GET", f"{base}/info?token={TOKEN}")
         assert status == 200
         assert info["serve_ui"] is False
     finally:

@@ -3,7 +3,7 @@
 Same driving style as test_file_api.py: single-request cases use the light
 app.test_client (full server lifecycle per request); the stateful save flow
 (begin/chunk/commit spans requests and lives in-memory on app.ctx) uses
-ReusableClient. No token => loopback passes the gate.
+ReusableClient. Every app configures a token explicitly (#142).
 """
 
 import base64
@@ -14,6 +14,7 @@ import time
 from sanic_testing.reusable import ReusableClient
 
 import webterm.broker.app as app_mod
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable
 from webterm.broker.app import (_rec_load_notes, _rec_sanitize_meta,
                                 _sweep_rec_sessions, create_app)
 
@@ -24,7 +25,8 @@ def _make_rec_app(tmp_path, monkeypatch):
     global _app_seq
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
-    cfg = {"editor_root": str(tmp_path),
+    cfg = {"auth_token": TEST_TOKEN,
+           "editor_root": str(tmp_path),
            "state_path": str(tmp_path / "webterm_state.json"),
            "recordings_dir": str(tmp_path / "recs")}
     return create_app(cfg, name=f"webterm-rec-test-{_app_seq}")
@@ -91,7 +93,7 @@ def test_save_list_get_roundtrip(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
     payload = (json.dumps({"v": 1, "cols": 80}) + "\n").encode() \
         + os.urandom(2 * 2 ** 20)          # >1 chunk at 1 MiB steps
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         rec_id = _save_one(client, payload,
                            meta={"title": "demo", "cols": 80, "rows": 24,
                                  "durationMs": 5000, "startedAt": 123})
@@ -115,7 +117,7 @@ def test_save_list_get_roundtrip(tmp_path, monkeypatch):
 
 def test_chunk_offset_and_session_guards(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/recording/begin", json={})
         rec_id = r.json["recording_id"]
         _, r = client.post("/recording/chunk",
@@ -144,7 +146,7 @@ def test_chunk_offset_and_session_guards(tmp_path, monkeypatch):
 def test_recording_size_cap_drops_session(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
     monkeypatch.setattr(app_mod, "MAX_RECORDING_BYTES", 100)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         _, r = client.post("/recording/begin", json={})
         rec_id = r.json["recording_id"]
         _, r = client.post("/recording/chunk",
@@ -164,15 +166,15 @@ def test_bad_ids_rejected_everywhere(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
     evil = ("..%2F..%2Fetc%2Fpasswd", "rec-1", "rec-20250101-000000-zzzzzzzz")
     for bad in evil:
-        _, r = app.test_client.get(f"/recording?id={bad}")
+        _, r = authed(app).get(f"/recording?id={bad}")
         assert r.status == 400, (bad, r.status)
-    _, r = app.test_client.post("/recording/delete",
+    _, r = authed(app).post("/recording/delete",
                                 json={"id": "../../x"})
     assert r.status == 400
-    _, r = app.test_client.get("/recording/notes?id=..")
+    _, r = authed(app).get("/recording/notes?id=..")
     assert r.status == 400
     # commit refuses an id that isn't a live session (and thus any forged one)
-    _, r = app.test_client.post("/recording/commit",
+    _, r = authed(app).post("/recording/commit",
                                 json={"recording_id": "../../x"})
     assert r.status == 404
 
@@ -180,19 +182,19 @@ def test_bad_ids_rejected_everywhere(tmp_path, monkeypatch):
 def test_get_delete_missing_recording_404(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
     good_shape = "rec-20250101-000000-0011aabb"
-    _, r = app.test_client.get(f"/recording?id={good_shape}")
+    _, r = authed(app).get(f"/recording?id={good_shape}")
     assert r.status == 404
-    _, r = app.test_client.post("/recording/delete", json={"id": good_shape})
+    _, r = authed(app).post("/recording/delete", json={"id": good_shape})
     assert r.status == 404
     # notes GET mirrors the PUT existence check — an orphan sidecar must not
     # make a deleted recording look note-valid
-    _, r = app.test_client.get(f"/recording/notes?id={good_shape}")
+    _, r = authed(app).get(f"/recording/notes?id={good_shape}")
     assert r.status == 404
 
 
 def test_delete_removes_file_and_sidecars(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         rec_id = _save_one(client, b"data\n", meta={"durationMs": 1000})
         _, r = client.post("/recording/notes",
                            json={"id": rec_id, "baseRev": 0,
@@ -209,7 +211,7 @@ def test_delete_removes_file_and_sidecars(tmp_path, monkeypatch):
 
 def test_notes_roundtrip_clamp_and_conflict(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         rec_id = _save_one(client, b"x\n", meta={"durationMs": 10_000})
         _, r = client.get(f"/recording/notes?id={rec_id}")
         assert r.json == {"ok": True, "rev": 0, "notes": []}
@@ -278,7 +280,7 @@ def test_committed_recordings_never_swept(tmp_path, monkeypatch):
     # recording — a later begin's sweeps must leave existing .blrec files
     # alone (unlike paste images, which are TTL+count swept).
     app = _make_rec_app(tmp_path, monkeypatch)
-    with ReusableClient(app) as client:
+    with authed_reusable(app) as client:
         rec_id = _save_one(client, b"keep me\n")
         blrec = tmp_path / "recs" / f"{rec_id}.blrec"
         old = time.time() - 30 * 24 * 3600

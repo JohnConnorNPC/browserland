@@ -11,6 +11,7 @@ read_only (403), a non-integer / missing value (400 bad_pace), and auth (401).
 
 from __future__ import annotations
 
+from .auth_helpers import TEST_TOKEN
 from webterm.broker.app import MAX_MCP_PACE_MS, create_app
 from webterm.broker.registry import WindowEntry
 
@@ -18,6 +19,10 @@ MCP_TOKEN = "pace-http-token"
 _app_seq = 0
 
 
+# /mcp/* is its own realm (Authorization: Bearer <mcp_token>), NOT the
+# browser auth_token — so these use the RAW client. authed() would append
+# ?token=<browser token>, and provided_token() prefers the query string
+# over the header, which would fail the MCP bearer check.
 def _make_app(tmp_path, monkeypatch, default_mode="readwrite"):
     """A broker app with MCP enabled + a known token, its state/sidecar under
     tmp_path (so no repo files are touched), and a UNIQUE Sanic name."""
@@ -29,6 +34,7 @@ def _make_app(tmp_path, monkeypatch, default_mode="readwrite"):
     cfg = {
         "state_path": str(tmp_path / "webterm_state.json"),
         "mcp_state_path": str(tmp_path / "webterm_mcp.json"),
+        "auth_token": TEST_TOKEN,
         "mcp_enabled": True,
         "mcp_token": MCP_TOKEN,
         "mcp_default_mode": default_mode,

@@ -5,7 +5,7 @@ The same broker reached through several URLs (127.0.0.1 / localhost / Tailscale
 duplicate taskbar chips and making Terminate silently fail against a stale twin.
 ``/info`` exposes a stable, non-secret ``broker_id`` so the UI can detect "same
 broker, different URL" and gate the terminate fallback. These cover the
-persisted-id contract and the token-or-loopback gate.
+persisted-id contract and the (mandatory, #142) token gate.
 
 The route tests use the in-process Sanic test client (each create_app needs a
 UNIQUE name — Sanic refuses two apps sharing a name in one process) and point
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker.app import _load_or_create_broker_id, create_app
 
 REPO = Path(__file__).resolve().parents[1]
@@ -71,16 +72,16 @@ def _make_app(tmp_path, monkeypatch, token=None):
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json")}
-    if token:
-        cfg["auth_token"] = token
+    cfg["auth_token"] = token or TEST_TOKEN
     return create_app(cfg, name=f"webterm-info-test-{_app_seq}")
 
 
-def test_info_loopback_ok_no_token(tmp_path, monkeypatch):
-    # No token configured: a loopback request (the test client dials 127.0.0.1)
-    # passes the gate and gets the broker_id + version.
+def test_info_with_token_returns_id_and_version(tmp_path, monkeypatch):
+    # Was test_info_loopback_ok_no_token: loopback used to pass the gate
+    # unauthenticated. Since #142 there is no loopback exemption anywhere, so
+    # the token is what gets us the broker_id + version.
     app = _make_app(tmp_path, monkeypatch, token=None)
-    _, response = app.test_client.get("/info")
+    _, response = authed(app).get("/info")
     assert response.status == 200
     body = response.json
     assert body["ok"] is True
@@ -94,7 +95,7 @@ def test_info_reports_mods_enabled_default_true(tmp_path, monkeypatch):
     # the frontend loader can gate at runtime (fail-open / default-on).
     app = _make_app(tmp_path, monkeypatch, token=None)
     assert app.ctx.mods_enabled is True
-    _, response = app.test_client.get("/info")
+    _, response = authed(app).get("/info")
     assert response.status == 200
     assert response.json["mods_enabled"] is True
 
@@ -104,10 +105,11 @@ def test_info_reports_mods_enabled_false_when_configured(tmp_path, monkeypatch):
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "auth_token": TEST_TOKEN,
            "mods_enabled": False}
     app = create_app(cfg, name=f"webterm-info-test-{_app_seq}")
     assert app.ctx.mods_enabled is False
-    _, response = app.test_client.get("/info")
+    _, response = authed(app).get("/info")
     assert response.status == 200
     assert response.json["mods_enabled"] is False
 
@@ -119,13 +121,13 @@ def test_serve_ui_default_true_serves_page_and_help(tmp_path, monkeypatch):
     # page and the help corpus are both served, exactly as before #87.
     app = _make_app(tmp_path, monkeypatch, token=None)
     assert app.ctx.serve_ui is True
-    _, response = app.test_client.get("/info")
+    _, response = authed(app).get("/info")
     assert response.status == 200
     assert response.json["serve_ui"] is True
-    _, page = app.test_client.get("/")
+    _, page = authed(app).get("/")
     assert page.status == 200
     assert "<title>Browserland</title>" in page.body.decode("utf-8")
-    _, corpus = app.test_client.get("/help-corpus.json")
+    _, corpus = authed(app).get("/help-corpus.json")
     assert corpus.status == 200
 
 
@@ -136,18 +138,19 @@ def test_headless_serves_api_but_not_page_or_help(tmp_path, monkeypatch):
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "auth_token": TEST_TOKEN,
            "serve_ui": False}
     app = create_app(cfg, name=f"webterm-info-test-{_app_seq}")
     assert app.ctx.serve_ui is False
-    _, response = app.test_client.get("/info")
+    _, response = authed(app).get("/info")
     assert response.status == 200
     assert response.json["serve_ui"] is False
-    _, page = app.test_client.get("/")
+    _, page = authed(app).get("/")
     assert page.status == 200
     assert page.json == {"ui": False}            # self-describing, not the page
-    _, corpus = app.test_client.get("/help-corpus.json")
+    _, corpus = authed(app).get("/help-corpus.json")
     assert corpus.status == 404                  # route not registered
-    _, sessions = app.test_client.get("/sessions")
+    _, sessions = authed(app).get("/sessions")
     assert sessions.status == 200                # JSON/WS API unaffected
     assert isinstance(sessions.json, list)
 
@@ -166,7 +169,9 @@ def _create_app_in_subprocess(serve_ui: bool, tmp_path) -> str:
         "import sys\n"
         "import webterm.broker.__main__  # noqa: F401 (CLI import path)\n"
         "from webterm.broker.app import create_app\n"
-        f"create_app({{'serve_ui': {serve_ui!r}}}, name='h')\n"
+        # Explicit auth_token so the child never mints a token sidecar.
+        f"create_app({{'serve_ui': {serve_ui!r}, "
+        f"'auth_token': 'subproc-token'}}, name='h')\n"
         "print('ui' if 'webterm.broker.ui' in sys.modules else '-',\n"
         "      'help' if 'webterm.broker.help_corpus' in sys.modules else '-')\n"
     )
@@ -193,13 +198,14 @@ def test_ui_mode_imports_ui_and_help(tmp_path):
 
 def test_info_requires_token_when_configured(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
-    # No / wrong token -> 401.
+    # No / wrong token -> 401. RAW client on purpose: authed() would
+    # append the very token this test needs to be missing.
     _, response = app.test_client.get("/info")
     assert response.status == 401
     _, response = app.test_client.get("/info?token=nope")
     assert response.status == 401
     # Correct token (the path appendHostToken uses) -> 200 with the id.
-    _, response = app.test_client.get("/info?token=sekrit")
+    _, response = authed(app).get("/info?token=sekrit")
     assert response.status == 200
     assert response.json["broker_id"] == app.ctx.broker_id
 
@@ -208,7 +214,7 @@ def test_info_options_preflight_cors(tmp_path, monkeypatch):
     # Even with a token configured, the preflight is answered with ACAO:* (the
     # cross-origin add-time probe depends on it).
     app = _make_app(tmp_path, monkeypatch, token="sekrit")
-    _, response = app.test_client.options("/info")
+    _, response = authed(app).options("/info")
     assert response.status == 204
     assert response.headers.get("Access-Control-Allow-Origin") == "*"
     assert response.headers.get("Access-Control-Allow-Methods") == \

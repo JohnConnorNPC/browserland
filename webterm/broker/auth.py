@@ -1,14 +1,26 @@
-"""Token auth + loopback detection.
+"""Token auth.
 
-Policy (producer connections may be remote, unlike the deployed bridge):
+Policy (#142): **a token is required on every surface, on every interface,
+always.** There is no loopback exemption and no opt-out. ``/browserland``
+producers, ``/ws``, ``/control``, ``/sessions``, ``/profiles``, ``/launch``,
+``/file/*``, ``/state`` and friends all refuse a request that carries no valid
+token — 401 on HTTP, close code 4401 on a WebSocket.
 
-* ``/browserland``: loopback connections are exempt (local terminals/agents
-  work unchanged); non-loopback must present the token. No token configured
-  -> non-loopback producers are refused.
-* ``/launch``: token required whenever one is configured. With no token
-  configured, only loopback requests are allowed — never an open RCE on a
-  non-loopback bind.
-* ``/ws`` + ``/sessions``: gated by the token only when one is configured.
+Loopback used to be an exemption. It was never a sound one: the recommended
+topology puts ``tailscale serve`` in front of a 127.0.0.1 bind, so every tailnet
+request arrives *from* loopback; and a plain web page can dial
+``ws://127.0.0.1:<port>/browserland`` (WebSockets are not CORS-gated) to
+re-register a live window and inject fabricated terminal output.
+
+Only ``GET /`` and ``GET /help-corpus.json`` stay public, plus the OPTIONS
+preflights (which carry no credentials by design). The token is typed *into*
+that page and auth is query/header-only with no cookies, so gating the document
+itself would 401 every reload, bookmark and new tab forever. Neither response
+carries host- or session-derived data.
+
+A fresh install stays one-command usable: with nothing configured the broker
+MINTS its own token into a sidecar (``webterm_token.json``) beside the state
+store and prints a ready-to-open ``?token=`` URL.
 
 Never log request URLs or args on auth failure — the token rides in the
 query string.
@@ -18,16 +30,134 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import json
 import os
-from typing import Optional
+import secrets
+from pathlib import Path
+from typing import Optional, Tuple
 
 TOKEN_ENV = "WEB_TERMINAL_TOKEN"
 MCP_TOKEN_ENV = "WEB_TERMINAL_MCP_TOKEN"
 
+#: Sidecar holding the auto-minted browser token, a sibling of the state store
+#: (``webterm_state.json``) like every other broker sidecar. Git-ignored.
+AUTH_STATE_FILENAME = "webterm_token.json"
 
-def resolve_token(config: Optional[dict]) -> Optional[str]:
-    """Env wins over the config file, so a unit file can override."""
-    return os.environ.get(TOKEN_ENV) or (config or {}).get("auth_token") or None
+#: Bytes of entropy for a minted token, before urlsafe-base64 expansion.
+_MINT_BYTES = 32
+
+
+def _read_token_file(path) -> Optional[str]:
+    """The token in ``path``, or None if it is missing/unreadable/malformed.
+
+    Never raises: a corrupt sidecar degrades to "no token on disk" so the caller
+    can re-mint rather than failing to boot."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(data, dict):
+        tok = data.get("auth_token")
+        if isinstance(tok, str) and tok:
+            return tok
+    return None
+
+
+def _write_token_file(path, token: str) -> bool:
+    """Overwrite ``path`` with ``token``. True on success. Used only to repair a
+    sidecar that exists but holds no usable token."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"auth_token": token}, fh)
+    except OSError:
+        return False
+    return True
+
+
+def resolve_existing_token(config: Optional[dict], path) -> Optional[str]:
+    """The configured token WITHOUT minting one: env -> config -> sidecar.
+
+    Env wins over the config file, so a unit file can override; the sidecar is
+    the last resort (it only exists once a previous run minted). This is what
+    ``--print-token`` uses — asking for the token must never be the thing that
+    creates it."""
+    env_tok = os.environ.get(TOKEN_ENV)
+    if env_tok:
+        return env_tok
+    cfg_tok = (config or {}).get("auth_token")
+    if isinstance(cfg_tok, str) and cfg_tok:
+        return cfg_tok
+    return _read_token_file(path)
+
+
+def resolve_or_mint_token(config: Optional[dict], path) -> Tuple[str, str]:
+    """``(token, source)`` — the live browser token. **Never None** (#142).
+
+    ``source`` is one of:
+
+    ``env``       $WEB_TERMINAL_TOKEN (a unit file / the parent broker)
+    ``config``    broker_config's ``auth_token``
+    ``file``      read back from the sidecar a previous run minted
+    ``minted``    freshly generated and persisted THIS run
+    ``ephemeral`` generated but NOT persisted (unwritable dir) — it changes on
+                  every restart and ``--print-token`` cannot recover it, so the
+                  caller must warn loudly
+
+    The mint is ``O_CREAT|O_EXCL`` rather than an atomic replace: two brokers
+    starting against the same state dir (the dev broker plus any test spawned
+    with ``cwd=REPO``) both see no file and both mint, and a last-writer-wins
+    replace would leave the loser running a token that is not the one on disk.
+    With O_EXCL exactly one create succeeds and the other re-reads and adopts
+    the winner, so both converge on one value.
+
+    Mode 0o600 is honoured on POSIX (umask can only clear bits further). Windows
+    has no POSIX mode: the file inherits the directory's ACL, so the state dir
+    must itself be private — see docs/SETUP.md."""
+    env_tok = os.environ.get(TOKEN_ENV)
+    if env_tok:
+        return env_tok, "env"
+    cfg_tok = (config or {}).get("auth_token")
+    if isinstance(cfg_tok, str) and cfg_tok:
+        return cfg_tok, "config"
+
+    path = Path(path)
+    existing = _read_token_file(path)
+    if existing:
+        return existing, "file"
+
+    minted = secrets.token_urlsafe(_MINT_BYTES)
+    blob = json.dumps({"auth_token": minted})
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        # Someone created it between our read and our create. Whatever is on
+        # disk wins so both brokers converge.
+        adopted = _read_token_file(path)
+        if adopted:
+            return adopted, "file"
+        # It exists but holds no usable token (truncated / hand-edited). A
+        # tokenless sidecar protects nobody and would re-mint on every start,
+        # so repair it in place, then re-read so a concurrent repair still
+        # converges on a single value.
+        if not _write_token_file(path, minted):
+            return minted, "ephemeral"
+        return (_read_token_file(path) or minted), "minted"
+    except OSError:
+        return minted, "ephemeral"
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(blob)
+    except OSError:
+        # Disk full mid-write: drop the half-file so the next start re-mints
+        # cleanly instead of adopting a truncated one.
+        try:
+            os.unlink(str(path))
+        except OSError:
+            pass
+        return minted, "ephemeral"
+    return minted, "minted"
 
 
 def resolve_mcp_token(config: Optional[dict]) -> Optional[str]:

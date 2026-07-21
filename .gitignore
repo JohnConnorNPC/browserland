@@ -19,6 +19,11 @@ webterm_modstore.json
 # Stable broker identity (/info, #64) — sibling of the state store
 webterm_identity.json
 
+# Auto-minted browser auth token (#142) — sibling of the state store. A SECRET:
+# it appears on the very next run of a broker with no auth_token configured and
+# must never be committable.
+webterm_token.json
+
 # Session recordings (#140) — durable user data beside the state store
 webterm_recordings/
 

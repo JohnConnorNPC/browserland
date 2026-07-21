@@ -69,14 +69,14 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _spawn_broker(port: int, token: str = None) -> subprocess.Popen:
+def _spawn_broker(port: int, token: str = TOKEN) -> subprocess.Popen:
+    # The token is ALWAYS explicit: these brokers run with cwd=REPO, and one
+    # with nothing configured would mint webterm_token.json into the real repo
+    # root — a live secret dropped beside the source tree (#142).
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("BROWSERLAND_BROKER_URL", None)
-    if token:
-        env["WEB_TERMINAL_TOKEN"] = token
-    else:
-        env.pop("WEB_TERMINAL_TOKEN", None)
+    env["WEB_TERMINAL_TOKEN"] = token
     proc = subprocess.Popen(
         [sys.executable, "-m", "webterm.broker",
          "--host", "0.0.0.0", "--port", str(port)],
@@ -119,17 +119,26 @@ def _headers(method: str, url: str):
         return exc.code, exc.headers
 
 
-def test_no_token_configured_remote_launch_403_loopback_ok():
+def test_launch_requires_a_token_on_loopback_too():
+    """#142: loopback is NOT an exemption any more.
+
+    This used to assert the opposite — remote /launch 403
+    `launch_disabled_no_token`, loopback /launch allowed unauthenticated. That
+    policy is exactly the hole: `tailscale serve` in front of a 127.0.0.1 bind
+    makes every tailnet request arrive from loopback, so "loopback-only" handed
+    the whole tailnet an RCE. Both interfaces now 401, and the SAME 401 shape
+    on both (the UI's login overlay keys off it)."""
     port = _free_port()
-    proc = _spawn_broker(port, token=None)
+    proc = _spawn_broker(port, token=TOKEN)
     try:
-        status, payload = _post(f"http://{LAN_IP}:{port}/launch")
-        assert status == 403
-        assert payload["error"] == "launch_disabled_no_token"
-        # Loopback stays usable without a token (unknown profile -> 400
-        # proves we got past the gate).
+        for host in (LAN_IP, "127.0.0.1"):
+            status, payload = _post(f"http://{host}:{port}/launch")
+            assert status == 401, host
+            assert payload["error"] == "auth_required", host
+        # With the token, loopback works again: an unknown profile 400s, which
+        # proves we got past the gate rather than being refused by it.
         status, payload = _post(
-            f"http://127.0.0.1:{port}/launch",
+            f"http://127.0.0.1:{port}/launch?token={TOKEN}",
             body=json.dumps({"profile": "nope"}).encode())
         assert status == 400
     finally:
@@ -162,15 +171,20 @@ def test_cors_on_nonloopback():
         proc.wait(timeout=5)
 
 
-def test_cors_on_nonloopback_without_token():
-    """Task 7's exact bug: a TOKENLESS broker reachable over the LAN/Tailscale
-    must now answer the multi-host UI's cross-origin /sessions fetch — it used
-    to send no ACAO header. /launch stays loopback-gated (403 remote)."""
+def test_sessions_401s_over_the_lan_with_cors_intact():
+    """#142: /sessions is no longer readable unauthenticated on ANY interface.
+
+    This used to assert 200 for a tokenless broker over the LAN — an open read
+    of every terminal's title, pid and cwd to anything that could route to the
+    box. It is now 401, but the CORS header must survive the change: without
+    ACAO on the 401 the UI's cross-origin login probe reads as a fetch
+    TypeError and the amber auth chip never appears. The preflight stays 204
+    and unauthenticated (it carries no credentials by design)."""
     port = _free_port()
-    proc = _spawn_broker(port, token=None)
+    proc = _spawn_broker(port, token=TOKEN)
     try:
         status, headers = _headers("GET", f"http://{LAN_IP}:{port}/sessions")
-        assert status == 200
+        assert status == 401
         assert headers.get("Access-Control-Allow-Origin") == "*"
         status, headers = _headers("OPTIONS", f"http://{LAN_IP}:{port}/state")
         assert status == 204

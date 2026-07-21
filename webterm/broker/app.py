@@ -50,6 +50,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -892,6 +893,81 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
+def _open_url(config: Optional[Dict[str, Any]], port: int, token: str) -> str:
+    """The ready-to-open desktop URL, token included. A wildcard bind has no
+    single address, so show loopback — the operator substitutes their own."""
+    host = ((config or {}).get("host") or "127.0.0.1").strip()
+    if host in ("", "0.0.0.0", "::", "*"):
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"                              # bare IPv6 literal
+    return f"http://{host}:{port}/?token={urllib.parse.quote(token, safe='')}"
+
+
+def _log_auth_banner(app: Sanic, port: int, config: Optional[Dict[str, Any]],
+                     *, minted_into_used_dir: bool) -> None:
+    """Say what the token situation is, exactly once, at startup (#142).
+
+    The full ``?token=`` URL is a live credential, so it is printed only when it
+    has to be:
+
+    * on the run that MINTED it, and then only to an interactive terminal — a
+      long-lived deploy under systemd/Docker/CI would otherwise bake the token
+      into a centralized log forever, and there ``--print-token`` recovers it;
+    * always when the token is EPHEMERAL, because nothing persisted it and
+      ``--print-token`` genuinely cannot get it back.
+
+    Every other run logs a pointer, never the value."""
+    token = app.ctx.auth_token
+    source = app.ctx.auth_token_source
+    path = app.ctx.auth_state_path
+    try:
+        interactive = bool(sys.stderr and sys.stderr.isatty())
+    except (AttributeError, ValueError):
+        interactive = False
+
+    if source == "ephemeral":
+        LOGGER.warning(
+            "AUTH TOKEN IS EPHEMERAL - could not write %s. A new token is "
+            "generated on EVERY restart, '--print-token' cannot recover it, "
+            "and terminals launched by this run will not survive a restart. "
+            "Make the directory writable, or set auth_token in broker_config "
+            "/ $%s. Open: %s",
+            path, auth.TOKEN_ENV, _open_url(config, port, token))
+        return
+
+    if source == "minted":
+        if minted_into_used_dir:
+            # This broker has run here before, without a token — i.e. an
+            # upgrade, not a fresh install. Say what just broke.
+            LOGGER.warning(
+                "=== UPGRADE NOTICE (#142): a token is now REQUIRED on every "
+                "connection, including loopback. This broker previously ran "
+                "with no token, so: (1) browsers will ask for one - the login "
+                "overlay appears on first load; (2) TERMINALS LAUNCHED BY THE "
+                "PREVIOUS RUN CANNOT RECONNECT and must be relaunched (their "
+                "shells keep running, but they were started without the token "
+                "and it cannot be injected into a live process); (3) scripts "
+                "calling /sessions, /launch or /file/* over loopback now get "
+                "401. A token has been minted into %s - recover it any time "
+                "with 'python -m webterm.broker --print-token'. See "
+                "docs/UPGRADING.md. ===", path)
+        else:
+            LOGGER.info("token auth enabled (minted a new token into %s)", path)
+        if interactive:
+            LOGGER.info("open the desktop at: %s", _open_url(config, port, token))
+        else:
+            LOGGER.info("run 'python -m webterm.broker --print-token' for the "
+                        "token and the URL to open")
+        return
+
+    where = {"env": f"${auth.TOKEN_ENV}",
+             "config": "broker_config auth_token"}.get(source, str(path))
+    LOGGER.info("token auth enabled (source=%s, %s) - "
+                "'python -m webterm.broker --print-token' prints it", source,
+                where)
+
+
 def _resolve_host_path(rel: str, default_dir: Path,
                        follow_leaf: bool = True) -> Path:
     """Resolve a client-supplied file path **host-wide** — anywhere on this box,
@@ -1356,8 +1432,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # an unauthenticated /docs + /openapi.json. Pin it off so every install
     # behaves like a clean one; CORS is hand-rolled below.
     app.config.AUTO_EXTEND = False
+    # The token rides in the query string (auth.py: never log request URLs), and
+    # Sanic's access log writes the full path+query for every request. Pin it off
+    # so a live credential can't be tailed out of broker.log.
+    app.config.ACCESS_LOG = False
     app.ctx.config = config
-    app.ctx.auth_token = auth.resolve_token(config)
+    # app.ctx.auth_token is resolved (and minted if need be) AFTER the state path
+    # below — the token sidecar is its sibling — and before the Launcher captures
+    # it. Nothing between here and there reads it.
     # This broker's build id (#22): surfaced in /mcp/info and used as the
     # baseline to flag a producer whose reported version differs as stale.
     app.ctx.version = build_version()
@@ -1416,6 +1498,25 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # ---- browser auth token (#142) ---------------------------------------
+    # MANDATORY on every surface and every interface — there is no loopback
+    # exemption and no opt-out. Resolved here, after state_path (the sidecar is
+    # its sibling; override with "auth_state_path") and before the Launcher
+    # captures it for the agents it spawns. Never None.
+    #
+    # "Has this state dir been used before?" is sampled BEFORE anything below
+    # creates a sidecar of its own (_load_or_create_broker_id writes the
+    # identity file), because a mint on a dir that already holds broker state
+    # means an install that used to run tokenless — the UPGRADE NOTICE case.
+    app.ctx.auth_state_path = Path(
+        config.get("auth_state_path")
+        or (app.ctx.state_path.parent / auth.AUTH_STATE_FILENAME)
+    ).resolve()
+    _dir_was_used = (app.ctx.state_path.exists()
+                     or (app.ctx.state_path.parent
+                         / "webterm_identity.json").exists())
+    app.ctx.auth_token, app.ctx.auth_token_source = auth.resolve_or_mint_token(
+        config, app.ctx.auth_state_path)
     # Terminal session recordings (#140): durable user data, so the default
     # lives BESIDE the state store (not the temp dir an OS cleaner may wipe).
     # Config "recordings_dir" overrides. Created lazily on first save.
@@ -1510,11 +1611,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     LOGGER.info("MCP interface: %s (default_mode=%s allow_launch=%s)",
                 "enabled" if (_mc["enabled"] and _mc["token"]) else "disabled",
                 _mc["default_mode"], _mc["allow_launch"])
-    if app.ctx.auth_token:
-        LOGGER.info("token auth enabled")
-    else:
-        LOGGER.warning("no auth token configured: /launch and non-loopback "
-                       "producers are loopback-only/disabled")
+    _log_auth_banner(app, port, config, minted_into_used_dir=_dir_was_used)
 
     async def _cors_headers(request: Request, response):
         # Unconditional ACAO:* (see module docstring) — token-gating it left a
@@ -1547,8 +1644,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _browser_ws(request: Request, ws: Websocket):
         # In-handler post-upgrade auth: see module docstring (4401 vs 1006).
-        token = app.ctx.auth_token
-        if token and not auth.request_token_ok(request, token):
+        if not auth.request_token_ok(request, app.ctx.auth_token):
             LOGGER.warning("rejected unauthenticated /ws from %s", request.ip)
             await ws.close(code=4401, reason="auth required")
             return
@@ -1556,11 +1652,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _control_ws(request: Request, ws: Websocket):
         # Per-browser control channel for the single-active-browser lease.
-        # Same post-upgrade auth gate as /ws (4401; token only when configured,
-        # loopback/tailnet otherwise unauthenticated — same posture as /ws, and
-        # /control can neither spawn nor mutate files so it adds no exposure).
-        token = app.ctx.auth_token
-        if token and not auth.request_token_ok(request, token):
+        # Same post-upgrade auth gate as /ws (4401, never a 1006-opaque upgrade
+        # refusal). An unauthenticated /control could otherwise steal the
+        # single-active-browser lease out from under the real client.
+        if not auth.request_token_ok(request, app.ctx.auth_token):
             LOGGER.warning("rejected unauthenticated /control from %s",
                            request.ip)
             await ws.close(code=4401, reason="auth required")
@@ -1655,8 +1750,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         await run_producer_session(ws, app.ctx.registry)
 
     async def _sessions(request: Request):
-        token = app.ctx.auth_token
-        if token and not auth.request_token_ok(request, token):
+        # 401 (never 403): the login overlay and the taskbar host chips pop on
+        # 401 only, and /sessions is the probe both of them use.
+        if not auth.request_token_ok(request, app.ctx.auth_token):
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
         # Stamp each summary's effective MCP mode so the UI's window menu can
@@ -1667,8 +1763,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _profiles(request: Request):
         # Same gate as /sessions. Names only — command/cwd never leave the
         # broker.
-        token = app.ctx.auth_token
-        if token and not auth.request_token_ok(request, token):
+        if not auth.request_token_ok(request, app.ctx.auth_token):
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
         profs = app.ctx.launcher.profiles
@@ -1743,20 +1838,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "title": title, "cwd": cwd}, None
 
     async def _launch(request: Request):
-        token = app.ctx.auth_token
-        if token:
-            if not auth.request_token_ok(request, token):
-                LOGGER.warning("rejected unauthenticated /launch from %s",
-                               request.ip)
-                return sanic_json({"ok": False, "error": "auth_required"},
-                                  status=401)
-        elif not auth.is_loopback_request(request):
-            LOGGER.warning("rejected non-loopback /launch from %s (no token "
-                           "configured)", request.ip)
-            return sanic_json(
-                {"ok": False, "error": "launch_disabled_no_token"},
-                status=403)
-
+        err = _gated_auth_error(request, "/launch")
+        if err is not None:
+            return err
         params, err = _parse_launch_body(request)
         if err is not None:
             return err
@@ -1768,24 +1852,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json(exc.payload, status=exc.status)
         return sanic_json(payload, status=status)
 
-    # ---- token-or-loopback gate (shared by /file/* and /state) -----------
-    # The EXACT /launch policy: token required when configured, else
-    # loopback-only. CORS headers ride on every response via _cors_headers, so
-    # a tokenless loopback broker stays unreadable cross-origin (same posture
-    # — and same accepted single-user-loopback exposure — as /launch).
+    # ---- token gate (shared by /file/*, /state and ~40 other routes) ------
+    # A token is REQUIRED, always, on every interface (#142). There is no
+    # loopback exemption: `tailscale serve` in front of a 127.0.0.1 bind makes
+    # every tailnet request arrive from loopback, and a page in the same browser
+    # reaches loopback too — which for /file/* meant host-wide read/write.
+    # ALWAYS 401 `auth_required`, never 403: the login overlay and the taskbar
+    # host chips pop on 401 only (63_js_clipboard_auth.js, 75_js_taskbar_hosts.js),
+    # and the mods match on that exact error string. CORS headers ride on every
+    # response via _cors_headers, including this one, or a cross-origin login
+    # probe surfaces as a fetch TypeError instead of "wrong password".
     def _gated_auth_error(request: Request, label: str):
-        token = app.ctx.auth_token
-        if token:
-            if not auth.request_token_ok(request, token):
-                LOGGER.warning("rejected unauthenticated %s from %s",
-                               label, request.ip)
-                return sanic_json({"ok": False, "error": "auth_required"},
-                                  status=401)
-        elif not auth.is_loopback_request(request):
-            LOGGER.warning("rejected non-loopback %s from %s (no token "
-                           "configured)", label, request.ip)
-            return sanic_json(
-                {"ok": False, "error": "disabled_no_token"}, status=403)
+        if not auth.request_token_ok(request, app.ctx.auth_token):
+            LOGGER.warning("rejected unauthenticated %s from %s",
+                           label, request.ip)
+            return sanic_json({"ok": False, "error": "auth_required"},
+                              status=401)
         return None
 
     def _file_auth_error(request: Request):
