@@ -68,6 +68,90 @@
                     });
                 }
 
+                // ---- download ----------------------------------------------
+                // The token rides recUrl's query string, so it must NEVER reach
+                // an <a href>: an anchor with `download` makes the browser file
+                // the SOURCE URL in its Downloads list, where the credential
+                // outlives the session, stays on screen, is re-triggerable via
+                // Retry, and syncs across devices. Fetch the bytes instead — a
+                // fetch URL is transient — and hand the anchor a blob: URL,
+                // which carries only the origin. Same shape as the
+                // file-manager's download fallback.
+                //
+                // Always re-fetches, even from the player, which already holds
+                // the recording in recData: parseRecording is LOSSY (blank and
+                // unparseable lines dropped, `d` replaced by `bytes`, a
+                // non-numeric `t` coerced to 0), so re-serializing it would not
+                // reproduce the stored file. A download must be the archived
+                // artifact, byte for byte.
+                const dlBusy = new Set();   // rec ids with a download in flight
+                function dlReport(report, msg) {
+                    // A download outlives its window, so the caller's status
+                    // line may be detached by the time we fail. The notice host
+                    // is always in the document.
+                    if (report) {
+                        try { report(msg); return; } catch (_) {}
+                    }
+                    showNotice(msg, { sticky: true });
+                }
+                async function downloadRecording(recId, report) {
+                    // Repeat clicks used to be free (the browser streamed each
+                    // one to disk); now each would buffer the whole file, so a
+                    // double-click on a big recording doubles the memory.
+                    if (dlBusy.has(recId)) return;
+                    dlBusy.add(recId);
+                    try {
+                        const r = await fetch(
+                            recUrl('/recording?id='
+                                   + encodeURIComponent(recId)));
+                        if (!r.ok) {
+                            let j = null;
+                            try { j = await r.json(); } catch (_) {}
+                            const err = (j && j.error) || ('HTTP ' + r.status);
+                            // Before this, a stale token (the broker restarted
+                            // and minted a new one) SAVED the 401 JSON body as
+                            // <id>.blrec — a 36-byte "recording" with no error
+                            // shown anywhere. Re-open the login prompt instead.
+                            if (err === 'auth_required') {
+                                promptFileHostAuth(localHost());
+                            }
+                            dlReport(report, 'download failed: ' + err);
+                            return;
+                        }
+                        // blob(), not text(): the bytes stay opaque and the
+                        // Blob inherits the response's application/octet-stream,
+                        // where text() would decode UTF-8 into a UTF-16 string
+                        // and double peak memory for nothing.
+                        const url = URL.createObjectURL(await r.blob());
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = recId + '.blrec';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        // Deliberately NOT gated on the window still being open:
+                        // the browser owns the transfer from the click onward,
+                        // so closing the player right after pressing the button
+                        // still lands the file — exactly as it did before this
+                        // change. Only the failure MESSAGE is routed away from a
+                        // detached node (dlReport).
+                        setTimeout(function () {
+                            URL.revokeObjectURL(url);
+                        }, 10000);
+                    } catch (e) {
+                        // fetch() REJECTS on a network failure (broker stopped,
+                        // tailnet dropped) rather than resolving with ok=false.
+                        // Unhandled, that would be a silent no-op — strictly
+                        // worse than the failed entry the download manager used
+                        // to show.
+                        dlReport(report,
+                                 'download failed: '
+                                 + String((e && e.message) || e));
+                    } finally {
+                        dlBusy.delete(recId);
+                    }
+                }
+
                 // ---- base64 <-> bytes --------------------------------------
                 function bytesToB64(u8) {
                     let s = '';
@@ -743,13 +827,12 @@
                                            function (e) { e.stopPropagation(); });
                     dlBtn.addEventListener('click', function (e) {
                         e.stopPropagation();
-                        const a = document.createElement('a');
-                        a.href = recUrl('/recording?id='
-                                        + encodeURIComponent(recId));
-                        a.download = recId + '.blrec';
-                        document.body.appendChild(a);
-                        a.click();
-                        a.remove();
+                        downloadRecording(recId, function (msg) {
+                            // The player's own status line while it is still
+                            // up; a notice once this window has gone.
+                            if (closed) showNotice(msg, { sticky: true });
+                            else setStatus(msg);
+                        });
                     });
 
                     // ---- notes --------------------------------------------
@@ -1105,13 +1188,15 @@
                         dl.title = 'download';
                         dl.addEventListener('click', function (e) {
                             e.stopPropagation();
-                            const a = document.createElement('a');
-                            a.href = recUrl('/recording?id='
-                                            + encodeURIComponent(r.id));
-                            a.download = r.id + '.blrec';
-                            document.body.appendChild(a);
-                            a.click();
-                            a.remove();
+                            downloadRecording(r.id, function (msg) {
+                                // The library's status line while the window is
+                                // still up; a notice once it has been closed.
+                                if (win.disposed) {
+                                    showNotice(msg, { sticky: true });
+                                } else {
+                                    statusEl.textContent = msg;
+                                }
+                            });
                         });
                         const del = document.createElement('button');
                         del.type = 'button';

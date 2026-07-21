@@ -12,10 +12,20 @@ them from the library removes them.
 
 What is captured: the terminal's raw output stream (byte-faithful, so colors
 and TUI apps replay exactly), resizes, and the initial size/font. Typed input
-is recorded as timestamped **markers only** — never the keystrokes themselves,
-so a password typed during a recording is not stored. If the connection drops
-and reattaches mid-recording, a gap marker is recorded (shown red on the
-timeline) and the replay heals with the reattach redraw.
+is recorded as timestamped **markers only** — the keystrokes themselves are
+never stored. If the connection drops and reattaches mid-recording, a gap
+marker is recorded (shown red on the timeline) and the replay heals with the
+reattach redraw.
+
+**A recording sees whatever the screen saw.** Not storing keystrokes protects
+input the terminal never echoes — a password at a `sudo` or `ssh` prompt does
+not appear. It does *not* protect anything the terminal prints: a secret typed
+or pasted onto a visible command line is echoed as output, and output is
+captured byte for byte. The same goes for anything a command prints — API keys
+in a `env`-style dump, tokens, connection strings. Recording also starts by
+capturing the screen that was **already there**, so content that scrolled past
+before you pressed ⏺ can still be in the file. Treat a `.blrec` like a screen
+recording: check what is in it before sharing it.
 
 A recording is held in memory until you stop it — reloading the page discards
 an in-progress recording (the browser warns first). Recordings auto-stop at

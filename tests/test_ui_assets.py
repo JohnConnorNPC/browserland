@@ -145,6 +145,77 @@ def test_index_html_never_puts_token_in_url():
     assert "searchParams.set('token'" not in INDEX_HTML
 
 
+# The token rides the query string (appendHostToken), so a URL built by one of
+# these builders is a live credential. Fine in a fetch(); NOT fine in any sink
+# the browser PERSISTS.
+_TOKEN_URL_BUILDERS = ("hostHttpUrl(", "appendHostToken(", "hostWsUrl(",
+                       "recUrl(")
+
+# Sinks that outlive the request. `.href` with a `download` attribute files the
+# source URL in the browser's Downloads list; `window.open`/`location` put it in
+# history and the address bar.
+_PERSISTING_SINKS = (".href =", ".src =", ".action =", "window.open(",
+                     "location.assign(", "location.replace(",
+                     "location.href =")
+
+
+def _ui_sources():
+    """(name, text) for every fragment and mod script that ends up in the page."""
+    for name in (*ui._ORDERED, *ui._MODS):
+        if not name.endswith(".js"):
+            continue
+        yield name, (BROKER_DIR / name).read_text(encoding="utf-8")
+
+
+def test_no_ui_source_puts_a_tokened_url_into_a_persisting_sink():
+    """A token-bearing URL must never reach a sink the browser remembers.
+
+    The bug this pins (recorder #142 follow-up): both recorder download buttons
+    did ``a.href = recUrl('/recording?id=' + ...)`` with ``a.download`` set, so
+    every download filed the live broker token into the browser's Downloads
+    list -- on screen long after the session, re-triggerable via Retry, and
+    synced across devices. The credential gates /launch and host-wide /file/*.
+
+    ``test_index_html_never_puts_token_in_url`` above did NOT catch it: it only
+    looks for ``searchParams.set('token'``. This scans every fragment and mod
+    for a token-URL builder feeding a persisting sink ON THE SAME LINE, which
+    is the shape the mistake actually takes. Downloads go through a Blob
+    instead (``URL.createObjectURL``), whose blob: URL carries only the origin.
+
+    Deliberately line-local: it cannot see ``const u = recUrl(p); a.href = u;``.
+    That is the accepted limit of a source scan -- it catches the idiom people
+    reach for, without banning ordinary anchors.
+    """
+    offenders = []
+    for name, text in _ui_sources():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if not any(sink in line for sink in _PERSISTING_SINKS):
+                continue
+            if not any(b in line for b in _TOKEN_URL_BUILDERS):
+                continue
+            offenders.append(f"{name}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "token-bearing URL assigned to a persisted sink (use fetch + Blob + "
+        "URL.createObjectURL instead):\n  " + "\n  ".join(offenders))
+
+
+def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
+    """The positive half of the invariant above.
+
+    An absence-assertion alone would also pass if someone deleted the download
+    buttons outright, so pin that the replacement is actually there."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    assert "URL.createObjectURL(await r.blob())" in src
+    assert "URL.revokeObjectURL(url)" in src, "blob URL must be revoked"
+    # Both buttons go through the one helper.
+    assert src.count("downloadRecording(") >= 3, \
+        "expected the helper plus both call sites"
+    # And a stale token must re-open the login prompt rather than silently
+    # saving the 401 JSON body as a .blrec (the pre-fix behaviour).
+    assert "promptFileHostAuth(localHost())" in src
+
+
 # --------------------------------------------------------------------------- #
 # the split actually happened
 # --------------------------------------------------------------------------- #

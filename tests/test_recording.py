@@ -113,6 +113,17 @@ def test_save_list_get_roundtrip(tmp_path, monkeypatch):
         # fetch returns the exact bytes
         _, r = client.get(f"/recording?id={rec_id}")
         assert r.status == 200 and r.body == payload
+        # ...with the download headers pinned. Since the recorder mod switched
+        # to a Blob download (it fetches, then anchors off URL.createObjectURL
+        # so the auth token never lands in the browser's Downloads list), the
+        # CLIENT names the file via `a.download` and no longer reads
+        # Content-Disposition -- so nothing in the app would notice if this
+        # header rotted. The content type still matters: Response.blob()
+        # inherits it, and a wrong one can make the browser open the recording
+        # in-tab instead of saving it.
+        assert r.headers["content-type"] == "application/octet-stream"
+        assert (r.headers["content-disposition"]
+                == f'attachment; filename="{rec_id}.blrec"')
 
 
 def test_chunk_offset_and_session_guards(tmp_path, monkeypatch):
