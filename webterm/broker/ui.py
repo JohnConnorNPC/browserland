@@ -38,8 +38,11 @@ localStorage, and multi-host federation (settings host list, per-host polling
 and status chips).
 """
 
+import base64
+import hashlib
 import json
 import logging
+import re
 from pathlib import Path, PurePosixPath
 
 _DIR = Path(__file__).resolve().parent
@@ -297,3 +300,33 @@ def assemble(ordered=_ORDERED, mods=_MODS, base: Path = _DIR) -> str:
 
 
 INDEX_HTML = assemble()
+
+
+def inline_script_hash(html: str = None) -> str:
+    """The CSP ``'sha256-…'`` source for the page's ONE inline ``<script>`` (#143).
+
+    Lets ``script-src`` authorize our own bundle WITHOUT ``'unsafe-inline'``, so
+    an injected inline script has no way in. Derived from the very string that
+    is served, so it can never drift from the bundle: edit a fragment or add a
+    mod and the hash follows.
+
+    The hash MUST cover the element's text child exactly -- every byte between
+    ``<script>`` and ``</script>``, including the leading newline and the
+    trailing indentation. Stripping any of it, or hashing the concatenated JS
+    before HTML assembly, yields a policy that blocks the whole application and
+    leaves a blank page. That is the one way this bricks the app, so the
+    extraction asserts rather than guesses.
+
+    Beware: ``<script`` appears ~9 more times in the bundle, all inside JS
+    COMMENTS (fragments discussing "the one concatenated <script>"). Those are
+    invisible to the HTML parser -- only ``</script>`` can close the element --
+    so the anchor is the exact ``<script>`` open tag (no attributes; the CDN
+    tags all carry ``src=``) paired with the first following ``</script>``."""
+    html = INDEX_HTML if html is None else html
+    blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
+    if len(blocks) != 1:
+        raise RuntimeError(
+            "expected exactly one inline <script> in the assembled page, found "
+            f"{len(blocks)}; the CSP hash would authorize the wrong bytes")
+    digest = hashlib.sha256(blocks[0].encode("utf-8")).digest()
+    return "sha256-" + base64.b64encode(digest).decode("ascii")

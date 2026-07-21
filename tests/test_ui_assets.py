@@ -17,6 +17,7 @@ gate; it is deliberately NOT asserted here so ordinary UI edits stay free.
 """
 
 import json
+import re
 from pathlib import Path, PurePosixPath
 
 from webterm.broker import ui
@@ -197,6 +198,120 @@ def test_no_ui_source_puts_a_tokened_url_into_a_persisting_sink():
     assert not offenders, (
         "token-bearing URL assigned to a persisted sink (use fetch + Blob + "
         "URL.createObjectURL instead):\n  " + "\n  ".join(offenders))
+
+
+# --------------------------------------------------------------------------- #
+# #143: third-party code must not execute unverified in the token's origin
+# --------------------------------------------------------------------------- #
+
+# Matches <script src="http..."> and <link ... href="http..."> in the assembled
+# page. Only ABSOLUTE http(s) URLs -- same-origin relative assets are ours.
+_EXTERNAL_SCRIPT_RE = re.compile(
+    r"<script\b[^>]*\bsrc=[\"'](https?://[^\"']+)[\"'][^>]*>", re.I)
+_EXTERNAL_LINK_RE = re.compile(
+    r"<link\b[^>]*\bhref=[\"'](https?://[^\"']+)[\"'][^>]*>", re.I)
+
+
+def _external_asset_tags():
+    """(url, full_tag) for every absolute-URL script/link in the served page."""
+    for regex in (_EXTERNAL_SCRIPT_RE, _EXTERNAL_LINK_RE):
+        for m in regex.finditer(INDEX_HTML):
+            yield m.group(1), m.group(0)
+
+
+def test_every_external_asset_has_sri_and_crossorigin():
+    """Third-party JS/CSS runs in the origin that holds every host's token.
+
+    prefs._hosts = [{id, label, url, token, ...}] lives in localStorage, so a
+    script from a compromised CDN package reads EVERY configured host's token --
+    not just this broker's -- and those tokens gate /launch (shell spawn) and
+    host-wide /file/*. Subresource Integrity is what stops a tampered response
+    executing; ``crossorigin`` is REQUIRED with it, because without it the
+    response is opaque and the browser cannot verify the hash at all.
+
+    Hashes were generated from the CDN bytes and cross-checked against unpkg
+    (two independent CDNs serving identical bytes). Regeneration command is in
+    the comment at the top of 00_head.html -- a stale hash BLOCKS the asset, so
+    any version bump must update it.
+
+    Note this test cannot verify a hash is *correct*, only that one is present:
+    a wrong hash fails closed (asset blocked, terminal doesn't load), which is
+    loud rather than silent, and is caught by actually opening the page.
+    """
+    tags = list(_external_asset_tags())
+    assert tags, "expected at least one external CDN asset in the page"
+    missing = []
+    for url, tag in tags:
+        if "integrity=" not in tag or "crossorigin=" not in tag:
+            missing.append(url)
+    assert not missing, (
+        "external assets without integrity+crossorigin (a compromised CDN "
+        "package would execute in the token's origin):\n  "
+        + "\n  ".join(missing))
+
+
+def test_external_assets_are_version_pinned():
+    """SRI is only meaningful on an immutable URL. A range/latest/tag URL can
+    legitimately change content, which would turn a pinned hash into a random
+    outage -- so an unpinned URL must never acquire an integrity attribute
+    instead of being fixed properly.
+
+    (This is exactly why the CodeMirror esm.sh imports carry no SRI: they use
+    semver RANGES on purpose -- see the comment at mods/editor/codemirror.js
+    -- because CodeMirror 6 needs one shared @codemirror/state instance and an
+    exact pin that drifts silently breaks syntax highlighting. Those are loaded
+    by dynamic import() from JS, not as tags, so they are not matched here.)
+    """
+    for url, _tag in _external_asset_tags():
+        assert re.search(r"@\d+\.\d+\.\d+", url), \
+            f"external asset is not version-pinned, so SRI cannot hold: {url}"
+
+
+def test_csp_hash_matches_the_inline_script_actually_served():
+    """The one way the CSP bricks the app: a hash that doesn't match the bytes.
+
+    ``script-src`` carries no ``'unsafe-inline'``, so if the ``'sha256-…'``
+    source is off by so much as the newline after ``<script>``, the browser
+    refuses to run the entire application and the user gets a blank page.
+
+    This recomputes the digest independently of ui.inline_script_hash -- reading
+    the served page and hashing the text child directly -- so an extraction bug
+    in the helper shows up as a mismatch here rather than as a blank page.
+    """
+    import base64
+    import hashlib
+
+    from webterm.broker.app import _csp_header
+
+    blocks = re.findall(r"<script>(.*?)</script>", INDEX_HTML, re.S)
+    assert len(blocks) == 1, (
+        f"expected exactly one inline <script>, found {len(blocks)} -- the CSP "
+        "hash would authorize the wrong bytes")
+    # Independently derived: no strip(), no normalization, exactly the element's
+    # text child as the HTML parser sees it.
+    expected = "sha256-" + base64.b64encode(
+        hashlib.sha256(blocks[0].encode("utf-8")).digest()).decode("ascii")
+    assert ui.inline_script_hash(INDEX_HTML) == expected
+    assert f"'{expected}'" in _csp_header(expected)
+
+
+def test_csp_authorizes_exactly_the_cdn_origins_the_page_uses():
+    """Every origin the page loads script from must be in script-src, and
+    nothing more -- an allowlist that drifts wider than the page is just a
+    weaker policy, and one that drifts narrower breaks a feature."""
+    from webterm.broker.app import _SCRIPT_ORIGINS
+
+    used = set()
+    for url, _tag in _external_asset_tags():
+        used.add("/".join(url.split("/")[:3]))
+    # CodeMirror is loaded by dynamic import() from JS, not as a tag, so it
+    # never appears in _external_asset_tags -- pick it up from the mod source.
+    cm = (BROKER_DIR / "mods/editor/codemirror.js").read_text(encoding="utf-8")
+    for m in re.finditer(r"CM_CDN\s*=\s*'(https://[^/']+)", cm):
+        used.add(m.group(1))
+    allowed = set(_SCRIPT_ORIGINS)
+    assert used <= allowed, f"origins the page uses but CSP omits: {used - allowed}"
+    assert allowed <= used, f"origins in CSP the page never uses: {allowed - used}"
 
 
 def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():

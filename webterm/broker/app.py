@@ -900,6 +900,37 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
+# Origins allowed to execute script (#143). jsdelivr serves xterm as classic
+# <script src> tags, all SRI-pinned; esm.sh serves CodeMirror as ES modules via
+# dynamic import() -- which CSP governs under script-src, not connect-src, and
+# esm.sh's stubs re-import via ROOT-RELATIVE paths so the whole module graph
+# stays on this one origin.
+_SCRIPT_ORIGINS = ("https://cdn.jsdelivr.net", "https://esm.sh")
+
+
+def _csp_header(inline_hash: Optional[str] = None) -> str:
+    """The Content-Security-Policy value (#143).
+
+    Deliberately NARROW. Only ``script-src`` (who may execute code) and
+    ``frame-ancestors`` (who may embed us) are set: adding ``default-src``,
+    ``style-src``, ``img-src`` or ``connect-src`` would have to enumerate every
+    inline style, the data: favicon, blob: download URLs and every host a
+    federated UI talks to -- each one a way to break the app for no gain against
+    the threat this addresses.
+
+    What it buys: a script from an origin NOT listed here cannot execute, even
+    if something injects a tag. What it explicitly does NOT buy: protection
+    from a compromised package on an origin that IS listed -- SRI is what
+    neutralizes jsdelivr, and nothing here saves esm.sh (see #143).
+
+    ``inline_hash`` authorizes our own bundle; without it (headless, which
+    serves no page and no inline script) the directive simply lists the
+    origins."""
+    script_src = " ".join(
+        ([f"'{inline_hash}'"] if inline_hash else []) + list(_SCRIPT_ORIGINS))
+    return f"script-src {script_src}; frame-ancestors 'none'"
+
+
 def _open_url(config: Optional[Dict[str, Any]], port: int, token: str) -> str:
     """The ready-to-open desktop URL, token included. A wildcard bind has no
     single address, so show loopback — the operator substitutes their own."""
@@ -1529,6 +1560,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # (agents from a previous tokenless broker retry forever). Old-code agents
     # hammer regardless of the fix on our side.
     app.ctx.producer_rejects = 0
+    # Baseline CSP. Replaced below with the hash-bearing variant when serve_ui
+    # is on; headless serves no inline script, so the origin list is enough.
+    app.ctx.csp = _csp_header()
     # Terminal session recordings (#140): durable user data, so the default
     # lives BESIDE the state store (not the temp dir an OS cleaner may wipe).
     # Config "recordings_dir" overrides. Created lazily on first save.
@@ -1644,7 +1678,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # into a terminal or writing a file. X-Frame-Options for older browsers,
         # frame-ancestors for the rest.
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["Content-Security-Policy"] = app.ctx.csp
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
@@ -4398,10 +4432,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # missing/oversized fragment (ui.assemble() is non-protective); deferring
         # it into the handler would let a broken broker boot "healthy" and only
         # 500 on the first GET /. sys.modules caches the assembled values.
-        from .ui import INDEX_HTML
+        from .ui import INDEX_HTML, inline_script_hash
         from .help_corpus import HELP_CORPUS
         app.ctx.index_html = INDEX_HTML
         app.ctx.help_corpus = HELP_CORPUS
+        # #143: authorize OUR bundle by hash so script-src needs no
+        # 'unsafe-inline'. Computed from the assembled page, here rather than at
+        # module scope so a headless broker still never imports .ui (#87).
+        app.ctx.csp = _csp_header(inline_script_hash(INDEX_HTML))
         app.add_route(_index, "/", methods=["GET"])
         app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
     else:

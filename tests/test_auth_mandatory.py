@@ -275,8 +275,17 @@ def test_security_headers_ride_on_every_response(tmp_path):
         _, r = app.test_client.get(path)
         assert r.headers.get("Referrer-Policy") == "no-referrer", path
         assert r.headers.get("X-Frame-Options") == "DENY", path
-        assert r.headers.get("Content-Security-Policy") == \
-            "frame-ancestors 'none'", path
+        csp = r.headers.get("Content-Security-Policy") or ""
+        # frame-ancestors is the clickjacking half; script-src (#143) is the
+        # supply-chain half. Asserted by substring, not equality, so adding a
+        # directive later doesn't fail here for no reason -- the exact
+        # script-src contents are pinned in test_ui_assets.py instead.
+        assert "frame-ancestors 'none'" in csp, path
+        assert "script-src " in csp, path
+        # 'unsafe-inline' would defeat the point: our bundle is authorized by
+        # hash precisely so an INJECTED inline script still cannot run.
+        assert "unsafe-inline" not in csp, path
+        assert "unsafe-eval" not in csp, path
 
 
 def test_a_valid_token_gets_through(tmp_path):
