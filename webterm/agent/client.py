@@ -26,6 +26,7 @@ from typing import Callable, Optional, Tuple
 import websockets
 
 from .. import protocol
+from .config import TOKEN_ENV
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +77,9 @@ class BrokerClient:
         self._on_flush_request = on_flush_request
         self.connected = False
         self._stopping = False
+        # One-shot latch so the 4401 explanation is logged once per
+        # rejection episode, not on every 10s retry.
+        self._auth_rejected = False
         self._stop_event: Optional[asyncio.Event] = None
         self._ws = None
 
@@ -121,6 +125,30 @@ class BrokerClient:
 
             if self._stopping:
                 break
+            # Auth rejection (#142) arrives POST-upgrade, i.e. after a
+            # SUCCESSFUL connect — which just reset the backoff above. Left
+            # alone this retries at a steady ~1 Hz forever, and a broker that
+            # has just started requiring tokens gets hammered by every stranded
+            # agent. Jump straight to the cap and say why, ONCE, naming the
+            # variable the operator has to set.
+            #
+            # Deliberately not fatal: the token can come back without this
+            # process restarting (an operator restoring a rolled-back
+            # webterm_token.json, or restarting the broker with the token the
+            # agent already holds), and a terminal that silently gave up is
+            # unrecoverable while a slow retry costs almost nothing.
+            if getattr(ws, "close_code", None) == 4401:
+                if not self._auth_rejected:
+                    self._auth_rejected = True
+                    LOGGER.error(
+                        "broker rejected this agent: no valid token. Set $%s to "
+                        "the broker's token (get it with 'python -m "
+                        "webterm.broker --print-token') and relaunch this "
+                        "terminal. Retrying every %.0fs meanwhile.",
+                        TOKEN_ENV, _BACKOFF_CAP)
+                backoff = _BACKOFF_CAP
+            else:
+                self._auth_rejected = False
             self._drain()
             if await self._sleep(backoff):
                 break
@@ -152,6 +180,11 @@ class BrokerClient:
         ))
         self._ws = ws
         self.connected = True
+        # Accepted — clear the 4401 latch here rather than on the next
+        # disconnect, so it means "rejected and not accepted since". Left to
+        # clear at session end it would stay set for the whole life of a healthy
+        # connection, and a later flap would skip the ERROR that explains it.
+        self._auth_rejected = False
         # Heal the connect-window race: the detection loop updates state.agent
         # then _enqueue()-drops the frame while connected is still False. The
         # hello above carries state.agent as read *before* the send, so a change

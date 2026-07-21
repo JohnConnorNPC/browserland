@@ -24,7 +24,7 @@ from .altscreen import DecModeSniffer
 from .backends import create_backend
 from .backends.base import PtyBackend
 from .client import BrokerClient
-from .config import AgentConfig
+from .config import TOKEN_ENV, AgentConfig
 from .env_util import spawn_env
 from .ringbuf import ByteRing
 from .snapshot import pyte_snap
@@ -392,9 +392,19 @@ class Agent:
         # Fresh PATH from the registry so a just-installed program is found
         # without a re-login (todo task 17). spawn_env() is a no-op copy of the
         # environment off Windows.
+        shell_env = spawn_env()
+        # Keep the broker token out of the user's shell (#142). spawn_env()
+        # copies os.environ, which now ALWAYS carries WEB_TERMINAL_TOKEN (the
+        # Launcher injects it and a token is mandatory), so without this every
+        # terminal could `echo $WEB_TERMINAL_TOKEN` and read the credential that
+        # gates host-wide file access and shell spawning. We already parsed it
+        # into AgentConfig, so dropping it here costs the agent nothing.
+        # Shell-side automation that legitimately needs it should read the
+        # sidecar or `python -m webterm.broker --print-token` instead.
+        shell_env.pop(TOKEN_ENV, None)
         self.backend.spawn(
             self.config.command, self.config.cols, self.config.rows,
-            cwd=self.config.cwd, env=spawn_env(),
+            cwd=self.config.cwd, env=shell_env,
         )
         self.state.pid = self.backend.pid or 0
         # Pin the shell's identity now (fresh spawn) so the task-manager's
