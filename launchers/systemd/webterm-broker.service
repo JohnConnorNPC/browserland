@@ -2,6 +2,11 @@
 #   sudo cp launchers/systemd/webterm-broker.service /etc/systemd/system/
 #   edit User/WorkingDirectory/ExecStart paths and the token, then
 #   sudo systemctl daemon-reload && sudo systemctl enable --now webterm-broker
+#
+# Set an EXPLICIT token here (#142). Left unset the broker mints one into
+# webterm_token.json beside its state store, which works - but under systemd
+# the value is never printed to a terminal, so you would have to fetch it with
+#   python3 -m webterm.broker --print-token
 [Unit]
 Description=webterm broker (WebSocket terminal relay on :4445)
 After=network-online.target

@@ -3,6 +3,12 @@
 #   sudo cp launchers/systemd/webterm-agent.service /etc/systemd/system/
 #   edit User/WorkingDirectory/ExecStart paths, broker URL and token, then
 #   sudo systemctl daemon-reload && sudo systemctl enable --now webterm-agent
+#
+# The token below is REQUIRED (#142): every connection needs one, including
+# loopback. It must MATCH the broker's - read it with
+#   python3 -m webterm.broker --print-token
+# and note that an agent started with the wrong token is closed with 4401 and
+# retries every 10s without ever registering.
 [Unit]
 Description=webterm agent (headless PTY producer)
 After=network-online.target webterm-broker.service
