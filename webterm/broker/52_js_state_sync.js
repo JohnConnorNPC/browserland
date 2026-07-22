@@ -67,7 +67,7 @@
             _statePushInFlight = true;
             try {
                 const blob = _stateBlob();
-                const r = await fetch(hostHttpUrl(localHost(), '/state'), {
+                const r = await hostFetch(localHost(), '/state', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -156,7 +156,7 @@
                 const ctrl = new AbortController();
                 const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
                 try {
-                    r = await fetch(hostHttpUrl(localHost(), '/state'),
+                    r = await hostFetch(localHost(), '/state',
                         { cache: 'no-store', signal: ctrl.signal });
                 } finally { clearTimeout(timer); }
             } catch (e) { return; }              // offline — keep localStorage

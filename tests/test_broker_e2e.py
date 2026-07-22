@@ -406,7 +406,7 @@ def test_index_serves_windowed_page(broker_proc):
     # chips — and the old persist-token-in-the-URL block must be gone
     # (tokens live in localStorage now).
     assert "_hosts" in body
-    assert "hostHttpUrl" in body
+    assert "hostFetch" in body
     assert "host-status" in body
     assert "searchParams.set('token'" not in body
 

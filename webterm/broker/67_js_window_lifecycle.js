@@ -435,9 +435,8 @@
                     const tid = setTimeout(() => ac.abort(), 30000);
                     let resp;
                     try {
-                        resp = await fetch(
-                            hostHttpUrl(hostById(win.hostId),
-                                '/file/paste_image'),
+                        resp = await hostFetch(
+                            hostById(win.hostId), '/file/paste_image',
                             {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },

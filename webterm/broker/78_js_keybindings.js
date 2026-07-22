@@ -199,7 +199,7 @@
             _mcpAsserting.add(win.id);
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-            fetch(hostHttpUrl(host, '/session/mcp'), {
+            hostFetch(host, '/session/mcp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: win.sid, mode }),
@@ -224,7 +224,7 @@
         async function killSessionOnHost(h, id, pid) {
             let res;
             try {
-                res = await fetch(hostHttpUrl(h, '/session/kill'), {
+                res = await hostFetch(h, '/session/kill', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id, pid }),

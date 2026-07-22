@@ -41,7 +41,7 @@
                 const payload = {};
                 if (name) payload.profile = name;
                 if (cwd) payload.cwd = cwd;
-                const r = await fetch(hostHttpUrl(host, '/launch'), {
+                const r = await hostFetch(host, '/launch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -79,7 +79,7 @@
             host = host || localHost();
             if (profilesCache.has(host.id)) return profilesCache.get(host.id);
             try {
-                const r = await fetch(hostHttpUrl(host, '/profiles'));
+                const r = await hostFetch(host, '/profiles');
                 if (r.status === 401) {
                     pollStateFor(host.id).authNeeded = true;
                     showAuthOverlay(host);

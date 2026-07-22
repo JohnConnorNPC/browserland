@@ -104,7 +104,8 @@ def test_index_html_served_sentinels_present():
         "<title>Browserland</title>",
         "term-window",
         "_hosts",
-        "hostHttpUrl",
+        "hostFetch",
+        "hostUrl",
         "host-status",
         "set-profiles-list",     # #70 launch-profile editor markup
         "renderProfilesEditor",  # #70 editor logic
@@ -149,7 +150,12 @@ def test_index_html_never_puts_token_in_url():
 # The token rides the query string (appendHostToken), so a URL built by one of
 # these builders is a live credential. Fine in a fetch(); NOT fine in any sink
 # the browser PERSISTS.
-_TOKEN_URL_BUILDERS = ("hostHttpUrl(", "appendHostToken(", "hostWsUrl(",
+#: Since #144 the ONLY builder that can put a token in a URL is hostWsUrl --
+#: HTTP goes through hostFetch, which sends Authorization: Bearer. hostHttpUrl,
+#: appendHostToken and the recorder's recUrl are gone; they are still listed so
+#: that reintroducing one under its old name trips this guard rather than
+#: quietly restoring the leak.
+_TOKEN_URL_BUILDERS = ("hostWsUrl(", "hostHttpUrl(", "appendHostToken(",
                        "recUrl(")
 
 # Sinks that outlive the request. `.href` with a `download` attribute files the
@@ -254,6 +260,60 @@ def test_vendored_assets_are_referenced_and_present_on_disk():
     for name in vendor._ASSETS:
         assert vendor.URL_PREFIX + name in referenced, \
             f"vendored {name} is never referenced by the page"
+
+
+def test_no_http_request_puts_the_token_in_the_url():
+    """#144: the token rides `Authorization: Bearer`, never a query string.
+
+    A URL credential leaks where a header cannot: any script on the page can
+    read the full URL out of `performance.getEntriesByType('resource')`, a
+    DevTools HAR export carries it into a bug report, and a reverse proxy
+    (`tailscale serve` -- the topology SETUP.md recommends) logs it.
+
+    The invariant is structural rather than stylistic: no function that builds
+    a token-bearing HTTP URL exists any more, so one cannot be called by
+    accident. A missed call site is a ReferenceError at load, which takes the
+    whole bundle down loudly -- exactly what you want over a silent 401.
+    """
+    banned = ("function hostHttpUrl", "function appendHostToken")
+    for name, text in _ui_sources():
+        for b in banned:
+            assert b not in text, (
+                f"{name} reintroduces {b!r} -- HTTP must use hostFetch "
+                "(Authorization: Bearer), see #144")
+    # ...and nothing calls them either.
+    for name, text in _ui_sources():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith(("//", "*", "/*")):
+                continue                      # prose may still name the old API
+            for b in ("hostHttpUrl(", "appendHostToken("):
+                assert b not in line, f"{name}:{lineno} calls removed {b}"
+
+
+def test_websocket_is_the_only_remaining_token_in_url():
+    """The documented exception, pinned so it stays deliberate.
+
+    The browser WebSocket API cannot set request headers on the handshake, so
+    /ws, /control and /browserland keep `?token=`. Closing that needs a
+    connect-ticket scheme, not a refactor -- see docs/TECHNICAL.md. This test
+    exists so the exception can't quietly grow to cover HTTP again.
+    """
+    auth_src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(
+        encoding="utf-8")
+    assert "function hostWsUrl" in auth_src
+    assert "function hostFetch" in auth_src
+    assert "function hostUrl" in auth_src
+    # The token-appending code lives inside hostWsUrl and nowhere else.
+    ws_start = auth_src.index("function hostWsUrl")
+    ws_end = auth_src.index("\n        }", ws_start)
+    assert "'token=' +" in auth_src[ws_start:ws_end], \
+        "hostWsUrl must still carry the token (browsers can't send WS headers)"
+    # hostFetch must NOT build a tokened URL.
+    f_start = auth_src.index("function hostFetch")
+    f_end = auth_src.index("\n        }", f_start)
+    body = auth_src[f_start:f_end]
+    assert "token=" not in body, "hostFetch must not put the token in the URL"
+    assert "Authorization" in body and "Bearer" in body
 
 
 def test_csp_hash_matches_the_inline_script_actually_served():
@@ -1427,14 +1487,14 @@ def test_filemanager_mod_packaged_and_manifest_agrees():
     assert "return launchFileManager()" in src
     # File I/O (incl. the DESTRUCTIVE delete + upload) rides ctx.file (#82): the
     # mod stashes ctx.file and every /file/* call flows through fmFile() — NO direct
-    # fileApiPost AND no raw upload fetch (hostHttpUrl) survives in the mod.
+    # fileApiPost AND no raw upload fetch (hostFetch) survives in the mod.
     assert "fmFile.cap = ctx.file;" in src
     assert "fmFile().list(" in src
     assert "fmFile().read(" in src
     assert "fmFile().delete(" in src
     assert "fmFile().upload(" in src
     assert "fileApiPost(" not in src, "file-manager mod must route I/O through ctx.file"
-    assert "hostHttpUrl(" not in src, "the raw upload fetch must be gone"
+    assert "hostFetch(" not in src, "the raw upload fetch must be gone"
     # Ships in the served page, AFTER the help mod and BEFORE the editor mod (so the
     # (+) menu lists File manager right after the core built-ins, ahead of the
     # text-editor + sticky-note mods).
@@ -1503,7 +1563,7 @@ def test_server_store_capability_present():
     # The transport helper targets /mod-store/<modId>, local host only, and
     # set() auto-attaches the core lease id so the active browser's write passes.
     for sym in ("function _modStoreApi", "'/mod-store/'",
-                "hostHttpUrl(localHost()", "clientId: CLIENT_ID"):
+                "hostFetch(localHost()", "clientId: CLIENT_ID"):
         assert sym in loader, f"missing ctx.serverStore transport symbol: {sym!r}"
     # ctxVersion is unchanged — ctx.serverStore is additive.
     assert "ctxVersion: 1" in loader
@@ -1558,7 +1618,7 @@ def test_browse_pane_component_present():
     # the file API, or persistence — those are injected per-consumer via hooks.
     # Locking this keeps the editor dialog working mods-off and the FM's
     # fail-closed host semantics where they belong (the consumer).
-    for banned in ("fileApiPost(", "hostHttpUrl(", "saveAppWindow(",
+    for banned in ("fileApiPost(", "hostFetch(", "saveAppWindow(",
                    "paneHost(", "fmFile("):
         assert banned not in src, \
             f"browse-pane component must stay I/O-agnostic, found {banned!r}"
@@ -1683,7 +1743,7 @@ def test_file_capability_chunked_ops_present():
         "dead download >5 MiB copy remains on a #108 byte path"
     # The mod still routes ALL I/O through the capability — no raw fetch snuck in
     # with the streaming rewrite.
-    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+    assert "fileApiPost(" not in fm and "hostFetch(" not in fm
 
 
 def test_checksum_verified_move_present():
@@ -1715,7 +1775,7 @@ def test_checksum_verified_move_present():
     assert "the source changed" not in fm, \
         "dead size-only move check remains — superseded by the SHA-256 gate"
     # The mod still routes ALL I/O through the capability — no raw fetch snuck in.
-    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+    assert "fileApiPost(" not in fm and "hostFetch(" not in fm
 
 
 def test_transfer_progress_window_present():
@@ -1748,7 +1808,7 @@ def test_transfer_progress_window_present():
     assert "fmFile().uploadAbort(" in fm
     # The mod still routes ALL I/O through the capability — no raw fetch snuck in
     # with the progress/cancel wiring.
-    assert "fileApiPost(" not in fm and "hostHttpUrl(" not in fm
+    assert "fileApiPost(" not in fm and "hostFetch(" not in fm
 
     css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
     assert ".app-dialog-progress" in css
@@ -1862,12 +1922,12 @@ def test_taskmanager_mod_packaged_and_manifest_agrees():
     # Session RPC (incl. the DESTRUCTIVE kill / session destroy) rides ctx.session
     # (#85): the mod stashes ctx.session and EVERY /session/* call flows through
     # tmSession() carrying the session's own host id — NO raw inline fetch
-    # (hostHttpUrl) and NO surviving inline sessionPost in the mod.
+    # (hostFetch) and NO surviving inline sessionPost in the mod.
     assert "tmSession.cap = ctx.session;" in src
     assert "tmSession().procs(sess.id, { host: sess.hostId })" in src
     assert "tmSession().kill(sess.id, sess.pid, { host: sess.hostId })" in src
     assert "tmSession().kill(sess.id, pid, { host: sess.hostId })" in src
-    assert "hostHttpUrl(" not in src, "the raw inline session fetch must be gone"
+    assert "hostFetch(" not in src, "the raw inline session fetch must be gone"
     assert "sessionPost(" not in src, "the old inline sessionPost must be gone"
     # Teardown closes any live task-manager window WHILE the kind is still
     # registered (so saveAppWindow early-returns — no junk record persists), then
@@ -1909,7 +1969,7 @@ def test_session_capability_present():
         assert sym in loader, f"missing ctx.session host-routing symbol: {sym!r}"
     # Routing reuses the EXISTING core host helpers (no parallel host logic).
     for sym in ("hostById(hostId)", "return localHost();",
-                "hostHttpUrl(host, route)"):
+                "hostFetch(host, route"):
         assert sym in loader, f"ctx.session must reuse core host helper: {sym!r}"
     # The {status,json} contract PRESERVES the HTTP status (so a 409 + session_gone
     # stays a 409 — the session-destroy success path) and never rejects.
@@ -1978,11 +2038,11 @@ def test_git_mod_packaged_and_manifest_agrees():
     assert "defaultEnabled: false" in src
     assert "tiers: ['session', 'window']" in src
     # Rides the per-terminal-window hook + the session git capability (#116),
-    # feature-detected — NOT a raw inline fetch (no hostHttpUrl in the mod).
+    # feature-detected — NOT a raw inline fetch (no hostFetch in the mod).
     assert "if (!ctx.windows) return;" in src
     assert "ctx.windows.onTerminalCreate(" in src
     assert "ctx.session.git(" in src
-    assert "hostHttpUrl(" not in src, "the raw inline git fetch must be gone from the mod"
+    assert "hostFetch(" not in src, "the raw inline git fetch must be gone from the mod"
     # Per-window teardown covers BOTH a window close (onDispose) and a mod disable
     # (ctx.onUnload drains the disposer set) — no stray interval / orphan DOM.
     assert "info.onDispose(" in src

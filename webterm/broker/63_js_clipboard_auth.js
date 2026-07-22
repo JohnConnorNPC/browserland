@@ -142,13 +142,42 @@
             } catch (_) {}
         })();
 
-        // Every fetch / WS dial goes through these: same-origin for the
-        // local host, the stored origin for remotes, each host's own token
-        // appended. (Remote JSON needs CORS on the broker — emitted only
-        // when a token is configured; the WS needs none.)
-        function hostHttpUrl(host, path) {
-            const base = (host && host.url) ? host.url : '';
-            return base + appendHostToken(host, path);
+        // Every fetch / WS dial goes through these: same-origin for the local
+        // host, the stored origin for remotes, each host's own token attached.
+        //
+        // HTTP sends the token as `Authorization: Bearer`, never in the query
+        // string (#144). A URL credential leaks everywhere a header does not:
+        // performance.getEntriesByType('resource') hands the full URL to ANY
+        // script on the page, DevTools HAR exports carry it into bug reports,
+        // and a reverse proxy (`tailscale serve`, the recommended topology)
+        // logs it. There is deliberately NO function here that builds a
+        // token-bearing HTTP URL, so one cannot be reintroduced by accident.
+        //
+        // Cost: an Authorization header makes a cross-origin request
+        // non-simple, so remote hosts now pay an OPTIONS preflight. The broker
+        // answers every one and sets Access-Control-Max-Age: 86400, so it is
+        // one round trip per host per day, not per request. ACAO stays `*`:
+        // a header set explicitly by fetch() is NOT a "credentialed" request in
+        // the CORS sense (that needs credentials:'include'), so `*` remains
+        // legal and a wrong token still returns a READABLE 401 rather than an
+        // opaque failure — which is what keeps the login overlay working.
+        function hostUrl(host, path) {
+            return ((host && host.url) ? host.url : '') + path;
+        }
+        function hostFetch(host, path, opts) {
+            const o = Object.assign({}, opts || {});
+            // Headers(), NOT Object.assign: a caller passing a real Headers
+            // instance (or an array of pairs) would spread to {} and SILENTLY
+            // drop its Content-Type, turning a JSON POST into a bodyless one
+            // the broker then rejects as bad_json. No caller does that today;
+            // this makes it impossible for one to start. Headers() also
+            // replaces any existing authorization case-insensitively.
+            const headers = new Headers(o.headers || undefined);
+            if (host && host.token) {
+                headers.set('Authorization', 'Bearer ' + host.token);
+            }
+            o.headers = headers;
+            return fetch(hostUrl(host, path), o);
         }
         function hostWsUrl(host, path) {
             let base;
@@ -159,11 +188,13 @@
                     ? 'wss:' : 'ws:';
                 base = proto + '//' + window.location.host;
             }
-            return base + appendHostToken(host, path);
-        }
-        function appendHostToken(host, path) {
-            if (!host || !host.token) return path;
-            return path + (path.indexOf('?') === -1 ? '?' : '&')
+            // The ONE place a token still rides a URL, and it is unavoidable:
+            // the browser WebSocket API cannot set request headers on the
+            // handshake. /ws, /control and /browserland therefore keep
+            // ?token=. Documented in docs/TECHNICAL.md rather than papered
+            // over — closing it needs a connect-ticket scheme, not a refactor.
+            if (!host || !host.token) return base + path;
+            return base + path + (path.indexOf('?') === -1 ? '?' : '&')
                 + 'token=' + encodeURIComponent(host.token);
         }
 
@@ -216,8 +247,14 @@
             if (!candidate) return;
             let resp;
             try {
-                resp = await fetch((host.url || '') + '/sessions?token='
-                    + encodeURIComponent(candidate));
+                // Probe with the CANDIDATE token, not the stored one, via the
+                // same Bearer path every other request uses (#144). It must
+                // not be a ?token= URL: the broker reads the query BEFORE the
+                // header, so a leftover query token would silently win over
+                // the header and make a correct password look wrong -- and the
+                // probe URL would land in Resource Timing like any other.
+                resp = await hostFetch({ url: host.url, token: candidate },
+                                       '/sessions');
             } catch (err) {
                 // With CORS pinned onto 401s too, a TypeError here really
                 // is "host down", not "wrong password".

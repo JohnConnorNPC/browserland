@@ -48,10 +48,10 @@
                 const disposers = new Set();  // live per-terminal UI teardowns
                 let libRender = null;         // live library window repaint
 
-                // ---- local-broker HTTP (the token rides hostHttpUrl) -------
-                function recUrl(path) { return hostHttpUrl(localHost(), path); }
+                // ---- local-broker HTTP (the token rides an Authorization
+                // header, never the URL -- see hostFetch, #144) -------------
                 async function recApi(path, opts) {
-                    const r = await fetch(recUrl(path), opts);
+                    const r = await hostFetch(localHost(), path, opts);
                     let j = null;
                     try { j = await r.json(); } catch (_) {}
                     if (!j || typeof j !== 'object') {
@@ -69,13 +69,13 @@
                 }
 
                 // ---- download ----------------------------------------------
-                // The token rides recUrl's query string, so it must NEVER reach
-                // an <a href>: an anchor with `download` makes the browser file
-                // the SOURCE URL in its Downloads list, where the credential
-                // outlives the session, stays on screen, is re-triggerable via
-                // Retry, and syncs across devices. Fetch the bytes instead — a
-                // fetch URL is transient — and hand the anchor a blob: URL,
-                // which carries only the origin. Same shape as the
+                // The download must NEVER be a plain <a href> to the broker:
+                // an anchor with `download` makes the browser file the SOURCE
+                // URL in its Downloads list, where it outlives the session,
+                // stays on screen and is re-triggerable via Retry. Fetch the
+                // bytes instead (hostFetch keeps the token in a header, so it
+                // is not in the URL at all since #144) and hand the anchor a
+                // blob: URL, which carries only the origin. Same shape as the
                 // file-manager's download fallback.
                 //
                 // Always re-fetches, even from the player, which already holds
@@ -101,9 +101,9 @@
                     if (dlBusy.has(recId)) return;
                     dlBusy.add(recId);
                     try {
-                        const r = await fetch(
-                            recUrl('/recording?id='
-                                   + encodeURIComponent(recId)));
+                        const r = await hostFetch(
+                            localHost(),
+                            '/recording?id=' + encodeURIComponent(recId));
                         if (!r.ok) {
                             let j = null;
                             try { j = await r.json(); } catch (_) {}
@@ -1005,9 +1005,10 @@
                     (async function () {
                         setStatus('loading…');
                         try {
-                            const r = await fetch(
-                                recUrl('/recording?id='
-                                       + encodeURIComponent(recId)));
+                            const r = await hostFetch(
+                                localHost(),
+                                '/recording?id='
+                                + encodeURIComponent(recId));
                             if (!r.ok) throw new Error('HTTP ' + r.status);
                             const text = await r.text();
                             if (closed) return;

@@ -463,7 +463,7 @@
             return base.replace(/\/+$/, '') + '/mcp';
         }
         function fetchMcpConfig(host) {
-            return fetch(hostHttpUrl(host, '/mcp/config'))
+            return hostFetch(host, '/mcp/config')
                 .then(r => (r.ok ? r.json() : null))
                 .then(j => { if (j && j.ok) mcpConfigCache.set(host.id, j); })
                 .catch(() => {});
@@ -516,7 +516,7 @@
             if (!t) return;
             const host = hostById(t.hostId);
             if (!host) return;
-            fetch(hostHttpUrl(host, '/mcp/config'), {
+            hostFetch(host, '/mcp/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(patch || {}),
@@ -548,7 +548,7 @@
         // invalidate the names-only profilesCache (76) so the right-click + launch
         // picker and the Default-profile <select> refetch the live set.
         function fetchProfilesConfig(host) {
-            return fetch(hostHttpUrl(host, '/profiles/config'))
+            return hostFetch(host, '/profiles/config')
                 .then(r => (r.ok ? r.json() : null))
                 .then(j => { if (j && j.ok) profilesConfigCache.set(host.id, j); })
                 .catch(() => {});
@@ -712,7 +712,7 @@
         }
         function saveProfilesConfig(host, profiles, defaultProfile) {
             if (!host) return;
-            return fetch(hostHttpUrl(host, '/profiles/config'), {
+            return hostFetch(host, '/profiles/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ profiles: profiles,
@@ -811,7 +811,7 @@
         // the Add dialog pre-filled (openDialog's singleton cancels this one), so
         // nothing is saved until the user confirms.
         function detectProfiles(host) {
-            fetch(hostHttpUrl(host, '/profiles/detect'))
+            hostFetch(host, '/profiles/detect')
                 .then(r => (r.ok ? r.json() : null))
                 .then(j => {
                     const list = (j && j.ok && Array.isArray(j.suggestions))

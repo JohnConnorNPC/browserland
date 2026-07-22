@@ -41,7 +41,7 @@
         function fetchHelpCorpus() {
             if (helpCorpusEntries) return Promise.resolve(helpCorpusEntries);
             if (helpCorpusPromise) return helpCorpusPromise;
-            helpCorpusPromise = fetch(hostHttpUrl(localHost(), '/help-corpus.json'))
+            helpCorpusPromise = hostFetch(localHost(), '/help-corpus.json')
                 .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
                 .then(data => {
                     helpCorpusData = data;

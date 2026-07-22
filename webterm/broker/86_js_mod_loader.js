@@ -989,7 +989,7 @@
                 return Promise.resolve(
                     { status: 0, json: { ok: false, error: 'no_host' } });
             }
-            return fetch(hostHttpUrl(host, route), {
+            return hostFetch(host, route, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -1012,14 +1012,13 @@
         // to rebase on, NOT an exception). `query` is an optional pre-built
         // querystring ('?rev=3'); `body` omitted -> a bodyless GET.
         function _modStoreApi(method, modId, body, query) {
-            const url = hostHttpUrl(localHost(),
-                '/mod-store/' + encodeURIComponent(modId) + (query || ''));
+            const path = '/mod-store/' + encodeURIComponent(modId) + (query || '');
             const opts = { method: method };
             if (body !== undefined) {
                 opts.headers = { 'Content-Type': 'application/json' };
                 opts.body = JSON.stringify(body);
             }
-            return fetch(url, opts).then(r => r.json()
+            return hostFetch(localHost(), path, opts).then(r => r.json()
                 .then(j => ({ status: r.status, json: j }))
                 .catch(() => ({ status: r.status,
                                 json: { ok: false, error: 'HTTP ' + r.status } })))
@@ -1089,7 +1088,7 @@
             if (!localInfo._p) {
                 localInfo._p = (async function () {
                     try {
-                        const r = await fetch(hostHttpUrl(localHost(), '/info'));
+                        const r = await hostFetch(localHost(), '/info');
                         if (!r.ok) return {};
                         const j = await r.json();
                         return (j && typeof j === 'object') ? j : {};

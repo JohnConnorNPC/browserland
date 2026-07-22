@@ -29,7 +29,7 @@
                 const ctrl = new AbortController();
                 const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
                 try {
-                    r = await fetch(hostHttpUrl(host, '/state'),
+                    r = await hostFetch(host, '/state',
                         { cache: 'no-store', signal: ctrl.signal });
                 } finally { clearTimeout(timer); }
             } catch (e) { return null; }          // offline / CORS — no cache
@@ -96,7 +96,7 @@
             // Always re-PUT the USER's edited settings — on a 409 only the rev
             // (and the layout baseline) adopts the winner; entry.settings is the
             // pending edit and must survive the retry.
-            const doPut = (baseRev) => fetch(hostHttpUrl(host, '/state'), {
+            const doPut = (baseRev) => hostFetch(host, '/state', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

@@ -46,14 +46,14 @@
 
         // ---- server file Open/Save (editor) ------------------------------
         // POST a JSON body to a /file/* route on a broker; the token (if any)
-        // rides in the query via hostHttpUrl, mirroring /launch. `host`
+        // rides an Authorization header via hostFetch (#144). `host`
         // defaults to the LOCAL broker so every existing caller is unchanged;
         // AGENTS.md editors on a remote terminal pass that terminal's host so
         // the read/write hits the broker the file actually lives on.
         // Always resolves to a parsed object — {ok:false,error} on any
         // transport/HTTP failure so callers never see a rejected promise.
         function fileApiPost(path, body, host) {
-            return fetch(hostHttpUrl(host || localHost(), path), {
+            return hostFetch(host || localHost(), path, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body || {}),

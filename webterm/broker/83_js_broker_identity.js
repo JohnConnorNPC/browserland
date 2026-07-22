@@ -11,7 +11,7 @@
             // any failure (404 older broker, 401 wrong token, network) — caller
             // treats null as "unknown identity, allow with no warning".
             try {
-                const r = await fetch(hostHttpUrl({ url, token }, '/info'));
+                const r = await hostFetch({ url, token }, '/info');
                 if (!r.ok) return null;
                 const j = await r.json();
                 if (j && j.ok && typeof j.broker_id === 'string'

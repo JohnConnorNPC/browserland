@@ -118,6 +118,33 @@ tailnet request arrive *from* loopback, and any page in the user's browser
 reaches loopback too. Upgrading a tokenless install is a **breaking change** —
 see [UPGRADING.md](UPGRADING.md).
 
+**How the token travels (#144).** HTTP sends it as `Authorization: Bearer`, never in the
+query string. A URL credential leaks where a header does not: any script on the page can
+read the full URL out of `performance.getEntriesByType('resource')`, a DevTools HAR export
+carries it into a bug report, and a reverse proxy logs it. There is deliberately **no**
+client function that builds a token-bearing HTTP URL, so one cannot be reintroduced by
+accident — `hostFetch(host, path, opts)` is the only way to call the API.
+
+Two places still carry `?token=`, both unavoidable and both deliberate:
+
+* **WebSocket dials** (`/ws`, `/control`, `/browserland`). The browser WebSocket API
+  cannot set request headers on the handshake, so `hostWsUrl` appends the token. Closing
+  this needs a short-lived connect-ticket scheme, not a refactor.
+* **The `?token=` deep link** (`http://host:4445/?token=…`). It is how a token reaches a
+  fresh browser at all; it is adopted into localStorage and scrubbed from the address bar
+  via `history.replaceState` on load.
+
+So this narrows the exposure from every request to the handshake and the first load — it
+does not eliminate it. Operationally: an `Authorization` header makes a cross-origin
+request non-simple, so remote hosts pay an `OPTIONS` preflight; the broker answers every
+one and sets `Access-Control-Max-Age: 86400`, making it one round trip per host per day
+rather than per request. `ACAO: *` stays legal because a header set explicitly by
+`fetch()` is **not** a credentialed request in the CORS sense (that needs
+`credentials: 'include'`), which is also why a wrong token still returns a *readable* 401
+instead of an opaque failure — that is what keeps the login overlay working. **If you
+front the broker with a reverse proxy, it must forward the `Authorization` header**; a
+proxy that strips it makes every host look like a wrong password.
+
 The mint is `O_CREAT|O_EXCL` (0600 on POSIX; Windows inherits the directory
 ACL), not an atomic replace: two brokers racing on one state dir both see no
 file, and last-writer-wins would leave the loser running a token that is not

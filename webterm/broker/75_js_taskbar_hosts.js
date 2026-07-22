@@ -130,7 +130,7 @@
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
             try {
-                const r = await fetch(hostHttpUrl(host, '/sessions'),
+                const r = await hostFetch(host, '/sessions',
                                       { signal: ctrl.signal });
                 if (r.status === 401) {
                     // A READABLE 401 = host up, wrong/missing password (the
@@ -403,7 +403,7 @@
                 _mcpAsserting.add(key);
                 const ctrl = new AbortController();
                 const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-                fetch(hostHttpUrl(host, '/session/mcp'), {
+                hostFetch(host, '/session/mcp', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: sess.sid, mode: want }),

@@ -13,7 +13,7 @@
         // Provider data comes from the broker's GET /status/fetch proxy (the
         // broker's only outbound HTTP), allowlisted + cached server-side. The
         // client passes only enabled provider IDs; the token rides via
-        // hostHttpUrl(localHost(), ...) exactly like the loader's /info probe.
+        // hostFetch(localHost(), ...) exactly like the loader's /info probe.
         registerMod({
             id: 'aistatus',
             version: '1.0.0',
@@ -225,9 +225,8 @@
                     const csv = en.map(function (p) { return p.id; }).join(',');
                     try {
                         // ids are a controlled [a-z] allowlist — query-safe, no encode.
-                        const url = hostHttpUrl(localHost(),
+                        const r = await hostFetch(localHost(),
                             '/status/fetch?provider=' + csv);
-                        const r = await fetch(url);
                         if (!r.ok) throw new Error('HTTP ' + r.status);
                         const j = await r.json();
                         if (!j || !j.ok || !Array.isArray(j.providers)) {
