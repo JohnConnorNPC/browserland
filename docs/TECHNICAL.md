@@ -171,6 +171,32 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 
 The one remaining third party is **CodeMirror from esm.sh**, loaded by dynamic `import()` when the text editor first opens. It cannot be integrity-pinned: its URLs are semver-range-resolved on purpose, because CodeMirror 6 needs one shared `@codemirror/state` instance and an exact pin that drifts silently kills syntax highlighting (see the comment in `mods/editor/codemirror.js`). Vendoring its ~50-module graph is the only real fix and is tracked separately.
 
+**Auditing recordings for secrets (#145).** A `.blrec` captures the terminal's output
+byte-for-byte, so anything the terminal *echoed* is in it — a secret pasted onto a visible
+command line, an API key printed by a config dump, or this broker's own token if someone
+ran `--print-token` while recording. Recordings are durable and downloadable, so:
+
+```bash
+python -m webterm.broker --scan-recordings          # 0 = clean, 1 = found, 2 = incomplete
+python -m webterm.broker --scan-recordings --json   # machine-readable
+python -m webterm.broker --scan-recordings --secret <OLD_TOKEN>   # rotated token
+```
+
+It resolves the live `auth_token` and `mcp_token` **read-only** (auditing must never mint
+one — that would search for a value the broker isn't even running) and streams each file,
+**base64-decoding `d` before searching**. That decode is the whole point: a plain
+`grep <token> *.blrec` finds nothing even when the token is present and returns a
+confident false all-clear. Output payloads arrive in arbitrary PTY chunks, so the scanner
+carries a `len(secret)-1` byte tail across events — a secret split over two (or twenty)
+events is still found, and one that straddles a resize/gap event is too.
+
+**Its limits are printed on every run, including clean ones**, because a tool like this
+recreating the false all-clear would be worse than not having it: it finds a secret only
+where it appears as *contiguous bytes*. A secret the terminal broke up — interleaved with
+colour/cursor escapes, redrawn by the shell as you typed, echoed a character at a time —
+is not found, and a rotated secret is only searched for if passed with `--secret`. It is
+read-only: recordings are archived artifacts and nothing here rewrites one.
+
 Tokens are passed to spawned agents via **env only** (never argv — visible
 in process lists), and auth failures log only path + client IP (the token
 rides in query strings — Sanic's access log is pinned off for the same

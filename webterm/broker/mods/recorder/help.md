@@ -27,6 +27,12 @@ capturing the screen that was **already there**, so content that scrolled past
 before you pressed ⏺ can still be in the file. Treat a `.blrec` like a screen
 recording: check what is in it before sharing it.
 
+To check a saved recording for this broker's own token, run
+`python -m webterm.broker --scan-recordings`. It base64-decodes the output
+stream first -- a plain `grep` over a `.blrec` finds nothing even when the
+token is in there, and reports a false all-clear. It only finds a secret that
+appears as contiguous bytes, so a clean result is evidence, not proof.
+
 A recording is held in memory until you stop it — reloading the page discards
 an in-progress recording (the browser warns first). Recordings auto-stop at
 50 MB of captured output.
