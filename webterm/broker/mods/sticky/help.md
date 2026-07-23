@@ -1,4 +1,4 @@
-A sticky note is a small, always-visible scratch pad for quick text. Notes stay out of the taskbar by default.
+A sticky note is a small, always-visible scratch pad for quick text. Notes use a fixed-width font, so pasted code, ASCII, and aligned columns line up the way they do in the terminal and editor. Notes stay out of the taskbar by default.
 
 ## Notes on the taskbar
 

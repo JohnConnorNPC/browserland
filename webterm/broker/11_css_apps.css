@@ -17,10 +17,13 @@
         }
         .term-window.app-note .app-textarea {
             /* Paper is driven by the chosen swatch (--note-paper/--note-fg),
-               falling back to the classic yellow for an un-themed note. */
+               falling back to the classic yellow for an un-themed note.
+               Notes render in the shared monospace stack (same as the editor,
+               terminals, and scratchpad) so pasted code, ASCII, and aligned
+               columns line up glyph-for-glyph. */
             background: var(--note-paper, #fff7ae);
             color: var(--note-fg, #3a3000);
-            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-family: Consolas, 'Liberation Mono', monospace;
         }
         .term-window.app-editor .app-textarea {
             background: #1e1e1e;

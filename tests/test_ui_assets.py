@@ -141,6 +141,18 @@ def test_label_order_editor_wired_into_page():
         assert sentinel in INDEX_HTML, f"missing #123 sentinel: {sentinel!r}"
 
 
+def test_sticky_notes_use_a_monospace_font():
+    # Notes render in the shared monospace stack (Consolas/'Liberation Mono'),
+    # so pasted code, ASCII, and aligned columns line up glyph-for-glyph — NOT
+    # the old proportional Segoe UI. Pinned here so a CSS edit to
+    # `.term-window.app-note .app-textarea` can't revert it silently. The 600
+    # slice reaches the actual font-family line (the leading comment mentions
+    # "monospace" too, so assert on the declaration, not just the word).
+    note_rule = INDEX_HTML.split(".term-window.app-note .app-textarea")[1][:600]
+    assert "font-family: Consolas, 'Liberation Mono', monospace;" in note_rule
+    assert "Segoe UI" not in note_rule
+
+
 def test_index_html_never_puts_token_in_url():
     # Security invariant carried over from the monolith: the page must not push
     # the auth token into the address bar.
