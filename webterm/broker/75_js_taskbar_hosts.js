@@ -1,3 +1,12 @@
+        // Tiling-membership GC bookkeeping (#147 follow-up; used by the poll
+        // sweep below). key -> ms timestamp of the FIRST successful poll that
+        // failed to mention it. Any reappearance deletes the entry, so only a
+        // CONTINUOUS absence ages toward the grace cutoff. Deliberately not
+        // persisted: a fresh page starts every key's clock at zero, which fails
+        // safe (nothing is dropped for the first grace window after a load).
+        const layoutGcMiss = new Map();
+        const LAYOUT_GC_GRACE_MS = 120000;   // 2 min of continuous absence
+
         // ---- taskbar ------------------------------------------------------
         // #123: render one ordered span per visible label part (id can now
         // interleave), replacing the old fixed idSpan+titleSpan pair. Rebuild
@@ -336,6 +345,66 @@
                     delete mm[k];
                     dropped += 1;
                 }
+            }
+            // ---- tiling-membership GC (#147 follow-up) --------------------
+            // The prefs sweep above skips reserved ('_'-prefixed) keys, so
+            // `_layout` outlives a dead session's prefs and a workspace hoards
+            // its column forever — one real deploy reached 47 dead keys on a
+            // single workspace, which is what made the switcher preview look
+            // wrong whichever way it rendered.
+            //
+            // Deliberately NOT reusing the one-shot `gcDone` gate above. That
+            // gate ("first OK non-empty poll") only proves ONE agent has
+            // re-registered: right after a broker restart a fast agent can
+            // satisfy it while slower SURVIVING agents are still absent, and
+            // dropping their membership would lose real placement — tolerable
+            // for a browser-local pref, not for `_layout`, which is synced and
+            // shared. So a key must be continuously missing from this host's
+            // successful polls for LAYOUT_GC_GRACE_MS before it is dropped; any
+            // reappearance resets it. Runs every poll (not once per load), so a
+            // long-lived page keeps converging instead of hoarding.
+            let layoutDropped = 0;
+            for (const host of hosts) {
+                const st = pollStateFor(host.id);
+                if (!st.ok || !st.sessions.length) continue;
+                const prefix = host.id + ':';
+                // Collect BEFORE mutating: removeKeyFromLayout rewrites the very
+                // rows/cells we would otherwise still be walking.
+                const seen = [];
+                for (const lws of getLayout().workspaces) {
+                    for (const lcol of (lws.columns || [])) {
+                        for (const lrow of (lcol.rows || [])) {
+                            for (const k of rowKeys(lrow)) {
+                                // `app:` is a reserved namespace, not a host — an
+                                // app window's content lives in the app store and
+                                // no session poll can attest to it. Skip it even if
+                                // some persisted host is literally called 'app'.
+                                if (k.slice(0, 4) === 'app:') continue;
+                                if (k.slice(0, prefix.length) !== prefix) continue;
+                                seen.push(k);
+                            }
+                        }
+                    }
+                }
+                const now = Date.now();
+                for (const k of seen) {
+                    if (merged.has(k) || windows.has(k) || pendingOpens.has(k)) {
+                        layoutGcMiss.delete(k);          // alive -> reset the clock
+                        continue;
+                    }
+                    const since = layoutGcMiss.get(k);
+                    if (since === undefined) { layoutGcMiss.set(k, now); continue; }
+                    if (now - since < LAYOUT_GC_GRACE_MS) continue;
+                    if (removeKeyFromLayout(k)) layoutDropped += 1;
+                    layoutGcMiss.delete(k);
+                }
+            }
+            if (layoutDropped) {
+                savePrefs();
+                // Layout mutations must be paired with a re-render; the dropped
+                // keys were dormant so the strip is unchanged, but the workspace
+                // dots/preview read `_layout` live.
+                renderWorkspaces();
             }
             for (const k of Object.keys(prefs)) {
                 if (k.charAt(0) === '_') continue;
