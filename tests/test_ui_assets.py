@@ -153,6 +153,21 @@ def test_sticky_notes_use_a_monospace_font():
     assert "Segoe UI" not in note_rule
 
 
+def test_ws_switcher_preview_honors_live_filter():
+    # #147: the switcher preview must apply the SAME liveness filter as the strip
+    # (isLiveKey), so minimized/dormant/phantom windows aren't drawn as tiles.
+    # isLiveKey is now a single shared helper both relayoutStrip and showWsPreview
+    # use — pin that it's defined exactly once, and pin the ACTUAL predicates the
+    # preview runs (not just the word, which a comment could satisfy): the per-row
+    # live filter, the tolerant per-cell live filter, and the empty-state gate that
+    # now keys off the live render set rather than the raw column count.
+    assert INDEX_HTML.count("function isLiveKey") == 1
+    preview = INDEX_HTML.split("function showWsPreview")[1][:7500]
+    assert "rowKeys(row).filter(isLiveKey)" in preview
+    assert "(Array.isArray(cell.keys) ? cell.keys : [])" in preview
+    assert "!renderCols.length && !floatN" in preview
+
+
 def test_index_html_never_puts_token_in_url():
     # Security invariant carried over from the monolith: the page must not push
     # the auth token into the address bar.
