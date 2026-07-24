@@ -162,21 +162,46 @@ class Launcher:
         # Start from a registry-fresh PATH (todo task 17) so the detached agent
         # — and the shell it spawns — find programs installed since the broker
         # logged in, without a re-login. No-op copy of os.environ off Windows.
-        env = spawn_env()
-        # The agent honors $BROWSERLAND_BROKER_URL above its --broker-url flag;
-        # pin it so an inherited value can't redirect our child.
-        env[BROKER_URL_ENV] = f"ws://127.0.0.1:{self._broker_port}/browserland"
-        # Token via env only — argv is visible in process lists.
-        if self._token:
-            env[TOKEN_ENV] = self._token
-        else:
-            env.pop(TOKEN_ENV, None)
+        #
+        # spawn_env() shells out to the Windows registry and _spawn_detached is
+        # a full process-creation syscall (not fast when the profile cwd is a
+        # network path), and the broker runs single_process=True — one event
+        # loop for every handler and every live terminal WebSocket. So both run
+        # together in ONE worker-thread hop below. Only inert data crosses the
+        # boundary (argv, cwd, token, port); self._pending and the registry
+        # waiter are loop-affine and stay on the loop.
+        #
+        # NOT asyncio.create_subprocess_exec: that binds a child watcher to a
+        # process this module deliberately breaks away from the job object (see
+        # the module docstring) so agents outlive a broker restart.
+        profile_cwd = profile.get("cwd")
+        token = self._token
+        broker_url = f"ws://127.0.0.1:{self._broker_port}/browserland"
 
+        def _build_env_and_spawn() -> subprocess.Popen:
+            env = spawn_env()
+            # The agent honors $BROWSERLAND_BROKER_URL above its --broker-url
+            # flag; pin it so an inherited value can't redirect our child.
+            env[BROKER_URL_ENV] = broker_url
+            # Token via env only — argv is visible in process lists.
+            if token:
+                env[TOKEN_ENV] = token
+            else:
+                env.pop(TOKEN_ENV, None)
+            return _spawn_detached(argv, cwd=profile_cwd, env=env)
+
+        # The offload MUST stay AFTER add_waiter + the _pending bump: those
+        # register the pending launch, and a child that reaches /browserland
+        # before anyone is waiting for it is a launch nobody ever collects.
         waiter = self._registry.add_waiter(window_id)
         self._pending += 1
         try:
             try:
-                proc = _spawn_detached(argv, cwd=profile.get("cwd"), env=env)
+                # No wait_for: a running executor future is not cancellable, so
+                # a deadline here would 504 the request and still leave the
+                # thread wedged mid-CreateProcess.
+                proc = await asyncio.get_running_loop().run_in_executor(
+                    None, _build_env_and_spawn)
             except Exception as exc:
                 raise LaunchError(500, f"spawn_failed: {exc}")
             LOGGER.info("launched profile %r as window %d (agent pid %s)",
