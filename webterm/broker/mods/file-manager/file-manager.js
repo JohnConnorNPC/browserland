@@ -512,10 +512,20 @@
                 let srcSize = null;
                 while (true) {
                     if (aborted()) return await cancelExit();
+                    // The signal goes DOWN to the request (ctx.file forwards it
+                    // to the fetch), so Cancel now interrupts the chunk that is
+                    // in flight instead of only being noticed once it finishes —
+                    // the difference between an instant Cancel and one that
+                    // waits out a multi-megabyte read on a slow link. It is
+                    // deliberately NOT passed to the uploadAbort cleanup below:
+                    // that call has to survive the very cancel that triggered it.
                     const rc = await fmFile().readChunk(srcPath,
                         { host: srcHost.id, offset: offset,
-                          length: FM_CHUNK_BYTES });
+                          length: FM_CHUNK_BYTES, signal: opts.signal });
                     if (win.disposed) return await failAbort();
+                    // An aborted request surfaces as a plain failure, so check
+                    // the signal FIRST or a Cancel reads as "transfer failed".
+                    if (aborted()) return await cancelExit();
                     if (!(rc && rc.ok) || typeof rc.content_b64 !== 'string') {
                         if (rc && rc.error === 'auth_required') {
                             promptFileHostAuth(srcHost);
@@ -525,8 +535,10 @@
                     }
                     if (srcSize === null) srcSize = rc.size;
                     const uc = await fmFile().uploadChunk(uploadId, rc.content_b64,
-                        { host: destHost.id, offset: offset });
+                        { host: destHost.id, offset: offset,
+                          signal: opts.signal });
                     if (win.disposed) return await failAbort();
+                    if (aborted()) return await cancelExit();
                     if (!(uc && uc.ok)) {
                         if (uc && uc.error === 'auth_required') {
                             promptFileHostAuth(destHost);
@@ -561,8 +573,12 @@
                 //    this (non-destructive) and commits unverified.
                 let expectedSha = null;
                 if (move) {
-                    const hres = await fmFile().hash(srcPath, { host: srcHost.id });
+                    // Cancellable: hashing a large source is unbounded work with
+                    // no client deadline, so the signal is the ONLY way out of it.
+                    const hres = await fmFile().hash(srcPath,
+                        { host: srcHost.id, signal: opts.signal });
                     if (win.disposed) return await failAbort();
+                    if (aborted()) return await cancelExit();
                     if (!(hres && hres.ok && hres.sha256)) {
                         if (hres && hres.error === 'auth_required') {
                             promptFileHostAuth(srcHost);
@@ -575,6 +591,14 @@
                 // 4) Commit (atomic replace on the dest). On a plain failure the
                 //    server has already dropped the temp + session, so no abort is
                 //    needed; a checksum_mismatch is a distinct, source-safe outcome.
+                //    Deliberately NOT cancellable, and on the long (transfer)
+                //    deadline rather than the metadata one: the replace happens
+                //    server-side regardless of what the client does, so abandoning
+                //    the request costs us only the ANSWER about whether it landed —
+                //    and for a MOVE that answer is what gates the source delete
+                //    below. If it does time out the result reads "may or may not
+                //    have completed" and we fall into the failure branch, which
+                //    keeps the source: the safe direction.
                 const cm = await fmFile().uploadCommit(uploadId,
                     { host: destHost.id, expected_sha256: expectedSha });
                 if (win.disposed) return false;
@@ -1170,10 +1194,21 @@
                                 showNotice('download cancelled');
                                 return;
                             }
+                            // Signal rides down to the request so Cancel drops the
+                            // chunk in flight, not just the one after it.
                             const rc = await fmFile().readChunk(child,
                                 { host: host.id, offset: offset,
-                                  length: FM_CHUNK_BYTES });
+                                  length: FM_CHUNK_BYTES,
+                                  signal: progress.signal });
                             if (win.disposed) { await abortWritable(); return; }
+                            // Check the cancel BEFORE the error branch: an
+                            // aborted read comes back as an ordinary failure and
+                            // would otherwise be reported as "download failed".
+                            if (progress.signal.aborted) {
+                                await abortWritable();
+                                showNotice('download cancelled');
+                                return;
+                            }
                             if (!(rc && rc.ok)
                                 || typeof rc.content_b64 !== 'string') {
                                 const err = (rc && rc.error) || '?';
