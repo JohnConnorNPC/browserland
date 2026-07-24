@@ -4100,11 +4100,30 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # machine tokenless page can drive this, the accepted /file/* posture — this
     # write is no weaker than /file/write (both grant persistent host code-exec),
     # so a tokenless broker must not run while the browser visits untrusted sites.
-    def _profiles_public_view() -> Dict[str, Any]:
+    def _which_map(exes: List[str]) -> Dict[str, bool]:
+        """Resolve each executable name on PATH. BLOCKING — worker thread only.
+
+        ``shutil.which`` walks every PATH entry (times every PATHEXT suffix on
+        Windows) hitting the filesystem, and a PATH carrying a dead UNC entry
+        stalls for the full SMB timeout. Takes and returns nothing but plain
+        strings/bools, so it is safe to hand to the executor.
+        """
+        return {exe: shutil.which(exe) is not None for exe in exes}
+
+    def _profiles_view_parts():
+        """Loop-side half of the public view: pure dict shuffling, no FS.
+
+        Returns ``(base, exe_by_name, exes)``: ``base`` is the whole response
+        except ``exists``; ``exe_by_name`` maps profile name -> command[0]
+        (omitted entirely for an empty command, which is the old
+        ``bool(cmd)`` guard); ``exes`` is those executables DEDUPED, because
+        profiles overwhelmingly share a handful of shells and the old code paid
+        one PATH walk per profile instead of one per distinct executable.
+        """
         launcher = app.ctx.launcher
         profiles = launcher.profiles          # live dict; iterate, never mutate
         out: Dict[str, Any] = {}
-        exists: Dict[str, bool] = {}
+        exe_by_name: Dict[str, str] = {}
         for name, entry in profiles.items():
             cmd = list(entry.get("command") or [])
             out[name] = {"command": cmd, "title": entry.get("title"),
@@ -4112,19 +4131,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          # #115: the editor reads this to paint each profile's
                          # default-color dot; None = no default (palette auto).
                          "color": entry.get("color")}
-            # Validate-executable-exists: does command[0] resolve on PATH now?
-            # A False marks a profile whose shell isn't installed (UI red flag).
-            exists[name] = bool(cmd) and shutil.which(cmd[0]) is not None
-        return {"ok": True, "default_profile": launcher.default_profile,
+            if cmd:
+                exe_by_name[name] = cmd[0]
+        base = {"ok": True, "default_profile": launcher.default_profile,
                 "profiles": out,
                 "os": "windows" if os.name == "nt" else "posix",
-                "source": app.ctx.profiles_source, "exists": exists}
+                "source": app.ctx.profiles_source}
+        return base, exe_by_name, sorted(set(exe_by_name.values()))
+
+    async def _profiles_view_finish(parts) -> Dict[str, Any]:
+        """Attach ``exists`` to a snapshot taken by ``_profiles_view_parts``.
+
+        Split from the snapshot so a caller holding ``profiles_lock`` can grab
+        its parts under the lock and RELEASE before paying for the probe —
+        holding an asyncio.Lock across a possibly-stalled executor hop would
+        convoy every later writer behind one dead PATH entry.
+        """
+        base, exe_by_name, exes = parts
+        # Validate-executable-exists: does command[0] resolve on PATH now?
+        # A False marks a profile whose shell isn't installed (UI red flag).
+        # Deliberately NO asyncio.wait_for: a running executor future is not
+        # cancellable, so a deadline would only 504 the caller while leaving
+        # the thread wedged (and eventually starve the shared executor).
+        found = await asyncio.get_running_loop().run_in_executor(
+            None, _which_map, exes)
+        base["exists"] = {name: name in exe_by_name
+                          and found[exe_by_name[name]]
+                          for name in base["profiles"]}
+        return base
+
+    async def _profiles_public_view() -> Dict[str, Any]:
+        # Read the launcher's live state on the loop, then hand the worker only
+        # inert strings — nothing loop-owned (no lock, no Request) crosses over.
+        return await _profiles_view_finish(_profiles_view_parts())
 
     async def _profiles_config_get(request: Request):
         err = _gated_auth_error(request, "/profiles/config")
         if err is not None:
             return err
-        return sanic_json(_profiles_public_view())
+        return sanic_json(await _profiles_public_view())
 
     async def _profiles_config_post(request: Request):
         err = _gated_auth_error(request, "/profiles/config")
@@ -4155,11 +4200,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.launcher.set_profiles(result["profiles"],
                                           result["default_profile"])
             app.ctx.profiles_source = "sidecar"
+            # Snapshot the response set while STILL holding the lock, so this
+            # client is answered with the profiles IT just wrote. Sampling the
+            # launcher after the release would let a concurrent POST land in
+            # between and hand back someone else's set — which the editor would
+            # then save straight back, silently reverting the other write. Only
+            # the snapshot is under the lock; the blocking PATH probe is not.
+            parts = _profiles_view_parts()
         # Audit: this write persists shell recipes /launch will spawn by name.
         LOGGER.info("launch profiles updated via /profiles/config: %d "
                     "profiles (default=%r) from %s", len(result["profiles"]),
                     result["default_profile"], request.ip)
-        return sanic_json(_profiles_public_view())
+        return sanic_json(await _profiles_view_finish(parts))
 
     async def _profiles_detect(request: Request):
         # Read-only environment scan seeding the editor (WSL distros on Windows,
