@@ -4660,17 +4660,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
         blrec, meta_path, notes_path = paths
-        try:
+
+        def _unlink_all():
+            # ONE hop for the whole teardown. The event file goes first and its
+            # failure is the reported one (FileNotFoundError -> 404, any other
+            # OSError -> 400); the sidecars stay best-effort, and are not
+            # touched at all when the event file unlink raises, exactly as when
+            # these were three separate on-loop calls.
             os.unlink(str(blrec))
+            for side in (meta_path, notes_path):
+                try:
+                    os.unlink(str(side))
+                except OSError:
+                    pass
+
+        try:
+            await _off_loop(_unlink_all)
         except FileNotFoundError:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        for side in (meta_path, notes_path):
-            try:
-                os.unlink(str(side))
-            except OSError:
-                pass
         return sanic_json({"ok": True})
 
     async def _recording_notes_get(request: Request):
@@ -4680,11 +4689,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(request.args.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        if not paths[0].exists():
-            # A deleted/never-saved recording must not look note-valid via an
+        blrec, _meta_path, notes_path = paths
+
+        def _read():
+            # Existence probe + sidecar parse in ONE hop off the loop. A
+            # deleted/never-saved recording must not look note-valid via an
             # orphan sidecar — mirror the PUT's existence check.
+            if not blrec.exists():
+                return None
+            return _rec_load_notes(notes_path)
+
+        notes = await _off_loop(_read)
+        if notes is None:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        notes = _rec_load_notes(paths[2])
         return sanic_json({"ok": True, "rev": notes["rev"],
                            "notes": notes["notes"]})
 
@@ -4712,9 +4729,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(raw_notes, list) \
                 or len(raw_notes) > MAX_RECORDING_NOTES:
             return sanic_json({"ok": False, "error": "bad_notes"}, status=400)
-        if not blrec.exists():
+
+        def _read_meta():
+            # Existence probe + meta parse in ONE hop off the loop. None means
+            # "no such recording"; a missing/corrupt meta sidecar still
+            # degrades to {} the way it always did.
+            if not blrec.exists():
+                return None
+            return _rec_load_json(meta_path) or {}
+
+        meta = await _off_loop(_read_meta)
+        if meta is None:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        meta = _rec_load_json(meta_path) or {}
         duration = meta.get("durationMs")
         clean = []
         for n in raw_notes:
@@ -4737,7 +4763,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             clean.append({"t": t, "text": text})
         clean.sort(key=lambda n: n["t"])
         async with app.ctx.rec_notes_lock:
-            current = _rec_load_notes(notes_path)
+            # The lock MUST span the whole read -> compare -> write sequence,
+            # or two concurrent note edits interleave and the loser's notes are
+            # silently overwritten. Both the read and the write are now off the
+            # loop, so the critical section holds across two await points —
+            # that is the point of the lock, not a bug to "fix" by narrowing
+            # it. rec_notes_lock is an asyncio.Lock (loop-affine): it is
+            # acquired and released on the loop and never crosses into a
+            # worker; only the inert notes path and plain dict do.
+            current = await _off_loop(_rec_load_notes, notes_path)
             if base_rev != current["rev"]:
                 return sanic_json({"ok": False, "error": "conflict",
                                    "rev": current["rev"],
