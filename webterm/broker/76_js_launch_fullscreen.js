@@ -36,16 +36,37 @@
             // round-trip) when nothing is configured, so unconfigured users keep
             // the broker's default cwd and are otherwise unaffected.
             if (!cwd) cwd = await resolveStartPath(host);
+            // The (+) button is the ONLY launch control, and a disabled button
+            // dispatches NEITHER click nor contextmenu — so holding it across the
+            // POST killed both gestures for however long the network took, while
+            // still looking alive (it isn't visibly greyed either). It is held
+            // only to swallow a double-launch now: the 500 ms debounce runs from
+            // the moment the request is DISPATCHED, not from when it answers.
+            let btnReleased = false;
+            const releaseLaunchBtn = () => {
+                if (btnReleased) return;
+                btnReleased = true;
+                if (launchBtn) {
+                    setTimeout(() => { launchBtn.disabled = false; }, 500);
+                }
+            };
             if (launchBtn) launchBtn.disabled = true;
             try {
                 const payload = {};
                 if (name) payload.profile = name;
                 if (cwd) payload.cwd = cwd;
-                const r = await hostFetch(host, '/launch', {
+                // Per-call deadline: the broker answers /launch with 202 only
+                // after REGISTER_TIMEOUT (10 s, launcher.py) when the agent
+                // hasn't registered yet, so the default 3 s client deadline
+                // would routinely abort a launch that is actually succeeding.
+                const pending = hostFetch(host, '/launch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
+                    timeoutMs: 15000,
                 });
+                releaseLaunchBtn();     // dispatched — stop holding the button
+                const r = await pending;
                 if (r.status === 401) {
                     // Direct user gesture — always worth the modal.
                     pollStateFor(host.id).authNeeded = true;
@@ -65,33 +86,95 @@
                 startFastPoll();
                 refreshTaskbar();
             } catch (e) {
-                showNotice('launch failed: ' + e);
-            } finally {
-                if (launchBtn) {
-                    setTimeout(() => { launchBtn.disabled = false; }, 500);
+                // A client-side deadline is NOT proof the launch did not happen:
+                // the request reached the broker and the shell may well be
+                // starting. Don't claim a failure — the session lands in the
+                // taskbar on its own once the agent registers.
+                if (e && e.name === 'TimeoutError') {
+                    showNotice('launch is taking a while — if it started it '
+                        + 'will appear in the taskbar');
+                    refreshTaskbar();
+                } else {
+                    showNotice('launch failed: ' + e);
                 }
+            } finally {
+                releaseLaunchBtn();     // no-op unless we never got to dispatch
             }
         }
 
         // /profiles is static per broker run — cache each host's first 200.
         const profilesCache = new Map();   // hostId -> {default, profiles}
-        async function fetchProfiles(host) {
+        // Negative cache: a host whose /profiles just FAILED is not re-dialed for
+        // PROFILES_FAIL_TTL_MS, so repeated right-clicks on (+) don't queue up a
+        // fresh doomed request per gesture against a dead broker.
+        //
+        // It hangs off profilesCache's own delete/clear rather than living beside
+        // it, so every existing invalidation site (81's profile editor, 83's host
+        // edit / host removal) drops the negative entry too — there is exactly one
+        // "forget what we know about this host" call and it keeps working without
+        // any of those fragments knowing this cache exists.
+        const PROFILES_FAIL_TTL_MS = 10000;
+        const profilesFailAt = new Map();  // hostId -> Date.now() of the failure
+        // One dial per host at a time: without this, N right-clicks inside the
+        // 3 s deadline queue N doomed requests before the first one can write a
+        // negative entry. Entries drop on settle, so nothing needs to invalidate
+        // this one. It also de-dupes against 75's warm-up prefetch.
+        const profilesInflight = new Map();   // hostId -> Promise
+        {
+            const _cacheDelete = profilesCache.delete.bind(profilesCache);
+            const _cacheClear = profilesCache.clear.bind(profilesCache);
+            profilesCache.delete = (id) => {
+                profilesFailAt.delete(id);
+                return _cacheDelete(id);
+            };
+            profilesCache.clear = () => {
+                profilesFailAt.clear();
+                return _cacheClear();
+            };
+        }
+        function profilesFailedRecently(hostId) {
+            const at = profilesFailAt.get(hostId);
+            if (at == null) return false;
+            if (Date.now() - at < PROFILES_FAIL_TTL_MS) return true;
+            profilesFailAt.delete(hostId);      // expired — allow a retry
+            return false;
+        }
+        function fetchProfiles(host) {
             host = host || localHost();
-            if (profilesCache.has(host.id)) return profilesCache.get(host.id);
+            if (profilesCache.has(host.id)) {
+                return Promise.resolve(profilesCache.get(host.id));
+            }
+            if (profilesFailedRecently(host.id)) return Promise.resolve(null);
+            const live = profilesInflight.get(host.id);
+            if (live) return live;
+            const p = fetchProfilesOnce(host);
+            profilesInflight.set(host.id, p);
+            const done = () => {
+                if (profilesInflight.get(host.id) === p) {
+                    profilesInflight.delete(host.id);
+                }
+            };
+            p.then(done, done);
+            return p;
+        }
+        async function fetchProfilesOnce(host) {
             try {
                 const r = await hostFetch(host, '/profiles');
                 if (r.status === 401) {
                     pollStateFor(host.id).authNeeded = true;
                     showAuthOverlay(host);
+                    profilesFailAt.set(host.id, Date.now());
                     return null;
                 }
-                if (!r.ok) return null;
-                const d = await r.json();
-                if (d && Array.isArray(d.profiles)) {
-                    profilesCache.set(host.id, d);
-                    return d;
+                if (r.ok) {
+                    const d = await r.json();
+                    if (d && Array.isArray(d.profiles)) {
+                        profilesCache.set(host.id, d);
+                        return d;
+                    }
                 }
             } catch (_) {}
+            profilesFailAt.set(host.id, Date.now());
             return null;
         }
 
@@ -249,35 +332,121 @@
                 const h = defaultLaunchHost();
                 launchProfile(h, hostDefaultProfile(h));
             };
-            async function openLaunchMenu(x, y) {
-                const hosts = allHosts();
-                if (hosts.length === 1) {
-                    const d = await fetchProfiles(hosts[0]);
-                    // Profiles (when available) + the app items below them.
-                    // If profiles are unavailable, still offer the apps (drop
-                    // the leading separator) — they need no broker.
-                    const items = (d && d.profiles.length)
-                        ? [...profileMenuItems(hosts[0], d), ...appMenuItems()]
-                        : appMenuItems().slice(1);
-                    renderMenu(items, x, y);
-                    return;
+            // '' when this host is worth dialing, else the suffix its single
+            // disabled row carries. Deliberately NOT a bare `!ok`: a
+            // freshly-created poll record starts ok=false, so before the first
+            // /sessions answer every host would look dead and never be dialed at
+            // all. The reachability rule is the one the taskbar chip already uses
+            // (hostChipState in 75) so the menu and the chip can never disagree —
+            // plus consecFailures > 0, i.e. a poll must actually have been tried
+            // and failed. authNeeded is folded in here so a mere right-click can
+            // never pop the login overlay (same reasoning as 75's prefetch gate).
+            function launchHostDownSuffix(host) {
+                const st = pollStateFor(host.id);
+                if (st.authNeeded) return ' — sign in required';
+                if (!st.ok && st.consecFailures > 0
+                        && (!st.everOk
+                            || st.consecFailures >= STALE_AFTER_FAILURES)) {
+                    return ' — unreachable';
                 }
-                const results = await Promise.all(
-                    hosts.map(h => fetchProfiles(h)));
+                return '';
+            }
+            // One host's rows, built from what is known RIGHT NOW — never awaits,
+            // never dials.
+            function launchHostItems(host, showHeader) {
+                const items = [];
+                // Down is checked BEFORE the cache: a host that has since gone
+                // away must not keep offering enabled launch rows out of a stale
+                // profile list (codex review). Zero network traffic either way,
+                // and the menu still opens instantly.
+                const downSuffix = launchHostDownSuffix(host);
+                if (downSuffix) {
+                    items.push({ label: host.label + downSuffix,
+                                 enabled: false });
+                    return items;
+                }
+                const d = profilesCache.get(host.id);
+                if (d && d.profiles.length) {
+                    if (showHeader) {
+                        items.push({ label: host.label, enabled: false });
+                    }
+                    items.push(...profileMenuItems(host, d));
+                    return items;
+                }
+                if (showHeader) items.push({ label: host.label, enabled: false });
+                items.push({
+                    label: (d || profilesFailedRecently(host.id))
+                        ? 'profiles unavailable' : 'loading profiles…',
+                    enabled: false,
+                });
+                return items;
+            }
+            function buildLaunchMenuItems(hosts, showHeader) {
                 const items = [];
                 hosts.forEach((host, i) => {
                     if (i) items.push({ sep: true });
-                    items.push({ label: host.label, enabled: false });
-                    const d = results[i];
-                    if (!d || !d.profiles.length) {
-                        items.push({ label: 'profiles unavailable',
-                                     enabled: false });
-                    } else {
-                        items.push(...profileMenuItems(host, d));
-                    }
+                    items.push(...launchHostItems(host, showHeader));
                 });
-                items.push(...appMenuItems());
-                renderMenu(items, x, y);
+                // The client apps need no broker at all, so they are ALWAYS in
+                // the very first paint — a dead host must never suppress them.
+                // Their leading separator is dropped when nothing precedes it.
+                const apps = appMenuItems();
+                items.push(...(items.length ? apps : apps.slice(1)));
+                return items;
+            }
+            // Cheap content fingerprint, so a host resolving to what is already
+            // on screen doesn't re-render the menu out from under the cursor.
+            function launchMenuSig(items) {
+                return items.map(it => it.sep ? '|'
+                    : ((it.enabled ? '+' : '-') + it.label)).join('\n');
+            }
+            // Late-resolve guard. renderMenu (77) rebuilds #ctx-menu's children
+            // from scratch and every menu in the app shares that one element, so
+            // "is the menu we painted still the one on screen?" is exactly "is
+            // our first child still there, and is the menu still open?".
+            // hideCtxMenu (78) only drops the .open class, hence both checks. The
+            // generation counter additionally retires the callbacks of a previous
+            // open of THIS menu.
+            let launchMenuGen = 0;
+            let launchMenuNode = null;
+            function launchMenuStillOurs(gen) {
+                return gen === launchMenuGen
+                    && !!launchMenuNode
+                    && ctxMenu.classList.contains('open')
+                    && ctxMenu.firstChild === launchMenuNode;
+            }
+            // Paints SYNCHRONOUSLY from whatever is cached, then re-paints as
+            // each host's /profiles lands. One dead host can no longer keep the
+            // whole menu — apps included — off the screen.
+            function openLaunchMenu(x, y) {
+                const hosts = allHosts();
+                const showHeader = hosts.length > 1;
+                const gen = ++launchMenuGen;
+                let sig = null;
+                const paint = (first) => {
+                    const items = buildLaunchMenuItems(hosts, showHeader);
+                    const next = launchMenuSig(items);
+                    if (!first) {
+                        if (!launchMenuStillOurs(gen)) return;
+                        if (next === sig) return;
+                    }
+                    sig = next;
+                    renderMenu(items, x, y);
+                    launchMenuNode = ctxMenu.firstChild;
+                };
+                paint(true);
+                for (const host of hosts) {
+                    // Skip anything already answered, known down, or recently
+                    // failed — those rows are final until something changes.
+                    // (fetchProfiles re-checks the cache/negative cache anyway;
+                    // this keeps the dead-host path free of even a promise.)
+                    if (profilesCache.has(host.id)
+                            || launchHostDownSuffix(host)
+                            || profilesFailedRecently(host.id)) {
+                        continue;
+                    }
+                    fetchProfiles(host).then(() => paint(false), () => {});
+                }
             }
             launchBtn.addEventListener('click', (e) => {
                 // e.clientX/e.clientY are valid on a plain click too, so the menu
