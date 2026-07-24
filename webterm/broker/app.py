@@ -2462,24 +2462,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         src_str, dst_str = str(src), str(dst)
 
         def _do_copy():
-            if src_kind == "dir":
-                shutil.copytree(src_str, dst_str, symlinks=True,
-                                dirs_exist_ok=overwrite)
-            else:
-                shutil.copy2(src_str, dst_str)
+            # Rollback lives HERE, inside the worker thread, rather than in the
+            # handler's except clause: rmtree of a half-copied tree is recursive
+            # blocking IO, and running it after the failure had propagated back
+            # to the loop froze the whole broker — every live terminal socket
+            # included — for the length of the delete. The guards are unchanged:
+            # only a !overwrite dst (freshly created by this op, so ours to
+            # remove) is ever touched, and a reparse point is unlinked, never
+            # recursed into. An overwrite wrote over a caller-owned dst in place
+            # and is still reported, not rolled back.
+            try:
+                if src_kind == "dir":
+                    shutil.copytree(src_str, dst_str, symlinks=True,
+                                    dirs_exist_ok=overwrite)
+                else:
+                    shutil.copy2(src_str, dst_str)
+            except (OSError, ValueError, shutil.Error, RecursionError):
+                if not overwrite:
+                    # Remove the partial litter. Anything that goes wrong in
+                    # here is swallowed so the bare `raise` below still carries
+                    # the ORIGINAL copy failure (and its traceback) to the
+                    # client — a broken rollback must never mask the real error.
+                    # Broad on purpose: rmtree(ignore_errors=True) eats OSError,
+                    # so what could still escape is the non-OSError tail (a
+                    # RecursionError off a very deep partial tree, say), and
+                    # that would now BE the executor's exception rather than a
+                    # 500 out of the handler.
+                    try:
+                        if (os.path.isdir(dst_str)
+                                and not _is_reparse_point(dst_str)):
+                            shutil.rmtree(dst_str, ignore_errors=True)
+                        elif os.path.lexists(dst_str):
+                            os.unlink(dst_str)
+                    except Exception:
+                        pass
+                raise
 
         try:
             await asyncio.get_running_loop().run_in_executor(None, _do_copy)
         except (OSError, ValueError, shutil.Error, RecursionError) as exc:
-            if not overwrite:
-                # dst was freshly created by this op — remove the partial litter.
-                try:
-                    if os.path.isdir(dst_str) and not _is_reparse_point(dst_str):
-                        shutil.rmtree(dst_str, ignore_errors=True)
-                    elif os.path.lexists(dst_str):
-                        os.unlink(dst_str)
-                except OSError:
-                    pass
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({"ok": True, "path": dst_str})
 
