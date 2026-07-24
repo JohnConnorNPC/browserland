@@ -26,9 +26,47 @@
         // with no HOME status, surface the overlay so there is at least a
         // visible "Become active" affordance — the control WS keeps retrying in
         // the background and a real status then drives the normal transition.
-        setTimeout(() => {
-            if (!_booted && !_deactivated) showBecomeActiveOverlay();
-        }, 8000);
+        //
+        // ...but ONLY when the broker actually answered at least once. The
+        // takeover prompt's button sends become_active over the control socket
+        // and silently returns when that socket isn't OPEN, so against an
+        // unreachable broker it is a dead-end dialog blaming a browser that
+        // doesn't exist. "Ever opened" is read off the control socket's own
+        // record (lastOpenAt is set in openControlWs's onopen and never reset),
+        // which distinguishes "never connected" from "was connected, now
+        // contended" without touching that fragment.
+        const UNREACHABLE_NOTICE = 'cannot reach this broker — retrying…';
+        function homeControlEverOpened() {
+            try {
+                const rec = controlSockets.get(homeHostId());
+                return !!(rec && rec.lastOpenAt);
+            } catch (_) { return false; }
+        }
+        function clearUnreachableNotice() {
+            const host = document.getElementById('notice-host');
+            if (!host) return;
+            for (const n of Array.from(host.querySelectorAll('.notice-sticky'))) {
+                if (n._noticeText === UNREACHABLE_NOTICE) n.remove();
+            }
+        }
+        (function startupStatusGuard() {
+            const tick = () => {
+                if (_booted || _deactivated) { clearUnreachableNotice(); return; }
+                if (homeControlEverOpened()) {
+                    // The broker is reachable but never said active/inactive —
+                    // the original footgun. Takeover prompt is the right (and
+                    // now working) affordance.
+                    clearUnreachableNotice();
+                    showBecomeActiveOverlay();
+                    return;
+                }
+                // showNotice dedupes identical sticky text, so re-ticking never
+                // stacks it. openControlWs's own backoff does the retrying.
+                showNotice(UNREACHABLE_NOTICE, { sticky: true, type: 'error' });
+                setTimeout(tick, 8000);
+            };
+            setTimeout(tick, 8000);
+        })();
         // Initial shared-state adopt — read-only and lease-independent (the
         // push is gated by _deactivated), so a reactivating tab and the active
         // one share rev. Resolves _stateReadyPromise to release bootActiveView.

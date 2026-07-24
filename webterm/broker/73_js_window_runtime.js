@@ -9,6 +9,12 @@
             if (win.termReady && win.wsOpen) sendResize(win, true);
         }
 
+        // Connect watchdog for a terminal's data WS. `new WebSocket()` has no
+        // connect timeout of its own (a black-holed host sits in CONNECTING for
+        // ~4 min on Chromium), so without this a window is a silent black
+        // rectangle that swallows input with no error and no retry.
+        const WS_CONNECT_TIMEOUT_MS = 5000;
+
         function attachWebSocket(win) {
             const host = hostById(win.hostId);
             if (!host) {
@@ -28,13 +34,42 @@
             // so scheduleReattach can tell a stable connection's death from
             // a failed dial.
             win.lastOpenAt = 0;
+            // Never leave the window blank while the dial is in flight. Written
+            // WITHOUT a newline so onopen can erase the line in place (CR +
+            // EL) — a connected session's scrollback must not carry a stale
+            // "connecting…" above its banner. A failed dial keeps it, followed
+            // by onclose's "[connection closed]", which reads correctly.
+            try {
+                win.term.write('connecting to '
+                    + (host.label || host.id) + '…');
+            } catch (_) {}
+            // Arm the watchdog: closing a still-CONNECTING socket fires
+            // onclose, which runs the EXISTING scheduleReattach backoff (the
+            // close carries no 4401/4409 code and win.disposed is false, so it
+            // is not mistaken for an intentional teardown). Deliberately no
+            // second retry path here.
+            if (win.connectTimer) clearTimeout(win.connectTimer);
+            win.connectTimer = setTimeout(() => {
+                win.connectTimer = null;
+                if (win.ws !== ws) return;            // superseded by a re-dial
+                if (ws.readyState !== WebSocket.CONNECTING) return;
+                try { ws.close(); } catch (_) {}
+            }, WS_CONNECT_TIMEOUT_MS);
+            // Hold the taskbar healing loop off this dial until the watchdog
+            // has ruled on it, so an external re-dial can never outrun the
+            // backoff into a tight loop against a black-holed host.
+            win.reattachAt = Date.now() + WS_CONNECT_TIMEOUT_MS;
 
             ws.onopen = () => {
+                if (win.connectTimer) {
+                    clearTimeout(win.connectTimer); win.connectTimer = null;
+                }
                 if (win.disposed) { try { ws.close(); } catch (_) {} return; }
                 win.wsOpen = true;
                 win.authFailed = false;
                 win.lastOpenAt = Date.now();
-                try { win.term.write('Connected to webterm (session ' + win.sid + ')\r\n'); } catch (_) {}
+                // '\r\x1b[2K' rewinds over the "connecting…" line above.
+                try { win.term.write('\r\x1b[2KConnected to webterm (session ' + win.sid + ')\r\n'); } catch (_) {}
                 maybeSendInitialResize(win);
             };
 
@@ -155,6 +190,9 @@
             };
 
             ws.onclose = (ev) => {
+                if (win.connectTimer) {
+                    clearTimeout(win.connectTimer); win.connectTimer = null;
+                }
                 if (win.disposed) return;
                 win.wsOpen = false;
                 if (ev && ev.code === 4401) {
