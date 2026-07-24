@@ -1552,26 +1552,56 @@ def _append_chunk(tmp: str, data: bytes) -> None:
     guard, BOTH append, and feed the rolling SHA-256 out of order — silently
     corrupting the transfer and the #110 checksum contract.
 
-    KNOWN RESIDUAL, accepted: the lock does not survive CANCELLATION of the
-    handler task (a client disconnect mid-append). The ``async with`` unwinds and
-    releases while the worker thread keeps writing, because a running
+    CANCELLATION is handled by the CALLER, which runs this whole locked sequence
+    inside ``asyncio.shield``. That is load-bearing, not belt-and-braces: a
+    client disconnect cancels the handler task, and an unshielded ``async with``
+    would release the lock while this worker thread kept writing (a running
     ``concurrent.futures`` future cannot be cancelled — the same reason
-    ``_off_loop`` takes no deadline. A later chunk can then re-append at the
-    offset the cancelled one never accounted for. It degrades LOUDLY on the path
-    that matters: a commit carrying ``expected_sha256`` sees the mismatch, 409s
-    and leaves the dest untouched. Closing it properly means running the critical
-    section in a shielded task, which is a separate decision."""
+    ``_off_loop`` takes no deadline). The bytes would land on disk unaccounted,
+    and a retry of that offset would append them AGAIN.
+
+    Do not "simplify" that shield away on the theory that the #110 checksum
+    catches it. It does not: the commit digest is built from what the handler
+    ACCOUNTED for, never from the bytes on disk, so a duplicated append still
+    produces a digest matching ``expected_sha256`` and publishes a corrupt file
+    behind a 200 — which, for a cross-host move, is what authorises deleting the
+    source."""
     with open(tmp, "ab") as fh:
         fh.write(data)
 
 
-def _commit_replace(tmp: str, dest: str) -> int:
+def _commit_replace(tmp: str, dest: str, overwrite: bool = True) -> int:
     """Size the finished session temp and ``os.replace`` it onto ``dest``,
     returning the size. ONE hop for both syscalls so nothing can grow the temp
     between the measurement and the swap.
 
+    When ``overwrite`` is False the existence check and the swap must be ONE
+    indivisible act, which is why it lives here and not in the handler. The
+    handler's per-session lock cannot serialize this: two commits for DIFFERENT
+    sessions aimed at the same dest hold DIFFERENT locks, so a plain
+    ``lexists`` -> ``replace`` pair lets both observe an absent dest and both
+    "succeed", silently clobbering the first writer. ``O_CREAT | O_EXCL`` hands
+    the decision to the kernel instead: exactly one caller creates the name, and
+    the loser gets FileExistsError. The swap then replaces our own placeholder.
+    (Before the session IO moved off the loop those two syscalls were await-free
+    and therefore atomic by construction — this restores that guarantee.)
+
     BLOCKING: call it through ``_off_loop``, never straight from a handler."""
     size = os.path.getsize(tmp)
+    if not overwrite:
+        fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        try:
+            os.replace(tmp, dest)
+        except OSError:
+            # Never leave the zero-byte reservation behind as a phantom file.
+            # We created it, so removing it cannot destroy anyone else's data.
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+            raise
+        return size
     os.replace(tmp, dest)
     return size
 
@@ -3540,41 +3570,61 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # The lock is loop-affine: acquired and released here, on the loop, with
         # only the inert temp path and bytes crossing into the worker. It is held
         # across NOTHING but this sequence.
-        async with session["lock"]:
-            # The session can have been popped (commit/abort/too_large) while we
-            # waited for the lock, and appending to a popped session's temp would
-            # resurrect a file nobody will ever clean up. Identity, not just
-            # presence: only the exact dict we locked counts.
-            if app.ctx.uploads.get(upload_id) is not session:
-                return sanic_json({"ok": False, "error": "no_session"},
-                                  status=404)
-            # Ordering guard: the client streams sequentially, so this chunk must
-            # start exactly where the last ended. A gap/dup/reorder is rejected
-            # WITHOUT appending (never silently corrupts the temp).
-            if offset != session["received"]:
-                return sanic_json({"ok": False, "error": "bad_offset",
-                                   "received": session["received"]}, status=409)
-            if session["received"] + len(data) > MAX_TRANSFER_BYTES:
-                # Past the per-session ceiling: drop the whole session (temp +
-                # slot) so a runaway transfer can't keep consuming disk.
-                app.ctx.uploads.pop(upload_id, None)
-                await _off_loop(_unlink_quiet, [session["tmp"]])
-                return sanic_json({"ok": False, "error": "too_large"},
-                                  status=400)
-            try:
-                await _off_loop(_append_chunk, session["tmp"], data)
-            except OSError as exc:
-                # A failed append leaves the temp in an unknown state — drop the
-                # session so the client can never commit a corrupt file.
-                app.ctx.uploads.pop(upload_id, None)
-                await _off_loop(_unlink_quiet, [session["tmp"]])
-                return sanic_json({"ok": False, "error": str(exc)}, status=400)
-            session["received"] += len(data)   # only after a successful write
-            session["hash"].update(data)       # #110: hash exactly the committed
-            #   bytes — the offset guard above rejected any dup/reorder before the
-            #   write, so each byte is fed to the digest once, in order.
-            received = session["received"]
-        return sanic_json({"ok": True, "received": received})
+        #
+        # CANCELLATION: a client disconnect cancels this handler task (Sanic's
+        # connection_lost). Left unshielded the `async with` would unwind and
+        # release the lock the moment the await was cancelled, WHILE the worker
+        # thread kept writing — a running concurrent.futures future cannot be
+        # cancelled. The bytes then land on disk with `received`/`hash` never
+        # accounting for them, and because the commit's digest is built from the
+        # ACCOUNTING rather than from the file, re-sending that same offset
+        # appends the bytes a second time and STILL produces a digest matching
+        # expected_sha256 — publishing a corrupt file behind a 200. (For a
+        # cross-host move that 200 is what authorises deleting the source.)
+        # Shielding runs the whole locked sequence to completion so disk and
+        # accounting can never diverge; a disconnected client merely loses the
+        # response and its retry hits the offset guard, as it should.
+        async def _locked_append():
+            async with session["lock"]:
+                # The session can have been popped (commit/abort/too_large) while
+                # we waited for the lock, and appending to a popped session's temp
+                # would resurrect a file nobody will ever clean up. Identity, not
+                # just presence: only the exact dict we locked counts.
+                if app.ctx.uploads.get(upload_id) is not session:
+                    return sanic_json({"ok": False, "error": "no_session"},
+                                      status=404)
+                # Ordering guard: the client streams sequentially, so this chunk
+                # must start exactly where the last ended. A gap/dup/reorder is
+                # rejected WITHOUT appending (never silently corrupts the temp).
+                if offset != session["received"]:
+                    return sanic_json(
+                        {"ok": False, "error": "bad_offset",
+                         "received": session["received"]}, status=409)
+                if session["received"] + len(data) > MAX_TRANSFER_BYTES:
+                    # Past the per-session ceiling: drop the whole session (temp +
+                    # slot) so a runaway transfer can't keep consuming disk.
+                    app.ctx.uploads.pop(upload_id, None)
+                    await _off_loop(_unlink_quiet, [session["tmp"]])
+                    return sanic_json({"ok": False, "error": "too_large"},
+                                      status=400)
+                try:
+                    await _off_loop(_append_chunk, session["tmp"], data)
+                except OSError as exc:
+                    # A failed append leaves the temp in an unknown state — drop
+                    # the session so the client can never commit a corrupt file.
+                    app.ctx.uploads.pop(upload_id, None)
+                    await _off_loop(_unlink_quiet, [session["tmp"]])
+                    return sanic_json({"ok": False, "error": str(exc)},
+                                      status=400)
+                session["received"] += len(data)   # only after a successful write
+                session["hash"].update(data)       # #110: hash exactly the
+                #   committed bytes — the offset guard above rejected any
+                #   dup/reorder before the write, so each byte is fed to the
+                #   digest once, in order.
+                return sanic_json({"ok": True,
+                                   "received": session["received"]})
+
+        return await asyncio.shield(_locked_append())
 
     async def _file_upload_commit(request: Request):
         # Finalize: atomically os.replace the temp onto the dest. Re-checks the
@@ -3603,6 +3653,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": "no_session"},
                                   status=404)   # a racing commit/abort won
             dest, tmp = session["dest"], session["tmp"]
+            # Fast path + error PRECEDENCE: this keeps "exists" ahead of
+            # bad_sha256/checksum_mismatch exactly as before. It is NOT the
+            # guarantee — it can't be, since a concurrent commit for a different
+            # session holds a different lock and would pass it too. The
+            # authoritative check is the O_CREAT|O_EXCL reserve inside
+            # _commit_replace below, which turns the loser into FileExistsError.
             if not session["overwrite"] and await _off_loop(os.path.lexists,
                                                             dest):
                 return sanic_json({"ok": False, "error": "exists"}, status=409)
@@ -3631,7 +3687,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                    "sha256": digest},
                                   status=409)   # dest NOT replaced
             try:
-                size = await _off_loop(_commit_replace, tmp, dest)
+                size = await _off_loop(_commit_replace, tmp, dest,
+                                       session["overwrite"])
+            except FileExistsError:
+                # Lost the atomic race for the name: another session committed
+                # this dest between our lexists check and the reserve. Same 409
+                # the pre-check produces, so the client sees one behaviour. The
+                # session is dropped like any other terminal failure.
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [tmp])
+                return sanic_json({"ok": False, "error": "exists"}, status=409)
             except OSError as exc:
                 # replace-over-dir (dest turned into a dir since begin) or any IO
                 # error: drop temp + session, report a clear code.

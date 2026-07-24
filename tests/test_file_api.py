@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -1317,6 +1318,111 @@ def test_upload_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
         assert r.status == 200 and r.json["ok"], r.json
         assert r.json["size"] == len(payload)
     assert (tmp_path / "race.bin").read_bytes() == payload
+
+
+def test_cancelled_chunk_leaves_accounting_and_disk_in_step(tmp_path,
+                                                            monkeypatch):
+    """A client disconnect mid-append must not strand unaccounted bytes.
+
+    The append rides a worker, and a running ``concurrent.futures`` future
+    cannot be cancelled. So without ``asyncio.shield`` around the locked
+    sequence, a disconnect unwinds ``async with`` while the thread keeps
+    writing: the bytes land on disk but ``received``/``hash`` never see them.
+
+    That is NOT caught by the #110 checksum, which is the trap worth pinning:
+    the commit digest is built from what the handler ACCOUNTED for, never from
+    the file, so re-sending that offset appends the bytes twice and STILL
+    matches ``expected_sha256`` — publishing a corrupt file behind a 200.
+    """
+    app = _make_file_app(tmp_path, monkeypatch)
+    payload = b"Z" * 512
+    real_append = app_mod._append_chunk
+    entered = threading.Event()
+
+    def slow_append(tmp, data):
+        entered.set()          # the worker is now inside the hop
+        time.sleep(0.40)       # ...and stays there long enough to be cancelled
+        real_append(tmp, data)
+
+    monkeypatch.setattr(app_mod, "_append_chunk", slow_append)
+    with authed_reusable(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "cancel.bin"})
+        assert r.status == 200, r.json
+        uid = r.json["upload_id"]
+        tmp = app.ctx.uploads[uid]["tmp"]
+        url = with_token(
+            f"http://{client.host}:{client.port}/file/upload_chunk",
+            app.ctx.auth_token)
+        body = {"upload_id": uid, "offset": 0,
+                "content_b64": base64.b64encode(payload).decode()}
+
+        async def _cancel_midflight():
+            task = asyncio.ensure_future(client._session.post(url, json=body))
+            # Wait for the append to actually start rather than guessing with a
+            # sleep, so the cancel always lands INSIDE the worker hop.
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            try:
+                await task
+            except BaseException:          # noqa: BLE001 - cancellation is the point
+                pass
+            await asyncio.sleep(1.0)       # let the shielded task settle
+
+        client._loop.run_until_complete(_cancel_midflight())
+
+        on_disk = os.path.getsize(tmp)
+        session = app.ctx.uploads.get(uid)
+        accounted = session["received"] if session else None
+        assert accounted == on_disk, (
+            f"accounting ({accounted}) diverged from disk ({on_disk}) after a "
+            "cancelled append: a retry at that offset would duplicate the "
+            "bytes and still satisfy expected_sha256 at commit")
+
+
+def test_two_no_overwrite_commits_cannot_both_win(tmp_path, monkeypatch):
+    """``overwrite: false`` must still mean exactly one writer.
+
+    Before the session IO moved off the loop, the commit's ``lexists`` and its
+    ``os.replace`` were await-free and therefore atomic by construction. They
+    are two worker hops now, and the per-SESSION lock cannot serialize them:
+    two commits aimed at one dest hold two DIFFERENT locks. The guarantee is
+    restored by the ``O_CREAT | O_EXCL`` reserve inside ``_commit_replace``.
+    """
+    app = _make_file_app(tmp_path, monkeypatch)
+    real_replace = app_mod._commit_replace
+
+    def slow_replace(tmp, dest, overwrite=True):
+        # Widen the hop so both commits sit between their own check and swap.
+        time.sleep(0.25)
+        return real_replace(tmp, dest, overwrite)
+
+    monkeypatch.setattr(app_mod, "_commit_replace", slow_replace)
+    with authed_reusable(app) as client:
+        uids = []
+        for payload in (b"A" * 64, b"B" * 64):
+            _, r = client.post("/file/upload_begin",
+                               json={"path": "dup.bin", "overwrite": False})
+            assert r.status == 200, r.json
+            uid = r.json["upload_id"]
+            _, r = client.post("/file/upload_chunk", json={
+                "upload_id": uid, "offset": 0,
+                "content_b64": base64.b64encode(payload).decode()})
+            assert r.status == 200, r.json
+            uids.append(uid)
+
+        first, second = _concurrent_posts(
+            client, "/file/upload_commit",
+            [{"upload_id": uids[0]}, {"upload_id": uids[1]}],
+            app.ctx.auth_token)
+        codes = sorted((first.status_code, second.status_code))
+        assert codes == [200, 409], (
+            f"overwrite=false stopped protecting the dest: got {codes} — both "
+            "sessions committed and one silently clobbered the other")
+        loser = first if first.status_code == 409 else second
+        assert loser.json()["error"] == "exists"
+        # Exactly one payload landed, whole.
+        assert len((tmp_path / "dup.bin").read_bytes()) == 64
 
 
 # ---- /file/paste_image (#137) ---------------------------------------------
