@@ -225,8 +225,14 @@
                     const csv = en.map(function (p) { return p.id; }).join(',');
                     try {
                         // ids are a controlled [a-z] allowlist — query-safe, no encode.
+                        // The broker fans out to every selected provider with a
+                        // 4s per-provider budget and gathers them, so its own
+                        // worst case is ~4s plus overhead — well past the default
+                        // deadline. 10s keeps a slow-but-answering tick from
+                        // being reported as a failure.
                         const r = await hostFetch(localHost(),
-                            '/status/fetch?provider=' + csv);
+                            '/status/fetch?provider=' + csv,
+                            { timeoutMs: 10000 });
                         if (!r.ok) throw new Error('HTTP ' + r.status);
                         const j = await r.json();
                         if (!j || !j.ok || !Array.isArray(j.providers)) {

@@ -41,7 +41,11 @@
         function fetchHelpCorpus() {
             if (helpCorpusEntries) return Promise.resolve(helpCorpusEntries);
             if (helpCorpusPromise) return helpCorpusPromise;
-            helpCorpusPromise = hostFetch(localHost(), '/help-corpus.json')
+            // ~200 KB of wiki text, and over a tailnet that is a transfer, not a
+            // round trip. The default deadline would abort a corpus that was
+            // mid-flight and drop Help back to its live-only entries.
+            helpCorpusPromise = hostFetch(localHost(), '/help-corpus.json',
+                                          { timeoutMs: 8000 })
                 .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
                 .then(data => {
                     helpCorpusData = data;
