@@ -3043,8 +3043,27 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                               status=400)
         if kind == "missing":
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        try:
+
+        def _stat_path():
+            # The tail's stat AND the shallow child scan in ONE worker hop, for
+            # the same reason the probe above runs off the loop: both are
+            # blocking syscalls against a host-wide, possibly-UNC path, and on
+            # this single-loop broker either one would freeze every live
+            # terminal for its full duration. Same shape as the already-
+            # offloaded _hash_file below. Branch order is preserved: a failing
+            # stat still short-circuits before the scan, and an unreadable dir
+            # still swallows its OSError and simply reports no count.
             st = p.stat()
+            children = None
+            if kind == "dir":
+                try:
+                    children = sum(1 for _ in p.iterdir())
+                except OSError:
+                    pass                       # unreadable dir — omit count
+            return st, children
+
+        try:
+            st, children = await _off_loop(_stat_path)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         out = {"ok": True, "path": str(p), "type": kind,
@@ -3061,11 +3080,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "hidden":   bool(attrs & stat.FILE_ATTRIBUTE_HIDDEN),
                 "archive":  bool(attrs & stat.FILE_ATTRIBUTE_ARCHIVE),
             }
-        if kind == "dir":
-            try:
-                out["children"] = sum(1 for _ in p.iterdir())
-            except OSError:
-                pass                               # unreadable dir — omit count
+        if children is not None:
+            out["children"] = children
         return sanic_json(out)
 
     async def _file_setattr(request: Request):
@@ -3169,14 +3185,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
         if kind != "file":
             return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
-        try:
+
+        def _read_range():
             # stat per call so eof reflects the CURRENT size (best-effort live
             # read; a file that grows/shrinks mid-stream converges each round —
             # #110 adds a checksum for integrity, out of scope here).
             size = p.stat().st_size
             with p.open("rb") as fh:
                 fh.seek(offset)
-                raw = fh.read(length)
+                return size, fh.read(length)
+
+        try:
+            # OFF the loop, like the _hash_file sibling below: this is the
+            # download hot path — one stat + one open + one seek + up to
+            # MAX_CHUNK_BYTES of read PER CHUNK — so on a big or remote file the
+            # on-loop version froze every live terminal once per 4 MiB.
+            size, raw = await _off_loop(_read_range)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         return sanic_json({
