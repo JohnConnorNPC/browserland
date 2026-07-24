@@ -197,6 +197,10 @@
             // tick won't fire a competing POST for the same window.
             setMcpMode(win.id, mode);
             _mcpAsserting.add(win.id);
+            // Site-owned deadline (timeoutMs: 0 opts out of hostFetch's, which
+            // ends at the response headers): this one only clears once the
+            // json() read has settled, so the key is freed even if the broker
+            // answers and then stalls its body.
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
             hostFetch(host, '/session/mcp', {
@@ -204,6 +208,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: win.sid, mode }),
                 signal: ctrl.signal,
+                timeoutMs: 0,
             }).then(r => r.json().catch(() => null)).then(j => {
                 if (j && j.ok) {
                     const sess = sessions.get(win.id);

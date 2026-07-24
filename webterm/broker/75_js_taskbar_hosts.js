@@ -136,11 +136,15 @@
 
         async function pollHost(host) {
             const st = pollStateFor(host.id);
+            // This site owns its deadline (timeoutMs: 0 opts out of hostFetch's,
+            // which is disarmed once the response HEADERS land): the one below
+            // spans the json() read as well, so a broker that answers and then
+            // stalls its body can never wedge refreshTaskbar's in-flight guard.
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
             try {
                 const r = await hostFetch(host, '/sessions',
-                                      { signal: ctrl.signal });
+                                      { signal: ctrl.signal, timeoutMs: 0 });
                 if (r.status === 401) {
                     // A READABLE 401 = host up, wrong/missing password (the
                     // broker sends CORS headers on 401s precisely so this
@@ -470,6 +474,10 @@
                 const host = hostById(sess.hostId);
                 if (!host) continue;
                 _mcpAsserting.add(key);
+                // Site-owned deadline (timeoutMs: 0 opts out of hostFetch's,
+                // which ends at the response headers): this one is only cleared
+                // once the json() read has settled too, which is what actually
+                // guarantees the key is freed.
                 const ctrl = new AbortController();
                 const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
                 hostFetch(host, '/session/mcp', {
@@ -477,6 +485,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id: sess.sid, mode: want }),
                     signal: ctrl.signal,
+                    timeoutMs: 0,
                 }).then(r => r.json().catch(() => null)).then(j => {
                     // Adopt optimistically ONLY if the user hasn't re-pinned
                     // this key meanwhile (a stale assert must never clobber a

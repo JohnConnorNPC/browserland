@@ -431,21 +431,17 @@
                 showNotice('Uploading image…', 2000);
                 try {
                     const b64 = await blobToBase64(blob);
-                    const ac = new AbortController();
-                    const tid = setTimeout(() => ac.abort(), 30000);
-                    let resp;
-                    try {
-                        resp = await hostFetch(
-                            hostById(win.hostId), '/file/paste_image',
-                            {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ content_b64: b64 }),
-                                signal: ac.signal,
-                            });
-                    } finally {
-                        clearTimeout(tid);
-                    }
+                    // 30 s, not the 3 s hostFetch default: this POST carries a
+                    // whole image (up to 5 MiB of base64) and must survive a
+                    // slow link.
+                    const resp = await hostFetch(
+                        hostById(win.hostId), '/file/paste_image',
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ content_b64: b64 }),
+                            timeoutMs: 30000,
+                        });
                     if (resp.status === 401) {
                         // Same heal path as a window-runtime 4401: flag the
                         // host and pop the login (or its amber chip).
@@ -478,7 +474,8 @@
                     _notifyClipboard('in', injected);   // #106 history
                 } catch (err) {
                     showNotice('image paste failed: '
-                        + (err && err.name === 'AbortError'
+                        + ((err && (err.name === 'TimeoutError'
+                                || err.name === 'AbortError'))
                             ? 'upload timed out' : err),
                         { sticky: true, type: 'error' });
                 } finally {

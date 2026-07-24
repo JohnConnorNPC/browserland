@@ -151,18 +151,27 @@
         // (another browser wrote) — our own pushes advance _stateRev so they
         // never re-trigger.
         async function pullState(initial) {
-            let r;
-            try {
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-                try {
-                    r = await hostFetch(localHost(), '/state',
-                        { cache: 'no-store', signal: ctrl.signal });
-                } finally { clearTimeout(timer); }
-            } catch (e) { return; }              // offline — keep localStorage
-            if (!r.ok) return;                   // 401/5xx — handled elsewhere
+            // ONE deadline for the whole exchange, connect THROUGH body, which
+            // is why this site opts out of hostFetch's built-in one
+            // (timeoutMs: 0): that one is disarmed as soon as the response
+            // HEADERS arrive, and a broker that answers and then stalls its
+            // body would hang this await forever — with the boot gate
+            // (_markStateReady) behind it, that is a permanently blank desktop.
+            // Same shape as pollHost: the json() read lives INSIDE the try, and
+            // the timer is cleared in the outer finally.
             let srv;
-            try { srv = await r.json(); } catch (e) { return; }
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+            try {
+                const r = await hostFetch(localHost(), '/state',
+                    { cache: 'no-store', signal: ctrl.signal, timeoutMs: 0 });
+                if (!r.ok) return;               // 401/5xx — handled elsewhere
+                srv = await r.json();
+            } catch (e) {                        // offline — keep localStorage
+                return;
+            } finally {
+                clearTimeout(timer);
+            }
             if (!srv || typeof srv !== 'object') return;
             const srvRev = (typeof srv.rev === 'number') ? srv.rev : 0;
             if (srvRev === 0) {

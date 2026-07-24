@@ -24,18 +24,23 @@
             }
             const host = hostById(hostId);
             if (!host) return null;
-            let r;
-            try {
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-                try {
-                    r = await hostFetch(host, '/state',
-                        { cache: 'no-store', signal: ctrl.signal });
-                } finally { clearTimeout(timer); }
-            } catch (e) { return null; }          // offline / CORS — no cache
-            if (!r.ok) return null;               // 401/5xx — handled elsewhere
+            // ONE deadline covering connect THROUGH body (hence timeoutMs: 0 —
+            // hostFetch's built-in deadline stops at the response headers, and a
+            // remote broker that answers and then stalls its body would leave
+            // this await, and the settings tab waiting on it, hung forever).
             let srv;
-            try { srv = await r.json(); } catch (e) { return null; }
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+            try {
+                const r = await hostFetch(host, '/state',
+                    { cache: 'no-store', signal: ctrl.signal, timeoutMs: 0 });
+                if (!r.ok) return null;           // 401/5xx — handled elsewhere
+                srv = await r.json();
+            } catch (e) {                         // offline / CORS — no cache
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
             if (!srv || typeof srv !== 'object') return null;
             const realLayout = (srv.layout && typeof srv.layout === 'object'
                 && !Array.isArray(srv.layout));
