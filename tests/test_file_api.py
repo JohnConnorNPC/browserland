@@ -5,12 +5,14 @@ browse the whole host (gated by the same auth as ``/launch``, which already
 grants shell-level filesystem access). These cover the resolution rules and the
 half-absolute / ADS rejections an adversarial review (codex) flagged."""
 
+import asyncio
 import base64
 import hashlib
 import os
 import re
 import stat
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -21,7 +23,7 @@ import gzip
 from sanic_testing.reusable import ReusableClient
 
 import webterm.broker.app as app_mod
-from .auth_helpers import TEST_TOKEN, authed, authed_reusable
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable, with_token
 from webterm.broker.app import (_NotText, _decode_file_text, _encode_file_text,
                                 _looks_binary, _resolve_host_path, create_app)
 
@@ -1250,6 +1252,71 @@ def test_upload_begin_sweeps_stale_session(tmp_path, monkeypatch):
         assert uid1 not in app.ctx.uploads
         assert not os.path.exists(tmp1)
         client.post("/file/upload_abort", json={"upload_id": r.json["upload_id"]})
+
+
+# ---- upload_chunk concurrency (the per-session lock) ---------------------
+# guard -> append -> received/hash used to be await-free, so the event loop
+# could not interleave two chunk requests inside it. Moving the append into a
+# worker put a real yield point in the middle: without the per-session
+# asyncio.Lock two POSTs at the SAME offset would BOTH clear the offset guard,
+# BOTH append, and feed the rolling SHA-256 out of order — a silently corrupt
+# upload that still passes #110's expected_sha256 check against nothing.
+
+
+def _concurrent_posts(client, path, bodies, token):
+    """Fire N POSTs that are genuinely in flight together and return their raw
+    httpx responses. ReusableClient runs the server on ``client._loop``, so
+    gathering the requests on that same loop is what actually overlaps them —
+    ``client.post`` alone is run_until_complete and can only serialize."""
+    url = with_token(f"http://{client.host}:{client.port}{path}", token)
+    session = client._session
+
+    async def _all():
+        return await asyncio.gather(*(session.post(url, json=b)
+                                      for b in bodies))
+
+    return client._loop.run_until_complete(_all())
+
+
+def test_upload_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
+                                                              monkeypatch):
+    app = _make_file_app(tmp_path, monkeypatch)
+    payload = b"the quick brown fox jumps over the lazy dog\n" * 32
+    real_append = app_mod._append_chunk
+
+    def slow_append(tmp, data):
+        # Widen the worker hop so the second request is GUARANTEED to reach the
+        # guard while the first is mid-append — that is precisely the window the
+        # lock closes, and without the lock this is where the loser wrongly
+        # succeeds. Runs in the executor, so it never stalls the loop.
+        time.sleep(0.25)
+        real_append(tmp, data)
+
+    monkeypatch.setattr(app_mod, "_append_chunk", slow_append)
+    body = {"content_b64": base64.b64encode(payload).decode(), "offset": 0}
+    with authed_reusable(app) as client:
+        _, r = client.post("/file/upload_begin", json={"path": "race.bin"})
+        assert r.status == 200, r.json
+        uid = r.json["upload_id"]
+        first, second = _concurrent_posts(
+            client, "/file/upload_chunk", [dict(body, upload_id=uid)] * 2,
+            app.ctx.auth_token)
+        codes = sorted((first.status_code, second.status_code))
+        assert codes == [200, 409], \
+            f"expected exactly one 200 and one 409, got {codes}"
+        loser = first if first.status_code == 409 else second
+        assert loser.json()["error"] == "bad_offset"
+        # The loser is told where the stream actually is: one payload in.
+        assert loser.json()["received"] == len(payload)
+        # And the digest the session accumulated still describes the bytes on
+        # disk, so a #110 verified commit passes.
+        _, r = client.post("/file/upload_commit",
+                           json={"upload_id": uid,
+                                 "expected_sha256":
+                                     hashlib.sha256(payload).hexdigest()})
+        assert r.status == 200 and r.json["ok"], r.json
+        assert r.json["size"] == len(payload)
+    assert (tmp_path / "race.bin").read_bytes() == payload
 
 
 # ---- /file/paste_image (#137) ---------------------------------------------

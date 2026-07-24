@@ -1513,21 +1513,111 @@ def _list_dir(rel: str, default_dir: Path):
     return d, kind, entries, truncated
 
 
-def _sweep_upload_sessions(uploads: Dict[str, Any], now: float) -> None:
-    """Drop chunked-upload sessions (#108) older than ``UPLOAD_SESSION_TTL`` and
-    best-effort unlink their temp files. Called lazily on each upload_begin so a
-    transfer the browser abandoned (closed before commit/abort) can't leak a temp
-    file or permanently hold a session slot. Keyed by ``created`` (not last-write)
-    so a genuinely stuck/idle session is reclaimed even if it never appended."""
+def _unlink_quiet(paths: List[str]) -> None:
+    """Best-effort ``os.unlink`` of every path, swallowing OSError per entry so
+    one already-gone (or locked) temp never hides the rest. The single place
+    upload/recording session teardown removes temps, so a whole batch rides ONE
+    worker hop instead of one blocking syscall per file.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    for p in paths:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def _mkstemp_part(parent: Path, prefix: str) -> str:
+    """Create — and immediately close — a ``.part`` temp under ``parent``,
+    returning its path. The temp MUST live beside the destination so commit's
+    ``os.replace`` is an atomic same-filesystem swap, which is why the caller
+    passes the dest parent rather than a temp dir.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=prefix, suffix=".part")
+    os.close(fd)
+    return tmp
+
+
+def _append_chunk(tmp: str, data: bytes) -> None:
+    """Append ONE upload/recording chunk to the session temp.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler.
+
+    The caller MUST hold the session's ``asyncio.Lock`` across the whole
+    guard -> append -> accounting sequence. Running the append in a worker turns
+    what used to be an await-free (and therefore atomic-by-construction) run of
+    handler code into one with a yield point in the middle: without the lock two
+    concurrent chunk POSTs for the same session would BOTH clear the offset
+    guard, BOTH append, and feed the rolling SHA-256 out of order — silently
+    corrupting the transfer and the #110 checksum contract.
+
+    KNOWN RESIDUAL, accepted: the lock does not survive CANCELLATION of the
+    handler task (a client disconnect mid-append). The ``async with`` unwinds and
+    releases while the worker thread keeps writing, because a running
+    ``concurrent.futures`` future cannot be cancelled — the same reason
+    ``_off_loop`` takes no deadline. A later chunk can then re-append at the
+    offset the cancelled one never accounted for. It degrades LOUDLY on the path
+    that matters: a commit carrying ``expected_sha256`` sees the mismatch, 409s
+    and leaves the dest untouched. Closing it properly means running the critical
+    section in a shielded task, which is a separate decision."""
+    with open(tmp, "ab") as fh:
+        fh.write(data)
+
+
+def _commit_replace(tmp: str, dest: str) -> int:
+    """Size the finished session temp and ``os.replace`` it onto ``dest``,
+    returning the size. ONE hop for both syscalls so nothing can grow the temp
+    between the measurement and the swap.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    size = os.path.getsize(tmp)
+    os.replace(tmp, dest)
+    return size
+
+
+def _commit_failed_cleanup(tmp: str, dest: str) -> bool:
+    """Teardown after a failed commit replace, in ONE hop: unlink the temp, then
+    report whether ``dest`` is a directory — the one cause worth naming in the
+    error. Same order the three separate on-loop calls used to run in.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    _unlink_quiet([tmp])
+    return os.path.isdir(dest)
+
+
+def _reap_upload_sessions(uploads: Dict[str, Any], now: float) -> List[str]:
+    """Pop chunked-upload sessions (#108) older than ``UPLOAD_SESSION_TTL`` and
+    RETURN their temp paths, leaving the unlinking to the caller.
+
+    ON THE LOOP, always: ``app.ctx.uploads`` is loop-owned and not thread-safe,
+    so the mutation can never move into a worker — only the inert list of paths
+    crosses over. That split is the whole reason this is a ``_reap_`` and not the
+    old blocking ``_sweep_``.
+
+    Called lazily on each upload_begin so a transfer the browser abandoned
+    (closed before commit/abort) can't leak a temp file or permanently hold a
+    session slot. Keyed by ``created`` (not last-write) so a genuinely stuck/idle
+    session is reclaimed even if it never appended."""
     stale = [uid for uid, s in uploads.items()
              if now - s.get("created", now) > UPLOAD_SESSION_TTL]
+    temps = []
     for uid in stale:
         s = uploads.pop(uid, None)
         if s:
-            try:
-                os.unlink(s["tmp"])
-            except OSError:
-                pass
+            temps.append(s["tmp"])
+    return temps
+
+
+def _sweep_upload_temps(temps: List[str], parent: Path, now: float) -> None:
+    """All of upload_begin's cleanup IO in ONE worker hop: unlink the temps the
+    loop's :func:`_reap_upload_sessions` just orphaned, then drop crash-orphaned
+    ``.part`` files under ``parent``. One hop rather than two because every
+    ``await`` is another point where a concurrent begin can interleave.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    _unlink_quiet(temps)
+    _sweep_orphan_parts(parent, now)
 
 
 def _sweep_orphan_parts(parent: Path, now: float) -> None:
@@ -1549,20 +1639,30 @@ def _sweep_orphan_parts(parent: Path, now: float) -> None:
             pass
 
 
-def _sweep_rec_sessions(sessions: Dict[str, Dict[str, Any]],
-                        now: float) -> None:
-    """Drop in-flight recording-save sessions older than RECORDING_SESSION_TTL
-    and unlink their temp files (#140). Committed recordings are NEVER swept —
-    they are durable user data; only abandoned begins are."""
+def _reap_rec_sessions(sessions: Dict[str, Dict[str, Any]],
+                       now: float) -> List[str]:
+    """Pop in-flight recording-save sessions older than RECORDING_SESSION_TTL
+    and RETURN their temp paths (#140) — the recording twin of
+    :func:`_reap_upload_sessions`, and ON THE LOOP for the same reason
+    (``app.ctx.rec_uploads`` is loop-owned). Committed recordings are NEVER
+    swept — they are durable user data; only abandoned begins are."""
+    temps = []
     for rec_id in list(sessions.keys()):
         session = sessions.get(rec_id)
         if session is None or now - session["created"] <= RECORDING_SESSION_TTL:
             continue
         sessions.pop(rec_id, None)
-        try:
-            os.unlink(session["tmp"])
-        except OSError:
-            pass
+        temps.append(session["tmp"])
+    return temps
+
+
+def _sweep_rec_temps(temps: List[str], rec_dir: Path, now: float) -> None:
+    """recording_begin's cleanup IO in ONE worker hop, mirroring
+    :func:`_sweep_upload_temps`.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    _unlink_quiet(temps)
+    _sweep_rec_orphan_parts(rec_dir, now)
 
 
 def _sweep_rec_orphan_parts(rec_dir: Path, now: float) -> None:
@@ -3356,18 +3456,34 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "exists"}, status=409)
         # Sweep BEFORE the cap check so abandoned sessions free their slot, and
         # drop crash-orphaned temps in the dir we're about to write.
+        #
+        # The reap (which is what actually frees a slot) and the cap check stay
+        # ADJACENT with no await between them: app.ctx.uploads is loop-owned, so
+        # keeping the read-modify-check on one loop turn is what stops two
+        # concurrent begins from both slipping past MAX_UPLOAD_SESSIONS. Only the
+        # disk half — unlinking the reaped temps + the orphan scan — goes to a
+        # worker, and it runs even on the 429 path so a reaped temp is never
+        # left behind.
         now = time.time()
-        _sweep_upload_sessions(app.ctx.uploads, now)
-        _sweep_orphan_parts(parent, now)
-        if len(app.ctx.uploads) >= MAX_UPLOAD_SESSIONS:
+        stale = _reap_upload_sessions(app.ctx.uploads, now)
+        over_cap = len(app.ctx.uploads) >= MAX_UPLOAD_SESSIONS
+        await _off_loop(_sweep_upload_temps, stale, parent, now)
+        if over_cap:
             return sanic_json({"ok": False, "error": "too_many_sessions"},
                               status=429)
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".webterm-up-",
-                                       suffix=".part")
-            os.close(fd)
+            tmp = await _off_loop(_mkstemp_part, parent, ".webterm-up-")
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        # Authoritative cap check, ADJACENT to the insert with no await between
+        # the two: the sweep and mkstemp hops above are yield points, so a
+        # concurrent begin can have claimed the last slot while we were in them.
+        # (The check before the sweep is only the fast path that skips the
+        # mkstemp entirely.) Losing here means dropping the temp we just made.
+        if len(app.ctx.uploads) >= MAX_UPLOAD_SESSIONS:
+            await _off_loop(_unlink_quiet, [tmp])
+            return sanic_json({"ok": False, "error": "too_many_sessions"},
+                              status=429)
         upload_id = secrets.token_hex(16)
         app.ctx.uploads[upload_id] = {
             "tmp": tmp, "dest": str(p), "overwrite": overwrite,
@@ -3376,6 +3492,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # can verify it against the source with no re-read. A chunkless
             # (0-byte) session commits sha256(b"") — matches an empty source.
             "hash": hashlib.sha256(),
+            # Serializes this session's chunk appends and its commit. Lives IN
+            # the session dict on purpose: popping the session drops the only
+            # reference, so there is no side table of locks to leak. Created
+            # exactly once, here, at begin — never lazily in the chunk path,
+            # where two concurrent requests would each mint their own.
+            "lock": asyncio.Lock(),
         }
         return sanic_json({"ok": True, "upload_id": upload_id})
 
@@ -3406,38 +3528,53 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if len(data) > MAX_CHUNK_BYTES:
             return sanic_json({"ok": False, "error": "chunk_too_large"},
                               status=400)
-        # Ordering guard: the client streams sequentially, so this chunk must
-        # start exactly where the last ended. A gap/dup/reorder is rejected
-        # WITHOUT appending (never silently corrupts the temp).
-        if offset != session["received"]:
-            return sanic_json({"ok": False, "error": "bad_offset",
-                               "received": session["received"]}, status=409)
-        if session["received"] + len(data) > MAX_TRANSFER_BYTES:
-            # Past the per-session ceiling: drop the whole session (temp + slot)
-            # so a runaway transfer can't keep consuming disk.
-            app.ctx.uploads.pop(upload_id, None)
+        # ---- the atomic region ------------------------------------------
+        # guard -> append -> accounting USED to be await-free, which made it
+        # atomic by construction: the loop could not interleave two requests
+        # inside it. The append now rides a worker, so that yield point is real
+        # and the per-session lock is what restores the guarantee. Without it two
+        # concurrent POSTs at the same offset would BOTH pass the guard, BOTH
+        # append, and feed the rolling digest out of order — a silently corrupt
+        # file that still "verifies" against nothing (#110).
+        #
+        # The lock is loop-affine: acquired and released here, on the loop, with
+        # only the inert temp path and bytes crossing into the worker. It is held
+        # across NOTHING but this sequence.
+        async with session["lock"]:
+            # The session can have been popped (commit/abort/too_large) while we
+            # waited for the lock, and appending to a popped session's temp would
+            # resurrect a file nobody will ever clean up. Identity, not just
+            # presence: only the exact dict we locked counts.
+            if app.ctx.uploads.get(upload_id) is not session:
+                return sanic_json({"ok": False, "error": "no_session"},
+                                  status=404)
+            # Ordering guard: the client streams sequentially, so this chunk must
+            # start exactly where the last ended. A gap/dup/reorder is rejected
+            # WITHOUT appending (never silently corrupts the temp).
+            if offset != session["received"]:
+                return sanic_json({"ok": False, "error": "bad_offset",
+                                   "received": session["received"]}, status=409)
+            if session["received"] + len(data) > MAX_TRANSFER_BYTES:
+                # Past the per-session ceiling: drop the whole session (temp +
+                # slot) so a runaway transfer can't keep consuming disk.
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": "too_large"},
+                                  status=400)
             try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": "too_large"}, status=400)
-        try:
-            with open(session["tmp"], "ab") as fh:
-                fh.write(data)
-        except OSError as exc:
-            # A failed append leaves the temp in an unknown state — drop the
-            # session so the client can never commit a corrupt file.
-            app.ctx.uploads.pop(upload_id, None)
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        session["received"] += len(data)       # only after a successful write
-        session["hash"].update(data)           # #110: hash exactly the committed
-        #   bytes — the offset guard above rejected any dup/reorder before the
-        #   write, so each byte is fed to the digest once, in order.
-        return sanic_json({"ok": True, "received": session["received"]})
+                await _off_loop(_append_chunk, session["tmp"], data)
+            except OSError as exc:
+                # A failed append leaves the temp in an unknown state — drop the
+                # session so the client can never commit a corrupt file.
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+            session["received"] += len(data)   # only after a successful write
+            session["hash"].update(data)       # #110: hash exactly the committed
+            #   bytes — the offset guard above rejected any dup/reorder before the
+            #   write, so each byte is fed to the digest once, in order.
+            received = session["received"]
+        return sanic_json({"ok": True, "received": received})
 
     async def _file_upload_commit(request: Request):
         # Finalize: atomically os.replace the temp onto the dest. Re-checks the
@@ -3456,46 +3593,53 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         session = app.ctx.uploads.get(upload_id)
         if session is None:
             return sanic_json({"ok": False, "error": "no_session"}, status=404)
-        dest, tmp = session["dest"], session["tmp"]
-        if not session["overwrite"] and os.path.lexists(dest):
-            return sanic_json({"ok": False, "error": "exists"}, status=409)
-        # #110: verify the accumulated SHA-256 BEFORE the atomic replace, so a
-        # mismatched (truncated/corrupt/source-changed) transfer never overwrites
-        # the dest — the existing dest is left intact and only the temp is dropped.
-        #   - absent expected_sha256 (copy)  -> no comparison, replace as before.
-        #   - present-but-malformed          -> 400 bad_sha256, session KEPT (a bad
-        #     request must never silently downgrade a verified move to unverified,
-        #     nor 500 on a non-string .lower()).
-        #   - present + digest mismatch      -> 409 checksum_mismatch, temp dropped,
-        #     session popped, dest NOT replaced.
-        expected = body.get("expected_sha256")
-        if expected is not None:
-            if not isinstance(expected, str) or not _SHA256_HEX_RE.fullmatch(expected):
-                return sanic_json({"ok": False, "error": "bad_sha256"}, status=400)
-            expected = expected.lower()       # hex is case-insensitive
-        digest = session["hash"].hexdigest()  # idempotent — safe to read here + below
-        if expected is not None and digest != expected:
-            app.ctx.uploads.pop(upload_id, None)
+        # Commit takes the SAME per-session lock the chunk path holds. It used to
+        # be await-free end to end, so it could not interleave with an append;
+        # now BOTH await, and an append landing between the size measurement and
+        # the replace would commit bytes the digest never saw. Everything under
+        # the lock is bounded (one lexists, one replace, one teardown).
+        async with session["lock"]:
+            if app.ctx.uploads.get(upload_id) is not session:
+                return sanic_json({"ok": False, "error": "no_session"},
+                                  status=404)   # a racing commit/abort won
+            dest, tmp = session["dest"], session["tmp"]
+            if not session["overwrite"] and await _off_loop(os.path.lexists,
+                                                            dest):
+                return sanic_json({"ok": False, "error": "exists"}, status=409)
+            # #110: verify the accumulated SHA-256 BEFORE the atomic replace, so a
+            # mismatched (truncated/corrupt/source-changed) transfer never
+            # overwrites the dest — the existing dest is left intact and only the
+            # temp is dropped.
+            #   - absent expected_sha256 (copy) -> no comparison, replace as before.
+            #   - present-but-malformed         -> 400 bad_sha256, session KEPT (a
+            #     bad request must never silently downgrade a verified move to
+            #     unverified, nor 500 on a non-string .lower()).
+            #   - present + digest mismatch     -> 409 checksum_mismatch, temp
+            #     dropped, session popped, dest NOT replaced.
+            expected = body.get("expected_sha256")
+            if expected is not None:
+                if (not isinstance(expected, str)
+                        or not _SHA256_HEX_RE.fullmatch(expected)):
+                    return sanic_json({"ok": False, "error": "bad_sha256"},
+                                      status=400)
+                expected = expected.lower()   # hex is case-insensitive
+            digest = session["hash"].hexdigest()   # idempotent — safe to read twice
+            if expected is not None and digest != expected:
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [tmp])
+                return sanic_json({"ok": False, "error": "checksum_mismatch",
+                                   "sha256": digest},
+                                  status=409)   # dest NOT replaced
             try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": "checksum_mismatch",
-                               "sha256": digest}, status=409)   # dest NOT replaced
-        try:
-            size = os.path.getsize(tmp)
-            os.replace(tmp, dest)
-        except OSError as exc:
-            # replace-over-dir (dest turned into a dir since begin) or any IO
-            # error: drop temp + session, report a clear code.
+                size = await _off_loop(_commit_replace, tmp, dest)
+            except OSError as exc:
+                # replace-over-dir (dest turned into a dir since begin) or any IO
+                # error: drop temp + session, report a clear code.
+                app.ctx.uploads.pop(upload_id, None)
+                dest_is_dir = await _off_loop(_commit_failed_cleanup, tmp, dest)
+                code = "is_dir" if dest_is_dir else str(exc)
+                return sanic_json({"ok": False, "error": code}, status=400)
             app.ctx.uploads.pop(upload_id, None)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            code = "is_dir" if os.path.isdir(dest) else str(exc)
-            return sanic_json({"ok": False, "error": code}, status=400)
-        app.ctx.uploads.pop(upload_id, None)
         return sanic_json({"ok": True, "path": dest, "size": size,
                            "sha256": digest})   # +sha256 (additive)
 
@@ -3513,12 +3657,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         upload_id = body.get("upload_id")
         if not isinstance(upload_id, str):
             return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        # The pop is the whole mutation and it happens on the loop, so abort stays
+        # atomic. It deliberately does NOT take the session lock: abort is the
+        # client's escape hatch and must never queue behind an append that is
+        # wedged on a dead share. Two accepted costs: an append racing this abort
+        # can recreate the temp it just removed (bounded and self-healing —
+        # _sweep_orphan_parts reaps stray .webterm-up-*.part files by age), and an
+        # abort issued while a commit is already inside the lock loses, so the
+        # upload lands anyway. Both need a client that aborts and writes the same
+        # session at once, and abort's contract was already best-effort.
         session = app.ctx.uploads.pop(upload_id, None)
         if session is not None:
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
+            await _off_loop(_unlink_quiet, [session["tmp"]])
         return sanic_json({"ok": True})
 
     @app.before_server_stop
@@ -3526,12 +3676,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # Unlink every in-flight upload temp on shutdown so a restart doesn't
         # leave .webterm-up-*.part litter (the lazy begin-sweep only runs while
         # the broker is up). Best-effort; the dict is cleared regardless.
-        for session in list(app_.ctx.uploads.values()):
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
+        # Collect + clear ON THE LOOP (the dict is loop-owned), unlink off it.
+        temps = [s["tmp"] for s in app_.ctx.uploads.values()]
         app_.ctx.uploads.clear()
+        await _off_loop(_unlink_quiet, temps)
 
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
@@ -4520,29 +4668,39 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
         rec_dir = app.ctx.recordings_dir
+        # mkdir(mode, parents, exist_ok) positionally — 0o700 on POSIX, the
+        # default 0o777 (ignored by Windows) elsewhere, exactly as before.
+        mode = 0o700 if os.name == "posix" else 0o777
         try:
-            if os.name == "posix":
-                rec_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            else:
-                rec_dir.mkdir(parents=True, exist_ok=True)
+            await _off_loop(rec_dir.mkdir, mode, True, True)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        # Reap ON THE LOOP then check the cap with no await between them, and do
+        # the unlinks + orphan scan in a worker — see _file_upload_begin for why.
         now = time.time()
-        _sweep_rec_sessions(app.ctx.rec_uploads, now)
-        _sweep_rec_orphan_parts(rec_dir, now)
-        if len(app.ctx.rec_uploads) >= MAX_RECORDING_SESSIONS:
+        stale = _reap_rec_sessions(app.ctx.rec_uploads, now)
+        over_cap = len(app.ctx.rec_uploads) >= MAX_RECORDING_SESSIONS
+        await _off_loop(_sweep_rec_temps, stale, rec_dir, now)
+        if over_cap:
             return sanic_json({"ok": False, "error": "too_many_sessions"},
                               status=429)
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(rec_dir),
-                                       prefix=".webterm-rec-", suffix=".part")
-            os.close(fd)
+            tmp = await _off_loop(_mkstemp_part, rec_dir, ".webterm-rec-")
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        # Authoritative cap check adjacent to the insert — see _file_upload_begin.
+        if len(app.ctx.rec_uploads) >= MAX_RECORDING_SESSIONS:
+            await _off_loop(_unlink_quiet, [tmp])
+            return sanic_json({"ok": False, "error": "too_many_sessions"},
+                              status=429)
         rec_id = "rec-%s-%s" % (time.strftime("%Y%m%d-%H%M%S"),
                                 secrets.token_hex(4))
         app.ctx.rec_uploads[rec_id] = {
             "tmp": tmp, "received": 0, "created": now,
+            # Same per-session lock as an upload session, for the same reason and
+            # with the same lifetime: it lives in this dict, so popping the
+            # session is what frees it. See _append_chunk.
+            "lock": asyncio.Lock(),
         }
         return sanic_json({"ok": True, "recording_id": rec_id})
 
@@ -4573,28 +4731,30 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if len(data) > MAX_CHUNK_BYTES:
             return sanic_json({"ok": False, "error": "chunk_too_large"},
                               status=400)
-        if offset != session["received"]:
-            return sanic_json({"ok": False, "error": "bad_offset",
-                               "received": session["received"]}, status=409)
-        if session["received"] + len(data) > MAX_RECORDING_BYTES:
-            app.ctx.rec_uploads.pop(rec_id, None)
+        # Identical atomic region to /file/upload_chunk, minus the digest — the
+        # per-session lock is what keeps guard -> append -> accounting indivisible
+        # now that the append rides a worker. See _append_chunk.
+        async with session["lock"]:
+            if app.ctx.rec_uploads.get(rec_id) is not session:
+                return sanic_json({"ok": False, "error": "no_session"},
+                                  status=404)
+            if offset != session["received"]:
+                return sanic_json({"ok": False, "error": "bad_offset",
+                                   "received": session["received"]}, status=409)
+            if session["received"] + len(data) > MAX_RECORDING_BYTES:
+                app.ctx.rec_uploads.pop(rec_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": "too_large"},
+                                  status=400)
             try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": "too_large"}, status=400)
-        try:
-            with open(session["tmp"], "ab") as fh:
-                fh.write(data)
-        except OSError as exc:
-            app.ctx.rec_uploads.pop(rec_id, None)
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
-            return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        session["received"] += len(data)
-        return sanic_json({"ok": True, "received": session["received"]})
+                await _off_loop(_append_chunk, session["tmp"], data)
+            except OSError as exc:
+                app.ctx.rec_uploads.pop(rec_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+            session["received"] += len(data)
+            received = session["received"]
+        return sanic_json({"ok": True, "received": received})
 
     async def _recording_commit(request: Request):
         # Finalize: atomic os.replace of the temp onto <id>.blrec, then the
@@ -4618,27 +4778,30 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
         blrec, meta_path, _notes = paths
         meta = _rec_sanitize_meta(body.get("meta"))
-        tmp = session["tmp"]
-        # Meta sidecar FIRST, .blrec replace SECOND: listing keys off .blrec
-        # presence, so this order means a listed recording always has its
-        # sidecar — a crash between the two leaves only an orphan sidecar
-        # (invisible, harmless), never a half-registered recording.
-        try:
-            size = os.path.getsize(tmp)
-            meta["size"] = size
-            meta["savedAt"] = int(time.time())
-            await asyncio.get_running_loop().run_in_executor(
-                None, _write_state_atomic, meta_path, meta)
-            os.replace(tmp, str(blrec))
-        except OSError as exc:
+        # Same per-session lock as /file/upload_commit: the size measurement, the
+        # sidecar write and the replace now span awaits, and an append landing in
+        # between would put bytes in the .blrec that meta["size"] never counted.
+        async with session["lock"]:
+            if app.ctx.rec_uploads.get(rec_id) is not session:
+                return sanic_json({"ok": False, "error": "no_session"},
+                                  status=404)
+            tmp = session["tmp"]
+            # Meta sidecar FIRST, .blrec replace SECOND: listing keys off .blrec
+            # presence, so this order means a listed recording always has its
+            # sidecar — a crash between the two leaves only an orphan sidecar
+            # (invisible, harmless), never a half-registered recording.
+            try:
+                size = await _off_loop(os.path.getsize, tmp)
+                meta["size"] = size
+                meta["savedAt"] = int(time.time())
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, meta_path, meta)
+                await _off_loop(os.replace, tmp, str(blrec))
+            except OSError as exc:
+                app.ctx.rec_uploads.pop(rec_id, None)
+                await _off_loop(_unlink_quiet, [tmp, str(meta_path)])
+                return sanic_json({"ok": False, "error": str(exc)}, status=400)
             app.ctx.rec_uploads.pop(rec_id, None)
-            for leftover in (tmp, str(meta_path)):
-                try:
-                    os.unlink(leftover)
-                except OSError:
-                    pass
-            return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        app.ctx.rec_uploads.pop(rec_id, None)
         return sanic_json({"ok": True, "recording_id": rec_id, "size": size})
 
     async def _recording_abort(request: Request):
@@ -4652,12 +4815,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         rec_id = body.get("recording_id")
         if not isinstance(rec_id, str):
             return sanic_json({"ok": False, "error": "bad_request"}, status=400)
+        # Lock-free pop for the same reason as /file/upload_abort: abort must
+        # never queue behind a wedged append.
         session = app.ctx.rec_uploads.pop(rec_id, None)
         if session is not None:
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
+            await _off_loop(_unlink_quiet, [session["tmp"]])
         return sanic_json({"ok": True})
 
     async def _recordings_list(request: Request):
@@ -4861,13 +5023,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     @app.before_server_stop
     async def _drain_rec_sessions(app_, loop):
         # Unlink every in-flight recording-save temp on shutdown, mirroring
-        # _drain_upload_sessions. Committed recordings are untouched.
-        for session in list(app_.ctx.rec_uploads.values()):
-            try:
-                os.unlink(session["tmp"])
-            except OSError:
-                pass
+        # _drain_upload_sessions (collect + clear on the loop, unlink off it).
+        # Committed recordings are untouched.
+        temps = [s["tmp"] for s in app_.ctx.rec_uploads.values()]
         app_.ctx.rec_uploads.clear()
+        await _off_loop(_unlink_quiet, temps)
 
     if app.ctx.serve_ui:
         # Import (and thus assemble) the UI constants here, gated on serve_ui, so

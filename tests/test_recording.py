@@ -6,6 +6,7 @@ app.test_client (full server lifecycle per request); the stateful save flow
 ReusableClient. Every app configures a token explicitly (#142).
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -14,9 +15,9 @@ import time
 from sanic_testing.reusable import ReusableClient
 
 import webterm.broker.app as app_mod
-from .auth_helpers import TEST_TOKEN, authed, authed_reusable
-from webterm.broker.app import (_rec_load_notes, _rec_sanitize_meta,
-                                _sweep_rec_sessions, create_app)
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable, with_token
+from webterm.broker.app import (_reap_rec_sessions, _rec_load_notes,
+                                _rec_sanitize_meta, _unlink_quiet, create_app)
 
 _app_seq = 0
 
@@ -272,18 +273,64 @@ def test_notes_corrupt_sidecar_degrades(tmp_path):
 # ---- sweeps (pure) ---------------------------------------------------------
 
 def test_stale_session_sweep_unlinks_temp(tmp_path):
+    # The sweep is split in two: _reap_rec_sessions mutates the (loop-owned)
+    # session table and hands back the temps, _unlink_quiet does the blocking
+    # unlink in a worker. Driven here exactly as _recording_begin drives it.
     tmp = tmp_path / ".webterm-rec-x.part"
     tmp.write_bytes(b"partial")
     sessions = {"rec-a": {"tmp": str(tmp), "received": 7,
                           "created": time.time() - 7200}}
-    _sweep_rec_sessions(sessions, time.time())
+    _unlink_quiet(_reap_rec_sessions(sessions, time.time()))
     assert sessions == {} and not tmp.exists()
     # a young session survives
     tmp.write_bytes(b"partial")
     sessions = {"rec-b": {"tmp": str(tmp), "received": 7,
                           "created": time.time()}}
-    _sweep_rec_sessions(sessions, time.time())
+    assert _reap_rec_sessions(sessions, time.time()) == []
     assert "rec-b" in sessions and tmp.exists()
+
+
+def test_recording_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
+                                                                 monkeypatch):
+    # /recording/chunk carries the identical exposure /file/upload_chunk does:
+    # the append now rides a worker, so without the per-session asyncio.Lock two
+    # POSTs at the same offset would both clear the guard and both append. See
+    # test_file_api.py's twin for the full reasoning.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = b"{}\n" * 256
+    real_append = app_mod._append_chunk
+
+    def slow_append(tmp, data):
+        time.sleep(0.25)                       # in the executor, not on the loop
+        real_append(tmp, data)
+
+    monkeypatch.setattr(app_mod, "_append_chunk", slow_append)
+    with authed_reusable(app) as client:
+        _, r = client.post("/recording/begin", json={})
+        assert r.status == 200, r.json
+        rec_id = r.json["recording_id"]
+        body = {"recording_id": rec_id, "offset": 0,
+                "content_b64": _b64(payload)}
+        url = with_token(
+            f"http://{client.host}:{client.port}/recording/chunk",
+            app.ctx.auth_token)
+        session = client._session
+
+        async def _both():
+            return await asyncio.gather(session.post(url, json=body),
+                                        session.post(url, json=body))
+
+        first, second = client._loop.run_until_complete(_both())
+        codes = sorted((first.status_code, second.status_code))
+        assert codes == [200, 409], \
+            f"expected exactly one 200 and one 409, got {codes}"
+        loser = first if first.status_code == 409 else second
+        assert loser.json()["error"] == "bad_offset"
+        assert loser.json()["received"] == len(payload)
+        _, r = client.post("/recording/commit",
+                           json={"recording_id": rec_id, "meta": {}})
+        assert r.status == 200 and r.json["size"] == len(payload), r.json
+    assert (tmp_path / "recs" / f"{rec_id}.blrec").read_bytes() == payload
 
 
 def test_committed_recordings_never_swept(tmp_path, monkeypatch):
