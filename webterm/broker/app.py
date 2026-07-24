@@ -819,6 +819,45 @@ def _write_state_atomic(path: Path, state: Dict[str, Any]) -> None:
                 pass
 
 
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically: temp file in the SAME directory,
+    fd closed, then ``os.replace``. A reader never observes a half-written file
+    (visibility only — crash durability is deliberately not promised), and the
+    fd is closed before the replace because Windows cannot replace an open file.
+
+    The temp is unlinked on ANY failure — the ``finally`` covers a non-OSError
+    too — so a botched write never litters the tree. The one implementation
+    behind /file/write, /file/upload and /file/paste_image, which used to carry
+    three verbatim copies of this dance.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".webterm-",
+                                   suffix=".tmp")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, str(path))
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _read_capped(path: Path, cap: int) -> bytes:
+    """Read at most ``cap + 1`` bytes from ``path``. One byte PAST the cap so a
+    file exactly at the cap still reads while anything larger is detectable by
+    length alone, and reading bounded bytes (rather than stat-then-read) closes
+    the grow-after-check window and bounds what we ever pull into memory.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    with path.open("rb") as fh:
+        return fh.read(cap + 1)
+
+
 async def _off_loop(fn, *args, timeout=None):
     """Run the BLOCKING callable ``fn(*args)`` on the default executor and await
     its result. The one canonical way to get filesystem / subprocess work off the
@@ -2294,12 +2333,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         try:
-            with p.open("rb") as fh:
-                # Read one byte past the cap: a file AT the cap still reads, but
-                # anything larger is rejected — and reading bounded bytes (vs a
-                # stat() then read_text()) closes the grow-after-check window
-                # and caps how much we ever pull into memory.
-                raw = fh.read(MAX_FILE_BYTES + 1)
+            # Capped at MAX_FILE_BYTES + 1 so oversize is detectable by length
+            # alone; off the loop because this file may live on a dead share.
+            raw = await _off_loop(_read_capped, p, MAX_FILE_BYTES)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
         if len(raw) > MAX_FILE_BYTES:
@@ -2371,7 +2407,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if kind not in ("file", "missing"):
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
-        parent = p.parent
         # Leaf first, then parent — this handler's order, unchanged.
         pkind = probe.parent_kind
         if pkind == "denied":
@@ -2380,28 +2415,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if pkind != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
-        # Atomic write: temp file in the same dir, fsync-free os.replace swap
-        # (atomic visibility — a reader never sees a half-written file; crash
-        # durability is intentionally not guaranteed for an editor). The temp
-        # is cleaned up on ANY failure (the finally covers a non-OSError too)
-        # so a botched write never litters the tree; the fd is closed before
-        # replace (Windows can't replace an open file).
-        tmp = None
+        # Atomic mkstemp -> write -> os.replace, off the loop (see
+        # _write_bytes_atomic for the semantics and the temp cleanup).
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".webterm-",
-                                       suffix=".tmp")
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, str(p))
-            tmp = None
+            await _off_loop(_write_bytes_atomic, p, data)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        finally:
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
         return sanic_json({"ok": True,
                            "path": str(p)})      # absolute, host-wide (#35)
 
@@ -2446,7 +2465,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if kind == "file" and not overwrite:
             return sanic_json({"ok": False, "error": "exists"},
                               status=409)
-        parent = p.parent
         # Leaf first, then parent — this handler's order, unchanged.
         pkind = probe.parent_kind
         if pkind == "denied":
@@ -2455,22 +2473,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if pkind != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
-        tmp = None
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=".webterm-",
-                                       suffix=".tmp")
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, str(p))
-            tmp = None
+            await _off_loop(_write_bytes_atomic, p, data)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        finally:
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
         return sanic_json({"ok": True,
                            "path": str(p),       # absolute, host-wide (#35)
                            "size": len(data)})
@@ -2511,36 +2517,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_an_image"},
                               status=400)
         paste_dir = app.ctx.paste_dir
+        # mkdir(mode, parents, exist_ok) positionally — 0o700 on POSIX, the
+        # default 0o777 (ignored by Windows) elsewhere, exactly as before.
+        mode = 0o700 if os.name == "posix" else 0o777
         try:
-            if os.name == "posix":
-                paste_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            else:
-                paste_dir.mkdir(parents=True, exist_ok=True)
+            await _off_loop(paste_dir.mkdir, mode, True, True)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        _sweep_paste_images(paste_dir, time.time())
+        # Retention sweep still runs BEFORE the new file is written (so the
+        # just-pasted image is never the one trimmed), just not on the loop.
+        await _off_loop(_sweep_paste_images, paste_dir, time.time())
         name = "paste-%s-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"),
                                    secrets.token_hex(4), kind)
         p = paste_dir / name
-        # Same atomic mkstemp + close + os.replace shape as /file/upload: a
-        # reader never sees a half-written file, and the fd is closed before
-        # replace (Windows can't replace an open file).
-        tmp = None
         try:
-            fd, tmp = tempfile.mkstemp(dir=str(paste_dir), prefix=".webterm-",
-                                       suffix=".tmp")
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, str(p))
-            tmp = None
+            await _off_loop(_write_bytes_atomic, p, data)
         except OSError as exc:
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        finally:
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
         return sanic_json({"ok": True,
                            "path": str(p),
                            "size": len(data),
