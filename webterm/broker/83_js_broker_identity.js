@@ -6,19 +6,31 @@
         // is stored on the host record under `brokerId` (browser-local — never
         // pushed to /state, see _stateBlob) and is best-effort: an older broker
         // (404) or an auth/transport miss simply leaves it unknown.
-        async function probeBrokerId(url, token) {
+        async function probeBrokerId(url, token, out) {
             // Cross-origin /info probe. Returns the broker_id string, or null on
             // any failure (404 older broker, 401 wrong token, network) — caller
             // treats null as "unknown identity, allow with no warning".
+            //
+            // `out` is an OPTIONAL sink for WHY a null came back, so a caller can
+            // word its message honestly: `out.reached` = the broker answered at
+            // all, `out.timedOut` = hostFetch's deadline fired. The return value
+            // is unchanged, so callers that pass nothing (the background identity
+            // refresh) behave exactly as before.
             try {
                 const r = await hostFetch({ url, token }, '/info');
-                if (!r.ok) return null;
+                if (out) out.reached = true;
+                if (!r.ok) {
+                    if (out) out.status = r.status;
+                    return null;
+                }
                 const j = await r.json();
                 if (j && j.ok && typeof j.broker_id === 'string'
                         && j.broker_id) {
                     return j.broker_id;
                 }
-            } catch (_) {}
+            } catch (err) {
+                if (out) out.timedOut = !!(err && err.name === 'TimeoutError');
+            }
             return null;
         }
         function findHostByBrokerId(brokerId, hosts) {
@@ -89,7 +101,13 @@
             return dupOf;
         }
 
+        // A double-click on Add used to fire two /info probes and — because both
+        // clicks cleared the pre-probe duplicate check before either returned —
+        // push TWO records for the same URL. One in-flight guard plus a
+        // re-check after the await (below) closes both halves of that window.
+        let hostFormBusy = false;
         async function commitHostForm() {
+            if (hostFormBusy) return;
             setHostError('');
             const label = hostLabelEl.value.trim();
             const url = normalizeHostUrl(hostUrlEl.value);
@@ -108,56 +126,98 @@
                 setHostError('host already configured');
                 return;
             }
-            if (editing) {
-                editing.label = label || defaultHostLabel(url);
-                editing.url = url;
-                if (pass) editing.token = pass;   // empty = keep existing
-                // The URL may now point somewhere else entirely — restart
-                // its poll/profile state from scratch.
-                hostPolls.delete(editing.id);
-                profilesCache.delete(editing.id);
-                authPrompted.delete(editing.id);
-            } else {
-                if (!pass) {
-                    // A remote /session/kill, /state etc. is token-or-loopback
-                    // gated, so a tokenless remote is undriveable from here even
-                    // though CORS is now unconditional — require the token.
-                    setHostError('password required — remote brokers must '
-                        + 'have an auth token configured');
-                    return;
-                }
-                // Probe identity (#64): warn (but allow) if this URL is a broker
-                // we already have under another address. A null id (older broker
-                // / unreachable / wrong token) just skips the warning.
-                let brokerId = null;
-                try {
-                    brokerId = await probeBrokerId(url, pass);
-                } catch (_) {}
-                if (brokerId) {
-                    const dup = findHostByBrokerId(brokerId, getHosts());
-                    if (dup) {
-                        const ok = await openConfirmDialog({
-                            title: 'Duplicate broker',
-                            message: 'This looks like the same broker you '
-                                + 'already have as "' + dup.label
-                                + '". Add anyway?',
-                            okLabel: 'Add anyway' });
-                        if (!ok) return;
+            // Busy from here down: the add path awaits an /info probe (and maybe
+            // a confirm dialog), and the button must come back in EVERY case —
+            // early return, throw, or success.
+            hostFormBusy = true;
+            const prevLabel = hostAddBtn.textContent;
+            hostAddBtn.disabled = true;
+            hostAddBtn.textContent = 'checking…';
+            let addWarning = '';
+            try {
+                if (editing) {
+                    editing.label = label || defaultHostLabel(url);
+                    editing.url = url;
+                    if (pass) editing.token = pass;   // empty = keep existing
+                    // The URL may now point somewhere else entirely — restart
+                    // its poll/profile state from scratch.
+                    hostPolls.delete(editing.id);
+                    profilesCache.delete(editing.id);
+                    authPrompted.delete(editing.id);
+                } else {
+                    if (!pass) {
+                        // A remote /session/kill, /state etc. is token-or-loopback
+                        // gated, so a tokenless remote is undriveable from here even
+                        // though CORS is now unconditional — require the token.
+                        setHostError('password required — remote brokers must '
+                            + 'have an auth token configured');
+                        return;
                     }
+                    // Probe identity (#64): warn (but allow) if this URL is a broker
+                    // we already have under another address. A null id (older broker
+                    // / unreachable / wrong token) just skips the warning.
+                    let brokerId = null;
+                    const probe = {};
+                    try {
+                        brokerId = await probeBrokerId(url, pass, probe);
+                    } catch (_) {}
+                    if (brokerId) {
+                        const dup = findHostByBrokerId(brokerId, getHosts());
+                        if (dup) {
+                            const ok = await openConfirmDialog({
+                                title: 'Duplicate broker',
+                                message: 'This looks like the same broker you '
+                                    + 'already have as "' + dup.label
+                                    + '". Add anyway?',
+                                okLabel: 'Add anyway' });
+                            if (!ok) return;
+                        }
+                    }
+                    // A host that is merely offline right now is still worth
+                    // storing, so an unreachable probe does NOT block the add —
+                    // but it must not be reported as a clean success either, or
+                    // the user reads "added" as "reachable" and only finds out
+                    // when the chip never goes green.
+                    if (!probe.reached) {
+                        addWarning = probe.timedOut
+                            ? 'added, but this broker did not answer in time — '
+                                + 'it may be offline or the URL may be wrong'
+                            : 'added, but this broker could not be reached — '
+                                + 'it may be offline or the URL may be wrong';
+                    }
+                    // Re-fetch the live array: getHosts() rebuilds prefs._hosts on
+                    // every call (the poll loop runs during the await above), so the
+                    // `hosts` captured before the probe may be detached — pushing to
+                    // it would be dropped on save.
+                    const live = getHosts();
+                    // Re-run the duplicate check AFTER the await: the pre-probe one
+                    // above answered a question that is now stale (a second Add, or
+                    // another browser's synced host list, can have landed the same
+                    // URL while we waited). Without this the same broker gets two
+                    // records — duplicate chips, and a Terminate that hits a twin.
+                    if (live.some(h => h.url === url)) {
+                        setHostError('host already configured');
+                        return;
+                    }
+                    live.push({ id: mintHostId(),
+                                label: label || defaultHostLabel(url),
+                                url, token: pass, brokerId });
                 }
-                // Re-fetch the live array: getHosts() rebuilds prefs._hosts on
-                // every call (the poll loop runs during the await above), so the
-                // `hosts` captured before the probe may be detached — pushing to
-                // it would be dropped on save.
-                getHosts().push({ id: mintHostId(),
-                                  label: label || defaultHostLabel(url),
-                                  url, token: pass, brokerId });
+                savePrefs();
+                resetHostForm();          // clears the form AND the error line
+                if (addWarning) setHostError(addWarning);
+                renderHostsList();
+                renderSettingsTabs();   // a new/renamed host changes the tab bar
+                refreshTaskbar();
+            } finally {
+                hostFormBusy = false;
+                hostAddBtn.disabled = false;
+                // resetHostForm() / startEditHost() relabel the button themselves;
+                // only put back the label WE replaced.
+                if (hostAddBtn.textContent === 'checking…') {
+                    hostAddBtn.textContent = prevLabel;
+                }
             }
-            savePrefs();
-            resetHostForm();
-            renderHostsList();
-            renderSettingsTabs();   // a new/renamed host changes the tab bar
-            refreshTaskbar();
         }
         hostAddBtn.addEventListener('click', commitHostForm);
 
