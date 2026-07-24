@@ -50,8 +50,30 @@
 
                 // ---- local-broker HTTP (the token rides an Authorization
                 // header, never the URL -- see hostFetch, #144) -------------
+                // Per-route deadlines. These are all JSON control calls on the
+                // local broker, but they are not uniformly cheap: a chunk PUT
+                // writes up to 2 MiB (decoded) to disk and the commit does a
+                // sidecar write plus an atomic replace, so both get 30s. The
+                // rest -- list, begin, abort, delete, notes -- are small,
+                // bounded FS work; 10s is generous headroom and still bails on
+                // a broker that has stopped answering. The recording BYTES
+                // (/recording?id=) are fetched directly, deliberately with no
+                // deadline at all -- see downloadRecording.
+                const REC_TIMEOUT_MS = new Map([
+                    ['/recording/chunk', 30000],
+                    ['/recording/commit', 30000],
+                ]);
+                const REC_TIMEOUT_DEFAULT_MS = 10000;
                 async function recApi(path, opts) {
-                    const r = await hostFetch(localHost(), path, opts);
+                    const o = Object.assign({}, opts || {});
+                    if (o.timeoutMs === undefined) {
+                        // The query string ('/recording/notes?id=...') is not
+                        // part of the route key.
+                        const route = path.split('?')[0];
+                        o.timeoutMs = REC_TIMEOUT_MS.has(route)
+                            ? REC_TIMEOUT_MS.get(route) : REC_TIMEOUT_DEFAULT_MS;
+                    }
+                    const r = await hostFetch(localHost(), path, o);
                     let j = null;
                     try { j = await r.json(); } catch (_) {}
                     if (!j || typeof j !== 'object') {
@@ -101,9 +123,14 @@
                     if (dlBusy.has(recId)) return;
                     dlBusy.add(recId);
                     try {
+                        // NO deadline: this streams the recording itself, up to
+                        // MAX_RECORDING_BYTES (256 MiB). Any fixed timer is a
+                        // guess about the user's link speed, and losing a large
+                        // download to one is far worse than waiting for it.
                         const r = await hostFetch(
                             localHost(),
-                            '/recording?id=' + encodeURIComponent(recId));
+                            '/recording?id=' + encodeURIComponent(recId),
+                            { timeoutMs: 0 });
                         if (!r.ok) {
                             let j = null;
                             try { j = await r.json(); } catch (_) {}
@@ -349,6 +376,12 @@
                     for (const ev of rec.events) lines.push(JSON.stringify(ev));
                     const payload = encoder.encode(lines.join('\n') + '\n');
                     let recId = null;
+                    // Once the commit is in flight the server may already have
+                    // replaced the .blrec, so the cleanup below must stop: an
+                    // abort racing a slow commit pops the session and unlinks
+                    // the temp out from under it, destroying a recording that
+                    // was about to land. Cleanup is for a failure BEFORE commit.
+                    let committing = false;
                     try {
                         const b = await recPost('/recording/begin', {});
                         if (!b.ok) return b;
@@ -361,16 +394,21 @@
                             });
                             if (!c.ok) throw new Error(c.error || 'chunk');
                         }
+                        committing = true;
                         return await recPost('/recording/commit',
                                              { recording_id: recId, meta: meta });
                     } catch (e) {
                         // Best-effort cleanup; the ORIGINAL failure is what
                         // gets reported (mirrors the upload_abort contract).
-                        if (recId) {
-                            try {
-                                recPost('/recording/abort',
-                                        { recording_id: recId });
-                            } catch (_) {}
+                        if (recId && !committing) {
+                            // The sync try/catch never saw this promise's
+                            // REJECTION — recApi rejects on a transport failure
+                            // (and now on a deadline abort), so a failed cleanup
+                            // became an unhandled rejection in the console. Catch
+                            // it on the promise; cleanup stays fire-and-forget so
+                            // the ORIGINAL failure is what gets reported.
+                            recPost('/recording/abort',
+                                    { recording_id: recId }).catch(() => {});
                         }
                         return { ok: false, error: String(e && e.message || e) };
                     }
@@ -1005,10 +1043,13 @@
                     (async function () {
                         setStatus('loading…');
                         try {
+                            // No deadline, same reason as downloadRecording:
+                            // the player loads the whole recording body.
                             const r = await hostFetch(
                                 localHost(),
                                 '/recording?id='
-                                + encodeURIComponent(recId));
+                                + encodeURIComponent(recId),
+                                { timeoutMs: 0 });
                             if (!r.ok) throw new Error('HTTP ' + r.status);
                             const text = await r.text();
                             if (closed) return;
@@ -1131,9 +1172,24 @@
                     const emptyMsg = document.getElementById('taskbar-empty');
                     if (emptyMsg) emptyMsg.remove();
 
+                    // recApi resolves to {ok:false,error} for an HTTP failure but
+                    // still REJECTS on a transport one (a dead broker, a deadline
+                    // abort) — and every caller of refresh() is a bare listener or
+                    // an un-awaited call, so that rejection used to vanish into an
+                    // unhandled promise, leaving the window stuck on "loading…"
+                    // forever with nothing on screen or in the console. Catch it
+                    // and say so in the same status line as every other failure.
                     async function refresh() {
                         statusEl.textContent = 'loading…';
-                        const j = await recApi('/recordings');
+                        let j;
+                        try {
+                            j = await recApi('/recordings');
+                        } catch (e) {
+                            if (win.disposed) return;
+                            statusEl.textContent = 'load failed: '
+                                + String((e && e.message) || e);
+                            return;
+                        }
                         if (win.disposed) return;
                         statusEl.textContent = j.ok ? ''
                             : ('load failed: ' + (j.error || ''));
