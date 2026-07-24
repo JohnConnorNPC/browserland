@@ -309,6 +309,43 @@
             });
         }
 
+        // ---- auto-reattach eligibility ------------------------------------
+        // The healing pass used to re-dial only a CLOSED socket. A socket stuck
+        // in CONNECTING is the case that actually hurts: a black-holed host
+        // (asleep, off the tailnet, silently dropped) never refuses the upgrade,
+        // so Chromium sits in CONNECTING for ~240 s with no onclose at all — no
+        // onclose means no scheduleReattach, so the window was never healed and
+        // rendered as a silent black rectangle until F5.
+        //
+        // The danger in relaxing the gate is re-dialling a HEALTHY socket that
+        // was dialled milliseconds ago, which would make a slow-but-fine connect
+        // unable to ever finish. There is no dial timestamp reachable from here
+        // (win.lastOpenAt is 0 until the socket OPENS, and reattachAt is only
+        // written by scheduleReattach, i.e. by an onclose that never came), so
+        // age is measured from the first TICK that saw this exact socket in
+        // CONNECTING — always an UNDER-estimate of its real age, so the gate errs
+        // toward waiting. Keyed on socket identity so each re-dial restarts the
+        // clock. 73's connect watchdog closes such sockets sooner; this is the
+        // belt to that pair of braces, so it waits longer on purpose.
+        const WS_CONNECTING_STUCK_MS = 8000;
+        function reattachable(win, now) {
+            const ws = win.ws;
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                win._connectingWs = null;
+                return true;                 // the original condition
+            }
+            if (ws.readyState !== WebSocket.CONNECTING) {
+                win._connectingWs = null;    // OPEN / CLOSING — not ours to heal
+                return false;
+            }
+            if (win._connectingWs !== ws) {  // first sighting of THIS socket
+                win._connectingWs = ws;
+                win._connectingSince = now;
+                return false;
+            }
+            return (now - win._connectingSince) >= WS_CONNECTING_STUCK_MS;
+        }
+
         // hostId -> ms of the last /profiles warm-up fired at it. The warm-up is
         // no longer awaited, and fetchProfiles' cache only populates when the
         // answer LANDS, so without this the 250 ms fast poll would fire a fresh
@@ -788,8 +825,16 @@
                 if (!merged.has(key)) continue;
                 const hostSt = hostPolls.get(win.hostId);
                 if (!hostSt || !hostSt.ok) continue;
-                if (win.ws && win.ws.readyState !== WebSocket.CLOSED) continue;
+                if (!reattachable(win, now)) continue;
                 if (now < (win.reattachAt || 0)) continue;
+                // A socket stuck in CONNECTING never produced an onclose, so it
+                // never scheduled a reattach and its backoff never advanced.
+                // Advance it HERE, before re-dialling, so a host that keeps
+                // black-holing the upgrade backs off 2s/4s/8s… like any other
+                // flapping window instead of being re-dialled every tick.
+                if (win.ws && win.ws.readyState === WebSocket.CONNECTING) {
+                    scheduleReattach(win);
+                }
                 reattachWindow(win);
             }
 
