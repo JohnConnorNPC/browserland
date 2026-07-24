@@ -954,12 +954,24 @@
         // resolves to a parsed object on every transport/HTTP error (never
         // rejects), so the only synthetic result is the fail-closed host: a
         // resolved {ok:false,error:'host_not_found'} with NO request sent.
+        //
+        // The transport controls ride along too: fileApiPost(route, body, host)
+        // already picks a per-route deadline, and a mod may override it with
+        // opts.timeoutMs (0 = none) and/or hand in opts.signal so a long
+        // transfer stays cancellable — the file manager's progress dialog
+        // Cancel is exactly that. They are forwarded EXPLICITLY (never the whole
+        // opts object) so a mod's own bookkeeping fields — host, offset,
+        // recursive, overwrite, expected_sha256 — can never leak into the fetch
+        // init and change how the request is made.
         function _modFileApi(route, body, opts) {
             const host = _modFileHost(opts && opts.host);
             if (!host) {
                 return Promise.resolve({ ok: false, error: 'host_not_found' });
             }
-            return fileApiPost(route, body, host);
+            return fileApiPost(route, body, host, {
+                timeoutMs: opts && opts.timeoutMs,
+                signal: opts && opts.signal,
+            });
         }
 
         // ---- ctx.session host routing (#85 / S12) ---------------------------
@@ -983,6 +995,13 @@
             if (!hostId || hostId === 'local') return localHost();
             return null;
         }
+        // A /session/* call is an RPC onto the owning broker's session loop,
+        // which caps its own wait at RPC_TIMEOUT = 10s (app.py). Sit just above
+        // that: long enough that the SERVER's timeout is what a mod sees (a real
+        // 504-shaped answer it can report), short enough that a dead broker
+        // doesn't hang the task manager forever. opts.timeoutMs / opts.signal
+        // override + cancel, forwarded explicitly like _modFileApi.
+        const SESSION_API_TIMEOUT_MS = 12000;
         function _modSessionApi(route, body, opts) {
             const host = _modSessionHost(opts && opts.host);
             if (!host) {
@@ -993,6 +1012,10 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
+                timeoutMs: (opts && opts.timeoutMs !== undefined
+                            && opts.timeoutMs !== null)
+                    ? opts.timeoutMs : SESSION_API_TIMEOUT_MS,
+                signal: opts && opts.signal,
             }).then(r => r.json()
                 .then(j => ({ status: r.status, json: j }))
                 .catch(() => ({ status: r.status,
