@@ -103,6 +103,14 @@
         // and on its host (#35). bringToFront keeps it current.
         let lastTermId = null;
         let refreshInFlight = false;
+        // Monotonic generation for refreshTaskbar (same shape as the mod's
+        // gitSeq). refreshInFlight is the mutex; a WATCHDOG can force-release it
+        // if a run ever wedges (see refreshTaskbar), and a force-release means
+        // two runs can be alive at once. So every await boundary in the run
+        // re-checks its seq against this counter and a superseded run bails
+        // instead of mutating sessions/windows underneath the newer one — and
+        // its `finally` only clears the mutex when it still owns it.
+        let refreshSeq = 0;
         // Per-window MCP-pin re-assertions in flight (by window key). The 2s
         // re-assert pass never fires a duplicate POST for a key it is already
         // driving, and a user-initiated mode change serialises against it via
@@ -125,12 +133,25 @@
         // transiently down broker never mass-closes its windows — and a
         // down remote never touches another host's. gcDone arms the
         // per-host one-time prefs GC; authNeeded drives the amber chip.
+        //
+        // The poll is no longer a per-tick barrier (a black-holed host used to
+        // cost every other host the full deadline before ANYTHING rendered), so
+        // three more fields track the poll itself rather than its result:
+        //   pollPromise  the in-flight poll, so a tick never stacks a second
+        //                request on a host that is still hanging on the first
+        //   polling      that poll is outstanding — with everOk false it means
+        //                "no answer YET", which the chip shows as neutral
+        //                instead of flashing red at a host that is merely slow
+        //   fresh        this host answered since the last tick consumed it, so
+        //                a tick that reuses last-good data can't double-count a
+        //                window's missingPolls and close it early
         const hostPolls = new Map();   // hostId -> state record
         function pollStateFor(hostId) {
             let st = hostPolls.get(hostId);
             if (!st) {
                 st = { ok: false, everOk: false, consecFailures: 0,
-                       sessions: [], authNeeded: false, gcDone: false };
+                       sessions: [], authNeeded: false, gcDone: false,
+                       pollPromise: null, polling: false, fresh: false };
                 hostPolls.set(hostId, st);
             }
             return st;
