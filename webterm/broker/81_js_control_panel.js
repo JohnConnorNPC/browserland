@@ -446,10 +446,17 @@
             setDefaultProfile.value = cur;
             // Fetch the profile list if we haven't yet, then re-render this one
             // control so the names appear. Guard against a tab switch mid-await.
+            // The re-render is conditional on the fetch having actually
+            // POPULATED the cache: against a dead host the GET fast-fails, and
+            // an unconditional re-render would re-enter here, re-fetch, fail
+            // again — a hot loop hammering a broker that is already down. A
+            // failed fetch simply leaves the "(broker default)" option standing.
             if (host && !profilesCache.has(host.id)) {
                 const wantTab = currentSettingsTab;
                 fetchProfiles(host).then(() => {
-                    if (currentSettingsTab === wantTab && settingsTarget === t) {
+                    if (profilesCache.has(host.id)
+                            && currentSettingsTab === wantTab
+                            && settingsTarget === t) {
                         renderDefaultProfile();
                     }
                 }).catch(() => {});
@@ -482,12 +489,21 @@
                 setMcpToken.value = '';
                 setMcpDefaultMode.value = 'off';
                 setMcpAllowLaunch.checked = false;
+                // Re-render ONLY if the GET actually populated the cache. An
+                // unconditional re-render re-enters this branch and re-fetches,
+                // so a host that fast-fails (broker down, connection refused)
+                // turns the section into a hot retry loop. Failing quietly here
+                // leaves the neutral defaults on screen; the next deliberate
+                // render (reopening the tab / switching back to this host) is
+                // the retry, and it is a manual one.
                 if (host && !mcpConfigFetching.has(host.id)) {
                     mcpConfigFetching.add(host.id);
                     const wantTab = currentSettingsTab;
                     fetchMcpConfig(host).then(() => {
                         mcpConfigFetching.delete(host.id);
-                        if (currentSettingsTab === wantTab && settingsTarget === t)
+                        if (mcpConfigCache.has(host.id)
+                                && currentSettingsTab === wantTab
+                                && settingsTarget === t)
                             renderMcpConfig();
                     }).catch(() => { mcpConfigFetching.delete(host.id); });
                 }
@@ -593,6 +609,12 @@
             return saveProfilesConfig(host, np, cfg.default_profile)
                 .then(() => refreshTaskbar());
         }
+        // Hosts whose last /profiles/config GET failed. While a host is in here
+        // the editor shows a manual "retry" control instead of re-fetching on
+        // every render: the old code re-rendered unconditionally after a failed
+        // fetch, and since a failed fetch leaves the cache empty that re-render
+        // immediately re-fetched — a hot loop against a broker that is down.
+        const profilesConfigFailed = new Set();
         function renderProfilesEditor() {
             flushProfilePickers();
             const t = settingsTarget;
@@ -600,19 +622,49 @@
             const host = hostById(t.hostId);
             const cfg = host ? profilesConfigCache.get(host.id) : null;
             setProfilesListEl.innerHTML = '';
+            // Add/Detect both end in a whole-set REPLACE POST built on top of
+            // the cached set, so neither is safe while that set is unknown —
+            // see openProfileDialog. Gate them on a loaded config.
+            if (setProfileAddBtn) setProfileAddBtn.disabled = !cfg;
+            if (setProfileDetectBtn) setProfileDetectBtn.disabled = !cfg;
             if (!cfg) {
+                if (host && profilesConfigFailed.has(host.id)) {
+                    setProfilesListEl.textContent = 'could not load — ';
+                    const again = document.createElement('button');
+                    again.type = 'button';
+                    again.textContent = 'retry';
+                    again.addEventListener('click', () => {
+                        profilesConfigFailed.delete(host.id);
+                        renderProfilesEditor();
+                    });
+                    setProfilesListEl.appendChild(again);
+                    return;
+                }
                 setProfilesListEl.textContent = 'loading…';
                 if (host && !profilesConfigFetching.has(host.id)) {
                     profilesConfigFetching.add(host.id);
                     const wantTab = currentSettingsTab;
                     fetchProfilesConfig(host).then(() => {
                         profilesConfigFetching.delete(host.id);
+                        // Only recurse when the GET actually populated the
+                        // cache; otherwise mark the host failed so the next
+                        // render offers retry rather than another request.
+                        if (!profilesConfigCache.has(host.id)) {
+                            profilesConfigFailed.add(host.id);
+                        }
                         if (currentSettingsTab === wantTab && settingsTarget === t)
                             renderProfilesEditor();
-                    }).catch(() => { profilesConfigFetching.delete(host.id); });
+                    }).catch(() => {
+                        // fetchProfilesConfig swallows its own errors, so this
+                        // is belt-and-braces — but if it ever stops doing so,
+                        // an unmarked failure would put the loop straight back.
+                        profilesConfigFetching.delete(host.id);
+                        profilesConfigFailed.add(host.id);
+                    });
                 }
                 return;
             }
+            profilesConfigFailed.delete(host.id);
             const names = Object.keys(cfg.profiles || {}).sort();
             if (!names.length) { setProfilesListEl.textContent = 'no profiles'; return; }
             for (const name of names) {
@@ -717,6 +769,13 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ profiles: profiles,
                                        default_profile: defaultProfile || '' }),
+                // Well past the default deadline: the broker validates the whole
+                // set, then does an ATOMIC sidecar write (temp + fsync + replace,
+                // off the event loop) behind profiles_lock and live-swaps the
+                // launcher. That is disk work under a lock, not a lookup — and a
+                // client-side abort here would report "save failed" on a write
+                // that in fact landed.
+                timeoutMs: 8000,
             }).then(r => r.json().catch(() => null)).then(j => {
                 if (j && j.ok) {
                     profilesConfigCache.set(host.id, j);
@@ -738,8 +797,17 @@
         // textarea, ONE argv token per line — avoids fragile quote-splitting: the
         // array joins to lines and splits back on newlines.
         function openProfileDialog(host, editName, preset) {
-            const cfg = profilesConfigCache.get(host.id)
-                || { profiles: {}, default_profile: '' };
+            // NEVER fall back to a phantom {profiles:{}}. saveProfilesConfig
+            // POSTs the WHOLE set and the broker persists exactly what it is
+            // sent (app.py _profiles_config_post writes `to_persist` verbatim),
+            // so a Save built on an empty stand-in would REPLACE every real
+            // profile on that broker with just the one being typed. If this
+            // host's config never loaded we cannot edit it — say so.
+            const cfg = profilesConfigCache.get(host.id);
+            if (!cfg) {
+                showNotice('profiles for this host aren’t loaded — retry first');
+                return;
+            }
             const base = preset || (editName ? (cfg.profiles[editName] || {}) : {});
             const initName = preset ? (preset.name || '') : (editName || '');
             let nameInput, titleInput, cwdInput, cmdArea;
@@ -811,7 +879,11 @@
         // the Add dialog pre-filled (openDialog's singleton cancels this one), so
         // nothing is saved until the user confirms.
         function detectProfiles(host) {
-            hostFetch(host, '/profiles/detect')
+            // The scan shells out — on Windows `wsl -l -q` with its own timeout=8
+            // (app.py), plus PATH probing — so the server's own worst case already
+            // exceeds the default deadline. Give it room rather than aborting a
+            // scan that was about to answer.
+            hostFetch(host, '/profiles/detect', { timeoutMs: 15000 })
                 .then(r => (r.ok ? r.json() : null))
                 .then(j => {
                     const list = (j && j.ok && Array.isArray(j.suggestions))

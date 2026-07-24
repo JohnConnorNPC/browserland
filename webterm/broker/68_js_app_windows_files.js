@@ -52,14 +52,79 @@
         // the read/write hits the broker the file actually lives on.
         // Always resolves to a parsed object — {ok:false,error} on any
         // transport/HTTP failure so callers never see a rejected promise.
-        function fileApiPost(path, body, host) {
+        //
+        // Per-route client deadlines. hostFetch's default deadline is sized for
+        // chatty control-plane GETs and is far too tight for real file work, so
+        // every /file/* route gets a budget derived from what the SERVER can
+        // actually spend on it:
+        //   - metadata (list/stat/mkdir/delete/rename/setattr/the upload session
+        //     bookkeeping): bounded syscalls -> FILE_API_TIMEOUT_DEFAULT_MS.
+        //   - whole-file and PER-CHUNK transfers: 60s, and for the chunked
+        //     routes that is 60s per chunk, not for the whole file.
+        //   - copy/move/zip/unzip/hash: genuinely unbounded TREE work with no
+        //     server-side ceiling, so NO deadline at all (0). A spurious abort
+        //     part-way through a copy is strictly worse than a slow copy; these
+        //     are cancelled by an explicit opts.signal (a user pressing Cancel),
+        //     never by a timer.
+        // A Map (not an object literal) so a route name can never collide with
+        // something inherited from Object.prototype.
+        const FILE_API_TIMEOUT_DEFAULT_MS = 15000;
+        const FILE_API_TIMEOUT_MS = new Map([
+            ['/file/read', 60000],
+            ['/file/write', 60000],
+            ['/file/upload', 60000],
+            ['/file/read_chunk', 60000],
+            ['/file/upload_chunk', 60000],
+            // Bookkeeping, but on the MUTATING side of a transfer: the finalize
+            // does an atomic sidecar write plus the os.replace onto the dest.
+            // Listed explicitly (rather than left on the metadata default) so
+            // the budget for "the write that actually lands" is stated, not
+            // inherited. A timeout here is still only a lost ANSWER — the
+            // replace happens server-side regardless — which is why the error
+            // says "may or may not have completed" and why no caller may treat
+            // it as licence to abort the session.
+            ['/file/upload_commit', 60000],
+            ['/file/copy', 0],
+            ['/file/move', 0],
+            ['/file/zip', 0],
+            ['/file/unzip', 0],
+            ['/file/hash', 0],
+        ]);
+        // Distinguish the two ways a request can end early, because they mean
+        // opposite things to a caller. A deadline abort is CLIENT-side only —
+        // the server may well have finished the write — so an unbounded op that
+        // trips one must never be reported as a clean failure. A user cancel is
+        // a deliberate, expected outcome and shouldn't read as an error at all.
+        // The booleans are additive; every existing caller still reads .error.
+        function fileApiError(e) {
+            const name = e && e.name;
+            if (name === 'TimeoutError') {
+                return { ok: false, timedOut: true,
+                         error: 'timed out — may or may not have completed' };
+            }
+            if (name === 'AbortError') {
+                return { ok: false, aborted: true, error: 'cancelled' };
+            }
+            return { ok: false, error: String(e) };
+        }
+        // opts (all optional): {timeoutMs, signal}. timeoutMs overrides the
+        // per-route default (0 disables the deadline entirely); signal lets a
+        // caller cancel — hostFetch composes it WITH the deadline rather than
+        // replacing it.
+        function fileApiPost(path, body, host, opts) {
+            const o = opts || {};
+            const routeMs = FILE_API_TIMEOUT_MS.has(path)
+                ? FILE_API_TIMEOUT_MS.get(path) : FILE_API_TIMEOUT_DEFAULT_MS;
             return hostFetch(host || localHost(), path, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body || {}),
+                timeoutMs: (o.timeoutMs === undefined || o.timeoutMs === null)
+                    ? routeMs : o.timeoutMs,
+                signal: o.signal,
             }).then(r => r.json().catch(
                 () => ({ ok: false, error: 'HTTP ' + r.status })
-            )).catch(e => ({ ok: false, error: String(e) }));
+            )).catch(fileApiError);
         }
         // Host-wide file tools (#35) work in ABSOLUTE native paths: the server
         // returns the host's own separators (C:\a\b on Windows, /a/b on POSIX).
