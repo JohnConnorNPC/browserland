@@ -147,3 +147,25 @@ async def test_file_list_keeps_the_loop_responsive(tmp_path, monkeypatch):
     names = {e["name"] for e in resp.json["entries"]}
     assert {"a.txt", "sub"} <= names, names
     assert resp.json["truncated"] is False
+
+
+async def test_file_stat_keeps_the_loop_responsive(tmp_path, monkeypatch):
+    """The same guarantee through _probe_path, on a handler that is not
+    /file/list — the batched probe is what every other /file/* route relies on."""
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch)
+    entered = threading.Event()
+    _block_classify(monkeypatch, entered)
+
+    url = with_token("/file/stat", TEST_TOKEN)
+
+    async def fire():
+        _, resp = await app.asgi_client.post(url, json={"path": "a.txt"})
+        return resp
+
+    ticks, resp = await _ticks_during(fire, entered)
+
+    assert ticks > MIN_TICKS, (
+        f"only {ticks} loop ticks serviced during a {BLOCK_S}s /file/stat — the "
+        "event loop was blocked by _probe_path's filesystem calls")
+    assert resp.status == 200 and resp.json["type"] == "file"

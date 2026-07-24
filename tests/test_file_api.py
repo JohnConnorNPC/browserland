@@ -300,6 +300,139 @@ def test_follow_leaf_preserves_symlink_leaf(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# batched off-loop probes (_probe_path / _probe_two)
+# --------------------------------------------------------------------------- #
+# The /file/* prologues used to run _resolve_host_path + _classify_path (+
+# _is_reparse_point + lexists) one blocking call at a time ON the event loop.
+# These pin that the batched one-hop replacements report the SAME kind /
+# bad_path outcomes, including the short-circuits that keep a probe from ever
+# stat-ing through a link.
+
+async def test_probe_path_kinds(tmp_path):
+    (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+
+    pf = await app_mod._probe_path("f.txt", tmp_path)
+    assert pf.kind == "file"
+    assert pf.path == (tmp_path / "f.txt").resolve()
+    assert pf.lexists is True and pf.is_link is False
+    # Not asked for -> inert, and (the point of the flag) not probed either.
+    assert pf.parent_kind == "" and pf.target is None and pf.target_kind == ""
+
+    assert (await app_mod._probe_path("d", tmp_path)).kind == "dir"
+    assert (await app_mod._probe_path("nope", tmp_path)).kind == "missing"
+    assert (await app_mod._probe_path("nope", tmp_path)).lexists is False
+
+
+async def test_probe_path_want_kind_off_skips_the_classify(tmp_path):
+    # want_kind=False must not merely blank the field, it must not CALL
+    # _classify_path — that call follows the leaf, and /file/delete relies on
+    # never traversing a link it is about to unlink.
+    (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+    p = await app_mod._probe_path("f.txt", tmp_path, want_kind=False)
+    assert p.kind == "" and p.lexists is True
+
+
+async def test_probe_path_parent_and_denied(tmp_path, monkeypatch):
+    (tmp_path / "d").mkdir()
+    p = await app_mod._probe_path("d/new.txt", tmp_path, want_parent=True)
+    assert p.kind == "missing" and p.parent_kind == "dir"
+
+    # A refused stat classifies as 'denied' (never a 500) — same contract the
+    # on-loop _classify_path had.
+    monkeypatch.setattr(app_mod.Path, "is_file",
+                        lambda self: (_ for _ in ()).throw(PermissionError()))
+    p = await app_mod._probe_path("d", tmp_path)
+    assert p.kind == "denied"
+
+
+async def test_probe_path_bad_path_raises_valueerror(tmp_path, monkeypatch):
+    # Resolver failures must stay ValueError across the executor boundary so the
+    # handlers keep returning bad_path, never a 500.
+    def boom(self, *a, **k):
+        raise OSError("symlink loop")
+
+    monkeypatch.setattr(app_mod.Path, "resolve", boom)
+    with pytest.raises(ValueError):
+        await app_mod._probe_path("anything", tmp_path)
+
+
+async def test_probe_path_target_short_circuits_on_a_link(tmp_path):
+    target = tmp_path / "target_dir"
+    target.mkdir()
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    p = await app_mod._probe_path("link", tmp_path, follow_leaf=False,
+                                  want_kind=False, want_target=True)
+    assert p.path == (tmp_path.resolve() / "link")     # the link ENTRY
+    assert p.lexists is True and p.is_link is True
+    assert p.target == target.resolve()                # resolved, as before...
+    assert p.target_kind == ""                         # ...but NOT classified
+
+
+async def test_probe_path_target_classified_for_a_real_path(tmp_path):
+    (tmp_path / "d").mkdir()
+    p = await app_mod._probe_path("d", tmp_path, follow_leaf=False,
+                                  want_kind=False, want_target=True)
+    assert p.is_link is False and p.target_kind == "dir"
+
+
+async def test_probe_two_reads_the_named_body_fields(tmp_path):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "d").mkdir()
+    src, dst = await app_mod._probe_two({"src": "a.txt", "dst": "d/out.zip"},
+                                        tmp_path, want_dst_parent=True)
+    assert src.kind == "file"
+    assert dst.kind == "missing" and dst.parent_kind == "dir"
+    # zip/unzip name their fields differently — same helper, same outcomes.
+    src, dst = await app_mod._probe_two({"path": "a.txt", "dest": "d"},
+                                        tmp_path, src_key="path",
+                                        dst_key="dest")
+    assert src.kind == "file" and dst.kind == "dir"
+
+
+@pytest.mark.parametrize("body", [
+    {},                                   # both missing
+    {"src": "a.txt"},                     # dst missing
+    {"src": "", "dst": "b.txt"},          # empty src
+    {"src": "a.txt", "dst": ""},          # empty dst
+    {"src": 5, "dst": "b.txt"},           # non-string src
+    {"src": "a.txt", "dst": None},        # non-string dst
+])
+async def test_probe_two_bad_fields_raise_valueerror(tmp_path, body):
+    with pytest.raises(ValueError):
+        await app_mod._probe_two(body, tmp_path)
+
+
+async def test_probe_two_move_shape_never_classifies(tmp_path):
+    # /file/move's exact call: both sides link-safe, neither classified, only
+    # lexists + the dst parent. A symlink src must be reported as a link entry
+    # without its target being stat'ed.
+    target = tmp_path / "t.txt"
+    target.write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    _symlink_or_skip(target, link)
+    src, dst = await app_mod._probe_two({"src": "link", "dst": "moved"},
+                                        tmp_path, src_follow_leaf=False,
+                                        dst_follow_leaf=False,
+                                        want_src_kind=False,
+                                        want_dst_kind=False,
+                                        want_dst_parent=True)
+    assert src.kind == "" and dst.kind == ""
+    assert src.lexists is True and src.is_link is True
+    assert dst.lexists is False and dst.parent_kind == "dir"
+
+
+async def test_off_loop_rejects_a_timeout():
+    # The deadline parameter is reserved, not implemented: passing one must fail
+    # loudly rather than silently running unbounded (wait_for cannot cancel a
+    # running executor future).
+    assert await app_mod._off_loop(os.path.basename, "a/b") == "b"
+    with pytest.raises(NotImplementedError):
+        await app_mod._off_loop(os.path.basename, "a/b", timeout=1.0)
+
+
+# --------------------------------------------------------------------------- #
 # /file/copy (#72)
 # --------------------------------------------------------------------------- #
 

@@ -60,7 +60,7 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from sanic import Request, Sanic, Websocket
 from sanic.exceptions import NotFound
@@ -120,8 +120,8 @@ UPLOAD_SESSION_TTL = 3600.0        # seconds since begin before a sweep drops it
 # (a build cache, a mail spool, an SMB share with a million entries). Cap the
 # number of entries one listing may return so the JSON payload — and the memory
 # both brokers and the browser hold — stays bounded. When the cap bites, the
-# response carries ``"truncated": true`` so the UI can say so instead of
-# quietly showing a partial directory.
+# response carries ``"truncated": true`` so the UI can say so instead of quietly
+# showing a partial directory.
 MAX_LIST_ENTRIES = 10000
 
 # Clipboard-image paste (#137): pasted images land in a dedicated paste dir
@@ -1222,7 +1222,11 @@ def _resolve_two(body: Dict[str, Any], default_dir: Path,
     ``bad_path`` by the caller) on a missing / non-string field or a resolver
     failure. ``*_follow_leaf`` pick link-safe leaf resolution per side: move
     resolves both link-safe (so it relocates a link entry, not its target); copy
-    follows (it is non-destructive to the source)."""
+    follows (it is non-destructive to the source).
+
+    NOTE: the ``/file/*`` handlers now use :func:`_probe_two` instead, which does
+    this resolution plus the follow-up stats in ONE off-loop hop. Prefer that —
+    calling this from a handler puts two blocking resolves back on the loop."""
     src_rel = body.get("src")
     dst_rel = body.get("dst")
     if not isinstance(src_rel, str) or not src_rel:
@@ -1262,6 +1266,167 @@ def _classify_path(p: Path) -> str:
         return "other" if p.exists() else "missing"
     except OSError:
         return "denied"
+
+
+class _Probe(NamedTuple):
+    """Everything the ``/file/*`` prologues need to know about ONE path, gathered
+    in a single worker hop. A field the caller did NOT ask for is an inert
+    default (``""`` / ``None``) — never a lie about the filesystem, just "not
+    asked", and (importantly) not a syscall that was never run today either.
+
+      ``path``         the resolved path (per ``follow_leaf``)
+      ``kind``         ``_classify_path(path)``: file|dir|other|missing|denied,
+                       or ``""`` when ``want_kind`` is False
+      ``parent_kind``  ``_classify_path(path.parent)``, or ``""`` unless
+                       ``want_parent``
+      ``lexists``      ``os.path.lexists(path)`` — TRUE for a broken symlink,
+                       which ``kind`` reports as 'missing'
+      ``is_link``      ``_is_reparse_point(path)``: symlink OR Windows junction
+      ``target``       the SAME rel resolved with ``follow_leaf=True``, or
+                       ``None`` unless ``want_target``
+      ``target_kind``  ``_classify_path(target)`` — see the short-circuit note on
+                       ``_probe_path_sync``; ``""`` unless ``want_target``
+
+    ``lexists`` and ``is_link`` are the only two computed unconditionally: both
+    are pure ``lstat``, so they never traverse a link and can never block on a
+    link's (possibly dead, possibly UNC) target."""
+    path: Path
+    kind: str
+    parent_kind: str
+    lexists: bool
+    is_link: bool
+    target: Optional[Path]
+    target_kind: str
+
+
+def _probe_path_sync(rel: str, default_dir: Path, follow_leaf: bool = True,
+                     want_kind: bool = True, want_parent: bool = False,
+                     want_target: bool = False) -> _Probe:
+    """Blocking body of :func:`_probe_path` — resolve + stat one path. Runs in a
+    worker thread; raises ``ValueError`` (-> ``bad_path``) exactly where
+    ``_resolve_host_path`` does.
+
+    The ``want_*`` flags are NOT an optimisation, they are a correctness
+    requirement: a classify FOLLOWS the leaf, so probing eagerly for a handler
+    that never classified that path today would add a brand-new traversal — and
+    for a symlink/junction pointing at a dead SMB share that is a brand-new hang
+    where today's code short-circuited first. Ask only for what the handler
+    actually inspects.
+
+    ``target_kind`` carries the same rule as an internal short-circuit: it is
+    computed only when the link-safe leaf EXISTS and is NOT a link, mirroring
+    ``/file/delete``, which returns not_found or removes the link entry before it
+    ever classifies through to a target."""
+    p = _resolve_host_path(rel, default_dir, follow_leaf=follow_leaf)
+    p_str = str(p)
+    # lstat only — never traverses, so it is safe to run unconditionally.
+    lexists = os.path.lexists(p_str)
+    is_link = _is_reparse_point(p_str)
+    target = None
+    target_kind = ""
+    if want_target:
+        target = _resolve_host_path(rel, default_dir, follow_leaf=True)
+        if lexists and not is_link:
+            target_kind = _classify_path(target)
+    return _Probe(
+        path=p,
+        kind=_classify_path(p) if want_kind else "",
+        parent_kind=_classify_path(p.parent) if want_parent else "",
+        lexists=lexists,
+        is_link=is_link,
+        target=target,
+        target_kind=target_kind,
+    )
+
+
+async def _probe_path(rel: str, default_dir: Path, follow_leaf: bool = True,
+                      want_kind: bool = True, want_parent: bool = False,
+                      want_target: bool = False) -> _Probe:
+    """Resolve and stat ONE client-supplied path in a single off-loop hop.
+
+    This is the batched replacement for the ``_resolve_host_path`` +
+    ``_classify_path`` (+ ``_is_reparse_point`` + ``lexists``) sequence the
+    ``/file/*`` handlers used to run one call at a time ON the event loop. Every
+    one of those is a blocking syscall against a host-wide, possibly-UNC path;
+    together they were the broker's single biggest source of loop stalls.
+
+    Raises ``ValueError`` on a resolver failure so callers keep returning the
+    same ``{"ok": false, "error": "bad_path"}`` 400 as before.
+
+    IMPORTANT — the caller must still branch in TODAY'S ORDER. The probe gathers
+    what was asked for eagerly, but WHICH error a bad request produces is decided
+    purely by the order the handler inspects these fields, so that order is
+    load-bearing and must not be "tidied".
+
+    TOCTOU: batching NARROWS the window BETWEEN THE CHECKS — they used to be
+    separate blocking syscalls with the whole cost of each one between them, and
+    are now adjacent inside one worker. It does add an await boundary before the
+    handler's body, so another coroutine on this loop can interleave there where
+    a fully-blocking prologue would have kept it out; that is accepted, because
+    the file API is check-then-act by construction and its host-wide, single-user
+    threat model already assumes the caller's own shells are mutating the same
+    tree concurrently. Do NOT "fix" this back to sequential on-loop calls: it
+    would trade a theoretical narrowing for freezing every live terminal on the
+    broker for the duration of a UNC stat."""
+    return await _off_loop(_probe_path_sync, rel, default_dir, follow_leaf,
+                           want_kind, want_parent, want_target)
+
+
+def _probe_two_sync(src_rel: str, dst_rel: str, default_dir: Path,
+                    src_follow_leaf: bool, dst_follow_leaf: bool,
+                    want_src_kind: bool, want_dst_kind: bool,
+                    want_src_parent: bool,
+                    want_dst_parent: bool) -> Tuple[_Probe, _Probe]:
+    """Blocking body of :func:`_probe_two`."""
+    return (
+        _probe_path_sync(src_rel, default_dir, follow_leaf=src_follow_leaf,
+                         want_kind=want_src_kind, want_parent=want_src_parent),
+        _probe_path_sync(dst_rel, default_dir, follow_leaf=dst_follow_leaf,
+                         want_kind=want_dst_kind, want_parent=want_dst_parent),
+    )
+
+
+async def _probe_two(body: Dict[str, Any], default_dir: Path,
+                     src_key: str = "src", dst_key: str = "dst",
+                     src_follow_leaf: bool = True,
+                     dst_follow_leaf: bool = True,
+                     want_src_kind: bool = True, want_dst_kind: bool = True,
+                     want_src_parent: bool = False,
+                     want_dst_parent: bool = False) -> Tuple[_Probe, _Probe]:
+    """Two-path sibling of :func:`_probe_path` for the copy/move/zip/unzip
+    handlers: read the two path fields out of ``body``, resolve and stat BOTH in
+    ONE off-loop hop, and return ``(src_probe, dst_probe)``.
+
+    The batched replacement for ``_resolve_two`` + the four-to-nine follow-up
+    ``_classify_path`` / ``lexists`` calls those handlers ran on the loop —
+    ``/file/copy`` alone drops from two resolves plus nine stats to one hop.
+
+    ``src_key``/``dst_key`` name the body fields because the callers disagree:
+    copy/move use ``src``/``dst``, zip uses ``src``/``dest``, unzip uses
+    ``path``/``dest``. A missing, non-string or empty field raises ``ValueError``
+    (-> ``bad_path``), the same outcome those handlers produced from their own
+    per-field validation, and in the same src-then-dst order.
+
+    ``*_follow_leaf`` picks link-safe leaf resolution per side, exactly as
+    ``_resolve_two`` did: move resolves both link-safe (it relocates a link
+    ENTRY, never the target tree); copy follows (non-destructive to the source).
+
+    ``want_*_kind`` default True but MUST be turned off for a side the handler
+    never classified before — ``/file/move`` is exactly that case (it decides on
+    ``lexists`` alone, precisely so a symlink src is relocated without its target
+    ever being stat'ed). See the flag note on :func:`_probe_path_sync`.
+
+    The ordering and TOCTOU notes on :func:`_probe_path` apply verbatim."""
+    src_rel = body.get(src_key)
+    dst_rel = body.get(dst_key)
+    if not isinstance(src_rel, str) or not src_rel:
+        raise ValueError("bad_path")
+    if not isinstance(dst_rel, str) or not dst_rel:
+        raise ValueError("bad_path")
+    return await _off_loop(_probe_two_sync, src_rel, dst_rel, default_dir,
+                           src_follow_leaf, dst_follow_leaf,
+                           want_src_kind, want_dst_kind,
+                           want_src_parent, want_dst_parent)
 
 
 def _list_dir(rel: str, default_dir: Path):
@@ -2116,10 +2281,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2195,10 +2360,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if len(data) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root,
+                                      want_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2206,7 +2372,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_a_file"},
                               status=400)
         parent = p.parent
-        pkind = _classify_path(parent)
+        # Leaf first, then parent — this handler's order, unchanged.
+        pkind = probe.parent_kind
         if pkind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2265,10 +2432,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if len(data) > MAX_FILE_BYTES:
             return sanic_json({"ok": False, "error": "too_large"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root,
+                                      want_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2279,7 +2447,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "exists"},
                               status=409)
         parent = p.parent
-        pkind = _classify_path(parent)
+        # Leaf first, then parent — this handler's order, unchanged.
+        pkind = probe.parent_kind
         if pkind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2401,26 +2570,33 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         recursive = bool(body.get("recursive", False))
+        # One hop for BOTH resolutions (link-safe leaf + followed target), the
+        # lexists and reparse-point probes, and the target classify. want_kind is
+        # OFF: this handler never classified the link-safe leaf, and doing so
+        # would stat THROUGH a link — the traversal the link branch below exists
+        # to avoid. target_kind carries the same short-circuit (see
+        # _probe_path_sync), so the branch order and outcomes are unchanged.
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
-            p_leaf = _resolve_host_path(rel, app.ctx.editor_root,
-                                        follow_leaf=False)
+            probe = await _probe_path(rel, app.ctx.editor_root,
+                                      follow_leaf=False, want_kind=False,
+                                      want_target=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        p, p_leaf = probe.target, probe.path
         leaf_str = str(p_leaf)
         # lexists, not exists: a broken symlink (target gone) still has a link
         # entry that should be deletable, and a real link must be detected here
         # before any classification follows it.
-        if not os.path.lexists(leaf_str):
+        if not probe.lexists:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        if _is_reparse_point(leaf_str):
+        if probe.is_link:
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, _remove_link, leaf_str)
             except (OSError, ValueError, shutil.Error, RecursionError) as exc:
                 return sanic_json({"ok": False, "error": str(exc)}, status=400)
             return sanic_json({"ok": True, "path": leaf_str})
-        kind = _classify_path(p)
+        kind = probe.target_kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2467,17 +2643,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root,
+                                      want_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
         if kind != "missing":
             return sanic_json({"ok": False, "error": "exists"}, status=409)
-        parent = p.parent
-        pkind = _classify_path(parent)
+        # Leaf first, then parent — this handler's order, unchanged.
+        pkind = probe.parent_kind
         if pkind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2511,16 +2688,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
         overwrite = bool(body.get("overwrite", False))
+        # One hop for both resolves + all three classifies (src, dst, dst.parent).
+        # The src -> dst -> dst-parent branch order below is TODAY's order and is
+        # what decides which error a bad request gets — do not reorder it.
         try:
-            src, dst = _resolve_two(body, app.ctx.editor_root)
+            src_p, dst_p = await _probe_two(body, app.ctx.editor_root,
+                                            want_dst_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        src, dst = src_p.path, dst_p.path
         if src == dst:
             return sanic_json({"ok": False, "error": "same"}, status=400)
         if _is_within(dst, src):
             return sanic_json({"ok": False, "error": "dest_in_source"},
                               status=400)
-        src_kind = _classify_path(src)
+        src_kind = src_p.kind
         if src_kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2529,11 +2711,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if src_kind not in ("file", "dir"):
             return sanic_json({"ok": False, "error": "not_supported"},
                               status=400)
-        dst_kind = _classify_path(dst)
+        dst_kind = dst_p.kind
         if dst_kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
-        dparent = _classify_path(dst.parent)
+        dparent = dst_p.parent_kind
         if dparent == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2585,11 +2767,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
         overwrite = bool(body.get("overwrite", False))
+        # One hop for both link-safe resolves, both lexists probes and the
+        # dst-parent classify; the branch order is unchanged. NEITHER side is
+        # classified (want_*_kind off) because this handler never classified
+        # them: move decides on lexists alone, exactly so a symlink/junction is
+        # relocated as an ENTRY with no stat through to its target.
         try:
-            src, dst = _resolve_two(body, app.ctx.editor_root,
-                                    src_follow_leaf=False, dst_follow_leaf=False)
+            src_p, dst_p = await _probe_two(body, app.ctx.editor_root,
+                                            src_follow_leaf=False,
+                                            dst_follow_leaf=False,
+                                            want_src_kind=False,
+                                            want_dst_kind=False,
+                                            want_dst_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        src, dst = src_p.path, dst_p.path
         if src == dst:
             return sanic_json({"ok": False, "error": "same"}, status=400)
         if _is_within(dst, src):
@@ -2598,16 +2790,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         src_str, dst_str = str(src), str(dst)
         # lexists (not exists): a broken symlink leaf still exists and must be
         # movable; a real symlink/junction must not be dereferenced here.
-        if not os.path.lexists(src_str):
+        if not src_p.lexists:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        dparent = _classify_path(dst.parent)
+        dparent = dst_p.parent_kind
         if dparent == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
         if dparent != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
-        dst_exists = os.path.lexists(dst_str)
+        dst_exists = dst_p.lexists
         if dst_exists and not overwrite:
             return sanic_json({"ok": False, "error": "exists"}, status=409)
 
@@ -2665,18 +2857,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
         overwrite = bool(body.get("overwrite", False))
-        src_rel = body.get("src")
-        dest_rel = body.get("dest")
-        if not isinstance(src_rel, str) or not src_rel:
-            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if not isinstance(dest_rel, str) or not dest_rel:
-            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        # _probe_two does the same src-then-dest field validation (missing /
+        # non-string / empty -> bad_path) and then both resolves plus all three
+        # classifies in ONE hop. Branch order below is unchanged.
         try:
-            src = _resolve_host_path(src_rel, app.ctx.editor_root)
-            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+            src_p, dest_p = await _probe_two(body, app.ctx.editor_root,
+                                             src_key="src", dst_key="dest",
+                                             want_dst_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        src_kind = _classify_path(src)
+        src, dest = src_p.path, dest_p.path
+        src_kind = src_p.kind
         if src_kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2685,7 +2876,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if src_kind not in ("file", "dir"):
             return sanic_json({"ok": False, "error": "not_supported"},
                               status=400)
-        dest_kind = _classify_path(dest)
+        dest_kind = dest_p.kind
         if dest_kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2693,7 +2884,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
         if dest_kind != "missing" and not overwrite:
             return sanic_json({"ok": False, "error": "exists"}, status=409)
-        dparent = _classify_path(dest.parent)
+        dparent = dest_p.parent_kind
         if dparent == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2779,18 +2970,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
-        path_rel = body.get("path")
-        dest_rel = body.get("dest")
-        if not isinstance(path_rel, str) or not path_rel:
-            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        if not isinstance(dest_rel, str) or not dest_rel:
-            return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        # Same one-hop probe as /file/zip, with this handler's field names
+        # (path/dest); the path-then-dest validation and the branch order below
+        # are unchanged.
         try:
-            zpath = _resolve_host_path(path_rel, app.ctx.editor_root)
-            dest = _resolve_host_path(dest_rel, app.ctx.editor_root)
+            z_p, dest_p = await _probe_two(body, app.ctx.editor_root,
+                                           src_key="path", dst_key="dest",
+                                           want_dst_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        zkind = _classify_path(zpath)
+        zpath, dest = z_p.path, dest_p.path
+        zkind = z_p.kind
         if zkind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2798,13 +2988,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
         if zkind != "file":
             return sanic_json({"ok": False, "error": "not_a_file"}, status=400)
-        dest_kind = _classify_path(dest)
+        dest_kind = dest_p.kind
         if dest_kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
         if dest_kind != "missing":
             return sanic_json({"ok": False, "error": "exists"}, status=409)
-        dparent = _classify_path(dest.parent)
+        dparent = dest_p.parent_kind
         if dparent == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2851,10 +3041,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2902,10 +3092,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:        # N3
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -2975,10 +3165,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_range"}, status=400)
         length = min(length, MAX_CHUNK_BYTES)   # never read more than one chunk
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -3024,10 +3214,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(rel, str) or not rel:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root)
+            probe = await _probe_path(rel, app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(p)
+        p, kind = probe.path, probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -3080,18 +3270,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
         overwrite = bool(body.get("overwrite", False))
         try:
-            p = _resolve_host_path(rel, app.ctx.editor_root, follow_leaf=False)
+            probe = await _probe_path(rel, app.ctx.editor_root,
+                                      follow_leaf=False, want_parent=True)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
+        p = probe.path
         parent = p.parent
-        pkind = _classify_path(parent)
+        # PARENT FIRST, then the leaf — this handler's order, unlike write/upload
+        # above, and it is what decides parent_missing vs exists on a bad request.
+        pkind = probe.parent_kind
         if pkind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
         if pkind != "dir":
             return sanic_json({"ok": False, "error": "parent_missing"},
                               status=400)
-        kind = _classify_path(p)
+        kind = probe.kind
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
