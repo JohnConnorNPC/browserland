@@ -177,7 +177,65 @@
                 headers.set('Authorization', 'Bearer ' + host.token);
             }
             o.headers = headers;
-            return fetch(hostUrl(host, path), o);
+            // Every request carries a DEADLINE, because this is the one door
+            // every HTTP call in the UI walks through. A host that is merely
+            // OFF refuses the connection and fails fast; a host that is
+            // black-holed (asleep, dropped off the tailnet, a firewall that
+            // silently discards) does not, and the browser will sit on that
+            // connect for ~90 s — every await behind it (the boot /state pull,
+            // the 2 s taskbar poll) stalls with it, which is what "the whole
+            // interface locks up while it checks the server" actually is.
+            // Default FETCH_TIMEOUT_MS; opts.timeoutMs overrides it for a call
+            // that is legitimately slower (an upload, a 30 s paste). Pass
+            // timeoutMs: 0 (or any non-positive / non-finite value) to opt OUT
+            // entirely — for a caller that owns a deadline of its own, e.g. one
+            // spanning the body read as well (fetch() resolves on HEADERS, so
+            // the deadline below is disarmed the moment they land — a slow body
+            // is never guillotined mid-stream, and a caller that cares about a
+            // stalled body must time the read itself).
+            // timeoutMs is OURS, not a fetch init key: drop it before the
+            // request sees it rather than trusting fetch to ignore it.
+            const timeoutMs = (o.timeoutMs === undefined)
+                ? FETCH_TIMEOUT_MS : o.timeoutMs;
+            delete o.timeoutMs;
+            if (!(typeof timeoutMs === 'number' && isFinite(timeoutMs)
+                    && timeoutMs > 0)) {
+                return fetch(hostUrl(host, path), o);
+            }
+            // COMPOSE with the caller's signal, never replace it: a caller that
+            // cancels (a closed progress dialog, an abandoned upload) must still
+            // abort this request, and with ITS reason — an AbortError the UI
+            // reads as "the user cancelled" — while our own abort carries a
+            // TimeoutError so the two stay distinguishable. AbortSignal.any()
+            // would be the one-liner, but it is far newer than the browser floor
+            // the rest of this file codes to (see the crypto.randomUUID fallback
+            // in 50_js_constants.js), so compose by hand. Older engines ignore
+            // abort()'s reason argument and synthesize a plain AbortError; that
+            // is a graceful degradation, not worth a shim.
+            const callerSignal = o.signal;
+            const ctrl = new AbortController();
+            o.signal = ctrl.signal;
+            const timer = setTimeout(() => {
+                ctrl.abort(new DOMException('timeout', 'TimeoutError'));
+            }, timeoutMs);
+            let onCallerAbort = null;
+            if (callerSignal) {
+                if (callerSignal.aborted) {
+                    ctrl.abort(callerSignal.reason);
+                } else {
+                    onCallerAbort = () => ctrl.abort(callerSignal.reason);
+                    callerSignal.addEventListener('abort', onCallerAbort);
+                }
+            }
+            return fetch(hostUrl(host, path), o).finally(() => {
+                clearTimeout(timer);
+                // A caller signal can outlive many requests (one controller per
+                // upload, per progress dialog): drop our listener or they pile
+                // up on it for as long as it lives.
+                if (onCallerAbort) {
+                    callerSignal.removeEventListener('abort', onCallerAbort);
+                }
+            });
         }
         function hostWsUrl(host, path) {
             let base;
