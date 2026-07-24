@@ -429,60 +429,19 @@
             box.appendChild(title);
             const map = document.createElement('div');
             map.className = 'wsp-map';
-            // Mirror relayoutStrip's live set (61) so the preview never shows a
-            // minimized/dormant/phantom ghost the workspace itself doesn't display
-            // (#147). Same skeleton as the strip's render set — per column the live
-            // rows, and per split row the live cells — each keyed off the SHARED
-            // isLiveKey. Dormant keys stay in _layout (reconcile keeps them) but
-            // are dropped here exactly as the strip drops them.
+            // Lay the columns out left-to-right by width fraction, rows top-to-
+            // bottom by height fraction — a faithful mini schematic.
             const cols = ws.columns || [];
-            const renderCols = [];
-            for (const col of cols) {
-                const liveRows = [];
-                for (const row of (col.rows || [])) {
-                    const liveKeys = rowKeys(row).filter(isLiveKey);
-                    if (!liveKeys.length) continue;                 // dormant row -> skip
-                    let liveCells = null;
-                    if (row.mode === 'split') {
-                        // Mirror relayoutStrip (61) exactly: a migrated split uses its
-                        // real cells; a legacy cells-less split synthesizes one single-
-                        // window pseudo-cell per live key (id === the key, so the by-key
-                        // widths lookup still matches) until reconcile migrates it.
-                        if (Array.isArray(row.cells)) {
-                            liveCells = [];
-                            for (const cell of row.cells) {
-                                const ck = (Array.isArray(cell.keys) ? cell.keys : [])
-                                    .filter(isLiveKey);
-                                if (!ck.length) continue;           // dead cell -> skip
-                                const at = cell.activeTab;
-                                liveCells.push({ cell, id: cell.id, liveKeys: ck,
-                                    repKey: (typeof at === 'string' && ck.indexOf(at) !== -1) ? at : ck[0] });
-                            }
-                            if (!liveCells.length) continue;
-                        } else {
-                            liveCells = liveKeys.map(k =>
-                                ({ cell: null, id: k, liveKeys: [k], repKey: k }));
-                        }
-                    }
-                    liveRows.push({ row, liveKeys, liveCells });
-                }
-                if (liveRows.length) renderCols.push({ col, liveRows });
-            }
-            // Lay the LIVE columns out left-to-right by width fraction, rows top-to-
-            // bottom by height fraction — a faithful mini schematic of what shows.
             let xoff = 0;
-            const totalFrac = renderCols.reduce((a, rc) => a + colCurrentFrac(rc.col), 0) || 1;
-            renderCols.forEach((rc) => {
-                const col = rc.col;
+            const totalFrac = cols.reduce((a, c) => a + colCurrentFrac(c), 0) || 1;
+            cols.forEach((col) => {
                 const wfrac = colCurrentFrac(col) / Math.max(1, totalFrac);
-                const rowsArr = rc.liveRows;
-                const hsum = rowsArr.reduce((a, lr) => a + (lr.row.height > 0 ? lr.row.height : 0), 0) || 1;
+                const rowsArr = col.rows || [];
+                const hsum = rowsArr.reduce((a, r) => a + (r.height > 0 ? r.height : 0), 0) || 1;
                 let yoff = 0;
-                rowsArr.forEach((lr) => {
-                    const row = lr.row;
+                rowsArr.forEach((row) => {
                     const hfrac = (row.height > 0 ? row.height : (1 / rowsArr.length)) / hsum;
-                    // Draw one labeled rect; a tabbed/group tile gets a "(+N)" badge
-                    // counting only its HIDDEN LIVE tabs (minimized tabs aren't shown).
+                    // Draw one labeled rect; a tabbed/group tile gets a "(+N)" badge.
                     const mkRect = (left, width, labelKey, plusN) => {
                         const r = document.createElement('div');
                         r.className = 'wsp-rect';
@@ -500,41 +459,45 @@
                         r.appendChild(lab);
                         map.appendChild(r);
                     };
-                    if (row.mode === 'split' && lr.liveCells) {
-                        // One sub-rect per LIVE cell, sized by widths[cell.id] within
-                        // the row band but renormalized over the LIVE cells (a dead
-                        // cell surrenders its width); a group cell labels its rep live
-                        // tab + "(+N)" of its remaining live tabs.
-                        const cells = lr.liveCells;
-                        const wsum = cells.reduce((a, lc) => {
-                            const v = row.widths && Number(row.widths[lc.id]);
+                    if (row.mode === 'split' && Array.isArray(row.cells)
+                        && row.cells.length) {
+                        // One sub-rect per CELL, sized by widths[cell.id] within the
+                        // row band; a group cell labels its active tab + "(+N)".
+                        const cells = row.cells;
+                        const wsum = cells.reduce((a, c) => {
+                            const v = row.widths && Number(row.widths[c.id]);
                             return a + ((Number.isFinite(v) && v > 0) ? v : 0);
                         }, 0);
                         let cxoff = 0;
-                        cells.forEach((lc) => {
-                            const v = row.widths && Number(row.widths[lc.id]);
+                        cells.forEach((c) => {
+                            const v = row.widths && Number(row.widths[c.id]);
                             const cf = wsum > 0
                                 ? ((Number.isFinite(v) && v > 0) ? v : 0) / wsum
                                 : (1 / cells.length);
-                            mkRect(xoff + cxoff * wfrac, cf * wfrac, lc.repKey,
-                                lc.liveKeys.length - 1);
+                            const isGroup = Array.isArray(c.keys) && c.keys.length >= 2;
+                            const labelKey = isGroup
+                                ? ((typeof c.activeTab === 'string'
+                                    && c.keys.indexOf(c.activeTab) !== -1)
+                                    ? c.activeTab : c.keys[0])
+                                : (c.keys ? c.keys[0] : undefined);
+                            mkRect(xoff + cxoff * wfrac, cf * wfrac, labelKey,
+                                isGroup ? (c.keys.length - 1) : 0);
                             cxoff += cf;
                         });
                     } else {
-                        // single/tabbed (or a legacy cells-less split): label the
-                        // active tab if it's live, else the first live key; badge the
-                        // count of the row's remaining LIVE tabs.
-                        const at = row.activeTab;
-                        const labelKey = (typeof at === 'string'
-                            && lr.liveKeys.indexOf(at) !== -1) ? at : lr.liveKeys[0];
-                        mkRect(xoff, wfrac, labelKey, lr.liveKeys.length - 1);
+                        const k = (row.mode === 'tabbed'
+                            && row.keys.indexOf(row.activeTab) !== -1)
+                            ? row.activeTab : rowKeys(row)[0];
+                        mkRect(xoff, wfrac, k,
+                            (row.mode === 'tabbed' && row.keys.length > 1)
+                                ? (row.keys.length - 1) : 0);
                     }
                     yoff += hfrac;
                 });
                 xoff += wfrac;
             });
             const floatN = countFloatingOnWs(ws.id);
-            if (!renderCols.length && !floatN) {
+            if (!cols.length && !floatN) {
                 const e = document.createElement('div');
                 e.className = 'wsp-empty';
                 e.textContent = 'empty';

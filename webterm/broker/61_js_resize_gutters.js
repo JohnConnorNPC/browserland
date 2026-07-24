@@ -6,17 +6,6 @@
             return (typeof col.widthFrac === 'number' && col.widthFrac > 0)
                 ? col.widthFrac : presetFraction(col.widthPreset);
         }
-        // Live-render predicate SHARED by relayoutStrip (below) and the workspace-
-        // switcher preview (62): a stored layout key is "live" iff its window
-        // exists and is not disposed / minimized / host-hidden. Both the strip and
-        // the preview must filter _layout through this SAME rule so the preview
-        // never draws a minimized/dormant/phantom ghost the workspace itself
-        // doesn't display (#147). Depends only on the shared-closure `windows` map
-        // + `hostHidden` (56), so hoisting it here is behavior-preserving.
-        function isLiveKey(k) {
-            const w = windows.get(k);
-            return w && !w.disposed && !w.minimized && !hostHidden(w.hostId);
-        }
         function buildColGutter(leftCol, rightCol) {
             const g = document.createElement('div');
             g.className = 'strip-col-gutter';
@@ -133,8 +122,11 @@
             // Render set: per column, the live ROWS (a row is live if >=1 of its
             // keys maps to a live, non-minimized window). Dormant rows/columns
             // are kept in _layout but not drawn; phantom (multi-host) keys are
-            // filtered out of liveKeys here (isLiveKey is now a shared module-scope
-            // helper, top of this fragment, so the preview mirrors it exactly).
+            // filtered out of liveKeys here.
+            const isLiveKey = (k) => {
+                const w = windows.get(k);
+                return w && !w.disposed && !w.minimized && !hostHidden(w.hostId);
+            };
             const renderCols = [];
             for (const col of ws.columns) {
                 const liveRows = [];
