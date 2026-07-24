@@ -239,10 +239,17 @@
         // so a mis-key can't kill a transfer mid-flight).
         //
         // openProgressDialog({title, name, from, to}) -> a live handle:
-        //   { signal, update(done,total), close() }
+        //   { signal, cancelled, update(done,total), close() }
         //   signal          — the AbortController.signal handed to the chunk loop
         //                     (opts.signal in transferTo / progress.signal in
-        //                     downloadRow). Cancel calls ctrl.abort().
+        //                     downloadRow). Cancel calls ctrl.abort(). It must
+        //                     reach the network layer or Cancel is decoration:
+        //                     the whole point is that the in-flight chunk dies.
+        //   cancelled       — true once the user hit Cancel. A caller whose loop
+        //                     unwinds through an AbortError reads this to report
+        //                     "cancelled" rather than "failed": a user's own
+        //                     Cancel is not an error and must never be shown as
+        //                     one.
         //   update(done,total) — byte counters only (never string concat): fill
         //                     width = done/total (guarded total<=0 -> 100%),
         //                     refresh the meta line (percent · done/total ·
@@ -325,10 +332,19 @@
             cancelBtn.textContent = 'Cancel';
             cancelBtn.addEventListener('click', function (e) {
                 e.stopPropagation();
-                if (ctrl.signal.aborted) return;
-                try { ctrl.abort(); } catch (_) {}
-                cancelBtn.disabled = true;
-                cancelBtn.textContent = 'Cancelling…';
+                if (!ctrl.signal.aborted) {
+                    try { ctrl.abort(); } catch (_) {}
+                    cancelBtn.textContent = 'Cancelling…';
+                    cancelBtn.title = 'click again to dismiss this window';
+                    return;
+                }
+                // Deliberately NOT disabled after the abort: this is the only
+                // control on the window, and disabling it leaves the user
+                // staring at a modal with nothing to click if the loop is wedged
+                // mid-chunk (a stalled socket, a broker that stopped answering).
+                // A second click dismisses the window; close() is idempotent, so
+                // the caller's own finally-close is still safe.
+                close();
             });
             foot.appendChild(cancelBtn);
             modal.appendChild(foot);
@@ -369,5 +385,12 @@
                     overlay.parentNode.removeChild(overlay);
                 }
             };
-            return { signal: ctrl.signal, update: update, close: close };
+            // Additive shape — `signal`, `update` and `close` keep their existing
+            // names/semantics for callers that ignore the rest.
+            return {
+                signal: ctrl.signal,
+                get cancelled() { return ctrl.signal.aborted; },
+                update: update,
+                close: close,
+            };
         }

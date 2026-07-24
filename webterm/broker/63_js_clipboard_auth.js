@@ -207,8 +207,16 @@
         const authErrorEl = document.getElementById('auth-error');
         const authTokenEl = document.getElementById('auth-token');
         const authHostLine = document.getElementById('auth-host-line');
+        const authSubmitBtn = document.getElementById('auth-submit');
         let authOverlayHostId = null;   // host the open overlay belongs to
         const authPrompted = new Set(); // host ids already auto-popped
+        let authSubmitting = false;     // a probe is in flight (double-submit guard)
+        // Bumped every time the overlay opens on a host or closes. The submit
+        // handler captures it, so a probe that resolves AFTER the user hit Cancel
+        // (or after the overlay was forced onto another host) can no longer store
+        // a token, hide a dialog it doesn't own, or re-authorise a dismissed
+        // prompt. A slow broker + an impatient Cancel used to do exactly that.
+        let authGeneration = 0;
         function showAuthOverlay(host, force) {
             if (!host) return;
             if (authOverlay.classList.contains('open')) {
@@ -219,6 +227,7 @@
             }
             authPrompted.add(host.id);
             authOverlayHostId = host.id;
+            authGeneration++;            // stales any probe from a previous open
             // textContent only — labels are user input and tokens live in
             // localStorage; never innerHTML a user-controlled string.
             authHostLine.textContent = host.id === 'local'
@@ -232,6 +241,7 @@
         function hideAuthOverlay() {
             authOverlay.classList.remove('open');
             authOverlayHostId = null;
+            authGeneration++;            // a probe still in flight is now stale
         }
         document.getElementById('auth-cancel').addEventListener('click', () => {
             hideAuthOverlay();
@@ -245,7 +255,15 @@
             if (!host) { hideAuthOverlay(); return; }
             const candidate = authTokenEl.value;
             if (!candidate) return;
+            if (authSubmitting) return;   // Enter + click: one probe, not two
+            const gen = authGeneration;   // see authGeneration above
             let resp;
+            authSubmitting = true;
+            const prevLabel = authSubmitBtn ? authSubmitBtn.textContent : '';
+            if (authSubmitBtn) {
+                authSubmitBtn.disabled = true;
+                authSubmitBtn.textContent = 'checking…';
+            }
             try {
                 // Probe with the CANDIDATE token, not the stored one, via the
                 // same Bearer path every other request uses (#144). It must
@@ -256,12 +274,31 @@
                 resp = await hostFetch({ url: host.url, token: candidate },
                                        '/sessions');
             } catch (err) {
-                // With CORS pinned onto 401s too, a TypeError here really
-                // is "host down", not "wrong password".
-                authErrorEl.textContent = 'broker unreachable: ' + err;
+                if (gen !== authGeneration) return;   // dialog already dismissed
+                // hostFetch's deadline surfaces as a TimeoutError DOMException.
+                // It must NEVER read like a rejected password: a slow/absent
+                // broker is not a wrong secret, and telling the user otherwise
+                // sends them hunting for a token that was right all along.
+                // Anything else here (a TypeError, with CORS pinned onto 401s
+                // too) really is "host down".
+                authErrorEl.textContent =
+                    (err && err.name === 'TimeoutError')
+                        ? 'broker unreachable (timed out)'
+                        : 'broker unreachable: ' + err;
                 authErrorEl.classList.add('show');
                 return;
+            } finally {
+                // Always restored — including on a throw, a stale-generation
+                // bail, or the success path below.
+                authSubmitting = false;
+                if (authSubmitBtn) {
+                    authSubmitBtn.disabled = false;
+                    authSubmitBtn.textContent = prevLabel;
+                }
             }
+            // The user cancelled (or the overlay moved to another host) while
+            // the probe was out: do NOT reopen/re-authorise what they dismissed.
+            if (gen !== authGeneration) return;
             if (resp.status === 401) {
                 authErrorEl.textContent = 'invalid password';
                 authErrorEl.classList.add('show');
