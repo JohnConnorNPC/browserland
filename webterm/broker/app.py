@@ -40,6 +40,7 @@ import asyncio
 import base64
 import codecs
 import errno
+import functools
 import hashlib
 import json
 import logging
@@ -114,6 +115,14 @@ _SHA256_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
 # files don't linger.
 MAX_UPLOAD_SESSIONS = 32
 UPLOAD_SESSION_TTL = 3600.0        # seconds since begin before a sweep drops it
+
+# /file/list is host-wide, so it can be pointed at a pathological directory
+# (a build cache, a mail spool, an SMB share with a million entries). Cap the
+# number of entries one listing may return so the JSON payload — and the memory
+# both brokers and the browser hold — stays bounded. When the cap bites, the
+# response carries ``"truncated": true`` so the UI can say so instead of
+# quietly showing a partial directory.
+MAX_LIST_ENTRIES = 10000
 
 # Clipboard-image paste (#137): pasted images land in a dedicated paste dir
 # under generated names and are swept lazily on each upload — expired by age
@@ -810,6 +819,46 @@ def _write_state_atomic(path: Path, state: Dict[str, Any]) -> None:
                 pass
 
 
+async def _off_loop(fn, *args, timeout=None):
+    """Run the BLOCKING callable ``fn(*args)`` on the default executor and await
+    its result. The one canonical way to get filesystem / subprocess work off the
+    event loop in this module.
+
+    Why it matters: the broker runs ``single_process=True`` — ONE event loop for
+    every HTTP handler, every producer WebSocket and every browser relay. A
+    blocking call in a handler therefore freezes the WHOLE broker, live terminals
+    included, for its full duration. The file API is deliberately host-wide and
+    accepts UNC paths, so a single ``/file/list`` against a dead SMB share would
+    otherwise wedge everything for the SMB timeout.
+
+    Only INERT data may cross into the worker (paths, bytes, plain values). The
+    loop-affine state — ``state_lock`` and the other asyncio locks, the registry
+    waiters, the launcher's pending map, ``bg_tasks``, and every Sanic
+    ``Request``/response object — is NOT thread-safe: mutate it on the loop and
+    hand the worker only what it needs.
+
+    ``timeout`` exists in the signature so the later deadline work can land here
+    without touching every call site, but it is NOT implemented and passing one
+    RAISES rather than being silently ignored — a deadline argument that quietly
+    does nothing is worse than no argument at all.
+
+    Why there is no deadline yet: ``asyncio.wait_for`` around
+    ``run_in_executor`` does not kill the worker, because a *running*
+    ``concurrent.futures`` future is not cancellable. Wrapping a deadline here
+    would only convert "request hangs, loop stays free" into "request 504s, thread
+    still wedged" — and enough wedged UNC probes would starve the SHARED default
+    executor that ``/status/fetch``, ``/profiles/detect`` and every
+    ``_write_state_atomic`` also depend on. Real deadlines need a dedicated,
+    bounded probe pool, which is a separate decision and out of scope here."""
+    if timeout is not None:
+        raise NotImplementedError(
+            "_off_loop takes no deadline yet: wait_for cannot cancel a running "
+            "executor future, so a timeout would 504 the request and leave the "
+            "worker thread wedged in the shared default executor")
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(fn, *args))
+
+
 def _load_modstore(path: Path) -> Dict[str, Any]:
     """Read+self-heal the /mod-store blob (#124): a dict of
     ``modId -> {rev, value, revisions:[{rev, value, ts}]}`` (newest-first ring).
@@ -1213,6 +1262,51 @@ def _classify_path(p: Path) -> str:
         return "other" if p.exists() else "missing"
     except OSError:
         return "denied"
+
+
+def _list_dir(rel: str, default_dir: Path):
+    """Blocking body of ``/file/list``: resolve + classify + scan, all in ONE
+    worker hop (it used to be a resolve, a classify and then an ``iterdir`` with
+    a per-child ``is_dir`` + ``stat``, every one of them on the event loop).
+
+    Returns ``(path, kind, entries, truncated)``. ``entries`` is empty unless
+    ``kind == "dir"`` — the caller maps every other kind to its own error, so
+    there is nothing to scan.
+
+    ``os.scandir`` (not ``Path.iterdir``) as a CONTEXT MANAGER: the ``DirEntry``
+    already carries the stat data, halving the syscalls per child, and closing
+    the iterator releases the directory handle — which on Windows is the
+    difference between a listable directory and one nobody can rename or delete.
+
+    At most ``MAX_LIST_ENTRIES`` entries are returned; ``truncated`` says the cap
+    bit. The sort happens AFTER truncation, so a truncated listing is an
+    arbitrary (filesystem-order) subset, sorted — the cap is a payload guard, not
+    a paging API.
+
+    Raises ``ValueError`` (-> ``bad_path``) from the resolver and ``OSError``
+    from the scan; the caller maps both exactly as before."""
+    d = _resolve_host_path(rel, default_dir)
+    kind = _classify_path(d)
+    entries: List[Dict[str, Any]] = []
+    truncated = False
+    if kind != "dir":
+        return d, kind, entries, truncated
+    with os.scandir(str(d)) as it:
+        for child in it:
+            if len(entries) >= MAX_LIST_ENTRIES:
+                truncated = True
+                break
+            try:
+                is_dir = child.is_dir()
+                size = 0 if is_dir else child.stat().st_size
+            except OSError:
+                continue                       # unreadable entry — skip it
+            entries.append({"name": child.name,
+                            "type": "dir" if is_dir else "file",
+                            "size": size})
+    # Dirs first, then case-insensitive by name.
+    entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
+    return d, kind, entries, truncated
 
 
 def _sweep_upload_sessions(uploads: Dict[str, Any], now: float) -> None:
@@ -1977,12 +2071,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        # ONE off-loop hop for the resolve + classify + scan (was three-plus
+        # blocking rounds on the event loop, one syscall per directory entry —
+        # against a host-wide path that may be a dead UNC share). The classify
+        # branches below still run in exactly the order they always did, so the
+        # same bad request still produces the same error.
         try:
-            d = _resolve_host_path(str(body.get("path") or ""),
-                                   app.ctx.editor_root)
+            d, kind, entries, truncated = await _off_loop(
+                _list_dir, str(body.get("path") or ""), app.ctx.editor_root)
         except ValueError:
             return sanic_json({"ok": False, "error": "bad_path"}, status=400)
-        kind = _classify_path(d)
+        except OSError as exc:
+            return sanic_json({"ok": False, "error": str(exc)}, status=400)
         if kind == "denied":
             return sanic_json({"ok": False, "error": "permission_denied"},
                               status=400)
@@ -1991,21 +2091,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if kind != "dir":
             return sanic_json({"ok": False, "error": "not_a_directory"},
                               status=400)
-        entries = []
-        try:
-            for child in d.iterdir():
-                try:
-                    is_dir = child.is_dir()
-                    size = 0 if is_dir else child.stat().st_size
-                except OSError:
-                    continue                       # unreadable entry — skip it
-                entries.append({"name": child.name,
-                                "type": "dir" if is_dir else "file",
-                                "size": size})
-        except OSError as exc:
-            return sanic_json({"ok": False, "error": str(exc)}, status=400)
-        # Dirs first, then case-insensitive by name.
-        entries.sort(key=lambda e: (e["type"] != "dir", e["name"].lower()))
         # Host-wide (#35): cwd/parent are ABSOLUTE. parent is null only at a
         # filesystem anchor (``/``, ``C:\`` or ``\\srv\share``), where
         # ``d.parent == d`` — Up is inert there (no drive-list nav by design).
@@ -2016,6 +2101,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             "cwd": str(d),
             "parent": parent,
             "entries": entries,
+            # True when MAX_LIST_ENTRIES bit: `entries` is a partial listing.
+            "truncated": truncated,
         })
 
     async def _file_read(request: Request):
