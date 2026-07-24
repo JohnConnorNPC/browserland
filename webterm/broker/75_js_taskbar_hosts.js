@@ -122,15 +122,40 @@
             bringToFront(id);
         }
 
+        // Hard ceiling on how long ONE refresh run may hold refreshInFlight.
+        // Both timers (the 2 s slow poll and the 250 ms auto-open fast poll) and
+        // every manual gesture that refreshes early-return while it is held, so
+        // a run that wedges freezes the desktop's whole heartbeat until F5.
+        const REFRESH_WATCHDOG_MS = POLL_MS * 5;
         async function refreshTaskbar() {
             // Coalesce overlapping calls: a slow /sessions response from the
             // 2s tick must not race a fast-poll tick during auto-open.
             if (refreshInFlight) return;
             refreshInFlight = true;
+            const seq = ++refreshSeq;
+            // Watchdog: no awaited sub-call may hold the GLOBAL mutex forever.
+            // Every fetch below is deadlined today, but this is the backstop for
+            // the next await someone adds — a wedged tick is indistinguishable
+            // from a dead UI. A force-release alone would be a BUG (two runs
+            // mutating sessions/windows at once), so releasing the mutex ALSO
+            // retires the generation: taking a run's mutex away is exactly the
+            // moment it stops being the current run, so it must bail at its next
+            // await whether or not a newer run has started yet — and its
+            // `finally` must no longer clear a mutex someone else may hold.
+            const watchdog = setTimeout(() => {
+                if (refreshSeq === seq && refreshInFlight) {
+                    refreshSeq += 1;
+                    refreshInFlight = false;
+                }
+            }, REFRESH_WATCHDOG_MS);
             try {
-                await refreshTaskbarInner();
+                await refreshTaskbarInner(seq);
             } finally {
-                refreshInFlight = false;
+                clearTimeout(watchdog);
+                // Only the run that still OWNS the mutex may release it: after a
+                // watchdog force-release a newer run holds it, and clearing it
+                // here would let a third run in alongside that one.
+                if (refreshSeq === seq) refreshInFlight = false;
             }
         }
 
@@ -164,12 +189,42 @@
                 st.authNeeded = false;
                 authPrompted.delete(host.id);
                 st.sessions = list;
+                // This answer has not been consumed by a tick yet. Ticks no
+                // longer wait for the poll, so without this a tick that reused
+                // last-good data would count a window's absence a SECOND time
+                // and close it well inside its intended grace window.
+                st.fresh = true;
             } catch (e) {
                 st.ok = false;
                 st.consecFailures += 1;
             } finally {
                 clearTimeout(timer);
             }
+        }
+
+        // One outstanding poll per host, ever. The tick fires this and does NOT
+        // block on it: a host that is black-holed (asleep, off the tailnet,
+        // silently firewalled) holds its connection open for the full
+        // FETCH_TIMEOUT_MS, which spans several ticks, and stacking a fresh
+        // doomed request on it every tick would be both pointless and a slow
+        // socket leak. Never rejects — pollHost swallows its own errors, and the
+        // catch here keeps a future refactor from producing an unhandled
+        // rejection at a fire-and-forget call site.
+        // The slot is only safe to hold because pollHost's own abort covers the
+        // headers AND the body read, so the promise ALWAYS settles within
+        // FETCH_TIMEOUT_MS — that deadline, not this map, is what guarantees a
+        // host gets re-polled. (Consequence: editing a host's url/token while its
+        // poll hangs costs at most one poll cycle before the new config is used.)
+        function pollHostOnce(host) {
+            const st = pollStateFor(host.id);
+            if (st.pollPromise) return null;   // already hanging on this host
+            st.polling = true;
+            const p = pollHost(host).catch(() => {}).then(() => {
+                st.polling = false;
+                st.pollPromise = null;
+            });
+            st.pollPromise = p;
+            return p;
         }
 
         // ---- host status chips ----------------------------------------------
@@ -179,6 +234,14 @@
         // click-to-login fallback once the overlay's one auto-pop was cancelled.
         function hostChipState(st) {
             if (st.authNeeded) return 'auth';
+            // Never answered, and its FIRST poll is still out: "not known yet",
+            // not "down". The tick no longer waits for the poll, so without this
+            // every host would paint red on the first tick and a merely slow
+            // (WAN, waking) broker would flash red before its first answer —
+            // exactly the flap the barrier used to hide by rendering nothing at
+            // all. 'pending' has no .host-chip rule on purpose: it falls back to
+            // the neutral base chip.
+            if (!st.everOk && st.polling) return 'pending';
             // Unreachable outranks the lease state (a down host's lease is
             // unknown); a transient blip stays 'ok' (or 'lease') — don't flap.
             if (!st.ok && (!st.everOk
@@ -232,6 +295,8 @@
                     if (states[i] === 'down') {
                         tip += ' — unreachable (broker down, or running a '
                             + 'pre-CORS webterm version)';
+                    } else if (states[i] === 'pending') {
+                        tip += ' — checking…';
                     }
                     tip += host.hidden
                         ? ' — hidden (click to show)'
@@ -244,18 +309,129 @@
             });
         }
 
-        async function refreshTaskbarInner() {
+        // ---- auto-reattach eligibility ------------------------------------
+        // The healing pass used to re-dial only a CLOSED socket. A socket stuck
+        // in CONNECTING is the case that actually hurts: a black-holed host
+        // (asleep, off the tailnet, silently dropped) never refuses the upgrade,
+        // so Chromium sits in CONNECTING for ~240 s with no onclose at all — no
+        // onclose means no scheduleReattach, so the window was never healed and
+        // rendered as a silent black rectangle until F5.
+        //
+        // The danger in relaxing the gate is re-dialling a HEALTHY socket that
+        // was dialled milliseconds ago, which would make a slow-but-fine connect
+        // unable to ever finish. There is no dial timestamp reachable from here
+        // (win.lastOpenAt is 0 until the socket OPENS, and reattachAt is only
+        // written by scheduleReattach, i.e. by an onclose that never came), so
+        // age is measured from the first TICK that saw this exact socket in
+        // CONNECTING — always an UNDER-estimate of its real age, so the gate errs
+        // toward waiting. Keyed on socket identity so each re-dial restarts the
+        // clock. 73's connect watchdog closes such sockets sooner; this is the
+        // belt to that pair of braces, so it waits longer on purpose.
+        const WS_CONNECTING_STUCK_MS = 8000;
+        function reattachable(win, now) {
+            const ws = win.ws;
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                win._connectingWs = null;
+                return true;                 // the original condition
+            }
+            if (ws.readyState !== WebSocket.CONNECTING) {
+                win._connectingWs = null;    // OPEN / CLOSING — not ours to heal
+                return false;
+            }
+            if (win._connectingWs !== ws) {  // first sighting of THIS socket
+                win._connectingWs = ws;
+                win._connectingSince = now;
+                return false;
+            }
+            return (now - win._connectingSince) >= WS_CONNECTING_STUCK_MS;
+        }
+
+        // hostId -> ms of the last /profiles warm-up fired at it. The warm-up is
+        // no longer awaited, and fetchProfiles' cache only populates when the
+        // answer LANDS, so without this the 250 ms fast poll would fire a fresh
+        // /profiles at the same host every tick until the first came back.
+        const profilesWarmAt = new Map();
+        const PROFILES_WARM_RETRY_MS = 5000;
+
+        // ---- late profile-color correction (#115) -------------------------
+        // The /profiles warm-up is fired, not awaited (see refreshTaskbarInner),
+        // so a window can open against a COLD cache and paint its frame from the
+        // host/auto color. openWindow paints the frame exactly ONCE and
+        // updateTaskbarColor only ever fixes the chip, so without this pass that
+        // window keeps the wrong frame color for its whole life. This is what
+        // lets the correction land on a later tick instead of never: once a
+        // host's /profiles is cached, its windows re-seed from their launch-
+        // profile color.
+        //
+        // Runs every tick rather than once-per-host-per-warm on purpose: it is a
+        // map lookup per open window, and "already reconciled" state is exactly
+        // the kind of sticky flag that strands the one window that happened to
+        // be mid-restore when it was set. Idempotent by construction — a window
+        // the user has recolored (a saved pref.color, the top of openWindow's
+        // precedence chain) is never touched, a host with no profile color for
+        // that window is skipped, and a window already wearing the right color
+        // short-circuits — so the steady state is a no-op.
+        function applyWarmProfileColors() {
+            for (const [key, win] of windows) {
+                if (win.disposed || !win.dom || !win.hostId) continue;
+                if ((prefs[key] || {}).color) continue;   // user's pick wins
+                const sess = sessions.get(key);
+                const want = profileDefaultColor(win.hostId,
+                    sess && sess.profile);
+                if (!want) continue;      // cold cache / no profile color: later
+                const hex = normalizeHex(want);
+                if (hex === win.color) continue;
+                win.color = hex;
+                win.dom.style.setProperty('--accent', hex);
+                win.dom.classList.toggle('dark-accent', isDarkAccent(hex));
+                updateTaskbarColor(key);
+            }
+        }
+
+        // How long a tick will wait for the polls it just started before it
+        // renders with what it has. Deliberately far below both POLL_MS (2000)
+        // and FAST_POLL_MS (250): a healthy broker answers in single-digit ms,
+        // so the common case is unchanged, while a dead one costs the tick this
+        // and no more. Its answer, if it ever comes, lands in hostPolls and is
+        // picked up by a later tick.
+        const HOST_POLL_SETTLE_MS = 150;
+
+        async function refreshTaskbarInner(seq) {
             // Torn down (HOME lease lost): no session polling, no /state pull,
             // no auto-reattach. The slow interval is also stopped by
             // teardownView, but this guard covers an in-flight tick.
             if (_deactivated) return;
             const hosts = allHosts();
-            await Promise.all(hosts.map(pollHost));
+            // NOT a barrier. `await Promise.all(hosts.map(pollHost))` made every
+            // tick cost the deadline of the SLOWEST host before a single chip
+            // rendered — one black-holed broker degraded the 2 s heartbeat to
+            // 3 s+ and collapsed the 250 ms restore poll entirely, which is the
+            // "unavailable server locks the interface up" report. Each poll now
+            // settles on its own into its host's hostPolls record, and the tick
+            // waits only a short budget for the ones it just started. A host
+            // whose answer misses that budget keeps its LAST-GOOD record (the
+            // retention this file already relies on) and lands on a later tick;
+            // a host that has never answered reads as 'pending', not 'down'.
+            const started = [];
+            for (const host of hosts) {
+                const p = pollHostOnce(host);
+                if (p) started.push(p);
+            }
+            if (started.length) {
+                let budget;
+                const capped = new Promise(res => {
+                    budget = setTimeout(res, HOST_POLL_SETTLE_MS);
+                });
+                await Promise.race([Promise.all(started), capped]);
+                clearTimeout(budget);
+            }
             // A teardown can land DURING the poll await; re-check so the rest
             // (which repopulates sessions/taskbar DOM, opens control sockets,
             // runs GC savePrefs, kicks pullState) never runs against a torn-
-            // down view.
-            if (_deactivated) return;
+            // down view. The seq check is the same guard against a run the
+            // watchdog force-released: superseded, so it must not touch shared
+            // state again (see refreshTaskbar).
+            if (_deactivated || seq !== refreshSeq) return;
 
             // Poll state for hosts no longer configured is dropped, never
             // merged — their windows were closed by removeHost().
@@ -507,7 +683,11 @@
             // consecutive misses close the window, and the counter only
             // advances on ticks where that window's OWN host answered OK
             // (a down remote must never close another host's windows, nor
-            // its own while it's unreachable).
+            // its own while it's unreachable) — and only on ticks that saw a
+            // NEW answer from it (`fresh`). The poll is no longer awaited, so a
+            // tick can re-render the previous answer; counting that as another
+            // miss would shrink the grace window (12 s) toward nothing on a host
+            // whose replies straddle a tick.
             for (const el of Array.from(itemsHost.querySelectorAll('.taskbar-item'))) {
                 const key = el.dataset.sessionId;
                 // App docs are not server sessions — live app docs own their
@@ -522,7 +702,7 @@
                 const win = windows.get(key);
                 if (win && !win.disposed) {
                     const hostSt = hostPolls.get(win.hostId);
-                    if (hostSt && hostSt.ok) {
+                    if (hostSt && hostSt.ok && hostSt.fresh) {
                         win.missingPolls = (win.missingPolls || 0) + 1;
                     }
                     el.classList.add('stale');
@@ -539,6 +719,11 @@
                     sessions.delete(key);
                 }
             }
+            // Every host's latest answer has now been accounted for. Cleared
+            // here, at the one point after the last reader and before the tick's
+            // remaining (await-free) work, so the next tick can tell a NEW answer
+            // from a redisplay of this one.
+            for (const st of hostPolls.values()) st.fresh = false;
 
             // Empty message only after some broker has answered at least
             // once — a fresh page with every broker down shows nothing.
@@ -567,20 +752,35 @@
             // /launch returns the new id and ?session= deep links seed it;
             // open each parked key the moment it shows up in its host's
             // /sessions.
-            // #115: warm each reachable host's /profiles (which now carries the
-            // per-profile color map) BEFORE opening any parked/restored window, so
-            // openWindow seeds the window FRAME from its launch-profile color on
-            // the first paint. Without this, a restored window opened on the first
-            // poll (cache cold) would fall through to the host/auto color and the
-            // FRAME would never correct (updateTaskbarColor only fixes the chip).
-            // fetchProfiles caches, so this is one fetch per host per page load;
-            // the `ok` gate keeps us off unreachable/unauth hosts (no auth pop).
+            // #115: warm each reachable host's /profiles (which carries the
+            // per-profile color map) so openWindow can seed a parked/restored
+            // window's FRAME from its launch-profile color. Fired, NEVER awaited:
+            // this is an optimisation, not a precondition, and awaiting it here
+            // put an unbounded-by-nature request inside the global heartbeat
+            // mutex — one stalled host meant no /sessions poll, no host-status
+            // repaint, no auto-open, no dead-window reaping, no auto-reattach and
+            // no /state pull, for as long as it stalled. `pendingOpens` is
+            // non-empty on every page load with restored windows, so that was the
+            // routine path, and only F5 got out of it.
+            // fetchProfiles caches (and never throws), so this is one fetch per
+            // host per page load; the `ok` gate keeps us off unreachable/unauth
+            // hosts (no auth pop), and profilesWarmAt keeps an un-landed request
+            // from being re-fired every 250 ms tick (a failed attempt leaves no
+            // cache entry, so it retries after PROFILES_WARM_RETRY_MS).
             if (pendingOpens.size) {
-                await Promise.all(hosts.map(h =>
-                    (pollStateFor(h.id).ok && !profilesCache.has(h.id))
-                        ? fetchProfiles(h) : null));
-                if (_deactivated) return;   // a teardown may land during the await
+                for (const h of hosts) {
+                    if (!pollStateFor(h.id).ok) continue;
+                    if (profilesCache.has(h.id)) continue;
+                    const last = profilesWarmAt.get(h.id) || 0;
+                    if ((Date.now() - last) < PROFILES_WARM_RETRY_MS) continue;
+                    profilesWarmAt.set(h.id, Date.now());
+                    fetchProfiles(h);
+                }
             }
+            // The cost of not waiting: a window opened against a COLD cache falls
+            // through to the host/auto color. openWindow paints the frame once,
+            // so the correction has to be re-applied here once the cache lands.
+            applyWarmProfileColors();
             if (pendingOpens.size) {
                 const now = Date.now();
                 for (const [key, deadline] of Array.from(pendingOpens)) {
@@ -625,8 +825,16 @@
                 if (!merged.has(key)) continue;
                 const hostSt = hostPolls.get(win.hostId);
                 if (!hostSt || !hostSt.ok) continue;
-                if (win.ws && win.ws.readyState !== WebSocket.CLOSED) continue;
+                if (!reattachable(win, now)) continue;
                 if (now < (win.reattachAt || 0)) continue;
+                // A socket stuck in CONNECTING never produced an onclose, so it
+                // never scheduled a reattach and its backoff never advanced.
+                // Advance it HERE, before re-dialling, so a host that keeps
+                // black-holing the upgrade backs off 2s/4s/8s… like any other
+                // flapping window instead of being re-dialled every tick.
+                if (win.ws && win.ws.readyState === WebSocket.CONNECTING) {
+                    scheduleReattach(win);
+                }
                 reattachWindow(win);
             }
 
