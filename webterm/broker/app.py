@@ -2178,7 +2178,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             "os": "windows" if os.name == "nt" else "posix",
         })
 
-    def _parse_launch_body(request: Request):
+    async def _parse_launch_body(request: Request):
         """Parse + validate a launch request body, shared by /launch and
         /mcp/launch. Returns ``(params, None)`` where params is the kwargs for
         ``launcher.launch``, or ``(None, error_response)``.
@@ -2189,7 +2189,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         symlink-collapsed path (rejecting the validate/spawn drift Codex
         flagged). Empty/missing -> the agent's default cwd. Not confined to a
         root: this is the broker's own host and a single-user token/loopback
-        tool (a launch_root config could tighten it if ever bound wider)."""
+        tool (a launch_root config could tighten it if ever bound wider).
+
+        Async because that validation is filesystem work on a client-supplied
+        path — realpath+isdir against a UNC path pointing at a dead share would
+        otherwise freeze the whole broker (one loop, every terminal on it) for
+        the SMB timeout. Both syscalls ride ONE ``_off_loop`` hop, which narrows
+        the realpath/isdir window between them; it does add an await boundary
+        before ``launcher.launch``, so the directory can be removed between the
+        check and the spawn — accepted, since that race exists regardless (the
+        agent is what actually opens the cwd, milliseconds later) and the spawn
+        failure is already reported as ``spawn_failed``. Do not "fix" this back
+        into blocking on-loop calls."""
         body: Dict[str, Any] = {}
         if request.body:
             try:
@@ -2218,12 +2229,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                         status=400)
             cwd = cwd.strip()
             if cwd:
-                try:
-                    cwd = os.path.realpath(cwd)
-                except (OSError, ValueError):
+                raw_cwd = cwd
+
+                def _resolve_cwd():
+                    """Blocking half: resolve then classify, in one hop.
+                    Returns (resolved_or_None, is_dir)."""
+                    try:
+                        resolved = os.path.realpath(raw_cwd)
+                    except (OSError, ValueError):
+                        return None, False
+                    return resolved, os.path.isdir(resolved)
+
+                cwd, cwd_is_dir = await _off_loop(_resolve_cwd)
+                if cwd is None:
                     return None, sanic_json({"ok": False, "error": "bad_cwd"},
                                             status=400)
-                if not os.path.isdir(cwd):
+                if not cwd_is_dir:
                     return None, sanic_json({"ok": False,
                                              "error": "cwd_not_dir"},
                                             status=400)
@@ -2236,7 +2257,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _gated_auth_error(request, "/launch")
         if err is not None:
             return err
-        params, err = _parse_launch_body(request)
+        params, err = await _parse_launch_body(request)
         if err is not None:
             return err
         try:
@@ -4002,7 +4023,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return err
         if not app.ctx.mcp_cfg["allow_launch"]:
             return sanic_json({"error": "launch_disabled"}, status=403)
-        params, perr = _parse_launch_body(request)
+        params, perr = await _parse_launch_body(request)
         if perr is not None:
             return perr
         try:
