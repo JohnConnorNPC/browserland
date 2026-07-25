@@ -301,6 +301,12 @@ def test_vendored_assets_are_referenced_and_present_on_disk():
     from webterm.broker import vendor
 
     referenced = set(re.findall(r"[\"'](/vendor/[^\"']+)[\"']", INDEX_HTML))
+    # The CodeMirror graph (#146) is reached by a COMPUTED specifier --
+    # `CM_BASE + 'entry-' + k + '.mjs'` -- so the page carries only the prefix,
+    # never a whole filename. Its own coverage lives in test_vendor_assets.py.
+    referenced.discard(vendor.CODEMIRROR_PREFIX)
+    assert vendor.CODEMIRROR_PREFIX not in vendor._ASSETS
+
     assert referenced, "page references no vendored assets"
     for url in sorted(referenced):
         name = url[len(vendor.URL_PREFIX):]
@@ -312,6 +318,29 @@ def test_vendored_assets_are_referenced_and_present_on_disk():
     for name in vendor._ASSETS:
         assert vendor.URL_PREFIX + name in referenced, \
             f"vendored {name} is never referenced by the page"
+
+
+def test_codemirror_loads_from_our_own_origin():
+    """#146: the editor must import the vendored graph, not esm.sh.
+
+    Pinned as a source assertion because the import specifier is computed at
+    call time, so nothing else in the suite can see where it points."""
+    from webterm.broker import vendor
+
+    cm = (BROKER_DIR / "mods/editor/codemirror.js").read_text(encoding="utf-8")
+    assert f"CM_BASE = '{vendor.CODEMIRROR_PREFIX}'" in cm
+    assert "import(CM_BASE + 'entry-' + k + '.mjs')" in cm, \
+        "the loader no longer imports the vendored entry modules"
+    # CM_VER survives as the generator's INPUT, and the comment block above it
+    # still explains esm.sh's resolution rules -- so prose may name the CDN.
+    # Code may not: there must be no base URL left that import() could be
+    # handed.
+    assert "CM_CDN" not in cm, "CM_CDN is gone; the graph is served by us"
+    for lineno, line in enumerate(cm.splitlines(), 1):
+        if line.lstrip().startswith(("//", "*", "/*")):
+            continue
+        assert "esm.sh" not in line, \
+            f"codemirror.js:{lineno} still reaches esm.sh from code: {line.strip()}"
 
 
 def test_no_http_request_puts_the_token_in_the_url():
@@ -399,16 +428,23 @@ def test_csp_hash_matches_the_inline_script_actually_served():
 def test_csp_authorizes_exactly_the_cdn_origins_the_page_uses():
     """Every origin the page loads script from must be in script-src, and
     nothing more -- an allowlist that drifts wider than the page is just a
-    weaker policy, and one that drifts narrower breaks a feature."""
+    weaker policy, and one that drifts narrower breaks a feature.
+
+    Since #146 vendored CodeMirror the correct answer is NO third-party origin
+    at all, so this now pins an empty set on both sides. That is the strongest
+    form of the same assertion, not a weaker one: script-src is 'self' plus our
+    inline hash, and this origin holds prefs._hosts[].token for every
+    configured host, so anything added back here is a fleet-wide trust
+    decision."""
     from webterm.broker.app import _SCRIPT_ORIGINS
 
     used = set()
     for url, _tag in _external_asset_tags():
         used.add("/".join(url.split("/")[:3]))
-    # CodeMirror is loaded by dynamic import() from JS, not as a tag, so it
-    # never appears in _external_asset_tags -- pick it up from the mod source.
+    # CodeMirror is loaded by dynamic import(), not a tag, so it never appears
+    # in _external_asset_tags -- pick up any absolute base URL from the source.
     cm = (BROKER_DIR / "mods/editor/codemirror.js").read_text(encoding="utf-8")
-    for m in re.finditer(r"CM_CDN\s*=\s*'(https://[^/']+)", cm):
+    for m in re.finditer(r"CM_(?:CDN|BASE)\s*=\s*'(https?://[^/']+)", cm):
         used.add(m.group(1))
     # 'self' is not a URL -- it covers the vendored /vendor/* scripts, which are
     # same-origin and therefore never appear as an absolute URL anywhere.
@@ -416,6 +452,7 @@ def test_csp_authorizes_exactly_the_cdn_origins_the_page_uses():
     assert "'self'" in _SCRIPT_ORIGINS,         "vendored xterm is same-origin, so script-src must allow 'self'"
     assert used <= allowed, f"origins the page uses but CSP omits: {used - allowed}"
     assert allowed <= used, f"origins in CSP the page never uses: {allowed - used}"
+    assert not allowed, f"#146 removed the last third-party origin; {allowed} is back"
 
 
 def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():

@@ -1124,14 +1124,19 @@ def _load_or_create_broker_id(path: Path) -> str:
     return bid
 
 
-# Origins allowed to execute script (#143). 'self' covers the vendored xterm
-# under /vendor/ -- it used to come from cdn.jsdelivr.net, which is now gone
-# from the page entirely. esm.sh is the one remaining third party: it serves
-# CodeMirror as ES modules via dynamic import(), which CSP governs under
-# script-src (NOT connect-src), and its stubs re-import via ROOT-RELATIVE paths
-# so the whole module graph stays on that single origin. It cannot be SRI-
-# pinned (its URLs are range-resolved on purpose) and so remains trusted.
-_SCRIPT_ORIGINS = ("'self'", "https://esm.sh")
+# Origins allowed to execute script (#143, #146). Now exactly ONE, and it is
+# us: 'self' covers everything under /vendor/ -- xterm, vendored in #143 when
+# it still came from cdn.jsdelivr.net, and the CodeMirror module graph the text
+# editor lazy-imports, vendored in #146 when it still came from esm.sh.
+#
+# There is no third-party origin left. That matters more here than on an
+# ordinary page because this origin holds prefs._hosts[].token for EVERY
+# configured host -- tokens that gate /launch and host-wide /file/* -- so a
+# compromised CDN package was compromise of the whole fleet, not just the box
+# serving the page. esm.sh was the last one and was the one that could not be
+# SRI-pinned (its URLs are range-resolved on purpose); vendoring is what closed
+# it. Adding an origin back here re-opens that, so don't.
+_SCRIPT_ORIGINS = ("'self'",)
 
 
 def _csp_header(inline_hash: Optional[str] = None) -> str:
@@ -1145,9 +1150,10 @@ def _csp_header(inline_hash: Optional[str] = None) -> str:
     the threat this addresses.
 
     What it buys: a script from an origin NOT listed here cannot execute, even
-    if something injects a tag. What it explicitly does NOT buy: protection
-    from a compromised package on an origin that IS listed -- SRI is what
-    neutralizes jsdelivr, and nothing here saves esm.sh (see #143).
+    if something injects a tag. Since #146 removed the last third-party origin
+    there is nothing left for it to permit but us, so the residual risk it used
+    to carry -- "a compromised package on an origin that IS listed" -- is now
+    only our own bytes.
 
     ``inline_hash`` authorizes our own bundle; without it (headless, which
     serves no page and no inline script) the directive simply lists the
@@ -2116,6 +2122,20 @@ async def _vendor_asset(request: Request, name: str):
     # bytes only change in a commit that also changes the wheel.
     return sanic_raw(body, content_type=ctype,
                      headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+async def _vendor_codemirror_asset(request: Request, name: str):
+    """The vendored CodeMirror graph (#146), one level down under
+    /vendor/codemirror/.
+
+    A separate route with a LITERAL second segment rather than widening
+    _vendor_asset to <path:path>: the lookup stays a single dict get on a
+    prefixed key, so a client-supplied name still cannot express a path at all.
+    The graph's own imports are relative ('./<file>.mjs'), which is why every
+    module has to live in this one flat namespace."""
+    from . import vendor          # deferred like the rest of the UI side (#87)
+
+    return await _vendor_asset(request, f"{vendor.CODEMIRROR}/{name}")
 
 
 async def _help_corpus(request: Request):
@@ -5587,6 +5607,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         app.add_route(_help_corpus, "/help-corpus.json", methods=["GET"])
         app.add_route(_vendor_asset, vendor.URL_PREFIX + "<name:str>",
                       methods=["GET"])
+        app.add_route(_vendor_codemirror_asset,
+                      vendor.CODEMIRROR_PREFIX + "<name:str>", methods=["GET"])
     else:
         app.add_route(_index_headless, "/", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")

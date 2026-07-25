@@ -164,10 +164,20 @@ TOKEN = "route-policy-token"
 #:                         an allowlist dict, so an arbitrary name cannot reach
 #:                         the filesystem.
 #:
+#: ``/vendor/codemirror/<name>``
+#:                         the vendored CodeMirror graph (#146). Same reasoning,
+#:                         one segment deeper: static generated modules from the
+#:                         wheel, the same allowlist dict, nothing host- or
+#:                         session-derived. A dynamic import() cannot carry an
+#:                         Authorization header either, and gating it would mean
+#:                         the text editor silently falls back to a plain
+#:                         textarea rather than fails loudly.
+#:
 #: OPTIONS preflights are also public — they carry no credentials by design and
 #: route resolution happens before request middleware, so they must be their own
 #: routes. They are filtered out below rather than listed here.
-PUBLIC_PATHS = {"/", "/help-corpus.json", "/vendor/<name:str>"}
+PUBLIC_PATHS = {"/", "/help-corpus.json", "/vendor/<name:str>",
+                "/vendor/codemirror/<name:str>"}
 
 _seq = 0
 
@@ -250,6 +260,18 @@ def test_the_public_pair_answers_without_a_token(tmp_path):
     assert miss.status in (400, 404), miss.status
     _, miss2 = app.test_client.get("/vendor/nope.js")
     assert miss2.status == 404
+    # #146: the CodeMirror graph is public for the same reason and bounded the
+    # same way. Its route has a literal second segment and still resolves
+    # through the one allowlist dict, so a name cannot express a path at all --
+    # including the encoded separators a <path:path> route would have to worry
+    # about.
+    _, cm = app.test_client.get("/vendor/codemirror/entry-state.mjs")
+    assert cm.status == 200
+    assert "javascript" in cm.headers["content-type"]
+    for probe in ("../../app.py", "..%2fapp.py", "%2e%2e%2fapp.py",
+                  "..%5capp.py", "nope.mjs"):
+        _, bad = app.test_client.get(f"/vendor/codemirror/{probe}")
+        assert bad.status in (400, 404), f"{probe} -> {bad.status}"
 
 
 def test_headless_root_still_answers_for_health_probes(tmp_path):
