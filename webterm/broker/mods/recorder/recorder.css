@@ -145,7 +145,7 @@
 }
 /* #151: segment marker on a recording that rolled over at the size cap. */
 .reclib-part {
-    margin-left: 6px;
+    margin-right: 6px;
     padding: 0 5px;
     border-radius: 8px;
     font-size: 10px;

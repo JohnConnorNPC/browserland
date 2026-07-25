@@ -492,6 +492,33 @@ def test_recorder_size_cap_rolls_instead_of_stopping():
     assert "' (part ' + meta0.seg + ')'" in src
 
 
+def test_recorder_files_the_size_it_was_actually_played_at():
+    """#151 arms capture from onTerminalCreate, where neither the grid nor the
+    font is settled (termfont restyles from its own hook; core fits a round trip
+    later), and meta.cols/rows is what a player window sizes itself to. So both
+    are re-read at the first captured byte as well as at start -- guarded on an
+    empty event list so a manual start never re-reads over a seed snapshot that
+    was serialized at the size it was taken.
+
+    The preferred source is win.lastSentDims, the grid core measured and handed
+    to the agent, i.e. the size the PTY laid those bytes out for."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    push = src[src.index("const pushOut = function"):
+               src.index("rec.wrapWrite = function")]
+    assert "if (!rec.events.length) adoptGeom();" in push
+    geom = src[src.index("const adoptGeom = function"):
+               src.index("const pushOut = function")]
+    # The grid core MEASURED and sent to the agent, not xterm's own grid, which
+    # lags it by a round trip -- reading the terminal files a recording as 80x24
+    # whose bytes were laid out for the real grid.
+    assert "const dims = win.lastSentDims;" in geom
+    for field in ("rec.cols = (dims && dims.cols) || t.cols;",
+                  "rec.rows = (dims && dims.rows) || t.rows;",
+                  "rec.fontFamily", "rec.fontSize"):
+        assert field in geom, f"adoptGeom must refresh {field!r}"
+
+
 def test_recorder_unload_guard_covers_saves_not_auto_recordings():
     """#151: the beforeunload prompt tracks what a reload would really destroy.
 

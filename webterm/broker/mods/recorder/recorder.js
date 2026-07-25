@@ -365,8 +365,47 @@
                             }
                         }
                     } catch (_) {}
+                    // The grid and the font a recording is FILED as (meta.cols /
+                    // meta.rows is what a player window sizes itself to, and
+                    // meta.fontFamily what it renders with). Re-read at the
+                    // first captured byte as well as at start, because #151 arms
+                    // capture from onTerminalCreate, where neither is settled
+                    // yet: the termfont mod restyles the terminal from its own
+                    // hook, and core fits the grid a round trip later.
+                    //
+                    // Prefer win.lastSentDims -- the grid core MEASURED and
+                    // handed to the agent, i.e. the size the PTY laid these
+                    // bytes out for -- over xterm's own grid, which lags it.
+                    // MEASURED, honestly: the very first bytes of a session (a
+                    // shell prompt, or the reattach redraw) reliably beat that
+                    // measurement, so a just-opened terminal is still filed at
+                    // the pristine 80x24 and carries an early resize event.
+                    // That is faithful -- it is what the live terminal did, and
+                    // the player follows recorded resizes -- so playback of an
+                    // auto-started recording opens at 80x24 and resizes a
+                    // moment in. Closing that cosmetic gap needs the player to
+                    // adopt an opening resize, not a better guess here:
+                    // FitAddon.proposeDimensions() disagrees with core's own
+                    // arithmetic by a couple of columns, and filing a size the
+                    // bytes were NOT laid out for would wrap the replay wrong.
+                    const adoptGeom = function () {
+                        const t = win.term;
+                        if (!t) return;
+                        const dims = win.lastSentDims;
+                        rec.cols = (dims && dims.cols) || t.cols;
+                        rec.rows = (dims && dims.rows) || t.rows;
+                        rec.fontFamily = (t.options && t.options.fontFamily)
+                            || rec.fontFamily;
+                        rec.fontSize = (t.options && t.options.fontSize)
+                            || rec.fontSize;
+                    };
+                    // A ⏺ on a terminal that is already up and running: adopt
+                    // now, since its seed snapshot means the first-byte pass
+                    // below is skipped.
+                    adoptGeom();
                     const pushOut = function (u8) {
                         if (rec.stopped) return;
+                        if (!rec.events.length) adoptGeom();
                         // A ws swap since the last chunk = a disconnect healed
                         // by a reattach snapshot — mark the gap on the timeline.
                         // A null -> socket transition is the FIRST attach, not a
@@ -689,22 +728,14 @@
                     info.onDispose(teardown);
 
                     terms.set(win.id, { win: win, info: info, ui: ui });
-                    // Arm auto-record for a terminal opening now. Deferred by
-                    // two frames on purpose: at onTerminalCreate the grid is
-                    // still the 80×24 default (core fits it, and sends the
-                    // initial resize, from its own rAF² a moment later), and
-                    // meta.cols/rows is what the player window sizes itself to.
-                    // Starting here would file every auto recording as 80×24
-                    // followed by an immediate resize.
-                    if (autoSetting.get()) {
-                        requestAnimationFrame(function () {
-                            requestAnimationFrame(function () {
-                                if (torn || win.disposed) return;
-                                if (!autoSetting.get()) return;
-                                if (userStopped.has(win.id)) return;
-                                startRecording(win, info, ui, { auto: true });
-                            });
-                        });
+                    // Arm auto-record for a terminal opening now — immediately,
+                    // not on a later frame, so no output can arrive before
+                    // capture is wrapped around term.write. The grid is still
+                    // the pre-fit default at this point; adoptGeom (above)
+                    // re-reads it at the first captured byte so the recording is
+                    // filed at the size it was actually played out on.
+                    if (autoSetting.get() && !userStopped.has(win.id)) {
+                        startRecording(win, info, ui, { auto: true });
                     }
                 });
 
@@ -1500,6 +1531,13 @@
                         name.className = 'reclib-name';
                         name.textContent = r.title || r.id;
                         name.title = r.id;
+                        const infoLine = document.createElement('div');
+                        infoLine.className = 'reclib-info';
+                        // The part marker rides the INFO line, not the name:
+                        // .reclib-name is nowrap + ellipsis, and a session title
+                        // long enough to truncate (it carries the running command
+                        // line) would clip the one label that says this recording
+                        // is only part of a run.
                         const parts = (r.series && segCount)
                             ? (segCount.get(r.series) || 0) : 0;
                         if (parts > 1 && r.seg) {
@@ -1508,20 +1546,21 @@
                             seg.textContent = 'part ' + r.seg + '/' + parts;
                             seg.title = 'segment ' + r.seg + ' of a recording '
                                 + 'that rolled over at the size cap';
-                            name.appendChild(seg);
+                            infoLine.appendChild(seg);
                         }
-                        const infoLine = document.createElement('div');
-                        infoLine.className = 'reclib-info';
                         const when = r.startedAt
                             ? new Date(r.startedAt).toLocaleString() : '';
-                        infoLine.textContent = when
+                        // appended, NOT assigned to textContent: the part marker
+                        // above is already a child of this line.
+                        infoLine.appendChild(document.createTextNode(
+                            when
                             + '  ·  ' + fmtClock(r.durationMs || 0)
                             + '  ·  ' + (r.cols || '?') + '×' + (r.rows || '?')
                             + '  ·  ' + fmtSize(r.size || 0)
                             + (r.notesCount
                                ? ('  ·  ' + r.notesCount + ' note'
                                   + (r.notesCount === 1 ? '' : 's'))
-                               : '');
+                               : '')));
                         const btns = document.createElement('div');
                         btns.className = 'reclib-btns';
                         const play = document.createElement('button');
