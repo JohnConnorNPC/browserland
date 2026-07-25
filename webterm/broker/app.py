@@ -4655,6 +4655,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if "value" not in body:
             return sanic_json({"ok": False, "error": "bad_value"}, status=400)
         value = body["value"]
+        # Optional "write this value AND forget the history" flag (#65). Strict
+        # bool, mirroring the baseRev bool-is-an-int guard above: a purge must be
+        # an explicit True, never a stray 1/"true"/{} that slipped through. When
+        # set, no prior value is pushed and the revision ring is written empty —
+        # the only way to un-publish a value that scrolled into the ring (e.g. a
+        # host token the registry mod published, then revoked). value:null +
+        # purgeRevisions:true = "forget everything this mod stored".
+        purge = body.get("purgeRevisions", False)
+        if not isinstance(purge, bool):
+            return sanic_json({"ok": False, "error": "bad_purgeRevisions"},
+                              status=400)
         client_id = str(body.get("clientId") or "").strip()
         # Lock the whole lease-check / read-rev / compare / dedupe / write / bump
         # (identical reasoning to /state: the write awaits, so two PUTs could
@@ -4680,17 +4691,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # No-op dedupe: an idle debounced autosave that resends the current
             # value must NOT bump rev or push a revision (else the ring churns on
             # every keystroke pause). Accept it as a success at the current rev.
-            if value == rec["value"]:
+            # A purge is NOT a no-op when there is still a ring to clear: dropping
+            # history is an OBSERVABLE mutation (GET ?rev=<old> flips 200->404),
+            # so it must be visible as a new rev — it falls through to the write
+            # below (which bumps rev and writes revisions:[]) rather than silently
+            # mutating the current rev in place. The ONLY true no-op is a purge
+            # with nothing left to clear: value unchanged AND the ring already
+            # empty (e.g. a first-write dedupe on the empty seed).
+            if value == rec["value"] and not (purge and rec["revisions"]):
                 return sanic_json({"ok": True, "rev": rec["rev"]})
             # Push the OUTGOING (soon-to-be-prior) value onto the newest-first
             # ring, then trim. Skip the empty seed: a brand-new mod id has no real
             # prior value (rev 0 / None), so don't record a meaningless {rev:0}
-            # entry — the ring starts once there's genuine history.
-            revisions = list(rec["revisions"])
-            if existed:
-                revisions.insert(0, {"rev": rec["rev"], "value": rec["value"],
-                                     "ts": int(time.time())})
-                del revisions[MODSTORE_MAX_REVISIONS:]
+            # entry — the ring starts once there's genuine history. A purge writes
+            # the ring EMPTY instead (drop the outgoing prior too), so the new
+            # value lands with no recoverable history.
+            if purge:
+                revisions = []
+            else:
+                revisions = list(rec["revisions"])
+                if existed:
+                    revisions.insert(0, {"rev": rec["rev"], "value": rec["value"],
+                                         "ts": int(time.time())})
+                    del revisions[MODSTORE_MAX_REVISIONS:]
             new_rec = {"rev": rec["rev"] + 1, "value": value,
                        "revisions": revisions}
             new_store = dict(app.ctx.modstore)
