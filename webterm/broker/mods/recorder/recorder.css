@@ -153,6 +153,32 @@
     opacity: 0.85;
 }
 .reclib-info { font-size: 11px; opacity: 0.75; }
+/* #161: which broker STORES this recording. Only drawn when more than one is
+   configured. The state/identity colour rides the dot, never the label text —
+   same reasoning as the host chips. */
+.reclib-host {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 6px;
+    padding: 0 5px;
+    border-radius: 8px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.12);
+    opacity: 0.85;
+}
+.reclib-host-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.7;
+    flex: 0 0 auto;
+}
+/* A broker that did not answer. Not an error COLOUR on the row text: the list
+   is mostly ordinary rows and a red block reads as data loss. */
+.reclib-hosterr { background: rgba(200, 140, 0, 0.12); }
+.reclib-hostsel { font-size: 11px; max-width: 160px; }
 .reclib-btns {
     display: flex;
     gap: 4px;

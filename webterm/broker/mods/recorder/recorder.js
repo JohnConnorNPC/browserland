@@ -62,6 +62,12 @@
                 const active = new Map();     // win.id -> recording state
                 const disposers = new Set();  // live per-terminal UI teardowns
                 let libRender = null;         // live library window repaint
+                // #161: which broker the library lists ('' = all of them).
+                // Module-scope, not per-window, so closing and reopening the
+                // library keeps the filter — but it is deliberately NOT
+                // persisted: a filter that survives a reload is a library that
+                // silently hides recordings after you have forgotten you set it.
+                let libFilterHostId = '';
                 // #151 auto-record bookkeeping. `terms` is the registry the
                 // setting's onChange walks to arm terminals that are ALREADY
                 // open (onTerminalCreate only fires once per window, and it
@@ -84,10 +90,44 @@
                         isBrowserGlobal: true,
                     });
 
-                // ---- local-broker HTTP (the token rides an Authorization
+                // ---- broker addressing (#161) ------------------------------
+                // A recording lives on the broker that STORED it, and this page
+                // can be attached to several. So every read/mutate call names
+                // the broker it targets. Only the CAPTURE path stays pinned to
+                // the local one: a session recorded in this browser is always
+                // uploaded here, whichever broker the terminal itself came from
+                // (so the origin chip below means "stored on", not "ran on").
+                //
+                // Callers carry a host ID, never a host OBJECT. The object can
+                // be replaced (a prefs adopt from /state rebuilds the array) or
+                // removed outright, so a captured one goes stale — holding a
+                // token that has since been re-entered, or naming a broker that
+                // is gone. And a missing host is NOT harmless: hostFetch(null,
+                // path) falls back to the SAME ORIGIN, so a stale reference
+                // would quietly run a delete against the local broker. Resolve
+                // at every call and treat "gone" as a visible error.
+                const HOST_GONE = 'broker no longer configured';
+                function recHost(hostId) {
+                    return hostById(hostId || 'local');
+                }
+                function recHostLabel(host) {
+                    if (!host) return 'broker';
+                    return host.id === 'local' ? 'this broker'
+                        : (host.label || host.url || host.id);
+                }
+                // Composite identity for anything keyed per recording: ids are
+                // only unique WITHIN a broker. JSON rather than
+                // `hostId + '|' + id` — host ids come out of a hand-editable
+                // prefs blob, so no separator character is reserved.
+                function recKey(hostId, id) {
+                    return JSON.stringify([String(hostId || 'local'),
+                                           String(id)]);
+                }
+
+                // ---- broker HTTP (the token rides an Authorization
                 // header, never the URL -- see hostFetch, #144) -------------
-                // Per-route deadlines. These are all JSON control calls on the
-                // local broker, but they are not uniformly cheap: a chunk PUT
+                // Per-route deadlines. These are all JSON control calls on a
+                // broker, but they are not uniformly cheap: a chunk PUT
                 // writes up to 2 MiB (decoded) to disk and the commit does a
                 // sidecar write plus an atomic replace, so both get 30s. The
                 // rest -- list, begin, abort, delete, notes -- are small,
@@ -100,7 +140,9 @@
                     ['/recording/commit', 30000],
                 ]);
                 const REC_TIMEOUT_DEFAULT_MS = 10000;
-                async function recApi(path, opts) {
+                async function recApi(hostId, path, opts) {
+                    const host = recHost(hostId);
+                    if (!host) return { ok: false, error: HOST_GONE };
                     const o = Object.assign({}, opts || {});
                     if (o.timeoutMs === undefined) {
                         // The query string ('/recording/notes?id=...') is not
@@ -109,21 +151,42 @@
                         o.timeoutMs = REC_TIMEOUT_MS.has(route)
                             ? REC_TIMEOUT_MS.get(route) : REC_TIMEOUT_DEFAULT_MS;
                     }
-                    const r = await hostFetch(localHost(), path, o);
+                    const r = await hostFetch(host, path, o);
                     let j = null;
                     try { j = await r.json(); } catch (_) {}
                     if (!j || typeof j !== 'object') {
+                        // A broker predating #140 has no /recording/* routes at
+                        // all and answers the catch-all 404 with HTML. Reported
+                        // as 'HTTP 404' that reads as a recording that went
+                        // missing; say what it actually is. A KNOWN route
+                        // 404s with a JSON body, so it keeps its own error.
+                        if (r.status === 404) {
+                            return { ok: false,
+                                     error: 'no recorder on this broker' };
+                        }
                         return { ok: false, error: 'HTTP ' + r.status };
                     }
                     if (j.ok === undefined) j.ok = r.ok;
                     return j;
                 }
-                function recPost(path, body) {
-                    return recApi(path, {
+                function recPost(hostId, path, body) {
+                    return recApi(hostId, path, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body),
                     });
+                }
+                // recApi resolves an HTTP failure to {ok:false,error} but still
+                // REJECTS on a transport one (a dead broker, a deadline abort).
+                // With one local broker that was a remote possibility; fanning
+                // out over remotes makes it ordinary, so every call site that
+                // is not already inside a try/catch goes through here.
+                async function recTry(promise) {
+                    try { return await promise; }
+                    catch (e) {
+                        return { ok: false,
+                                 error: String((e && e.message) || e) };
+                    }
                 }
 
                 // ---- download ----------------------------------------------
@@ -142,7 +205,7 @@
                 // non-numeric `t` coerced to 0), so re-serializing it would not
                 // reproduce the stored file. A download must be the archived
                 // artifact, byte for byte.
-                const dlBusy = new Set();   // rec ids with a download in flight
+                const dlBusy = new Set();   // recKey()s with a download in flight
                 function dlReport(report, msg) {
                     // A download outlives its window, so the caller's status
                     // line may be detached by the time we fail. The notice host
@@ -152,19 +215,28 @@
                     }
                     showNotice(msg, { sticky: true });
                 }
-                async function downloadRecording(recId, report) {
+                async function downloadRecording(hostId, recId, report) {
+                    const host = recHost(hostId);
+                    if (!host) {
+                        dlReport(report, 'download failed: ' + HOST_GONE);
+                        return;
+                    }
                     // Repeat clicks used to be free (the browser streamed each
                     // one to disk); now each would buffer the whole file, so a
                     // double-click on a big recording doubles the memory.
-                    if (dlBusy.has(recId)) return;
-                    dlBusy.add(recId);
+                    // Keyed per (broker, id): the same id on two brokers is two
+                    // different recordings, and blocking the second would be a
+                    // silent no-op.
+                    const busyKey = recKey(host.id, recId);
+                    if (dlBusy.has(busyKey)) return;
+                    dlBusy.add(busyKey);
                     try {
                         // NO deadline: this streams the recording itself, up to
                         // MAX_RECORDING_BYTES (256 MiB). Any fixed timer is a
                         // guess about the user's link speed, and losing a large
                         // download to one is far worse than waiting for it.
                         const r = await hostFetch(
-                            localHost(),
+                            host,
                             '/recording?id=' + encodeURIComponent(recId),
                             { timeoutMs: 0 });
                         if (!r.ok) {
@@ -176,7 +248,7 @@
                             // <id>.blrec — a 36-byte "recording" with no error
                             // shown anywhere. Re-open the login prompt instead.
                             if (err === 'auth_required') {
-                                promptFileHostAuth(localHost());
+                                promptFileHostAuth(host);
                             }
                             dlReport(report, 'download failed: ' + err);
                             return;
@@ -211,7 +283,7 @@
                                  'download failed: '
                                  + String((e && e.message) || e));
                     } finally {
-                        dlBusy.delete(recId);
+                        dlBusy.delete(busyKey);
                     }
                 }
 
@@ -694,20 +766,24 @@
                     // the temp out from under it, destroying a recording that
                     // was about to land. Cleanup is for a failure BEFORE commit.
                     let committing = false;
+                    // Pinned to the LOCAL broker (#161): capture happens in
+                    // this browser, so this is the one recorder path that does
+                    // not take a host — the recording is filed here even when
+                    // the terminal it came from runs on a remote broker.
                     try {
-                        const b = await recPost('/recording/begin', {});
+                        const b = await recPost('local', '/recording/begin', {});
                         if (!b.ok) return b;
                         recId = b.recording_id;
                         for (let off = 0; off < payload.length; off += CHUNK_RAW) {
                             const part = payload.subarray(off, off + CHUNK_RAW);
-                            const c = await recPost('/recording/chunk', {
+                            const c = await recPost('local', '/recording/chunk', {
                                 recording_id: recId, offset: off,
                                 content_b64: bytesToB64(part),
                             });
                             if (!c.ok) throw new Error(c.error || 'chunk');
                         }
                         committing = true;
-                        return await recPost('/recording/commit',
+                        return await recPost('local', '/recording/commit',
                                              { recording_id: recId, meta: meta });
                     } catch (e) {
                         // Best-effort cleanup; the ORIGINAL failure is what
@@ -719,7 +795,7 @@
                             // became an unhandled rejection in the console. Catch
                             // it on the promise; cleanup stays fire-and-forget so
                             // the ORIGINAL failure is what gets reported.
-                            recPost('/recording/abort',
+                            recPost('local', '/recording/abort',
                                     { recording_id: recId }).catch(() => {});
                         }
                         return { ok: false, error: String(e && e.message || e) };
@@ -930,13 +1006,24 @@
                     const recId = String(appData.recId || '');
                     const id = String(appData.id);
                     const meta0 = appData.meta || {};
+                    // #161: which broker STORES this recording. Kept as an id,
+                    // not a host object (see recHost), and deliberately NOT
+                    // written to win.hostId — core reads that as the broker a
+                    // TERMINAL belongs to and drives visibility masking, auth
+                    // healing and reattachment off it. App windows stay 'app'.
+                    const recHostId = String(appData.hostId || 'local');
                     // The stored title is the plain session name for every
                     // segment; the part number is DERIVED from meta.seg here
                     // rather than baked into the title, so `seg` stays the one
-                    // source of truth for a chain's ordering.
+                    // source of truth for a chain's ordering. A non-local
+                    // broker is named too — otherwise two same-named sessions
+                    // from two brokers give identical windows and taskbar
+                    // labels.
                     const title = 'Playback — '
                         + (meta0.title || recId)
-                        + (meta0.seg > 1 ? (' (part ' + meta0.seg + ')') : '');
+                        + (meta0.seg > 1 ? (' (part ' + meta0.seg + ')') : '')
+                        + (recHostId !== 'local'
+                           ? (' · ' + recHostLabel(recHost(recHostId))) : '');
                     const geom = clampGeom(appData.geom
                                            || appDefaultGeom('text-editor'));
                     const color = normalizeHex(appData.color
@@ -1246,7 +1333,7 @@
                                            function (e) { e.stopPropagation(); });
                     dlBtn.addEventListener('click', function (e) {
                         e.stopPropagation();
-                        downloadRecording(recId, function (msg) {
+                        downloadRecording(recHostId, recId, function (msg) {
                             // The player's own status line while it is still
                             // up; a notice once this window has gone.
                             if (closed) showNotice(msg, { sticky: true });
@@ -1365,11 +1452,14 @@
                         input.focus();
                     }
                     async function loadNotes() {
-                        const j = await recApi('/recording/notes?id='
-                                               + encodeURIComponent(recId));
+                        const j = await recTry(recApi(
+                            recHostId,
+                            '/recording/notes?id=' + encodeURIComponent(recId)));
                         if (j.ok) {
                             notes = j.notes || [];
                             notesRev = j.rev || 0;
+                        } else if (j.error === 'auth_required') {
+                            promptFileHostAuth(recHost(recHostId));
                         }
                         renderNotes();
                     }
@@ -1385,12 +1475,19 @@
                         return notesChain;
                     }
                     async function doSaveNotes() {
-                        const j = await recPost('/recording/notes', {
-                            id: recId, baseRev: notesRev, notes: notes,
-                        });
+                        const j = await recTry(recPost(
+                            recHostId, '/recording/notes',
+                            { id: recId, baseRev: notesRev, notes: notes }));
                         if (j.ok) {
                             notesRev = j.rev;
                             setStatus('');
+                        } else if (j.error === 'auth_required') {
+                            // Same shape as the sticky failure below — the list
+                            // on screen holds edits the broker does not have —
+                            // but this one has a remedy, so offer it.
+                            promptFileHostAuth(recHost(recHostId));
+                            setStatus('note save failed — sign in to '
+                                      + recHostLabel(recHost(recHostId)));
                         } else if (j.error === 'conflict') {
                             // Another player window changed the notes — adopt
                             // the live copy (the user re-applies their edit).
@@ -1421,17 +1518,42 @@
                     });
 
                     // ---- load ---------------------------------------------
-                    (async function () {
+                    // A named function, not the one-shot IIFE it used to be:
+                    // openAppWindow dedupes by id and only FOCUSES an existing
+                    // window, so a player that failed its load (a remote broker
+                    // whose token had expired) could never be retried — Play
+                    // just re-focused the dead window. _onHostAuth below re-runs
+                    // it once that broker is signed into.
+                    let loading = false;
+                    async function load() {
+                        // recData set = this player is already up; a retry must
+                        // never build a second Terminal over the live one.
+                        if (loading || closed || recData) return;
+                        loading = true;
                         setStatus('loading…');
                         try {
+                            const host = recHost(recHostId);
+                            if (!host) throw new Error(HOST_GONE);
                             // No deadline, same reason as downloadRecording:
                             // the player loads the whole recording body.
                             const r = await hostFetch(
-                                localHost(),
+                                host,
                                 '/recording?id='
                                 + encodeURIComponent(recId),
                                 { timeoutMs: 0 });
-                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            if (!r.ok) {
+                                // The error BODY, not just the status: a 401
+                                // carries {error:'auth_required'}, and reporting
+                                // it as 'HTTP 401' loses the one failure the
+                                // user can actually fix.
+                                let j = null;
+                                try { j = await r.json(); } catch (_) {}
+                                const err = (j && j.error) || ('HTTP ' + r.status);
+                                if (err === 'auth_required') {
+                                    promptFileHostAuth(host);
+                                }
+                                throw new Error(err);
+                            }
                             const text = await r.text();
                             if (closed) return;
                             recData = parseRecording(text);
@@ -1471,8 +1593,18 @@
                                 setStatus('load failed: '
                                     + String(e && e.message || e));
                             }
+                        } finally {
+                            loading = false;
                         }
-                    })();
+                    }
+                    load();
+                    // #46's per-window hook: core fires it on every live window
+                    // after a successful login. Only this recording's broker
+                    // matters — another host authenticating is not a reason to
+                    // retry — and load() self-guards the already-loaded case.
+                    win._onHostAuth = function (hostId) {
+                        if (hostId === recHostId) load();
+                    };
 
                     win.cleanups.push(function () {
                         closed = true;
@@ -1505,9 +1637,18 @@
                     const refreshBtn = document.createElement('button');
                     refreshBtn.type = 'button';
                     refreshBtn.textContent = 'Refresh';
+                    // #161 broker filter. Hidden entirely while one broker is
+                    // configured (the majority setup) so the single-host window
+                    // is exactly what it was. Options are rebuilt on every
+                    // refresh — brokers are added and removed from the Control
+                    // Panel while this window is open.
+                    const hostSel = document.createElement('select');
+                    hostSel.className = 'reclib-hostsel';
+                    hostSel.title = 'which broker to list recordings from';
                     const statusEl = document.createElement('span');
                     statusEl.className = 'reclib-status';
                     toolbar.appendChild(refreshBtn);
+                    toolbar.appendChild(hostSel);
                     toolbar.appendChild(statusEl);
                     const listEl = document.createElement('div');
                     listEl.className = 'reclib-body';
@@ -1553,37 +1694,170 @@
                     const emptyMsg = document.getElementById('taskbar-empty');
                     if (emptyMsg) emptyMsg.remove();
 
-                    // recApi resolves to {ok:false,error} for an HTTP failure but
-                    // still REJECTS on a transport one (a dead broker, a deadline
-                    // abort) — and every caller of refresh() is a bare listener or
-                    // an un-awaited call, so that rejection used to vanish into an
-                    // unhandled promise, leaving the window stuck on "loading…"
-                    // forever with nothing on screen or in the console. Catch it
-                    // and say so in the same status line as every other failure.
-                    async function refresh() {
-                        statusEl.textContent = 'loading…';
-                        let j;
-                        try {
-                            j = await recApi('/recordings');
-                        } catch (e) {
-                            if (win.disposed) return;
-                            statusEl.textContent = 'load failed: '
-                                + String((e && e.message) || e);
-                            return;
+                    // Which brokers this window lists. '' = all of them.
+                    // Deliberately NOT filtered by hostHidden(): "hidden" is a
+                    // display mask over a broker's WINDOWS and taskbar items
+                    // (focus mode), and dropping its recordings here would also
+                    // remove the only way to delete them while it is on.
+                    // Documented in help.md rather than inferred.
+                    function listHosts() {
+                        const all = allHosts();
+                        if (!libFilterHostId) return all;
+                        const one = all.filter(h => h.id === libFilterHostId);
+                        // A filter pinned to a broker that has since been
+                        // removed would otherwise show an empty library with no
+                        // way back — fall back to all and reset the control.
+                        if (one.length) return one;
+                        libFilterHostId = '';
+                        return all;
+                    }
+                    // Rebuilt only when the host set actually CHANGED: this runs
+                    // on every refresh, including background ones, and blowing
+                    // the <select> away mid-interaction would shut the dropdown
+                    // under the user. '' is the "all brokers" value, and cannot
+                    // collide with a host id: getHosts() drops any entry whose
+                    // id is not a NON-EMPTY string.
+                    function syncHostSel() {
+                        const all = allHosts();
+                        hostSel.style.display = all.length > 1 ? '' : 'none';
+                        const want = [''].concat(all.map(h => h.id));
+                        const have = Array.from(hostSel.options)
+                            .map(o => o.value);
+                        if (want.length !== have.length
+                            || want.some((v, i) => v !== have[i])) {
+                            hostSel.innerHTML = '';
+                            const optAll = document.createElement('option');
+                            optAll.value = '';
+                            optAll.textContent = 'All brokers';
+                            hostSel.appendChild(optAll);
+                            for (const h of all) {
+                                const o = document.createElement('option');
+                                o.value = h.id;
+                                o.textContent = recHostLabel(h);
+                                hostSel.appendChild(o);
+                            }
                         }
-                        if (win.disposed) return;
-                        statusEl.textContent = j.ok ? ''
-                            : ('load failed: ' + (j.error || ''));
+                        hostSel.value = libFilterHostId;
+                    }
+
+                    // #161: one GET per broker, in parallel, merged into one
+                    // list. Each host is wrapped on its own — recApi resolves an
+                    // HTTP failure to {ok:false,error} but still REJECTS on a
+                    // transport one (a dead broker, a deadline abort), and with
+                    // remotes in the fan-out that is ordinary rather than
+                    // exotic. One unreachable broker must cost its own row, not
+                    // the whole list. (Before the fan-out this same rejection
+                    // used to vanish into an unhandled promise and leave the
+                    // window stuck on "loading…" with nothing in the console.)
+                    //
+                    // opts.prompt: may this refresh open a login overlay?
+                    // Only a USER-initiated one may — the window opening, the
+                    // Refresh button, a row's Sign in. libRender() repaints
+                    // fire from a recording finishing its save and from a note
+                    // save, and a password modal popping out of a background
+                    // repaint is exactly the modal storm this mod must not add.
+                    let refreshGen = 0;
+                    async function refresh(opts) {
+                        const o = opts || {};
+                        const myGen = ++refreshGen;
+                        const hosts = listHosts();
+                        syncHostSel();
+                        statusEl.textContent = 'loading…';
+                        const results = await Promise.all(hosts.map(
+                            async function (h) {
+                                const j = await recTry(
+                                    recApi(h.id, '/recordings'));
+                                return { hostId: h.id, j: j };
+                            }));
+                        // A slower earlier refresh must never paint over a
+                        // newer one (Refresh spam, or a save landing mid-load).
+                        if (win.disposed || myGen !== refreshGen) return;
                         listEl.innerHTML = '';
-                        const recs = (j.ok && j.recordings) || [];
-                        if (!recs.length) {
+                        const multi = allHosts().length > 1;
+                        const failed = [];
+                        // [hostId, rec] pairs. Each broker returns its own list
+                        // newest-first; the merge re-sorts across them.
+                        let entries = [];
+                        for (const res of results) {
+                            const j = res.j || {};
+                            // Array-check, not a truthiness check: one broker
+                            // answering something unexpected under `recordings`
+                            // must not break the renderer for the others.
+                            if (!j.ok || !Array.isArray(j.recordings)) {
+                                failed.push({ hostId: res.hostId,
+                                              error: j.error || 'load failed' });
+                                continue;
+                            }
+                            for (const r of j.recordings) {
+                                if (r && typeof r === 'object' && r.id) {
+                                    entries.push({ hostId: res.hostId, rec: r });
+                                }
+                            }
+                        }
+                        // Sorting only when there is something to merge. With a
+                        // single source the broker's own order is authoritative
+                        // and is passed through untouched — a re-sort could only
+                        // reorder it, and startedAt is not sound enough to do
+                        // that on (below).
+                        if (results.length > 1) {
+                            // startedAt is Date.now() on whichever BROWSER made
+                            // the recording, so across machines it is an
+                            // approximation, not a clock. Sort on it anyway (it
+                            // is the only ordering the user thinks in), but
+                            // defensively: a missing/NaN/hand-edited value sorts
+                            // last instead of scrambling the list, and ties
+                            // break on host order then the broker's own
+                            // position, so the order is at least STABLE between
+                            // repaints.
+                            const at = function (e) {
+                                const v = e.rec.startedAt;
+                                return (typeof v === 'number' && isFinite(v))
+                                    ? v : -Infinity;
+                            };
+                            const hostOrder = new Map(
+                                hosts.map((h, i) => [h.id, i]));
+                            entries = entries.map((e, i) => ({ e: e, i: i }));
+                            entries.sort(function (a, b) {
+                                const d = at(b.e) - at(a.e);
+                                if (d) return d;
+                                const ha = hostOrder.get(a.e.hostId) || 0;
+                                const hb = hostOrder.get(b.e.hostId) || 0;
+                                return (ha - hb) || (a.i - b.i);
+                            });
+                            entries = entries.map(x => x.e);
+                        }
+                        for (const f of failed) {
+                            listEl.appendChild(buildHostError(f));
+                        }
+                        // Only prompt for ONE broker per refresh, and only the
+                        // first in host order: promptFileHostAuth force-opens
+                        // whenever no overlay is up, so prompting for each
+                        // failing host in turn would queue a login storm.
+                        if (o.prompt) {
+                            const first = failed.find(
+                                f => f.error === 'auth_required');
+                            if (first) promptFileHostAuth(recHost(first.hostId));
+                        }
+                        if (!entries.length) {
                             const empty = document.createElement('div');
                             empty.className = 'reclib-empty';
-                            empty.textContent = 'no recordings yet — press ⏺ '
-                                + 'on a terminal title bar to record one';
+                            // "press ⏺ to record one" is only true of the local
+                            // broker — captures always save HERE — so it would
+                            // be a lie under a remote-only filter.
+                            const onlyRemote = hosts.length === 1
+                                && hosts[0].id !== 'local';
+                            empty.textContent = failed.length
+                                ? 'no recordings from the brokers that answered'
+                                : (onlyRemote
+                                   ? ('no recordings on '
+                                      + recHostLabel(hosts[0]))
+                                   : ('no recordings yet — press ⏺ on a '
+                                      + 'terminal title bar to record one'));
                             listEl.appendChild(empty);
-                            return;
                         }
+                        statusEl.textContent =
+                            (failed.length && failed.length === results.length)
+                                ? ('load failed: ' + failed[0].error) : '';
                         // #151: how long each chain is, so a rolled recording
                         // reads as "part 2/3" instead of three identically-named
                         // rows. One pass over the whole list, not per row.
@@ -1595,18 +1869,62 @@
                         // says what the chain's length was, which stays true as
                         // segments are deleted. An ordinary recording carries a
                         // series id too, so a max of 1 must not grow a "part 1".
+                        //
+                        // #161: keyed per BROKER. Series ids are minted client-
+                        // side, so two brokers can hold unrelated chains under
+                        // the same one, and merging them would invent parts.
                         const segMax = new Map();
-                        for (const r of recs) {
+                        for (const e of entries) {
+                            const r = e.rec;
                             if (!r.series || !r.seg) continue;
-                            segMax.set(r.series,
-                                       Math.max(segMax.get(r.series) || 0,
-                                                r.seg));
+                            const k = recKey(e.hostId, r.series);
+                            segMax.set(k, Math.max(segMax.get(k) || 0, r.seg));
                         }
-                        for (const r of recs) {
-                            listEl.appendChild(buildRow(r, segMax));
+                        for (const e of entries) {
+                            listEl.appendChild(buildRow(e, segMax, multi));
                         }
                     }
-                    function buildRow(r, segMax) {
+                    // A broker that did not answer. Its own row rather than a
+                    // status line: with several brokers the status line can only
+                    // report one of them, and a silently-shorter list is the
+                    // failure mode this whole feature exists to remove.
+                    function buildHostError(f) {
+                        const host = recHost(f.hostId);
+                        const row = document.createElement('div');
+                        row.className = 'reclib-row reclib-hosterr';
+                        const main = document.createElement('div');
+                        main.className = 'reclib-main';
+                        const name = document.createElement('div');
+                        name.className = 'reclib-name';
+                        name.textContent = recHostLabel(host);
+                        const info = document.createElement('div');
+                        info.className = 'reclib-info';
+                        info.textContent = f.error === 'auth_required'
+                            ? 'password required' : f.error;
+                        main.appendChild(name);
+                        main.appendChild(info);
+                        row.appendChild(main);
+                        if (f.error === 'auth_required' && host) {
+                            const btns = document.createElement('div');
+                            btns.className = 'reclib-btns';
+                            const signin = document.createElement('button');
+                            signin.type = 'button';
+                            signin.className = 'reclib-btn';
+                            signin.textContent = 'Sign in';
+                            signin.addEventListener('mousedown',
+                                function (e) { e.stopPropagation(); });
+                            signin.addEventListener('click', function (e) {
+                                e.stopPropagation();
+                                promptFileHostAuth(recHost(f.hostId));
+                            });
+                            btns.appendChild(signin);
+                            row.appendChild(btns);
+                        }
+                        return row;
+                    }
+                    function buildRow(entry, segMax, multi) {
+                        const r = entry.rec;
+                        const hostId = entry.hostId;
                         const row = document.createElement('div');
                         row.className = 'reclib-row';
                         const name = document.createElement('div');
@@ -1615,13 +1933,31 @@
                         name.title = r.id;
                         const infoLine = document.createElement('div');
                         infoLine.className = 'reclib-info';
+                        // Which broker STORES this recording (#161) — shown only
+                        // when there is more than one, so the single-broker
+                        // window is unchanged. The #103 per-host identity colour
+                        // rides the dot, never the label text.
+                        if (multi) {
+                            const host = recHost(hostId);
+                            const tag = document.createElement('span');
+                            tag.className = 'reclib-host';
+                            const dot = document.createElement('span');
+                            dot.className = 'reclib-host-dot';
+                            const c = host && strictHex(host.color);
+                            if (c) dot.style.background = c;
+                            tag.appendChild(dot);
+                            tag.appendChild(document.createTextNode(
+                                recHostLabel(host)));
+                            tag.title = 'stored on ' + recHostLabel(host);
+                            infoLine.appendChild(tag);
+                        }
                         // The part marker rides the INFO line, not the name:
                         // .reclib-name is nowrap + ellipsis, and a session title
                         // long enough to truncate (it carries the running command
                         // line) would clip the one label that says this recording
                         // is only part of a run.
                         const parts = (r.series && segMax)
-                            ? (segMax.get(r.series) || 0) : 0;
+                            ? (segMax.get(recKey(hostId, r.series)) || 0) : 0;
                         if (parts > 1 && r.seg) {
                             const seg = document.createElement('span');
                             seg.className = 'reclib-part';
@@ -1665,10 +2001,18 @@
                         play.textContent = '▶ Play';
                         play.addEventListener('click', function (e) {
                             e.stopPropagation();
+                            // The window id carries the BROKER too (#161): ids
+                            // are only unique per broker, so without it playing
+                            // recording X from host B would just re-focus the
+                            // already-open player for X from host A. Both
+                            // components are encoded — openAppWindow keys on the
+                            // whole string, and a host id is free-form.
                             openAppWindow({
-                                id: 'app:recplay:' + r.id,
+                                id: 'app:recplay:'
+                                    + encodeURIComponent(hostId) + ':'
+                                    + encodeURIComponent(r.id),
                                 appKind: 'recplayer',
-                                recId: r.id, meta: r,
+                                hostId: hostId, recId: r.id, meta: r,
                             });
                         });
                         const dl = document.createElement('button');
@@ -1677,7 +2021,7 @@
                         dl.title = 'download';
                         dl.addEventListener('click', function (e) {
                             e.stopPropagation();
-                            downloadRecording(r.id, function (msg) {
+                            downloadRecording(hostId, r.id, function (msg) {
                                 // The library's status line while the window is
                                 // still up; a notice once it has been closed.
                                 if (win.disposed) {
@@ -1707,10 +2051,19 @@
                                 return;
                             }
                             clearTimeout(disarm);
-                            const j = await recPost('/recording/delete',
-                                                    { id: r.id });
+                            // recTry: a delete against a REMOTE broker can fail
+                            // in transport, and this listener is async — the
+                            // rejection had nowhere to go but an unhandled
+                            // promise, leaving the row armed and the user with
+                            // no idea whether the recording is gone.
+                            const j = await recTry(recPost(
+                                hostId, '/recording/delete', { id: r.id }));
+                            if (win.disposed) return;
                             if (j.ok) refresh();
                             else {
+                                if (j.error === 'auth_required') {
+                                    promptFileHostAuth(recHost(hostId));
+                                }
                                 statusEl.textContent = 'delete failed: '
                                     + (j.error || '');
                             }
@@ -1733,14 +2086,42 @@
                                                 function (e) { e.stopPropagation(); });
                     refreshBtn.addEventListener('click', function (e) {
                         e.stopPropagation();
-                        refresh();
+                        refresh({ prompt: true });
                     });
-                    libRender = refresh;
+                    hostSel.addEventListener('mousedown',
+                                             function (e) { e.stopPropagation(); });
+                    hostSel.addEventListener('change', function () {
+                        libFilterHostId = hostSel.value;
+                        refresh({ prompt: true });
+                    });
+                    // The BACKGROUND repaint (a recording finished saving, a
+                    // note was saved). Trailing-edge coalesced: with one broker
+                    // this was one cheap local GET, but it now costs one per
+                    // broker, and the events that drive it arrive in bursts —
+                    // the auto-record off switch stops every terminal at once,
+                    // and each of those saves lands its own repaint. Never
+                    // prompts for a password (see refresh).
+                    let bgTimer = null;
+                    const bgRefresh = function () {
+                        if (bgTimer !== null) return;
+                        bgTimer = setTimeout(function () {
+                            bgTimer = null;
+                            if (!win.disposed) refresh({ prompt: false });
+                        }, 250);
+                    };
+                    libRender = bgRefresh;
                     win.cleanups.push(function () {
-                        if (libRender === refresh) libRender = null;
+                        if (bgTimer !== null) clearTimeout(bgTimer);
+                        if (libRender === bgRefresh) libRender = null;
                     });
+                    // #46's per-window hook: heal the list in place once a
+                    // broker is signed into, instead of leaving its error row
+                    // up until someone presses Refresh.
+                    win._onHostAuth = function () {
+                        refresh({ prompt: false });
+                    };
 
-                    refresh();
+                    refresh({ prompt: true });
                     if (findKeyInLayout(id)) placeWindowTiled(win);
                     else bringToFront(id);
                     return win;

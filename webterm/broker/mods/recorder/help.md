@@ -94,6 +94,32 @@ each one. **Play** opens a player window fixed at the recording's original
 columns×rows — the window sizes itself to the recording, and follows any
 resizes that happened during it.
 
+## Several brokers
+
+The library lists recordings from **every broker you have connected**, merged
+into one list, and each row is tagged with the broker that holds it. Play,
+download, notes and delete all act on that broker — nothing is copied between
+them. The drop-down beside **Refresh** narrows the list to one broker; it
+appears only when more than one is configured, and resets to *All brokers* when
+the page is reloaded.
+
+A broker that does not answer gets its **own row** rather than quietly
+shortening the list: unreachable, or *password required* with a **Sign in**
+button. Signing in refills the list in place. A broker running a build older
+than the recorder reads as *no recorder on this broker*.
+
+Two details worth knowing:
+
+- The tag means **stored on**, not *ran on*. A recording is always saved to the
+  broker this page is served from, even when the terminal itself is running on
+  a remote one — so recording a remote session files it here.
+- Hiding a broker (the per-broker hide toggle) masks its **windows**, not its
+  recordings. They stay listed, so you can still delete them.
+
+The merged list is ordered newest-first by each recording's start time, which
+is taken from the clock of the browser that recorded it. Across machines with
+disagreeing clocks that ordering is an approximation.
+
 Transport controls: play/pause, playback speed 0.25×–8×, and **◀◀ reverse** —
 a true backwards animation, not just a jump. The scrubber seeks anywhere;
 seeking and reverse render from keyframes the player indexes when it loads a

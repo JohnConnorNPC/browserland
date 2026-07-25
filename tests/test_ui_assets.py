@@ -431,8 +431,64 @@ def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
     assert src.count("downloadRecording(") >= 3, \
         "expected the helper plus both call sites"
     # And a stale token must re-open the login prompt rather than silently
-    # saving the 401 JSON body as a .blrec (the pre-fix behaviour).
-    assert "promptFileHostAuth(localHost())" in src
+    # saving the 401 JSON body as a .blrec (the pre-fix behaviour). Since #161
+    # the prompt names the broker the recording came FROM, not localHost().
+    assert "promptFileHostAuth(host);" in src
+
+
+def test_recorder_reaches_every_broker_not_just_the_local_one():
+    """#161: the library lists recordings from every configured broker, and
+    every per-recording op targets the broker that stores it.
+
+    Source-slice asserts, so be honest about the limit: these prove the wiring
+    is shaped right, NOT that a request lands on the right broker. That is what
+    the two-broker live verification covers. What they do catch is the specific
+    regression this change exists to remove -- a recorder call falling back to
+    getHosts()[0]."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    # localHost() must not come back. It is the exact bug: every recorder route
+    # hard-wired to getHosts()[0], so a recording on broker B was invisible from
+    # a page attached to broker A. The one path that IS local-only (capture ->
+    # upload) says so with a literal 'local', which is greppable and cannot
+    # silently follow a reordered host list.
+    assert "localHost()" not in src, \
+        "recorder routes must name their broker, not default to getHosts()[0]"
+    for route in ("/recording/begin", "/recording/chunk", "/recording/commit"):
+        assert "recPost('local', '%s'" % route in src, \
+            "capture uploads stay pinned to the local broker"
+    # Every call carries a host id, and a host that no longer resolves is an
+    # ERROR -- never a silent fall-through. hostFetch(null, path) targets the
+    # SAME ORIGIN, so a stale id must not reach it: that would run a delete
+    # against the local broker.
+    assert "async function recApi(hostId, path, opts)" in src
+    assert "function recPost(hostId, path, body)" in src
+    assert "async function downloadRecording(hostId, recId, report)" in src
+    assert re.search(r"const host = recHost\(hostId\);\s*\n\s*"
+                     r"if \(!host\) return \{ ok: false, error: HOST_GONE \};",
+                     src), "recApi must refuse a host it cannot resolve"
+    # The fan-out itself, and the per-host isolation that keeps one dead broker
+    # from emptying the list.
+    assert "hosts.map(" in src and "'/recordings'" in src
+    assert "recTry(" in src, "a transport failure is per-host, not fatal"
+    assert "function buildHostError(" in src, \
+        "a broker that did not answer gets a row, not a shorter list"
+    # Ids are unique per BROKER only: anything keyed by one is composite.
+    assert "function recKey(hostId, id)" in src
+    assert "recKey(host.id, recId)" in src, "downloads keyed per (broker, id)"
+    assert "recKey(hostId, r.series)" in src, "#151 chains keyed per broker"
+    assert "'app:recplay:'" in src
+    assert "encodeURIComponent(hostId)" in src, \
+        "the player window id carries the broker, encoded"
+    # A background repaint must never pop a login modal, and the player must be
+    # retryable once its broker is signed into.
+    assert "refresh({ prompt: false })" in src and \
+        "refresh({ prompt: true })" in src
+    assert "win._onHostAuth" in src
+    # App windows keep hostId 'app' -- core reads win.hostId as the broker a
+    # TERMINAL belongs to and drives masking/reattach off it.
+    assert "hostId: 'app'" in src
+    assert "hostId: recHostId" not in src
 
 
 def test_recorder_autorecord_setting_is_synced_and_default_off():
