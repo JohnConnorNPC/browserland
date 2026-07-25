@@ -392,7 +392,14 @@
             const needsConptyPasteWrap = () => {
                 if (term.modes.bracketedPasteMode) return false;
                 const sess = sessions.get(String(win.id));
-                return !!(sess && BRACKET_GAP_AGENTS[sess.agent]);
+                // Own-property test, not a bare index: sess.agent now also
+                // arrives straight off a JSON `agent` frame (#156), and an
+                // inherited key ('constructor', 'toString') would read truthy
+                // and wrap a paste. The map's CONTENTS are untouched — #138's
+                // "do not extend untested" rule is about which agents are
+                // listed, not how the lookup is spelled.
+                return !!(sess && Object.prototype.hasOwnProperty.call(
+                    BRACKET_GAP_AGENTS, sess.agent));
             };
             const pasteTextToTerm = (text) => {
                 if (needsConptyPasteWrap()) {
