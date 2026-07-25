@@ -536,6 +536,35 @@ def test_recorder_unload_guard_covers_saves_not_auto_recordings():
     assert "pendingSaves++" in src and "pendingSaves--" in src
 
 
+def test_recorder_queues_uploads_under_the_broker_session_cap():
+    """The broker 429s `too_many_sessions` past MAX_RECORDING_SESSIONS and the
+    rejected segment is lost outright. #151 makes many-at-once ordinary -- the
+    off switch stops every auto recording in one go, and a rolling terminal hands
+    over a segment while the next fills -- so saves queue instead of racing."""
+    from webterm.broker.app import MAX_RECORDING_SESSIONS
+
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    m = re.search(r"const SAVE_SLOTS = (\d+);", src)
+    assert m, "the save queue must declare its concurrency"
+    assert 0 < int(m.group(1)) < MAX_RECORDING_SESSIONS, (
+        f"SAVE_SLOTS={m.group(1)} must stay under the broker's "
+        f"MAX_RECORDING_SESSIONS={MAX_RECORDING_SESSIONS} so a manual save is "
+        f"never starved by rolling segments")
+    # Every stop goes through the queue, not straight at saveRecording.
+    stop = src[src.index("function stopRecording"):
+               src.index("// Uploads are QUEUED")]
+    assert "enqueueSave(rec).then(" in stop
+    assert "saveRecording(" not in stop
+    # A rejection must not strand the counter: saveRecording serializes the whole
+    # segment outside its own HTTP try/catch, so an allocation failure at rolling
+    # sizes rejects -- and an armed reload guard would never disarm.
+    pump = src[src.index("function pumpSaves"):src.index("async function saveRecording")]
+    assert ".catch(function (e) {" in pump
+    assert pump.index(".catch(") < pump.index(".then("), \
+        "catch must precede then so the handler always runs"
+
+
 # --------------------------------------------------------------------------- #
 # the split actually happened
 # --------------------------------------------------------------------------- #

@@ -330,7 +330,7 @@
                         auto: !!o.auto,
                         series: o.series || newSeriesId(),
                         seg: o.seg || 1,
-                        rollTimer: null,
+                        rollTimer: null, rolling: false,
                     };
                     const now = function () {
                         return Math.max(0, Math.round(performance.now() - t0));
@@ -450,6 +450,11 @@
                             if (!rec.stopped) {
                                 rec.events.push({ t: now(), k: 'r',
                                                   c: cols, r: rows });
+                                // Every append path checks the cap, or the
+                                // event-count ceiling does not actually bound
+                                // the array — a session driven only by resizes
+                                // would grow it with nothing to trip.
+                                maybeRoll(win, rec);
                             }
                         } catch (_) {}
                         return rec.rawResize.call(win.term, cols, rows);
@@ -493,16 +498,31 @@
                 // task, where xterm has had a chance to drain writes it had
                 // only queued.
                 function maybeRoll(win, rec) {
-                    if (rec.stopped || rec.rollTimer !== null) return;
+                    if (rec.stopped || rec.rolling) return;
                     if (rec.bytes <= REC_CAP_BYTES
                         && rec.events.length <= REC_CAP_EVENTS) return;
+                    rec.rolling = true;
                     rec.rollTimer = setTimeout(function () {
                         rec.rollTimer = null;
                         // Anything that stopped or replaced this recording in
                         // the meantime (⏺, window close, auto-record switched
                         // off) wins — never roll a dead segment.
                         if (rec.stopped || active.get(win.id) !== rec) return;
-                        rollRecording(win, rec);
+                        // Wait for xterm's write queue to DRAIN before rolling.
+                        // A task boundary alone is not enough: term.write only
+                        // parses within a time budget and finishes the rest on
+                        // its own timer, so the next segment's seed snapshot
+                        // could be serialized from a screen that is missing the
+                        // very output that tripped the cap — and if that output
+                        // cleared the screen or moved the cursor, part N+1 would
+                        // replay from the wrong state. term.write('', cb) is the
+                        // same completion barrier the keyframe pass uses
+                        // (flushTerm). Overshoot is free: this segment is still
+                        // patched and still capturing until the roll lands.
+                        win.term.write('', function () {
+                            if (rec.stopped || active.get(win.id) !== rec) return;
+                            rollRecording(win, rec);
+                        });
                     }, 0);
                 }
                 function rollRecording(win, rec) {
@@ -569,7 +589,16 @@
                     // MAX_RECORDING_SESSIONS backpressure, surfaces).
                     pendingSaves++;
                     syncUnloadGuard();
-                    saveRecording(rec).then(function (res) {
+                    // Which save owns this title bar's label. Several segments
+                    // of one terminal can be in flight at once (rolling, or the
+                    // off switch), and they do not finish in order — without a
+                    // generation a slow part 1 landing late would overwrite
+                    // part 2's 'save failed' with 'saved ✓', and its 4s clear
+                    // would wipe the newer result.
+                    const ui = rec.ui;
+                    ui.saveGen = (ui.saveGen || 0) + 1;
+                    const myGen = ui.saveGen;
+                    enqueueSave(rec).then(function (res) {
                         pendingSaves--;
                         syncUnloadGuard();
                         const partOf = rec.seg > 1
@@ -579,14 +608,55 @@
                                        + (res.error || 'unknown error'),
                                        { sticky: true });
                         }
-                        if (!active.has(win.id)) {
-                            rec.ui.setLabel(res.ok ? 'saved ✓' : 'save failed');
+                        if (ui.saveGen === myGen && !active.has(win.id)) {
+                            ui.setLabel(res.ok ? 'saved ✓' : 'save failed');
                             setTimeout(function () {
-                                if (!active.has(win.id)) rec.ui.setLabel('');
+                                if (ui.saveGen === myGen
+                                    && !active.has(win.id)) ui.setLabel('');
                             }, 4000);
                         }
                         if (libRender) libRender();
                     });
+                }
+
+                // Uploads are QUEUED, not fired the moment capture stops. The
+                // broker allows MAX_RECORDING_SESSIONS (4) concurrent save
+                // sessions and 429s `too_many_sessions` beyond that, which loses
+                // the segment outright — and #151 makes many-at-once ordinary:
+                // the off switch stops every auto recording in one go, and a
+                // rolling terminal hands over a segment while the next one is
+                // already filling. Queuing also caps peak memory, since each
+                // concurrent save transiently holds its segment twice (the
+                // event array plus the serialized payload).
+                const SAVE_SLOTS = 2;   // < 4, so a manual ⏺ save is never starved
+                const saveQueue = [];
+                let saveRunning = 0;
+                function enqueueSave(rec) {
+                    return new Promise(function (resolve) {
+                        saveQueue.push({ rec: rec, resolve: resolve });
+                        pumpSaves();
+                    });
+                }
+                function pumpSaves() {
+                    while (saveRunning < SAVE_SLOTS && saveQueue.length) {
+                        const job = saveQueue.shift();
+                        saveRunning++;
+                        // .catch BEFORE .then, not after: saveRecording
+                        // serializes the whole segment outside its own HTTP
+                        // try/catch, so an allocation failure at exactly the
+                        // sizes rolling produces would REJECT. Unhandled, that
+                        // strands the caller's pendingSaves counter — leaving
+                        // the reload guard armed forever and the title-bar label
+                        // stuck on "saving…".
+                        saveRecording(job.rec).catch(function (e) {
+                            return { ok: false,
+                                     error: String((e && e.message) || e) };
+                        }).then(function (res) {
+                            saveRunning--;
+                            job.resolve(res);
+                            pumpSaves();
+                        });
+                    }
                 }
 
                 async function saveRecording(rec) {
@@ -715,10 +785,16 @@
                         if (active.has(win.id)) stopRecording(win, 'teardown');
                         // Only if this window still owns the id — a lost-lease
                         // rebuild re-opens under the same key, so a late
-                        // teardown must not evict the live replacement.
+                        // teardown must not evict the live replacement, nor
+                        // erase a ⏺ stop that was made on it. (Core returns the
+                        // existing window for a known id, so a replacement can
+                        // only appear after this window is gone; the guard is
+                        // cheap insurance either way.)
                         const reg = terms.get(win.id);
-                        if (reg && reg.win === win) terms.delete(win.id);
-                        userStopped.delete(win.id);
+                        if (!reg || reg.win === win) {
+                            terms.delete(win.id);
+                            userStopped.delete(win.id);
+                        }
                         btn.removeEventListener('mousedown', stopProp);
                         btn.removeEventListener('click', onClick);
                         btn.remove();
@@ -1508,23 +1584,29 @@
                             listEl.appendChild(empty);
                             return;
                         }
-                        // #151: how many segments each chain has, so a rolled
-                        // recording reads as "part 2 of 3" instead of three
-                        // identically-named rows. Counted over the whole list
-                        // (one pass, not per row) and only labelled for chains
-                        // with more than one segment — an ordinary recording
-                        // carries a series id too and must not grow a "part 1".
-                        const segCount = new Map();
+                        // #151: how long each chain is, so a rolled recording
+                        // reads as "part 2/3" instead of three identically-named
+                        // rows. One pass over the whole list, not per row.
+                        //
+                        // The HIGHEST seg, not the number of rows: delete part 1
+                        // of a three-part run and a row count would render the
+                        // survivors as "part 2/2" and "part 3/2", and a lone
+                        // surviving part 3 would lose its label entirely. A max
+                        // says what the chain's length was, which stays true as
+                        // segments are deleted. An ordinary recording carries a
+                        // series id too, so a max of 1 must not grow a "part 1".
+                        const segMax = new Map();
                         for (const r of recs) {
-                            if (!r.series) continue;
-                            segCount.set(r.series,
-                                         (segCount.get(r.series) || 0) + 1);
+                            if (!r.series || !r.seg) continue;
+                            segMax.set(r.series,
+                                       Math.max(segMax.get(r.series) || 0,
+                                                r.seg));
                         }
                         for (const r of recs) {
-                            listEl.appendChild(buildRow(r, segCount));
+                            listEl.appendChild(buildRow(r, segMax));
                         }
                     }
-                    function buildRow(r, segCount) {
+                    function buildRow(r, segMax) {
                         const row = document.createElement('div');
                         row.className = 'reclib-row';
                         const name = document.createElement('div');
@@ -1538,8 +1620,8 @@
                         // long enough to truncate (it carries the running command
                         // line) would clip the one label that says this recording
                         // is only part of a run.
-                        const parts = (r.series && segCount)
-                            ? (segCount.get(r.series) || 0) : 0;
+                        const parts = (r.series && segMax)
+                            ? (segMax.get(r.series) || 0) : 0;
                         if (parts > 1 && r.seg) {
                             const seg = document.createElement('span');
                             seg.className = 'reclib-part';

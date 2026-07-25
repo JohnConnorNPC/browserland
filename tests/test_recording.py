@@ -106,6 +106,9 @@ def test_meta_sanitizer_segment_chain():
     assert "seg" not in _rec_sanitize_meta({"seg": True})
     assert "seg" not in _rec_sanitize_meta({"seg": float("nan")})
     assert _rec_sanitize_meta({"seg": 2.0})["seg"] == 2
+    # ...and unlike the other numerics, a non-integral seg is REJECTED rather
+    # than truncated: int(1.9) == 1 would file a second segment as the first.
+    assert "seg" not in _rec_sanitize_meta({"seg": 1.9})
 
 
 # ---- save flow (stateful; ReusableClient) ----------------------------------

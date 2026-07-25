@@ -1750,12 +1750,16 @@ def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
     series = meta.get("series")
     if isinstance(series, str) and _RECORDING_SERIES_RE.fullmatch(series):
         out["series"] = series
+    # Unlike the other numerics, `seg` is an ORDERING key, so a non-integral
+    # value is rejected rather than truncated: int(1.9) == 1 would file a second
+    # segment as the first one.
     seg = meta.get("seg")
-    if (not isinstance(seg, bool) and isinstance(seg, (int, float))
-            and not (isinstance(seg, float) and not math.isfinite(seg))):
-        iv = int(seg)
-        if 1 <= iv <= 2**53:
-            out["seg"] = iv
+    if not isinstance(seg, bool) and isinstance(seg, (int, float)):
+        if isinstance(seg, float) and (not math.isfinite(seg)
+                                       or not seg.is_integer()):
+            seg = None
+        if seg is not None and 1 <= int(seg) <= 2**53:
+            out["seg"] = int(seg)
     return out
 
 
