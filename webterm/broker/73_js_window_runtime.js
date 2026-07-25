@@ -73,6 +73,26 @@
                 maybeSendInitialResize(win);
             };
 
+            // Live-push merge target: this window's row in the `sessions` map,
+            // seeded if the first push beats the first /sessions poll. Shared by
+            // the agent / cwd / title branches below so all three merge into one
+            // record instead of racing three different seed shapes.
+            //
+            // These merges are a HEAD START, never a second source of truth: the
+            // ~2 s poll in refreshTaskbarInner (75_js_taskbar_hosts) does
+            // `sessions.set(key, sess)` with the broker's own object, replacing
+            // this record wholesale. The broker sets those same fields before it
+            // re-broadcasts the frame, so a poll that STARTED after the push
+            // re-asserts the same values; a response already in flight when the
+            // push landed carries the older ones and briefly wins (last writer),
+            // which is exactly today's behaviour — the next poll repairs it. So
+            // the worst case here is the status quo, never something worse.
+            // Exactly how `title` has always behaved.
+            const liveSess = () => sessions.get(String(win.id))
+                || { key: String(win.id), id: win.sid, sid: win.sid,
+                     hostId: win.hostId,
+                     hostLabel: (hostById(win.hostId) || {}).label };
+
             ws.onmessage = (event) => {
                 if (win.disposed) return;
                 if (event.data instanceof ArrayBuffer) {
@@ -168,16 +188,40 @@
                     flashMcpBtn(win, data.kind === 'write' ? 'write' : 'read');
                     return;
                 }
+                if (data.type === 'agent') {
+                    // Live foreground-agent push (#156). The broker already
+                    // whitelists the value (registry._whitelist_agent), so this
+                    // is one of the known agents or "" for none.
+                    //
+                    // NO re-render, deliberately — unlike the `title` branch
+                    // just below, which must repaint the title bar it owns.
+                    // Every consumer reads sessions at use time:
+                    // needsConptyPasteWrap (67) on each paste, the AGENTS.md
+                    // button (mods/agent-docs) on click, the task-manager mod on
+                    // its own timer. Landing the value in the map IS the fix.
+                    const key = String(win.id);
+                    const sess = liveSess();
+                    sess.agent = String(data.data || '');
+                    sessions.set(key, sess);
+                    return;
+                }
+                if (data.type === 'cwd') {
+                    // Live working-dir push (#156) so the AGENTS.md button
+                    // tracks a `cd` on the next click instead of a poll cycle
+                    // later. No re-render needed — same reasoning as `agent`.
+                    const key = String(win.id);
+                    const sess = liveSess();
+                    sess.cwd = String(data.data || '');
+                    sessions.set(key, sess);
+                    return;
+                }
                 if (data.type === 'title') {
                     // Live title push from the producer (OSC 0/2 etc.).
                     // Mirror the polling path in refreshTaskbarInner so the
                     // title bar + taskbar entry both update without waiting.
                     const newTitle = String(data.data || '');
                     const key = String(win.id);
-                    const sess = sessions.get(key)
-                        || { key, id: win.sid, sid: win.sid,
-                             hostId: win.hostId,
-                             hostLabel: (hostById(win.hostId) || {}).label };
+                    const sess = liveSess();
                     sess.title = newTitle;
                     sessions.set(key, sess);
                     const display = formatTitle(sess);

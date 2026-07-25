@@ -97,7 +97,8 @@ class PtyBackend(ABC):
     def cwd(self) -> Optional[str]:
         """Best-effort working directory for this session's file tools, or None.
 
-        Prefer the AGENT'S own cwd (Claude Code / codex / grok / opencode) over
+        Prefer the AGENT'S own cwd (Claude Code / codex / grok / opencode /
+        hermes — whatever ``detect._AGENTS`` lists) over
         the shell's: the agent can run in a *subdir* of where the session shell
         sits, in which case the shell's cwd points a level too high and the
         "edit AGENTS.md for this folder" button opens the wrong place (issue

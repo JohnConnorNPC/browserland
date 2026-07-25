@@ -26,6 +26,20 @@ def test_no_false_positive_on_arguments():
     assert classify_proc("cat", ["cat", "claude.md"]) is None
 
 
+def test_hermes_matches_the_same_name_rules():
+    """#156: hermes joined the whitelist by NAME only — no ``.hermes`` vendor
+    dir was found to attribute, so it must ride rules 1-3 exactly like the
+    others (basename / argv[0] / interpreter wrapper) and nothing else."""
+    assert classify_proc("hermes.exe", ["hermes.exe"]) == "hermes"
+    assert classify_proc("node.exe", ["C:\\x\\hermes", "serve"]) == "hermes"
+    assert classify_proc("node", ["node", "hermes"]) == "hermes"
+    # Same strictness as the rest: an argument named hermes never trips.
+    assert classify_proc("rg", ["rg", "hermes"]) is None
+    # And no vendor-dir rule was added for it (#156: not added speculatively).
+    assert classify_proc("agent.exe", ["agent.exe"],
+                         "C:\\Users\\u\\.hermes\\bin\\agent.exe") is None
+
+
 def test_grok_vendor_dir_in_exe_path():
     """The reported case: grok installed as agent.exe under .grok\\bin.
     Basename 'agent' matches nothing, but the .grok dir in the exe path does."""

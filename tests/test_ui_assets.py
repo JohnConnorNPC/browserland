@@ -141,6 +141,31 @@ def test_label_order_editor_wired_into_page():
         assert sentinel in INDEX_HTML, f"missing #123 sentinel: {sentinel!r}"
 
 
+def test_agent_and_cwd_frames_handled_in_browser():
+    # #156: protocol.py advertises `agent` and `cwd` as broker->browser pushes,
+    # but the ws.onmessage if-chain in 73_js_window_runtime used to drop both —
+    # they fell off the end of the chain and the data only landed on the ~2 s
+    # /sessions poll. No JS test runner exists (pytest only), so lock the served
+    # -page symbols: both branches, both merges, and the shared seed helper.
+    for sentinel in (
+        "data.type === 'agent'",       # #156 branch (73)
+        "data.type === 'cwd'",         # #156 branch (73)
+        "sess.agent = String(data.data || '')",  # #156 merge into the map (73)
+        "sess.cwd = String(data.data || '')",    # #156 merge into the map (73)
+        "const liveSess = ()",         # #156 seed shared with the title branch (73)
+    ):
+        assert sentinel in INDEX_HTML, f"missing #156 sentinel: {sentinel!r}"
+    # The paste wrap reads sess.agent, which now arrives straight off a JSON
+    # frame — the lookup must be an own-property test so an inherited key
+    # ('constructor', 'toString') can't read truthy and bracket a paste (67).
+    assert re.search(r"Object\.prototype\.hasOwnProperty\.call\(\s*"
+                     r"BRACKET_GAP_AGENTS,\s*sess\.agent\)", INDEX_HTML), \
+        "needsConptyPasteWrap must use an own-property test on BRACKET_GAP_AGENTS"
+    # ...and the map itself stays restricted to the live-verified agent (#138).
+    assert "const BRACKET_GAP_AGENTS = { claude: true };" in INDEX_HTML, \
+        "BRACKET_GAP_AGENTS must not be extended without a live-verified agent"
+
+
 def test_sticky_notes_use_a_monospace_font():
     # Notes render in the shared monospace stack (Consolas/'Liberation Mono'),
     # so pasted code, ASCII, and aligned columns line up glyph-for-glyph — NOT

@@ -271,9 +271,57 @@ def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"
     assert _whitelist_agent("  codex  ") == "codex"
+    assert _whitelist_agent("hermes") == "hermes"     # #156
     assert _whitelist_agent("vim") == ""
     assert _whitelist_agent("") == ""
     assert _whitelist_agent(None) == ""
+
+
+def test_hermes_agent_frame_survives_the_whitelist():
+    """#156: a hermes session must be attributable end to end — the label
+    survives _whitelist_agent, lands on the entry, shows in summary() (the
+    /sessions poll shape), and is re-broadcast to attached browsers."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        ws.feed(json.dumps({"type": "hello", "window_id": 1, "pid": 5,
+                            "title": "t", "cols": 80, "rows": 24,
+                            "kind": "agent"}))
+        task = asyncio.create_task(run_producer_session(ws, reg))
+        assert await _wait(lambda: reg.get(1) is not None)
+        entry = reg.get(1)
+        sub = CaptureWS()
+        entry.add_subscriber(sub)
+
+        ws.feed(json.dumps({"type": "agent", "data": "hermes"}))
+        # Wait on the BROADCAST, not on entry.agent: the entry is written first
+        # and the broadcast awaited after, so waiting on the entry could observe
+        # the update before the push and read sub.sent one scheduling slot early.
+        assert await _wait(lambda: any(
+            json.loads(s) == {"type": "agent", "data": "hermes"}
+            for s in sub.sent))
+        assert entry.agent == "hermes"
+        assert entry.summary()["agent"] == "hermes"
+
+        ws.feed(None)
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_agent_whitelists_do_not_drift():
+    """#156: the whitelist is duplicated in two packages on purpose (the broker
+    must not import the agent package for one constant), so pin them equal here
+    — a name added to only one side silently collapses to "" on the wire.
+
+    MEMBERSHIP is the invariant, so compare as sets: the order inside either
+    tuple carries no meaning and a harmless reorder must not fail the suite."""
+    from webterm.agent import detect
+    from webterm.broker import registry
+
+    assert set(detect._AGENTS) == set(registry._AGENTS), (
+        "agent whitelists drifted: webterm/agent/detect.py has "
+        f"{detect._AGENTS}, webterm/broker/registry.py has {registry._AGENTS}")
 
 
 def test_exit_frame_broadcasts_and_deregisters_immediately():

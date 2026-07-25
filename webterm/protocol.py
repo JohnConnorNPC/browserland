@@ -10,7 +10,7 @@ Producer -> broker (text JSON):
     {"type": "hello",   "window_id": <int>, "pid": <int>, "title": "...",
      "cols": N, "rows": M}    # + optional "host", "kind", "agent", "cwd", "version", "pyte"
     {"type": "title",   "data": "..."}
-    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
+    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|"hermes"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir of the shell
     {"type": "resized", "cols": <int>, "rows": <int>}
     {"type": "exit",    "code": <int>}    # child process exited (PTY EOF)
@@ -25,7 +25,7 @@ Broker -> producer (text JSON):
 Broker -> browser (text JSON):
     {"type": "resized", "cols": N, "rows": M}
     {"type": "title",   "data": "..."}        # live title push on change
-    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|""}  # foreground agent
+    {"type": "agent",   "data": "claude"|"grok"|"codex"|"opencode"|"hermes"|""}  # foreground agent
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir push
     {"type": "exit",    "code": <int>}    # session's child exited — tear down now
     {"type": "error", "reason": "unknown_session", "session_id": <int>}
@@ -111,7 +111,8 @@ def title_frame(title: str) -> str:
 
 
 def agent_frame(name: str) -> str:
-    """Foreground-agent push: which of claude/grok/codex/opencode is running, or
+    """Foreground-agent push: which of claude/grok/codex/opencode/hermes is
+    running, or
     "" for none. Sent by the agent on change and re-broadcast by the broker."""
     return json.dumps({"type": "agent", "data": str(name)})
 
