@@ -1006,7 +1006,14 @@ async def _shielded_region(lock: asyncio.Lock, section):
         finally:
             lock.release()        # in the SHIELDED task, never the caller's
 
-    task = asyncio.ensure_future(_held())
+    try:
+        task = asyncio.ensure_future(_held())
+    except BaseException:
+        # Nothing will ever run _held's finally, so the lock would be held for
+        # the life of the process. Only reachable if the loop is already going
+        # away under us (there is no await between the acquire and here).
+        lock.release()
+        raise
     _CRITICAL_TASKS.add(task)
     task.add_done_callback(_CRITICAL_TASKS.discard)
     try:
@@ -4693,15 +4700,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # probe below is not (and is left UNSHIELDED — it is a pure read
             # with no side effect worth finishing for a gone client).
             parts = _profiles_view_parts()
+            # Audit: this write persists shell recipes /launch will spawn by
+            # name. It belongs INSIDE the shielded section, next to the swap it
+            # describes — a cancelled request still completes the write and the
+            # live swap, and an effective change to what /launch can spawn must
+            # never land without its audit line.
+            LOGGER.info("launch profiles updated via /profiles/config: %d "
+                        "profiles (default=%r) from %s",
+                        len(result["profiles"]), result["default_profile"],
+                        request.ip)
             return None
 
         write_err = await _shielded_region(app.ctx.profiles_lock, _locked_write)
         if write_err is not None:
             return write_err
-        # Audit: this write persists shell recipes /launch will spawn by name.
-        LOGGER.info("launch profiles updated via /profiles/config: %d "
-                    "profiles (default=%r) from %s", len(result["profiles"]),
-                    result["default_profile"], request.ip)
         return sanic_json(await _profiles_view_finish(parts))
 
     async def _profiles_detect(request: Request):
