@@ -544,6 +544,42 @@ def test_cancelled_recording_commit_publishes_and_pops_together(tmp_path,
     assert gzip.decompress(blrec.read_bytes()) == payload
 
 
+def test_second_commit_never_strips_a_published_recordings_sidecar(tmp_path,
+                                                                   monkeypatch):
+    """Commit cleanup must never delete metadata for a recording on disk.
+
+    Defence in depth behind the shield, so the precondition is FABRICATED here:
+    a live session whose temp is already gone, which is exactly what a commit
+    that published and then leaked leaves behind. ``os.path.getsize(tmp)`` then
+    raises FileNotFoundError and the cleanup used to unlink ``[tmp, meta_path]``
+    — stripping size/title/savedAt off a recording that stays listed and
+    downloadable. ``/recording/delete`` is the only path allowed to remove a
+    published recording's files.
+    """
+    app = _make_rec_app(tmp_path, monkeypatch)
+    with authed_reusable(app) as client:
+        rec_id = _save_one(client, b'{"t":1}\n' * 8, meta={"title": "keepme"})
+        meta_path = tmp_path / "recs" / f"{rec_id}.meta.json"
+        blrec = tmp_path / "recs" / f"{rec_id}.blrec.gz"
+        assert meta_path.exists() and blrec.exists()
+        # The leaked session a cancelled-mid-replace commit would leave.
+        app.ctx.rec_uploads[rec_id] = {
+            "tmp": str(tmp_path / "recs" / ".webterm-rec-gone.part"),
+            "received": 0, "created": time.time(), "lock": asyncio.Lock(),
+        }
+        _, r = client.post("/recording/commit",
+                           json={"recording_id": rec_id, "meta": {}})
+        assert r.status == 400, r.json          # the temp really is gone
+        assert blrec.exists(), "cleanup must not touch the published events file"
+        assert meta_path.exists(), (
+            "cleanup deleted the sidecar of a published, listed recording — it "
+            "stays downloadable but loses its size/title/savedAt")
+        assert json.loads(meta_path.read_text())["title"] == "keepme"
+        _, r = client.get("/recordings")
+        entry = next(e for e in r.json["recordings"] if e["id"] == rec_id)
+        assert entry["title"] == "keepme"
+
+
 def test_committed_recordings_never_swept(tmp_path, monkeypatch):
     # The durability contract: only /recording/delete removes a committed
     # recording — a later begin's sweeps must leave existing .blrec files

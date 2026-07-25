@@ -1900,6 +1900,18 @@ class _RecPaths(NamedTuple):
         return (self.gz, self.raw)
 
 
+def _rec_events_exist(paths: _RecPaths) -> bool:
+    """True when EITHER encoding's event file for this id is on disk, i.e. when
+    the recording is published and listed.
+
+    Single-sources the "does this recording exist?" predicate that notes, meta
+    and commit cleanup all key off, so none of them can drift into checking one
+    encoding and missing a pre-#159 uncompressed recording.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler."""
+    return any(p.exists() for p in paths.events)
+
+
 def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
     """Whitelist + type-check the client-supplied recording meta (#140). Only
     known scalar fields survive, each clamped/coerced, so the meta sidecar can
@@ -5183,7 +5195,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 await _off_loop(os.replace, tmp, str(blrec))
             except OSError as exc:
                 app.ctx.rec_uploads.pop(rec_id, None)
-                await _off_loop(_unlink_quiet, [tmp, str(meta_path)])
+                # Cleanup must never strip the sidecar off a recording that is
+                # ALREADY on disk and listed. The precondition is a commit that
+                # published and then failed to pop its session (what the shield
+                # now prevents): a SECOND commit for that id finds the temp
+                # already consumed by the replace, getsize raises
+                # FileNotFoundError, and the naive unlink([tmp, meta_path])
+                # deletes the live recording's size/title/savedAt — listed and
+                # downloadable, but nameless. _recording_delete stays the only
+                # path allowed to remove a published recording's files.
+                #
+                # Deliberately a BIAS AGAINST DESTRUCTIVE CLEANUP, not a proof
+                # of ownership: any OSError keeps the sidecar once an event file
+                # is there, including the ambiguous ones (PermissionError, IO
+                # error) where the temp's fate is unknown. Losing a sidecar we
+                # could have kept is worse than leaving one we could have
+                # dropped, which the next successful commit for that id
+                # overwrites anyway. A hand-placed event file under a colliding
+                # id would also spare its sidecar; ids are a timestamp plus 4
+                # random bytes, and that outcome is still the safe direction.
+                doomed = [tmp]
+                if not await _off_loop(_rec_events_exist, paths):
+                    doomed.append(str(meta_path))
+                await _off_loop(_unlink_quiet, doomed)
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=400)
             app.ctx.rec_uploads.pop(rec_id, None)
@@ -5394,7 +5428,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # deleted/never-saved recording must not look note-valid via an
             # orphan sidecar — mirror the PUT's existence check. EITHER
             # encoding counts: an old uncompressed recording is annotatable.
-            if not any(p.exists() for p in paths.events):
+            if not _rec_events_exist(paths):
                 return None
             return _rec_load_notes(paths.notes)
 
@@ -5432,7 +5466,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # Existence probe + meta parse in ONE hop off the loop. None means
             # "no such recording"; a missing/corrupt meta sidecar still
             # degrades to {} the way it always did. Either encoding counts.
-            if not any(p.exists() for p in paths.events):
+            if not _rec_events_exist(paths):
                 return None
             return _rec_load_json(paths.meta) or {}
 
