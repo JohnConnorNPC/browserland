@@ -135,6 +135,14 @@ _PROLOGUE_RE = re.compile(
               (?P<q2>["'])(?P<spec2>[^"'\n]*)(?P=q2)\s*;?               # named / star
     )""", re.X | re.S)
 
+#: The same two import forms, unanchored -- for the post-prologue pass in
+#: :func:`_specifiers`, which supplies the statement-boundary check itself.
+_IMPORT_RE = re.compile(
+    r"""(?:import|export)(?![\w$])(?:
+          \s*(?P<q1>["'])(?P<spec1>[^"'\n]*)(?P=q1)                     # side effect
+        | (?P<clause>[^"'`;]*?)\bfrom\s*(?P<q2>["'])(?P<spec2>[^"'\n]*)(?P=q2)
+    )""", re.X)
+
 #: Syntax the rewriter does not understand. esm.sh emits none of it today; if a
 #: future build does, fail loudly rather than ship a half-rewritten graph that
 #: reaches for the network at runtime.
@@ -144,13 +152,23 @@ _UNSUPPORTED = (
     ("import assertions", re.compile(r"\b(?:assert|with)\s*\{\s*type\s*:")),
 )
 
-#: A QUOTED esm.sh module path. After rewriting, one of these surviving means a
-#: missed specifier -- i.e. "vendored" code that still fetches from the network.
-#: Deliberately quote-anchored so the `/* esm.sh - <pkg>@<ver> */` provenance
-#: header every upstream file carries is not mistaken for a leak.
+#: A QUOTED absolute path or URL. After rewriting, one of these surviving means
+#: a missed specifier -- i.e. "vendored" code that still fetches from the
+#: network. Deliberately quote-anchored so the `/* esm.sh - <pkg>@<ver> */`
+#: provenance header every upstream file carries is not mistaken for a leak.
+#:
+#: It covers any root-relative path ending in `.mjs`, not just
+#: `/<pkg>@<version>/...`. An earlier version required the version and so said
+#: nothing about esm.sh's node polyfills, which import bare `/node/events.mjs`
+#: -- the graph shipped with two unrewritten specifiers and the editor silently
+#: fell back to a textarea. Not "any root-relative path": `"/"` is an ordinary
+#: string in a parser.
+#: The absolute arm is pinned to esm.sh rather than matching any URL: view.mjs
+#: contains "http://www.w3.org/2000/svg", which is a namespace, not an import.
 _LEFTOVER_RE = re.compile(
-    r"""["'](?:https?:)?//esm\.sh/[^"']*["']"""
-    r"""|["']/(?:@[^/"']+/)?[^/"']+@[^"']*["']""")
+    r"""["'](?:https?:)?//esm\.sh/[^"']*["']"""         # absolute / protocol-relative
+    r"""|["']/[^"'\s]*\.mjs["']"""                      # /node/events.mjs
+    r"""|["']/(?:@[^/"']+/)?[^/"']+@[^"']*["']""")      # /pkg@version/...
 
 
 # --------------------------------------------------------------------------
@@ -281,21 +299,58 @@ def _scan_prologue(text: str) -> Tuple[List[Tuple[int, int, str]], int]:
 
 
 def _specifiers(text: str) -> List[Tuple[int, int, str]]:
-    """Every static import/export specifier, left-to-right."""
-    return _scan_prologue(text)[0]
+    """Every static import/export specifier, left-to-right.
+
+    Two passes, because neither alone is both safe and complete:
+
+    * the PROLOGUE, matched exactly (comments, directives, whole import
+      statements from offset 0). This is where esbuild puts imports, and
+      matching it statement-by-statement means a string that merely looks like
+      an import can never be mistaken for one.
+    * anything AFTER the prologue that starts at a statement boundary -- the
+      preceding non-space character is ``;``, ``}`` or ``{``. esm.sh's node
+      polyfills need this: ``node/process.mjs`` declares two helper functions
+      and only then imports ``/node/events.mjs``. ESM allows that (import
+      declarations are top-level, not top-of-file) and a prologue-only scan
+      shipped those two specifiers unrewritten.
+
+    The boundary rule is what keeps the second pass off string contents:
+    ``@codemirror/lang-javascript``'s completion snippets embed literal source
+    (``p('import {${names}} from "${module}"…')``) where ``import`` follows a
+    quote, not a statement terminator. Anything that slips through anyway fails
+    loudly rather than silently -- a bogus specifier 404s during the crawl, and
+    :data:`_LEFTOVER_RE` refuses to write a file with an unrewritten path.
+    """
+    specs, end = _scan_prologue(text)
+    for match in _IMPORT_RE.finditer(text, end):
+        pos = match.start() - 1
+        while pos >= 0 and text[pos] in " \t\r\n":
+            pos -= 1
+        if pos < 0 or text[pos] not in ";}{":
+            continue
+        for group in ("spec1", "spec2"):
+            if match.group(group) is not None:
+                specs.append((*match.span(group), match.group(group)))
+    return specs
 
 
-def _assert_prologue_complete(url: str, text: str) -> None:
-    """Nothing that looks like an esm.sh module path may survive past the
-    prologue -- that would be an import the rewriter never saw, i.e. a
-    "vendored" file that still fetches from the network at runtime."""
-    end = _scan_prologue(text)[1]
-    hit = _LEFTOVER_RE.search(text, end)
-    if hit:
-        raise SystemExit(
-            f"{url}: {hit.group(0)[:80]} appears at offset {hit.start()}, past "
-            f"the import prologue (ends at {end}). The rewriter only walks the "
-            f"prologue, so this import would not be vendored.")
+def _assert_every_module_path_is_a_specifier(url: str, text: str) -> None:
+    """Every module-shaped string in the file must be one the rewriter is about
+    to rewrite.
+
+    The self-check the first version lacked: it asserted only that no LEFTOVER
+    pattern appeared past the prologue, which said nothing about a path shape
+    the pattern did not describe. Comparing spans instead means an import the
+    scanner cannot see is a loud failure here rather than a runtime fetch from
+    a "vendored" file.
+    """
+    spans = {(start, end) for start, end, _ in _specifiers(text)}
+    for hit in _LEFTOVER_RE.finditer(text):
+        if (hit.start() + 1, hit.end() - 1) not in spans:      # strip the quotes
+            raise SystemExit(
+                f"{url}: {hit.group(0)[:80]} at offset {hit.start()} is not a "
+                f"specifier the rewriter found, so it would ship unrewritten. "
+                f"Teach _specifiers/_LEFTOVER_RE about this form.")
 
 
 def _check_unsupported(url: str, text: str) -> None:
@@ -362,7 +417,7 @@ class Fetcher:
             except UnicodeDecodeError as exc:
                 raise SystemExit(f"{final}: not valid UTF-8 ({exc})")
             _check_unsupported(final, text)
-            _assert_prologue_complete(final, text)
+            _assert_every_module_path_is_a_specifier(final, text)
             self.by_key[key] = text
         return key
 

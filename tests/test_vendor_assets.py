@@ -126,7 +126,7 @@ CODEMIRROR_DIR = VENDOR_DIR / "codemirror"
 #: commit; the generator's own `--check` prints nothing to copy, so take it
 #: from the assertion message below.
 CODEMIRROR_MANIFEST = \
-    "sha384-tiWt1Anb4MAbuVGr1hXSe89cDSWs0xTZ1uXisVS38tUVi44pPFHRpxH4eWwkzKD2"
+    "sha384-yPnqg0O9gF3TAwMf8Tv+6H9+vzBVVnrGiN1MXGzWggtc/SVVM/E9hTUSsC9NmRo4"
 
 
 def test_codemirror_manifest_matches_its_pin():
