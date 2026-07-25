@@ -34,8 +34,13 @@
                 // before. A kind may supply its own restore; else openAppWindow.
                 const kind = lookupWindowKind(rec && rec.appKind);
                 if (kind && !kind.serialize) continue;
-                try { (kind && kind.restore ? kind.restore : openAppWindow)(rec); }
-                catch (e) { console.warn('app window restore failed', appId, e); }
+                // restoring: this is the ONE automatic creation path, so each
+                // window keeps the workspace it was on rather than being re-homed
+                // to whichever workspace the page happens to boot on (#152).
+                try {
+                    (kind && kind.restore ? kind.restore : openAppWindow)(
+                        rec, { restoring: true });
+                } catch (e) { console.warn('app window restore failed', appId, e); }
             }
         }
 

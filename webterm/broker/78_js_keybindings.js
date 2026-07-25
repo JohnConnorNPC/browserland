@@ -644,23 +644,21 @@
             const isApp = (win && win.type === 'app')
                 || (sess && sess.kind === 'app');
             const items = [];
-            // Focus: always available. Reopen a closed window (app docs via
-            // their store factory, terminals from /sessions), switch to its
-            // workspace first, restore if minimized, else just raise it — the
-            // onTaskbarClick reopen branch, minus the off-ws float reveal.
+            // Focus: always available. A CLOSED window reopens (app docs via
+            // their store factory, terminals from /sessions) on the workspace it
+            // was parked on — the onTaskbarClick reopen branch. A LIVE one goes
+            // through the shared reveal (#152), which used to be missing here:
+            // a float parked elsewhere raised nothing at all.
             items.push({ label: 'Focus', enabled: true, action: () => {
-                const targetWs = workspaceIndexForKey(key);
-                if (targetWs !== null && targetWs !== getLayout().activeWs)
-                    switchWorkspace(targetWs);
-                const w = windows.get(key);
-                if (!w) {
+                if (!windows.has(key)) {
+                    const targetWs = workspaceIndexForKey(key);
+                    if (targetWs !== null && targetWs !== getLayout().activeWs)
+                        switchWorkspace(targetWs);
                     if (appStore[key]) openAppWindow(appStore[key]);
                     else openWindow(key, sessions.get(key));
-                } else if (w.minimized) {
-                    restoreWindow(key);
-                } else {
-                    bringToFront(key);
+                    return;
                 }
+                revealAndFocusWindow(key);
             }});
             items.push({ label: (win && win.minimized) ? 'Restore' : 'Minimize',
                          enabled: windows.has(key),

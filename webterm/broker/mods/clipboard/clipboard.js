@@ -229,8 +229,7 @@
                     win.cleanups.push(() => liveWins.delete(win));
 
                     render();
-                    if (findKeyInLayout(id)) placeWindowTiled(win);
-                    else bringToFront(id);
+                    finishWindowPlacement(win);
                     return win;
                 }
 

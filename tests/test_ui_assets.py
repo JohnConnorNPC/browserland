@@ -2880,3 +2880,128 @@ def test_control_panel_has_no_native_password_inputs():
     pw_ids = re.findall(r'type="password"\s+id="([^"]+)"', INDEX_HTML)
     assert pw_ids == ["auth-token"], \
         f"unexpected native password input(s) survive: {pw_ids}"
+# --------------------------------------------------------------------------- #
+# floating windows honour the active workspace (#152)
+# --------------------------------------------------------------------------- #
+
+def test_float_workspace_placement_helpers_wired_into_page():
+    # #152: floating membership was never written at creation (so a window born
+    # on a non-active workspace painted, then flicked away when the 2 s poll
+    # stamped it) and never cleared on close (so prefs._floatWs only grew and a
+    # fixed id inherited dead membership). No JS test runner exists (pytest
+    # only), so lock the served-page symbols of the fix.
+    for sentinel in (
+        "function windowOffActiveWs",      # membership test, not a CSS-class test
+        "function adoptFloatWorkspace",    # stamp + mask in the creation frame
+        "function finishWindowPlacement",  # the one factored creation tail
+        "function revealAndFocusWindow",   # the one factored open-or-focus
+    ):
+        assert sentinel in INDEX_HTML, f"missing #152 sentinel: {sentinel!r}"
+
+
+def test_float_workspace_decided_from_membership_not_css_class():
+    # The reveal must key off MEMBERSHIP (prefs._floatWs vs the active workspace),
+    # never off the .ws-hidden class: the class is a presentation echo that a
+    # setWindowWs(render=false) leaves stale in EITHER direction, so a class-only
+    # test both misses a float that must move and refuses to repair one that must
+    # not. windowOffActiveWs is the predicate that encodes it.
+    ws = (BROKER_DIR / "62_js_workspaces.js").read_text(encoding="utf-8")
+    start = ws.index("function windowOffActiveWs")
+    body = ws[start:ws.index("function adoptFloatWorkspace")]
+    assert "ws-hidden" not in body,         "windowOffActiveWs must not consult the ws-hidden class"
+    assert "activeWorkspace().id" in body
+
+
+def test_creation_tails_are_factored_through_finish_window_placement():
+    # Every window factory ended with the same two lines; they are now one call,
+    # so the workspace stamp can never be forgotten by a new factory that copies
+    # the tail. The old form must be gone from every factory.
+    factories = [
+        "81_js_control_panel.js",
+        "mods/aistatus/aistatus.js",
+        "mods/clipboard/clipboard.js",
+        "mods/editor/editor.js",
+        "mods/file-manager/file-manager.js",
+        "mods/help/help.js",
+        "mods/recorder/recorder.js",
+        "mods/scratchpad/scratchpad.js",
+        "mods/task-manager/task-manager.js",
+    ]
+    for rel in factories:
+        text = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert "finishWindowPlacement(win);" in text,             f"{rel} does not use the factored creation tail"
+        assert "if (findKeyInLayout(id)) placeWindowTiled(win);" not in text,             f"{rel} still carries the old unstamped creation tail"
+    # openWindow (terminals) keeps its own decideTiled split — placement happens
+    # before the RAF measurement — so it adopts the workspace in the else branch.
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "adoptFloatWorkspace(win);" in life
+
+
+def test_close_window_forgets_float_workspace_membership():
+    # The prefs GC skips every _-prefixed key, so closeWindow is the ONLY pruning
+    # prefs._floatWs gets. Without it the map grows without bound and a window
+    # with a fixed id (app:recorder / app:clip / app:scratch) reopens onto the
+    # workspace a previous instance died on.
+    rt = (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8")
+    close = rt[rt.index("function closeWindow"):rt.index("async function requestCloseAppWindow")]
+    assert "delete floatWsMap()[id];" in close
+    assert "savePrefsLocal();" in close
+    # teardownView (remote-lease loss) must NOT route through closeWindow, or a
+    # rebuild would re-home every window to the active workspace.
+    alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    teardown = alv[alv.index("function teardownView"):alv.index("async function rebuildView")]
+    assert "closeWindow(" not in teardown,         "teardownView must inline its teardown so membership survives a rebuild"
+
+
+def test_revealed_float_refits_its_terminal():
+    # .ws-hidden is display:none, so a masked window has a 0x0 box and sendResize
+    # bails on it. A window created already-masked therefore never sent ANY
+    # cols/rows; one revealed by a workspace switch kept stale ones. The
+    # hidden -> visible transition has to re-measure.
+    ws = (BROKER_DIR / "62_js_workspaces.js").read_text(encoding="utf-8")
+    vis = ws[ws.index("function applyWorkspaceVisibility"):
+             ws.index("function workspaceIndexForKey")]
+    assert "refitSoon(win)" in vis,         "a float revealed by a workspace switch must re-measure"
+
+
+def test_taskbar_chip_click_keeps_its_own_reveal():
+    # onTaskbarClick is the path #152 factored the helper OUT of, but it keeps its
+    # inline reveal on purpose: its `revealed` flag feeds the minimize-toggle
+    # guard below it, so a chip click on an off-workspace window reveals instead
+    # of round-tripping straight back to minimized.
+    tb = (BROKER_DIR / "75_js_taskbar_hosts.js").read_text(encoding="utf-8")
+    click = tb[tb.index("function onTaskbarClick"):tb.index("// Hard ceiling on how long")]
+    assert "let revealed = false;" in click
+    assert "if (!switched && !revealed && frontId === id) { minimizeWindow(id); return; }" in click
+def test_app_launch_rehomes_but_restore_keeps_its_workspace():
+    # The creation path needs the same split as the dedupe path. A FIXED-id
+    # singleton keeps its prefs._floatWs entry long after its window is gone —
+    # the ephemeral kinds (clipboard, recorder library) are never recreated by
+    # restoreAppWindows, and a reload drops the window while localStorage keeps
+    # the entry. Building it masked and letting bringToFront refuse it is
+    # symptom B again, via creation instead of dedupe. So openAppWindow reveals
+    # after building, EXCEPT for its one automatic caller.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "function openAppWindow(appData, opts)" in s54
+    assert "const restoring = !!(opts && opts.restoring);" in s54
+    assert "if (win && !restoring) revealAndFocusWindow(win.id);" in s54
+    assert "if (!restoring) revealAndFocusWindow(id);" in s54
+    # restoreAppWindows is that automatic caller, and must say so — otherwise
+    # every persisted window re-homes to whichever workspace the page boots on.
+    alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    restore = alv[alv.index("function restoreAppWindows"):alv.index("// Restore-on-refresh")]
+    assert "{ restoring: true }" in restore,         "restoreAppWindows must mark itself as a restore, not a launch"
+
+
+def test_adopt_float_workspace_heals_dangling_membership():
+    # applyWorkspaceVisibility heals a membership pointing at a removed workspace.
+    # The creation stamp must heal it the same way, or a window whose workspace
+    # was deleted is masked against a workspace nothing can switch to and only
+    # appears when the next poll runs — "does nothing, then appears later", which
+    # is worse than the flicker #152 set out to fix.
+    ws = (BROKER_DIR / "62_js_workspaces.js").read_text(encoding="utf-8")
+    body = ws[ws.index("function adoptFloatWorkspace"):
+              ws.index("function finishWindowPlacement")]
+    assert "liveWsIds" in body, "adoptFloatWorkspace must heal a dangling ws id"
+    assert "applyTaskbarWorkspace()" in body,         "a freshly stamped window's taskbar ws badge must not lag a poll"
+

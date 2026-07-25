@@ -1699,8 +1699,7 @@
             setActive('left');
             reList('left');
             reList('right');
-            if (findKeyInLayout(id)) placeWindowTiled(win);
-            else bringToFront(id);
+            finishWindowPlacement(win);
             return win;
         }
 

@@ -603,6 +603,87 @@
             for (const k of Object.keys(m)) if (m[k] === fromWsId) m[k] = toWsId;
             savePrefsLocal();
         }
+        // ---- placement / activation helpers (#152) -----------------------
+        // Does this float belong to a workspace OTHER than the active one?
+        // Answered from MEMBERSHIP, never from the ws-hidden class: the class is
+        // a presentation echo that a setWindowWs(render:false) can leave stale in
+        // either direction. Tiled (membership IS the column), all-workspaces
+        // (null) and unassigned (undefined — adopted on sight) are all "not off".
+        function windowOffActiveWs(win) {
+            if (!win || win.tiled) return false;
+            const wsId = windowWsId(win);
+            return (typeof wsId === 'string') && wsId !== activeWorkspace().id;
+        }
+        // Stamp a floating window's workspace at CREATION, and mask it in the
+        // same frame. Without this the stamp only lands later — from
+        // applyWorkspaceVisibility on the 2 s taskbar poll, on /state adopt, or
+        // inside switchWorkspace — with two consequences: a window that belongs
+        // to another workspace paints where you are and flicks away a tick later,
+        // and an unassigned window born on ws A just before a switch to B is
+        // stamped B (switchWorkspace sets activeWs BEFORE it applies visibility).
+        function adoptFloatWorkspace(win) {
+            if (!win || win.disposed || win.tiled) return;
+            const wsId = windowWsId(win);
+            // Reconcile membership exactly as applyWorkspaceVisibility does, or
+            // the creation stamp and the poll disagree for two seconds: an
+            // unassigned window adopts the active ws, and one pointing at a
+            // workspace that no longer exists (removed while this key had no
+            // window) is HEALED here. Without the heal, a dangling ref would
+            // mask the window against a workspace nothing can switch to — the
+            // poll would fix it a tick later, turning "paints then vanishes"
+            // into "does nothing, then appears", which is worse in a throttled
+            // background tab.
+            const liveWsIds = new Set(getLayout().workspaces.map(w => w.id));
+            if (wsId === undefined
+                || (typeof wsId === 'string' && !liveWsIds.has(wsId))) {
+                setWindowWs(win, activeWorkspace().id, false);   // masked below
+            }
+            const hide = windowOffActiveWs(win);
+            win.dom.classList.toggle('ws-hidden', hide);
+            // Same invariant applyWorkspaceVisibility holds: a masked window is
+            // never the front window. A window this fresh can't already be front,
+            // but this is the only other place the mask is applied, so it owns
+            // the rule rather than assuming its callers do.
+            if (hide && frontId === win.id) { frontId = null; updateTaskbarActive(); }
+            applyTaskbarWorkspace();   // else the chip's ws badge lags a poll
+        }
+        // The single creation tail every window factory ends with: a tiled window
+        // goes into its column, a float adopts the active workspace and takes
+        // focus. findKeyInLayout (not decideTiled) is deliberate — it is exactly
+        // the test the factories already made, so app windows keep floating
+        // unless the layout already holds a column for them.
+        function finishWindowPlacement(win) {
+            if (!win || win.disposed) return win;
+            if (findKeyInLayout(win.id)) placeWindowTiled(win);
+            else { adoptFloatWorkspace(win); bringToFront(win.id); }
+            return win;
+        }
+        // Open-or-focus for a window that ALREADY exists. Invoking one parked on
+        // another workspace must never silently do nothing — bringToFront hard-
+        // refuses a masked float and restoreWindow delegates to it:
+        //   float elsewhere  -> re-home it HERE (the #152 decision)
+        //   tiled elsewhere  -> go THERE instead; a tiled window's membership IS
+        //                       its column, so it cannot be re-homed without
+        //                       restructuring the layout
+        //   masked but ours  -> repair the stale mask
+        // An all-workspaces float (windowWsId === null) is never re-homed: it is
+        // not hidden by design.
+        function revealAndFocusWindow(id) {
+            const win = windows.get(id);
+            if (!win || win.disposed) return null;
+            if (win.tiled) {
+                const loc = findKeyInLayout(id);
+                if (loc && loc.wsIndex !== getLayout().activeWs) {
+                    switchWorkspace(loc.wsIndex);
+                }
+            } else if (windowOffActiveWs(win)) {
+                setWindowWs(win, activeWorkspace().id, true);   // re-home + render
+            } else if (win.dom.classList.contains('ws-hidden')) {
+                applyWorkspaceVisibility();                     // repair the mask
+            }
+            if (win.minimized) restoreWindow(id); else bringToFront(id);
+            return win;
+        }
         // Mask floating windows that don't belong to the active workspace;
         // lazily lock an unassigned (new / pre-feature) window to the current
         // workspace. Idempotent — safe to call every poll tick.
@@ -629,6 +710,12 @@
                 if (win.dom.classList.contains('ws-hidden') !== !show) {
                     win.dom.classList.toggle('ws-hidden', !show);
                     if (!show && frontId === win.id) { frontId = null; frontCleared = true; }
+                    // Masked -> visible: .ws-hidden is display:none, so the
+                    // window had no box while parked and sendResize bailed on
+                    // its 0x0 rect. Re-measure now it has one, else the PTY
+                    // keeps whatever cols/rows it last saw — for a window
+                    // created already-masked (#152), that is none at all.
+                    else if (show) refitSoon(win);
                 }
             }
             if (frontCleared) updateTaskbarActive();

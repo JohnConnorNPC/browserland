@@ -108,9 +108,7 @@
             // would collide and reuse the wrong broker's window.
             const aid = 'app:agents:' + fileHostId + ':' + cwd;
             if (windows.has(aid)) {
-                const w = windows.get(aid);
-                if (w.minimized) restoreWindow(aid);
-                else bringToFront(aid);
+                revealAndFocusWindow(aid);   // parked on another ws -> bring it here (#152)
                 return;
             }
             await openAgentDocsWindow({ id: aid, cwd, fileHostId });

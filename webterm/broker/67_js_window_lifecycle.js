@@ -76,12 +76,11 @@
             id = String(id);
             const existing = windows.get(id);
             if (existing) {
-                if (existing.minimized) {
-                    existing.minimized = false;
-                    existing.dom.classList.remove('minimized');
-                    if (existing.tiled) requestRelayout();   // back into its column
-                }
-                bringToFront(id);
+                // Re-home / navigate first (#152): opening a window that is
+                // already live but parked on another workspace must not silently
+                // no-op. revealAndFocusWindow un-minimizes via restoreWindow,
+                // which is the same three steps this branch used to inline.
+                revealAndFocusWindow(id);
                 refitSoon(existing);
                 return existing;
             }
@@ -696,6 +695,14 @@
             // (not the floating geometry it was created with).
             if (decideTiled(id)) {
                 placeWindowTiled(win);
+            } else {
+                // Float: stamp workspace membership and mask NOW, in the frame
+                // the window is created (#152), so a terminal reattached into a
+                // parked workspace never paints before it hides. Masked means
+                // display:none, but sendResize bails on a 0x0 box and the
+                // hidden->visible transition refits, so nothing is measured
+                // wrong — it is measured when the workspace is shown.
+                adoptFloatWorkspace(win);
             }
 
             // After two RAFs the term has measured itself.

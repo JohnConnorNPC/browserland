@@ -634,8 +634,7 @@
 
                     hydrate();
 
-                    if (findKeyInLayout(id)) placeWindowTiled(win);
-                    else bringToFront(id);
+                    finishWindowPlacement(win);
                     // Persist the view-state record so a reload restores the window
                     // (content then re-hydrates from the server).
                     saveAppWindow(win);

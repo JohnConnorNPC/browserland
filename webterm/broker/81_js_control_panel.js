@@ -31,15 +31,16 @@
             const id = String(appData.id || newAppId('cp'));
             const existing = windows.get(id);
             if (existing) {
-                if (existing.minimized) restoreWindow(id); else bringToFront(id);
+                revealAndFocusWindow(id);
                 return existing;
             }
             // Single-instance: focus the live Control Panel rather than spawn a
-            // second (there is only one #settings-modal node to host).
+            // second (there is only one #settings-modal node to host). Parked on
+            // another workspace it must come HERE, not silently no-op (#152) —
+            // Ctrl+Alt+P is the whole reason that symptom was reported.
             const live = findControlPanelWindow();
             if (live) {
-                if (live.minimized) restoreWindow(live.id);
-                bringToFront(live.id);
+                revealAndFocusWindow(live.id);
                 return live;
             }
             const modal = document.getElementById('settings-modal');
@@ -125,8 +126,7 @@
             showSettingsPane('local');
             renderSettings();
 
-            if (findKeyInLayout(id)) placeWindowTiled(win);
-            else bringToFront(id);
+            finishWindowPlacement(win);
             return win;
         }
         function toggleControlPanelWindow() {

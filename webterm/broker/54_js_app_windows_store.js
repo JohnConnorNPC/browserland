@@ -316,14 +316,42 @@
         // back to ships in a mod: openAppWindow is the central dispatcher, called
         // from file-manager/task-manager/restore/keybindings + the sticky mod (Help
         // does NOT route through it — its open-paths call openHelpWindow directly).)
-        function openAppWindow(appData) {
+        // opts.restoring marks the ONE automatic caller (restoreAppWindows at
+        // boot / after a lease rebuild). Every other caller is a person asking
+        // for this window NOW, which is what decides its workspace below (#152).
+        function openAppWindow(appData, opts) {
+            const restoring = !!(opts && opts.restoring);
             const id = String(appData.id);
             const existing = windows.get(id);
             if (existing) {
-                if (existing.minimized) restoreWindow(id);
-                else bringToFront(id);
+                // The central dedupe, so this one swap covers every singleton
+                // routed through it (recorder library, clipboard, scratchpad,
+                // task manager, aistatus, sticky, file manager, editor): a
+                // launch of a window parked on another workspace re-homes it
+                // here rather than silently doing nothing (#152).
+                if (!restoring) revealAndFocusWindow(id);
                 return existing;
             }
+            const win = buildAppWindow(appData);
+            // The window did NOT exist a moment ago and has just been built.
+            // Creation preserved whatever workspace membership its key still
+            // carried, which is right for a restore and wrong for a launch: a
+            // FIXED-id singleton keeps its membership in browser-local prefs long
+            // after its window is gone (the ephemeral kinds — clipboard, recorder
+            // library — are never recreated by restoreAppWindows, and a reload
+            // drops the window while localStorage keeps the entry). Launching one
+            // from another workspace would otherwise build it already-masked and
+            // bringToFront would refuse it — symptom B of #152 through the
+            // creation path instead of the dedupe path. A no-op when the window
+            // already belongs here.
+            if (win && !restoring) revealAndFocusWindow(win.id);
+            return win;
+        }
+
+        // Record -> window, via the kind registry. Split out of openAppWindow so
+        // the dispatch stays one expression per branch and the workspace decision
+        // above applies to every branch uniformly.
+        function buildAppWindow(appData) {
             const kind = lookupWindowKind(appData.appKind);
             if (kind && kind.factory) return kind.factory(appData);
             // Unknown/unregistered appKind. The hoisted note/editor builder

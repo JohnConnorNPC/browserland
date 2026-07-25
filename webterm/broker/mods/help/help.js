@@ -383,7 +383,7 @@
             const id = String(appData.id || newAppId('help'));
             const existing = windows.get(id);
             if (existing) {
-                if (existing.minimized) restoreWindow(id); else bringToFront(id);
+                revealAndFocusWindow(id);
                 return existing;
             }
             // Single-instance invariant enforced HERE, not only in focusOrOpenHelp:
@@ -392,8 +392,7 @@
             // spawning a second one.
             const liveHelp = findHelpWindow();
             if (liveHelp) {
-                if (liveHelp.minimized) restoreWindow(liveHelp.id);
-                bringToFront(liveHelp.id);
+                revealAndFocusWindow(liveHelp.id);
                 return liveHelp;
             }
             const title = appData.title || 'Help';
@@ -482,8 +481,7 @@
             try { fetchProfiles(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchMcpConfig(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
 
-            if (findKeyInLayout(id)) placeWindowTiled(win);
-            else bringToFront(id);
+            finishWindowPlacement(win);
             setTimeout(() => { try { win._help.searchEl.focus(); } catch (_) {} }, 0);
             return win;
         }
@@ -493,8 +491,7 @@
             markHelpSeen();   // any deliberate open is the strongest "seen" signal
             const ex = findHelpWindow();
             if (ex) {
-                if (ex.minimized) restoreWindow(ex.id);
-                bringToFront(ex.id);
+                revealAndFocusWindow(ex.id);   // parked on another ws -> bring it here (#152)
                 setTimeout(() => { try { ex._help.searchEl.focus(); } catch (_) {} }, 0);
                 return ex;
             }

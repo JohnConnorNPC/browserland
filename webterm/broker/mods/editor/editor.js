@@ -2142,8 +2142,7 @@
             // into its column (survives reload via the same path terminals use);
             // otherwise it stays floating with the geom applied above. New docs
             // are never in _layout, so they always start floating + pinned.
-            if (findKeyInLayout(id)) placeWindowTiled(win);
-            else bringToFront(id);
+            finishWindowPlacement(win);
             return win;
         }
 

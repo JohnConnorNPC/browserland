@@ -342,8 +342,7 @@
                     if (emptyMsg) emptyMsg.remove();
 
                     renderWindow(win);
-                    if (findKeyInLayout(id)) placeWindowTiled(win);
-                    else bringToFront(id);
+                    finishWindowPlacement(win);
                     return win;
                 }
 
