@@ -208,6 +208,13 @@
                 rows: 24,
                 fontFamily: TERM_FONT_BASELINE,   // #126: mod overrides per terminal
                 fontSize: 14,
+                // #154: while an app owns the mouse (lazygit/btop/mc), xterm hands
+                // drags to the app and drag-select dies. Its escape gesture is
+                // Shift-drag everywhere EXCEPT macOS, where shouldForceSelection
+                // requires this option — which defaults false, so a Mac user had no
+                // gesture at all. Option-drag is the iTerm2 / Terminal.app
+                // convention, so this matches what they already expect.
+                macOptionClickForcesSelection: true,
                 theme: { background: '#000000' }
             });
             const fitAddon = new FitAddon.FitAddon();

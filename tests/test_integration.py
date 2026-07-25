@@ -20,6 +20,15 @@ from webterm.agent.config import AgentConfig
 
 from .fake_broker import FakeBroker
 
+# The DEC-mode re-assert postamble every snapshot ends with (#138, #154), with
+# mouse reporting idle. Spelled out as literal bytes on purpose: these tests pin
+# the WIRE CONTRACT a reloaded xterm.js sees, so they must not re-derive it from
+# the code under test. Order within a mutually-exclusive group is load-bearing —
+# xterm.js maps DECRST of any member back to the group default, so the resets
+# have to precede the set (see _reassert_group).
+_MOUSE_IDLE = (b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l"     # tracking level
+               b"\x1b[?1006l\x1b[?1016l")                       # encoding
+
 
 class FakeBackend(PtyBackend):
     """Test double: output is injected with feed(); exit with exit_child()."""
@@ -211,7 +220,7 @@ async def test_snapshot_reasserts_bracketed_paste(running_agent, broker):
     await broker.request_snapshot()
     snap = await broker.wait_binary(
         lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
-    assert snap.endswith(b"\x1b[?2004h\x1b[?1l")
+    assert snap.endswith(b"\x1b[?2004h\x1b[?1l" + _MOUSE_IDLE)
 
 
 async def test_snapshot_postamble_modes_never_set(running_agent, broker):
@@ -223,7 +232,7 @@ async def test_snapshot_postamble_modes_never_set(running_agent, broker):
     await broker.request_snapshot()
     snap = await broker.wait_binary(
         lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
-    assert snap.endswith(b"\x1b[?2004l\x1b[?1l")
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1l" + _MOUSE_IDLE)
 
 
 async def test_snapshot_postamble_decckm_on(running_agent, broker):
@@ -235,7 +244,54 @@ async def test_snapshot_postamble_decckm_on(running_agent, broker):
     await broker.request_snapshot()
     snap = await broker.wait_binary(
         lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
-    assert snap.endswith(b"\x1b[?2004l\x1b[?1h")
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1h" + _MOUSE_IDLE)
+
+
+async def test_snapshot_reasserts_mouse_reporting(running_agent, broker):
+    # #154 track 1: the same bug class as bracketed paste, for the mouse. A
+    # repainting TUI's ESC[2J sits AFTER the mouse DECSETs it emitted at
+    # startup, so raw.py's _trim reliably replays the repaint and drops the
+    # enables — a reloaded xterm.js then has tracking off while lazygit still
+    # thinks it is on, and every click is dead. The postamble restores both the
+    # tracking level and the SGR encoding.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[?1002;1006hmouse-tui")
+    await broker.wait_binary(lambda b: b"mouse-tui" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    # RESETS FIRST, then the set, per group. xterm.js maps DECRST of any
+    # tracking mode to activeProtocol="NONE", so a ?1003l trailing the ?1002h
+    # would silently re-break exactly what this postamble exists to fix.
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1l"
+                         b"\x1b[?9l\x1b[?1000l\x1b[?1003l\x1b[?1002h"
+                         b"\x1b[?1016l\x1b[?1006h")
+
+
+async def test_snapshot_postamble_tracks_mouse_off_again(running_agent, broker):
+    # A TUI that exits resets its modes; the postamble must follow it down, or a
+    # reattach would re-enable tracking under a plain shell and eat drag-select.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[?1002;1006h\x1b[?1002;1006lback to shell")
+    await broker.wait_binary(lambda b: b"back to shell" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1l" + _MOUSE_IDLE)
+
+
+async def test_snapshot_postamble_follows_a_ris(running_agent, broker):
+    # The recovery flow: a killed TUI leaves mouse capture on, the user runs
+    # `reset` (RIS), and the terminal is clean again. The postamble must NOT
+    # resurrect the capture on the next reload — that would make `reset` look
+    # broken and put an escape sequence on the command line at every click.
+    _, backend, _ = running_agent
+    backend.feed(b"\x1b[?1002;1006h\x1bcafter reset")
+    await broker.wait_binary(lambda b: b"after reset" in b)
+    await broker.request_snapshot()
+    snap = await broker.wait_binary(
+        lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
+    assert snap.endswith(b"\x1b[?2004l\x1b[?1l" + _MOUSE_IDLE)
 
 
 async def test_snapshot_pyte_mode_carries_postamble(broker):
@@ -253,7 +309,7 @@ async def test_snapshot_pyte_mode_carries_postamble(broker):
         await broker.request_snapshot()
         snap = await broker.wait_binary(
             lambda b: b.startswith(b"\x1b[0m\x1b[2J\x1b[H"))
-        assert snap.endswith(b"\x1b[?2004h\x1b[?1l")
+        assert snap.endswith(b"\x1b[?2004h\x1b[?1l" + _MOUSE_IDLE)
     finally:
         backend.exit_child(0)
         await asyncio.wait_for(task, 5)

@@ -2488,6 +2488,25 @@ def test_conpty_bracket_gap_wrap_present():
     assert "const pasteTextToTerm" in INDEX_HTML
 
 
+def test_mac_option_click_forces_selection():
+    # #154 track 2: xterm's escape gesture out of app-owned mouse tracking is
+    # shouldForceSelection -> Shift-drag everywhere except macOS, where it also
+    # needs macOptionClickForcesSelection. That option defaults FALSE in the
+    # vendored bundle, so without this a Mac user in lazygit/btop has no gesture
+    # at all to select text. Must be on the Terminal ctor, and must reach the
+    # served page (fragments are concatenated at import).
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "macOptionClickForcesSelection: true" in life
+    assert "macOptionClickForcesSelection: true" in INDEX_HTML
+    # It has to be INSIDE the `new Terminal({...})` options, not a stray
+    # assignment: xterm reads it from rawOptions, so placement is the behaviour.
+    ctor = life.split("new Terminal({", 1)[1].split("});", 1)[0]
+    assert "macOptionClickForcesSelection: true" in ctor
+    # The vendored bundle must still honour the option name we are setting.
+    xterm = (BROKER_DIR / "vendor" / "xterm.js").read_text(encoding="utf-8")
+    assert "macOptionClickForcesSelection" in xterm
+
+
 def test_image_paste_wired_into_page():
     # #137: clipboard-image paste. Capture helpers live in 63 (secure-context
     # gate, text-wins image read, base64, prompt quoting); the upload/injection

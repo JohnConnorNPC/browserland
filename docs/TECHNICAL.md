@@ -306,9 +306,17 @@ snapshots as unframed binary. Broker → producer: `input`, `resize` (reply
 attach: broker sends `resized` *before* requesting the snapshot. Snapshots
 start `ESC[0m ESC[2J ESC[H` — deliberately no `ESC c`/`ESC[3J`, since
 already-attached browsers receive them too — and end with a DEC-mode
-re-assert postamble (`?2004h/l` + `?1h/l` per the agent's live sniffer,
-#138) so a reloaded xterm.js recovers bracketed-paste and
-application-cursor state. The browser→broker `paste` frame type is a
+re-assert postamble (`?2004h/l` + `?1h/l` + mouse reporting, per the
+agent's live sniffer; #138, #154) so a reloaded xterm.js recovers
+bracketed-paste, application-cursor and mouse-tracking state. Mouse
+reporting is two mutually-exclusive groups — tracking level
+(`9/1000/1002/1003`) and extended encoding (`1006/1016`) — and within
+each the postamble emits the **resets first and the set last**, because
+xterm.js maps DECRST of *any* group member back to the group default, so
+a trailing reset would undo the set. Without this, a repainting TUI's
+`ESC[2J` reliably survives `raw.py`'s `_trim` while the mouse DECSETs it
+emitted at startup do not, and every click in `lazygit`/`btop` dies at
+the first browser reload. The browser→broker `paste` frame type is a
 legacy alias for `input` (#138), kept only for tabs served before the UI
 switched to xterm's `paste()`. Windows caveat: ConPTY never forwards an
 app's `?2004h` request to the terminal side (verified live on Server
@@ -317,8 +325,11 @@ app's `?2004h` request to the terminal side (verified live on Server
 bracketed-paste mode is off (`pasteTextToTerm` in the window lifecycle
 fragment).
 
-Known limits: no scrollback replay, no alt-screen modeling in snapshots,
-mouse not forwarded.
+Known limits: no scrollback replay, no alt-screen modeling in snapshots.
+Mouse input *is* forwarded (xterm.js encodes reports onto `onData` like
+any other key), but the sniffer inherits `altscreen.py`'s heuristic
+limits — 8-bit CSI (`0x9b`) is not matched, and `1005`/`1015` encodings
+are untracked because the vendored xterm.js logs both as unsupported.
 
 ## MCP HTTP interface
 

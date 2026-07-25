@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .. import build_version, protocol
-from .altscreen import DecModeSniffer
+from .altscreen import DecModeSniffer, MOUSE_ENCODINGS, MOUSE_TRACK_MODES
 from .backends import create_backend
 from .backends.base import PtyBackend
 from .client import BrokerClient
@@ -269,15 +269,40 @@ def _safe_cwd(configured: Optional[str]) -> str:
         return ""
 
 
+def _reassert_group(modes: tuple, active: int) -> bytes:
+    """Re-assert one mutually-exclusive DEC-mode group: reset every member that
+    is not ``active``, THEN set the active one (0 = none active).
+
+    The order is load-bearing, not stylistic. xterm.js maps DECRST of *any*
+    member of a group back to the group default (``activeProtocol = "NONE"`` /
+    ``activeEncoding = "DEFAULT"``), so a reset emitted after the set would
+    silently undo it. Resets first, set last, is correct under both that
+    model and a real xterm's independent-bits model.
+
+    Emitting the full group (rather than just the active member, which xterm.js
+    alone would accept since it keeps ONE slot) leaves the group briefly at its
+    default mid-parse. That is deliberate: the whole postamble is a few dozen
+    bytes at the tail of one snapshot write, an attached browser is mid-repaint
+    at that instant, and the cost of the alternative — a postamble that only
+    describes the active mode and silently relies on a single-slot emulator —
+    is a far harder bug to see."""
+    out = b"".join(b"\x1b[?%dl" % m for m in modes if m != active)
+    return out + (b"\x1b[?%dh" % active if active else b"")
+
+
 def _mode_reassert(sniffer: DecModeSniffer) -> bytes:
-    """DEC private-mode re-assert postamble for snapshots (#138): bracketed
-    paste (2004) + DECCKM (1) in their live-sniffed direction. A snapshot
-    replays only screen content, so a reloaded xterm.js would otherwise sit
-    with both modes off until the app happens to re-emit them — multiline
-    pastes submit line-by-line and TUI arrow keys go dead. Idempotent for a
-    viewer whose state already matches."""
+    """DEC private-mode re-assert postamble for snapshots (#138, #154):
+    bracketed paste (2004), DECCKM (1) and mouse reporting (tracking level +
+    extended encoding) in their live-sniffed direction. A snapshot replays only
+    screen content, so a reloaded xterm.js would otherwise sit with every mode
+    off until the app happens to re-emit them — multiline pastes submit
+    line-by-line, TUI arrow keys go dead, and a mouse-driven TUI's clicks and
+    scroll stop reaching it while the app still believes tracking is on.
+    Idempotent for a viewer whose state already matches."""
     return (b"\x1b[?2004" + (b"h" if sniffer.bracketed_paste else b"l")
-            + b"\x1b[?1" + (b"h" if sniffer.app_cursor else b"l"))
+            + b"\x1b[?1" + (b"h" if sniffer.app_cursor else b"l")
+            + _reassert_group(MOUSE_TRACK_MODES, sniffer.mouse_tracking)
+            + _reassert_group(MOUSE_ENCODINGS, sniffer.mouse_encoding))
 
 
 @dataclass
