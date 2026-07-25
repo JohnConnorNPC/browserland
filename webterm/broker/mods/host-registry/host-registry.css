@@ -1,0 +1,60 @@
+        /* ---- mod: host-registry (#65) --------------------------------------
+           The Control Panel pane (a browser-mounted registerSettingsPane) is
+           button-only; the publish/pull dialogs reuse the shared .app-dialog
+           primitive (69_js_dialog.js), so only the host-list rows inside those
+           dialogs + the pane's action row need styling. All theme-var driven,
+           matching the Control Panel / host-row look. Indentation matches the
+           head <style> zone the mod-css splice lands in (ui.py:_mod_css). */
+        .hostreg-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .hostreg-actions button { flex: 0 0 auto; }
+        .hostreg-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 44vh;
+            overflow: auto;
+            margin: 8px 0;
+            padding: 4px;
+            border: 1px solid var(--bg-2);
+            border-radius: 4px;
+            background: var(--bg);
+        }
+        .hostreg-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 8px;
+            padding: 4px 6px;
+            border-radius: 3px;
+        }
+        .hostreg-row input[type="checkbox"] { flex: 0 0 auto; }
+        .hostreg-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+        /* Classification accents in the pull dialog. */
+        .hostreg-new    { border-left: 3px solid #5fbf7f; }
+        .hostreg-differs{ border-left: 3px solid #e0a93a; }
+        .hostreg-identical {
+            border-left: 3px solid var(--bg-2);
+            color: var(--fg-dim);
+        }
+        .hostreg-tag {
+            flex: 0 0 auto;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--fg-dim);
+        }
+        .hostreg-haspw {
+            color: #e0a93a;
+            font-size: 11px;
+        }
+        /* The include-passwords opt-in + its warning. */
+        .hostreg-danger { color: #e07b3a; }
+        .hostreg-warn {
+            color: #e0a93a;
+            width: 100%;
+            flex-basis: 100%;
+        }
