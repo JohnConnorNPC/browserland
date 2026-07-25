@@ -44,10 +44,14 @@ include = ["webterm*"]
 # vendor/* ships the vendored xterm (#143) that the broker serves at /vendor/*.
 # It is NOT optional: without it the page loads with no terminal at all, since
 # there is no CDN fallback any more -- that is the point.
+# vendor/codemirror/* is the same deal for the text editor's CodeMirror graph
+# (#146) -- ~116 generated .mjs modules plus the manifest.json that IS the
+# served allowlist, so omitting the .json ships a broker that 500s at startup.
 "webterm.broker" = ["*.html", "*.json", "*.css", "*.js",
                     "mods/*/*.js", "mods/*/*.css", "mods/*/*.json",
                     "mods/*/*.md",
-                    "vendor/*.js", "vendor/*.css"]
+                    "vendor/*.js", "vendor/*.css",
+                    "vendor/codemirror/*.mjs", "vendor/codemirror/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

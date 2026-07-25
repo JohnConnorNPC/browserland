@@ -1,10 +1,19 @@
         // ---- CodeMirror 6 lazy loader (text-editor syntax highlighting) ----
-        // Loaded on first editor open from an ESM CDN. Cached in a module-level
-        // promise so multiple editors share one load. On ANY import failure we
-        // reject; the caller's .catch keeps the plain <textarea> editor
-        // (mandatory offline fallback). Language packs are loaded eagerly
-        // alongside the core — they're small and detection needs whichever one a
-        // file uses.
+        // Loaded on first editor open from OUR OWN ORIGIN (#146 — see CM_BASE
+        // below; it used to be an ESM CDN). Cached in a module-level promise so
+        // multiple editors share one load. On ANY import failure we reject; the
+        // caller's .catch keeps the plain <textarea> editor. Language packs are
+        // loaded eagerly alongside the core — they're small and detection needs
+        // whichever one a file uses.
+        //
+        // ---------------------------------------------------------------------
+        // Everything from here to CM_VER is about WHICH BUILD gets fetched, and
+        // it is now upgrade-time-only reasoning: the generator resolves these
+        // specifiers, and the browser just loads the committed result. It stays
+        // because CM_VER is still the generator's input, so getting a pin wrong
+        // still produces the bug it describes — just at generate time, loudly,
+        // instead of in a user's browser, silently.
+        // ---------------------------------------------------------------------
         //
         // CDN choice — esm.sh, NOT jsdelivr/+esm: CodeMirror 6 is split into
         // many npm packages that all share a SINGLE @codemirror/state module,
@@ -57,19 +66,43 @@
         // dep URLs, so pinning the target everywhere forces the whole graph onto
         // the /es2022/ builds (and thus the single deduped state/view/language)
         // regardless of the browser's per-UA default target (codex review).
-        const CM_CDN = 'https://esm.sh/';
+        //
+        // #146: the whole graph is now VENDORED and served by this broker from
+        // /vendor/codemirror/ — so `script-src` is 'self' plus our inline hash
+        // and no third-party origin executes in the origin that holds
+        // prefs._hosts[].token for every configured host. The editor also works
+        // offline, like the terminal has since #143.
+        //
+        // CM_VER below is no longer what the browser fetches. It is the INPUT to
+        // `python -m webterm.broker.vendor_codemirror`, which resolves it once,
+        // rewrites every import to a relative path, asserts there is exactly one
+        // concrete build per package, and commits the result. The browser loads
+        // `entry-<key>.mjs` — a stable name the generator assigns to each CM_VER
+        // entry point, so an upgrade that renames every hashed file leaves this
+        // file untouched.
+        const CM_BASE = '/vendor/codemirror/';
         const CM_VER = {
             view: '@codemirror/view@^6.23.0?target=es2022',
             state: '@codemirror/state@^6.5.0?target=es2022',
             language: '@codemirror/language@^6.10.0?target=es2022',
             commands: '@codemirror/commands@6.8.0?target=es2022',
             search: '@codemirror/search@6.5.10?target=es2022',
-            autocomplete: '@codemirror/autocomplete@6.18.6?target=es2022',
+            // #146: autocomplete/lang-javascript/lang-html are RANGES for the
+            // same reason the three above are. Vendoring the graph proved they
+            // were loading TWICE: lang-markdown pulls @codemirror/lang-html
+            // ^6.0.0 -> that pulls lang-javascript ^6.0.0 -> that pulls
+            // autocomplete ^6.0.0, and each of those resolved NEWER than our
+            // exact pin, so esm.sh served both builds. Two autocomplete
+            // instances is the silent-facet bug again in miniature (a language
+            // pack registers its completion source on one instance's facet
+            // while `autocompletion()` reads the other's). The generator
+            // asserts one build per package and says to do exactly this.
+            autocomplete: '@codemirror/autocomplete@^6.18.6?target=es2022',
             theme: '@codemirror/theme-one-dark@6.1.2?target=es2022',
-            js: '@codemirror/lang-javascript@6.2.2?target=es2022',
+            js: '@codemirror/lang-javascript@^6.2.2?target=es2022',
             py: '@codemirror/lang-python@6.1.7?target=es2022',
             json: '@codemirror/lang-json@6.0.1?target=es2022',
-            html: '@codemirror/lang-html@6.4.9?target=es2022',
+            html: '@codemirror/lang-html@^6.4.9?target=es2022',
             css: '@codemirror/lang-css@6.3.1?target=es2022',
             md: '@codemirror/lang-markdown@6.3.2?target=es2022',
             cpp: '@codemirror/lang-cpp@6.0.2?target=es2022',
@@ -96,7 +129,7 @@
             // the results back onto a `m` map by the SAME keys, so adding/removing
             // an import can never off-by-one a positional destructure (codex).
             const keys = Object.keys(CM_VER);
-            _cmModulesPromise = Promise.all(keys.map((k) => import(CM_CDN + CM_VER[k])))
+            _cmModulesPromise = Promise.all(keys.map((k) => import(CM_BASE + 'entry-' + k + '.mjs')))
                 .then((arr) => {
                     const m = {};
                     keys.forEach((k, i) => { m[k] = arr[i]; });
@@ -135,8 +168,11 @@
                         },
                     };
                 }).catch((e) => {
-                    // Allow a later retry (e.g. transient CDN blip) by clearing the
-                    // cache, then re-reject so this caller keeps the textarea.
+                    // Allow a later retry by clearing the cache, then re-reject so
+                    // this caller keeps the textarea. Since #146 the modules are
+                    // same-origin static files, so there is no CDN blip left to
+                    // retry past — but a 404 from a half-installed wheel is real,
+                    // and one failed open should not poison every later one.
                     _cmModulesPromise = null;
                     throw e;
                 });
