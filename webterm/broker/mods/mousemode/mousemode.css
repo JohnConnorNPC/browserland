@@ -1,0 +1,30 @@
+        /* ---- mod: mouse mode chip (#155) -----------------------------------
+           The ambient 🖱 in a terminal's title bar while mouse reporting is on.
+           Routed into the head <style> by ui.py's mod-css splice (mod.json
+           `styles`); present-but-inert until the mod's JS adds the span. Sized
+           like the sibling .git-label so a title bar carrying both stays on one
+           line, and deliberately NOT pointer-events:none (unlike .title-text) —
+           the tooltip needs hover. `cursor: inherit` keeps the title bar's move
+           cursor and user-select:none keeps a drag that STARTS on the glyph from
+           selecting it instead of moving the window: a mousedown here bubbles to
+           the bar, so this region drags like the rest of it. */
+        .term-window .mousemode-chip {
+            font-size: 11px;
+            line-height: 1;
+            margin: 0 3px 0 1px;
+            opacity: 0.85;
+            cursor: inherit;
+            user-select: none;
+            -webkit-user-select: none;
+            /* Never let the glyph squeeze the title text or wrap the bar. */
+            flex: 0 0 auto;
+            white-space: nowrap;
+            /* Ask for a colour-emoji face explicitly: with the title bar's own
+               family, U+1F5B1 can land on a text-presentation glyph or tofu.
+               The fixed min-width also keeps the bar from twitching sideways as
+               the chip appears and disappears. */
+            font-family: "Segoe UI Emoji", "Apple Color Emoji",
+                         "Noto Color Emoji", sans-serif;
+            min-width: 14px;
+            text-align: center;
+        }

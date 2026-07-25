@@ -145,6 +145,7 @@ _MODS = [
     "mods/termfont/termfont.js",  # #126 terminal-font Control Panel select (ctx.settings.select) + xterm applicator via ctx.windows.onTerminalCreate (extracted from core; last core appearance setting); default-off
     "mods/recorder/recorder.js",  # #140 session recorder: per-terminal ⏺ capture via ctx.windows.onTerminalCreate + library/player window kinds via ctx.registerWindowKind; broker /recording/* storage; ships recorder.css
     "mods/host-registry/host-registry.js",  # #65 optional shared broker list: publish/pull prefs._hosts via ctx.serverStore (opts.host routing + purgeRevisions); browser-mounted registerSettingsPane; ships host-registry.css
+    "mods/mousemode/mousemode.js",  # #155 ambient 🖱 title-bar chip while an app owns the mouse: samples term.modes.mouseTrackingMode on term.onWriteParsed via ctx.windows.onTerminalCreate; default-ON (invisible until tracking is on); ships mousemode.css
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

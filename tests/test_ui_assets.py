@@ -1511,6 +1511,84 @@ def test_host_registry_mod_packaged_and_manifest_agrees():
     assert browser_pane < anchor < troubleshoot
 
 
+def test_mousemode_mod_packaged_and_manifest_agrees():
+    # #155: the ambient 🖱 title-bar chip, shown for exactly as long as a
+    # full-screen app owns the mouse. A pure READER: it rides
+    # ctx.windows.onTerminalCreate and samples xterm's own public modes getter,
+    # so it needs no other ctx capability and touches no broker endpoint.
+    import json
+    mod_dir = BROKER_DIR / "mods" / "mousemode"
+    js = mod_dir / "mousemode.js"
+    css = mod_dir / "mousemode.css"
+    manifest = mod_dir / "mod.json"
+    help_md = mod_dir / "help.md"
+    assert js.is_file() and css.is_file() and manifest.is_file() \
+        and help_md.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "mousemode"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "mousemode.js"
+    assert meta["styles"] == ["mousemode.css"]
+    assert meta["help"]["slug"] == "mousemode"
+    assert "mods/mousemode/mousemode.js" in ui._MODS
+    src = js.read_text(encoding="utf-8")
+    # The negative assertions below are about CODE, not prose — the mod's header
+    # comment discusses the alternatives it rejected by name.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "registerMod(" in src
+    assert "id: 'mousemode'" in src
+    assert "ctxVersion: 1" in src
+    # Tiers match the order-sensitive _EXPECTED_TIERS guard above.
+    assert "tiers: ['window']" in src
+    # Ships default-ON (no defaultEnabled:false): the chip is invisible until an
+    # app grabs the mouse, so it costs a shell-only user nothing. Asserted so
+    # flipping it off becomes a deliberate, reviewed change.
+    assert "defaultEnabled" not in src
+    # The per-terminal hook is feature-detected, like git/termfont.
+    assert "if (!ctx.windows) return;" in src
+    # The chip's ONE source of truth is xterm's public modes getter, sampled on
+    # the public onWriteParsed event — not the internal enable-mouse-events class
+    # xterm toggles, and not a per-window timer (#155 rules that out).
+    assert "mouseTrackingMode" in src
+    assert "onWriteParsed" in src
+    assert "setInterval" not in src
+    # The modes getter ALLOCATES on every read and a flooding terminal parses
+    # far more writes than it paints, so onWriteParsed only arms one rAF — and
+    # the queued frame is cancelled on teardown, never left to fire onto a
+    # removed node. This is what makes default-ON defensible.
+    assert "requestAnimationFrame(" in src
+    assert "cancelAnimationFrame(" in src
+    # No platform sniffing: both gestures are named unconditionally, because
+    # navigator.platform is deprecated/spoofable and misreads iPadOS.
+    for gone in ("navigator.platform", "userAgentData", "navigator.userAgent"):
+        assert gone not in code, f"mousemode must not sniff the platform: {gone!r}"
+    # The tooltip states the MEASURED state. "Mouse reporting is on" is true
+    # whenever the mode is set; "this app is reading the mouse" is not — a
+    # killed TUI or a cat'd escape sequence leaves reporting on with nobody
+    # listening.
+    assert "Mouse reporting is on" in src
+    # Read-only and side-effect-free on the terminal: it must never write to the
+    # PTY, wrap term.write, or touch mouse reporting itself.
+    for forbidden in ("term.write", "sendChunked", "term.paste", "ctx.session",
+                      "ctx.file", "hostFetch"):
+        assert forbidden not in code, f"mousemode must stay a reader: {forbidden!r}"
+    # Teardown covers BOTH exits (window close + mod disable), the git idiom.
+    assert "info.onDispose(teardown)" in src
+    assert "ctx.onUnload(" in src
+    assert "disp.dispose()" in src
+    # Tooltip text is platform-correct: Shift-drag forces a selection everywhere
+    # EXCEPT macOS, where #154's macOptionClickForcesSelection makes it
+    # Option-drag. Both spellings must be present, chosen at init.
+    assert "Shift-drag" in src and "Option-drag" in src
+    # Ships in the served page, AFTER the host-registry mod (the last mod before
+    # it in _MODS), and its CSS rides the mod-css splice.
+    assert "id: 'mousemode'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'host-registry'") \
+        < INDEX_HTML.index("id: 'mousemode'")
+    assert ".mousemode-chip" in INDEX_HTML
+
+
 def test_editor_serialized_fields_preserved():
     # The hard #83 requirement: every editor serialized field round-trips. They
     # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
@@ -2620,6 +2698,7 @@ _EXPECTED_TIERS = {
     "termfont": ["settings", "window"],  # #126 synced termFont select (ctx.settings.select) + per-terminal apply (ctx.windows.onTerminalCreate)
     "recorder": ["window", "settings"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file). #151 added the synced recorder.autoRecord toggle (ctx.settings.boolean)
     "host-registry": ["storage", "settings"],  # #65 durable server store (ctx.serverStore) + a browser-mounted registerSettingsPane
+    "mousemode": ["window"],  # #155 per-terminal 🖱 chip via ctx.windows.onTerminalCreate; reads xterm's own modes getter, so no other capability
 }
 
 

@@ -1,0 +1,224 @@
+        // ---- mod: mouse mode chip (#155) -----------------------------------
+        // The ambient half of "TUIs feel broken for copy/paste". When lazygit /
+        // btop / mc enable mouse reporting, xterm hands every click, drag and
+        // wheel event to the app and DISABLES its own selection service, so
+        // drag-select silently stops highlighting anything. Nothing in the UI
+        // says why. This mod puts a 🖱 in that terminal's title bar for exactly
+        // as long as the app owns the mouse, and names the escape gesture in the
+        // tooltip — the same sentence wiki/Keyboard-Shortcuts.md carries, at the
+        // moment of confusion instead of on a wiki page.
+        //
+        // Deliberately AMBIENT, not eventful (#155 rejected a detect-and-coach
+        // toast): mouse tracking is persistent STATE, and an app enables it
+        // during its splash output — a one-shot toast fires while the user is
+        // still reading the splash and is long gone by the time they first try to
+        // select something. A chip cannot misfire: it is true precisely when
+        // tracking is on. Scope is a chip and a tooltip — no popover, no click
+        // action, no settings (a click action would be a separate issue).
+        //
+        // SAMPLING. xterm exposes `term.modes` as a GETTER with no change event:
+        //     get modes(){ … switch(coreMouseService.activeProtocol){ … }
+        //                  return { …, mouseTrackingMode:t, … } }   // 'none'|'x10'|'vt200'|'drag'|'any'
+        // so the chip has to sample it. The trigger is `term.onWriteParsed`,
+        // which fires only when output was actually PARSED — an idle terminal
+        // costs nothing, and every mode change arrives as parsed output by
+        // definition (DECSET/DECRST from the app, the RIS an exiting app leaves
+        // behind, and the mouse modes the agent RE-ASSERTS in a reattach
+        // snapshot's postamble — webterm/agent/agent.py, #154 — so a reload or a
+        // lost-lease rebuild re-derives the chip instead of guessing).
+        //
+        // The read is NOT free: the getter allocates a fresh 9-field object every
+        // access, and a flooding terminal parses writes far faster than it
+        // paints. So onWriteParsed only ARMS a requestAnimationFrame — at most
+        // one sample per frame no matter how much output arrives, and the DOM
+        // write lands at paint time. The initial sample is synchronous (see
+        // below) and the pending frame is cancelled on teardown.
+        //
+        // Rejected: watching the `enable-mouse-events` class xterm toggles on
+        // term.element — it fires exactly on the transition, but it is an
+        // internal implementation detail, and a renamed class would silently
+        // freeze the chip, whereas both `modes` and `onWriteParsed` are public
+        // API (core already reads `term.modes.bracketedPasteMode` per paste,
+        // #138). Also rejected: a per-window timer, which #155 rules out in
+        // spirit — there is nothing a 1 Hz poll would catch that a parsed write
+        // does not, and it would mask an xterm API skew instead of surfacing it.
+        //
+        // Ships default-ON: it is invisible until an app grabs the mouse, so a
+        // shell-only user pays one getter read per output frame and sees nothing.
+        // Per-window state lives in the onTerminalCreate closure (never fields on
+        // win), and teardown is idempotent for BOTH exits — a window close
+        // (info.onDispose → win.cleanups, drained by closeWindow and by the
+        // lost-lease view rebuild) and a mod disable (ctx.onUnload drains every
+        // live window's teardown) — following the git mod (#116) exactly.
+        registerMod({
+            id: 'mousemode',
+            version: '1.0.0',
+            ctxVersion: 1,
+            tiers: ['window'],
+            init: function (ctx) {
+                // Feature-detect the per-terminal-window hook (additive ctx
+                // capability, #116): an older loader without ctx.windows leaves
+                // the mod inert, as the git / termfont mods do.
+                if (!ctx.windows) return;
+
+                // How much of the mouse the running program asked for, in a
+                // terminal user's words rather than xterm's protocol names. An
+                // unknown value (a future xterm growing a fifth protocol) still
+                // shows the chip with a generic phrase: the chip's claim is true
+                // for every non-'none' value.
+                const MODE_TEXT = {
+                    x10: 'clicks',
+                    vt200: 'clicks',
+                    drag: 'clicks and drags',
+                    any: 'clicks, drags and every mouse move',
+                };
+                // The tooltip states the MEASURED state — "mouse reporting is
+                // on" — never "this app is reading the mouse". They are not the
+                // same claim: a crashed or killed TUI, a buggy one that skips its
+                // cleanup, or a `cat` of a file containing DECSET 1002 all leave
+                // reporting on with nobody listening. The chip is honest about
+                // what it can actually see.
+                //
+                // Both gestures are named, with no platform detection. xterm's
+                // shouldForceSelection is `shiftKey` everywhere and `altKey` on
+                // macOS (gated on the macOptionClickForcesSelection option core
+                // sets, #154), so naming both is complete; sniffing
+                // navigator.platform to name one would add a deprecated,
+                // spoofable, iPad-confusing failure mode to save four words.
+                const tooltipFor = function (mode) {
+                    return 'Mouse reporting is on — '
+                        + (MODE_TEXT[mode] || 'mouse events')
+                        + ' go to the program, not the browser. '
+                        + 'Shift-drag selects text anyway'
+                        + ' (Option-drag on macOS)'
+                        + ' · Shift+scroll scrolls the terminal'
+                        + ' · Ctrl+Shift+C copies the selection';
+                };
+
+                // Every LIVE window's idempotent teardown, so a mod DISABLE can
+                // tear down chips on windows that are still open (win.cleanups
+                // only fires on window close / view rebuild). Each teardown
+                // self-removes, so the two exits never double-run.
+                const disposers = new Set();
+                // Never decorate the same win twice. Replay and the create-time
+                // emit are mutually exclusive for one subscription; the WeakSet
+                // keeps that robust and self-cleaning (a closed win is GC'd out).
+                const decorated = new WeakSet();
+
+                ctx.windows.onTerminalCreate(function (info) {
+                    const win = info.win;
+                    // No term = nothing to sample. App windows never reach this
+                    // hook, but a guard keeps the mod honest if that changes.
+                    if (!win || !win.term || decorated.has(win)) return;
+                    // onWriteParsed is the whole mechanism: without it the chip
+                    // could only go stale, and #155 rules out a timer. Bail
+                    // BEFORE adding a node so a version skew leaves no dead chip
+                    // pinned to whatever the mode was at open.
+                    if (typeof win.term.onWriteParsed !== 'function') return;
+                    decorated.add(win);
+
+                    // A passive <span>, not a .tb-btn: no click action, and no
+                    // mousedown handler either, so a mousedown on it bubbles to
+                    // the title bar and drags the window like the title text and
+                    // the git branch label already do (wireDrag treats anything
+                    // that does not stopPropagation as "the bar itself"). The
+                    // class is mod-prefixed so a future mod cannot collide with
+                    // it. role/aria-label carry the same sentence as the tooltip,
+                    // since a `title` alone reaches neither a screen reader
+                    // reading the title bar nor a touch user with no hover.
+                    const chip = document.createElement('span');
+                    chip.className = 'mousemode-chip';
+                    chip.setAttribute('role', 'img');
+                    chip.textContent = '🖱';   // 🖱 U+1F5B1
+                    chip.style.display = 'none';         // ambient: hidden at 'none'
+                    info.addTitleBarItem(chip);
+
+                    let last = null;      // last mode PAINTED (null = never)
+                    let torn = false;
+                    let frame = 0;        // pending rAF handle (0 = none)
+                    const paint = function () {
+                        if (torn || win.disposed) return;
+                        let mode;
+                        try {
+                            mode = (win.term.modes
+                                && win.term.modes.mouseTrackingMode) || 'none';
+                        } catch (_) {
+                            // A getter that threw tells us NOTHING about the
+                            // mode. Keep whatever is on screen rather than
+                            // claiming 'none' and hiding a chip that should be
+                            // up — the next parsed write samples again.
+                            return;
+                        }
+                        if (mode === last) return;   // change-detected: no DOM work
+                        last = mode;
+                        if (mode === 'none') {
+                            chip.style.display = 'none';
+                            // Drop the stale tooltip with it: a hidden node is
+                            // still visible to devtools and a11y trees.
+                            chip.removeAttribute('title');
+                            chip.removeAttribute('aria-label');
+                            return;
+                        }
+                        const text = tooltipFor(mode);
+                        chip.title = text;
+                        chip.setAttribute('aria-label', text);
+                        chip.style.display = '';
+                    };
+                    // Coalesce to one sample per frame: a terminal under flood
+                    // parses far more writes than it paints, and the modes getter
+                    // allocates on every read. Cheap enough to leave armed for
+                    // every terminal, which is what lets the mod ship default-ON.
+                    const onParsed = function () {
+                        if (torn || frame) return;
+                        frame = requestAnimationFrame(function () {
+                            frame = 0;
+                            paint();
+                        });
+                    };
+
+                    // One disposable, disposed on either exit. onWriteParsed
+                    // fires AFTER the chunk is parsed, so the mode read inside
+                    // already reflects any DECSET/DECRST that chunk carried.
+                    let disp = null;
+                    try { disp = win.term.onWriteParsed(onParsed); }
+                    catch (_) { disp = null; }
+                    // Sample once NOW, synchronously: enabling the mod mid-session
+                    // replays this hook over terminals that are already running an
+                    // app, and that app may not write again for minutes.
+                    paint();
+
+                    const teardown = function () {
+                        if (torn) return;
+                        torn = true;
+                        disposers.delete(teardown);
+                        // Drop the decorate-once guard so IF this exact win were
+                        // ever re-emitted (it is not today — closeWindow and
+                        // teardownView both discard the win first) a future
+                        // create would re-decorate rather than silently skip.
+                        decorated.delete(win);
+                        if (disp) {
+                            try { disp.dispose(); } catch (_) {}
+                            disp = null;
+                        }
+                        // A queued frame must not fire after the node is gone.
+                        if (frame) {
+                            try { cancelAnimationFrame(frame); } catch (_) {}
+                            frame = 0;
+                        }
+                        try { chip.remove(); } catch (_) {}
+                    };
+                    disposers.add(teardown);
+                    info.onDispose(teardown);
+                });
+
+                // Mod teardown: every live window's chip goes now. The
+                // onTerminalCreate unsubscribe is auto-registered by the loader
+                // (rec.unloads), so no new terminal is decorated after this.
+                ctx.onUnload(function () {
+                    for (const t of Array.from(disposers)) {
+                        try { t(); } catch (_) {}
+                    }
+                    disposers.clear();
+                });
+            },
+        });

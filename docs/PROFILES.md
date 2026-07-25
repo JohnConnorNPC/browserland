@@ -133,6 +133,44 @@ Git-Bash path to your install.
 `-l` makes it a login shell (sources your profile / rc). `Detect…` proposes each
 of these that is actually installed.
 
+### Launching an app instead of a shell
+
+Nothing says `command` has to be a shell. A profile can launch a TUI or an agent
+CLI directly, so the window *is* the app:
+
+```jsonc
+// A TUI, straight into the window — no shell in between.
+"btop":    { "command": ["btop"], "title": "btop" },
+"lazygit": { "command": ["wsl.exe", "-d", "Ubuntu", "--cd", "~", "--", "lazygit"] },
+
+// Needs login-shell PATH (nvm / pyenv / ~/.local/bin) before the name resolves:
+// -l sources your rc files, -c runs the app, and `exec` keeps the shell out of
+// the way so quitting the app ends the session instead of dropping to a prompt.
+"claude":  { "command": ["wsl.exe", "-d", "Ubuntu", "--cd", "~", "--",
+                         "bash", "-lc", "exec claude"], "color": "#c96442" },
+
+// A remote TUI: -t forces a PTY, without which curses apps refuse to start.
+"htop-lab": { "command": ["ssh", "-t", "user@lab", "htop"] }
+```
+
+A profile that launches an app behaves differently from one that launches a shell,
+in ways worth knowing before you wonder what broke:
+
+- **There is no prompt to come back to.** When the app exits, the session exits
+  with it and the window closes. A shell profile survives the app and leaves you
+  a prompt; this does not.
+- **The mouse is usually gone from the first frame.** Most full-screen apps turn
+  on mouse reporting during startup, so drag-select is dead before you ever get a
+  chance to try it. `Shift`-drag (`Option`-drag on macOS) forces a selection and
+  `Shift+scroll` still reaches scrollback — see
+  [Keyboard Shortcuts](https://github.com/JohnConnorNPC/browserland/wiki/Keyboard-Shortcuts).
+  The **Mouse mode chip** mod puts a 🖱 in the title bar while that is the case.
+- **No shell means no rc files.** `["claude"]` only works if `claude` is already
+  on the broker's own `PATH`; anything installed by a login shell needs the
+  `bash -lc "exec …"` form above.
+- **`Detect…` will not propose these.** It scans for shells and WSL distros, so
+  app profiles are always hand-added.
+
 ---
 
 See also: **[SETUP.md](SETUP.md)** (config basics) and
