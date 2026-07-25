@@ -1638,11 +1638,26 @@
                             when
                             + '  ·  ' + fmtClock(r.durationMs || 0)
                             + '  ·  ' + (r.cols || '?') + '×' + (r.rows || '?')
-                            + '  ·  ' + fmtSize(r.size || 0)
-                            + (r.notesCount
-                               ? ('  ·  ' + r.notesCount + ' note'
-                                  + (r.notesCount === 1 ? '' : 's'))
-                               : '')));
+                            + '  ·  '));
+                        // #159: `size` still means the RECORDING's size — what
+                        // it was before compression and what a download gives
+                        // you — so the column reads the same across a library
+                        // holding both encodings. The on-disk footprint is a
+                        // separate number and belongs in a tooltip, not in a
+                        // column that would then mean two different things
+                        // depending on when the recording was made.
+                        const sizeEl = document.createElement('span');
+                        sizeEl.textContent = fmtSize(r.size || 0);
+                        if (r.diskSize != null && r.diskSize !== r.size) {
+                            sizeEl.title = fmtSize(r.diskSize) + ' on disk'
+                                + (r.enc === 'gzip' ? ' (gzip)' : '');
+                        }
+                        infoLine.appendChild(sizeEl);
+                        infoLine.appendChild(document.createTextNode(
+                            r.notesCount
+                                ? ('  ·  ' + r.notesCount + ' note'
+                                   + (r.notesCount === 1 ? '' : 's'))
+                                : ''));
                         const btns = document.createElement('div');
                         btns.className = 'reclib-btns';
                         const play = document.createElement('button');

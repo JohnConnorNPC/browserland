@@ -171,7 +171,20 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 
 The one remaining third party is **CodeMirror from esm.sh**, loaded by dynamic `import()` when the text editor first opens. It cannot be integrity-pinned: its URLs are semver-range-resolved on purpose, because CodeMirror 6 needs one shared `@codemirror/state` instance and an exact pin that drifts silently kills syntax highlighting (see the comment in `mods/editor/codemirror.js`). Vendoring its ~50-module graph is the only real fix and is tracked separately.
 
-**Auditing recordings for secrets (#145).** A `.blrec` captures the terminal's output
+**Recordings are stored gzipped (#159).** A recording is JSONL carrying base64 PTY output —
+about the most compressible thing the app produces, and an always-on capture rolls a fresh
+50 MiB segment forever. New recordings land as `<id>.blrec.gz` (measured ~8x smaller);
+`<id>.blrec` keeps meaning an older uncompressed file and is never rewritten. **The suffix
+is the encoding** — nothing sniffs content, so a corrupt `.gz` reports as a corrupt gzip
+rather than being retried as JSONL. Each uploaded chunk is compressed as its own gzip
+*member*, which keeps appends streaming and commit a plain `os.replace`; concatenated
+members are valid gzip and Python/GNU tooling reads them transparently. `GET /recording`
+still serves **plain JSONL** on the wire, deliberately: HTTP client decoders commonly stop
+at the first member (httpx does), so passing the stored bytes through under
+`Content-Encoding: gzip` would silently truncate multi-chunk recordings. Disk was the
+growth problem; the wire is unchanged.
+
+**Auditing recordings for secrets (#145).** A recording captures the terminal's output
 byte-for-byte, so anything the terminal *echoed* is in it — a secret pasted onto a visible
 command line, an API key printed by a config dump, or this broker's own token if someone
 ran `--print-token` while recording. Recordings are durable and downloadable, so:
@@ -188,7 +201,12 @@ one — that would search for a value the broker isn't even running) and streams
 `grep <token> *.blrec` finds nothing even when the token is present and returns a
 confident false all-clear. Output payloads arrive in arbitrary PTY chunks, so the scanner
 carries a `len(secret)-1` byte tail across events — a secret split over two (or twenty)
-events is still found, and one that straddles a resize/gap event is too.
+events is still found, and one that straddles a resize/gap event is too. It scans **both
+encodings**; a compressed recording it could not open would be a live secret that quietly
+stopped being findable, so a file that fails to decompress is reported as an error
+(exit 2, incomplete) and never skipped into a clean result. By hand, the compressed
+equivalent of the futile `grep` above is `zgrep` / `gzip -dc … | grep` — equally futile,
+and for the same base64 reason.
 
 **Its limits are printed on every run, including clean ones**, because a tool like this
 recreating the false all-clear would be worse than not having it: it finds a secret only

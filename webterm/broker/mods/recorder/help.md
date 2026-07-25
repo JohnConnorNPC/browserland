@@ -59,9 +59,16 @@ captured, including the sessions you would not have thought to record.
 
 To check a saved recording for this broker's own token, run
 `python -m webterm.broker --scan-recordings`. It base64-decodes the output
-stream first -- a plain `grep` over a `.blrec` finds nothing even when the
-token is in there, and reports a false all-clear. It only finds a secret that
-appears as contiguous bytes, so a clean result is evidence, not proof.
+stream first -- a plain `grep` (or `zgrep`) over a recording finds nothing even
+when the token is in there, and reports a false all-clear. It scans compressed
+and uncompressed recordings alike. It only finds a secret that appears as
+contiguous bytes, so a clean result is evidence, not proof.
+
+Recordings are stored **gzipped** on the broker (`.blrec.gz`, typically around
+8x smaller than the raw capture); recordings saved before that change stay as
+they are and keep working. Downloading still gives you plain `.blrec` JSONL
+either way. The size shown in the library is the recording's own size, not its
+compressed footprint -- hover it to see what it actually occupies on disk.
 
 A recording is held in memory until you stop it — reloading the page discards
 an in-progress recording.
