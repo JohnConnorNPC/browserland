@@ -12,6 +12,7 @@ token would be the very artifact this feature warns about.
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 
 import pytest
@@ -336,3 +337,100 @@ def test_found_however_finely_the_output_is_chunked(tmp_path, chunk):
     p = _write(tmp_path / f"rec-chunk-{chunk}.blrec", events=events)
     res = recscan.scan_file(p, SECRETS)
     assert len(res.findings) == 1, f"missed with {chunk}-byte chunks"
+
+
+# ---- compressed recordings (#159) ---------------------------------------
+
+def _write_gz(path, meta=None, events=(), chunked=False):
+    """Compose a .blrec.gz. With ``chunked``, each line lands as its own gzip
+    MEMBER -- which is what the broker actually produces, since it compresses
+    per uploaded chunk."""
+    lines = [json.dumps(meta or {"title": "demo", "cols": 80, "rows": 24})]
+    lines += [json.dumps(e) for e in events]
+    blob = ("\n".join(lines) + "\n").encode("utf-8")
+    if chunked:
+        parts = blob.splitlines(keepends=True)
+        path.write_bytes(b"".join(gzip.compress(p, 6) for p in parts))
+    else:
+        path.write_bytes(gzip.compress(blob, 6))
+    return path
+
+
+def test_finds_a_secret_in_a_compressed_recording(tmp_path):
+    """The #159 regression that matters: a live secret sitting in a compressed
+    recording must not silently stop being findable."""
+    p = _write_gz(tmp_path / "rec-gz.blrec.gz",
+                  events=[_out(100, f"token is {TOKEN}\r\n")])
+    # Neither a plain grep NOR a gzip-aware one finds it -- the payload is
+    # base64 -- which is exactly why this scanner exists.
+    assert TOKEN.encode() not in p.read_bytes()
+    assert TOKEN not in gzip.decompress(p.read_bytes()).decode()
+    res = recscan.scan_file(p, SECRETS)
+    assert [f.label for f in res.findings] == ["auth_token"]
+    assert res.errors == []
+
+
+def test_finds_a_secret_split_across_gzip_members(tmp_path):
+    """The broker compresses PER UPLOADED CHUNK, so a real recording is a
+    multi-member stream. Reading only the first member would report a confident
+    all-clear on everything after it."""
+    blob = f"prefix {TOKEN} suffix"
+    events = [_out(i * 10, blob[i:i + 4]) for i in range(0, len(blob), 4)]
+    p = _write_gz(tmp_path / "rec-multi.blrec.gz", events=events, chunked=True)
+    assert p.read_bytes().count(b"\x1f\x8b\x08") > 3, "expected many members"
+    res = recscan.scan_file(p, SECRETS)
+    assert len(res.findings) == 1
+
+
+def test_scan_dir_covers_both_encodings(tmp_path):
+    # A mixed directory is the normal state after #159: old recordings stay
+    # uncompressed forever, new ones are gzip.
+    _write(tmp_path / "rec-old.blrec", events=[_out(1, f"a={TOKEN}")])
+    _write_gz(tmp_path / "rec-new.blrec.gz", events=[_out(2, f"b={MCP}")])
+    _write_gz(tmp_path / "rec-clean.blrec.gz", events=[_out(3, "nothing here")])
+    res = recscan.scan_dir(tmp_path, SECRETS)
+    assert sorted(f.label for f in res.findings) == ["auth_token", "mcp_token"]
+    assert {f.path.name for f in res.findings} == {"rec-old.blrec",
+                                                   "rec-new.blrec.gz"}
+    assert res.errors == []
+
+
+def test_a_corrupt_compressed_recording_is_an_error_not_a_pass(tmp_path):
+    """A file the auditor cannot read must make the run INCOMPLETE. Reporting
+    it as clean is the false all-clear this module exists to prevent -- and a
+    truncated gzip raises EOFError, which is not an OSError, so it would have
+    escaped the original handler and aborted the whole audit."""
+    good = _write_gz(tmp_path / "rec-trunc.blrec.gz",
+                     events=[_out(1, f"x={TOKEN}"), _out(2, "y" * 4000)])
+    blob = good.read_bytes()
+    good.write_bytes(blob[:len(blob) // 2])
+    res = recscan.scan_file(good, SECRETS)
+    assert res.errors, "a truncated recording must not read as clean"
+    # A neighbouring healthy recording is still audited.
+    _write_gz(tmp_path / "rec-ok.blrec.gz", events=[_out(1, f"z={MCP}")])
+    res = recscan.scan_dir(tmp_path, SECRETS)
+    assert res.errors
+    assert "mcp_token" in [f.label for f in res.findings]
+
+
+def test_garbage_named_gz_is_reported_not_sniffed(tmp_path):
+    # Encoding comes from the SUFFIX. A .blrec.gz that is not gzip at all is an
+    # error, never silently retried as raw JSONL (which would "succeed" at
+    # finding nothing).
+    p = tmp_path / "rec-lies.blrec.gz"
+    p.write_bytes(json.dumps({"title": "not actually gzip"}).encode())
+    res = recscan.scan_file(p, SECRETS)
+    assert res.errors and not res.findings
+
+
+def test_cli_finds_a_secret_in_both_encodings(tmp_path):
+    # The #159 acceptance criterion at the level the user actually runs it.
+    recs = tmp_path / "webterm_recordings"
+    recs.mkdir()
+    _write(recs / "rec-old.blrec", events=[_out(10, f"old={TOKEN}")])
+    _write_gz(recs / "rec-new.blrec.gz", events=[_out(20, f"new={TOKEN}")],
+              chunked=True)
+    rc, out, err = _cli(tmp_path, env={"WEB_TERMINAL_TOKEN": TOKEN})
+    assert rc == 1, (out, err)
+    assert "rec-old.blrec" in out and "rec-new.blrec.gz" in out
+    assert "ERROR" not in err

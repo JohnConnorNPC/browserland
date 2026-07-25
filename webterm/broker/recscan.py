@@ -1,6 +1,6 @@
 """Audit committed session recordings for secrets (#145).
 
-A ``.blrec`` captures the terminal's output stream byte-for-byte, so anything
+A recording captures the terminal's output stream byte-for-byte, so anything
 the terminal ECHOED is in it: a secret pasted onto a visible command line, an
 API key printed by a config dump, or the broker's own token if someone ran
 ``--print-token`` while recording. Recordings are durable (nothing sweeps them)
@@ -10,9 +10,17 @@ and downloadable, so "is there a secret in this file?" needs an answer.
 audit --
 
     grep "$(python -m webterm.broker --print-token)" webterm_recordings/*.blrec
+    gzip -dc webterm_recordings/*.blrec.gz | grep "$(...)"   # or zgrep
 
 -- finds nothing even when the token IS in the recording, and reports a
 confident all-clear. Every search here decodes ``d`` first.
+
+**Both encodings are scanned** (#159). New recordings are gzip (``.blrec.gz``,
+one member per uploaded chunk); ``.blrec`` is the older uncompressed form and
+never gets rewritten. A compressed recording this tool could not open would be a
+live secret that silently stopped being findable, so the encoding comes from the
+SUFFIX and a file that fails to decompress is reported as an ERROR (incomplete),
+never skipped into a clean result.
 
 Format (newline-delimited JSON): line 1 is meta, then one event per line.
 ``{"t":ms,"k":"o","d":"<base64 output>"}`` carries content; ``k:"i"`` is an
@@ -41,10 +49,38 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
+import itertools
 import json
 import os
+import zlib
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
+
+#: Recording event-file suffixes, newest encoding first (#159). Kept in step
+#: with ``webterm.broker.app.REC_SUFFIX``/``REC_SUFFIX_GZ``, but deliberately
+#: NOT imported from there: this module is the offline auditor and must stay
+#: importable without dragging in Sanic and the whole broker app.
+SUFFIX_GZ = ".blrec.gz"
+SUFFIX_RAW = ".blrec"
+
+#: Everything a damaged recording can raise on read. ``gzip.BadGzipFile`` IS an
+#: OSError, but a TRUNCATED member raises ``EOFError`` and a corrupt deflate
+#: stream raises ``zlib.error`` -- neither is one. Letting either escape would
+#: abort the whole audit on one bad file, which is the opposite of this module's
+#: "one corrupt file must not stop the rest" contract.
+_READ_ERRORS = (OSError, EOFError, zlib.error)
+
+
+def _open_text(path: Path):
+    """Open a recording as UTF-8 text, decompressing when the SUFFIX says to.
+
+    Suffix, never content sniffing: a corrupt ``.blrec.gz`` must surface as a
+    corrupt gzip (an audit ERROR) rather than being retried as raw JSONL, which
+    would quietly "succeed" at finding nothing in binary noise."""
+    if path.name.endswith(SUFFIX_GZ):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return open(path, "r", encoding="utf-8", errors="replace")
 
 
 class Finding(NamedTuple):
@@ -128,7 +164,7 @@ def iter_events(path: Path) -> Iterator[Tuple[int, dict]]:
     Line 1 is meta and is NOT an event, matching the player's parseRecording.
     Unparseable lines are skipped rather than fatal -- a truncated recording
     should still be auditable, and the player skips them too."""
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    with _open_text(path) as fh:
         index = -1
         for line in fh:
             line = line.strip()
@@ -189,9 +225,9 @@ def scan_file(path: Path, secrets: Dict[str, str]) -> ScanResult:
     # shells set to the running command line -- a plausible resting place for a
     # pasted secret.
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with _open_text(path) as fh:
             _scan_plain(fh.readline().encode("utf-8", "replace"), META_INDEX, 0)
-    except OSError as exc:
+    except _READ_ERRORS as exc:
         return ScanResult(findings, [f"{path}: unreadable ({exc})"])
 
     bad_b64 = 0
@@ -231,7 +267,10 @@ def scan_file(path: Path, secrets: Dict[str, str]) -> ScanResult:
                                 spans_events=abs_start < chunk_start))
                     pos = window.buf.find(needle, pos + 1)
             window.trim()
-    except OSError as exc:
+    except _READ_ERRORS as exc:
+        # Partway through: KEEP the findings already collected (they are real)
+        # and record the failure, so the run exits "incomplete" rather than
+        # reporting the truncated prefix as a clean bill of health.
         errors.append(f"{path}: read failed partway ({exc})")
     if bad_b64:
         errors.append(f"{path}: {bad_b64} output event(s) had undecodable "
@@ -240,13 +279,20 @@ def scan_file(path: Path, secrets: Dict[str, str]) -> ScanResult:
 
 
 def scan_dir(directory: Path, secrets: Dict[str, str]) -> ScanResult:
-    """Scan every .blrec in a directory. Ids sort by date, so name order is
-    chronological."""
+    """Scan every recording in a directory, compressed or not (#159). Ids sort
+    by date and the id is the name PREFIX, so name order stays chronological
+    across both suffixes.
+
+    Two exact globs rather than one loose ``*.blrec*``, which would also drag in
+    editor backups and stray temps. If both encodings somehow exist for one id
+    BOTH are scanned -- this is an audit, so covering a file twice is harmless
+    where missing one is the failure that matters."""
     findings: List[Finding] = []
     errors: List[str] = []
     if not directory.is_dir():
         return ScanResult(findings, [f"{directory}: not a directory"])
-    for path in sorted(directory.glob("*.blrec")):
+    for path in sorted(itertools.chain(directory.glob("*" + SUFFIX_RAW),
+                                       directory.glob("*" + SUFFIX_GZ))):
         res = scan_file(path, secrets)
         findings.extend(res.findings)
         errors.extend(res.errors)
