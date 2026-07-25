@@ -146,9 +146,9 @@
                     authPrompted.delete(editing.id);
                 } else {
                     if (!pass) {
-                        // A remote /session/kill, /state etc. is token-or-loopback
-                        // gated, so a tokenless remote is undriveable from here even
-                        // though CORS is now unconditional — require the token.
+                        // A remote /session/kill, /state etc. is token-gated, so a
+                        // tokenless remote is undriveable from here even though CORS
+                        // is now unconditional — require the token.
                         setHostError('password required — remote brokers must '
                             + 'have an auth token configured');
                         return;

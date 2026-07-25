@@ -2765,7 +2765,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     # ---- richer file operations (#72) ------------------------------------
     # mkdir / copy / move / zip / unzip / stat round out the file manager's
-    # context menu. Same token-or-loopback gate, host-wide resolution
+    # context menu. Same token gate, host-wide resolution
     # (_resolve_host_path) and absolute-path echo as the read/write/delete
     # endpoints above; they add NO new privilege (an authenticated client
     # already has shell-level filesystem access). Heavy IO (copytree / rmtree /
@@ -3749,8 +3749,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # ---- task manager + git button (/session/*) --------------------------
     # On-demand broker<->producer round-trips (correlated by req id) so process
     # listing, scoped kill, and git status work for LOCAL and REMOTE sessions
-    # alike (the agent does the work in its own host/cwd). Same token-or-loopback
-    # gate as /launch — killing processes is privileged. The agent scopes kills
+    # alike (the agent does the work in its own host/cwd). Same token gate as
+    # /launch — killing processes is privileged. The agent scopes kills
     # to the session's own process tree; the broker never trusts a client pid
     # beyond relaying it.
     async def _session_rpc(entry, make_frame, expected: str,
@@ -3875,10 +3875,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     # ---- MCP HTTP interface (/mcp/*) -------------------------------------
     # Consumed by an EXTERNAL MCP server against a documented contract. Gated
-    # by the per-broker MCP token only — NO loopback exemption (unlike
-    # auth_token): MCP is opt-in, so with no token configured (or the feature
-    # disabled) the whole surface is 403 mcp_disabled. CORS rides the shared
-    # response middleware; OPTIONS preflights are registered alongside.
+    # by the per-broker MCP token only — a realm entirely separate from the
+    # browser auth_token: MCP is opt-in, so with no token configured (or the
+    # feature disabled) the whole surface is 403 mcp_disabled. CORS rides the
+    # shared response middleware; OPTIONS preflights are registered alongside.
     def _mcp_auth_error(request: Request):
         cfg = app.ctx.mcp_cfg
         if not cfg.get("enabled") or not cfg.get("token"):
@@ -4249,8 +4249,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
-    # BROWSER auth_token (loopback-or-token, same as /file/* and /state) — NOT
-    # the MCP token — so the secret only ever travels to an already-
+    # BROWSER auth_token (same as /file/* and /state) — NOT the MCP token —
+    # so the secret only ever travels to an already-
     # authenticated browser and never rides the synced /state blob.
     def _mcp_token_env_pinned() -> bool:
         # The admin env override (resolve_token semantics: "env wins so a unit
@@ -4326,14 +4326,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     # ---- launch profiles config (browser-facing, #70) --------------------
     # The Control Panel reads/writes the FULL profile objects here. Gated by the
-    # BROWSER token-or-loopback realm (_gated_auth_error), EXACTLY like /file/*,
+    # BROWSER auth_token realm (_gated_auth_error), EXACTLY like /file/*,
     # /state and /mcp/config — never the MCP-token realm. So the commands (the
     # RCE-by-design half of the profiles-only model) only ever travel to an
     # already-authenticated browser; /profiles and /mcp/profiles stay names-only,
-    # so an MCP/AI agent still can't read commands or define profiles. A same-
-    # machine tokenless page can drive this, the accepted /file/* posture — this
+    # so an MCP/AI agent still can't read commands or define profiles. This
     # write is no weaker than /file/write (both grant persistent host code-exec),
-    # so a tokenless broker must not run while the browser visits untrusted sites.
+    # so the browser token must be kept secret, exactly as a shell would be.
     def _which_map(exes: List[str]) -> Dict[str, bool]:
         """Resolve each executable name on PATH. BLOCKING — worker thread only.
 
@@ -4459,10 +4458,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "suggestions": suggestions})
 
     # ---- broker identity (/info) -----------------------------------------
-    # Non-secret stable id + build version (#64). Gated by the SAME
-    # token-or-loopback policy as /state: the same-origin local probe passes via
-    # loopback (no token); the cross-origin add-time probe passes via the
-    # ?token= appendHostToken already attaches. Gating (vs fully public) keeps a
+    # Non-secret stable id + build version (#64). Gated by the SAME token
+    # policy as /state: the same-origin local probe passes via the local host's
+    # stored token, and the cross-origin add-time probe via the ?token=
+    # appendHostToken already attaches. Gating (vs fully public) keeps a
     # durable broker fingerprint off the unauthenticated network — adding a
     # remote already requires a token anyway.
     async def _info(request: Request):
@@ -4475,7 +4474,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "serve_ui": app.ctx.serve_ui})
 
     # ---- AI-provider status proxy (/status/fetch, #112) ------------------
-    # The broker's ONLY outbound HTTP. Gated by the SAME token-or-loopback
+    # The broker's ONLY outbound HTTP. Gated by the SAME token
     # policy as /info & /state (browser realm). The client passes ONLY allowlist
     # ids (?provider=a,b — never a URL); unknown ids are dropped, and a request
     # that names providers but validates NONE is a 400 (the SSRF allowlist
@@ -4521,7 +4520,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # concurrency on an integer rev: GET returns {rev, settings, layout}; PUT
     # supplies {baseRev, settings, layout} and is rejected 409 (with the
     # current state inlined, so the loser resyncs in one round trip) when
-    # baseRev != the live rev. Same token-or-loopback gate as /file/*.
+    # baseRev != the live rev. Same token gate as /file/*.
     async def _state_get(request: Request):
         err = _gated_auth_error(request, "/state")
         if err is not None:
@@ -4589,7 +4588,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "rev": new_state["rev"]})
 
     # ---- /mod-store/<modId> (#124): generic per-mod server KV + rev ring ----
-    # The durable, cross-browser twin of ctx.storage. Same token-or-loopback gate
+    # The durable, cross-browser twin of ctx.storage. Same token gate
     # and the SAME single-active-client lease as /state. GET is ungated by the
     # lease (a non-active/reactivating browser can always READ); PUT is lease-
     # gated (409 not_active) so a background tab can't clobber the active one.
@@ -4711,7 +4710,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # /file/paste_image), lands atomically as <id>.blrec in recordings_dir,
     # with a whitelisted meta sidecar (<id>.meta.json) so listing never parses
     # the big event file, and a revisioned notes sidecar (<id>.notes.json).
-    # Same token-or-loopback gate as /file/*.
+    # Same token gate as /file/*.
     def _rec_auth_error(request: Request):
         return _gated_auth_error(request, "/recording")
 
