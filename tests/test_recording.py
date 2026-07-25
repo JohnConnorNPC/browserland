@@ -12,6 +12,7 @@ import gzip
 import json
 import os
 import random
+import threading
 import time
 
 from sanic_testing.reusable import ReusableClient
@@ -364,13 +365,16 @@ def test_recording_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
     # test_file_api.py's twin for the full reasoning.
     app = _make_rec_app(tmp_path, monkeypatch)
     payload = b"{}\n" * 256
-    real_append = app_mod._append_chunk
+    # Patch _append_chunk_GZ, not _append_chunk: #159 switched this handler to
+    # the gzip variant, and for a while this widening patched a function
+    # /recording/chunk no longer calls — an inert race-widener that still passed.
+    real_append = app_mod._append_chunk_gz
 
     def slow_append(tmp, data):
         time.sleep(0.25)                       # in the executor, not on the loop
         real_append(tmp, data)
 
-    monkeypatch.setattr(app_mod, "_append_chunk", slow_append)
+    monkeypatch.setattr(app_mod, "_append_chunk_gz", slow_append)
     with authed_reusable(app) as client:
         _, r = client.post("/recording/begin", json={})
         assert r.status == 200, r.json
@@ -398,6 +402,146 @@ def test_recording_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
         assert r.status == 200 and r.json["size"] == len(payload), r.json
     stored = (tmp_path / "recs" / f"{rec_id}.blrec.gz").read_bytes()
     assert gzip.decompress(stored) == payload
+
+
+# ---- #160: a cancelled request must not release the lock mid-write ----------
+# Sanic cancels the handler task on connection_lost, and a RUNNING executor
+# future cannot be cancelled — so an unshielded `async with` unwinds and frees
+# the lock while the worker keeps writing. The upload twin of the first test
+# lives at test_file_api.py::test_cancelled_chunk_leaves_accounting_and_disk_in_step.
+
+
+def _cancel_once_entered(client, url, body, entered, settled):
+    """POST, cancel the request the moment ``entered`` fires, then wait for the
+    shielded task's side effects instead of guessing with a fixed sleep.
+
+    ``settled`` is polled on the loop; the bounded 4 s ceiling only ever runs to
+    the end when the behaviour under test is BROKEN, so a correct run is fast.
+    """
+    async def _drive():
+        task = asyncio.ensure_future(client._session.post(url, json=body))
+        while not entered.is_set():            # cancel INSIDE the worker hop
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except BaseException:      # noqa: BLE001 - cancellation is the point
+            pass
+        for _ in range(400):
+            if settled():
+                break
+            await asyncio.sleep(0.01)
+
+    client._loop.run_until_complete(_drive())
+
+
+def test_cancelled_recording_chunk_leaves_accounting_and_disk_in_step(
+        tmp_path, monkeypatch):
+    """A tab close mid-append must not strand unaccounted bytes on disk.
+
+    Unshielded, the cancel releases the session lock while the worker is still
+    inside the gzip append: the member lands but ``received`` stays at the old
+    offset. The 409 body hands that stale ``received`` back specifically so a
+    client can resume — and a resumed POST at that offset appends the SAME
+    member twice. Post-#159 the file is a gzip stream, so the duplicate is
+    invisible to every reader, and a genuinely CONCURRENT pair (which the stale
+    offset makes possible) interleaves 3-4 raw writes into an invalid deflate
+    stream that costs the WHOLE archive, not just the bad chunk.
+
+    The invariant is decompressed length, not ``getsize``: the temp holds
+    compressed members while ``received`` counts decoded input bytes.
+    """
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = b'{"t":1,"d":"x"}\n' * 32
+    real_append = app_mod._append_chunk_gz
+    entered = threading.Event()
+
+    def slow_append(tmp, data):
+        entered.set()          # the worker is now inside the hop
+        time.sleep(0.40)       # ...and stays there long enough to be cancelled
+        real_append(tmp, data)
+
+    monkeypatch.setattr(app_mod, "_append_chunk_gz", slow_append)
+    with authed_reusable(app) as client:
+        _, r = client.post("/recording/begin", json={})
+        assert r.status == 200, r.json
+        rec_id = r.json["recording_id"]
+        tmp = app.ctx.rec_uploads[rec_id]["tmp"]
+        url = with_token(
+            f"http://{client.host}:{client.port}/recording/chunk",
+            app.ctx.auth_token)
+        body = {"recording_id": rec_id, "offset": 0,
+                "content_b64": _b64(payload)}
+        _cancel_once_entered(
+            client, url, body, entered,
+            lambda: app.ctx.rec_uploads.get(rec_id, {}).get("received"))
+
+        with open(tmp, "rb") as fh:
+            on_disk = len(gzip.decompress(fh.read())) if os.path.getsize(tmp) \
+                else 0
+        session = app.ctx.rec_uploads.get(rec_id)
+        accounted = session["received"] if session else None
+        assert accounted == on_disk, (
+            f"accounting ({accounted}) diverged from disk ({on_disk}) after a "
+            "cancelled append: the 409 body would hand a client that stale "
+            "offset, and re-POSTing it duplicates the gzip member")
+
+
+def test_cancelled_recording_commit_publishes_and_pops_together(tmp_path,
+                                                                monkeypatch):
+    """A recording that reached disk must never leave its session behind.
+
+    The commit body is tiny, so this one is deterministically cancellable — no
+    ``pause_reading`` coin flip — which makes it the path a stock tab close
+    actually hits. Unshielded, the cancel lands inside the publishing
+    ``os.replace``: the worker finishes it, the recording is on disk and listed,
+    and the ``rec_uploads.pop`` after the await never runs. The session then
+    holds one of only MAX_RECORDING_SESSIONS slots for RECORDING_SESSION_TTL,
+    and it is the precondition for the sidecar deletion covered by
+    ``test_second_commit_never_strips_a_published_recordings_sidecar``.
+    """
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = b'{"t":1}\n' * 16
+    real_replace = os.replace
+    entered = threading.Event()
+
+    def slow_replace(src, dst, *a, **kw):
+        # Gate on the PUBLISH hop only. _write_state_atomic writes the meta
+        # sidecar through its own os.replace first, and widening THAT reproduces
+        # a different (benign, by-design) case instead.
+        if not str(dst).endswith(".blrec.gz"):
+            return real_replace(src, dst, *a, **kw)
+        entered.set()
+        time.sleep(0.40)
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "replace", slow_replace)
+    with authed_reusable(app) as client:
+        _, r = client.post("/recording/begin", json={})
+        assert r.status == 200, r.json
+        rec_id = r.json["recording_id"]
+        _, r = client.post("/recording/chunk",
+                           json={"recording_id": rec_id, "offset": 0,
+                                 "content_b64": _b64(payload)})
+        assert r.status == 200, r.json
+        url = with_token(
+            f"http://{client.host}:{client.port}/recording/commit",
+            app.ctx.auth_token)
+        _cancel_once_entered(
+            client, url, {"recording_id": rec_id, "meta": {"title": "t"}},
+            entered, lambda: rec_id not in app.ctx.rec_uploads)
+
+        blrec = tmp_path / "recs" / f"{rec_id}.blrec.gz"
+        # Both assertions matter, and they must be read INSIDE the client
+        # context: _drain_rec_sessions clears rec_uploads at server stop, which
+        # would forge a pass.
+        assert blrec.exists(), \
+            "the shielded replace should still have published the recording"
+        assert rec_id not in app.ctx.rec_uploads, (
+            "the recording is published and listed but its session leaked: it "
+            "holds a save slot for RECORDING_SESSION_TTL and arms the "
+            "destructive second-commit cleanup")
+    assert gzip.decompress(blrec.read_bytes()) == payload
 
 
 def test_committed_recordings_never_swept(tmp_path, monkeypatch):

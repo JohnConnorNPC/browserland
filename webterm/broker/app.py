@@ -916,6 +916,108 @@ async def _off_loop(fn, *args, timeout=None):
     return await loop.run_in_executor(None, functools.partial(fn, *args))
 
 
+#: Strong references to in-flight :func:`_shielded_region` tasks. The loop holds
+#: only WEAK references to tasks, and a shielded task's other referent is the
+#: awaiting handler — which is exactly the thing being cancelled. A done callback
+#: discards each entry, so this never grows past what is actually running.
+_CRITICAL_TASKS: set = set()
+
+
+def _log_orphaned_section(task) -> None:
+    """Log a shielded critical section that failed AFTER its request was gone.
+
+    Such a failure is otherwise INVISIBLE — worse than the usual "Task exception
+    was never retrieved" noise. CPython's ``shield`` calls ``inner.exception()``
+    from its own done callback whenever the outer future was cancelled,
+    deliberately marking the exception retrieved, so the traceback is consumed
+    and dropped; and the client is already gone, so there is no 500 either. An
+    unexpected KeyError/ValueError inside a critical section would then leave
+    disk and memory disagreeing with no trace anywhere at all."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        LOGGER.error("shielded critical section failed after its request was "
+                     "cancelled; disk and memory may disagree", exc_info=exc)
+
+
+async def _shielded_region(lock: asyncio.Lock, section):
+    """Acquire ``lock`` CANCELLABLY, then run ``section()`` to completion even if
+    this request is cancelled, releasing the lock inside the shielded task.
+
+    ``section`` is a no-argument coroutine FUNCTION (not a coroutine) holding one
+    whole ``guard -> await _off_loop(...) -> accounting -> response`` sequence.
+    It must NOT take the lock itself: this owns both acquire and release.
+
+    WHY THE SHIELD IS LOAD-BEARING, not belt-and-braces. Sanic awaits handlers
+    inline on the connection task and ``connection_lost`` cancels that task
+    unconditionally (so does the RESPONSE_TIMEOUT sweep), so a tab close,
+    navigation or dropped link cancels a handler mid-flight. Unshielded, a cancel
+    landing on ``await _off_loop(...)`` unwinds the ``async with`` and RELEASES
+    THE LOCK immediately — while the worker thread keeps going, because a
+    *running* ``concurrent.futures`` future cannot be cancelled (the same fact
+    that makes :func:`_off_loop` refuse a deadline). Two things break at once:
+
+      - the post-await accounting never runs, so loop-owned state (``received``,
+        ``ctx.state``, the popped session) stops matching what is on disk; and
+      - the next request for that lock walks straight into the critical section
+        while the first worker is still writing — two threads inside one
+        ``open(p, 'ab')`` or one temp+``os.replace``.
+
+    WHY ACQUISITION IS DELIBERATELY OUTSIDE THE SHIELD. Shielding the acquire too
+    would make every QUEUED waiter cancellation-immune, which is a denial of
+    service rather than a safety property: one slow worker (the default executor
+    is SHARED with ``/status/fetch``, ``/profiles/detect`` and every
+    ``_write_state_atomic``) stalls the holder, later requests queue on the lock,
+    each hits the 60 s RESPONSE_TIMEOUT cancel, and each leaves behind an
+    immortal waiter still retaining its decoded body. On the process-global locks
+    (state, mod-store, mcp, profiles) that would be route-wide. The rule this
+    encodes: CANCEL FREELY UNTIL THE FIRST IRREVERSIBLE STEP, NEVER IN THE MIDDLE
+    OF ONE. A cancel while queued is free — nothing has been written — and
+    behaves exactly as it did before this helper existed.
+
+    WHAT IT DOES NOT BUY, so nobody reads more into it:
+
+      - It does NOT get the response to the client. The socket is already gone;
+        the returned value is discarded and Sanic writes its own error. The
+        useful work is the SIDE EFFECTS (finishing the write, running the
+        accounting, holding the lock throughout) — never the ``Response``.
+      - It therefore does NOT turn "the client was told it failed" into "nothing
+        happened". A disconnect or response timeout can now be followed by the
+        write landing, so a retry may legitimately meet conflict/no_session for
+        an operation the client believes failed. That is the deliberate trade: a
+        consistent server over a client-visible non-event.
+      - It does NOT make ``before_server_stop`` wait for in-flight work. The
+        drains take no lock and are a separate loop task, not a cancellation, so
+        they race an in-flight append exactly as they did before.
+        ``_CRITICAL_TASKS`` is the seam if that is ever addressed.
+      - It does NOT survive DIRECT cancellation of the shielded task (loop
+        teardown, a bulk task cancel), which reproduces the original bug.
+      - It does NOT make a two-file publish atomic, nor protect against a process
+        kill. Durability still rests on temp + ``os.replace``.
+
+    So error paths inside ``section`` must STILL mutate their dicts before their
+    own awaits."""
+    await lock.acquire()          # cancellable ON PURPOSE — see above
+
+    async def _held():
+        try:
+            return await section()
+        finally:
+            lock.release()        # in the SHIELDED task, never the caller's
+
+    task = asyncio.ensure_future(_held())
+    _CRITICAL_TASKS.add(task)
+    task.add_done_callback(_CRITICAL_TASKS.discard)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Nobody will ever observe this task's outcome now, so make a failure
+        # loud instead of letting shield silently eat it.
+        task.add_done_callback(_log_orphaned_section)
+        raise
+
+
 def _load_modstore(path: Path) -> Dict[str, Any]:
     """Read+self-heal the /mod-store blob (#124): a dict of
     ``modId -> {rev, value, revisions:[{rev, value, ts}]}`` (newest-first ring).
@@ -1571,9 +1673,9 @@ def _append_chunk(tmp: str, data: bytes) -> None:
     corrupting the transfer and the #110 checksum contract.
 
     CANCELLATION is handled by the CALLER, which runs this whole locked sequence
-    inside ``asyncio.shield``. That is load-bearing, not belt-and-braces: a
-    client disconnect cancels the handler task, and an unshielded ``async with``
-    would release the lock while this worker thread kept writing (a running
+    through :func:`_shielded_region`. That is load-bearing, not belt-and-braces:
+    a client disconnect cancels the handler task, and an unshielded region would
+    release the lock while this worker thread kept writing (a running
     ``concurrent.futures`` future cannot be cancelled — the same reason
     ``_off_loop`` takes no deadline). The bytes would land on disk unaccounted,
     and a retry of that offset would append them AGAIN.
@@ -3672,12 +3774,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # append, and feed the rolling digest out of order — a silently corrupt
         # file that still "verifies" against nothing (#110).
         #
-        # The lock is loop-affine: acquired and released here, on the loop, with
-        # only the inert temp path and bytes crossing into the worker. It is held
-        # across NOTHING but this sequence.
+        # The lock is loop-affine: taken and released by _shielded_region, on the
+        # loop, with only the inert temp path and bytes crossing into the worker.
+        # It is held across NOTHING but this sequence.
         #
         # CANCELLATION: a client disconnect cancels this handler task (Sanic's
-        # connection_lost). Left unshielded the `async with` would unwind and
+        # connection_lost). Left unshielded the locked region would unwind and
         # release the lock the moment the await was cancelled, WHILE the worker
         # thread kept writing — a running concurrent.futures future cannot be
         # cancelled. The bytes then land on disk with `received`/`hash` never
@@ -3690,46 +3792,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # accounting can never diverge; a disconnected client merely loses the
         # response and its retry hits the offset guard, as it should.
         async def _locked_append():
-            async with session["lock"]:
-                # The session can have been popped (commit/abort/too_large) while
-                # we waited for the lock, and appending to a popped session's temp
-                # would resurrect a file nobody will ever clean up. Identity, not
-                # just presence: only the exact dict we locked counts.
-                if app.ctx.uploads.get(upload_id) is not session:
-                    return sanic_json({"ok": False, "error": "no_session"},
-                                      status=404)
-                # Ordering guard: the client streams sequentially, so this chunk
-                # must start exactly where the last ended. A gap/dup/reorder is
-                # rejected WITHOUT appending (never silently corrupts the temp).
-                if offset != session["received"]:
-                    return sanic_json(
-                        {"ok": False, "error": "bad_offset",
-                         "received": session["received"]}, status=409)
-                if session["received"] + len(data) > MAX_TRANSFER_BYTES:
-                    # Past the per-session ceiling: drop the whole session (temp +
-                    # slot) so a runaway transfer can't keep consuming disk.
-                    app.ctx.uploads.pop(upload_id, None)
-                    await _off_loop(_unlink_quiet, [session["tmp"]])
-                    return sanic_json({"ok": False, "error": "too_large"},
-                                      status=400)
-                try:
-                    await _off_loop(_append_chunk, session["tmp"], data)
-                except OSError as exc:
-                    # A failed append leaves the temp in an unknown state — drop
-                    # the session so the client can never commit a corrupt file.
-                    app.ctx.uploads.pop(upload_id, None)
-                    await _off_loop(_unlink_quiet, [session["tmp"]])
-                    return sanic_json({"ok": False, "error": str(exc)},
-                                      status=400)
-                session["received"] += len(data)   # only after a successful write
-                session["hash"].update(data)       # #110: hash exactly the
-                #   committed bytes — the offset guard above rejected any
-                #   dup/reorder before the write, so each byte is fed to the
-                #   digest once, in order.
-                return sanic_json({"ok": True,
-                                   "received": session["received"]})
+            # The session can have been popped (commit/abort/too_large) while
+            # we waited for the lock, and appending to a popped session's temp
+            # would resurrect a file nobody will ever clean up. Identity, not
+            # just presence: only the exact dict we locked counts.
+            if app.ctx.uploads.get(upload_id) is not session:
+                return sanic_json({"ok": False, "error": "no_session"},
+                                  status=404)
+            # Ordering guard: the client streams sequentially, so this chunk
+            # must start exactly where the last ended. A gap/dup/reorder is
+            # rejected WITHOUT appending (never silently corrupts the temp).
+            if offset != session["received"]:
+                return sanic_json(
+                    {"ok": False, "error": "bad_offset",
+                     "received": session["received"]}, status=409)
+            if session["received"] + len(data) > MAX_TRANSFER_BYTES:
+                # Past the per-session ceiling: drop the whole session (temp +
+                # slot) so a runaway transfer can't keep consuming disk.
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": "too_large"},
+                                  status=400)
+            try:
+                await _off_loop(_append_chunk, session["tmp"], data)
+            except OSError as exc:
+                # A failed append leaves the temp in an unknown state — drop
+                # the session so the client can never commit a corrupt file.
+                app.ctx.uploads.pop(upload_id, None)
+                await _off_loop(_unlink_quiet, [session["tmp"]])
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=400)
+            session["received"] += len(data)   # only after a successful write
+            session["hash"].update(data)       # #110: hash exactly the
+            #   committed bytes — the offset guard above rejected any
+            #   dup/reorder before the write, so each byte is fed to the
+            #   digest once, in order.
+            return sanic_json({"ok": True,
+                               "received": session["received"]})
 
-        return await asyncio.shield(_locked_append())
+        return await _shielded_region(session["lock"], _locked_append)
 
     async def _file_upload_commit(request: Request):
         # Finalize: atomically os.replace the temp onto the dest. Re-checks the
@@ -3753,28 +3854,39 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # now BOTH await, and an append landing between the size measurement and
         # the replace would commit bytes the digest never saw. Everything under
         # the lock is bounded (one lexists, one replace, one teardown).
-        async with session["lock"]:
+        #
+        # Shielded for the same reason the chunk path is (see _shielded_region),
+        # with a commit-specific payoff: a cancel inside the _commit_replace hop
+        # PUBLISHES the file and then skips the session pop, so the session leaks
+        # until UPLOAD_SESSION_TTL — and with overwrite=false a retry now sees its
+        # own published dest, returns 409 exists at the lexists pre-check, and
+        # doesn't even reclaim it. Shielding makes "published" and "session
+        # popped" happen together.
+        async def _locked_commit():
             if app.ctx.uploads.get(upload_id) is not session:
                 return sanic_json({"ok": False, "error": "no_session"},
                                   status=404)   # a racing commit/abort won
             dest, tmp = session["dest"], session["tmp"]
             # Fast path + error PRECEDENCE: this keeps "exists" ahead of
             # bad_sha256/checksum_mismatch exactly as before. It is NOT the
-            # guarantee — it can't be, since a concurrent commit for a different
-            # session holds a different lock and would pass it too. The
-            # authoritative check is the O_CREAT|O_EXCL reserve inside
-            # _commit_replace below, which turns the loser into FileExistsError.
+            # guarantee — it can't be, since a concurrent commit for a
+            # different session holds a different lock and would pass it too.
+            # The authoritative check is the O_CREAT|O_EXCL reserve inside
+            # _commit_replace below, which turns the loser into
+            # FileExistsError.
             if not session["overwrite"] and await _off_loop(os.path.lexists,
                                                             dest):
-                return sanic_json({"ok": False, "error": "exists"}, status=409)
-            # #110: verify the accumulated SHA-256 BEFORE the atomic replace, so a
-            # mismatched (truncated/corrupt/source-changed) transfer never
-            # overwrites the dest — the existing dest is left intact and only the
-            # temp is dropped.
-            #   - absent expected_sha256 (copy) -> no comparison, replace as before.
-            #   - present-but-malformed         -> 400 bad_sha256, session KEPT (a
-            #     bad request must never silently downgrade a verified move to
-            #     unverified, nor 500 on a non-string .lower()).
+                return sanic_json({"ok": False, "error": "exists"},
+                                  status=409)
+            # #110: verify the accumulated SHA-256 BEFORE the atomic replace,
+            # so a mismatched (truncated/corrupt/source-changed) transfer
+            # never overwrites the dest — the existing dest is left intact and
+            # only the temp is dropped.
+            #   - absent expected_sha256 (copy) -> no comparison, replace as
+            #     before.
+            #   - present-but-malformed         -> 400 bad_sha256, session
+            #     KEPT (a bad request must never silently downgrade a verified
+            #     move to unverified, nor 500 on a non-string .lower()).
             #   - present + digest mismatch     -> 409 checksum_mismatch, temp
             #     dropped, session popped, dest NOT replaced.
             expected = body.get("expected_sha256")
@@ -3784,7 +3896,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     return sanic_json({"ok": False, "error": "bad_sha256"},
                                       status=400)
                 expected = expected.lower()   # hex is case-insensitive
-            digest = session["hash"].hexdigest()   # idempotent — safe to read twice
+            digest = session["hash"].hexdigest()   # idempotent — read twice ok
             if expected is not None and digest != expected:
                 app.ctx.uploads.pop(upload_id, None)
                 await _off_loop(_unlink_quiet, [tmp])
@@ -3801,17 +3913,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # session is dropped like any other terminal failure.
                 app.ctx.uploads.pop(upload_id, None)
                 await _off_loop(_unlink_quiet, [tmp])
-                return sanic_json({"ok": False, "error": "exists"}, status=409)
+                return sanic_json({"ok": False, "error": "exists"},
+                                  status=409)
             except OSError as exc:
-                # replace-over-dir (dest turned into a dir since begin) or any IO
-                # error: drop temp + session, report a clear code.
+                # replace-over-dir (dest turned into a dir since begin) or any
+                # IO error: drop temp + session, report a clear code.
                 app.ctx.uploads.pop(upload_id, None)
-                dest_is_dir = await _off_loop(_commit_failed_cleanup, tmp, dest)
+                dest_is_dir = await _off_loop(_commit_failed_cleanup, tmp,
+                                              dest)
                 code = "is_dir" if dest_is_dir else str(exc)
                 return sanic_json({"ok": False, "error": code}, status=400)
             app.ctx.uploads.pop(upload_id, None)
-        return sanic_json({"ok": True, "path": dest, "size": size,
-                           "sha256": digest})   # +sha256 (additive)
+            return sanic_json({"ok": True, "path": dest, "size": size,
+                               "sha256": digest})   # +sha256 (additive)
+
+        return await _shielded_region(session["lock"], _locked_commit)
 
     async def _file_upload_abort(request: Request):
         # Idempotent best-effort teardown: pop the session + unlink its temp.
@@ -4392,10 +4508,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 and not isinstance(body.get("token"), str)):
             return sanic_json({"ok": False, "error": "bad_token"}, status=400)
         env_pinned = _mcp_token_env_pinned()
-        async with app.ctx.mcp_lock:
+        # Shielded: the sidecar write awaits and the live ctx swap lands AFTER
+        # it, so an unshielded cancel in that hop leaves disk ahead of memory —
+        # the running broker keeps the old token/mode while a restart silently
+        # adopts the abandoned one. See _shielded_region.
+        async def _locked_write():
             cfg = dict(app.ctx.mcp_cfg)
-            # Token edits are honored only when env is NOT pinning it (else the
-            # live token would diverge from the env value restart restores).
+            # Token edits are honored only when env is NOT pinning it (else
+            # the live token would diverge from the env value restart
+            # restores).
             if not env_pinned:
                 if body.get("generate"):
                     # Server-minted token (never a client-chosen secret here).
@@ -4425,9 +4546,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     None, _write_state_atomic, app.ctx.mcp_state_path,
                     to_persist)
             except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
             app.ctx.mcp_cfg = cfg
-        return sanic_json(_mcp_cfg_public(cfg))
+            return sanic_json(_mcp_cfg_public(cfg))
+
+        return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 
     # ---- launch profiles config (browser-facing, #70) --------------------
     # The Control Panel reads/writes the FULL profile objects here. Gated by the
@@ -4525,26 +4649,43 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": verr}, status=400)
         to_persist = {"profiles": result["profiles"],
                       "default_profile": result["default_profile"]}
-        async with app.ctx.profiles_lock:
+        parts = None
+
+        # Shielded (see _shielded_region): the sidecar write awaits and the
+        # launcher live-swap lands AFTER it, so an unshielded cancel in that hop
+        # keeps serving the OLD profile set from a sidecar that already holds the
+        # new one — until a restart adopts the value nobody confirmed. The
+        # section returns an error response, or None once the swap is done.
+        async def _locked_write():
+            nonlocal parts
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, _write_state_atomic, app.ctx.profiles_path,
                     to_persist)
             except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)}, status=500)
-            # Disk is truth first; ONLY on a successful write do we live-swap the
-            # launcher, so a failed write never leaves runtime disagreeing with
-            # the sidecar. set_profiles rebinds fresh objects (atomic vs launch).
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
+            # Disk is truth first; ONLY on a successful write do we live-swap
+            # the launcher, so a failed write never leaves runtime disagreeing
+            # with the sidecar. set_profiles rebinds fresh objects (atomic vs
+            # launch).
             app.ctx.launcher.set_profiles(result["profiles"],
                                           result["default_profile"])
             app.ctx.profiles_source = "sidecar"
             # Snapshot the response set while STILL holding the lock, so this
             # client is answered with the profiles IT just wrote. Sampling the
             # launcher after the release would let a concurrent POST land in
-            # between and hand back someone else's set — which the editor would
-            # then save straight back, silently reverting the other write. Only
-            # the snapshot is under the lock; the blocking PATH probe is not.
+            # between and hand back someone else's set — which the editor
+            # would then save straight back, silently reverting the other
+            # write. Only the snapshot is under the lock; the blocking PATH
+            # probe below is not (and is left UNSHIELDED — it is a pure read
+            # with no side effect worth finishing for a gone client).
             parts = _profiles_view_parts()
+            return None
+
+        write_err = await _shielded_region(app.ctx.profiles_lock, _locked_write)
+        if write_err is not None:
+            return write_err
         # Audit: this write persists shell recipes /launch will spawn by name.
         LOGGER.info("launch profiles updated via /profiles/config: %d "
                     "profiles (default=%r) from %s", len(result["profiles"]),
@@ -4658,13 +4799,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # linearized while this PUT was queued on the lock is seen — checking
         # before the (awaiting) lock acquire would let a just-deactivated
         # client's in-flight write still clobber the active layout.
-        async with app.ctx.state_lock:
+        #
+        # Shielded for the same reason (see _shielded_region), with a rev-
+        # specific payoff: the write awaits and `ctx.state = new_state` lands
+        # AFTER it, so an unshielded cancel there leaves DISK AHEAD OF MEMORY.
+        # It self-heals on the next successful PUT, but a restart inside that
+        # window silently adopts a value no client was ever told landed, and the
+        # same rev number ends up describing two different states.
+        async def _locked_write():
             # Single-active-client lease: a non-active browser must not mutate
             # the shared layout/settings (a torn-down/background tab could
-            # otherwise clobber the active one). 409 not_active inlines the live
-            # state so the loser resyncs in one round trip. A None lease (broker
-            # just restarted, nobody has claimed yet) does NOT block — and GET
-            # /state stays ungated so a reactivating tab can always read.
+            # otherwise clobber the active one). 409 not_active inlines the
+            # live state so the loser resyncs in one round trip. A None lease
+            # (broker just restarted, nobody has claimed yet) does NOT block —
+            # and GET /state stays ungated so a reactivating tab can read.
             active = app.ctx.active_client_id
             if active is not None and client_id != active:
                 s = app.ctx.state
@@ -4675,8 +4823,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 }, status=409)
             current = app.ctx.state
             if base_rev != current["rev"]:
-                # Conflict — inline the live state so the client rebases without
-                # a second GET (Codex review fix: avoids a 409 retry storm).
+                # Conflict — inline the live state so the client rebases
+                # without a second GET (Codex review fix: avoids a 409 retry
+                # storm).
                 return sanic_json({
                     "ok": False, "error": "conflict",
                     "rev": current["rev"], "settings": current["settings"],
@@ -4688,9 +4837,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 await asyncio.get_running_loop().run_in_executor(
                     None, _write_state_atomic, app.ctx.state_path, new_state)
             except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
             app.ctx.state = new_state
-        return sanic_json({"ok": True, "rev": new_state["rev"]})
+            return sanic_json({"ok": True, "rev": new_state["rev"]})
+
+        return await _shielded_region(app.ctx.state_lock, _locked_write)
 
     # ---- /mod-store/<modId> (#124): generic per-mod server KV + rev ring ----
     # The durable, cross-browser twin of ctx.storage. Same token gate
@@ -4776,7 +4928,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # (identical reasoning to /state: the write awaits, so two PUTs could
         # interleave on rev, and the lease check must live INSIDE the lock so a
         # become_active that linearized while this PUT queued is seen).
-        async with app.ctx.modstore_lock:
+        # Shielded exactly like /state, and for the same disk-ahead-of-memory
+        # reason — see _shielded_region.
+        async def _locked_write():
             existed = modId in app.ctx.modstore
             rec = app.ctx.modstore.get(modId) \
                 or {"rev": 0, "value": None, "revisions": []}
@@ -4787,36 +4941,38 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     "rev": rec["rev"], "value": rec["value"],
                 }, status=409)
             if base_rev != rec["rev"]:
-                # Conflict — inline the live value so the client rebases in one
-                # round trip (no follow-up GET), matching /state.
+                # Conflict — inline the live value so the client rebases in
+                # one round trip (no follow-up GET), matching /state.
                 return sanic_json({
                     "ok": False, "error": "conflict",
                     "rev": rec["rev"], "value": rec["value"],
                 }, status=409)
-            # No-op dedupe: an idle debounced autosave that resends the current
-            # value must NOT bump rev or push a revision (else the ring churns on
-            # every keystroke pause). Accept it as a success at the current rev.
-            # A purge is NOT a no-op when there is still a ring to clear: dropping
-            # history is an OBSERVABLE mutation (GET ?rev=<old> flips 200->404),
-            # so it must be visible as a new rev — it falls through to the write
-            # below (which bumps rev and writes revisions:[]) rather than silently
-            # mutating the current rev in place. The ONLY true no-op is a purge
-            # with nothing left to clear: value unchanged AND the ring already
-            # empty (e.g. a first-write dedupe on the empty seed).
+            # No-op dedupe: an idle debounced autosave that resends the
+            # current value must NOT bump rev or push a revision (else the
+            # ring churns on every keystroke pause). Accept it as a success at
+            # the current rev. A purge is NOT a no-op when there is still a
+            # ring to clear: dropping history is an OBSERVABLE mutation (GET
+            # ?rev=<old> flips 200->404), so it must be visible as a new rev —
+            # it falls through to the write below (which bumps rev and writes
+            # revisions:[]) rather than silently mutating the current rev in
+            # place. The ONLY true no-op is a purge with nothing left to
+            # clear: value unchanged AND the ring already empty (e.g. a
+            # first-write dedupe on the empty seed).
             if value == rec["value"] and not (purge and rec["revisions"]):
                 return sanic_json({"ok": True, "rev": rec["rev"]})
             # Push the OUTGOING (soon-to-be-prior) value onto the newest-first
-            # ring, then trim. Skip the empty seed: a brand-new mod id has no real
-            # prior value (rev 0 / None), so don't record a meaningless {rev:0}
-            # entry — the ring starts once there's genuine history. A purge writes
-            # the ring EMPTY instead (drop the outgoing prior too), so the new
-            # value lands with no recoverable history.
+            # ring, then trim. Skip the empty seed: a brand-new mod id has no
+            # real prior value (rev 0 / None), so don't record a meaningless
+            # {rev:0} entry — the ring starts once there's genuine history. A
+            # purge writes the ring EMPTY instead (drop the outgoing prior
+            # too), so the new value lands with no recoverable history.
             if purge:
                 revisions = []
             else:
                 revisions = list(rec["revisions"])
                 if existed:
-                    revisions.insert(0, {"rev": rec["rev"], "value": rec["value"],
+                    revisions.insert(0, {"rev": rec["rev"],
+                                         "value": rec["value"],
                                          "ts": int(time.time())})
                     del revisions[MODSTORE_MAX_REVISIONS:]
             new_rec = {"rev": rec["rev"] + 1, "value": value,
@@ -4825,11 +4981,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             new_store[modId] = new_rec
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _write_state_atomic, app.ctx.modstore_path, new_store)
+                    None, _write_state_atomic, app.ctx.modstore_path,
+                    new_store)
             except OSError as exc:
-                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=500)
             app.ctx.modstore = new_store
-        return sanic_json({"ok": True, "rev": new_rec["rev"]})
+            return sanic_json({"ok": True, "rev": new_rec["rev"]})
+
+        return await _shielded_region(app.ctx.modstore_lock, _locked_write)
 
     # ---- terminal session recordings (/recording/*, #140) ----------------
     # The recorder mod's storage: a finished recording streams in through the
@@ -4928,14 +5088,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                               status=400)
         # Identical atomic region to /file/upload_chunk, minus the digest — the
         # per-session lock is what keeps guard -> append -> accounting indivisible
-        # now that the append rides a worker. See _append_chunk.
-        async with session["lock"]:
+        # now that the append rides a worker, and the shield is what keeps a
+        # disconnect from unwinding the region (releasing the lock) while that
+        # worker is still inside the append. See _append_chunk / _shielded_region.
+        async def _locked_append():
             if app.ctx.rec_uploads.get(rec_id) is not session:
                 return sanic_json({"ok": False, "error": "no_session"},
                                   status=404)
             if offset != session["received"]:
                 return sanic_json({"ok": False, "error": "bad_offset",
-                                   "received": session["received"]}, status=409)
+                                   "received": session["received"]},
+                                  status=409)
             if session["received"] + len(data) > MAX_RECORDING_BYTES:
                 app.ctx.rec_uploads.pop(rec_id, None)
                 await _off_loop(_unlink_quiet, [session["tmp"]])
@@ -4943,16 +5106,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                   status=400)
             try:
                 # #159: each chunk becomes its own gzip member. `received`
-                # still counts DECODED INPUT bytes, so MAX_RECORDING_BYTES keeps
-                # its exact meaning and the client's roll threshold is untouched.
+                # still counts DECODED INPUT bytes, so MAX_RECORDING_BYTES
+                # keeps its exact meaning and the client's roll threshold is
+                # untouched.
                 await _off_loop(_append_chunk_gz, session["tmp"], data)
             except (OSError, zlib.error) as exc:
                 app.ctx.rec_uploads.pop(rec_id, None)
                 await _off_loop(_unlink_quiet, [session["tmp"]])
-                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=400)
             session["received"] += len(data)
-            received = session["received"]
-        return sanic_json({"ok": True, "received": received})
+            return sanic_json({"ok": True,
+                               "received": session["received"]})
+
+        return await _shielded_region(session["lock"], _locked_append)
 
     async def _recording_commit(request: Request):
         # Finalize: atomic os.replace of the temp onto <id>.blrec.gz, then the
@@ -4980,20 +5147,29 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # Same per-session lock as /file/upload_commit: the size measurement, the
         # sidecar write and the replace now span awaits, and an append landing in
         # between would put bytes in the .blrec that meta["size"] never counted.
-        async with session["lock"]:
+        #
+        # Shielded (see _shielded_region), and this is the site where it matters
+        # most: the replace is the LAST await, so an unshielded cancel inside it
+        # publishes and lists the recording while the pop below never runs. The
+        # user is told "not saved" for a recording that is on disk, complete, and
+        # the session keeps one of MAX_RECORDING_SESSIONS slots for an hour.
+        # Shielding makes "published" and "session popped" happen together, which
+        # also removes the precondition for the second-commit cleanup below.
+        async def _locked_commit():
             if app.ctx.rec_uploads.get(rec_id) is not session:
                 return sanic_json({"ok": False, "error": "no_session"},
                                   status=404)
             tmp = session["tmp"]
-            # Meta sidecar FIRST, .blrec replace SECOND: listing keys off .blrec
-            # presence, so this order means a listed recording always has its
-            # sidecar — a crash between the two leaves only an orphan sidecar
-            # (invisible, harmless), never a half-registered recording.
+            # Meta sidecar FIRST, .blrec replace SECOND: listing keys off
+            # .blrec presence, so this order means a listed recording always
+            # has its sidecar — a crash between the two leaves only an orphan
+            # sidecar (invisible, harmless), never a half-registered
+            # recording.
             try:
                 # `size` keeps meaning UNCOMPRESSED bytes — the length of the
                 # JSONL the client uploaded, which is what it meant for every
-                # recording before #159 and what a player/download produces. It
-                # comes from the accounted input bytes, NOT from stat, so
+                # recording before #159 and what a player/download produces.
+                # It comes from the accounted input bytes, NOT from stat, so
                 # compression cannot silently redefine the recorder's size
                 # column mid-library. `diskSize` is the new, separately named
                 # on-disk footprint.
@@ -5008,9 +5184,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             except OSError as exc:
                 app.ctx.rec_uploads.pop(rec_id, None)
                 await _off_loop(_unlink_quiet, [tmp, str(meta_path)])
-                return sanic_json({"ok": False, "error": str(exc)}, status=400)
+                return sanic_json({"ok": False, "error": str(exc)},
+                                  status=400)
             app.ctx.rec_uploads.pop(rec_id, None)
-        return sanic_json({"ok": True, "recording_id": rec_id, "size": size})
+            return sanic_json({"ok": True, "recording_id": rec_id, "size": size})
+
+        return await _shielded_region(session["lock"], _locked_commit)
 
     async def _recording_abort(request: Request):
         # Idempotent cleanup, mirroring /file/upload_abort.
@@ -5281,15 +5460,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 t = min(t, duration)
             clean.append({"t": t, "text": text})
         clean.sort(key=lambda n: n["t"])
-        async with app.ctx.rec_notes_lock:
+        # Shielded (see _shielded_region). This is the ONLY read-compare-write in
+        # the tree whose compare reads DISK rather than loop-owned memory, which
+        # makes the lock the entire serialisation: a cancel between the load and
+        # the write releases it, lets a second editor read the SAME rev, and the
+        # first writer's replace can still land afterwards — a silent lost update
+        # that both clients were told succeeded.
+        async def _locked_write():
             # The lock MUST span the whole read -> compare -> write sequence,
-            # or two concurrent note edits interleave and the loser's notes are
-            # silently overwritten. Both the read and the write are now off the
-            # loop, so the critical section holds across two await points —
-            # that is the point of the lock, not a bug to "fix" by narrowing
-            # it. rec_notes_lock is an asyncio.Lock (loop-affine): it is
-            # acquired and released on the loop and never crosses into a
-            # worker; only the inert notes path and plain dict do.
+            # or two concurrent note edits interleave and the loser's notes
+            # are silently overwritten. Both the read and the write are now
+            # off the loop, so the critical section holds across two await
+            # points — that is the point of the lock, not a bug to "fix" by
+            # narrowing it. rec_notes_lock is an asyncio.Lock (loop-affine):
+            # it is acquired and released on the loop and never crosses into
+            # a worker; only the inert notes path and plain dict do.
             current = await _off_loop(_rec_load_notes, paths.notes)
             if base_rev != current["rev"]:
                 return sanic_json({"ok": False, "error": "conflict",
@@ -5302,7 +5487,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             except OSError as exc:
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=500)
-        return sanic_json({"ok": True, "rev": new_rec["rev"]})
+            return sanic_json({"ok": True, "rev": new_rec["rev"]})
+
+        return await _shielded_region(app.ctx.rec_notes_lock, _locked_write)
 
     @app.before_server_stop
     async def _drain_rec_sessions(app_, loop):
@@ -5459,3 +5646,5 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.error_handler.add(NotFound, _handle_404)
 
     return app
+
+
