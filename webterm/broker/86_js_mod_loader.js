@@ -299,33 +299,52 @@
                 // just funnels durable server storage through one reviewed, mod-
                 // scoped choke point. Additive — ctxVersion stays 1; feature-detect
                 // `if (ctx.serverStore)`.
+                // opts.host (#65): a server store is per-broker, so every call
+                // takes an optional host *id* (win.fileHostId semantics) routing
+                // the request to THAT broker — the seam publish-to-all needs to
+                // write one registry to each broker. Omitted / ''/'local' -> the
+                // local broker (so every existing caller is unchanged); an unknown
+                // remote id FAILS CLOSED (no request, synthetic no-host result),
+                // never a silent write to the local store. Additive — ctxVersion
+                // stays 1; a mod feature-detects the whole family with
+                // `if (ctx.serverStore)` (host routing is a superset of the old
+                // local-only contract, so an omitted opts behaves exactly as v1).
                 serverStore: {
                     // Current value + revision METADATA (rev + ts, NO bodies — the
                     // ring can be large). -> {rev, value, revisions:[{rev,ts}]}
                     // (rev 0 / value null when the mod has never written). Ungated
                     // by the lease, so a non-active / reactivating browser always
                     // reads.
-                    get: function () {
-                        return _modStoreApi('GET', modId).then(r => r.json);
+                    get: function (opts) {
+                        return _modStoreApi('GET', modId, undefined, '', opts)
+                            .then(r => r.json);
                     },
                     // Optimistic write: PUT {baseRev, value, clientId}. clientId is
                     // the core lease id (CLIENT_ID), so the ACTIVE browser's write
                     // passes the lease. Resolves {status, ok, rev, error?, value?}:
                     // 200 {ok:true, rev}; 409 {error:'conflict'|'not_active', rev,
                     // value} with the LIVE value inlined (rebase in one round trip);
-                    // 400/413/500 {ok:false, error}.
-                    set: function (value, baseRev) {
-                        return _modStoreApi('PUT', modId, {
+                    // 400/413/500 {ok:false, error}. opts.purgeRevisions (#65) adds
+                    // the strict-bool "write value AND forget history" flag — the
+                    // only way to un-publish a value that scrolled into the ring.
+                    set: function (value, baseRev, opts) {
+                        const body = {
                             baseRev: baseRev, value: value, clientId: CLIENT_ID,
-                        }).then(r => Object.assign({ status: r.status }, r.json));
+                        };
+                        if (opts && opts.purgeRevisions === true) {
+                            body.purgeRevisions = true;
+                        }
+                        return _modStoreApi('PUT', modId, body, '', opts)
+                            .then(r => Object.assign({ status: r.status }, r.json));
                     },
                     // Fetch ONE past (or current) revision's FULL value. -> {ok,
                     // rev, value} or {ok:false, error:'no_such_rev'} (404 — it
                     // scrolled off the ring) / 'bad_rev'. Drives History preview +
                     // restore.
-                    getRevision: function (n) {
+                    getRevision: function (n, opts) {
                         return _modStoreApi('GET', modId, undefined,
-                            '?rev=' + encodeURIComponent(n)).then(r => r.json);
+                            '?rev=' + encodeURIComponent(n), opts)
+                            .then(r => r.json);
                     },
                 },
                 // #85 (S12): host session RPC — ONE reviewed wrapper over the
@@ -531,7 +550,14 @@
         // tab's visibility now to avoid a flash if a section is mounted while the
         // panel is open on a remote tab (#74); renderSettings re-syncs later.
         function _controlSection(rec, opts) {
-            const host = document.getElementById('set-mods');
+            // #65: opts.mount ('mods' default | 'browser') picks the target pane.
+            // 'browser' mounts into #set-browser-mods (in the Browser settings
+            // pane, beside the Hosts list) instead of the per-host #set-mods, so a
+            // browser-local mod can sit with the config it manages. Unknown / omit
+            // -> the historical #set-mods, so every existing control is unchanged.
+            const mountId = opts.mount === 'browser'
+                ? 'set-browser-mods' : 'set-mods';
+            const host = document.getElementById(mountId);
             const section = document.createElement('div');
             section.className = 'set-section set-mod-setting';
             section.dataset.modId = rec.id;
@@ -803,8 +829,20 @@
                 throw new Error('registerSettingsPane[' + rec.id
                     + ']: render() must be a function');
             }
-            const section = _controlSection(rec,
-                { title: spec.title, isBrowserGlobal: spec.isBrowserGlobal });
+            // #65: spec.mount ('mods' default | 'browser') picks the target pane.
+            // A 'browser' mount lands in #set-pane-browser, which is .active ONLY
+            // on the Browser tab — so the section is already hidden on every other
+            // tab by the pane itself and must NOT also be .set-browser-global:
+            // applyBrowserGlobalVisibility() display:none's those whenever the tab
+            // isn't 'local', which would hide it exactly when the Browser tab
+            // (its own tab) is open. So a 'browser' mount is forced non-browser-
+            // global regardless of spec.isBrowserGlobal.
+            const browserMount = spec.mount === 'browser';
+            const section = _controlSection(rec, {
+                title: spec.title,
+                mount: browserMount ? 'browser' : 'mods',
+                isBrowserGlobal: browserMount ? false : spec.isBrowserGlobal,
+            });
             if (spec.id) section.dataset.paneId = spec.id;
             const node = spec.render();      // throw => initMod rolls back section
             if (node && node.nodeType) section.appendChild(node);
@@ -1023,25 +1061,43 @@
              .catch(e => ({ status: 0, json: { ok: false, error: String(e) } }));
         }
 
-        // ---- ctx.serverStore transport (#124) ------------------------------
-        // The /mod-store twin of _modSessionApi: fetch the generic per-mod server
-        // KV (GET current+metadata / one revision, PUT an optimistic write) on the
-        // LOCAL broker ONLY — a server store is per-broker, so cross-host routing
-        // is deliberately out of scope. Resolves to {status, json} on EVERY
-        // outcome (never rejects): the parsed body with its HTTP status, an
-        // HTTP-<status> stub when the body isn't JSON, or a status-0
-        // {error:String(e)} on a transport failure — so a caller honors the
-        // broker's status contract verbatim (a 409 not_active / conflict is data
-        // to rebase on, NOT an exception). `query` is an optional pre-built
-        // querystring ('?rev=3'); `body` omitted -> a bodyless GET.
-        function _modStoreApi(method, modId, body, query) {
-            const path = '/mod-store/' + encodeURIComponent(modId) + (query || '');
-            const opts = { method: method };
-            if (body !== undefined) {
-                opts.headers = { 'Content-Type': 'application/json' };
-                opts.body = JSON.stringify(body);
+        // ---- ctx.serverStore transport (#124, host routing #65) ------------
+        // Resolve a mod-supplied host *id* to the host object, FAIL CLOSED —
+        // the /mod-store twin of _modFileHost/_modSessionHost: a known id -> that
+        // host; ''/'local'/undefined -> the local broker; an UNKNOWN remote id ->
+        // null so the op aborts (no request) instead of silently writing the
+        // wrong broker's registry. A server store is per-broker, so publish-to-
+        // all (#65) routes each write to a specific host through here.
+        function _modStoreHost(hostId) {
+            const h = hostById(hostId);
+            if (h) return h;
+            if (!hostId || hostId === 'local') return localHost();
+            return null;
+        }
+        // Fetch the generic per-mod server KV (GET current+metadata / one
+        // revision, PUT an optimistic write) on the resolved host. Resolves to
+        // {status, json} on EVERY outcome (never rejects): the parsed body with
+        // its HTTP status, an HTTP-<status> stub when the body isn't JSON, a
+        // status-0 no_host when the host won't resolve (fail closed, no request),
+        // or a status-0 {error:String(e)} on a transport failure — so a caller
+        // honors the broker's status contract verbatim (a 409 not_active /
+        // conflict is data to rebase on, NOT an exception). `query` is an optional
+        // pre-built querystring ('?rev=3'); `body` omitted -> a bodyless GET;
+        // opts.host picks the target broker (omitted -> local, so #124 callers
+        // are unchanged).
+        function _modStoreApi(method, modId, body, query, opts) {
+            const host = _modStoreHost(opts && opts.host);
+            if (!host) {
+                return Promise.resolve(
+                    { status: 0, json: { ok: false, error: 'no_host' } });
             }
-            return hostFetch(localHost(), path, opts).then(r => r.json()
+            const path = '/mod-store/' + encodeURIComponent(modId) + (query || '');
+            const o = { method: method };
+            if (body !== undefined) {
+                o.headers = { 'Content-Type': 'application/json' };
+                o.body = JSON.stringify(body);
+            }
+            return hostFetch(host, path, o).then(r => r.json()
                 .then(j => ({ status: r.status, json: j }))
                 .catch(() => ({ status: r.status,
                                 json: { ok: false, error: 'HTTP ' + r.status } })))

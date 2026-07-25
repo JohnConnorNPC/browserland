@@ -1581,16 +1581,20 @@ def test_server_store_capability_present():
     # helper ride in the served loader. The durable, cross-browser twin of
     # ctx.storage; the scratchpad mod depends on it. ctxVersion stays 1 (additive).
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
-    # The capability object + its three methods, on the per-mod ctx.
+    # The capability object + its three methods. Each takes an additive opts arg
+    # (#65: opts.host routing + set()'s opts.purgeRevisions); the positional
+    # params are unchanged, so a #124 caller that omits opts is byte-compatible.
     for sym in ("serverStore: {",
-                "get: function ()",
-                "set: function (value, baseRev)",
-                "getRevision: function (n)"):
+                "get: function (opts)",
+                "set: function (value, baseRev, opts)",
+                "getRevision: function (n, opts)"):
         assert sym in loader, f"missing ctx.serverStore method: {sym!r}"
-    # The transport helper targets /mod-store/<modId>, local host only, and
-    # set() auto-attaches the core lease id so the active browser's write passes.
-    for sym in ("function _modStoreApi", "'/mod-store/'",
-                "hostFetch(localHost()", "clientId: CLIENT_ID"):
+    # The transport helper targets /mod-store/<modId>, resolves the target broker
+    # via _modStoreHost (local by default, so #124 callers are unchanged; #65
+    # publish-to-all routes to a specific host id and FAILS CLOSED on an unknown
+    # one), and set() auto-attaches the core lease id so the active browser passes.
+    for sym in ("function _modStoreApi", "function _modStoreHost",
+                "'/mod-store/'", "clientId: CLIENT_ID"):
         assert sym in loader, f"missing ctx.serverStore transport symbol: {sym!r}"
     # ctxVersion is unchanged — ctx.serverStore is additive.
     assert "ctxVersion: 1" in loader
