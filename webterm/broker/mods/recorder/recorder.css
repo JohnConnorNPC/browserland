@@ -143,6 +143,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* #151: segment marker on a recording that rolled over at the size cap. */
+.reclib-part {
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 8px;
+    font-size: 10px;
+    background: rgba(255, 255, 255, 0.12);
+    opacity: 0.85;
+}
 .reclib-info { font-size: 11px; opacity: 0.75; }
 .reclib-btns {
     display: flex;

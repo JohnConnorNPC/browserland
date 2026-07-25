@@ -2469,7 +2469,7 @@ _EXPECTED_TIERS = {
     "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip
     "scratchpad": ["storage", "window"],  # #124 durable server store (ctx.serverStore) + window kind
     "termfont": ["settings", "window"],  # #126 synced termFont select (ctx.settings.select) + per-terminal apply (ctx.windows.onTerminalCreate)
-    "recorder": ["window"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file)
+    "recorder": ["window", "settings"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file). #151 added the synced recorder.autoRecord toggle (ctx.settings.boolean)
     "host-registry": ["storage", "settings"],  # #65 durable server store (ctx.serverStore) + a browser-mounted registerSettingsPane
 }
 
