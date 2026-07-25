@@ -139,6 +139,10 @@ PASTE_IMAGE_MAX_FILES = 64         # cap on retained paste-* files
 # committed recording — only POST /recording/delete does. Only abandoned
 # in-flight .part temps are swept.
 _RECORDING_ID_RE = re.compile(r"rec-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
+# #151: the client-minted id linking the segments of one rolling recording. It
+# is meta only (never a path component), but it is still an identity the library
+# groups by, so keep it to a short opaque token.
+_RECORDING_SERIES_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 MAX_RECORDING_BYTES = 256 * 2**20   # cap per committed recording file
 MAX_RECORDING_SESSIONS = 4          # concurrent in-flight recording saves
 RECORDING_SESSION_TTL = 3600.0      # seconds before an abandoned save is swept
@@ -1737,6 +1741,25 @@ def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
     font = meta.get("fontFamily")
     if isinstance(font, str) and font:
         out["fontFamily"] = font[:200]
+    # #151 segment chain: `series` links the segments a rolling recording was
+    # split into, `seg` is the 1-based position in that chain. Unlike `title`,
+    # `series` is an IDENTITY — truncating an over-long one would silently fold
+    # two distinct chains together, so a malformed id is REJECTED (the segment
+    # still saves, just unlinked) rather than clamped. `seg` is only meaningful
+    # from 1 up, so a 0 is dropped too.
+    series = meta.get("series")
+    if isinstance(series, str) and _RECORDING_SERIES_RE.fullmatch(series):
+        out["series"] = series
+    # Unlike the other numerics, `seg` is an ORDERING key, so a non-integral
+    # value is rejected rather than truncated: int(1.9) == 1 would file a second
+    # segment as the first one.
+    seg = meta.get("seg")
+    if not isinstance(seg, bool) and isinstance(seg, (int, float)):
+        if isinstance(seg, float) and (not math.isfinite(seg)
+                                       or not seg.is_integer()):
+            seg = None
+        if seg is not None and 1 <= int(seg) <= 2**53:
+            out["seg"] = int(seg)
     return out
 
 
@@ -4937,7 +4960,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          "notesRev": notes["rev"]}
                 for key in ("title", "cols", "rows", "startedAt",
                             "durationMs", "events", "fontFamily", "fontSize",
-                            "savedAt"):
+                            "savedAt", "series", "seg"):
                     if key in meta:
                         entry[key] = meta[key]
                 out.append(entry)

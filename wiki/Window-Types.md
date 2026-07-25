@@ -32,7 +32,9 @@ A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left
 
 ## Session recorder
 
-Every terminal title bar carries a **⏺ record button**: click to record that session, click again to stop and save it to the broker. The **Session recorder** window from the **+** menu lists saved recordings and plays them back in a window fixed at the original recorded size, with pause, speed, continuous reverse, and timestamped notes. See the **Session recorder** section of the in-app help for details.
+Every terminal title bar carries a **⏺ record button**: click to record that session, click again to stop and save it to the broker. The **Session recorder** window from the **+** menu lists saved recordings and plays them back in a window fixed at the original recorded size, with pause, speed, continuous reverse, and timestamped notes.
+
+**Control Panel → Session recorder → auto-record every session** (off by default) records every terminal as it opens, so nothing is missed for want of pressing ⏺ first. Switching it off again stops the recordings it started; a recording you began by hand keeps running. A long recording rolls over into numbered parts at the 50 MB size cap rather than stopping, and with auto-record on a page reload no longer warns before discarding the segment in progress. Recordings are never swept, so leaving it on grows the broker's `webterm_recordings/` directory until you delete from the library. See the **Session recorder** section of the in-app help for details.
 
 ## Scratchpad
 

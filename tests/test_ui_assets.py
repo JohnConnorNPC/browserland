@@ -435,6 +435,136 @@ def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
     assert "promptFileHostAuth(localHost())" in src
 
 
+def test_recorder_autorecord_setting_is_synced_and_default_off():
+    """#151: the auto-record toggle rides the same synced settings primitive as
+    the other mod toggles, and ships OFF so the mod stays inert until opted in.
+
+    Source-slice asserts, so be honest about what they prove: that the wiring is
+    present and defaults off, NOT that any gate holds at runtime. The behaviour
+    (arming on create, the off switch, the roll) is what the live verification
+    covers."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    m = re.search(r"ctx\.settings\.boolean\(\s*\n?\s*'recorder\.autoRecord',"
+                  r"\s*(\w+),(.*?)\}\);", src, re.S)
+    assert m, "recorder must own recorder.autoRecord via ctx.settings.boolean"
+    assert m.group(1) == "false", \
+        "auto-record must default OFF -- the key absent from the synced blob"
+    assert "isBrowserGlobal: true" in m.group(2)
+    # The setting is useless if it only arms terminals opened AFTER the flip
+    # (onTerminalCreate has long since fired for the open ones), and dangerous
+    # if flipping it off leaves a rolling recording running forever.
+    assert "autoSetting.onChange(" in src
+    assert "userStopped" in src, \
+        "a manual stop must survive the next auto-record pass"
+    # It reaches the served page (the mod scripts splice into one <script>).
+    assert "'recorder.autoRecord'" in INDEX_HTML
+
+
+def test_recorder_size_cap_rolls_instead_of_stopping():
+    """#151: the cap opens a new segment rather than ending capture."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    assert "function rollRecording" in src and "function maybeRoll" in src
+    # The cap is reached from the capture path via maybeRoll, never by ending
+    # capture: the pre-#151 `if (rec.bytes > REC_CAP_BYTES) stopRecording(...)`
+    # is what an always-on recording cannot survive.
+    push = src[src.index("const pushOut = function"):
+               src.index("rec.wrapWrite = function")]
+    assert "maybeRoll(win, rec);" in push
+    assert "stopRecording" not in push
+    # ...and BOTH ceilings feed it: bytes bounds an output-heavy session, the
+    # event count bounds an output-light one (input markers cost no bytes).
+    roll = src[src.index("function maybeRoll"):src.index("function rollRecording")]
+    assert "REC_CAP_BYTES" in roll and "REC_CAP_EVENTS" in roll
+    # The roll is deferred by a task: nothing is lost (the old segment is still
+    # patched until the timer fires) and the un-patch -> re-patch never runs
+    # re-entrantly from inside term.write.
+    assert "rec.rollTimer = setTimeout(" in roll
+    # A failed replacement must be visible -- the previous segment is already
+    # torn down, so a silent failure is exactly the symptom #151 removes.
+    assert "showNotice(" in src[src.index("function rollRecording"):
+                                src.index("function rollRecording") + 1200]
+    # The chain rides the meta the server whitelists (#151), derived from `seg`
+    # rather than baked into the stored title.
+    assert "series: rec.series, seg: rec.seg," in src
+    assert "'part ' + r.seg + '/' + parts" in src
+    assert "' (part ' + meta0.seg + ')'" in src
+
+
+def test_recorder_files_the_size_it_was_actually_played_at():
+    """#151 arms capture from onTerminalCreate, where neither the grid nor the
+    font is settled (termfont restyles from its own hook; core fits a round trip
+    later), and meta.cols/rows is what a player window sizes itself to. So both
+    are re-read at the first captured byte as well as at start -- guarded on an
+    empty event list so a manual start never re-reads over a seed snapshot that
+    was serialized at the size it was taken.
+
+    The preferred source is win.lastSentDims, the grid core measured and handed
+    to the agent, i.e. the size the PTY laid those bytes out for."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    push = src[src.index("const pushOut = function"):
+               src.index("rec.wrapWrite = function")]
+    assert "if (!rec.events.length) adoptGeom();" in push
+    geom = src[src.index("const adoptGeom = function"):
+               src.index("const pushOut = function")]
+    # The grid core MEASURED and sent to the agent, not xterm's own grid, which
+    # lags it by a round trip -- reading the terminal files a recording as 80x24
+    # whose bytes were laid out for the real grid.
+    assert "const dims = win.lastSentDims;" in geom
+    for field in ("rec.cols = (dims && dims.cols) || t.cols;",
+                  "rec.rows = (dims && dims.rows) || t.rows;",
+                  "rec.fontFamily", "rec.fontSize"):
+        assert field in geom, f"adoptGeom must refresh {field!r}"
+
+
+def test_recorder_unload_guard_covers_saves_not_auto_recordings():
+    """#151: the beforeunload prompt tracks what a reload would really destroy.
+
+    An unconditional guard means auto-record prompts on EVERY reload; the
+    pre-#151 guard dropped the instant capture stopped, so a reload during
+    "saving..." lost the upload with no warning at all."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    guard = src[src.index("function syncUnloadGuard"):]
+    guard = guard[:guard.index("function newSeriesId")]
+    assert "pendingSaves > 0" in guard
+    assert "if (!r.auto)" in guard
+    assert "active.size === 1" not in guard, \
+        "the pre-#151 capture-only condition must be gone"
+    assert "pendingSaves++" in src and "pendingSaves--" in src
+
+
+def test_recorder_queues_uploads_under_the_broker_session_cap():
+    """The broker 429s `too_many_sessions` past MAX_RECORDING_SESSIONS and the
+    rejected segment is lost outright. #151 makes many-at-once ordinary -- the
+    off switch stops every auto recording in one go, and a rolling terminal hands
+    over a segment while the next fills -- so saves queue instead of racing."""
+    from webterm.broker.app import MAX_RECORDING_SESSIONS
+
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    m = re.search(r"const SAVE_SLOTS = (\d+);", src)
+    assert m, "the save queue must declare its concurrency"
+    assert 0 < int(m.group(1)) < MAX_RECORDING_SESSIONS, (
+        f"SAVE_SLOTS={m.group(1)} must stay under the broker's "
+        f"MAX_RECORDING_SESSIONS={MAX_RECORDING_SESSIONS} so a manual save is "
+        f"never starved by rolling segments")
+    # Every stop goes through the queue, not straight at saveRecording.
+    stop = src[src.index("function stopRecording"):
+               src.index("// Uploads are QUEUED")]
+    assert "enqueueSave(rec).then(" in stop
+    assert "saveRecording(" not in stop
+    # A rejection must not strand the counter: saveRecording serializes the whole
+    # segment outside its own HTTP try/catch, so an allocation failure at rolling
+    # sizes rejects -- and an armed reload guard would never disarm.
+    pump = src[src.index("function pumpSaves"):src.index("async function saveRecording")]
+    assert ".catch(function (e) {" in pump
+    assert pump.index(".catch(") < pump.index(".then("), \
+        "catch must precede then so the handler always runs"
+
+
 # --------------------------------------------------------------------------- #
 # the split actually happened
 # --------------------------------------------------------------------------- #
@@ -2469,7 +2599,7 @@ _EXPECTED_TIERS = {
     "clipboard": ["clipboard", "window", "taskbar"],  # #106 clipboard seam + window kind; #118 tray chip
     "scratchpad": ["storage", "window"],  # #124 durable server store (ctx.serverStore) + window kind
     "termfont": ["settings", "window"],  # #126 synced termFont select (ctx.settings.select) + per-terminal apply (ctx.windows.onTerminalCreate)
-    "recorder": ["window"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file)
+    "recorder": ["window", "settings"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file). #151 added the synced recorder.autoRecord toggle (ctx.settings.boolean)
     "host-registry": ["storage", "settings"],  # #65 durable server store (ctx.serverStore) + a browser-mounted registerSettingsPane
 }
 
