@@ -40,6 +40,27 @@ Right-click a window's **title bar** to move it elsewhere (the [[Taskbar]]-item 
 
 The **Send to** items appear only on **tiled** windows' title-bar menus. A floating window's menu offers **Tile this window** instead — tile it first, then send it — or use **Show on all workspaces** to make it visible everywhere.
 
+## Where a window opens, and what happens when you launch it again
+
+A window you open lands on the workspace you are **currently on**, and it stays there — it never appears for a moment and then disappears.
+
+Launching something that is **already open** does not open a second copy. What happens next depends on how that window is arranged:
+
+| The open window is… | Launching it again… |
+|---|---|
+| **Floating**, on another workspace | Moves it to the workspace you are on, and focuses it. |
+| **Floating**, set to *On all workspaces* | Focuses it where it is — it is already visible everywhere, so it is never moved. |
+| **Tiled**, on another workspace | Takes **you** to its workspace and focuses it there. |
+| Minimized | Restores it, applying the same rule. |
+
+The split is deliberate. A floating window can be picked up and moved anywhere, so it comes to you. A tiled window's place *is* its column in that workspace's strip, so moving it would rearrange the layout you built — instead you are taken to it. To move a tiled window for real, use **Send to workspace N** from its title-bar menu.
+
+This applies to every way of launching: the **+** menu, the keyboard shortcut, and the app's own button or chip.
+
+Clicking a window's **taskbar** item behaves the same way, with one addition — it also un-minimizes, and clicking the item of the window you are already focused on minimizes it.
+
+**Closing a window forgets its workspace.** Reopen it later and it opens on whichever workspace you are on, like anything else newly opened. Reloading the page is different: nothing is closed, so every window comes back on the workspace it was on.
+
 ## Renaming, removing, and labeling workspaces
 
 Right-click a **pager dot** for that workspace's options:
