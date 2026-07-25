@@ -1294,6 +1294,68 @@ def test_scratchpad_mod_packaged_and_manifest_agrees():
         < INDEX_HTML.index("id: 'scratchpad'")
 
 
+def test_host_registry_mod_packaged_and_manifest_agrees():
+    # #65: the host-registry mod — an optional shared broker list published to /
+    # pulled from a broker via ctx.serverStore, with a browser-mounted settings
+    # pane. The host list stays browser-local (prefs._hosts); the mod only reads/
+    # writes a server-side COPY. First consumer of registerSettingsPane, and of
+    # the mount:'browser' + serverStore opts.host / purgeRevisions extensions.
+    import json
+    mod_dir = BROKER_DIR / "mods" / "host-registry"
+    js = mod_dir / "host-registry.js"
+    css = mod_dir / "host-registry.css"
+    manifest = mod_dir / "mod.json"
+    help_md = mod_dir / "help.md"
+    assert js.is_file() and css.is_file() and manifest.is_file() \
+        and help_md.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "host-registry"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "host-registry.js"
+    assert meta["styles"] == ["host-registry.css"]
+    assert meta["help"]["slug"] == "host-registry"
+    # help order sits ABOVE the recorder's 2090 (2090 is taken) so mod help
+    # cards keep a stable, collision-free order.
+    assert meta["help"]["order"] > 2090
+    # Declared LAST in _MODS (no mod depends on it; nothing depends on it).
+    assert "mods/host-registry/host-registry.js" in ui._MODS
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'host-registry'" in src
+    assert "ctxVersion: 1" in src
+    # Tiers match the order-sensitive _EXPECTED_TIERS guard above.
+    assert "tiers: ['storage', 'settings']" in src
+    # Built on the durable server store, feature-detected, and mounts a pane in
+    # the Browser settings tab — never doing host /file/* I/O.
+    assert "if (!ctx.serverStore) return;" in src
+    assert "ctx.registerSettingsPane(" in src
+    assert "mount: 'browser'" in src
+    assert "fileApiPost(" not in src
+    # The core host model is NOT relocated: the mod is a layer over the existing
+    # browser-local prefs._hosts, so it reaches the shared closure directly.
+    assert "getHosts()" in src
+    assert "savePrefs()" in src
+    # Publishing tokens is opt-in + revocable: the purge flag rides set()'s opts.
+    assert "purgeRevisions: true" in src
+    # All untrusted text is textContent, never innerHTML (labels/urls/tokens).
+    assert ".innerHTML" not in src
+    # Ships in the served page, AFTER the recorder mod (the last mod before it).
+    assert "id: 'host-registry'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'recorder'") \
+        < INDEX_HTML.index("id: 'host-registry'")
+    # Its CSS rides the served page via the mod-css splice.
+    assert ".hostreg-list" in INDEX_HTML
+    # The Browser-pane mount anchor exists and sits inside #set-pane-browser
+    # (so a mounted section is hidden on every non-Browser tab by the pane
+    # itself, never leaking onto a remote-host tab — #65 containment).
+    body = (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    assert 'id="set-browser-mods"' in body
+    browser_pane = body.index('id="set-pane-browser"')
+    anchor = body.index('id="set-browser-mods"')
+    troubleshoot = body.index("Troubleshooting")
+    assert browser_pane < anchor < troubleshoot
+
+
 def test_editor_serialized_fields_preserved():
     # The hard #83 requirement: every editor serialized field round-trips. They
     # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
@@ -1581,16 +1643,20 @@ def test_server_store_capability_present():
     # helper ride in the served loader. The durable, cross-browser twin of
     # ctx.storage; the scratchpad mod depends on it. ctxVersion stays 1 (additive).
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
-    # The capability object + its three methods, on the per-mod ctx.
+    # The capability object + its three methods. Each takes an additive opts arg
+    # (#65: opts.host routing + set()'s opts.purgeRevisions); the positional
+    # params are unchanged, so a #124 caller that omits opts is byte-compatible.
     for sym in ("serverStore: {",
-                "get: function ()",
-                "set: function (value, baseRev)",
-                "getRevision: function (n)"):
+                "get: function (opts)",
+                "set: function (value, baseRev, opts)",
+                "getRevision: function (n, opts)"):
         assert sym in loader, f"missing ctx.serverStore method: {sym!r}"
-    # The transport helper targets /mod-store/<modId>, local host only, and
-    # set() auto-attaches the core lease id so the active browser's write passes.
-    for sym in ("function _modStoreApi", "'/mod-store/'",
-                "hostFetch(localHost()", "clientId: CLIENT_ID"):
+    # The transport helper targets /mod-store/<modId>, resolves the target broker
+    # via _modStoreHost (local by default, so #124 callers are unchanged; #65
+    # publish-to-all routes to a specific host id and FAILS CLOSED on an unknown
+    # one), and set() auto-attaches the core lease id so the active browser passes.
+    for sym in ("function _modStoreApi", "function _modStoreHost",
+                "'/mod-store/'", "clientId: CLIENT_ID"):
         assert sym in loader, f"missing ctx.serverStore transport symbol: {sym!r}"
     # ctxVersion is unchanged — ctx.serverStore is additive.
     assert "ctxVersion: 1" in loader
@@ -2379,6 +2445,7 @@ _EXPECTED_TIERS = {
     "scratchpad": ["storage", "window"],  # #124 durable server store (ctx.serverStore) + window kind
     "termfont": ["settings", "window"],  # #126 synced termFont select (ctx.settings.select) + per-terminal apply (ctx.windows.onTerminalCreate)
     "recorder": ["window"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file)
+    "host-registry": ["storage", "settings"],  # #65 durable server store (ctx.serverStore) + a browser-mounted registerSettingsPane
 }
 
 

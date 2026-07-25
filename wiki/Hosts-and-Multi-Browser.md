@@ -14,6 +14,17 @@ Each host you add gets its own settings tab in the Control Panel. Settings like 
 
 The password you enter is the broker's browser-login token. The bearer token AI agents use to drive terminals over MCP is a **separate** secret, configured on its own — if you plan to let agents work on this host, see [[MCP-and-AI-Agents]].
 
+## Sharing your broker list
+
+Your host list normally lives only in the browser you added it in: open the desktop from a different browser and you start with an empty list, and clearing local storage to fix a UI glitch also wipes your remote brokers. The optional **Broker registry** fixes that by storing a copy of the list on a broker, so you can pull it back somewhere else. It is a convenience layer, not a change to how connections work — your host list stays browser-local and remains the source of truth, and the desktop always connects **directly** to each broker. The broker only stores the list; it never proxies your traffic.
+
+Find it in **Control Panel → Browser → Broker registry**, just below the Hosts list.
+
+- **Publish** saves this browser's list to the broker. You pick which hosts to include and set the absolute address other machines use to reach this broker (a loopback address like `localhost` / `127.x` can't be shared, so the local broker is skipped when its address is loopback). Optionally publish to **every configured broker** at once, so opening the desktop from any of them recovers the full list; each broker is reported separately. Publishing requires this browser to hold the target broker's active-writer lease.
+- **Pull** imports hosts published to this broker. New hosts are checked by default; a host you already have that differs is unchecked (your local copy wins unless you tick it), and an identical one is greyed out. Matching is by the broker's verified identity, then its address, so pulling an updated list updates the hosts you already have instead of duplicating them, and it never touches your **this broker** entry or your default-host choice. If you apply a host whose URL changed, its saved password is cleared (never carried across to a different address), so you may need to re-enter it.
+
+**Passwords are not shared unless you ask.** The **Include passwords** box is off by default and warns you: publishing a broker's token lets anyone who can read that registry log into every included broker — a lateral-movement path between your machines. Only include passwords when the broker holding the registry is as trusted as the brokers whose tokens it carries. **Forget passwords** removes every token from the registry *and* its saved history, but it does **not** revoke access — a browser that already pulled a token keeps it, and the token stays valid until you rotate it (`--print-token` shows the current one). If a token was ever exposed, rotate it.
+
 ## Default color per host
 
 Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.

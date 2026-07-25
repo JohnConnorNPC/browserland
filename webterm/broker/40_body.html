@@ -256,6 +256,14 @@
                     <div class="set-hint">remote brokers must have an auth token
                         configured (it doubles as the password here)</div>
                 </div>
+                <!-- #65: mod-contributed panes that manage BROWSER-scoped host
+                     config (the host-registry mod, via
+                     registerSettingsPane({mount:'browser'})) mount here, so they
+                     sit with the Hosts list they act on instead of one tab away in
+                     #set-mods. Inside #set-pane-browser, which is .active only on
+                     the Browser tab, so a mounted section is hidden on every other
+                     tab by the pane itself and is NOT .set-browser-global. -->
+                <div id="set-browser-mods"></div>
                 <div class="set-section">
                     <div class="set-title">Troubleshooting</div>
                     <div class="set-row">

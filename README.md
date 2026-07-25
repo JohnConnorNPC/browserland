@@ -183,8 +183,9 @@ The desktop with tiled and floating terminals
 ## Mods
 
 The desktop's app windows and most of its optional chrome ship as **mods** —
-the terminal pipeline, window manager, multi-host, and MCP surfaces stay
-core. A mod is a self-contained folder under `webterm/broker/mods/<id>/`
+the terminal pipeline, window manager, the multi-host connection model, and
+MCP surfaces stay core (only the *optional sharing* of that host list across
+browsers is a mod). A mod is a self-contained folder under `webterm/broker/mods/<id>/`
 holding a manifest (`mod.json`), one entry script, and optional CSS + an
 in-app help page. Mods are trusted first-party code: the broker splices an
 explicit allow-list of them into the single served page (there is no runtime
@@ -196,7 +197,7 @@ with revision history, an in-desktop copy/paste observer, and help cards.
 A mod's *settings* sync across your browsers via the broker's shared state;
 its *enable/disable* toggle is deliberately per-browser — flip it in
 **Control Panel → Mods**. A broker-side `mods_enabled` master switch gates
-the whole system. The desktop ships with fifteen:
+the whole system. The desktop ships with sixteen:
 
 | Mod | What it adds | Default |
 |---|---|---|
@@ -211,6 +212,7 @@ the whole system. The desktop ships with fifteen:
 | `scratchpad` | server-backed notes, synced across browsers with revision history | on |
 | `agent-docs` | AGENTS.md / CLAUDE.md one-click openers on terminal title bars | on |
 | `recorder` | terminal session recorder + fixed-size player (speed, continuous rewind, timestamped notes) | on |
+| `host-registry` | optional shared broker list — publish/pull your host list across browsers | on |
 | `git` | per-terminal git branch + dirty-state widget | off |
 | `aistatus` | AI-provider status chip + window | off |
 | `clipboard` | rolling history of copies/pastes made through the desktop | off |

@@ -1006,6 +1006,165 @@ def test_mod_store_lease_not_active(broker_proc):
     asyncio.run(scenario())
 
 
+def test_mod_store_purge_clears_ring(broker_proc):
+    """purgeRevisions:true writes the value AND forgets history (#65): the new
+    value stays readable, but every prior revision 404s no_such_rev — the only
+    way to un-publish a value (e.g. a token) that scrolled into the ring."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-purge"
+    # Three distinct writes -> rev 3; the ring holds the two prior revs [2, 1].
+    rev = 0
+    for i in range(3):
+        status, payload = _http(
+            "PUT", f"{base}/mod-store/{mod}",
+            body=json.dumps({"baseRev": rev, "value": {"v": 1, "n": i}}
+                            ).encode(), headers=auth)
+        assert status == 200, payload
+        rev = payload["rev"]
+    assert rev == 3
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert [e["rev"] for e in payload["revisions"]] == [2, 1]
+    # A purging write to a NEW value -> rev 4 (a purge that changes state bumps
+    # rev), the ring emptied, and the prior revs gone.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 3, "value": {"v": 1, "n": "final"},
+                         "purgeRevisions": True}).encode(), headers=auth)
+    assert status == 200 and payload["rev"] == 4
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert payload["rev"] == 4 and payload["value"] == {"v": 1, "n": "final"}
+    assert payload["revisions"] == []
+    # A previously-ringed revision now 404s — the whole point of the purge.
+    for old in (1, 2, 3):
+        status, payload = _http(
+            "GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev={old}")
+        assert status == 404 and payload["error"] == "no_such_rev", old
+    # The current rev still resolves via ?rev=.
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=4")
+    assert status == 200 and payload["value"] == {"v": 1, "n": "final"}
+
+
+def test_mod_store_purge_on_dedupe_path(broker_proc):
+    """A purge whose value EQUALS the current one still clears the ring — but
+    because dropping history is an OBSERVABLE mutation (?rev=<old> flips to
+    404), it bumps rev rather than mutating the current rev in place (#65).
+    'Scrub back to what I already have' must not silently no-op."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-purge-dedupe"
+    v1 = {"v": 1, "keep": "yes"}
+    v2 = {"v": 1, "keep": "no"}
+    # rev 1 (v1), rev 2 (v2). The ring holds [1] with v1's body still readable.
+    for base_rev, val in ((0, v1), (1, v2)):
+        status, _ = _http(
+            "PUT", f"{base}/mod-store/{mod}",
+            body=json.dumps({"baseRev": base_rev, "value": val}).encode(),
+            headers=auth)
+        assert status == 200
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=1")
+    assert status == 200 and payload["value"] == v1   # recoverable pre-purge
+    # Resend the CURRENT value (v2) with purge: value unchanged, but a ring is
+    # present -> rev bumps 2->3, the ring is scrubbed, v1 is no longer readable.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 2, "value": v2,
+                         "purgeRevisions": True}).encode(), headers=auth)
+    assert status == 200 and payload["ok"] is True and payload["rev"] == 3
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert payload["rev"] == 3 and payload["value"] == v2
+    assert payload["revisions"] == []
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}&rev=1")
+    assert status == 404 and payload["error"] == "no_such_rev"
+
+
+def test_mod_store_purge_true_noop(broker_proc):
+    """A purge with nothing left to clear (value unchanged AND the ring already
+    empty) is a true no-op: rev unchanged, no spurious disk write (#65)."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-purge-noop"
+    v1 = {"v": 1, "x": "a"}
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 0, "value": v1}).encode(), headers=auth)
+    assert status == 200 and payload["rev"] == 1   # ring is empty (first write)
+    # Purge with the same value and an already-empty ring: rev stays 1.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 1, "value": v1,
+                         "purgeRevisions": True}).encode(), headers=auth)
+    assert status == 200 and payload["ok"] is True and payload["rev"] == 1
+    status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
+    assert payload["rev"] == 1 and payload["value"] == v1
+    assert payload["revisions"] == []
+
+
+def test_mod_store_purge_validation_and_gating(broker_proc):
+    """purgeRevisions is a STRICT bool (bool is an int subclass, so a truthy
+    non-bool must not sneak a purge through), and a purge is still baseRev-
+    gated: a stale purge is a conflict, never a bypass (#65)."""
+    _, _, base = broker_proc
+    auth = {"Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json"}
+    mod = "e2e-purge-val"
+    # A non-bool flag is 400 BEFORE any store mutation (1/"true"/{}/[]/0 all).
+    for bad in (1, "true", {}, [], 0):
+        status, payload = _http(
+            "PUT", f"{base}/mod-store/{mod}",
+            body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                             "purgeRevisions": bad}).encode(), headers=auth)
+        assert status == 400 and payload["error"] == "bad_purgeRevisions", bad
+    # The store is untouched by those rejects, so baseRev 0 still seeds rev 1.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 0, "value": {"v": 1}}).encode(),
+        headers=auth)
+    assert status == 200 and payload["rev"] == 1
+    # A stale baseRev with purge is a conflict — purge never bypasses the rev
+    # gate (you must be at head to scrub), and the live value is inlined.
+    status, payload = _http(
+        "PUT", f"{base}/mod-store/{mod}",
+        body=json.dumps({"baseRev": 0, "value": {"v": 2},
+                         "purgeRevisions": True}).encode(), headers=auth)
+    assert status == 409 and payload["error"] == "conflict"
+    assert payload["rev"] == 1 and payload["value"] == {"v": 1}
+
+
+def test_mod_store_purge_lease_gated(broker_proc):
+    """A purge is still lease-gated: a non-active client's purging PUT is 409
+    not_active — it cannot scrub a store it isn't allowed to write (#65)."""
+    _, port, base = broker_proc
+
+    async def scenario():
+        ctrl, st = await _claim_lease(port, "PG")
+        assert st["active"] is True and st["activeClientId"] == "PG"
+        try:
+            auth = {"Authorization": f"Bearer {TOKEN}",
+                    "Content-Type": "application/json"}
+            mod = "e2e-purge-lease"
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                                 "purgeRevisions": True,
+                                 "clientId": "OTHER"}).encode(), headers=auth)
+            assert status == 409 and payload["error"] == "not_active"
+            # The active client's purge is accepted.
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                                 "purgeRevisions": True,
+                                 "clientId": "PG"}).encode(), headers=auth)
+            assert status == 200 and payload["ok"] is True
+        finally:
+            await ctrl.close()
+
+    asyncio.run(scenario())
+
+
 def test_file_upload_roundtrip(broker_proc, tmp_path):
     _, _, base = broker_proc
     auth = {"Authorization": f"Bearer {TOKEN}",
