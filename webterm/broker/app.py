@@ -41,6 +41,7 @@ import base64
 import codecs
 import errno
 import functools
+import gzip
 import hashlib
 import json
 import logging
@@ -59,6 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -148,6 +150,18 @@ MAX_RECORDING_SESSIONS = 4          # concurrent in-flight recording saves
 RECORDING_SESSION_TTL = 3600.0      # seconds before an abandoned save is swept
 MAX_RECORDING_NOTES = 500           # notes per recording
 MAX_RECORDING_NOTE_TEXT = 4096      # chars per note
+# #159: the two event-file encodings. New recordings land compressed; the bare
+# suffix keeps meaning an uncompressed pre-#159 file, which is durable user data
+# that nothing ever rewrites. THE SUFFIX IS THE ENCODING — no path is ever
+# chosen by sniffing content, so a corrupt .gz reports as a corrupt gzip instead
+# of being silently retried as raw JSONL.
+REC_SUFFIX = ".blrec"
+REC_SUFFIX_GZ = ".blrec.gz"
+# Level 6 (zlib's own default), not 9. Measured on a synthetic-but-realistic
+# recording (spinner redraws, coloured log lines, full-screen repaints): 6 gives
+# 8.1x at ~27 MiB/s per worker, 9 gives 8.2x at ~16 MiB/s. The extra 1% is not
+# worth 1.7x the CPU when this runs in the shared executor on every chunk.
+REC_GZIP_LEVEL = 6
 
 
 # Non-UTF-8 editor support (#97). The broker ships only sanic+websockets, so
@@ -1574,6 +1588,44 @@ def _append_chunk(tmp: str, data: bytes) -> None:
         fh.write(data)
 
 
+def _append_chunk_gz(tmp: str, data: bytes) -> None:
+    """Append ONE recording chunk as its own gzip MEMBER to the session temp.
+
+    BLOCKING: call it through ``_off_loop``, never straight from a handler. The
+    caller's lock/shield contract is exactly :func:`_append_chunk`'s and is
+    unchanged by compression — that contract guards accounting ORDER, and the
+    order does not change here.
+
+    Compressing per chunk rather than gzipping the finished temp at commit is
+    what keeps the append STREAMING: ``_recording_commit`` stays a size + an
+    ``os.replace``, with no extra full read+write of up to ``MAX_RECORDING_BYTES``
+    in a worker while the client waits. Concatenated gzip members are a valid
+    gzip stream (RFC 1952 §2.2), and ``gzip.open``/``gzip.decompress``/``zcat``
+    read them transparently. Measured cost of the framing at 2 MiB chunks: 0.4%
+    worse than one member, i.e. nothing.
+
+    The known cost, recorded rather than waved off: a reader built on a bare
+    ``zlib.decompressobj(wbits=31)`` stops at the end of the FIRST member and
+    reports success, unless it loops on ``unused_data``. That is not
+    hypothetical — httpx's response decoder does it — and it is exactly why
+    ``_recording_get`` decodes server-side instead of passing these bytes
+    through as ``Content-Encoding: gzip``. Read that comment before changing
+    either. (``gzip --list`` has the same shape of wart: it reports the last
+    member's sizes rather than the whole file's.)
+
+    ``filename=""`` keeps the session temp's path out of every member header
+    (it would otherwise be taken from ``fileobj.name``), and ``mtime=0`` keeps
+    members byte-reproducible instead of stamping wall-clock into each one."""
+    if not data:
+        # An empty chunk is a legal no-op on the raw path; here it would append
+        # a 20-byte member carrying nothing.
+        return
+    with open(tmp, "ab") as fh:
+        with gzip.GzipFile(fileobj=fh, mode="wb", compresslevel=REC_GZIP_LEVEL,
+                           filename="", mtime=0) as gz:
+            gz.write(data)
+
+
 def _commit_replace(tmp: str, dest: str, overwrite: bool = True) -> int:
     """Size the finished session temp and ``os.replace`` it onto ``dest``,
     returning the size. ONE hop for both syscalls so nothing can grow the temp
@@ -1702,8 +1754,8 @@ def _sweep_rec_temps(temps: List[str], rec_dir: Path, now: float) -> None:
 def _sweep_rec_orphan_parts(rec_dir: Path, now: float) -> None:
     """Best-effort removal of stale ``.webterm-rec-*.part`` temps under the
     recordings dir (#140) — a crash orphans a save session's temp exactly like
-    the upload case (_sweep_orphan_parts). Committed *.blrec files and the
-    meta/notes sidecars are never candidates."""
+    the upload case (_sweep_orphan_parts). Committed recordings (*.blrec and
+    *.blrec.gz) and the meta/notes sidecars are never candidates."""
     try:
         candidates = list(rec_dir.glob(".webterm-rec-*.part"))
     except OSError:
@@ -1714,6 +1766,36 @@ def _sweep_rec_orphan_parts(rec_dir: Path, now: float) -> None:
                 child.unlink()
         except OSError:
             pass
+
+
+class _RecPaths(NamedTuple):
+    """Every file belonging to one VALIDATED recording id (#140, #159).
+
+    ``gz`` and ``raw`` are the two possible event files. New recordings land as
+    ``gz``; ``raw`` is a pre-#159 uncompressed recording. Both are built from
+    the same id-regex-validated stem plus a FIXED suffix, so the regex remains
+    the whole traversal defense for the new suffix exactly as it was for the old
+    one.
+
+    Nothing may assume one encoding per recording, and nothing may assume one
+    encoding per #151 ``series``: a segment roll can cross a broker restart, so
+    two segments of one chain can differ."""
+    rec_id: str
+    gz: Path
+    raw: Path
+    meta: Path
+    notes: Path
+
+    @property
+    def events(self) -> Tuple[Path, Path]:
+        """Both event-file candidates, newest encoding FIRST.
+
+        This is the resolution order for every read. Ids are a timestamp plus 4
+        random bytes so both files existing for one id essentially cannot happen
+        on its own — but a user can copy files into the recordings dir, so the
+        tie is broken the same way everywhere (gzip wins in list, get, notes and
+        delete) rather than left for each caller to disagree about."""
+        return (self.gz, self.raw)
 
 
 def _rec_sanitize_meta(meta: Any) -> Dict[str, Any]:
@@ -4753,22 +4835,25 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The recorder mod's storage: a finished recording streams in through the
     # begin/chunk/commit trio below (server-generated rec-* ids — the client
     # never names a path, strictly narrower than /file/upload_* exactly like
-    # /file/paste_image), lands atomically as <id>.blrec in recordings_dir,
-    # with a whitelisted meta sidecar (<id>.meta.json) so listing never parses
-    # the big event file, and a revisioned notes sidecar (<id>.notes.json).
-    # Same token gate as /file/*.
+    # /file/paste_image), lands atomically as <id>.blrec.gz in recordings_dir
+    # (#159 — gzip, one member per uploaded chunk; <id>.blrec is the older
+    # uncompressed form and stays readable forever), with a whitelisted meta
+    # sidecar (<id>.meta.json) so listing never parses the big event file, and
+    # a revisioned notes sidecar (<id>.notes.json). Same token gate as /file/*.
     def _rec_auth_error(request: Request):
         return _gated_auth_error(request, "/recording")
 
-    def _rec_paths(rec_id: str):
-        """(blrec, meta, notes) paths for a VALIDATED id, or None on a bad id.
-        The strict id regex is the whole traversal defense: every file touched
-        is <recordings_dir>/<id><fixed suffix>."""
+    def _rec_paths(rec_id: str) -> Optional[_RecPaths]:
+        """Every path for a VALIDATED id, or None on a bad id. The strict id
+        regex is the whole traversal defense: every file touched is
+        <recordings_dir>/<id><fixed suffix>, for BOTH event-file suffixes."""
         if not isinstance(rec_id, str) or not _RECORDING_ID_RE.fullmatch(rec_id):
             return None
         d = app.ctx.recordings_dir
-        return (d / (rec_id + ".blrec"), d / (rec_id + ".meta.json"),
-                d / (rec_id + ".notes.json"))
+        return _RecPaths(rec_id,
+                         d / (rec_id + REC_SUFFIX_GZ), d / (rec_id + REC_SUFFIX),
+                         d / (rec_id + ".meta.json"),
+                         d / (rec_id + ".notes.json"))
 
     async def _recording_begin(request: Request):
         err = _rec_auth_error(request)
@@ -4857,8 +4942,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": "too_large"},
                                   status=400)
             try:
-                await _off_loop(_append_chunk, session["tmp"], data)
-            except OSError as exc:
+                # #159: each chunk becomes its own gzip member. `received`
+                # still counts DECODED INPUT bytes, so MAX_RECORDING_BYTES keeps
+                # its exact meaning and the client's roll threshold is untouched.
+                await _off_loop(_append_chunk_gz, session["tmp"], data)
+            except (OSError, zlib.error) as exc:
                 app.ctx.rec_uploads.pop(rec_id, None)
                 await _off_loop(_unlink_quiet, [session["tmp"]])
                 return sanic_json({"ok": False, "error": str(exc)}, status=400)
@@ -4867,10 +4955,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "received": received})
 
     async def _recording_commit(request: Request):
-        # Finalize: atomic os.replace of the temp onto <id>.blrec, then the
-        # whitelisted meta sidecar (with the authoritative on-disk size). A
-        # failed sidecar write rolls the .blrec back off disk so list/get
-        # never see a half-registered recording.
+        # Finalize: atomic os.replace of the temp onto <id>.blrec.gz, then the
+        # whitelisted meta sidecar (with both sizes — see below). A failed
+        # sidecar write rolls the event file back off disk so list/get never
+        # see a half-registered recording.
         err = _rec_auth_error(request)
         if err is not None:
             return err
@@ -4886,7 +4974,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(rec_id)
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        blrec, meta_path, _notes = paths
+        # A new recording is ALWAYS compressed — never "whichever exists".
+        blrec, meta_path = paths.gz, paths.meta
         meta = _rec_sanitize_meta(body.get("meta"))
         # Same per-session lock as /file/upload_commit: the size measurement, the
         # sidecar write and the replace now span awaits, and an append landing in
@@ -4901,8 +4990,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # sidecar — a crash between the two leaves only an orphan sidecar
             # (invisible, harmless), never a half-registered recording.
             try:
-                size = await _off_loop(os.path.getsize, tmp)
+                # `size` keeps meaning UNCOMPRESSED bytes — the length of the
+                # JSONL the client uploaded, which is what it meant for every
+                # recording before #159 and what a player/download produces. It
+                # comes from the accounted input bytes, NOT from stat, so
+                # compression cannot silently redefine the recorder's size
+                # column mid-library. `diskSize` is the new, separately named
+                # on-disk footprint.
+                size = session["received"]
                 meta["size"] = size
+                meta["enc"] = "gzip"
+                meta["diskSize"] = await _off_loop(os.path.getsize, tmp)
                 meta["savedAt"] = int(time.time())
                 await asyncio.get_running_loop().run_in_executor(
                     None, _write_state_atomic, meta_path, meta)
@@ -4940,24 +5038,55 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
         def _scan():
             out = []
+            seen = set()
             try:
-                files = list(rec_dir.glob("rec-*.blrec"))
+                # TWO exact globs, gzip first, never one loose "rec-*.blrec*":
+                # that would also sweep up editor backups and stray temps. Note
+                # `rec-*.blrec` does NOT match `<id>.blrec.gz` — fnmatch anchors
+                # the end — so the two lists are disjoint by construction.
+                files = (sorted(rec_dir.glob("rec-*" + REC_SUFFIX_GZ))
+                         + sorted(rec_dir.glob("rec-*" + REC_SUFFIX)))
             except OSError:
                 return out
             for f in files:
-                rec_id = f.name[:-len(".blrec")]
-                if not _RECORDING_ID_RE.fullmatch(rec_id):
+                gz = f.name.endswith(REC_SUFFIX_GZ)
+                rec_id = f.name[:-len(REC_SUFFIX_GZ if gz else REC_SUFFIX)]
+                # gzip is scanned first, so a duplicated id resolves to the
+                # compressed file here exactly as it does in get/notes/delete.
+                if not _RECORDING_ID_RE.fullmatch(rec_id) or rec_id in seen:
                     continue
+                seen.add(rec_id)
                 meta = _rec_load_json(
                     rec_dir / (rec_id + ".meta.json")) or {}
                 notes = _rec_load_notes(rec_dir / (rec_id + ".notes.json"))
                 try:
-                    size = f.stat().st_size
+                    disk = f.stat().st_size
                 except OSError:
-                    size = meta.get("size", 0)
-                entry = {"id": rec_id, "size": size,
+                    disk = None
+                logical = meta.get("size")
+                if isinstance(logical, bool) or not isinstance(logical, int) \
+                        or logical < 0:
+                    logical = None
+                entry = {"id": rec_id,
                          "notesCount": len(notes["notes"]),
                          "notesRev": notes["rev"]}
+                if disk is not None:
+                    entry["diskSize"] = disk       # always the CURRENT stat,
+                    #   never meta["diskSize"] — the file on disk is the truth
+                if gz:
+                    entry["enc"] = "gzip"
+                    # No stat fallback for `size` here: stat is the COMPRESSED
+                    # length, and reporting it under a field that means
+                    # uncompressed bytes would understate every recording whose
+                    # sidecar went missing. Better absent (the client renders
+                    # it unknown, alongside the ?×? and 0:00 that a lost sidecar
+                    # already produces) than confidently wrong.
+                    if logical is not None:
+                        entry["size"] = logical
+                else:
+                    # Uncompressed: stat IS the uncompressed length, and stays
+                    # authoritative over the sidecar exactly as before #159.
+                    entry["size"] = disk if disk is not None else (logical or 0)
                 for key in ("title", "cols", "rows", "startedAt",
                             "durationMs", "events", "fontFamily", "fontSize",
                             "savedAt", "series", "seg"):
@@ -4978,18 +5107,53 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(request.args.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        blrec = paths[0]
+        # ALWAYS plain JSONL on the wire, whatever the storage encoding is.
+        #
+        # #159 originally planned to hand a stored .blrec.gz straight through
+        # under `Content-Encoding: gzip` and let the client inflate — less work
+        # here, fewer bytes on the wire. DO NOT REINSTATE THAT without changing
+        # how the file is FRAMED. Chunks are stored as separate gzip MEMBERS,
+        # and a concatenated-member stream, while perfectly valid gzip, is not
+        # universally handled by HTTP client decoders: they commonly wrap a bare
+        # `zlib.decompressobj(wbits=31)`, which stops at the end of the first
+        # member and reports success. httpx does exactly this (verified — its
+        # GZipDecoder returns only the first member and drops the rest), so a
+        # multi-chunk recording would arrive SILENTLY TRUNCATED, which for an
+        # archive is the worst possible failure. Serving decoded bytes keeps
+        # this endpoint byte-identical to its pre-#159 behaviour for every
+        # client, and the issue's own framing is that disk is the growth
+        # problem and the wire is not.
+        def _read():
+            """Resolve the encoding by SUFFIX and return decoded JSONL.
+
+            ONE worker hop for the whole read, and the inflate happens in here
+            too, so the compressed buffer is dropped on return rather than
+            being held alongside the decoded one on the loop."""
+            for path, stored_gz in ((paths.gz, True), (paths.raw, False)):
+                try:
+                    data = path.read_bytes()
+                except FileNotFoundError:
+                    continue
+                return gzip.decompress(data) if stored_gz else data
+            raise FileNotFoundError(str(paths.gz))
+
         try:
             data = await asyncio.get_running_loop().run_in_executor(
-                None, blrec.read_bytes)
+                None, _read)
         except FileNotFoundError:
             return sanic_json({"ok": False, "error": "not_found"}, status=404)
-        except OSError as exc:
+        except (OSError, EOFError, zlib.error) as exc:
+            # BadGzipFile is an OSError, but a TRUNCATED member raises EOFError
+            # and a corrupt deflate stream raises zlib.error — neither is one,
+            # and an uncaught one here would be a 500 on a damaged archive.
             return sanic_json({"ok": False, "error": str(exc)}, status=400)
+        # The name is built from the validated id, not from the file's stem:
+        # Path("<id>.blrec.gz").stem is "<id>.blrec", which would have produced
+        # "<id>.blrec.blrec".
         return sanic_raw(data, content_type="application/octet-stream",
                          headers={"Content-Disposition":
-                                  'attachment; filename="%s.blrec"'
-                                  % blrec.stem})
+                                  'attachment; filename="%s%s"'
+                                  % (paths.rec_id, REC_SUFFIX)})
 
     async def _recording_delete(request: Request):
         # The ONLY deletion path for a committed recording (no sweep ever).
@@ -5004,16 +5168,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(body.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        blrec, meta_path, notes_path = paths
 
         def _unlink_all():
-            # ONE hop for the whole teardown. The event file goes first and its
-            # failure is the reported one (FileNotFoundError -> 404, any other
+            # ONE hop for the whole teardown. The event files go first and their
+            # failure is the reported one (nothing removed -> 404, any other
             # OSError -> 400); the sidecars stay best-effort, and are not
-            # touched at all when the event file unlink raises, exactly as when
+            # touched at all when an event-file unlink raises, exactly as when
             # these were three separate on-loop calls.
-            os.unlink(str(blrec))
-            for side in (meta_path, notes_path):
+            #
+            # BOTH suffixes are unlinked (#159), so deleting a recording never
+            # leaves the other encoding behind to reappear in the next listing.
+            # A non-missing OSError still propagates immediately: the recording
+            # is not gone, so its sidecars must survive to keep it listable.
+            removed = 0
+            for path in paths.events:
+                try:
+                    os.unlink(str(path))
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+            if not removed:
+                raise FileNotFoundError(str(paths.gz))
+            for side in (paths.meta, paths.notes):
                 try:
                     os.unlink(str(side))
                 except OSError:
@@ -5034,15 +5210,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(request.args.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        blrec, _meta_path, notes_path = paths
-
         def _read():
             # Existence probe + sidecar parse in ONE hop off the loop. A
             # deleted/never-saved recording must not look note-valid via an
-            # orphan sidecar — mirror the PUT's existence check.
-            if not blrec.exists():
+            # orphan sidecar — mirror the PUT's existence check. EITHER
+            # encoding counts: an old uncompressed recording is annotatable.
+            if not any(p.exists() for p in paths.events):
                 return None
-            return _rec_load_notes(notes_path)
+            return _rec_load_notes(paths.notes)
 
         notes = await _off_loop(_read)
         if notes is None:
@@ -5064,7 +5239,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         paths = _rec_paths(body.get("id"))
         if paths is None:
             return sanic_json({"ok": False, "error": "bad_id"}, status=400)
-        blrec, meta_path, notes_path = paths
         base_rev = body.get("baseRev")
         if isinstance(base_rev, bool) or not isinstance(base_rev, int) \
                 or base_rev < 0:
@@ -5078,10 +5252,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         def _read_meta():
             # Existence probe + meta parse in ONE hop off the loop. None means
             # "no such recording"; a missing/corrupt meta sidecar still
-            # degrades to {} the way it always did.
-            if not blrec.exists():
+            # degrades to {} the way it always did. Either encoding counts.
+            if not any(p.exists() for p in paths.events):
                 return None
-            return _rec_load_json(meta_path) or {}
+            return _rec_load_json(paths.meta) or {}
 
         meta = await _off_loop(_read_meta)
         if meta is None:
@@ -5116,7 +5290,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # it. rec_notes_lock is an asyncio.Lock (loop-affine): it is
             # acquired and released on the loop and never crosses into a
             # worker; only the inert notes path and plain dict do.
-            current = await _off_loop(_rec_load_notes, notes_path)
+            current = await _off_loop(_rec_load_notes, paths.notes)
             if base_rev != current["rev"]:
                 return sanic_json({"ok": False, "error": "conflict",
                                    "rev": current["rev"],
@@ -5124,7 +5298,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             new_rec = {"rev": current["rev"] + 1, "notes": clean}
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _write_state_atomic, notes_path, new_rec)
+                    None, _write_state_atomic, paths.notes, new_rec)
             except OSError as exc:
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=500)

@@ -8,8 +8,10 @@ ReusableClient. Every app configures a token explicitly (#142).
 
 import asyncio
 import base64
+import gzip
 import json
 import os
+import random
 import time
 
 from sanic_testing.reusable import ReusableClient
@@ -121,22 +123,41 @@ def test_save_list_get_roundtrip(tmp_path, monkeypatch):
         rec_id = _save_one(client, payload,
                            meta={"title": "demo", "cols": 80, "rows": 24,
                                  "durationMs": 5000, "startedAt": 123})
-        # temp .part gone, .blrec + meta sidecar present
+        # temp .part gone, .blrec.gz + meta sidecar present. #159: the bare
+        # .blrec suffix is NEVER written any more -- it only ever means an
+        # older, uncompressed recording.
         rec_dir = tmp_path / "recs"
         assert not list(rec_dir.glob(".webterm-rec-*.part"))
-        assert (rec_dir / f"{rec_id}.blrec").read_bytes() == payload
+        assert not (rec_dir / f"{rec_id}.blrec").exists()
+        stored = (rec_dir / f"{rec_id}.blrec.gz").read_bytes()
+        assert gzip.decompress(stored) == payload
         meta = json.loads((rec_dir / f"{rec_id}.meta.json").read_text())
-        assert meta["title"] == "demo" and meta["size"] == len(payload)
-        # list inlines the sidecar meta + size
+        assert meta["title"] == "demo"
+        # `size` keeps meaning UNCOMPRESSED bytes across the #159 switch, so a
+        # library holding both encodings compares like with like; the on-disk
+        # footprint gets its own separately named field.
+        assert meta["size"] == len(payload)
+        assert meta["enc"] == "gzip"
+        # diskSize is the on-disk footprint. This particular payload is
+        # os.urandom, i.e. INCOMPRESSIBLE, so it is very slightly LARGER than
+        # the source -- deflate's stored-block + per-member header overhead.
+        # The compression win is asserted on realistic content instead, in
+        # test_realistic_recording_compresses.
+        assert meta["diskSize"] == len(stored)
+        # list inlines the sidecar meta + both sizes
         _, r = client.get("/recordings")
         assert r.status == 200 and r.json["ok"]
         entry = [e for e in r.json["recordings"] if e["id"] == rec_id][0]
         assert entry["title"] == "demo"
         assert entry["size"] == len(payload)
+        assert entry["diskSize"] == len(stored)
+        assert entry["enc"] == "gzip"
         assert entry["notesCount"] == 0
-        # fetch returns the exact bytes
+        # fetch returns the exact bytes, decoded: the wire format is unchanged
+        # by #159, so the recorder mod needed no change at all.
         _, r = client.get(f"/recording?id={rec_id}")
         assert r.status == 200 and r.body == payload
+        assert "content-encoding" not in r.headers
         # ...with the download headers pinned. Since the recorder mod switched
         # to a Blob download (it fetches, then anchors off URL.createObjectURL
         # so the auth token never lands in the browser's Downloads list), the
@@ -375,7 +396,8 @@ def test_recording_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
         _, r = client.post("/recording/commit",
                            json={"recording_id": rec_id, "meta": {}})
         assert r.status == 200 and r.json["size"] == len(payload), r.json
-    assert (tmp_path / "recs" / f"{rec_id}.blrec").read_bytes() == payload
+    stored = (tmp_path / "recs" / f"{rec_id}.blrec.gz").read_bytes()
+    assert gzip.decompress(stored) == payload
 
 
 def test_committed_recordings_never_swept(tmp_path, monkeypatch):
@@ -385,9 +407,276 @@ def test_committed_recordings_never_swept(tmp_path, monkeypatch):
     app = _make_rec_app(tmp_path, monkeypatch)
     with authed_reusable(app) as client:
         rec_id = _save_one(client, b"keep me\n")
-        blrec = tmp_path / "recs" / f"{rec_id}.blrec"
+        blrec = tmp_path / "recs" / f"{rec_id}.blrec.gz"
         old = time.time() - 30 * 24 * 3600
         os.utime(blrec, (old, old))            # a month old
         _, r = client.post("/recording/begin", json={})   # runs both sweeps
         assert r.json["ok"]
         assert blrec.exists()
+
+
+# ---- #159: gzip on disk, both encodings readable ---------------------------
+
+def _realistic_blrec(target_bytes=3 << 20) -> bytes:
+    """A recording that looks like a terminal session rather than noise.
+
+    The compression claim in #159 is about REAL captures -- spinner redraws,
+    coloured log lines, full-screen repaints -- so asserting a ratio against
+    os.urandom would prove nothing, and asserting it against a single repeated
+    byte would prove too much."""
+    rng = random.Random(159)
+    words = "building compiling linking test passed ok error warning".split()
+    out = [json.dumps({"v": 1, "cols": 120, "rows": 40, "title": "demo"})]
+    t = 0
+    total = 0
+    i = 0
+    while total < target_bytes:
+        r = rng.random()
+        if r < 0.45:                                    # spinner redraw
+            payload = ("\r\x1b[K" + "|/-\\"[i % 4] + " working "
+                       + str(i % 100) + "%").encode()
+        elif r < 0.8:                                   # coloured log line
+            payload = ("\x1b[32m[ok]\x1b[0m "
+                       + " ".join(rng.choice(words) for _ in range(8))
+                       + "\r\n").encode()
+        else:                                           # full repaint
+            payload = b"".join(
+                ("\x1b[%d;1H\x1b[K" % row
+                 + " ".join(rng.choice(words) for _ in range(10))).encode()
+                for row in range(1, 41))
+        total += len(payload)
+        t += rng.randint(5, 90)
+        out.append(json.dumps({"t": t, "k": "o", "d": _b64(payload)}))
+        i += 1
+    return ("\n".join(out) + "\n").encode()
+
+
+def _plant_raw_recording(rec_dir, rec_id, payload, meta=None):
+    """Write a pre-#159 UNCOMPRESSED recording the way the old broker did.
+
+    Deliberately not driven through the API: the API cannot produce one any
+    more, and the point of these cases is that files already sitting on a
+    user's disk keep working."""
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    (rec_dir / (rec_id + ".blrec")).write_bytes(payload)
+    side = {"title": "old one", "cols": 80, "rows": 24, "size": len(payload),
+            "startedAt": 1000, "durationMs": 4000}
+    side.update(meta or {})
+    (rec_dir / (rec_id + ".meta.json")).write_text(json.dumps(side),
+                                                  encoding="utf-8")
+    return rec_dir / (rec_id + ".blrec")
+
+
+OLD_ID = "rec-20250101-010101-deadbeef"
+
+
+def test_realistic_recording_compresses(tmp_path, monkeypatch):
+    # The acceptance bar from #159: a realistic recording is >=5x smaller on
+    # disk. Anything less and the feature is not worth its complexity.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = _realistic_blrec()
+    with authed_reusable(app) as client:
+        rec_id = _save_one(client, payload, step=2 << 20)
+        stored = (tmp_path / "recs" / (rec_id + ".blrec.gz")).read_bytes()
+        ratio = len(payload) / len(stored)
+        assert ratio >= 5, "only %.1fx smaller on disk" % ratio
+        # ...and it is still the same recording, byte for byte.
+        assert gzip.decompress(stored) == payload
+        _, r = client.get("/recording?id=" + rec_id)
+        assert r.status == 200 and r.body == payload
+
+
+def test_chunk_boundaries_do_not_break_the_stream(tmp_path, monkeypatch):
+    # Each chunk lands as its own gzip MEMBER, so a multi-chunk save produces a
+    # multi-member file. That is a valid gzip stream (RFC 1952 2.2) and every
+    # reader must see the WHOLE thing, not just the first member.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = _realistic_blrec(target_bytes=1 << 20)
+    with authed_reusable(app) as client:
+        rec_id = _save_one(client, payload, step=64 << 10)   # many members
+        stored = (tmp_path / "recs" / (rec_id + ".blrec.gz")).read_bytes()
+        assert stored.count(b"\x1f\x8b\x08") > 5, "expected several members"
+        assert gzip.decompress(stored) == payload
+        _, r = client.get("/recording?id=" + rec_id)
+        assert r.body == payload
+        # The member headers must not carry the session temp's path (GzipFile
+        # takes FNAME from fileobj.name unless told otherwise) -- that would
+        # leak the recordings dir into every downloaded file.
+        assert b".webterm-rec-" not in stored
+
+
+def test_empty_chunk_adds_no_member(tmp_path, monkeypatch):
+    # A zero-length chunk is a legal no-op on the raw path; it must not append
+    # an empty gzip member either.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    with authed_reusable(app) as client:
+        _, r = client.post("/recording/begin", json={})
+        rec_id = r.json["recording_id"]
+        _, r = client.post("/recording/chunk",
+                           json={"recording_id": rec_id, "offset": 0,
+                                 "content_b64": ""})
+        assert r.status == 200 and r.json["received"] == 0
+        _, r = client.post("/recording/chunk",
+                           json={"recording_id": rec_id, "offset": 0,
+                                 "content_b64": _b64(b"hi\n")})
+        assert r.status == 200
+        _, r = client.post("/recording/commit",
+                           json={"recording_id": rec_id, "meta": {}})
+        assert r.status == 200
+        stored = (tmp_path / "recs" / (rec_id + ".blrec.gz")).read_bytes()
+        assert gzip.decompress(stored) == b"hi\n"
+        assert stored.count(b"\x1f\x8b\x08") == 1
+
+
+def test_old_uncompressed_recording_still_works(tmp_path, monkeypatch):
+    # Existing .blrec files are durable user data that nothing rewrites. They
+    # must still list, play (get), annotate and delete.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = (json.dumps({"v": 1, "cols": 80}) + "\n").encode() \
+        + b'{"t":1,"k":"o","d":"aGVsbG8="}\n'
+    blrec = _plant_raw_recording(tmp_path / "recs", OLD_ID, payload)
+    client = authed(app)
+    _, r = client.get("/recordings")
+    entry = [e for e in r.json["recordings"] if e["id"] == OLD_ID][0]
+    assert entry["title"] == "old one"
+    assert entry["size"] == len(payload)      # stat IS the true size here
+    assert entry["diskSize"] == len(payload)
+    assert "enc" not in entry                 # raw: no encoding claimed
+    # get returns it verbatim, with no Content-Encoding to inflate
+    _, r = client.get("/recording?id=" + OLD_ID)
+    assert r.status == 200 and r.body == payload
+    assert "content-encoding" not in r.headers
+    assert (r.headers["content-disposition"]
+            == 'attachment; filename="%s.blrec"' % OLD_ID)
+    # annotate
+    _, r = client.post("/recording/notes",
+                       json={"id": OLD_ID, "baseRev": 0,
+                             "notes": [{"t": 1, "text": "still here"}]})
+    assert r.status == 200 and r.json["rev"] == 1
+    _, r = client.get("/recording/notes?id=" + OLD_ID)
+    assert r.json["notes"] == [{"t": 1, "text": "still here"}]
+    # delete
+    _, r = client.post("/recording/delete", json={"id": OLD_ID})
+    assert r.status == 200 and r.json["ok"]
+    assert not blrec.exists()
+    assert not (tmp_path / "recs" / (OLD_ID + ".meta.json")).exists()
+
+
+def test_get_never_serves_gzip_on_the_wire(tmp_path, monkeypatch):
+    """The multi-member trap, pinned so nobody optimizes it back in.
+
+    Chunks are stored as separate gzip MEMBERS. That is valid gzip, and Python
+    reads it transparently -- but HTTP client decoders commonly wrap a bare
+    `zlib.decompressobj(wbits=31)`, which stops after the FIRST member and
+    reports success. httpx does exactly that (asserted below against the real
+    decoder). Passing the stored bytes through under Content-Encoding: gzip
+    would therefore hand such a client a silently truncated recording, so the
+    endpoint always decodes, whatever the client says it accepts."""
+    from httpx._decoders import GZipDecoder
+    two_members = gzip.compress(b"first-", 6) + gzip.compress(b"second", 6)
+    dec = GZipDecoder()
+    assert dec.decode(two_members) + dec.flush() == b"first-",         "if this ever passes the whole file, revisit the pass-through"
+    assert gzip.decompress(two_members) == b"first-second"   # Python is fine
+
+    app = _make_rec_app(tmp_path, monkeypatch)
+    payload = _realistic_blrec(target_bytes=256 << 10)
+    with authed_reusable(app) as client:
+        rec_id = _save_one(client, payload, step=32 << 10)    # many members
+        for header in ("gzip, deflate", "identity", "*", "gzip;q=0", ""):
+            _, r = client.get("/recording?id=" + rec_id,
+                              headers={"Accept-Encoding": header})
+            assert r.status == 200, header
+            assert "content-encoding" not in r.headers, header
+            assert r.body == payload, header
+
+
+def test_get_reports_a_corrupt_recording(tmp_path, monkeypatch):
+    # A truncated .blrec.gz must be a clean 400, not a 500: a damaged archive
+    # is a thing that happens, and the player surfaces the error.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    rec_dir = tmp_path / "recs"
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    good = gzip.compress(b'{"v":1}\n' + b"payload " * 200, 6)
+    (rec_dir / (OLD_ID + ".blrec.gz")).write_bytes(good[:len(good) // 2])
+    client = authed(app)
+    # `identity` forces the server-side inflate, which is where a damaged
+    # file actually surfaces.
+    _, r = client.get("/recording?id=" + OLD_ID,
+                      headers={"Accept-Encoding": "identity"})
+    assert r.status == 400 and not r.json["ok"]
+
+
+def test_gzip_wins_when_both_encodings_exist(tmp_path, monkeypatch):
+    # Ids carry 4 random bytes so this essentially cannot happen on its own,
+    # but a user can copy files into the recordings dir. The tie must break the
+    # SAME way in list, get and delete, or the three disagree about what the
+    # recording is.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    rec_dir = tmp_path / "recs"
+    _plant_raw_recording(rec_dir, OLD_ID, b'{"v":1}\nOLD\n')
+    (rec_dir / (OLD_ID + ".blrec.gz")).write_bytes(
+        gzip.compress(b'{"v":1}\nNEW\n'))
+    client = authed(app)
+    _, r = client.get("/recordings")
+    hits = [e for e in r.json["recordings"] if e["id"] == OLD_ID]
+    assert len(hits) == 1, "one id must list once"
+    assert hits[0]["enc"] == "gzip"
+    _, r = client.get("/recording?id=" + OLD_ID,
+                      headers={"Accept-Encoding": "identity"})
+    assert r.body == b'{"v":1}\nNEW\n'
+    # ...and delete takes BOTH, so the loser cannot reappear next listing.
+    _, r = client.post("/recording/delete", json={"id": OLD_ID})
+    assert r.status == 200
+    assert not (rec_dir / (OLD_ID + ".blrec")).exists()
+    assert not (rec_dir / (OLD_ID + ".blrec.gz")).exists()
+
+
+def test_mixed_encoding_series_lists_together(tmp_path, monkeypatch):
+    # #151 segment chains can cross a broker restart, so one series can hold
+    # both encodings. Nothing may assume a series is uniform.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    rec_dir = tmp_path / "recs"
+    _plant_raw_recording(rec_dir, OLD_ID, b'{"v":1}\npart one\n',
+                         meta={"series": "s-abc", "seg": 1})
+    payload = (json.dumps({"v": 1}) + "\n").encode() + b"part two\n"
+    with authed_reusable(app) as client:
+        new_id = _save_one(client, payload,
+                           meta={"series": "s-abc", "seg": 2})
+        _, r = client.get("/recordings")
+        chain = {e["id"]: e for e in r.json["recordings"]
+                 if e.get("series") == "s-abc"}
+        assert set(chain) == {OLD_ID, new_id}
+        assert [chain[OLD_ID]["seg"], chain[new_id]["seg"]] == [1, 2]
+        assert "enc" not in chain[OLD_ID] and chain[new_id]["enc"] == "gzip"
+
+
+def test_size_absent_rather_than_wrong_without_a_sidecar(tmp_path, monkeypatch):
+    # stat() on a .blrec.gz is the COMPRESSED length. Reporting it under
+    # `size` -- which means uncompressed bytes -- would understate every
+    # recording whose sidecar was lost. Absent beats confidently wrong.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    rec_dir = tmp_path / "recs"
+    rec_dir.mkdir(parents=True, exist_ok=True)
+    blob = gzip.compress(b'{"v":1}\n' + b"x" * 5000, 6)
+    (rec_dir / (OLD_ID + ".blrec.gz")).write_bytes(blob)
+    client = authed(app)
+    _, r = client.get("/recordings")
+    entry = [e for e in r.json["recordings"] if e["id"] == OLD_ID][0]
+    assert "size" not in entry
+    assert entry["diskSize"] == len(blob)
+
+
+def test_byte_cap_still_counts_input_bytes(tmp_path, monkeypatch):
+    # MAX_RECORDING_BYTES is checked against DECODED INPUT bytes, before
+    # compression, so the ceiling did not move: a payload that compresses 100x
+    # is still rejected at the threshold it always was.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_mod, "MAX_RECORDING_BYTES", 4096)
+    with authed_reusable(app) as client:
+        _, r = client.post("/recording/begin", json={})
+        rec_id = r.json["recording_id"]
+        blob = b"a" * 5000                       # ~30 bytes once compressed
+        _, r = client.post("/recording/chunk",
+                           json={"recording_id": rec_id, "offset": 0,
+                                 "content_b64": _b64(blob)})
+        assert r.status == 400 and r.json["error"] == "too_large"
