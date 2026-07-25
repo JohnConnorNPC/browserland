@@ -84,15 +84,27 @@ def test_cancelled_lock_waiter_leaves_no_immortal_task(tmp_path, monkeypatch):
             f"http://{client.host}:{client.port}/recording/chunk",
             app.ctx.auth_token)
         body = {"recording_id": rec_id, "offset": 0, "content_b64": "e30K"}
+        lock = app.ctx.rec_uploads[rec_id]["lock"]
         before = set(app_mod._CRITICAL_TASKS)
 
         async def _drive():
             holder = asyncio.ensure_future(client._session.post(url, json=body))
-            while not inside.is_set():     # holder now owns the lock
+            for _ in range(500):           # holder now owns the lock
+                if inside.is_set():
+                    break
                 await asyncio.sleep(0.01)
+            assert inside.is_set(), "the holder never entered its worker hop"
             waiter = asyncio.ensure_future(client._session.post(url, json=body))
-            for _ in range(50):            # let the waiter reach the acquire
+            # Handshake, not a sleep guess: asyncio.Lock parks contenders in
+            # _waiters, so a non-empty deque IS "the second request reached the
+            # acquire". Without this the sampling below could run before the
+            # waiter ever got there, and `queued == 1` would pass trivially —
+            # even for an implementation that shields acquisition.
+            for _ in range(500):
+                if lock._waiters:
+                    break
                 await asyncio.sleep(0.01)
+            assert lock._waiters, "the second request never reached the lock"
             queued = len(set(app_mod._CRITICAL_TASKS) - before)
             waiter.cancel()
             try:
@@ -159,13 +171,18 @@ def test_section_failing_after_cancellation_is_logged(tmp_path, monkeypatch,
 
         async def _drive():
             task = asyncio.ensure_future(client._session.post(url, json=body))
-            while not entered.is_set():
+            for _ in range(500):       # deadlined: an inert patch must FAIL,
+                if entered.is_set():   # not hang the suite forever
+                    break
                 await asyncio.sleep(0.01)
+            assert entered.is_set(), "the worker never entered its hop"
             task.cancel()
             try:
                 await task
             except BaseException:  # noqa: BLE001 - cancellation is the point
                 pass
+            assert task.cancelled(), \
+                "the request completed instead of being cancelled mid-hop"
             for _ in range(400):
                 if any("shielded critical section failed" in rec.message
                        for rec in caplog.records):
@@ -215,13 +232,19 @@ def test_cancelled_state_put_leaves_disk_and_memory_in_step(tmp_path,
 
         async def _drive():
             task = asyncio.ensure_future(client._session.put(url, json=body))
-            while not entered.is_set():
+            for _ in range(500):       # deadlined: an inert patch must FAIL,
+                if entered.is_set():   # not hang the suite forever
+                    break
                 await asyncio.sleep(0.01)
+            assert entered.is_set(), "the writer never entered its hop"
             task.cancel()
             try:
                 await task
             except BaseException:  # noqa: BLE001 - cancellation is the point
                 pass
+            assert task.cancelled(), (
+                "the PUT completed instead of being cancelled mid-write, so "
+                "this run proves nothing about the shield")
             for _ in range(400):
                 if app.ctx.state["rev"] != 0:
                     break

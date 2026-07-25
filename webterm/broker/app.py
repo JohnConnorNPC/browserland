@@ -934,6 +934,15 @@ def _log_orphaned_section(task) -> None:
     unexpected KeyError/ValueError inside a critical section would then leave
     disk and memory disagreeing with no trace anywhere at all."""
     if task.cancelled():
+        # The shielded task was cancelled OUTRIGHT — not via the request, which
+        # the shield absorbs, but directly (loop teardown, a bulk task cancel).
+        # That is the one case that reproduces the original bug in full: the
+        # lock is released while the worker may still be writing and the
+        # accounting after the await never runs. Nothing here can prevent it;
+        # say so rather than letting it pass unrecorded.
+        LOGGER.warning("shielded critical section was cancelled outright; its "
+                       "worker may still be writing and its accounting did not "
+                       "run — disk and memory may disagree")
         return
     exc = task.exception()
     if exc is not None:
@@ -5184,6 +5193,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": "no_session"},
                                   status=404)
             tmp = session["tmp"]
+            # Never commit onto an id whose event file is ALREADY on disk. A
+            # successful commit pops its session, so the only way to reach this
+            # with a live session is the pathological one — a commit that
+            # published and then failed to pop (what the shield now prevents) —
+            # and going ahead would OVERWRITE the published recording's sidecar
+            # with this commit's meta before the replace even runs. That is the
+            # damage the cleanup below cannot undo: it can decline to delete a
+            # sidecar, but the wrong title/size/savedAt would already be on
+            # disk. Refuse instead, and drop the session + temp so the state
+            # cannot repeat. One stat, reused by the cleanup path.
+            published = await _off_loop(_rec_events_exist, paths)
+            if published:
+                app.ctx.rec_uploads.pop(rec_id, None)
+                await _off_loop(_unlink_quiet, [tmp])
+                return sanic_json({"ok": False, "error": "already_published"},
+                                  status=409)
             # Meta sidecar FIRST, .blrec replace SECOND: listing keys off
             # .blrec presence, so this order means a listed recording always
             # has its sidecar — a crash between the two leaves only an orphan
@@ -5208,28 +5233,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             except OSError as exc:
                 app.ctx.rec_uploads.pop(rec_id, None)
                 # Cleanup must never strip the sidecar off a recording that is
-                # ALREADY on disk and listed. The precondition is a commit that
-                # published and then failed to pop its session (what the shield
-                # now prevents): a SECOND commit for that id finds the temp
-                # already consumed by the replace, getsize raises
-                # FileNotFoundError, and the naive unlink([tmp, meta_path])
-                # deletes the live recording's size/title/savedAt — listed and
-                # downloadable, but nameless. _recording_delete stays the only
+                # ALREADY on disk and listed: it would stay downloadable but
+                # lose its size/title/savedAt, and _recording_delete is the only
                 # path allowed to remove a published recording's files.
                 #
-                # Deliberately a BIAS AGAINST DESTRUCTIVE CLEANUP, not a proof
-                # of ownership: any OSError keeps the sidecar once an event file
-                # is there, including the ambiguous ones (PermissionError, IO
-                # error) where the temp's fate is unknown. Losing a sidecar we
-                # could have kept is worse than leaving one we could have
-                # dropped, which the next successful commit for that id
-                # overwrites anyway. A hand-placed event file under a colliding
-                # id would also spare its sidecar; ids are a timestamp plus 4
-                # random bytes, and that outcome is still the safe direction.
-                doomed = [tmp]
-                if not await _off_loop(_rec_events_exist, paths):
-                    doomed.append(str(meta_path))
-                await _off_loop(_unlink_quiet, doomed)
+                # Taking meta_path here is safe ONLY because the guard above
+                # already proved nothing was published for this id, so the sole
+                # sidecar that can exist is the one this commit just wrote (or a
+                # stale orphan from an earlier failed commit, which no event file
+                # references either). Do not reinstate this unlink without that
+                # guard, and do not "improve" it into a fresh existence probe:
+                # a probe here would see the file THIS commit's replace just
+                # published and spare a sidecar we wrote ourselves.
+                await _off_loop(_unlink_quiet, [tmp, str(meta_path)])
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=400)
             app.ctx.rec_uploads.pop(rec_id, None)

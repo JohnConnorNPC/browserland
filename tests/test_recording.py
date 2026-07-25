@@ -411,28 +411,52 @@ def test_recording_chunk_concurrent_same_offset_exactly_one_wins(tmp_path,
 # lives at test_file_api.py::test_cancelled_chunk_leaves_accounting_and_disk_in_step.
 
 
+def _await_flag(flag, what, tries=500):
+    """Poll a threading.Event on the loop, with a DEADLINE.
+
+    An un-deadlined `while not flag.is_set()` turns an inert monkeypatch or a
+    routing regression into a suite that hangs forever instead of one that fails
+    — which is exactly how the stale `_append_chunk` patch survived #159.
+    """
+    async def _wait():
+        for _ in range(tries):
+            if flag.is_set():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"timed out waiting for {what}")
+    return _wait()
+
+
 def _cancel_once_entered(client, url, body, entered, settled):
     """POST, cancel the request the moment ``entered`` fires, then wait for the
     shielded task's side effects instead of guessing with a fixed sleep.
 
-    ``settled`` is polled on the loop; the bounded 4 s ceiling only ever runs to
-    the end when the behaviour under test is BROKEN, so a correct run is fast.
+    Returns True if the request task really ended CANCELLED. Every caller must
+    assert that: if the worker finished before the cancel landed, the request
+    completes normally and the consistency assertions downstream would hold even
+    against the unshielded code — passing for the wrong reason.
+
+    ``settled`` is polled on the loop; the bounded 4 s ceiling only runs to the
+    end when the behaviour under test is BROKEN, so a correct run is fast.
     """
     async def _drive():
         task = asyncio.ensure_future(client._session.post(url, json=body))
-        while not entered.is_set():            # cancel INSIDE the worker hop
-            await asyncio.sleep(0.01)
-        task.cancel()
+        await _await_flag(entered, "the worker to enter its hop")
+        task.cancel()                          # cancel INSIDE the worker hop
         try:
             await task
-        except BaseException:      # noqa: BLE001 - cancellation is the point
+        except asyncio.CancelledError:
             pass
+        except BaseException:      # noqa: BLE001 - any other end is not a cancel
+            pass
+        was_cancelled = task.cancelled()
         for _ in range(400):
             if settled():
                 break
             await asyncio.sleep(0.01)
+        return was_cancelled
 
-    client._loop.run_until_complete(_drive())
+    return client._loop.run_until_complete(_drive())
 
 
 def test_cancelled_recording_chunk_leaves_accounting_and_disk_in_step(
@@ -472,9 +496,11 @@ def test_cancelled_recording_chunk_leaves_accounting_and_disk_in_step(
             app.ctx.auth_token)
         body = {"recording_id": rec_id, "offset": 0,
                 "content_b64": _b64(payload)}
-        _cancel_once_entered(
+        assert _cancel_once_entered(
             client, url, body, entered,
-            lambda: app.ctx.rec_uploads.get(rec_id, {}).get("received"))
+            lambda: app.ctx.rec_uploads.get(rec_id, {}).get("received")), \
+            "the request completed instead of being cancelled mid-append, so " \
+            "this run proves nothing about the shield"
 
         with open(tmp, "rb") as fh:
             on_disk = len(gzip.decompress(fh.read())) if os.path.getsize(tmp) \
@@ -527,9 +553,11 @@ def test_cancelled_recording_commit_publishes_and_pops_together(tmp_path,
         url = with_token(
             f"http://{client.host}:{client.port}/recording/commit",
             app.ctx.auth_token)
-        _cancel_once_entered(
+        assert _cancel_once_entered(
             client, url, {"recording_id": rec_id, "meta": {"title": "t"}},
-            entered, lambda: rec_id not in app.ctx.rec_uploads)
+            entered, lambda: rec_id not in app.ctx.rec_uploads), \
+            "the request completed instead of being cancelled mid-replace, so " \
+            "this run proves nothing about the shield"
 
         blrec = tmp_path / "recs" / f"{rec_id}.blrec.gz"
         # Both assertions matter, and they must be read INSIDE the client
@@ -546,15 +574,25 @@ def test_cancelled_recording_commit_publishes_and_pops_together(tmp_path,
 
 def test_second_commit_never_strips_a_published_recordings_sidecar(tmp_path,
                                                                    monkeypatch):
-    """Commit cleanup must never delete metadata for a recording on disk.
+    """A commit onto an already-published id is refused, not half-applied.
 
     Defence in depth behind the shield, so the precondition is FABRICATED here:
-    a live session whose temp is already gone, which is exactly what a commit
-    that published and then leaked leaves behind. ``os.path.getsize(tmp)`` then
-    raises FileNotFoundError and the cleanup used to unlink ``[tmp, meta_path]``
-    — stripping size/title/savedAt off a recording that stays listed and
-    downloadable. ``/recording/delete`` is the only path allowed to remove a
-    published recording's files.
+    a live session for an id whose recording is already on disk, which is what a
+    commit that published and then failed to pop would leave. Both halves of the
+    damage are covered.
+
+    - It must not DELETE the sidecar. The cleanup used to unlink
+      ``[tmp, meta_path]`` on any OSError, so a temp already consumed by the
+      first replace stripped size/title/savedAt off a recording that stays
+      listed and downloadable.
+    - It must not OVERWRITE it either. The sidecar is written BEFORE the event
+      file, so a commit allowed to proceed would stamp its own (empty) meta over
+      the published recording's before failing — damage no cleanup can undo,
+      which is why the guard refuses ahead of the write rather than tidying up
+      after it.
+
+    A temp that still EXISTS is used deliberately, so the guard is what stops
+    this rather than an incidental FileNotFoundError from getsize.
     """
     app = _make_rec_app(tmp_path, monkeypatch)
     with authed_reusable(app) as client:
@@ -562,19 +600,28 @@ def test_second_commit_never_strips_a_published_recordings_sidecar(tmp_path,
         meta_path = tmp_path / "recs" / f"{rec_id}.meta.json"
         blrec = tmp_path / "recs" / f"{rec_id}.blrec.gz"
         assert meta_path.exists() and blrec.exists()
-        # The leaked session a cancelled-mid-replace commit would leave.
+        published = blrec.read_bytes()
+        # The leaked session a cancelled-mid-replace commit would leave, with a
+        # perfectly good temp: only the already-published id makes this illegal.
+        leaked_tmp = tmp_path / "recs" / ".webterm-rec-leaked.part"
+        leaked_tmp.write_bytes(gzip.compress(b'{"t":2}\n'))
         app.ctx.rec_uploads[rec_id] = {
-            "tmp": str(tmp_path / "recs" / ".webterm-rec-gone.part"),
-            "received": 0, "created": time.time(), "lock": asyncio.Lock(),
+            "tmp": str(leaked_tmp), "received": 8,
+            "created": time.time(), "lock": asyncio.Lock(),
         }
         _, r = client.post("/recording/commit",
-                           json={"recording_id": rec_id, "meta": {}})
-        assert r.status == 400, r.json          # the temp really is gone
-        assert blrec.exists(), "cleanup must not touch the published events file"
+                           json={"recording_id": rec_id, "meta": {"title": "x"}})
+        assert r.status == 409 and r.json["error"] == "already_published", r.json
+        assert rec_id not in app.ctx.rec_uploads, \
+            "the refused commit must still drop the stale session"
+        assert not leaked_tmp.exists(), "...and its temp"
+        assert blrec.read_bytes() == published, \
+            "the published events file was modified"
         assert meta_path.exists(), (
             "cleanup deleted the sidecar of a published, listed recording — it "
             "stays downloadable but loses its size/title/savedAt")
-        assert json.loads(meta_path.read_text())["title"] == "keepme"
+        assert json.loads(meta_path.read_text())["title"] == "keepme", \
+            "the refused commit overwrote the published recording's metadata"
         _, r = client.get("/recordings")
         entry = next(e for e in r.json["recordings"] if e["id"] == rec_id)
         assert entry["title"] == "keepme"
