@@ -157,7 +157,7 @@ The desktop with tiled and floating terminals
   back to WinPTY only if console acquisition fails (or when forced via
   `--pty-backend winpty`).
 - **AI agent fleet**: detects the foreground coding agent in each window
-  (`claude` / `codex` / `grok` / `opencode`) and tracks live OSC title +
+  (`claude` / `codex` / `grok` / `opencode` / `hermes`) and tracks live OSC title +
   working directory, with an opt-in per-window git-status widget (the `git`
   mod).
 - **Multi-host — the control plane**: attach the same UI to the brokers on all

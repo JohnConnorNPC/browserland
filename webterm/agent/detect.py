@@ -1,8 +1,9 @@
 """Foreground-agent classifier.
 
 Given a process's executable name and argv, decide whether it *is* one of the
-agents we care about (``claude`` / ``grok`` / ``codex`` / ``opencode``). Used by
-the PTY backends' ``foreground_command()`` to label the live session.
+agents we care about (``claude`` / ``grok`` / ``codex`` / ``opencode`` /
+``hermes``). Used by the PTY backends' ``foreground_command()`` to label the
+live session.
 
 Deliberately strict — we match the executable name, ``argv[0]``, and (for
 interpreter wrappers like node/python/pwsh) the *first* script-like argument
@@ -19,6 +20,17 @@ known per-vendor install directory (``.grok`` / ``.claude`` / ``.codex`` /
 ``.opencode``) in the *executable's own path* (or argv[0]). That stays strict:
 it only ever inspects the program being run, never arbitrary arguments, so
 ``rg codex`` is still safe.
+
+``hermes`` is deliberately NOT in that map (#156): no ``.hermes`` install layout
+was found to attribute, and the map exists to rescue a vendor's *generically*
+named launcher — a plainly named ``hermes`` is already covered by the name rule.
+Add an entry only against a real install, never speculatively.
+
+Known caveat for ``hermes``: the name is not exclusive — Meta's React Native JS
+engine also ships a ``hermes`` binary — so a build running it is labelled as a
+foreground agent. Accepted: the consequences are attribution-only (a taskbar
+chip, and ``cwd()`` preferring that process's dir), and ``hermes`` is NOT in the
+browser's BRACKET_GAP_AGENTS, so no paste/input behaviour rides the label.
 """
 
 from __future__ import annotations
@@ -26,7 +38,11 @@ from __future__ import annotations
 import os
 from typing import List, Optional, Sequence
 
-_AGENTS = ("claude", "grok", "codex", "opencode")
+# DRIFT: duplicated as ``_AGENTS`` in ``webterm/broker/registry.py`` (the broker
+# side that WHITELISTS these labels off the wire) — keep both in step; a label
+# missing there collapses to "" no matter what this classifier returns.
+# ``tests/test_registry_agent.py::test_agent_whitelists_do_not_drift`` enforces it.
+_AGENTS = ("claude", "grok", "codex", "opencode", "hermes")
 _INTERP = ("node", "node.exe", "python", "python.exe", "python3",
            "pwsh", "pwsh.exe", "powershell", "powershell.exe")
 _STRIP = (".exe", ".cmd", ".ps1", ".bat", ".js", ".mjs", ".cjs", ".py")
@@ -77,8 +93,8 @@ def _vendor_from_path(path: Optional[str]) -> Optional[str]:
 
 def classify_proc(name: str, cmdline: Sequence[str],
                   exe: Optional[str] = None) -> Optional[str]:
-    """Return 'claude' | 'grok' | 'codex' | 'opencode' if this process is that
-    agent, else None. ``name`` is the process executable name; ``cmdline`` is its
+    """Return 'claude' | 'grok' | 'codex' | 'opencode' | 'hermes' if this process
+    is that agent, else None. ``name`` is the process executable name; ``cmdline`` is its
     argv; ``exe`` is the process's full executable path (optional, best-effort —
     callers pass ``proc.exe()`` when available)."""
     # 1) executable name itself (claude.exe, codex)

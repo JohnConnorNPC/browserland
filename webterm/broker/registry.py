@@ -31,7 +31,11 @@ LOGGER = logging.getLogger(__name__)
 
 # Only these foreground-agent labels are accepted from a producer; anything
 # else (a hostile or buggy agent) collapses to "" = nothing running.
-_AGENTS = ("claude", "grok", "codex", "opencode")
+# DRIFT: duplicated as ``_AGENTS`` in ``webterm/agent/detect.py`` (the producer
+# side that PRODUCES these labels) — keep both in step; deliberately not a shared
+# import, so the broker package stays independent of the agent package.
+# ``tests/test_registry_agent.py::test_agent_whitelists_do_not_drift`` enforces it.
+_AGENTS = ("claude", "grok", "codex", "opencode", "hermes")
 
 
 def _whitelist_agent(value: Any) -> str:
