@@ -10,6 +10,34 @@ disk beside its state store (`webterm_recordings/`, override with
 `recordings_dir` in the broker config) and are never expired — only deleting
 them from the library removes them.
 
+## Auto-record every session
+
+**Control Panel → Session recorder → auto-record every session** (off by
+default) starts recording every terminal as it opens, without anyone pressing
+⏺. Like the other browser-global settings it is shared across every browser
+viewing this broker.
+
+- Switching it **on** also starts recording the terminals that are already
+  open.
+- Switching it **off** stops — and saves — the recordings it started. A
+  recording you started by hand with ⏺ keeps going; the setting only owns the
+  ones it opened itself.
+- ⏺ still works while it is on: pressing it stops that terminal's recording
+  and it stays stopped. Pressing it again starts a new one.
+- Nothing is captured while no browser has the terminal open. This records
+  what a browser is *showing*, so a session running with the desktop closed is
+  not recorded.
+
+With auto-record on, a page reload does **not** warn before discarding the
+segment in progress — a prompt on every single reload is worse than losing the
+tail of a recording that will be re-armed on the next load. A recording you
+started by hand still warns, and so does a reload while a recording is still
+uploading.
+
+Recordings are never swept, so leaving this on accumulates files on the
+broker's disk indefinitely. There is no size or age limit yet — delete what you
+do not need from the library.
+
 What is captured: the terminal's raw output stream (byte-faithful, so colors
 and TUI apps replay exactly), resizes, and the initial size/font. Typed input
 is recorded as timestamped **markers only** — the keystrokes themselves are
@@ -25,7 +53,9 @@ captured byte for byte. The same goes for anything a command prints — API keys
 in a `env`-style dump, tokens, connection strings. Recording also starts by
 capturing the screen that was **already there**, so content that scrolled past
 before you pressed ⏺ can still be in the file. Treat a `.blrec` like a screen
-recording: check what is in it before sharing it.
+recording: check what is in it before sharing it. Turning on auto-record makes
+that guarantee more load-bearing, not less: everything every session prints is
+captured, including the sessions you would not have thought to record.
 
 To check a saved recording for this broker's own token, run
 `python -m webterm.broker --scan-recordings`. It base64-decodes the output
@@ -34,8 +64,20 @@ token is in there, and reports a false all-clear. It only finds a secret that
 appears as contiguous bytes, so a clean result is evidence, not proof.
 
 A recording is held in memory until you stop it — reloading the page discards
-an in-progress recording (the browser warns first). Recordings auto-stop at
-50 MB of captured output.
+an in-progress recording.
+
+## Long recordings roll over
+
+A single recording holds 50 MB of captured output (or 250,000 recorded events,
+whichever comes first). At that point capture does **not** stop: the segment so
+far is saved and a fresh one opens immediately on the same terminal, seeded with
+the screen as it stood at the boundary. The ⏺ timer restarts from 0:00 and the
+elapsed clock is per segment.
+
+Segments of the same run are listed in the library as **part 2/3** and so on,
+newest first, and a player window titles the part it is playing. Each part is a
+complete recording in its own right — it opens on the screen the previous part
+ended on — so there is no seeking across a boundary.
 
 ## Playback
 
