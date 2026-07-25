@@ -88,6 +88,26 @@ def test_meta_sanitizer_whitelists_and_clamps():
     assert "rows" not in _rec_sanitize_meta({"rows": float("inf")})
 
 
+def test_meta_sanitizer_segment_chain():
+    # #151: the segment chain a rolling recording is split into. `series` is an
+    # IDENTITY the library groups by, so unlike `title` a malformed one is
+    # REJECTED rather than truncated -- clamping a 200-char id to 64 could fold
+    # two distinct chains into one. The segment still saves, just unlinked.
+    ok = _rec_sanitize_meta({"series": "s1abcd-0011223344ff", "seg": 3})
+    assert ok["series"] == "s1abcd-0011223344ff" and ok["seg"] == 3
+    assert "series" not in _rec_sanitize_meta({"series": "x" * 65})
+    assert "series" not in _rec_sanitize_meta({"series": "bad id"})
+    assert "series" not in _rec_sanitize_meta({"series": "../../etc/passwd"})
+    assert "series" not in _rec_sanitize_meta({"series": ""})
+    assert "series" not in _rec_sanitize_meta({"series": 7})
+    # seg is 1-based: 0 is not a position in a chain.
+    assert "seg" not in _rec_sanitize_meta({"seg": 0})
+    assert "seg" not in _rec_sanitize_meta({"seg": -1})
+    assert "seg" not in _rec_sanitize_meta({"seg": True})
+    assert "seg" not in _rec_sanitize_meta({"seg": float("nan")})
+    assert _rec_sanitize_meta({"seg": 2.0})["seg"] == 2
+
+
 # ---- save flow (stateful; ReusableClient) ----------------------------------
 
 def test_save_list_get_roundtrip(tmp_path, monkeypatch):
@@ -125,6 +145,28 @@ def test_save_list_get_roundtrip(tmp_path, monkeypatch):
         assert r.headers["content-type"] == "application/octet-stream"
         assert (r.headers["content-disposition"]
                 == f'attachment; filename="{rec_id}.blrec"')
+
+
+def test_list_inlines_segment_chain(tmp_path, monkeypatch):
+    # #151: the library groups a rolled recording by (series, seg) and labels
+    # "part N/M" from the LIST response, so both keys have to survive the commit
+    # sidecar AND the list handler's own key whitelist -- the sanitizer passing
+    # them is only half the path.
+    app = _make_rec_app(tmp_path, monkeypatch)
+    head = (json.dumps({"v": 1, "cols": 80}) + "\n").encode()
+    with authed_reusable(app) as client:
+        ids = [_save_one(client, head,
+                         meta={"title": "long run", "series": "sABC-1234",
+                               "seg": seg, "startedAt": 1000 + seg})
+               for seg in (1, 2)]
+        _, r = client.get("/recordings")
+        assert r.status == 200 and r.json["ok"]
+        by_id = {e["id"]: e for e in r.json["recordings"]}
+        for seg, rec_id in enumerate(ids, start=1):
+            assert by_id[rec_id]["series"] == "sABC-1234"
+            assert by_id[rec_id]["seg"] == seg
+            # the part number is DERIVED from seg, never baked into the title
+            assert by_id[rec_id]["title"] == "long run"
 
 
 def test_chunk_offset_and_session_guards(tmp_path, monkeypatch):

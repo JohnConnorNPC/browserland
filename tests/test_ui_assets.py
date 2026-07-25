@@ -435,6 +435,80 @@ def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
     assert "promptFileHostAuth(localHost())" in src
 
 
+def test_recorder_autorecord_setting_is_synced_and_default_off():
+    """#151: the auto-record toggle rides the same synced settings primitive as
+    the other mod toggles, and ships OFF so the mod stays inert until opted in.
+
+    Source-slice asserts, so be honest about what they prove: that the wiring is
+    present and defaults off, NOT that any gate holds at runtime. The behaviour
+    (arming on create, the off switch, the roll) is what the live verification
+    covers."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    m = re.search(r"ctx\.settings\.boolean\(\s*\n?\s*'recorder\.autoRecord',"
+                  r"\s*(\w+),(.*?)\}\);", src, re.S)
+    assert m, "recorder must own recorder.autoRecord via ctx.settings.boolean"
+    assert m.group(1) == "false", \
+        "auto-record must default OFF -- the key absent from the synced blob"
+    assert "isBrowserGlobal: true" in m.group(2)
+    # The setting is useless if it only arms terminals opened AFTER the flip
+    # (onTerminalCreate has long since fired for the open ones), and dangerous
+    # if flipping it off leaves a rolling recording running forever.
+    assert "autoSetting.onChange(" in src
+    assert "userStopped" in src, \
+        "a manual stop must survive the next auto-record pass"
+    # It reaches the served page (the mod scripts splice into one <script>).
+    assert "'recorder.autoRecord'" in INDEX_HTML
+
+
+def test_recorder_size_cap_rolls_instead_of_stopping():
+    """#151: the cap opens a new segment rather than ending capture."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    assert "function rollRecording" in src and "function maybeRoll" in src
+    # The cap is reached from the capture path via maybeRoll, never by ending
+    # capture: the pre-#151 `if (rec.bytes > REC_CAP_BYTES) stopRecording(...)`
+    # is what an always-on recording cannot survive.
+    push = src[src.index("const pushOut = function"):
+               src.index("rec.wrapWrite = function")]
+    assert "maybeRoll(win, rec);" in push
+    assert "stopRecording" not in push
+    # ...and BOTH ceilings feed it: bytes bounds an output-heavy session, the
+    # event count bounds an output-light one (input markers cost no bytes).
+    roll = src[src.index("function maybeRoll"):src.index("function rollRecording")]
+    assert "REC_CAP_BYTES" in roll and "REC_CAP_EVENTS" in roll
+    # The roll is deferred by a task: nothing is lost (the old segment is still
+    # patched until the timer fires) and the un-patch -> re-patch never runs
+    # re-entrantly from inside term.write.
+    assert "rec.rollTimer = setTimeout(" in roll
+    # A failed replacement must be visible -- the previous segment is already
+    # torn down, so a silent failure is exactly the symptom #151 removes.
+    assert "showNotice(" in src[src.index("function rollRecording"):
+                                src.index("function rollRecording") + 1200]
+    # The chain rides the meta the server whitelists (#151), derived from `seg`
+    # rather than baked into the stored title.
+    assert "series: rec.series, seg: rec.seg," in src
+    assert "'part ' + r.seg + '/' + parts" in src
+    assert "' (part ' + meta0.seg + ')'" in src
+
+
+def test_recorder_unload_guard_covers_saves_not_auto_recordings():
+    """#151: the beforeunload prompt tracks what a reload would really destroy.
+
+    An unconditional guard means auto-record prompts on EVERY reload; the
+    pre-#151 guard dropped the instant capture stopped, so a reload during
+    "saving..." lost the upload with no warning at all."""
+    src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
+        encoding="utf-8")
+    guard = src[src.index("function syncUnloadGuard"):]
+    guard = guard[:guard.index("function newSeriesId")]
+    assert "pendingSaves > 0" in guard
+    assert "if (!r.auto)" in guard
+    assert "active.size === 1" not in guard, \
+        "the pre-#151 capture-only condition must be gone"
+    assert "pendingSaves++" in src and "pendingSaves--" in src
+
+
 # --------------------------------------------------------------------------- #
 # the split actually happened
 # --------------------------------------------------------------------------- #
