@@ -27,6 +27,27 @@ Find it in **Control Panel → Browser → Broker registry**, just below the Hos
 
 **Passwords are not shared unless you ask.** The **Include passwords** box is off by default and warns you: publishing a broker's token lets anyone who can read that registry log into every included broker — a lateral-movement path between your machines. Only include passwords when the broker holding the registry is as trusted as the brokers whose tokens it carries. **Forget passwords** removes every token from the registry *and* its saved history, but it does **not** revoke access — a browser that already pulled a token keeps it, and the token stays valid until you rotate it (`--print-token` shows the current one). If a token was ever exposed, rotate it.
 
+## Mods on a broker
+
+Which mods run is normally **your browser's** choice: **Control Panel → this broker → Mods** lists everything installed and you tick what you want, and that choice stays in the browser you made it in. On a setup with several brokers that means the same decision has to be made again in every browser you sit at.
+
+Each host tab therefore also has a **Mods on this broker** section — including the tab of a *remote* broker. It lists the mods **that** broker serves, each with three states:
+
+- **Default** — that broker says nothing, so each browser's own Mods list decides. The option says which way "default" falls for that mod (`Default (on)` / `Default (off)`), because a few mods ship off.
+- **On** / **Off** — that broker *pins* the mod. Every browser that loads its page gets that answer, and the mod's checkbox in their Mods list is locked and labelled `pinned on` / `pinned off`.
+
+A few things worth knowing:
+
+- **It applies at page load, not now.** A pin is what that broker hands to the *next* browser that loads its page — including your own tab if you pinned something on **this broker**, so a change here is not live in the session you make it in.
+- **Pinning on is a real switch, not a suggestion.** It turns the mod on for everyone on that broker, including mods that ship off by default (the clipboard history, for instance). Pin one on only if you want it running in every browser that broker serves.
+- **Pinning a mod on also pins what it needs.** The scratchpad needs the text editor, so pinning the scratchpad on shows the editor as `on — required by scratchpad`. If you pin a dependency **off** explicitly, that wins: the mod that needs it stays off and shows as blocked in the Mods list.
+- **A pin lives on the broker**, not in your browser, and not in the settings that sync between your browsers. It survives a restart, and it can be changed even while somebody else's browser is the active view on that broker — unlike the other settings on a host tab, which that broker only accepts from its active browser.
+- **A mod that broker doesn't have** still shows if it is pinned there (as `not installed on this broker`), so a leftover pin is visible and removable rather than silently governing nothing.
+
+If a broker can't answer, the section says why instead of showing an empty list: it may be **running an older build** that can't report its mods (update it to manage them from here), **serving no desktop page** at all (a headless broker has no mods to pin), **unreachable**, or **refusing your password**. Select the tab again to retry.
+
+The broker-wide **master switch** still outranks all of this: a broker started with `mods_enabled: false` runs no mods at all, and its section says so.
+
 ## Default color per host
 
 Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.

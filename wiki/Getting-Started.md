@@ -38,6 +38,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 | Window mode | Floating vs. tiling (see [[Window-Modes]]) |
 | Drag hold delay | The hold time for the snap and pop-out gestures (see [[Snapping-and-Pop-out]]) |
 | Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
+| Mods on this broker | Which mods that broker pins on or off for every browser that loads its page — including a remote broker's, from its own tab (see [[Hosts-and-Multi-Browser]]) |
 | MCP | AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
 | Keyboard shortcuts | Rebind any action (see [[Keyboard-Shortcuts]]) |
 | Clipboard (OSC 52) | Whether programs on that host may set your clipboard — off by default (see [[Keyboard-Shortcuts]]) |
@@ -46,7 +47,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 ### Per-browser vs. per-host settings
 
 - **Browser-global settings** follow the browser you are sitting at — theme and background, the terminal font (an opt-in mod, off by default — turn it on under **Control Panel → Mods**), the start-button label, restore-on-refresh, the taskbar workspace filter, and the clock chip's time zone.
-- **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own.
+- **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own. **Mods on this broker** sits there too, and is the one setting that governs *other* browsers: it pins mods on or off for everyone who loads that broker's page, so it overrides their per-browser Mods list rather than yours.
 - **Clipboard (OSC 52)** is per host like the settings above it, but is the one setting that is also **browser-local**: it never travels to a broker, in either direction. That is deliberate. It is the switch that decides whether a broker may write to your clipboard, so storing it on that broker would let the broker grant itself the permission. Turning it on for one host has no effect on any other, and it does not follow you to another browser.
 
 <!-- help:ignore-start -->
