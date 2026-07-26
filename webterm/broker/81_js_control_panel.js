@@ -184,6 +184,13 @@
             _kbRecording = null;
             renderSettingsTabs();
             showSettingsPane(tabId);
+            // #157: the mod-policy section keys off currentSettingsTab alone (not
+            // settingsTarget / this host's /state), so paint it NOW — before any
+            // await, on every tab including 'browser'. If the remote /state fetch
+            // below is slow or fails, renderSettings never runs, and rows left from
+            // the previous tab would show another broker's policy under this host's
+            // name — the defect #153 fixed for the OSC 52 box.
+            renderModPolicy();
             if (tabId === 'browser') {
                 settingsOpenHostId = null;
                 resetHostForm();
@@ -303,6 +310,7 @@
             renderDefaultProfile();
             renderProfilesEditor();
             renderMcpConfig();
+            renderModPolicy();   // #157 (also painted synchronously on tab switch)
             renderKeybindings();
         }
         // #123: taskbar/title label editor. Renders one reorderable row per key
@@ -620,6 +628,276 @@
             np[name] = Object.assign({}, np[name], { color: val || null });
             return saveProfilesConfig(host, np, cfg.default_profile)
                 .then(() => refreshTaskbar());
+        }
+        // ---- "Mods on this broker" section (#157) ---------------------------
+        // Views and edits the MOD POLICY of the broker whose tab is open: the
+        // on/off that broker PINS for every browser that loads its page. Three
+        // states per mod — Default (unpinned, so each browser's own Mods list
+        // decides), On, Off — which is exactly {absent, true, false} in that
+        // broker's policy.
+        //
+        // What this is NOT: it does not scope YOUR mods per host, and on a remote
+        // tab it changes nothing about your current session. It edits state that
+        // takes effect when a browser next loads THAT broker's page.
+        //
+        // Read and write are both that broker's own admin surface — GET /info for
+        // the catalog + pins, POST /mods/policy to change one. Deliberately NOT
+        // the settingsTarget /state path every other control on this pane uses: a
+        // /state PUT is lease-gated (409 not_active unless you are that broker's
+        // single active browser), so the pins of any broker with a live viewer of
+        // its own would be permanently unwritable — the exact broker an operator
+        // reaches for this section to administer. Nothing here reads or writes
+        // `t.s`, so the section also stays usable on a tab whose /state never
+        // loaded.
+        //
+        // Cached per host WITH the failure recorded, mirroring profilesConfigFailed
+        // below: a render must never re-fetch after a failed fetch, or a sleeping
+        // broker turns the section into a hot retry loop. Re-selecting the tab is
+        // the retry, and it is a deliberate one.
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy}
+        const modCatalogFetching = new Set();   // hostIds with an in-flight GET
+        // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
+        // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
+        // absence), so every state has copy of its own and none re-fetches:
+        //   ok           - a current broker: `mods` is its served catalog
+        //   headless     - serve_ui false: it serves no page, so it serves no mods
+        //   unsupported  - answered /info without `mods`: predates this feature
+        //   unauthorized - 401/403: no token stored for that host, or a stale one
+        //   unreachable  - down, black-holed, or CORS-blocked
+        async function fetchModCatalog(host) {
+            const rec = { state: 'unreachable', mods: [], modsEnabled: true,
+                          policy: {} };
+            try {
+                const r = await hostFetch(host, '/info', { cache: 'no-store' });
+                if (r.status === 401 || r.status === 403) {
+                    rec.state = 'unauthorized';
+                } else if (r.ok) {
+                    let j = null;
+                    try { j = await r.json(); } catch (_) { j = null; }
+                    if (j && typeof j === 'object' && Array.isArray(j.mods)) {
+                        rec.mods = j.mods;
+                        rec.modsEnabled = (j.mods_enabled !== false);
+                        rec.policy = sanitizeModPolicy(j.mod_policy);
+                        rec.state = (j.serve_ui === false) ? 'headless' : 'ok';
+                    } else {
+                        // A pre-#157 broker answers /info fine and simply lacks the
+                        // keys. This is WHY the catalog rides /info: a brand-new
+                        // path would have failed its cross-origin OPTIONS preflight
+                        // on that broker and arrived here as an opaque network
+                        // error — reported as "asleep" for a machine that is up.
+                        rec.state = 'unsupported';
+                    }
+                }
+            } catch (_) { /* leave 'unreachable' */ }
+            modCatalogCache.set(host.id, rec);
+        }
+        // The well-shaped {modId: bool} subset of whatever a peer sent — the twin
+        // of the broker's own _sanitize_mod_policy. A peer is not trusted to bound
+        // our DOM: only real booleans on mod-id-shaped keys survive, capped.
+        function sanitizeModPolicy(raw) {
+            const out = {};
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+            for (const k of Object.keys(raw).sort()) {
+                if (Object.keys(out).length >= MAX_MOD_POLICY_KEYS) break;
+                if (typeof raw[k] === 'boolean' && MOD_ID_RE.test(k)) out[k] = raw[k];
+            }
+            return out;
+        }
+        // The pins a pinned-ON mod IMPLIES: its declared `requires`, transitively.
+        // The enforcing loader does the same thing (_resolvePins, 86) because a
+        // "pinned on" mod whose dependency is off never actually runs; this mirror
+        // exists so the editor can SAY so on the dependency's row instead of
+        // showing it as unpinned while it is in fact forced on. Walks the catalog
+        // backwards: it is in served order, where a dependency always precedes its
+        // dependents, so one pass closes a chain. An EXPLICIT pin is never
+        // overridden — pinning `editor:false` under `scratchpad:true` leaves editor
+        // off and scratchpad blocked, which is what the loader enforces.
+        function modPolicyImplied(mods, policy) {
+            const implied = {};                 // id -> the mod that requires it
+            const byId = new Set(mods.map((m) => m.id));
+            for (let i = mods.length - 1; i >= 0; i--) {
+                const m = mods[i];
+                const on = (policy[m.id] === true)
+                    || (policy[m.id] === undefined && implied[m.id] !== undefined);
+                if (!on) continue;
+                for (const dep of (Array.isArray(m.requires) ? m.requires : [])) {
+                    if (byId.has(dep) && policy[dep] === undefined
+                            && implied[dep] === undefined) {
+                        implied[dep] = m.id;
+                    }
+                }
+            }
+            return implied;
+        }
+        // Change one pin on `host`. `pin` is true / false / null (= clear).
+        // PATCH-shaped ({set:{id:…}}) so two operators editing different mods
+        // cannot clobber each other, and the broker answers with the AUTHORITATIVE
+        // policy — which is what the row repaints from, so a refused or partial
+        // write can never leave the select showing a value that never landed.
+        async function saveModPin(host, id, pin) {
+            const body = { set: {} };
+            body.set[id] = pin;
+            let r;
+            try {
+                r = await hostFetch(host, '/mods/policy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+            } catch (e) {
+                showNotice('could not reach ' + (host.label || host.url)
+                    + ' to change its mod policy');
+                return false;
+            }
+            if (!r.ok) {
+                showNotice('could not change the mod policy on '
+                    + (host.label || host.url) + ' (HTTP ' + r.status + ')');
+                return false;
+            }
+            let j = null;
+            try { j = await r.json(); } catch (_) { j = null; }
+            const rec = modCatalogCache.get(host.id);
+            if (rec && j && j.ok) rec.policy = sanitizeModPolicy(j.policy);
+            return true;
+        }
+        // Paint the section for the CURRENT tab. Safe to call with no settings
+        // target and before/without any /state — it keys off currentSettingsTab
+        // alone. That is what lets selectSettingsTab call it SYNCHRONOUSLY on
+        // every tab switch: a remote /state GET can take seconds and can fail
+        // outright, and rows left over from the previous tab would be another
+        // machine's policy under this host's name (the #153 lesson).
+        function renderModPolicy() {
+            const list = document.getElementById('set-mod-policy-list');
+            const hint = document.getElementById('set-mod-policy-hint');
+            if (!list || !hint) return;
+            const tabId = currentSettingsTab;
+            list.textContent = '';
+            if (tabId === 'browser') { hint.textContent = ''; return; }
+            const host = hostById(tabId);
+            if (!host) {
+                // The host was removed while its tab was open. hostFetch(null, …)
+                // silently resolves against OUR OWN origin, so a null host must
+                // never reach it — bail instead of reading our own policy under
+                // someone else's name.
+                hint.textContent = 'this broker is no longer configured.';
+                return;
+            }
+            const rec = modCatalogCache.get(host.id);
+            if (!rec) {
+                hint.textContent = 'reading this broker’s mods…';
+                if (!modCatalogFetching.has(host.id)) {
+                    modCatalogFetching.add(host.id);
+                    const wantTab = tabId;
+                    fetchModCatalog(host).then(() => {
+                        modCatalogFetching.delete(host.id);
+                        // Repaint ONLY if this is still the open tab, so a late
+                        // answer can never paint one broker's mods under another's.
+                        if (currentSettingsTab === wantTab) renderModPolicy();
+                    }).catch(() => { modCatalogFetching.delete(host.id); });
+                }
+                return;
+            }
+            const isLocal = (host.id === 'local');
+            if (rec.state !== 'ok') {
+                // Degrade with copy per cause, and offer NO edit: writing a pin to
+                // a broker that cannot enforce it (an older build) would plant
+                // state that silently activates when it is next upgraded.
+                hint.textContent = {
+                    headless: 'this broker serves no desktop page, so it serves no '
+                        + 'mods — there is nothing to pin here.',
+                    unsupported: 'this broker’s build does not report its mods, so '
+                        + 'its mod policy cannot be read or changed from here. '
+                        + 'Update it to manage its mods remotely.',
+                    unauthorized: 'this broker did not accept our password, so its '
+                        + 'mods cannot be read. Set its password on the Browser tab.',
+                    unreachable: 'could not reach this broker to read its mods. '
+                        + 'Select this tab again to retry.',
+                }[rec.state] || 'this broker’s mods are unavailable.';
+                return;
+            }
+            const implied = modPolicyImplied(rec.mods, rec.policy);
+            // Union of served mods and whatever the policy names, so a pin for a
+            // mod this broker does not ship is VISIBLE (and clearable) instead of
+            // silently governing nothing. Capped: the row count must never be a
+            // function of what a peer chose to send us.
+            const rows = rec.mods.filter(
+                (m) => m && typeof m.id === 'string' && MOD_ID_RE.test(m.id)
+            ).slice(0, MAX_MOD_POLICY_KEYS);
+            const served = new Set(rows.map((m) => m.id));
+            for (const id of Object.keys(rec.policy)) {
+                if (rows.length >= MAX_MOD_POLICY_KEYS) break;
+                if (!served.has(id)) rows.push({ id: id, missing: true });
+            }
+            for (const m of rows) {
+                const id = m.id;
+                const row = document.createElement('div');
+                row.className = 'set-mod-policy-row';
+                row.dataset.modId = id;
+                const name = document.createElement('span');
+                name.className = 'set-mod-policy-name';
+                name.textContent = id;
+                // A peer's own strings — text nodes only, and length-capped so a
+                // long or hostile title/description cannot blow out the panel.
+                const desc = [m.title, m.description].filter(
+                    (s) => typeof s === 'string' && s).join(' — ');
+                if (desc) name.title = desc.slice(0, 400);
+                row.appendChild(name);
+                const sel = document.createElement('select');
+                sel.className = 'set-mod-policy-pin';
+                // "Default" has to say what the default IS: four shipped mods are
+                // default-off, and an unlabelled "Default" reads as "on" for them.
+                const dflt = m.missing ? 'Default'
+                    : ((m.default_enabled === false) ? 'Default (off)'
+                                                     : 'Default (on)');
+                for (const opt of [['', dflt], ['on', 'On'], ['off', 'Off']]) {
+                    const o = document.createElement('option');
+                    o.value = opt[0];
+                    o.textContent = opt[1];
+                    sel.appendChild(o);
+                }
+                sel.value = (typeof rec.policy[id] === 'boolean')
+                    ? (rec.policy[id] ? 'on' : 'off') : '';
+                sel.disabled = !rec.modsEnabled;
+                sel.addEventListener('change', () => {
+                    // Resolve the host at EVENT time, never from a closure: these
+                    // rows outlive a tab switch by however long the change event
+                    // takes to arrive, and a captured host would write this pin
+                    // into the PREVIOUS broker's policy.
+                    const h = hostById(currentSettingsTab);
+                    if (!h || h.id !== host.id) { renderModPolicy(); return; }
+                    const pin = (sel.value === '') ? null : (sel.value === 'on');
+                    sel.disabled = true;
+                    const wantTab = currentSettingsTab;
+                    saveModPin(h, id, pin).then(() => {
+                        if (currentSettingsTab === wantTab) renderModPolicy();
+                        else sel.disabled = false;
+                    }).catch(() => { sel.disabled = false; });
+                });
+                row.appendChild(sel);
+                const note = document.createElement('span');
+                note.className = 'set-mod-policy-note';
+                if (m.missing) {
+                    note.textContent = 'not installed on this broker';
+                } else if (rec.policy[id] === undefined && implied[id]) {
+                    note.textContent = 'on — required by ' + implied[id];
+                }
+                row.appendChild(note);
+                list.appendChild(row);
+            }
+            if (!rec.modsEnabled) {
+                hint.textContent = 'this broker’s master mod switch is off '
+                    + '(mods_enabled=false), so none of its mods run — pins are '
+                    + 'shown but cannot be changed from here.';
+                return;
+            }
+            hint.textContent = 'What this broker pins for every browser that loads '
+                + (isLocal ? 'this' : 'that') + ' page. “Default” leaves the choice '
+                + 'to each browser (its own Mods list); On and Off take the choice '
+                + 'away and lock it — including for mods that ship off, so pinning '
+                + 'one on turns it on for everyone. Applies the next time a browser '
+                + 'loads that page'
+                + (isLocal ? ', including this one — so a change here is not live.'
+                           : '.');
         }
         // Hosts whose last /profiles/config GET failed. While a host is in here
         // the editor shows a manual "retry" control instead of re-fetching on

@@ -26,6 +26,19 @@
             settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
             helpCards: [],            // #78: mod-contributed Help cards (ctx.registerHelpCards), sanitized typed entries the Help mod merges with the core corpus
             booted: false,
+            // #157: this broker's MOD POLICY as resolved at boot — {id: bool},
+            // the pins GET /mods reported (plus the dependencies they imply).
+            // A frozen SNAPSHOT on purpose: it is read at page load and never
+            // re-read from a /state pull, for exactly the reason the per-browser
+            // set is not synced (a pull must not tear down a mod in use).
+            // `{}` until loadMods resolves it, so every reader sees "no pins"
+            // rather than a TDZ/undefined during page-script eval.
+            policy: {},
+            // Did the boot /mods actually answer? false after a 401 (no token
+            // stored yet) / 404 (older broker) / network failure, which is what
+            // lets a successful login re-ask instead of silently running the
+            // page unpinned until the next reload.
+            policyAuthoritative: false,
         };
 
         // A duplicate id / slot claim is a hard error (no silent last-wins).
@@ -1163,18 +1176,77 @@
         // safe to call before this fragment's top-level code runs (no TDZ).
         // Returns the parsed object, or {} on any failure (=> mods stay enabled,
         // broker_id stays unknown) — same best-effort posture probeBrokerId had.
-        function localInfo() {
+        //
+        // #157: `localInfo._ok` records whether a real payload ever arrived. The
+        // {} of a failure and the {} of a broker that reports no pins are the
+        // same value to every caller, but only the FIRST may be retried after a
+        // login, so the boot policy needs the two told apart. `refetch` drops the
+        // memo for exactly that retry (see notifyModsHostAuth); learnLocalBrokerId
+        // has long since read its copy, so re-asking cannot disturb it.
+        function localInfo(refetch) {
+            if (refetch) localInfo._p = null;
             if (!localInfo._p) {
                 localInfo._p = (async function () {
                     try {
                         const r = await hostFetch(localHost(), '/info');
                         if (!r.ok) return {};
                         const j = await r.json();
-                        return (j && typeof j === 'object') ? j : {};
+                        if (j && typeof j === 'object') {
+                            localInfo._ok = true;
+                            return j;
+                        }
+                        return {};
                     } catch (_) { return {}; }
                 })();
             }
             return localInfo._p;
+        }
+
+        // Resolve a reported policy map into the pins this build will ENFORCE.
+        //
+        // Two things happen here. (1) Only well-shaped entries survive — a real
+        // boolean for an id this build actually registered; a pin naming a mod
+        // this broker does not ship is dropped (it is still shown, as "not
+        // installed here", by the editor, which reads the SERVER's catalog).
+        // (2) A pinned-ON mod's `requires` are pinned ON too, transitively:
+        // without that, "pinned on" is a lie the moment a browser has the
+        // dependency locally disabled (#121's precondition leaves the dependent
+        // blocked) or disables it later (the disable cascade at _takeDown would
+        // tear the pinned mod down). An EXPLICIT pin always wins over an implied
+        // one, so pinning `editor:false` and `scratchpad:true` leaves editor off
+        // and scratchpad visibly blocked ("needs: editor") rather than silently
+        // overriding the operator's own off.
+        //
+        // The reverse walk works because of the loader's static ordering guard: a
+        // dependency is always registered EARLIER than its dependents, so walking
+        // registration order BACKWARDS visits every dependent before its
+        // dependencies and one pass closes a whole chain.
+        function _resolvePins(raw) {
+            const pins = {};
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return pins;
+            const known = new Set(window.__mods.registered.map(
+                function (m) { return m.id; }));
+            const explicit = new Set();
+            for (const id of Object.keys(raw)) {
+                if (typeof raw[id] !== 'boolean' || !known.has(id)) continue;
+                pins[id] = raw[id];
+                explicit.add(id);
+            }
+            const regs = window.__mods.registered;
+            for (let i = regs.length - 1; i >= 0; i--) {
+                const m = regs[i];
+                if (pins[m.id] !== true) continue;
+                for (const dep of (m.requires || [])) {
+                    if (known.has(dep) && !explicit.has(dep)) pins[dep] = true;
+                }
+            }
+            return pins;
+        }
+        // The pin in force for one mod: true (pinned on), false (pinned off), or
+        // null (unpinned — the browser's own choice governs).
+        function _pin(id) {
+            const p = window.__mods.policy;
+            return (p && typeof p[id] === 'boolean') ? p[id] : null;
         }
 
         // Init one mod through the full isolation path. Returns a structured
@@ -1299,9 +1371,65 @@
         // their default (#116): present flips the default, absent keeps it. For a
         // default-on mod this is the old `!disabled.has(id)`; for a default-off
         // mod it is the mirror (present => enabled).
+        //
+        // #157: a PIN from this broker's mod policy outranks all of it. The
+        // per-browser set is not consulted at all for a pinned mod — it is left
+        // untouched in localStorage, so unpinning restores whatever that browser
+        // had chosen before. Layering the policy UNDER the set instead (as a
+        // replacement default) would invert on a policy change: declared-on +
+        // browser-toggled-off + operator pins off => the set's "away from
+        // default" entry flips it back ON, which is the opposite of both wishes.
         function isModEnabled(id) {
+            const pin = _pin(id);
+            if (pin !== null) return pin;
             const def = _modDefault(id);
             return _modsDisabled().has(id) ? !def : def;
+        }
+        // #121 enable cascade, extracted (#157) so the operator toggle and the
+        // post-login policy apply drive the SAME sequencing. Bring `decl` up, then
+        // a single FORWARD pass over the mods registered AFTER it: any that is
+        // itself enabled, not yet active, and whose every `requires` is now active
+        // gets init'd. The ordering guard (a dependency is always registered
+        // EARLIER than its dependents) makes this deps-first, so one pass suffices
+        // even for a chain — no fixpoint loop.
+        function _bringUp(decl) {
+            const regs = window.__mods.registered;
+            if (!window.__mods.active.has(decl.id)) initMod(decl);
+            for (let i = regs.indexOf(decl) + 1; i < regs.length; i++) {
+                const m = regs[i];
+                if (window.__mods.active.has(m.id) || !isModEnabled(m.id)) continue;
+                // Only mods that DECLARE a dependency participate — an inactive
+                // mod with no `requires` is a boot init-FAILURE, not a dependency
+                // block, so enabling something else must not silently retry it
+                // (deps.every is vacuously true for []).
+                const deps = m.requires || [];
+                if (deps.length && deps.every(function (d) { return window.__mods.active.has(d); })) {
+                    initMod(m);
+                }
+            }
+        }
+        // #121 disable cascade, extracted (#157) alongside _bringUp. Nothing
+        // still-active may be left requiring `id`. First compute the transitive
+        // closure of active mods that depend on it via a FORWARD pass (dependencies
+        // precede dependents, so `id` and every already-doomed dep is seen before
+        // the mods that require it — a single pass gets the full chain). Then tear
+        // them down dependents-FIRST (reverse index order) and `id` itself LAST, so
+        // no mod is unloaded while an active mod still requires it. Each mod's own
+        // teardown stays per-mod LIFO inside disableMod; sequencing the disableMod
+        // calls is what makes the cross-mod teardown correct.
+        function _takeDown(id) {
+            const regs = window.__mods.registered;
+            const doomed = new Set([id]);
+            for (const m of regs) {
+                if (m.id === id || !window.__mods.active.has(m.id)) continue;
+                const deps = m.requires || [];
+                if (deps.some(function (d) { return doomed.has(d); })) doomed.add(m.id);
+            }
+            doomed.delete(id);
+            for (let i = regs.length - 1; i >= 0; i--) {
+                if (doomed.has(regs[i].id)) disableMod(regs[i].id);
+            }
+            disableMod(id);
         }
         // Persist the per-mod choice AND apply it live, reusing the SAME isolated
         // initMod/disableMod paths boot uses (so a live toggle exercises production
@@ -1310,10 +1438,18 @@
         // live init/teardown is itself gated on the master switch: with master off
         // we persist the preference but never init (the gate is absolute). Returns
         // the new enabled state.
+        //
+        // #157: a PINNED mod refuses the write outright — no persist, no live
+        // init/teardown — and reports the pin. The Mods pane disables its
+        // checkbox, so this is belt-and-braces for a programmatic caller (the
+        // __test API, a keybinding) that would otherwise write a preference the
+        // resolver ignores and leave the pane showing a value that isn't in force.
         function setModEnabled(id, on) {
             const decl = window.__mods.registered.find(
                 function (m) { return m.id === id; });
             if (!decl) return null;
+            const pin = _pin(id);
+            if (pin !== null) return pin;
             on = !!on;
             const set = _modsDisabled();
             // Store an id only while it is toggled AWAY from its default (#116);
@@ -1322,50 +1458,7 @@
             if (on === _modDefault(id)) set.delete(id); else set.add(id);
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
-                const regs = window.__mods.registered;
-                if (on) {
-                    // #121 enable cascade. Bring THIS mod up, then a single FORWARD
-                    // pass over the mods registered AFTER it: any that is itself
-                    // enabled, not yet active, and whose every `requires` is now
-                    // active gets init'd. The ordering guard (a dependency is always
-                    // registered EARLIER than its dependents) makes this deps-first,
-                    // so one pass suffices even for a chain — no fixpoint loop.
-                    if (!window.__mods.active.has(id)) initMod(decl);
-                    for (let i = regs.indexOf(decl) + 1; i < regs.length; i++) {
-                        const m = regs[i];
-                        if (window.__mods.active.has(m.id) || !isModEnabled(m.id)) continue;
-                        // Only mods that DECLARE a dependency participate — an
-                        // inactive mod with no `requires` is a boot init-FAILURE, not
-                        // a dependency block, so enabling something else must not
-                        // silently retry it (deps.every is vacuously true for []).
-                        const deps = m.requires || [];
-                        if (deps.length && deps.every(function (d) { return window.__mods.active.has(d); })) {
-                            initMod(m);
-                        }
-                    }
-                } else {
-                    // #121 disable cascade. Nothing still-active may be left
-                    // requiring `id`. First compute the transitive closure of active
-                    // mods that depend on it via a FORWARD pass (dependencies precede
-                    // dependents, so `id` and every already-doomed dep is seen before
-                    // the mods that require it — a single pass gets the full chain).
-                    // Then tear them down dependents-FIRST (reverse index order) and
-                    // `id` itself LAST, so no mod is unloaded while an active mod
-                    // still requires it. Each mod's own teardown stays per-mod LIFO
-                    // inside disableMod; sequencing the disableMod calls is what makes
-                    // the cross-mod teardown correct.
-                    const doomed = new Set([id]);
-                    for (const m of regs) {
-                        if (m.id === id || !window.__mods.active.has(m.id)) continue;
-                        const deps = m.requires || [];
-                        if (deps.some(function (d) { return doomed.has(d); })) doomed.add(m.id);
-                    }
-                    doomed.delete(id);
-                    for (let i = regs.length - 1; i >= 0; i--) {
-                        if (doomed.has(regs[i].id)) disableMod(regs[i].id);
-                    }
-                    disableMod(id);
-                }
+                if (on) _bringUp(decl); else _takeDown(id);
             }
             // #113: a mod that ships help.md but registers no help CARDS (e.g.
             // clock) has no teardown that refreshes Help, so toggling it wouldn't
@@ -1397,6 +1490,17 @@
                 for (const r of rows) {
                     const enabled = isModEnabled(r.id);   // default XOR override (#116)
                     r.cb.checked = enabled;
+                    // #157: a mod this broker PINS is not this browser's call —
+                    // show the pin and lock the box. Reflected (not decided) here:
+                    // the pin came from the boot policy snapshot, so this runs on
+                    // every /state pull without ever changing what is in force.
+                    const pin = _pin(r.id);
+                    r.cb.disabled = (pin !== null);
+                    r.pin.textContent = (pin === null) ? ''
+                        : (pin ? 'pinned on' : 'pinned off');
+                    r.pin.title = (pin === null) ? ''
+                        : ('this broker pins ' + r.id + ' ' + (pin ? 'on' : 'off')
+                           + ' for every browser that loads its page');
                     let state, label;
                     if (!enabled) { state = 'off'; label = state; }
                     else if (window.__mods.active.has(r.id)) { state = 'active'; label = state; }
@@ -1429,7 +1533,8 @@
                     hint.className = 'set-hint';
                     hint.textContent = 'Enable or disable installed mods (this '
                         + 'browser). The broker’s master switch can disable all at '
-                        + 'once.';
+                        + 'once, and a mod this broker pins (see “Mods on this '
+                        + 'broker”) is locked here.';
                     wrap.appendChild(hint);
                     const list = document.createElement('div');
                     list.className = 'set-mods-list';
@@ -1454,6 +1559,9 @@
                         const status = document.createElement('span');
                         status.className = 'set-mod-status';
                         label.appendChild(status);
+                        const pin = document.createElement('span');   // #157
+                        pin.className = 'set-mod-pin';
+                        label.appendChild(pin);
                         row.appendChild(label);
                         const tiers = document.createElement('div');
                         tiers.className = 'set-mod-tiers';
@@ -1472,7 +1580,7 @@
                             tiers.appendChild(b);
                         }
                         row.appendChild(tiers);
-                        rows.push({ id: m.id, cb: cb, status: status });
+                        rows.push({ id: m.id, cb: cb, status: status, pin: pin });
                         list.appendChild(row);
                     }
                     wrap.appendChild(list);
@@ -1494,7 +1602,15 @@
             try {
                 const info = await localInfo();
                 if (info && info.mods_enabled === false) enabled = false;
+                // #157: the broker's pins, resolved ONCE here — before the gate,
+                // before any init — so every later reader (the boot loop, the
+                // Mods pane, setModEnabled) sees one frozen answer. An older
+                // broker has no mod_policy key and _resolvePins({}) is {}, i.e.
+                // byte-for-byte today's behaviour.
+                window.__mods.policy = _resolvePins(info && info.mod_policy);
+                window.__mods.policyAuthoritative = !!localInfo._ok;
             } catch (_) {}
+            window.__mods.policyResolved = true;
             window.__mods.masterEnabled = enabled;
             if (!enabled) {
                 console.info('[mods] disabled by broker (mods_enabled=false)');
@@ -1522,6 +1638,68 @@
             }
         }
 
+        // Reconcile every registered mod with the CURRENT resolved policy, using
+        // the same isolated cascades a live operator toggle uses. Teardowns run
+        // first, in reverse registration order (so _takeDown never unloads a mod
+        // an active dependent still requires), then the bring-ups run forward
+        // (deps precede dependents, so a chain comes up in one pass).
+        function _applyPolicyLive() {
+            if (window.__mods.masterEnabled === false) return;   // gate absolute
+            const regs = window.__mods.registered;
+            for (let i = regs.length - 1; i >= 0; i--) {
+                const m = regs[i];
+                if (window.__mods.active.has(m.id) && !isModEnabled(m.id)) {
+                    _takeDown(m.id);
+                }
+            }
+            for (const m of regs.slice()) {
+                if (!window.__mods.active.has(m.id) && isModEnabled(m.id)) {
+                    _bringUp(m);
+                }
+            }
+            if (window.__mods._reflectManager) {
+                try { window.__mods._reflectManager(); } catch (_) {}
+            }
+            _refreshHelpIfOpen();
+        }
+
+        // #157: a host just authenticated (called from the login overlay, 63).
+        // This closes the hole in "the broker pins it for every browser that
+        // loads its page": a browser arriving with no stored token 401s on the
+        // boot /info, so the pins are unknown and every mod comes up at this
+        // browser's own default — and entering the token heals sockets and
+        // windows in place, it does NOT reload, so without this the page would
+        // run unpinned until the user happens to refresh.
+        //
+        // Deliberately narrow. It fires only for the HOME broker (a remote host's
+        // token says nothing about our pins), only while the boot snapshot was
+        // NEVER authoritative, and only once — so an ordinary later /state or
+        // /info round trip can never re-resolve the policy and tear down a mod
+        // being used, which is the whole reason the snapshot is frozen.
+        async function notifyModsHostAuth(hostId) {
+            if (!window.__mods || !window.__mods.policyResolved) return;
+            if (window.__mods.policyAuthoritative) return;
+            let lh = null;
+            try { lh = localHost(); } catch (_) {}
+            if (!lh || hostId !== lh.id) return;
+            let info = {};
+            try { info = await localInfo(true); } catch (_) {}
+            if (!localInfo._ok) return;              // still cannot ask; try again next login
+            window.__mods.policyAuthoritative = true;
+            if (info && info.mods_enabled === false) {
+                // The master gate is a PAGE-LOAD decision (loadMods returns
+                // before mounting anything when it is off). This session already
+                // fail-opened past it, so pinning individual mods on top of that
+                // would be applying half a policy: say so and leave the session
+                // alone rather than tearing the desktop's mods out from under it.
+                console.warn('[mods] this broker disables mods '
+                    + '(mods_enabled=false); it applies on the next page load');
+                return;
+            }
+            window.__mods.policy = _resolvePins(info && info.mod_policy);
+            _applyPolicyLive();
+        }
+
         // Test API (#71 acceptance: isolation / duplicate-conflict / version-
         // refusal / teardown). Drives the SAME initMod/disableMod paths the real
         // boot uses, so the Playwright checks exercise production code, not a
@@ -1546,6 +1724,13 @@
             isEnabled: function (id) { return isModEnabled(id); },
             disabledIds: function () { return Array.from(_modsDisabled()); },
             masterEnabled: function () { return window.__mods.masterEnabled; },
+            // #157: the resolved pin map in force (including the pins a pinned-ON
+            // mod's `requires` imply) and one mod's pin — true / false / null.
+            // Read-only inspectors: the acceptance asserts that a pin beats the
+            // per-browser set, that setEnabled refuses a pinned id, and that
+            // pinning a dependent on also pins its dependency on.
+            policy: function () { return Object.assign({}, window.__mods.policy); },
+            pinOf: function (id) { return _pin(id); },
             registered: function () {
                 return window.__mods.registered.map(function (m) {
                     // #106: expose the declared boot default so an acceptance test

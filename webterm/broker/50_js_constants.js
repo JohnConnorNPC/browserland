@@ -46,6 +46,12 @@
         const MIN_H = 160;
         const FETCH_TIMEOUT_MS = 3000;
         const STALE_AFTER_FAILURES = 2;
+        // #157: a mod-policy key is a mod id — the SAME shape the broker enforces
+        // (_MODSTORE_ID_RE in app.py) and the shape every mod dir uses. Anything
+        // else in a /state blob is junk the policy editor must not render, and the
+        // cap bounds the row count (and the blob) no matter what a peer sends.
+        const MOD_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+        const MAX_MOD_POLICY_KEYS = 256;
         // A session missing from MISSING_POLLS_CLOSE consecutive successful
         // polls closes its open window (~12 s at POLL_MS — above the agent's
         // 10 s reconnect cap, so a broker restart never mass-closes).

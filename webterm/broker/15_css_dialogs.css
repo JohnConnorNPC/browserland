@@ -385,3 +385,22 @@
             border: 1px solid var(--bg-3); background: var(--bg); color: var(--fg-dim);
         }
         .set-mod-tier-none { font-style: italic; opacity: 0.7; }
+        /* #157: a mod this broker PINS is not this browser's choice — the row's
+           checkbox is disabled and this badge names the pin. Same muted amber as
+           the "blocked" status: a soft "not yours to set", not an error. */
+        .set-mod-pin:not(:empty) {
+            font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;
+            border: 1px solid var(--bg-3); background: var(--bg); color: #d29922;
+        }
+        /* #157: the per-host "Mods on this broker" section — that broker's served
+           mods and the Default/On/Off pin it applies to every browser loading its
+           page. Per-HOST (not .set-browser-global), so it shows on remote tabs. */
+        .set-mod-policy { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+        .set-mod-policy-row {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        }
+        .set-mod-policy-name { font-weight: 600; flex: 0 0 auto; }
+        .set-mod-policy-pin { flex: 0 0 auto; }
+        .set-mod-policy-note {
+            font-size: 11px; color: var(--fg-dim); flex: 1 1 auto; min-width: 0;
+        }

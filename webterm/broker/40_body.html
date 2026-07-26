@@ -244,6 +244,21 @@
                         window's mode is overridable from its title-bar menu. Connect
                         URL: <code id="set-mcp-url">&mdash;</code></div>
                 </div>
+                <!-- #157: the mods THIS TAB'S BROKER serves, and the on/off it
+                     pins for every browser that loads its page. Deliberately a
+                     STATIC core section rather than a loader-mounted pane: it edits
+                     that broker's /state, not this browser's mod set, so it must
+                     survive a local broker whose own mods_enabled is false (which
+                     makes loadMods return before it mounts anything), and it must
+                     be painted synchronously on a tab switch (renderModPolicy) so a
+                     dead remote can never leave the PREVIOUS host's rows on screen
+                     under its name -- the #153 lesson. NOT .set-browser-global: it
+                     is per-host, so it shows on remote tabs too. -->
+                <div class="set-section" id="set-mod-policy">
+                    <div class="set-title">Mods on this broker</div>
+                    <div id="set-mod-policy-list" class="set-mod-policy"></div>
+                    <div class="set-hint" id="set-mod-policy-hint"></div>
+                </div>
                 <div class="set-section">
                     <div class="set-title">Keybindings</div>
                     <div id="set-keybindings"></div>

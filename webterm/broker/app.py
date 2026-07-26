@@ -290,6 +290,59 @@ MODSTORE_MAX_REVISIONS = 50         # revision-ring depth (per mod)
 # with a JSON metadata key. Compiled once; used by the loader + both handlers.
 _MODSTORE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
+# #157: this broker's MOD POLICY -- {modId: bool}, the on/off this broker PINS
+# for every browser that loads its page (an absent id leaves the choice to that
+# browser). Reported by GET /info and written by POST /mods/policy.
+#
+# It is broker-owned admin state in a SIDECAR, deliberately NOT a key in the
+# /state settings blob, for the same reason /mcp/config and /profiles/config are
+# not: a /state PUT is lease-gated (409 not_active unless you are that broker's
+# single active browser), so a policy stored there could never be changed on a
+# broker that has a live viewer of its own -- which is precisely the broker an
+# operator wants to administer remotely. /state's whole-blob last-writer-wins
+# would also let an unrelated settings push from an idle browser silently drop
+# the pins. MAX_MOD_POLICY_KEYS bounds the file, the payload, and the number of
+# rows a peer can make another broker's Control Panel render; it is an order of
+# magnitude above the ~17 in-repo mods.
+MAX_MOD_POLICY_KEYS = 256
+
+
+def _sanitize_mod_policy(raw: Any) -> Dict[str, bool]:
+    """The well-shaped ``{modId: bool}`` subset of ``raw``.
+
+    Keys must match the mod-id shape (the same one /mod-store/<modId> enforces);
+    values must be REAL bools -- a truthy string or 1/0 is dropped, not coerced,
+    because a pin is an operator decision and inferring one from junk is worse
+    than reporting none. Sorted + capped so the result is deterministic and
+    bounded however mangled the input (hand-edited sidecar, hostile PUT)."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, bool] = {}
+    for mid in sorted(raw):
+        if len(out) >= MAX_MOD_POLICY_KEYS:
+            break
+        val = raw[mid]
+        if isinstance(mid, str) and isinstance(val, bool) \
+                and _MODSTORE_ID_RE.fullmatch(mid):
+            out[mid] = val
+    return out
+
+
+def _load_mod_policy(path: Path) -> Dict[str, bool]:
+    """The persisted mod policy (``webterm_mod_policy.json``), or ``{}``.
+
+    Sidecar-is-truth like _load_mcp_cfg, and protective for the same reason: a
+    missing, truncated or hand-edited file must degrade to "this broker pins
+    nothing" -- which is the pre-#157 behaviour -- never break startup."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("policy"), dict):
+        return _sanitize_mod_policy(data["policy"])
+    return _sanitize_mod_policy(data)
+
 # /session/* management RPCs: how long the broker waits for the producer's
 # reply before giving up with 504 (the agent does psutil/git work off its
 # event loop, so this is generous).
@@ -2187,6 +2240,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # (the clock ships as one), so an out-of-the-box install runs them. Surfaced
     # via /info so the loader can gate at runtime (fail-open / default-on).
     app.ctx.mods_enabled = bool(config.get("mods_enabled", True))
+    # The mods this broker SERVES, for GET /mods (#157). Filled from
+    # ui.mod_catalog() in the serve_ui block far below — NOT here — because
+    # importing .ui assembles the whole page and a headless broker must never do
+    # that (#87). So the default is the literal truth for a headless broker: it
+    # serves no desktop page, hence no mods, and its /mods says so via serve_ui.
+    app.ctx.mod_catalog = []
     # Headless mode (#87): when off, the broker serves the full JSON/WS API but
     # not the desktop page (GET /) or the in-app Help corpus, and skips
     # assembling both UI constants entirely. Defaults ON so existing deploys are
@@ -2354,6 +2413,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     ).resolve()
     app.ctx.mcp_cfg = _load_mcp_cfg(app.ctx.mcp_state_path, config)
     app.ctx.mcp_lock = asyncio.Lock()
+    # #157: the mod policy — this broker's per-mod pins, in a sidecar beside the
+    # /state store (override with "mod_policy_path"), read by GET /info and
+    # written by POST /mods/policy. Same shape as the MCP config above: broker-
+    # owned admin state with its own lock serializing read / mutate / atomic
+    # write, NOT part of the lease-gated /state blob.
+    app.ctx.mod_policy_path = Path(
+        config.get("mod_policy_path")
+        or (app.ctx.state_path.parent / "webterm_mod_policy.json")
+    ).resolve()
+    app.ctx.mod_policy = _load_mod_policy(app.ctx.mod_policy_path)
+    app.ctx.mod_policy_lock = asyncio.Lock()
     _mc = app.ctx.mcp_cfg
     LOGGER.info("MCP interface: %s (default_mode=%s allow_launch=%s)",
                 "enabled" if (_mc["enabled"] and _mc["token"]) else "disabled",
@@ -4767,10 +4837,87 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _gated_auth_error(request, "/info")
         if err is not None:
             return err
+        # #157: `mods` (what this broker serves) + `mod_policy` (the on/off it
+        # PINS for every browser that loads its page) ride /info rather than a
+        # route of their own, and that is a compatibility decision, not tidiness.
+        # A cross-origin GET carrying Authorization is non-simple, so it is
+        # preceded by OPTIONS; a broker predating this feature has no route for a
+        # NEW path, its preflight fails, and the browser reports an opaque
+        # network error -- indistinguishable from "that machine is asleep". On
+        # /info (already in the explicit preflight list below) an older broker
+        # answers normally and simply lacks the two keys, which is a difference
+        # the client can SEE and report honestly.
+        #
+        # `mods` is empty on a headless broker (it serves no page, so it serves
+        # no mods) -- `serve_ui` is what tells the two empties apart. It reports
+        # only what mod.json carries plus the two fields the manifests now
+        # declare (defaultEnabled/requires, drift-tested against the JS): a mod's
+        # `tiers` stay JS-only, so the peer's trust badges are deliberately not
+        # advertised here.
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
                            "version": app.ctx.version,
                            "mods_enabled": app.ctx.mods_enabled,
-                           "serve_ui": app.ctx.serve_ui})
+                           "serve_ui": app.ctx.serve_ui,
+                           "mods": app.ctx.mod_catalog,
+                           "mod_policy": dict(app.ctx.mod_policy)})
+
+    # ---- mod policy write (/mods/policy, #157) ----------------------------
+    # The ONLY writer of the pins GET /info reports. Token-gated like every
+    # browser-realm route -- and deliberately NOT lease-gated: unlike /state and
+    # /mod-store this is not shared UI state one active browser owns, it is the
+    # broker's own configuration, and the whole point of the feature is being
+    # able to set it on a broker that somebody else is using right now.
+    #
+    # PATCH semantics, not replace: the body is {"set": {modId: bool|null}} where
+    # null CLEARS a pin. Two operators editing different mods therefore cannot
+    # clobber each other, and a client never has to hold (or resend) the whole
+    # map it may have read minutes ago. The response is the authoritative stored
+    # policy, so the editor repaints from what actually landed rather than from
+    # what it hoped would.
+    async def _mods_policy_post(request: Request):
+        err = _gated_auth_error(request, "/mods/policy")
+        if err is not None:
+            return err
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        changes = body.get("set")
+        if not isinstance(changes, dict) or not changes:
+            return sanic_json({"ok": False, "error": "bad_set"}, status=400)
+        if len(changes) > MAX_MOD_POLICY_KEYS:
+            return sanic_json({"ok": False, "error": "too_many"}, status=413)
+        # Validate EVERY entry before the lock so a bad field changes nothing.
+        for mid, val in changes.items():
+            if not isinstance(mid, str) or not _MODSTORE_ID_RE.fullmatch(mid):
+                return sanic_json({"ok": False, "error": "bad_mod_id"},
+                                  status=400)
+            if val is not None and not isinstance(val, bool):
+                return sanic_json({"ok": False, "error": "bad_pin"}, status=400)
+        # Shielded for _mcp_config_post's reason: the sidecar write awaits and
+        # the live ctx swap lands AFTER it, so an unshielded cancel in that hop
+        # leaves disk ahead of memory -- the running broker still serving the old
+        # pins while a restart adopts pins no client was told had landed.
+        async def _locked_write():
+            policy = dict(app.ctx.mod_policy)
+            for mid, val in changes.items():
+                if val is None:
+                    policy.pop(mid, None)
+                else:
+                    policy[mid] = bool(val)
+            policy = _sanitize_mod_policy(policy)
+            if len(policy) > MAX_MOD_POLICY_KEYS:      # belt: sanitize caps too
+                return sanic_json({"ok": False, "error": "too_many"},
+                                  status=413)
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.mod_policy_path,
+                    {"policy": policy})
+            except OSError as exc:
+                return sanic_json({"ok": False, "error": str(exc)}, status=500)
+            app.ctx.mod_policy = policy
+            return sanic_json({"ok": True, "policy": policy})
+
+        return await _shielded_region(app.ctx.mod_policy_lock, _locked_write)
 
     # ---- AI-provider status proxy (/status/fetch, #112) ------------------
     # The broker's ONLY outbound HTTP. Gated by the SAME token
@@ -5589,10 +5736,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # missing/oversized fragment (ui.assemble() is non-protective); deferring
         # it into the handler would let a broken broker boot "healthy" and only
         # 500 on the first GET /. sys.modules caches the assembled values.
-        from .ui import INDEX_HTML, inline_script_hash
+        from .ui import INDEX_HTML, inline_script_hash, mod_catalog
         from .help_corpus import HELP_CORPUS
         from . import vendor
         app.ctx.index_html = INDEX_HTML
+        # #157: the served mod list, captured HERE for the same reason as the
+        # page — /mods is registered unconditionally (a headless broker is still
+        # a host tab), so the handler must never be the thing that imports .ui.
+        app.ctx.mod_catalog = mod_catalog()
         app.ctx.help_corpus = HELP_CORPUS
         # #143: authorize OUR bundle by hash so script-src needs no
         # 'unsafe-inline'. Computed from the assembled page, here rather than at
@@ -5641,6 +5792,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_session_git, "/session/git", methods=["POST"])
     app.add_route(_session_mcp, "/session/mcp", methods=["POST"])
     app.add_route(_info, "/info", methods=["GET"])
+    app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
@@ -5703,6 +5855,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/session/git", "preflight_session_git"),
                              ("/session/mcp", "preflight_session_mcp"),
                              ("/info", "preflight_info"),
+                             ("/mods/policy", "preflight_mods_policy"),
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),

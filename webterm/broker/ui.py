@@ -278,6 +278,55 @@ def _mod_css(mods, base: Path = _DIR):
     return out
 
 
+def mod_catalog(mods=_MODS, base: Path = _DIR):
+    """The mods this broker SERVES, as plain data for ``GET /mods`` (#157) --
+    one entry per mod dir in _MODS order::
+
+        [{"id": "clock", "title": "Clock", "description": "...",
+          "version": "1.0.0", "default_enabled": True, "requires": []}, ...]
+
+    Derived from the same ``_MODS`` list + ``mod.json`` manifests that assembly
+    itself walks, so the catalog can never advertise a mod the page does not
+    carry. Best-effort like ``_mod_css``: a missing/unreadable manifest still
+    yields a row (id falling back to the DIRECTORY name, which is the id by
+    convention -- `mods/<id>/`), because "this mod is served" is true whether or
+    not its manifest parses.
+
+    ``default_enabled`` and ``requires`` are the manifest's declarations of what
+    the mod's registerMod() call says in JS. They are duplicated deliberately:
+    without the default, the remote policy editor's "Default" option cannot say
+    whether default MEANS on or off (four shipped mods are default-off), and
+    without ``requires`` it cannot show that pinning a mod on also forces its
+    dependency on. tests/test_ui_assets.py pins both against the JS so the copy
+    cannot drift. ``tiers`` is NOT reported -- it is display-only trust metadata
+    with no behaviour behind it, and duplicating fifteen more arrays to show a
+    peer's badges is not worth the drift surface."""
+    out = []
+    for mod_dir in _mod_dirs(mods):
+        meta = _manifest(mod_dir, base)
+        mid = meta.get("id")
+        if not isinstance(mid, str) or not mid:
+            mid = PurePosixPath(mod_dir).name
+
+        def _text(key, default=""):
+            v = meta.get(key, default)
+            return v if isinstance(v, str) else default
+
+        reqs = meta.get("requires", [])
+        if not isinstance(reqs, list):
+            _LOG.warning("mod %s: `requires` must be a list, got %s",
+                         mod_dir, type(reqs).__name__)
+            reqs = []
+        out.append({"id": mid, "title": _text("title", mid),
+                    "description": _text("description"),
+                    "version": _text("version"),
+                    # Absent == the registerMod default (on); only an explicit
+                    # `false` ships a mod off, matching the JS's `!== false`.
+                    "default_enabled": meta.get("defaultEnabled") is not False,
+                    "requires": [r for r in reqs if isinstance(r, str) and r]})
+    return out
+
+
 def assemble(ordered=_ORDERED, mods=_MODS, base: Path = _DIR) -> str:
     """Five-segment empty-string join: core fragments up to the head-css splice
     point, the mod stylesheets, the rest of core up to the mod-js splice point,

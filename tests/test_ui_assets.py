@@ -865,6 +865,61 @@ def test_mod_scripts_exist_on_disk_and_match_mods_dir():
         f"mods/ *.js drift: declared={sorted(declared)} on_disk={sorted(on_disk)}")
 
 
+def test_mod_catalog_matches_the_registerMod_declarations():
+    # #157: GET /info advertises ui.mod_catalog() so another broker's Control
+    # Panel tab can list this broker's mods and label its policy's "Default"
+    # option correctly. `defaultEnabled` and `requires` therefore live in BOTH
+    # mod.json (read by Python) and the registerMod() call (read by the loader),
+    # and this is the guard that keeps the copies honest -- in both directions,
+    # so neither adding nor removing a declaration can drift silently.
+    #
+    # The JS is matched by source text on purpose: it is the same assertion style
+    # test_clock_mod_packaged_and_manifest_agrees already uses, and the loader's
+    # own contract is `defaultEnabled !== false` / `requires || []`, i.e. absent
+    # means default-on / no deps.
+    catalog = {m["id"]: m for m in ui.mod_catalog()}
+    assert len(catalog) == len(ui._mod_dirs(ui._MODS)), "duplicate mod id"
+    for mod_dir in ui._mod_dirs(ui._MODS):
+        mid = PurePosixPath(mod_dir).name
+        # id agreement: directory name == manifest id == the id registerMod
+        # claims. All three are the pin/pane key namespace, so a mismatch would
+        # let a policy pin name a mod the loader cannot resolve.
+        assert mid in catalog, f"{mod_dir}: catalog id != directory name"
+        src = "".join((BROKER_DIR / rel).read_text(encoding="utf-8")
+                      for rel in ui._MODS
+                      if PurePosixPath(rel).parent.as_posix() == mod_dir)
+        assert f"id: '{mid}'" in src, f"{mod_dir}: registerMod id != dir name"
+
+        js_default_off = re.search(r"defaultEnabled:\s*false", src) is not None
+        assert catalog[mid]["default_enabled"] is not js_default_off, (
+            f"{mod_dir}: mod.json defaultEnabled disagrees with its registerMod "
+            f"declaration (JS says default-{'off' if js_default_off else 'on'})")
+
+        js_requires = re.search(r"requires:\s*\[([^\]]*)\]", src)
+        js_deps = sorted(re.findall(r"'([^']+)'", js_requires.group(1))) \
+            if js_requires else []
+        assert sorted(catalog[mid]["requires"]) == js_deps, (
+            f"{mod_dir}: mod.json requires {catalog[mid]['requires']} but its "
+            f"registerMod declares {js_deps}")
+        # A declared dependency must be a mod that exists and is spliced EARLIER
+        # (the loader's static ordering guard the pin resolver relies on).
+        for dep in js_deps:
+            assert dep in catalog, f"{mod_dir}: requires unknown mod {dep!r}"
+            assert ui._mod_dirs(ui._MODS).index(f"mods/{dep}") \
+                < ui._mod_dirs(ui._MODS).index(mod_dir), \
+                f"{mod_dir}: dependency {dep!r} must load first"
+
+
+def test_mod_catalog_ids_are_valid_policy_keys():
+    # A catalog id doubles as a mod-policy key in the /state settings blob, and
+    # app.py only reports policy keys matching the mod-id shape -- an id outside
+    # it could never be pinned. Kept as the same regex /mod-store/<modId> uses.
+    from webterm.broker.app import _MODSTORE_ID_RE
+    for m in ui.mod_catalog():
+        assert _MODSTORE_ID_RE.fullmatch(m["id"]), \
+            f"mod id {m['id']!r} cannot be used as a mod-policy key"
+
+
 def test_clock_mod_packaged_and_manifest_agrees():
     import json
     mod_dir = BROKER_DIR / "mods" / "clock"
@@ -2884,6 +2939,101 @@ def test_loadmods_honors_per_mod_disabled_under_master_gate():
     assert boot.index("_mountModsManagerPane()") < boot.index("isModEnabled(decl.id)")
     # stale ids are pruned so the set can't grow junk.
     assert "pruned" in boot
+    # #157: the broker's PINS resolve before the gate and before any init, so
+    # every later reader (the boot loop, the Mods pane, setModEnabled) sees one
+    # frozen answer and no mod can start under the wrong policy.
+    assert boot.index("_resolvePins(") < boot.index("mods_enabled=false")
+    assert boot.index("_resolvePins(") < boot.index("isModEnabled(decl.id)")
+
+
+def test_mod_policy_pins_outrank_the_per_browser_toggle():
+    # #157 resolution order: a pin from the broker's policy wins over the
+    # per-browser set, and a pinned mod refuses the local toggle outright (so a
+    # programmatic caller can't persist a preference the resolver ignores).
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    enabled = loader[loader.index("function isModEnabled"):
+                     loader.index("function _bringUp")]
+    # The pin is consulted and returned BEFORE the disabled-set is even read.
+    assert enabled.index("_pin(id)") < enabled.index("_modsDisabled()")
+    setter = loader[loader.index("function setModEnabled"):
+                    loader.index("function _mountModsManagerPane")]
+    assert setter.index("_pin(id)") < setter.index("_writeModsDisabled(")
+    # A pinned-ON mod's dependencies are pinned too, or "pinned on" is a lie the
+    # moment a browser has the dependency locally disabled (#121 leaves the
+    # dependent blocked, and the disable cascade would tear it down again).
+    pins = loader[loader.index("function _resolvePins"):
+                  loader.index("function _pin(")]
+    assert "requires" in pins and "explicit" in pins
+
+
+def test_mod_policy_is_broker_admin_state_not_the_synced_state_blob():
+    # #157: a /state PUT is lease-gated (409 not_active for any browser that is
+    # not that broker's active view), so a policy stored in the settings blob
+    # could never be changed on a broker with a live viewer -- the very broker
+    # this section exists to administer. The policy therefore lives in the
+    # broker's own sidecar behind POST /mods/policy, and NOTHING may write it
+    # through the settings target.
+    settings = (BROKER_DIR / "55_js_settings_model.js").read_text(encoding="utf-8")
+    assert "modPolicy" not in settings
+    panel = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+    policy = panel[panel.index('// ---- "Mods on this broker" section'):
+                   panel.index("// Hosts whose last /profiles/config GET failed")]
+    assert "'/mods/policy'" in policy and "'/info'" in policy
+    # Never through t.s / t.save() (the lease-gated /state path every other
+    # control on this pane uses).
+    assert "t.save()" not in policy and "putHostState" not in policy
+    # The host is resolved at EVENT time inside the change handler, because
+    # hostFetch(null, path) silently resolves against OUR OWN origin -- a stale
+    # closure would write a peer's pin into this broker's policy.
+    assert "hostById(currentSettingsTab)" in policy
+    # Every failure mode gets its own copy, and none of them re-fetches on a
+    # repaint (a sleeping broker must not become a hot retry loop).
+    for state in ("headless", "unsupported", "unauthorized", "unreachable"):
+        assert state in policy
+    assert "modCatalogFetching" in policy
+
+
+def test_mod_policy_section_is_per_host_and_painted_on_tab_switch():
+    # The section is STATIC core markup in the host pane, NOT a loader-mounted
+    # pane: it must survive a local broker whose own mods_enabled is false (which
+    # makes loadMods return before mounting anything), and it must not be
+    # .set-browser-global or applyBrowserGlobalVisibility would hide it on every
+    # remote tab -- the tabs it exists for.
+    body = (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    # The ELEMENT, not the comment above it (which explains why it is not global).
+    section = body[body.index('<div class="set-section" id="set-mod-policy">'):
+                   body.index('id="set-mod-policy-hint"')]
+    assert "set-browser-global" not in section
+    assert 'id="set-mod-policy"' in body and 'id="set-mod-policy-list"' in body
+    assert body.index('id="set-mod-policy"') > body.index('id="set-pane-host"')
+    assert body.index('id="set-mod-policy"') < body.index('id="set-pane-browser"')
+    # Painted SYNCHRONOUSLY on tab select, before the remote /state await: a slow
+    # or failing fetch must never leave the previous host's rows on screen under
+    # this host's name (the #153 lesson, 81:205-212).
+    panel = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+    tab = panel[panel.index("async function selectSettingsTab"):
+                panel.index("// Populate the host-form fields")]
+    assert tab.index("renderModPolicy()") < tab.index("await fetchHostState")
+    assert tab.index("renderModPolicy()") < tab.index("if (tabId === 'browser')")
+
+
+def test_mod_policy_applies_after_a_first_login():
+    # A browser arriving with no stored token 401s on the boot /info, so the pins
+    # are unknown and every mod comes up at this browser's own default -- and
+    # entering the token heals sockets in place, it does NOT reload. The login
+    # success path therefore re-asks once and reconciles, or the broker's "pinned
+    # for every browser that loads its page" promise is false on first visit.
+    auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    assert "notifyModsHostAuth(host.id)" in auth
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    hook = loader[loader.index("async function notifyModsHostAuth"):
+                  loader.index("// Test API")]
+    # Narrow by construction: HOME broker only, never once the snapshot is
+    # authoritative (so an ordinary later round trip can't re-tear-down a mod in
+    # use), and it re-fetches rather than trusting the memo.
+    assert "policyAuthoritative" in hook
+    assert "hostId !== lh.id" in hook
+    assert "localInfo(true)" in hook
 
 
 def test_mods_declare_reviewed_trust_tiers():

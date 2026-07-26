@@ -770,6 +770,12 @@
             // it may have died on a 4401 before the token was entered. For the
             // HOME broker this is what un-blocks the deferred boot / overlay.
             try { openControlWs(host); } catch (_) {}
+            // #157: the boot /info was 401 for a browser that had no token yet,
+            // so this broker's MOD POLICY was unknown and every mod came up at
+            // this browser's own default. Now that we can ask, re-ask once and
+            // reconcile. A no-op for a normal (already-authenticated) load and
+            // for every remote host — see notifyModsHostAuth in 86.
+            try { notifyModsHostAuth(host.id); } catch (_) {}
             // App windows (text editor / file manager) carry hostId 'app', so
             // the terminal-healing loop below never reaches them. Notify any
             // file tool bound to the host that just authenticated so it can

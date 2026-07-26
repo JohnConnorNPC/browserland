@@ -189,6 +189,12 @@
                     }
                 }
             }
+            // #157 deliberately adds NOTHING here: a broker's mod policy is its
+            // own admin state in a sidecar (GET /info, POST /mods/policy), not a
+            // key in this synced blob. A /state PUT is lease-gated, so a policy
+            // stored here could not be changed on a broker that has a live viewer
+            // — the very broker you want to administer — and an unrelated push
+            // from an idle browser could drop the pins wholesale.
             return s;
         }
         function getSettings() {
