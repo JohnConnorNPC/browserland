@@ -234,6 +234,14 @@
             // false would hand a clipboard request to whatever registered
             // earlier. Disposal below is load-bearing for the same reason: a
             // reopened terminal must not stack duplicate handlers.
+            //
+            // Cost of registering at all, checked in the vendored bundle rather
+            // than assumed: an UNTERMINATED OSC 52 now buffers, where before
+            // registration the parser took the no-handler path and accumulated
+            // nothing. It is bounded, though — OscHandler.put() zeroes _data and
+            // latches _hitLimit once it passes PAYLOAD_LIMIT (1e7), and a
+            // limit-hit sequence never reaches this callback at all. So the
+            // worst case is a transient buffer, self-clearing, not a leak.
             // A closure variable, not a field on `win` (which is built below):
             // the request identity must not be reachable — or forgeable — from
             // anything the PTY can influence, and this also keeps the handler
