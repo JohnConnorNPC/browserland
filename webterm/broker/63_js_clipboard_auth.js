@@ -332,7 +332,12 @@
             // and does not even buy safety — the characters that make
             // pastejacking dangerous (CR, LF, TAB) are exactly the ones a strip
             // would keep. Exact copy semantics, or a visible refusal.
-            if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) {
+            // The range runs to \x9f, not \x7f: C1 is the 8-bit spelling of the
+            // same controls, and the vendored parser honours it — U+009B is
+            // CSI and U+009D is OSC. Stopping at DEL would reject `a\x1bb` and
+            // wave through its exact twin spelled with the single C1 byte,
+            // which is not a rejection rule, it is a spelling preference.
+            if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(text)) {
                 return { error: 'control-chars' };
             }
             return { text: text };

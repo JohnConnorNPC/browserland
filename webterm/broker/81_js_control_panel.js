@@ -202,6 +202,14 @@
             settingsTarget = null;
             settingsOpenHostId = tabId;     // pause prefetch for this host
             applyBrowserGlobalVisibility(false);  // hide local-only controls now
+            // #153: the clipboard grant is BROWSER-LOCAL, so it neither needs
+            // nor waits for the remote's /state. Rendered here, synchronously,
+            // for the same reason: if the fetch below fails (host down, no
+            // token) renderSettings never runs, and the box would otherwise sit
+            // there showing the PREVIOUS tab's host — a grant switch displaying
+            // another machine's answer. The change handler resolves its host
+            // from currentSettingsTab, so it stays usable on that tab too.
+            setOsc52.checked = isOsc52Allowed(tabId);
             setHostLoadingEl.style.display = '';
             setPaneHost.classList.add('loading');
             const entry = await fetchHostState(tabId);
@@ -1012,9 +1020,14 @@
         // is never itself reachable from a broker. Takes effect on the next
         // sequence; nothing to reapply.
         setOsc52.addEventListener('change', () => {
-            const t = settingsTarget;
-            if (!t) return;
-            setOsc52Allowed(t.hostId, setOsc52.checked);
+            // currentSettingsTab, NOT settingsTarget: the target is null while a
+            // remote's /state is in flight and stays null if that fetch fails,
+            // and a browser-local grant has no business being ungrantable
+            // because the far end is unreachable.
+            const hostId = currentSettingsTab;
+            if (!hostId || hostId === 'browser') return;
+            setOsc52Allowed(hostId, setOsc52.checked);
+            setOsc52.checked = isOsc52Allowed(hostId);   // reflect what stuck
         });
 
         setConfirmTerminate.addEventListener('change', () => {

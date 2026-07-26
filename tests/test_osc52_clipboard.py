@@ -364,6 +364,26 @@ CASES.unknown_host_fails_shut = () => {
     return out;
 };
 
+CASES.c1_controls_rejected = () => {
+    reset();
+    const out = {};
+    const probes = {
+        'CSI(U+009B)': 'ab\u009bc',
+        'OSC(U+009D)': 'ab\u009dc',
+        'PAD(U+0080)': 'ab\u0080c',
+        'APC(U+009F)': 'ab\u009fc',
+        'esc(7bit)':   'ab\u001bc',
+        'plain':       'ab c',
+        'accented':    'caf\u00e9 \u2014 na\u00efve',   // U+00E9/U+2014 must PASS
+    };
+    for (const [name, text] of Object.entries(probes)) {
+        clipboard.writes.length = 0;
+        osc52Request(req(), 'c;' + Buffer.from(text, 'utf8').toString('base64'));
+        out[name] = clipboard.writes.length;
+    }
+    return out;
+};
+
 // --- adversarial-review regressions ---------------------------------------
 CASES.pc_must_match_the_legal_alphabet = () => {
     reset();
@@ -817,9 +837,25 @@ def test_the_settings_row_writes_the_local_store_not_the_state_blob():
     panel = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
     i = panel.index("setOsc52.addEventListener")
     handler = panel[i:panel.index("});", i)]
-    assert "setOsc52Allowed(t.hostId" in handler
-    assert "t.save()" not in handler
-    assert "t.s." not in handler
+    # Comments explain the reasoning and name the things being avoided, so the
+    # asserts below have to look at CODE.
+    code = "\n".join(ln for ln in handler.splitlines()
+                     if not ln.strip().startswith("//"))
+    assert "setOsc52Allowed(" in code
+    assert "t.save()" not in code
+    assert "t.s." not in code
+    # It must not depend on settingsTarget: that is null while a remote's
+    # /state is in flight and STAYS null if the fetch fails, and a
+    # browser-local grant has no business being ungrantable because the far
+    # end is unreachable.
+    assert "settingsTarget" not in code
+    assert "currentSettingsTab" in code
+    # ...and the box is painted synchronously on tab select for the same
+    # reason, rather than only from renderSettings (which never runs on a
+    # failed load, leaving the PREVIOUS host's answer on screen).
+    start = panel.index("async function selectSettingsTab")
+    sel = panel[start:panel.index("\n        }", start)]
+    assert "setOsc52.checked = isOsc52Allowed(tabId)" in sel
 
 
 def test_defaults_to_off():
@@ -952,3 +988,15 @@ def test_removing_a_host_drops_its_grant(harness):
     r = run(harness, "removing_a_host_drops_its_grant")
     assert "remote1" in r["before"]
     assert "remote1" not in r["after"]
+
+
+def test_c1_controls_are_rejected_like_their_7_bit_twins(harness):
+    """C1 is the 8-bit spelling of the same controls and the vendored parser
+    honours it -- U+009B IS CSI, U+009D IS OSC. Stopping the reject class at
+    DEL would refuse a payload spelled with ESC and wave through its exact
+    twin spelled with one C1 byte."""
+    r = run(harness, "c1_controls_rejected")
+    counts = {k: v for k, v in r.items() if not k.startswith("__")}
+    assert counts == {"CSI(U+009B)": 0, "OSC(U+009D)": 0, "PAD(U+0080)": 0,
+                      "APC(U+009F)": 0, "esc(7bit)": 0, "plain": 1,
+                      "accented": 1}
