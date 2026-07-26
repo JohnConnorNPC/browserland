@@ -198,7 +198,8 @@ with revision history, an in-desktop copy/paste observer, and help cards.
 A mod's *settings* sync across your browsers via the broker's shared state;
 its *enable/disable* toggle is deliberately per-browser — flip it in
 **Control Panel → Mods**. A broker-side `mods_enabled` master switch gates
-the whole system. The desktop ships with sixteen:
+the whole system, and a broker can *pin* individual mods on or off for every
+browser that loads its page. The desktop ships with eighteen:
 
 | Mod | What it adds | Default |
 |---|---|---|
@@ -214,6 +215,8 @@ the whole system. The desktop ships with sixteen:
 | `agent-docs` | AGENTS.md / CLAUDE.md one-click openers on terminal title bars | on |
 | `recorder` | terminal session recorder + fixed-size player (speed, continuous rewind, timestamped notes) | on |
 | `host-registry` | optional shared broker list — publish/pull your host list across browsers | on |
+| `mousemode` | title-bar chip while a full-screen app owns the mouse | on |
+| `mod-sync` | copy this broker's mod setup to your other brokers (all or selected) | on |
 | `git` | per-terminal git branch + dirty-state widget | off |
 | `aistatus` | AI-provider status chip + window | off |
 | `clipboard` | rolling history of copies/pastes made through the desktop | off |

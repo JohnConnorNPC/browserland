@@ -48,6 +48,33 @@ If a broker can't answer, the section says why instead of showing an empty list:
 
 The broker-wide **master switch** still outranks all of this: a broker started with `mods_enabled: false` runs no mods at all, and its section says so.
 
+## Copying a mod setup between brokers
+
+Setting the same mods up by hand on every machine is what **Control Panel → Browser → Sync mods** is for. It copies which mods are on, plus the settings those mods own, to the brokers you pick. It never sends mod **code** — a broker can only be told about mods it already serves, and one it doesn't have is reported rather than quietly skipped.
+
+The two directions are deliberately not mirror images, because only one kind of per-mod state on another machine can be written from here at all:
+
+- **Push to brokers…** writes each target's own **mod policy** (the pins above) and its **mod settings**. Pins are the only per-mod state on another machine that is remotely writable, and they are what that broker hands every browser that loads it.
+- **Adopt from a broker…** changes **this browser's** own Mods choices and this broker's mod settings. It pins nothing here — a local pin would lock this browser's own checkboxes, and since pins are read once at page load it wouldn't even apply until you reloaded.
+
+So pushing configures a machine; adopting configures you.
+
+### Pins are kept to a minimum
+
+By default a pin is written **only where that broker's own default would land somewhere else**, and a pin it no longer needs is **cleared**. Syncing two brokers that already agree therefore locks nothing, and pushing repeatedly doesn't pile up pins. Ticking **Lock every mod on the target** instead pins every shared mod explicitly — that locks those checkboxes for everyone on that broker, and it is the only way to also override a choice a browser over there made just for itself.
+
+As everywhere else with pins: what you push applies the next time a browser **loads** that broker's page, not to a session already open there. Mod settings are shared state, so its browsers pick those up as they poll.
+
+### Nothing is written before you have seen it
+
+Selecting brokers only opens a **preview**, which names — per broker — every pin it will create or clear, every setting that will change with its old and new value, and everything being left alone and why. Brokers that already match say so and are unticked.
+
+Afterwards each broker keeps its own result row: a push is never all-or-nothing. **Retry** rebuilds the whole plan against that broker as it is *now* rather than replaying a stale one, and **Undo pins** puts back the pins that broker had before that push (settings are not undone — their old values were that broker's, and re-asserting a whole blob is exactly the overwrite this avoids).
+
+A broker whose mods can't be listed is **refused** rather than written to blind, since without its mod list there's no way to tell which settings it has any use for: an **older build** that can't report its mods (update it first), one **serving no desktop page**, one **unreachable**, or one **refusing your password**. A broker whose **master mod switch is off** takes the settings but no pins, because a pin made then is inert *and* awkward to clear later. A host you have no password for is shown but not selectable.
+
+One limit worth knowing: only settings owned by a mod that is **on** in this browser travel, because a mod's settings control only exists while the mod is running. That's consistent — a mod that's off here is being turned off there too — but it means a value a disabled mod deliberately keeps (the terminal-font mod preserves your font so re-enabling restores it) stays behind. Turn the mod on, push, then turn it off again if you want that value to travel.
+
 ## Default color per host
 
 Each host — including the local **this broker** — can carry an optional **default terminal color**. Set it in **Control Panel → Hosts** with the color dot on that host's row (the same swatch picker used in a window's title bar). When set, every **new** terminal launched on that host starts in that color instead of the automatic palette pick, so you can tell at a glance which broker a window belongs to. The host's status chip also gets a thicker border in that color.

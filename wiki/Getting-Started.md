@@ -39,6 +39,7 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 | Drag hold delay | The hold time for the snap and pop-out gestures (see [[Snapping-and-Pop-out]]) |
 | Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
 | Mods on this broker | Which mods that broker pins on or off for every browser that loads its page — including a remote broker's, from its own tab (see [[Hosts-and-Multi-Browser]]) |
+| Sync mods | Copy this broker's mod setup to the other brokers you have configured, instead of repeating it on each machine (see [[Hosts-and-Multi-Browser]]) |
 | MCP | AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
 | Keyboard shortcuts | Rebind any action (see [[Keyboard-Shortcuts]]) |
 | Clipboard (OSC 52) | Whether programs on that host may set your clipboard — off by default (see [[Keyboard-Shortcuts]]) |
