@@ -320,15 +320,21 @@
 
             // #153: the activity stamp the OSC 52 gate reads. Capture phase, so
             // it lands whether or not the app or xterm consumes the event.
+            // passive: it only ever reads a clock, and `wheel`/`touchstart`
+            // default to NON-passive on a plain element — declaring it keeps
+            // this off the scroll-blocking path next to the existing
+            // Shift+wheel handler.
             const USER_INPUT_EVENTS = ['keydown', 'mousedown', 'mouseup',
                 'touchstart', 'wheel', 'paste', 'compositionend'];
+            const USER_INPUT_OPTS = { capture: true, passive: true };
             for (const t of USER_INPUT_EVENTS) {
-                dom.addEventListener(t, onUserInputEv, true);
+                dom.addEventListener(t, onUserInputEv, USER_INPUT_OPTS);
             }
             win.cleanups.push(() => {
                 for (const t of USER_INPUT_EVENTS) {
-                    try { dom.removeEventListener(t, onUserInputEv, true); }
-                    catch (_) {}
+                    try {
+                        dom.removeEventListener(t, onUserInputEv, { capture: true });
+                    } catch (_) {}
                 }
             });
 
