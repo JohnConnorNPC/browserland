@@ -729,36 +729,70 @@
             }
             return implied;
         }
-        // Change one pin on `host`. `pin` is true / false / null (= clear).
-        // PATCH-shaped ({set:{id:…}}) so two operators editing different mods
-        // cannot clobber each other, and the broker answers with the AUTHORITATIVE
+        // Change pins on `host`. `set` is {modId: true | false | null (= clear)}.
+        // PATCH-shaped ({set:{…}}) so two operators editing different mods cannot
+        // clobber each other, and the broker answers with the AUTHORITATIVE
         // policy — which is what the row repaints from, so a refused or partial
         // write can never leave the select showing a value that never landed.
-        async function saveModPin(host, id, pin) {
-            const body = { set: {} };
-            body.set[id] = pin;
+        //
+        // #158: takes the whole map, not one id, so a bulk apply (the sync-mods
+        // mod pushing this broker's setup to a peer) is ONE round trip landing
+        // under the broker's own lock, rather than N writes leaving N partial
+        // states behind a failure. The pin editor's saveModPin below is the
+        // one-key wrapper, so both callers share this single write path — #158
+        // asked for exactly that rather than a second way to set the same field.
+        // opts.quiet suppresses the notices: a fan-out reports per broker in its
+        // own result rows, and one toast per failing host is a storm.
+        // Resolves {ok, error?} and NEVER rejects.
+        async function saveModPins(host, set, opts) {
+            const quiet = !!(opts && opts.quiet);
+            const ids = Object.keys(set || {});
+            // hostFetch(null, …) silently resolves against OUR OWN origin, so a
+            // caller that lost its host must never reach it — that would write
+            // this broker's policy under a peer's name.
+            if (!host) return { ok: false, error: 'no_host' };
+            if (!ids.length) return { ok: true };        // nothing to write
+            if (ids.length > MAX_MOD_POLICY_KEYS) {
+                return { ok: false, error: 'too_many' };
+            }
             let r;
             try {
                 r = await hostFetch(host, '/mods/policy', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
+                    body: JSON.stringify({ set: set }),
                 });
             } catch (e) {
-                showNotice('could not reach ' + (host.label || host.url)
-                    + ' to change its mod policy');
-                return false;
+                if (!quiet) {
+                    showNotice('could not reach ' + (host.label || host.url)
+                        + ' to change its mod policy');
+                }
+                return { ok: false, error: 'unreachable' };
             }
             if (!r.ok) {
-                showNotice('could not change the mod policy on '
-                    + (host.label || host.url) + ' (HTTP ' + r.status + ')');
-                return false;
+                if (!quiet) {
+                    showNotice('could not change the mod policy on '
+                        + (host.label || host.url) + ' (HTTP ' + r.status + ')');
+                }
+                let e = null;
+                try { e = await r.json(); } catch (_) { e = null; }
+                return { ok: false,
+                         error: (e && e.error) ? e.error : ('HTTP ' + r.status) };
             }
             let j = null;
             try { j = await r.json(); } catch (_) { j = null; }
             const rec = modCatalogCache.get(host.id);
             if (rec && j && j.ok) rec.policy = sanitizeModPolicy(j.policy);
-            return true;
+            return { ok: true };
+        }
+        // One pin, for the per-host editor's select. Keeps the boolean contract
+        // its change handler was written against.
+        function saveModPin(host, id, pin) {
+            const set = {};
+            set[id] = pin;
+            return saveModPins(host, set).then(function (res) {
+                return !!(res && res.ok);
+            });
         }
         // Paint the section for the CURRENT tab. Safe to call with no settings
         // target and before/without any /state — it keys off currentSettingsTab
