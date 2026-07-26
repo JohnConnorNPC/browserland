@@ -404,6 +404,24 @@
                     row.appendChild(hostRowButton('remove', null,
                         () => removeHost(host.id)));
                 }
+                // #149: focus mode's permanent home — hide/show this broker's
+                // windows from the Hosts pane too; the single-broker chip and
+                // the (+) menu's broker row are shortcuts to the same toggle.
+                // toggleHostHidden re-renders this list, so the box tracks a
+                // toggle made from any surface (and this row's own change
+                // event survives the rebuild it triggers).
+                const hideWrap = document.createElement('label');
+                hideWrap.className = 'host-hide';
+                hideWrap.title = "hide this broker's windows (focus mode) — "
+                    + 'they are masked, not closed';
+                const hideCb = document.createElement('input');
+                hideCb.type = 'checkbox';
+                hideCb.checked = !!host.hidden;
+                hideCb.addEventListener('change',
+                    () => toggleHostHidden(host.id));
+                hideWrap.appendChild(hideCb);
+                hideWrap.appendChild(document.createTextNode('hidden'));
+                row.appendChild(hideWrap);
                 // #103: optional per-host DEFAULT accent — the reused swatch
                 // picker on a lightweight shim target (a `color` getter reading
                 // the live host record, `disposed`, and the shared module cleanups

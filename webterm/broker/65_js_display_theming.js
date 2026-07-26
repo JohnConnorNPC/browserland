@@ -139,8 +139,10 @@
                 btn.textContent = lbl;
                 const swapped = !!getSettings().swapLaunchButtons;
                 btn.title = lbl + (swapped
-                    ? ' — new terminal (left-click for profiles, right-click launches default)'
-                    : ' — new terminal (right-click for profiles)');
+                    ? ' — new terminal (left-click for profiles & broker '
+                        + 'status, right-click launches default)'
+                    : ' — new terminal (right-click for profiles & broker '
+                        + 'status)');
             } catch (_) {}
         }
 

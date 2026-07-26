@@ -116,5 +116,11 @@
             applyHostVisibilityAll();
             updateTaskbarActive();
             renderHostStatus();
+            // #149: the toggle now has three surfaces — single-broker chip,
+            // (+) menu broker row, and the Hosts pane's hidden checkbox — so
+            // a toggle from any of them must repaint the pane's checkbox.
+            // renderHostsList is safe with the Control Panel closed (its
+            // #set-hosts-list mount is static markup in 40_body.html).
+            renderHostsList();
         }
 

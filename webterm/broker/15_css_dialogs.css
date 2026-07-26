@@ -134,6 +134,15 @@
             white-space: nowrap;
             cursor: help;
         }
+        /* #149: the per-host hidden (focus mode) checkbox. */
+        .host-row .host-hide {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
         #settings-modal input[type=number],
         #settings-modal input[type=text],
         #auth-form input[type=password],
