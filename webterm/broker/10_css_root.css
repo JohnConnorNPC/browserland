@@ -64,11 +64,13 @@
             min-width: 0;
             overflow: hidden;
         }
-        /* Per-host status chips. renderHostStatus() draws one chip per broker,
-           always (even a single healthy local), so the per-broker hide toggle is
-           always reachable. The :empty rule below mainly matters before the first
-           render — there's always at least the local host, so the bar isn't empty
-           once chips exist. */
+        /* Host status. ONE broker: renderHostStatus() draws its chip, always
+           (even a single healthy local), so the per-broker hide toggle is
+           always reachable. TWO OR MORE (#149): one aggregate badge — the
+           worst state colors it, and the per-host detail (with the chip's old
+           per-host actions) lives on the start (+) menu's broker rows, which
+           the badge opens. The :empty rule below mainly matters before the
+           first render — something always renders once anything has. */
         #host-status {
             display: flex;
             gap: 4px;
@@ -77,8 +79,8 @@
         }
         #host-status:empty { display: none; }
         /* Always-visible virtual-desktop pager (bottom-right of the taskbar,
-           left of the host chips). Shows in both floating and tiling mode.
-           Reuses .ws-dot. */
+           left of the host status chip/badge). Shows in both floating and
+           tiling mode. Reuses .ws-dot. */
         #ws-pager {
             display: flex;
             gap: 4px;
@@ -109,6 +111,11 @@
         .host-chip.lease { border-color: #3a5a8a; color: #6fa3e0; }
         /* "off" = this broker's windows are toggled hidden (focus mode). */
         .host-chip.off { opacity: 0.45; text-decoration: line-through; }
+        /* #149: the multi-broker aggregate badge — same chip skin and state
+           classes, but it is keyboard-operable (role=button + tabindex in
+           renderHostStatus), so keyboard focus gets a visible ring. Its .off
+           (EVERY broker hidden) reuses the chip rule above. */
+        .host-chip.agg:focus-visible { outline: 1px solid var(--accent-default); }
         /* Display mask for hidden brokers — xterm + WebSocket stay alive. */
         .term-window.broker-hidden { display: none; }
         .taskbar-item.broker-hidden { display: none; }

@@ -228,10 +228,13 @@
         }
 
         // ---- host status chips ----------------------------------------------
-        // One chip per host, ok/down/auth/lease. renderHostStatus() draws a chip
-        // for every broker, always (even a single healthy local), so the
-        // per-broker hide toggle is always reachable. The auth chip is the
-        // click-to-login fallback once the overlay's one auto-pop was cancelled.
+        // ONE broker: a chip per host, exactly as before #149 — ok/down/auth/
+        // lease, the per-broker hide toggle always reachable, the auth chip
+        // the click-to-login fallback once the overlay's one auto-pop was
+        // cancelled. MORE than one broker: the chips collapse into a single
+        // aggregate badge (worst state colors it, every host gets a line in
+        // its tooltip) and the per-host detail lives on the live broker rows
+        // of the start (+) menu, which the badge opens on click.
         function hostChipState(st) {
             if (st.authNeeded) return 'auth';
             // Never answered, and its FIRST poll is still out: "not known yet",
@@ -251,62 +254,203 @@
             if (st.leaseInactive) return 'lease';   // reachable, not our lease
             return 'ok';
         }
+        // The (+) menu must not paint a merely never-polled host as dead:
+        // pollStateFor() records start ok=false/everOk=false, which
+        // hostChipState reads as 'down' before a poll has even been TRIED.
+        // consecFailures > 0 is the "actually failed" proof (the rule the
+        // menu's old launchHostDownSuffix carried); until then, 'pending'.
+        function hostMenuState(st) {
+            const s = hostChipState(st);
+            if (s === 'down' && !st.consecFailures) return 'pending';
+            return s;
+        }
+        // Short state phrase, shared by the aggregate badge's tooltip and the
+        // (+) menu's broker rows — one string source, so the two surfaces can
+        // never describe the same state differently. '' for ok; callers
+        // append it after a dash only when non-empty (the badge tooltip
+        // spells 'ok' explicitly instead).
+        function hostStateSuffix(state) {
+            if (state === 'auth') return 'password required';
+            if (state === 'lease') return 'another browser is active';
+            if (state === 'down') return 'down';
+            if (state === 'pending') return 'checking…';
+            return '';
+        }
+        // The single-broker chip's tooltip, verbatim as it has always read.
+        // The (+) menu's broker rows reuse it, so both surfaces describe the
+        // same click the same way.
+        function hostChipTip(host, state) {
+            let tip = host.id === 'local'
+                ? 'this broker' : host.url;
+            if (state === 'auth') {
+                tip += ' — password required (click to log in)';
+            } else if (state === 'lease') {
+                tip += ' — another browser is active here (click to '
+                    + 'take over)';
+            } else {
+                if (state === 'down') {
+                    tip += ' — unreachable (broker down, or running a '
+                        + 'pre-CORS webterm version)';
+                } else if (state === 'pending') {
+                    tip += ' — checking…';
+                }
+                tip += host.hidden
+                    ? ' — hidden (click to show)'
+                    : ' — click to hide';
+            }
+            return tip;
+        }
+        // The (+) menu's live broker row (#149): the same three actions the
+        // taskbar chip has always had, but decided at CLICK time, not at
+        // build time. The row's LABEL can lag one poll (~2 s) behind reality
+        // (renderHostStatus repaints the open menu on the next status
+        // change); the ACTION re-reads the state, so it never acts on a
+        // stale snapshot — an ok row that just lost its lease requests the
+        // lease back instead of hiding the windows (codex review). keepOpen:
+        // the hide toggle re-renders the still-open menu (via the repaint
+        // renderHostStatus triggers); auth/lease close it because their
+        // overlay / notice takes over from there.
+        function hostMenuItems(host) {
+            const state = hostMenuState(pollStateFor(host.id));
+            const suffix = hostStateSuffix(state);
+            const label = host.label
+                + (suffix ? ' — ' + suffix : '')
+                + (host.hidden ? ' — hidden' : '');
+            const action = () => {
+                const h = hostById(host.id) || host;
+                const now = hostMenuState(pollStateFor(h.id));
+                if (now === 'auth') {
+                    hideCtxMenu();
+                    showAuthOverlay(h, true);
+                    return;
+                }
+                if (now === 'lease') {
+                    hideCtxMenu();
+                    sendBecomeActive(h);
+                    // Honest wording: the broker's {active:true} push is
+                    // what confirms the takeover, not this click.
+                    showNotice('takeover requested — ' + h.label);
+                    return;
+                }
+                toggleHostHidden(h.id);
+                const fresh = hostById(h.id);
+                if (fresh && fresh.hidden) {
+                    showNotice(h.label
+                        + ' hidden — its windows are masked, not closed');
+                }
+            };
+            return [{
+                label,
+                enabled: true,
+                action,
+                keepOpen: true,
+                cls: 'host-row' + (host.hidden ? ' off' : ''),
+                title: hostChipTip(host, state),
+                swatch: { state, color: strictHex(host.color) },
+            }];
+        }
+        // A single broker keeps exactly the pre-#149 chip: label, state
+        // class, identity border, and the state's own click action.
+        function renderSingleHostChip(el, host, state) {
+            const chip = document.createElement('span');
+            chip.className = 'host-chip ' + state
+                + (host.hidden ? ' off' : '');
+            // #103: the per-host identity color paints this broker chip's
+            // BORDER, thicker. Inline style beats the .host-chip.<state>
+            // class's border-color (inline > class), so the identity color
+            // wins the border — while the state classes' TEXT color (down=red,
+            // auth=amber, lease=blue, ok=green) stays untouched and legible.
+            // strictHex rejects a corrupted value → the status border as today.
+            const chipColor = strictHex(host.color);
+            if (chipColor) {
+                chip.style.borderColor = chipColor;
+                chip.style.borderWidth = '2px';
+            }
+            chip.textContent = host.label;
+            if (state === 'auth') {
+                // Auth chips stay login-on-click: a broker you can't reach
+                // has no live windows to hide, and one-click re-login wins.
+                chip.addEventListener('click',
+                    () => showAuthOverlay(host, true));
+            } else if (state === 'lease') {
+                // Another browser is active on this remote broker; its
+                // windows are masked. Click to take the lease (the broker's
+                // {active:true} push then unmasks them) — mirrors the auth
+                // chip's click-to-login.
+                chip.addEventListener('click',
+                    () => sendBecomeActive(host));
+            } else {
+                chip.addEventListener('click',
+                    () => toggleHostHidden(host.id));
+            }
+            chip.title = hostChipTip(host, state);
+            el.appendChild(chip);
+        }
+        // #149: two or more brokers collapse into one badge. The WORST state
+        // colors it (auth > down > lease — a fault is never hidden behind a
+        // healthy majority), but the COUNT covers every abnormal host, so one
+        // auth host cannot mask three down ones ('4 brokers · 4 need
+        // attention'). Per-host detail rides the tooltip/aria-label; the
+        // click opens the start (+) menu, where each broker has a live row
+        // carrying the chip's old per-host actions.
+        function renderAggregateChip(el, hosts, states) {
+            const chip = document.createElement('span');
+            const bad = states.filter(s =>
+                s === 'auth' || s === 'down' || s === 'lease').length;
+            const worst = ['auth', 'down', 'lease'].find(
+                s => states.indexOf(s) !== -1)
+                || (states.indexOf('pending') !== -1 ? 'pending' : 'ok');
+            let text = hosts.length + ' brokers';
+            if (bad) {
+                text += ' · ' + bad
+                    + (bad === 1 ? ' needs attention' : ' need attention');
+            } else if (worst === 'pending') {
+                text += ' · checking…';
+            }
+            chip.className = 'host-chip agg ' + worst
+                + (hosts.every(h => h.hidden) ? ' off' : '');
+            chip.textContent = text;
+            const lines = hosts.map((h, i) =>
+                h.label + ' — ' + (hostStateSuffix(states[i]) || 'ok')
+                + (h.hidden ? ' — hidden' : ''));
+            chip.title = lines.join('\n') + '\n— click for the broker menu';
+            // Keyboard/AT parity is cheap here, and multi-line titles don't
+            // exist on touch — the per-host breakdown rides aria-label too.
+            chip.setAttribute('role', 'button');
+            chip.tabIndex = 0;
+            chip.setAttribute('aria-label',
+                text + ': ' + lines.join('; ') + ' — opens the broker menu');
+            const open = () => {
+                const r = chip.getBoundingClientRect();
+                openLaunchMenu(r.left, r.bottom);
+            };
+            chip.addEventListener('click', open);
+            chip.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();   // Space must not scroll the page
+                    open();
+                }
+            });
+            el.appendChild(chip);
+        }
         function renderHostStatus() {
             const el = document.getElementById('host-status');
+            if (!el) return;   // 9 of its 10 call sites are unguarded (#149)
             const hosts = allHosts();
             const states = hosts.map(h => hostChipState(pollStateFor(h.id)));
-            // One chip per broker, always (even a single healthy local), so
-            // the per-broker hide toggle is always reachable.
             el.textContent = '';
-            hosts.forEach((host, i) => {
-                const chip = document.createElement('span');
-                chip.className = 'host-chip ' + states[i]
-                    + (host.hidden ? ' off' : '');
-                // #103: the per-host identity color paints this broker chip's
-                // BORDER, thicker. Inline style beats the .host-chip.<state>
-                // class's border-color (inline > class), so the identity color
-                // wins the border — while the state classes' TEXT color (down=red,
-                // auth=amber, lease=blue, ok=green) stays untouched and legible.
-                // strictHex rejects a corrupted value → the status border as today.
-                const chipColor = strictHex(host.color);
-                if (chipColor) {
-                    chip.style.borderColor = chipColor;
-                    chip.style.borderWidth = '2px';
-                }
-                chip.textContent = host.label;
-                let tip = host.id === 'local'
-                    ? 'this broker' : host.url;
-                if (states[i] === 'auth') {
-                    // Auth chips stay login-on-click: a broker you can't reach
-                    // has no live windows to hide, and one-click re-login wins.
-                    tip += ' — password required (click to log in)';
-                    chip.addEventListener('click',
-                        () => showAuthOverlay(host, true));
-                } else if (states[i] === 'lease') {
-                    // Another browser is active on this remote broker; its
-                    // windows are masked. Click to take the lease (the broker's
-                    // {active:true} push then unmasks them) — mirrors the auth
-                    // chip's click-to-login.
-                    tip += ' — another browser is active here (click to '
-                        + 'take over)';
-                    chip.addEventListener('click',
-                        () => sendBecomeActive(host));
-                } else {
-                    if (states[i] === 'down') {
-                        tip += ' — unreachable (broker down, or running a '
-                            + 'pre-CORS webterm version)';
-                    } else if (states[i] === 'pending') {
-                        tip += ' — checking…';
-                    }
-                    tip += host.hidden
-                        ? ' — hidden (click to show)'
-                        : ' — click to hide';
-                    chip.addEventListener('click',
-                        () => toggleHostHidden(host.id));
-                }
-                chip.title = tip;
-                el.appendChild(chip);
-            });
+            if (hosts.length === 1) {
+                renderSingleHostChip(el, hosts[0], states[0]);
+            } else {
+                renderAggregateChip(el, hosts, states);
+            }
+            // The (+) menu shows these same states on its broker rows; every
+            // status repaint refreshes it through the owner + signature gate
+            // in 76, so an OPEN menu tracks auth/lease/down transitions
+            // instead of going behaviorally stale (codex review). A
+            // no-change tick is a no-op there, so this never eats a click or
+            // a hover.
+            repaintLaunchMenu();
         }
 
         // ---- auto-reattach eligibility ------------------------------------

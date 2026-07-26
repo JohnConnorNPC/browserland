@@ -141,6 +141,30 @@ def test_label_order_editor_wired_into_page():
         assert sentinel in INDEX_HTML, f"missing #123 sentinel: {sentinel!r}"
 
 
+def test_host_status_aggregate_wired_into_page():
+    # #149: >1 broker collapses the taskbar chips into one aggregate badge and
+    # moves per-host detail onto live broker rows in the start (+) menu. No JS
+    # test runner exists (pytest only), so lock the served-page symbols: the
+    # menu-state helpers and row builder (75), the aggregate renderer + its
+    # badge CSS hook, the renderer's new keep-open field (77), and the
+    # poll-driven guarded repaint of an open menu (76).
+    for sentinel in (
+        "function hostMenuState",      # #149 never-polled != down (75)
+        "function hostStateSuffix",    # #149 shared state phrases (75)
+        "function hostMenuItems",      # #149 the live broker row (75)
+        "function renderAggregateChip",  # #149 the collapsed badge (75)
+        ".host-chip.agg",              # #149 badge CSS hook (10)
+        "ctx-swatch",                  # #149 row state dot (77 + 14)
+        "keepOpen",                    # #149 hide-toggle keeps the menu open (77)
+        "function repaintLaunchMenu",  # #149 owner+sig-gated menu refresh (76)
+    ):
+        assert sentinel in INDEX_HTML, f"missing #149 sentinel: {sentinel!r}"
+    # The hide toggle must never close the menu via the generic click path:
+    # renderMenu's dispatcher gates hideCtxMenu on the item's keepOpen flag.
+    s77 = (BROKER_DIR / "77_js_context_menu.js").read_text(encoding="utf-8")
+    assert "if (!it.keepOpen) hideCtxMenu();" in s77
+
+
 def test_agent_and_cwd_frames_handled_in_browser():
     # #156: protocol.py advertises `agent` and `cwd` as broker->browser pushes,
     # but the ws.onmessage if-chain in 73_js_window_runtime used to drop both —

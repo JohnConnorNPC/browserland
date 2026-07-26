@@ -318,48 +318,23 @@
             return items;
         }
 
-        // '' when this host is worth dialing, else the suffix its single
-        // disabled row carries. Deliberately NOT a bare `!ok`: a
-        // freshly-created poll record starts ok=false, so before the first
-        // /sessions answer every host would look dead and never be dialed at
-        // all. The reachability rule is the one the taskbar chip already uses
-        // (hostChipState in 75) so the menu and the chip can never disagree —
-        // plus consecFailures > 0, i.e. a poll must actually have been tried
-        // and failed. authNeeded is folded in here so a mere right-click can
-        // never pop the login overlay (same reasoning as 75's prefetch gate).
-        function launchHostDownSuffix(host) {
-            const st = pollStateFor(host.id);
-            if (st.authNeeded) return ' — sign in required';
-            if (!st.ok && st.consecFailures > 0
-                    && (!st.everOk
-                        || st.consecFailures >= STALE_AFTER_FAILURES)) {
-                return ' — unreachable';
-            }
-            return '';
-        }
         // One host's rows, built from what is known RIGHT NOW — never awaits,
-        // never dials.
-        function launchHostItems(host, showHeader) {
-            const items = [];
-            // Down is checked BEFORE the cache: a host that has since gone
-            // away must not keep offering enabled launch rows out of a stale
-            // profile list (codex review). Zero network traffic either way,
-            // and the menu still opens instantly.
-            const downSuffix = launchHostDownSuffix(host);
-            if (downSuffix) {
-                items.push({ label: host.label + downSuffix,
-                             enabled: false });
-                return items;
-            }
+        // never dials. Every host leads with its LIVE broker row (#149) —
+        // hostMenuItems (75), the taskbar chip's state + actions where the
+        // dead header row used to sit — and a lone local broker gets it too,
+        // so auth/lease/down recovery is always reachable from the menu.
+        // Profile rows follow only for a host that is neither down nor
+        // waiting on a password: those states have nothing to launch, and
+        // the broker row itself says why.
+        function launchHostItems(host) {
+            const items = hostMenuItems(host);
+            const state = hostMenuState(pollStateFor(host.id));
+            if (state === 'auth' || state === 'down') return items;
             const d = profilesCache.get(host.id);
             if (d && d.profiles.length) {
-                if (showHeader) {
-                    items.push({ label: host.label, enabled: false });
-                }
                 items.push(...profileMenuItems(host, d));
                 return items;
             }
-            if (showHeader) items.push({ label: host.label, enabled: false });
             items.push({
                 label: (d || profilesFailedRecently(host.id))
                     ? 'profiles unavailable' : 'loading profiles…',
@@ -367,11 +342,11 @@
             });
             return items;
         }
-        function buildLaunchMenuItems(hosts, showHeader) {
+        function buildLaunchMenuItems(hosts) {
             const items = [];
             hosts.forEach((host, i) => {
                 if (i) items.push({ sep: true });
-                items.push(...launchHostItems(host, showHeader));
+                items.push(...launchHostItems(host));
             });
             // The client apps need no broker at all, so they are ALWAYS in
             // the very first paint — a dead host must never suppress them.
@@ -382,9 +357,20 @@
         }
         // Cheap content fingerprint, so a host resolving to what is already
         // on screen doesn't re-render the menu out from under the cursor.
+        // Every rendered-or-behavioral field participates (#149): a row whose
+        // label alone is unchanged can still have flipped its swatch state,
+        // its strike-through class, or its identity color.
         function launchMenuSig(items) {
             return items.map(it => it.sep ? '|'
-                : ((it.enabled ? '+' : '-') + it.label)).join('\n');
+                : [(it.enabled ? '+' : '-') + it.label,
+                   it.cls || '',
+                   it.title || '',
+                   it.keepOpen ? 'k' : '',
+                   it.iconKey || '',
+                   it.swatch
+                       ? (it.swatch.state || '') + ':'
+                           + (it.swatch.color || '')
+                       : ''].join('\u001f')).join('\n');
         }
         // Late-resolve guard. renderMenu (77) rebuilds #ctx-menu's children
         // from scratch and every menu in the app shares that one element, so
@@ -401,46 +387,62 @@
                 && ctxMenu.classList.contains('open')
                 && ctxMenu.firstChild === launchMenuNode;
         }
+        // The CURRENT open's paint(false), or null. renderHostStatus (75)
+        // calls repaintLaunchMenu after every status repaint, so an OPEN
+        // menu tracks auth/lease/down transitions instead of going
+        // behaviorally stale (#149, codex review); the owner gate + the
+        // signature make a stale or no-change call a no-op, so a closed or
+        // replaced menu is never resurrected and an unchanged 2 s tick never
+        // re-renders under the cursor.
+        let launchMenuPaint = null;
+        function repaintLaunchMenu() {
+            if (launchMenuPaint) launchMenuPaint();
+        }
         // Paints SYNCHRONOUSLY from whatever is cached, then re-paints as
-        // each host's /profiles lands. One dead host can no longer keep the
-        // whole menu — apps included — off the screen.
+        // each host's /profiles lands and as broker states change. One dead
+        // host can no longer keep the whole menu — apps included — off the
+        // screen.
         // Hoisted out of the if(launchBtn) block (#149) so the taskbar's
         // aggregate broker badge (75) can open the menu too — the badge must
         // work even on a page whose launch button is missing.
         function openLaunchMenu(x, y) {
             const hosts = allHosts();
-            const showHeader = hosts.length > 1;
             const gen = ++launchMenuGen;
             let sig = null;
             const paint = (first) => {
-                const items = buildLaunchMenuItems(hosts, showHeader);
+                if (!first && !launchMenuStillOurs(gen)) return;
+                const items = buildLaunchMenuItems(hosts);
                 const next = launchMenuSig(items);
-                if (!first) {
-                    if (!launchMenuStillOurs(gen)) return;
-                    if (next === sig) return;
-                }
+                if (!first && next === sig) return;
                 sig = next;
                 renderMenu(items, x, y);
                 launchMenuNode = ctxMenu.firstChild;
-            };
-            paint(true);
-            for (const host of hosts) {
-                // Skip anything already answered, known down, or recently
-                // failed — those rows are final until something changes.
-                // (fetchProfiles re-checks the cache/negative cache anyway;
-                // this keeps the dead-host path free of even a promise.)
-                if (profilesCache.has(host.id)
-                        || launchHostDownSuffix(host)
-                        || profilesFailedRecently(host.id)) {
-                    continue;
+                // (Re-)kick /profiles for every host that is fetchable NOW —
+                // not just at open, so a host that was down then and has
+                // since recovered gets its profiles on the repaint its state
+                // change triggered (codex review). fetchProfiles de-dupes
+                // in-flight dials and honours the negative cache, so a
+                // repaint never queues duplicate requests; the continuation
+                // funnels through repaintLaunchMenu, i.e. always repaints
+                // the menu that is open NOW, never a retired one.
+                for (const host of hosts) {
+                    if (profilesCache.has(host.id)
+                            || profilesFailedRecently(host.id)) {
+                        continue;
+                    }
+                    const hs = hostMenuState(pollStateFor(host.id));
+                    if (hs === 'auth' || hs === 'down') continue;
+                    fetchProfiles(host).then(
+                        () => repaintLaunchMenu(), () => {});
                 }
-                fetchProfiles(host).then(() => paint(false), () => {});
-            }
+            };
+            launchMenuPaint = () => paint(false);
+            paint(true);
         }
         if (launchBtn) {
             // Two gestures on the START (+) button: quick-launch a terminal, and
-            // a picker menu — profiles grouped under disabled host-header rows
-            // when >1 host. Which gesture is which is decided at click time by
+            // a picker menu — each broker's live status row above its profiles
+            // (#149). Which gesture is which is decided at click time by
             // #114's swapLaunchButtons: default OFF maps left = quick-launch,
             // right = menu; ON swaps them. The listeners stay bound once and the
             // contextmenu one always suppresses the native menu (see below).
