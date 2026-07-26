@@ -318,6 +318,125 @@
             return items;
         }
 
+        // '' when this host is worth dialing, else the suffix its single
+        // disabled row carries. Deliberately NOT a bare `!ok`: a
+        // freshly-created poll record starts ok=false, so before the first
+        // /sessions answer every host would look dead and never be dialed at
+        // all. The reachability rule is the one the taskbar chip already uses
+        // (hostChipState in 75) so the menu and the chip can never disagree —
+        // plus consecFailures > 0, i.e. a poll must actually have been tried
+        // and failed. authNeeded is folded in here so a mere right-click can
+        // never pop the login overlay (same reasoning as 75's prefetch gate).
+        function launchHostDownSuffix(host) {
+            const st = pollStateFor(host.id);
+            if (st.authNeeded) return ' — sign in required';
+            if (!st.ok && st.consecFailures > 0
+                    && (!st.everOk
+                        || st.consecFailures >= STALE_AFTER_FAILURES)) {
+                return ' — unreachable';
+            }
+            return '';
+        }
+        // One host's rows, built from what is known RIGHT NOW — never awaits,
+        // never dials.
+        function launchHostItems(host, showHeader) {
+            const items = [];
+            // Down is checked BEFORE the cache: a host that has since gone
+            // away must not keep offering enabled launch rows out of a stale
+            // profile list (codex review). Zero network traffic either way,
+            // and the menu still opens instantly.
+            const downSuffix = launchHostDownSuffix(host);
+            if (downSuffix) {
+                items.push({ label: host.label + downSuffix,
+                             enabled: false });
+                return items;
+            }
+            const d = profilesCache.get(host.id);
+            if (d && d.profiles.length) {
+                if (showHeader) {
+                    items.push({ label: host.label, enabled: false });
+                }
+                items.push(...profileMenuItems(host, d));
+                return items;
+            }
+            if (showHeader) items.push({ label: host.label, enabled: false });
+            items.push({
+                label: (d || profilesFailedRecently(host.id))
+                    ? 'profiles unavailable' : 'loading profiles…',
+                enabled: false,
+            });
+            return items;
+        }
+        function buildLaunchMenuItems(hosts, showHeader) {
+            const items = [];
+            hosts.forEach((host, i) => {
+                if (i) items.push({ sep: true });
+                items.push(...launchHostItems(host, showHeader));
+            });
+            // The client apps need no broker at all, so they are ALWAYS in
+            // the very first paint — a dead host must never suppress them.
+            // Their leading separator is dropped when nothing precedes it.
+            const apps = appMenuItems();
+            items.push(...(items.length ? apps : apps.slice(1)));
+            return items;
+        }
+        // Cheap content fingerprint, so a host resolving to what is already
+        // on screen doesn't re-render the menu out from under the cursor.
+        function launchMenuSig(items) {
+            return items.map(it => it.sep ? '|'
+                : ((it.enabled ? '+' : '-') + it.label)).join('\n');
+        }
+        // Late-resolve guard. renderMenu (77) rebuilds #ctx-menu's children
+        // from scratch and every menu in the app shares that one element, so
+        // "is the menu we painted still the one on screen?" is exactly "is
+        // our first child still there, and is the menu still open?".
+        // hideCtxMenu (78) only drops the .open class, hence both checks. The
+        // generation counter additionally retires the callbacks of a previous
+        // open of THIS menu.
+        let launchMenuGen = 0;
+        let launchMenuNode = null;
+        function launchMenuStillOurs(gen) {
+            return gen === launchMenuGen
+                && !!launchMenuNode
+                && ctxMenu.classList.contains('open')
+                && ctxMenu.firstChild === launchMenuNode;
+        }
+        // Paints SYNCHRONOUSLY from whatever is cached, then re-paints as
+        // each host's /profiles lands. One dead host can no longer keep the
+        // whole menu — apps included — off the screen.
+        // Hoisted out of the if(launchBtn) block (#149) so the taskbar's
+        // aggregate broker badge (75) can open the menu too — the badge must
+        // work even on a page whose launch button is missing.
+        function openLaunchMenu(x, y) {
+            const hosts = allHosts();
+            const showHeader = hosts.length > 1;
+            const gen = ++launchMenuGen;
+            let sig = null;
+            const paint = (first) => {
+                const items = buildLaunchMenuItems(hosts, showHeader);
+                const next = launchMenuSig(items);
+                if (!first) {
+                    if (!launchMenuStillOurs(gen)) return;
+                    if (next === sig) return;
+                }
+                sig = next;
+                renderMenu(items, x, y);
+                launchMenuNode = ctxMenu.firstChild;
+            };
+            paint(true);
+            for (const host of hosts) {
+                // Skip anything already answered, known down, or recently
+                // failed — those rows are final until something changes.
+                // (fetchProfiles re-checks the cache/negative cache anyway;
+                // this keeps the dead-host path free of even a promise.)
+                if (profilesCache.has(host.id)
+                        || launchHostDownSuffix(host)
+                        || profilesFailedRecently(host.id)) {
+                    continue;
+                }
+                fetchProfiles(host).then(() => paint(false), () => {});
+            }
+        }
         if (launchBtn) {
             // Two gestures on the START (+) button: quick-launch a terminal, and
             // a picker menu — profiles grouped under disabled host-header rows
@@ -332,122 +451,6 @@
                 const h = defaultLaunchHost();
                 launchProfile(h, hostDefaultProfile(h));
             };
-            // '' when this host is worth dialing, else the suffix its single
-            // disabled row carries. Deliberately NOT a bare `!ok`: a
-            // freshly-created poll record starts ok=false, so before the first
-            // /sessions answer every host would look dead and never be dialed at
-            // all. The reachability rule is the one the taskbar chip already uses
-            // (hostChipState in 75) so the menu and the chip can never disagree —
-            // plus consecFailures > 0, i.e. a poll must actually have been tried
-            // and failed. authNeeded is folded in here so a mere right-click can
-            // never pop the login overlay (same reasoning as 75's prefetch gate).
-            function launchHostDownSuffix(host) {
-                const st = pollStateFor(host.id);
-                if (st.authNeeded) return ' — sign in required';
-                if (!st.ok && st.consecFailures > 0
-                        && (!st.everOk
-                            || st.consecFailures >= STALE_AFTER_FAILURES)) {
-                    return ' — unreachable';
-                }
-                return '';
-            }
-            // One host's rows, built from what is known RIGHT NOW — never awaits,
-            // never dials.
-            function launchHostItems(host, showHeader) {
-                const items = [];
-                // Down is checked BEFORE the cache: a host that has since gone
-                // away must not keep offering enabled launch rows out of a stale
-                // profile list (codex review). Zero network traffic either way,
-                // and the menu still opens instantly.
-                const downSuffix = launchHostDownSuffix(host);
-                if (downSuffix) {
-                    items.push({ label: host.label + downSuffix,
-                                 enabled: false });
-                    return items;
-                }
-                const d = profilesCache.get(host.id);
-                if (d && d.profiles.length) {
-                    if (showHeader) {
-                        items.push({ label: host.label, enabled: false });
-                    }
-                    items.push(...profileMenuItems(host, d));
-                    return items;
-                }
-                if (showHeader) items.push({ label: host.label, enabled: false });
-                items.push({
-                    label: (d || profilesFailedRecently(host.id))
-                        ? 'profiles unavailable' : 'loading profiles…',
-                    enabled: false,
-                });
-                return items;
-            }
-            function buildLaunchMenuItems(hosts, showHeader) {
-                const items = [];
-                hosts.forEach((host, i) => {
-                    if (i) items.push({ sep: true });
-                    items.push(...launchHostItems(host, showHeader));
-                });
-                // The client apps need no broker at all, so they are ALWAYS in
-                // the very first paint — a dead host must never suppress them.
-                // Their leading separator is dropped when nothing precedes it.
-                const apps = appMenuItems();
-                items.push(...(items.length ? apps : apps.slice(1)));
-                return items;
-            }
-            // Cheap content fingerprint, so a host resolving to what is already
-            // on screen doesn't re-render the menu out from under the cursor.
-            function launchMenuSig(items) {
-                return items.map(it => it.sep ? '|'
-                    : ((it.enabled ? '+' : '-') + it.label)).join('\n');
-            }
-            // Late-resolve guard. renderMenu (77) rebuilds #ctx-menu's children
-            // from scratch and every menu in the app shares that one element, so
-            // "is the menu we painted still the one on screen?" is exactly "is
-            // our first child still there, and is the menu still open?".
-            // hideCtxMenu (78) only drops the .open class, hence both checks. The
-            // generation counter additionally retires the callbacks of a previous
-            // open of THIS menu.
-            let launchMenuGen = 0;
-            let launchMenuNode = null;
-            function launchMenuStillOurs(gen) {
-                return gen === launchMenuGen
-                    && !!launchMenuNode
-                    && ctxMenu.classList.contains('open')
-                    && ctxMenu.firstChild === launchMenuNode;
-            }
-            // Paints SYNCHRONOUSLY from whatever is cached, then re-paints as
-            // each host's /profiles lands. One dead host can no longer keep the
-            // whole menu — apps included — off the screen.
-            function openLaunchMenu(x, y) {
-                const hosts = allHosts();
-                const showHeader = hosts.length > 1;
-                const gen = ++launchMenuGen;
-                let sig = null;
-                const paint = (first) => {
-                    const items = buildLaunchMenuItems(hosts, showHeader);
-                    const next = launchMenuSig(items);
-                    if (!first) {
-                        if (!launchMenuStillOurs(gen)) return;
-                        if (next === sig) return;
-                    }
-                    sig = next;
-                    renderMenu(items, x, y);
-                    launchMenuNode = ctxMenu.firstChild;
-                };
-                paint(true);
-                for (const host of hosts) {
-                    // Skip anything already answered, known down, or recently
-                    // failed — those rows are final until something changes.
-                    // (fetchProfiles re-checks the cache/negative cache anyway;
-                    // this keeps the dead-host path free of even a promise.)
-                    if (profilesCache.has(host.id)
-                            || launchHostDownSuffix(host)
-                            || profilesFailedRecently(host.id)) {
-                        continue;
-                    }
-                    fetchProfiles(host).then(() => paint(false), () => {});
-                }
-            }
             launchBtn.addEventListener('click', (e) => {
                 // e.clientX/e.clientY are valid on a plain click too, so the menu
                 // opens at the cursor when swapped.
