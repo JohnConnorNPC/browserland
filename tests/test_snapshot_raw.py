@@ -68,3 +68,110 @@ def test_query_strip_keeps_sgr_and_cursor_sequences():
     assert out == raw.PREAMBLE + b"\x1b[?1049h"
     no_marker = b"\x1b[1;31mbold red\x1b[0m\x1b[10;20H\x1b[?25l"
     assert raw.render(no_marker, evicted=False) == raw.PREAMBLE + no_marker
+
+
+# ---- OSC 52 clipboard strip (#153) -----------------------------------------
+# The ring is replayed on every attach, to every attached browser. A clipboard
+# request emitted once must not be re-delivered to browsers that were not there.
+
+
+def test_osc52_stripped_from_replay():
+    data = b"before\x1b]52;c;aGVsbG8=\x07after"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"beforeafter"
+
+
+def test_osc52_leading_zero_form_stripped():
+    # Leading zeros are legal in an OSC parameter: 052 IS 52.
+    data = b"a\x1b]052;c;aGVsbG8=\x07b"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"ab"
+
+
+def test_osc52_c1_introducer_stripped():
+    # The C1 OSC as xterm.js actually sees it: UTF-8 encoded U+009D.
+    data = b"a\xc2\x9d52;c;aGVsbG8=\x07b"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"ab"
+
+
+def test_osc52_st_terminators_stripped():
+    # ESC \ (7-bit ST) and the C1 ST as UTF-8 (U+009C) both end the string.
+    st7 = b"a\x1b]52;c;aGVsbG8=\x1b\\b"
+    assert raw.render(st7, evicted=False) == raw.PREAMBLE + b"ab"
+    st8 = b"a\x1b]52;c;aGVsbG8=\xc2\x9cb"
+    assert raw.render(st8, evicted=False) == raw.PREAMBLE + b"ab"
+
+
+def test_osc52_empty_pc_form_stripped():
+    # What tmux actually emits on a copy-mode copy: Pc is EMPTY.
+    data = b"x\x1b]52;;Q09QWQ==\x07y"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"xy"
+
+
+def test_osc52_wrapped_base64_payload_stripped_whole():
+    # base64(1) wraps at 76 columns; a newline inside the payload must not
+    # leave the tail behind as visible junk.
+    data = b"x\x1b]52;c;QUFB\nQkJC\nQ0ND\x07y"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"xy"
+
+
+def test_osc52_unterminated_at_ring_tail_stripped():
+    # Cut mid-write at the newest end of the ring: nothing follows it, so
+    # removing it cannot eat anything.
+    data = b"visible output\x1b]52;c;QUFBQQ"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"visible output"
+
+
+def test_osc52_unterminated_absorbs_trailing_plain_text():
+    # Plain text after an unterminated sequence is still PAYLOAD: xterm.js is
+    # inside the OSC string and swallows it, so it was never on screen live
+    # either. Removing it reproduces the live rendering rather than changing it.
+    data = b"\x1b]52;c;QUFBQQ" + b"later output"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b""
+
+
+def test_osc52_unterminated_never_eats_a_following_escape_sequence():
+    # The case the bound exists for. An ESC after a truncated sequence ABORTS
+    # the OSC in xterm's parser, so everything from there really is on screen —
+    # a greedy "terminator optional" match would have eaten it.
+    data = b"\x1b]52;c;QUFBQQ" + b"\x1b[31mred\x1b[0m rest"
+    out = raw.render(data, evicted=False)
+    assert out == raw.PREAMBLE + data
+    assert b"\x1b[31mred" in out and b"rest" in out
+
+
+def test_osc52_aborted_sequence_is_not_matched():
+    # CAN (0x18) aborts an OSC string, so this one can never reach a
+    # clipboard. Leaving it is correct — and the ABORTED text is what a live
+    # terminal renders, so the replay matches what the user saw.
+    data = b"\x1b]52;c;QUFB\x18tail\x07"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + data
+
+
+def test_osc52_strip_leaves_ordinary_output_untouched():
+    # The negative case: nothing resembling OSC 52 is disturbed. Includes an
+    # OSC 0 title (which the title sniffer owns) and a literal "52;" in text.
+    data = (b"\x1b]0;my title\x07"
+            b"exit code 52; retrying\r\n"
+            b"\x1b[1;32mok\x1b[0m\n"
+            b"\x1b]8;;https://example.com/x\x07link\x1b]8;;\x07")
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + data
+
+
+def test_osc52_strip_runs_after_trim_and_with_query_strip():
+    # All three passes compose: trim to the last clear, drop the DA request,
+    # drop the clipboard write.
+    data = (b"stale\x1b[2Jfresh \x1b[c"
+            b"\x1b]52;c;aGVsbG8=\x07"
+            b"\x1b[31mred\x1b[0m")
+    out = raw.render(data, evicted=True)
+    assert out == raw.PREAMBLE + b"\x1b[2Jfresh \x1b[31mred\x1b[0m"
+
+
+def test_osc52_repeated_c1_introducers_do_not_blow_up():
+    # Runtime bound, not correctness: a ring packed with C1 introducers must
+    # not make the scan quadratic. 256 KiB is a full ring.
+    data = b"\xc2\x9d52;" * 40000
+    out = raw.render(data, evicted=False)
+    # Every one of them is unterminated and followed by another introducer,
+    # so only the last (which runs to the end) is removable.
+    assert out.startswith(raw.PREAMBLE)
+    assert len(out) < len(raw.PREAMBLE) + len(data)
