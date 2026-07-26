@@ -79,9 +79,39 @@
                         || (typeof v === 'number' && isFinite(v))
                         || (typeof v === 'string' && v.length <= STR_MAX);
                 }
+                // Peer-supplied text is bounded before it reaches the DOM. It is
+                // only ever set with textContent, so this is about not letting a
+                // hostile or merely enormous string blow the panel out — the same
+                // treatment #157 gives a peer's mod titles (81:843).
+                function cap(s, n) {
+                    s = (s == null) ? '' : String(s);
+                    return (s.length > n) ? (s.slice(0, n) + '…') : s;
+                }
                 function showValue(v) {
-                    if (typeof v === 'string') return v === '' ? '(empty)' : v;
-                    return String(v);
+                    if (typeof v === 'string') return v === '' ? '(empty)' : cap(v, 120);
+                    return cap(String(v), 120);
+                }
+                // A value an ACTIVE control will actually accept. isScalar bounds
+                // the shape; this bounds the DOMAIN, which matters when adopting a
+                // PEER's value: every mod validates read-through (an unknown value
+                // silently falls back to its default WITHOUT rewriting the blob),
+                // so planting an out-of-domain value would report a change that
+                // never visibly happens and leave junk in the synced blob. A
+                // radio/select's legal set is its own rendered options; a boolean's
+                // is the two booleans. An unknown kind is left to isScalar alone.
+                function acceptedBy(entry, v) {
+                    if (!entry) return false;
+                    if (entry.kind === 'boolean') return typeof v === 'boolean';
+                    if (entry.kind === 'select' || entry.kind === 'radio') {
+                        if (typeof v !== 'string') return false;
+                        let opts = [];
+                        try {
+                            opts = Array.from(entry.section.querySelectorAll(
+                                'option, input[type="radio"]')).map((o) => o.value);
+                        } catch (_) { return false; }
+                        return opts.indexOf(v) !== -1;
+                    }
+                    return true;
                 }
                 // This broker's own verified identity, used to spot a "remote"
                 // host entry that actually points back at us (an alias by IP,
@@ -182,7 +212,15 @@
                         if (seen.has(key)) continue;
                         seen.add(key);
                         let locked = '';
-                        if (mine && h.brokerId && h.brokerId === mine) {
+                        // Self-targeting must fail CLOSED. brokerId is the verified
+                        // identity but is only known once that host has been polled,
+                        // so an unpolled alias would slip through on that test alone
+                        // and we would write THIS broker's own policy under a peer's
+                        // name. The origin comparison catches the common alias with
+                        // no identity yet.
+                        const sameOrigin = (normalizeHostUrl(h.url) || '')
+                            === window.location.origin;
+                        if (sameOrigin || (mine && h.brokerId && h.brokerId === mine)) {
                             locked = 'this is this broker under another name';
                         } else if (!h.token) {
                             locked = 'no password saved';
@@ -211,7 +249,11 @@
                 async function planFor(host, lockAll) {
                     const plan = { hostId: host.id, name: label(host), state: '',
                                    why: '', modRows: [], setRows: [], setObj: {},
-                                   priorPolicy: {}, pinsBlocked: '', extra: 0 };
+                                   priorPolicy: {}, pinsBlocked: '', extra: 0,
+                                   // Recorded so a Retry repeats THIS operation
+                                   // rather than silently downgrading a locking
+                                   // push to a minimal one.
+                                   lockAll: !!lockAll };
                     await fetchModCatalog(host);
                     const rec = modCatalogCache.get(host.id);
                     if (!rec) { plan.state = 'unreachable'; return plan; }
@@ -230,12 +272,15 @@
                         return plan;
                     }
                     plan.priorPolicy = Object.assign({}, rec.policy);
+                    // A peer's catalog is UNTRUSTED input. Keep one sanitized array
+                    // and use it everywhere, including for modPolicyImplied — handed
+                    // the raw array, a single null/!object element throws on `m.id`
+                    // and takes the whole preview down with no message.
+                    const cat = (Array.isArray(rec.mods) ? rec.mods : []).filter(
+                        (m) => m && typeof m === 'object'
+                            && typeof m.id === 'string' && MOD_ID_RE.test(m.id));
                     const byId = new Map();
-                    for (const m of rec.mods) {
-                        if (m && typeof m.id === 'string' && MOD_ID_RE.test(m.id)) {
-                            byId.set(m.id, m);
-                        }
-                    }
+                    for (const m of cat) byId.set(m.id, m);
                     const mods = localMods();
                     const wantById = new Map(mods.map((m) => [m.id, m.want]));
                     // Mods that broker serves and we do not: we have no opinion
@@ -286,9 +331,13 @@
                     // beats an implied one, so where the implication contradicts
                     // our choice we write the explicit pin. Bounded fixpoint:
                     // adding an explicit OFF can un-imply a chain behind it.
-                    for (let pass = 0; pass < 4; pass++) {
+                    // Bounded fixpoint: `implied` is recomputed per pass,
+                    // so the bound must exceed the deepest requires-chain a peer
+                    // can declare (the deepest in-repo today is one link). The
+                    // loop breaks as soon as a pass changes nothing.
+                    for (let pass = 0; pass < 8; pass++) {
                         let changed = false;
-                        const implied = modPolicyImplied(rec.mods, after);
+                        const implied = modPolicyImplied(cat, after);
                         for (const m of mods) {
                             if (!byId.has(m.id) || m.want) continue;
                             if (after[m.id] !== undefined) continue;
@@ -313,7 +362,7 @@
                         plan.pinsBlocked = 'its master mod switch is off '
                             + '(mods_enabled=false), so no pins were written';
                     }
-                    const finalImplied = modPolicyImplied(rec.mods, after);
+                    const finalImplied = modPolicyImplied(cat, after);
                     for (const m of mods) {
                         const cat = byId.get(m.id);
                         if (!cat) {
@@ -338,7 +387,9 @@
                                     return (dc.default_enabled === false);
                                 });
                             if (miss.length) {
-                                note = 'needs ' + miss.join(', ')
+                                // A peer declares its own `requires` strings and
+                                // the broker does not shape-check them, so cap.
+                                note = 'needs ' + cap(miss.slice(0, 8).join(', '), 200)
                                     + ' — it will not run there';
                             }
                         }
@@ -359,14 +410,25 @@
                     // --- settings ---
                     // Only keys owned by a mod that broker actually serves; the
                     // rest have nothing to configure over there.
+                    //
+                    // If its /state cannot be read (it answered /info, so this is
+                    // a transient or partial failure) the settings half is
+                    // UNAVAILABLE, not empty: treating a failed read as "no
+                    // current value" would preview every key as `(unset) → x` and
+                    // present a blind whole-blob write as a clean diff. The pins
+                    // still go — they ride a different endpoint.
                     const live = await readState(host);
+                    if (!live) {
+                        plan.settingsUnreadable = true;
+                        return plan;
+                    }
                     for (const s of localSettings()) {
                         if (!byId.has(s.modId)) {
                             plan.setRows.push({ key: s.key, modId: s.modId,
                                 value: s.value, action: 'missing' });
                             continue;
                         }
-                        const cur = live ? live.settings[s.key] : undefined;
+                        const cur = live.settings[s.key];
                         plan.setRows.push({ key: s.key, modId: s.modId,
                             value: s.value, cur: cur,
                             action: (cur === s.value) ? 'same' : 'write' });
@@ -393,13 +455,25 @@
                 // untouched; a bare {} would wipe it, so a broker whose layout we
                 // could not read is refused rather than clobbered (the same rule
                 // putHostState applies).
+                //
+                // ONE deadline covering connect THROUGH body (hence timeoutMs: 0):
+                // hostFetch's own deadline stops at the response HEADERS, so a peer
+                // that answers and then stalls its body would hang this await
+                // forever — and the push walks its targets sequentially, so one
+                // such peer would silently wedge the whole fan-out. Same guard, and
+                // the same reason, as fetchHostState (53_js_remote_host_cache.js).
                 async function readState(host) {
                     let r, srv;
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(function () { ctrl.abort(); },
+                        FETCH_TIMEOUT_MS);
                     try {
-                        r = await hostFetch(host, '/state', { cache: 'no-store' });
+                        r = await hostFetch(host, '/state', {
+                            cache: 'no-store', signal: ctrl.signal, timeoutMs: 0 });
                         if (!r.ok) return null;
                         srv = await r.json();
                     } catch (_) { return null; }
+                    finally { clearTimeout(timer); }
                     if (!srv || typeof srv !== 'object') return null;
                     const settings = (srv.settings && typeof srv.settings === 'object'
                         && !Array.isArray(srv.settings)) ? srv.settings : {};
@@ -464,7 +538,7 @@
                     }
                     const out = { name: label(host), hostId: host.id, ok: true,
                                   parts: [], priorPolicy: plan.priorPolicy,
-                                  wrote: {} };
+                                  wrote: {}, lockAll: !!plan.lockAll };
                     const writes = plan.setRows.filter((r) => r.action === 'write');
                     if (writes.length) {
                         const res = await writeSettings(host, writes);
@@ -484,10 +558,15 @@
                     }
                     const ids = Object.keys(plan.setObj);
                     if (ids.length) {
+                        // Record the ATTEMPT before making it, so Undo is offered
+                        // even when the answer never arrives: a POST that times out
+                        // or drops its connection may still have committed on the
+                        // peer, and "restore the pins it had before" is the right
+                        // action either way — a no-op when the write never landed.
+                        out.wrote = Object.assign({}, plan.setObj);
                         const res = await saveModPins(host, plan.setObj,
                             { quiet: true });
                         if (res && res.ok) {
-                            out.wrote = Object.assign({}, plan.setObj);
                             const pins = ids.filter((i) => plan.setObj[i] !== null);
                             const clears = ids.length - pins.length;
                             out.parts.push(pins.length + ' pinned'
@@ -575,13 +654,16 @@
                             + 'mods at all — there is no setup to adopt';
                         return plan;
                     }
+                    // Sanitize the peer's catalog once and use only that, for the
+                    // same reason as planFor: modPolicyImplied dereferences `m.id`
+                    // on every element, so one null would throw and take the whole
+                    // preview down with no message.
+                    const cat = (Array.isArray(rec.mods) ? rec.mods : []).filter(
+                        (m) => m && typeof m === 'object'
+                            && typeof m.id === 'string' && MOD_ID_RE.test(m.id));
                     const byId = new Map();
-                    for (const m of rec.mods) {
-                        if (m && typeof m.id === 'string' && MOD_ID_RE.test(m.id)) {
-                            byId.set(m.id, m);
-                        }
-                    }
-                    const implied = modPolicyImplied(rec.mods, rec.policy);
+                    for (const m of cat) byId.set(m.id, m);
+                    const implied = modPolicyImplied(cat, rec.policy);
                     for (const m of localMods()) {
                         if (!byId.has(m.id)) {
                             plan.modRows.push({ id: m.id, action: 'missing',
@@ -605,12 +687,28 @@
                                 action: 'write' });
                         }
                     }
+                    // A failed read is NOT "it has no settings": without it every
+                    // key would silently drop out and the diff would claim this
+                    // browser already matches. Say so instead.
                     const live = await readState(host);
-                    for (const s of localSettings()) {
+                    if (!live) plan.settingsUnreadable = true;
+                    const byKey = new Map();
+                    for (const t of window.__mods.settingToggles) {
+                        if (t && t.key) byKey.set(t.key, t);
+                    }
+                    for (const s of (live ? localSettings() : [])) {
                         if (!byId.has(s.modId)) continue;
-                        const there = live ? live.settings[s.key] : undefined;
+                        const there = live.settings[s.key];
                         if (there === undefined) continue;
                         if (!isScalar(there)) continue;
+                        // The peer's value must be one the owning control would
+                        // actually take, or adopting it is a change we report and
+                        // the mod then ignores.
+                        if (!acceptedBy(byKey.get(s.key), there)) {
+                            plan.setRows.push({ key: s.key, modId: s.modId,
+                                value: there, cur: s.value, action: 'rejected' });
+                            continue;
+                        }
                         plan.setRows.push({ key: s.key, modId: s.modId,
                             value: there, cur: s.value,
                             action: (there === s.value) ? 'same' : 'write' });
@@ -669,7 +767,8 @@
                                 + (r.note ? ' (' + r.note + ')' : '')]);
                         } else if (r.action === 'unpin') {
                             lines.push(['write', r.id + ' → unpin (its own default '
-                                + 'already gives ' + (r.want ? 'on' : 'off') + ')']);
+                                + 'already gives ' + (r.want ? 'on' : 'off') + ')'
+                                + (r.note ? ' (' + r.note + ')' : '')]);
                         } else if (r.action === 'master-off') {
                             lines.push(['skip', r.id + ' — would need a pin, but '
                                 + 'that broker’s master mod switch is off']);
@@ -686,6 +785,10 @@
                             lines.push(['skip', r.key + ' — ' + r.modId
                                 + ' is not installed there']);
                         }
+                    }
+                    if (plan.settingsUnreadable) {
+                        lines.push(['skip', 'its current settings could not be '
+                            + 'read, so no settings are written — only pins']);
                     }
                     return lines;
                 }
@@ -918,13 +1021,25 @@
                         }
                     }
                     for (const r of plan.setRows) {
+                        if (r.action === 'rejected') {
+                            lines.push(['skip', r.key + ' — that broker\'s value ('
+                                + showValue(r.value) + ') is not one '
+                                + r.modId + ' accepts here, so it is left alone']);
+                            continue;
+                        }
                         if (r.action !== 'write') continue;
                         lines.push(['write', r.key + ': ' + showValue(r.cur)
                             + ' → ' + showValue(r.value)]);
                     }
+                    if (plan.settingsUnreadable) {
+                        lines.push(['skip', 'its mod settings could not be read, '
+                            + 'so only the on/off state above is compared']);
+                    }
                     if (!lines.filter((l) => l[0] === 'write').length) {
-                        showNotice('This browser already matches ' + plan.name
-                            + '.');
+                        showNotice(plan.settingsUnreadable
+                            ? ('This browser matches ' + plan.name + '’s mod '
+                                + 'on/off state; its settings could not be read.')
+                            : ('This browser already matches ' + plan.name + '.'));
                         return;
                     }
                     const ok = await openDialog({
@@ -977,13 +1092,30 @@
                                 // changed since the preview.
                                 const h = hostById(r.hostId);
                                 if (!h) { showNotice('no longer configured.'); return; }
-                                planFor(h, false).then(function (p) {
+                                // Retry the SAME operation: carry the lock-every-mod
+                                // choice through. Rebuilding minimally instead would
+                                // not be a retry — in minimal mode every pin whose
+                                // target default already agrees is an explicit CLEAR,
+                                // so a "retry" of a locking push would quietly undo
+                                // the locks it had just asked for.
+                                planFor(h, !!r.lockAll).then(function (p) {
                                     if (p.state !== 'ok') {
                                         showNotice(p.name + ' — ' + p.why,
                                             { sticky: true, type: 'error' });
                                         return;
                                     }
                                     return pushTo(p).then(function (out) {
+                                        // Undo must still reach back to how that
+                                        // broker looked before the FIRST push in
+                                        // this row: keep the earliest prior value
+                                        // for every id (a later Object.assign
+                                        // argument wins, so the older map goes
+                                        // last), and undo the union of what both
+                                        // attempts wrote.
+                                        out.priorPolicy = Object.assign({},
+                                            out.priorPolicy, r.priorPolicy);
+                                        out.wrote = Object.assign({},
+                                            r.wrote, out.wrote);
                                         results = results.map(
                                             (x) => (x.hostId === r.hostId) ? out : x);
                                         renderResults();

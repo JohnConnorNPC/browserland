@@ -1847,6 +1847,41 @@ def test_mod_sync_mod_packaged_and_manifest_agrees():
     for forbidden in ("ctx.file", "ctx.serverStore", "mod-store"):
         assert forbidden not in code, \
             f"mod-sync must not ship mod code / add storage: {forbidden!r}"
+    # --- defects an adversarial review of the diff found, kept fixed ---
+    # Retry must repeat the SAME operation. Rebuilding with a hardcoded
+    # lockAll=false silently downgrades a "Lock every mod" push to a minimal
+    # one -- and in minimal mode every pin whose target default already agrees
+    # becomes an explicit CLEAR, so the "retry" would undo the locks the user
+    # asked for and then report success.
+    assert "lockAll: !!lockAll" in code
+    assert "planFor(h, !!r.lockAll)" in code
+    # ...and a retry must not destroy the row's undo baseline: keep the EARLIEST
+    # prior value per id (older map last, since a later Object.assign arg wins)
+    # and undo the union of what both attempts wrote.
+    assert "out.priorPolicy, r.priorPolicy" in code
+    assert "r.wrote, out.wrote" in code
+    # hostFetch's deadline stops at the response HEADERS, so a peer that answers
+    # then stalls its body would hang forever -- and the push walks its targets
+    # sequentially, so one such peer wedges the whole fan-out. Same guard, and
+    # reason, as fetchHostState.
+    assert "new AbortController()" in code
+    assert "timeoutMs: 0" in code
+    # Adopting a PEER's setting value needs a DOMAIN check, not just a scalar
+    # shape one: mods validate read-through and silently fall back, so an
+    # out-of-domain value would be reported as applied and then ignored.
+    assert "function acceptedBy(entry, v)" in src
+    assert "acceptedBy(byKey.get(s.key), there)" in code
+    # Self-targeting fails CLOSED. brokerId is only known once a host has been
+    # polled, so the identity test alone lets an unpolled alias through and we
+    # would write THIS broker's own policy under a peer's name.
+    assert "=== window.location.origin" in code
+    # A peer's catalog is untrusted: modPolicyImplied must get the SANITIZED
+    # array, or one null element throws and takes the whole preview down.
+    assert "modPolicyImplied(rec.mods" not in code
+    assert "modPolicyImplied(cat, after)" in code
+    # A POST that times out may still have committed, so the undo baseline is
+    # recorded BEFORE the attempt rather than only on a confirmed success.
+    assert "out.wrote = Object.assign({}, plan.setObj);" in code
     # Ships in the served page, AFTER the mousemode mod (the last mod before it
     # in _MODS), and its CSS rides the mod-css splice.
     assert "id: 'mod-sync'" in INDEX_HTML
