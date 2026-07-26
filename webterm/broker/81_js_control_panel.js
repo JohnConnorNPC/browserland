@@ -253,6 +253,10 @@
             // (0 or a clamped number), so reflect verbatim; 0 shows as "0".
             setSlideMs.value = (typeof s.slideScreenMs === 'number') ? s.slideScreenMs : 350;
 
+            // #153: clipboard authorization for the host this tab belongs to,
+            // read from the browser-local map — never t.s, which syncs.
+            setOsc52.checked = isOsc52Allowed(t.hostId);
+
             // Restore-on-refresh governs THIS browser's startup (not a remote
             // host), so it always reflects the LOCAL setting on every host tab.
             setRestore.checked = !!getSettings().restoreOnRefresh;
@@ -1002,6 +1006,17 @@
             setConfirmTerminate.disabled = !setCloseTerminates.checked;
             if (t.isLocal) applyDisplaySettings();   // live re-title open terminal × buttons
         });
+        // #153: authorize OSC 52 clipboard writes for the host this tab belongs
+        // to. Writes the browser-local map keyed by t.hostId — deliberately NOT
+        // t.s/t.save(), so the switch that lets a broker write your clipboard
+        // is never itself reachable from a broker. Takes effect on the next
+        // sequence; nothing to reapply.
+        setOsc52.addEventListener('change', () => {
+            const t = settingsTarget;
+            if (!t) return;
+            setOsc52Allowed(t.hostId, setOsc52.checked);
+        });
+
         setConfirmTerminate.addEventListener('change', () => {
             const t = settingsTarget;
             if (!t) return;

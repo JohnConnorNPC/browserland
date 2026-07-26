@@ -18,6 +18,14 @@
         const setConfirmTerminate = document.getElementById('set-confirm-terminate'); // #88
         const setSnapHold = document.getElementById('set-snap-hold');   // #38 dwell delay (ms)
         const setSlideMs = document.getElementById('set-slide-ms');     // #125 slide rate (ms/screen)
+        // #153: OSC 52 clipboard authorization. The odd one out — PER HOST like
+        // the controls above it, but read from and written to a dedicated
+        // localStorage map rather than settingsTarget.s, because a setting that
+        // rode the synced /state blob would let a compromised broker grant
+        // itself clipboard write. So it is NOT .set-browser-global (it must
+        // stay visible and editable on every host tab) and it never touches
+        // t.s / t.save().
+        const setOsc52 = document.getElementById('set-osc52');
         const setRestore = document.getElementById('set-restore-refresh');
         const setHideOtherWs = document.getElementById('set-taskbar-hide-other-ws');
         const setDefaultProfile = document.getElementById('set-default-profile');

@@ -216,6 +216,38 @@
                 macOptionClickForcesSelection: true,
                 theme: { background: '#000000' }
             });
+            // OSC 52 clipboard bridge (#153). Registered HERE — after the
+            // Terminal exists, before term.open(body) — because parser
+            // registration does not depend on DOM attachment, and the invariant
+            // worth having is "the handler exists before this terminal can
+            // receive a byte". `term.parser` is stable API in the vendored
+            // 5.3.0 build: its getter does NOT call _checkProposedApi() (unlike
+            // `get unicode()`), so this is not proposed API behind a flag.
+            //
+            // Registering inside openWindow is also what keeps recorder
+            // PLAYBACK inert: the other two `new Terminal(` sites in the tree
+            // are both in mods/recorder/recorder.js, so replaying a recording
+            // can never write your clipboard.
+            //
+            // ALWAYS returns true, so the handler terminates the chain. xterm
+            // tries OSC handlers newest-first with fallthrough, and returning
+            // false would hand a clipboard request to whatever registered
+            // earlier. Disposal below is load-bearing for the same reason: a
+            // reopened terminal must not stack duplicate handlers.
+            // A closure variable, not a field on `win` (which is built below):
+            // the request identity must not be reachable — or forgeable — from
+            // anything the PTY can influence, and this also keeps the handler
+            // free of a temporal-dead-zone reference to a `const` declared
+            // later in the same scope.
+            let lastUserInputAt = 0;
+            const markUserInput = () => { lastUserInputAt = Date.now(); };
+            const oscDisp = term.parser.registerOscHandler(52, (data) => {
+                osc52Request({
+                    hostId: hostId, sid: sid, winId: id,
+                    lastInputAt: lastUserInputAt,
+                }, data);
+                return true;
+            });
             const fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
             term.open(body);
@@ -269,8 +301,13 @@
             // windows restore via appStore, never this set).
             if (win.type !== 'app') addOpenTerm(id);
 
+            // #153: the OSC 52 registration is disposed with the window. Not
+            // hygiene — xterm tries OSC handlers newest-first with fallthrough,
+            // so a leaked registration from a reopened terminal would stack.
+            win.cleanups.push(() => { try { oscDisp.dispose(); } catch (_) {} });
+
             // bring to front on any mousedown inside the window dom
-            const onMouseDown = () => bringToFront(id);
+            const onMouseDown = () => { markUserInput(); bringToFront(id); };
             dom.addEventListener('mousedown', onMouseDown);
             win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
@@ -651,6 +688,26 @@
                 if (blob) pasteImageBlob(blob);
                 else sendChunked('input', '\x1bv');
             };
+            // Ctrl+Shift+V (#153): the symmetry partner of the Ctrl+Shift+C
+            // branch below. It already worked BY ACCIDENT in Chrome and Firefox
+            // — their native paste-as-plain-text fires a DOM `paste`, which
+            // onClipPaste picks up — so this is not a fix for brokenness; it
+            // closes the cases that accident misses (macOS/Safari, and a
+            // terminal whose xterm textarea does not have focus) and makes the
+            // chord layout-independent. Routed through pasteTextToTerm so
+            // #138's ConPTY hand-bracketing applies exactly as on every other
+            // paste path.
+            const handleCtrlShiftVPaste = async () => {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (text) {
+                        pasteTextToTerm(text);
+                        _notifyClipboard('in', text);   // #106 history
+                    }
+                } catch (err) {
+                    console.error('paste read failed:', err);
+                }
+            };
             term.attachCustomKeyEventHandler(ev => {
                 if (ev.type !== 'keydown') return true;
                 const key = (ev.key || '').toLowerCase();
@@ -659,6 +716,18 @@
                     if (sel) copyTextToClipboard(sel);
                     ev.preventDefault();
                     ev.stopPropagation();
+                    return false;
+                }
+                if (ev.ctrlKey && ev.shiftKey && key === 'v') {
+                    // On a plain-http LAN origin navigator.clipboard does not
+                    // exist. Fall THROUGH rather than swallow the chord, so the
+                    // browser's own paste-as-plain-text still lands via
+                    // onClipPaste — taking it over there would remove the only
+                    // working path on that origin.
+                    if (!canReadClipboard()) return true;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    handleCtrlShiftVPaste();
                     return false;
                 }
                 if (ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey
@@ -673,7 +742,18 @@
 
             // term -> server (xterm.js delivers a Ctrl+V paste as one
             // onData string, so this path needs the chunking too)
-            const onDataDisp = term.onData((data) => sendChunked('input', data));
+            //
+            // #153: this is also the activity stamp the OSC 52 gate reads. It
+            // is the right seam because it carries EVERY kind of user input —
+            // typing, a paste, and the mouse-report bytes an app that grabbed
+            // the mouse receives — where a keydown listener would reject touch
+            // and mouse-driven copies and misfire around IME composition. It
+            // deliberately does NOT fire for MCP send_input, which reaches the
+            // PTY over HTTP without passing through xterm at all.
+            const onDataDisp = term.onData((data) => {
+                markUserInput();
+                sendChunked('input', data);
+            });
             win.cleanups.push(() => { try { onDataDisp.dispose(); } catch (_) {} });
 
             // Track IME composition so relayout never reparents (and aborts a

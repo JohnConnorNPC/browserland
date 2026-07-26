@@ -165,6 +165,21 @@
                     <div class="set-hint">ask before the &#215; button kills a session. Only applies
                         when the option above is on.</div>
                 </div>
+                <div class="set-section">
+                    <div class="set-title">Clipboard (OSC 52)</div>
+                    <label class="set-check"><input type="checkbox" id="set-osc52" />
+                        Let programs on this host set my clipboard</label>
+                    <div class="set-hint">full-screen programs (tmux copy-mode,
+                        Neovim, lazygit, agent CLIs) copy by asking the terminal
+                        to do it. Off by default: everything downstream of the
+                        terminal can send this, including a remote box you
+                        don&#8217;t own. Authorised <b>per host</b> and stored in
+                        <b>this browser only</b> &#8212; a broker cannot switch
+                        it on for itself. Writes only, never reads; needs
+                        https/localhost, the window focused, and recent activity
+                        in the front terminal. Neovim&#8217;s <code>"+y</code>
+                        works; <code>"*y</code> is ignored.</div>
+                </div>
                 <div class="set-section set-browser-global">
                     <div class="set-title">Restore on refresh</div>
                     <label class="set-check"><input type="checkbox" id="set-restore-refresh" />

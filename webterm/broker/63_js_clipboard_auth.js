@@ -84,16 +84,21 @@
             _clipboardObservers.add(fn);
             return function () { _clipboardObservers.delete(fn); };
         }
+        // Returns Promise<boolean> — did the text actually reach the clipboard?
+        // (#153) It used to return undefined and swallow every failure, which
+        // was fine while every caller was a user gesture that could see the
+        // result for itself. An unprompted PTY-driven write has to TELL the user
+        // what happened, and it cannot tell the truth about a promise it never
+        // looked at. Existing callers ignore the value and are unaffected.
         function copyTextToClipboard(text) {
-            if (!text) return;
+            if (!text) return Promise.resolve(false);
             _notifyClipboard('out', text);   // #106: one call covers both write paths
             if (canWriteClipboardModern()) {
-                navigator.clipboard.writeText(text).catch(() => {
-                    copyTextLegacy(text);
-                });
-                return;
+                return navigator.clipboard.writeText(text)
+                    .then(() => true)
+                    .catch(() => copyTextLegacy(text));
             }
-            copyTextLegacy(text);
+            return Promise.resolve(copyTextLegacy(text));
         }
         function copyTextLegacy(text) {
             // execCommand('copy') still works in non-secure contexts as
@@ -110,17 +115,288 @@
             ta.style.top = '0';
             ta.style.opacity = '0';
             document.body.appendChild(ta);
+            let ok = false;
             try {
                 ta.select();
                 ta.setSelectionRange(0, text.length);
-                document.execCommand('copy');
+                ok = !!document.execCommand('copy');
             } catch (e) {
                 console.debug('legacy copy failed:', e);
             } finally {
                 document.body.removeChild(ta);
                 try { prev && prev.focus && prev.focus(); } catch (_) {}
             }
+            return ok;
         }
+
+        // ---- OSC 52: PTY-driven clipboard write (#153) ----------------------
+        // A TUI that cannot reach the system clipboard itself asks the terminal
+        // to do it: `ESC ] 52 ; Pc ; <base64> BEL`. xterm.js 5.3.0 registers no
+        // handler for OSC 52, so until now the sequence was parsed and silently
+        // discarded — "copy" inside lazygit/fzf/an agent CLI did nothing, with
+        // no error and no clue.
+        //
+        // Everything downstream of the PTY is untrusted (a `cat` of a hostile
+        // file, a dependency's build output, an SSH session to someone else's
+        // box), and Browserland's amplification over a local terminal is that
+        // the write crosses the network to the user's own laptop. So this is
+        // default-OFF, opt-in per host, and gated.
+        //
+        // ARBITRATION IS BROWSER-GLOBAL even though parsing is per terminal:
+        // the clipboard and the user-activation state belong to the DOCUMENT,
+        // not to a terminal. Per-terminal limiters would let two terminals
+        // evade the limit in parallel and let their writeText promises resolve
+        // out of order, so a notice could name the wrong source. Every request
+        // therefore carries an immutable identity captured at request time and
+        // routes through the single policy below.
+        //
+        // NOT implemented, deliberately: the `?` query form, which asks the
+        // terminal to REPLY with the clipboard on the PTY. That is clipboard
+        // exfiltration to whatever is running in the terminal. It is refused in
+        // code, not behind a setting anyone can flip.
+
+        // Authorization lives under a DEDICATED local key, keyed per host —
+        // never prefs/_settings, which sync to the broker's /state. That is the
+        // point: a compromised broker must not be able to grant itself
+        // clipboard write by editing its own settings blob. Per host, because
+        // trusting your laptop's broker should not silently extend to every
+        // remote box you attach to. Absent/junk entry = OFF.
+        const OSC52_HOSTS_KEY = 'webterm:osc52Hosts:v1';
+        function loadOsc52Hosts() {
+            try {
+                const o = JSON.parse(localStorage.getItem(OSC52_HOSTS_KEY) || '{}');
+                return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+            } catch (e) { return {}; }
+        }
+        function isOsc52Allowed(hostId) {
+            return loadOsc52Hosts()[String(hostId || 'local')] === true;
+        }
+        function setOsc52Allowed(hostId, on) {
+            const map = loadOsc52Hosts();
+            const k = String(hostId || 'local');
+            if (on) map[k] = true; else delete map[k];
+            try { localStorage.setItem(OSC52_HOSTS_KEY, JSON.stringify(map)); }
+            catch (e) { /* quota/private mode: the gate stays shut, which is safe */ }
+        }
+
+        // 1 MiB decoded. Checked as a base64-LENGTH bound before atob(), so a
+        // payload we are about to reject is never allocated. Rejected, never
+        // truncated: a half-copied `rm -rf /home/me/project` is a foot-gun of
+        // exactly the wrong shape.
+        const OSC52_MAX_BYTES = 1024 * 1024;
+        const OSC52_MAX_B64 = Math.ceil(OSC52_MAX_BYTES / 3) * 4;
+        // Activation window: a real TUI copy follows a keypress or a mouse
+        // gesture within a second or so. Keyed on user INPUT, not on keydown —
+        // a key-only check rejects touch and mouse-driven copies and misfires
+        // around IME composition.
+        const OSC52_ACTIVITY_MS = 5000;
+        // Rate limit, stated explicitly rather than left to the reader:
+        // BROWSER-GLOBAL (see the arbitration note above), 5 writes per rolling
+        // 10 s. Only writes that pass every other gate consume quota — a
+        // refusal already cost the caller a notice and never touched the
+        // clipboard, and charging refusals would let a hostile program lock the
+        // user out of their own legitimate copy.
+        const OSC52_RATE_MAX = 5;
+        const OSC52_RATE_WINDOW_MS = 10000;
+        // Notices are coalesced per reason (not suppressed): a program in a
+        // loop must not be able to bury the desktop in toasts, but every
+        // DISTINCT reason still surfaces. A silent rejection would recreate the
+        // exact symptom this whole feature exists to fix.
+        const OSC52_NOTICE_THROTTLE_MS = 3000;
+
+        const _osc52 = {
+            accepted: [],          // ms timestamps of accepted writes (rolling)
+            noticedAt: new Map(),  // reason -> last notice ms
+            offeredHosts: new Set(),  // hosts already told "it's off" this load
+        };
+        function _osc52Notice(reason, text, opts) {
+            const now = Date.now();
+            const last = _osc52.noticedAt.get(reason) || 0;
+            if (now - last < OSC52_NOTICE_THROTTLE_MS) return;
+            _osc52.noticedAt.set(reason, now);
+            showNotice(text, opts);
+        }
+        // Attribution comes from application-owned facts ONLY — the broker's
+        // session id and the user's own host label. NEVER the window title:
+        // titles are settable straight from the PTY via OSC 0/2, so a hostile
+        // program could otherwise forge the attribution on its own clipboard
+        // write.
+        function _osc52Who(req) {
+            const h = hostById(req.hostId);
+            const where = (!h || h.id === 'local') ? 'this broker' : h.label;
+            return 'terminal #' + req.sid + ' on ' + where;
+        }
+
+        // Decode Pd. Returns {text} | {error}. Never throws.
+        function _osc52Decode(pd) {
+            // Tolerate the shapes real emitters produce: base64(1) wraps at 76
+            // columns, some tools omit padding, some use the URL-safe alphabet.
+            const b64 = String(pd).replace(/\s+/g, '')
+                .replace(/-/g, '+').replace(/_/g, '/');
+            if (!b64) return { error: 'empty' };
+            if (b64.length > OSC52_MAX_B64) return { error: 'too-large' };
+            let bin;
+            try {
+                bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+            } catch (e) { return { error: 'bad-base64' }; }
+            if (bin.length > OSC52_MAX_BYTES) return { error: 'too-large' };
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            let text;
+            try {
+                // fatal:true ON PURPOSE. OSC 52 carries BYTES, not a declared
+                // charset, and non-UTF-8 payloads really happen (a remote box
+                // in a legacy locale, a byte-oriented tool). The default
+                // non-fatal mode substitutes U+FFFD and reports SUCCESS — it
+                // would claim a copy while silently mutating it.
+                text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            } catch (e) { return { error: 'not-utf8' }; }
+            // Reject on a control character; do NOT strip. A silent C0 strip is
+            // the worst option available: it corrupts legitimate copies that
+            // contain ESC/FF/NUL/BS, can CONCATENATE text that was separated,
+            // and does not even buy safety — the characters that make
+            // pastejacking dangerous (CR, LF, TAB) are exactly the ones a strip
+            // would keep. Exact copy semantics, or a visible refusal.
+            if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) {
+                return { error: 'control-chars' };
+            }
+            return { text: text };
+        }
+
+        // The single entry point. `req` is {hostId, sid, winId, lastInputAt} —
+        // captured by the caller at REQUEST time and immutable from here on, so
+        // an async resolution can never re-read a front window that has since
+        // changed. Returns nothing; the handler always reports handled.
+        function osc52Request(req, data) {
+            const semi = String(data).indexOf(';');
+            if (semi === -1) return;                  // malformed: no Pc;Pd
+            const pc = String(data).slice(0, semi);
+            const pd = String(data).slice(semi + 1);
+
+            // Pc is a LIST, not a scalar: zero or more of `c s p q 0-7`, and an
+            // empty Pc means s0. tmux's copy-mode copy really does emit
+            // `ESC]52;;<base64>BEL` with Pc EMPTY (captured under
+            // TERM=xterm-256color), so a strict equality check against
+            // {c,s,""} would reject the single most common real emitter.
+            //
+            // A request naming neither c nor s (`p`, `q`, `3`) is IGNORED: the
+            // browser has one clipboard and no X11 PRIMARY to write, so
+            // honouring a p-only request would let a selection the user aimed
+            // at PRIMARY overwrite the CLIPBOARD they did not. Consequence,
+            // disclosed rather than discovered: Neovim maps `+` to c and `*` to
+            // p, so `"+y` works and `"*y` is ignored.
+            if (pc !== '' && pc.indexOf('c') === -1 && pc.indexOf('s') === -1) {
+                return;
+            }
+            // The query form. Refused here, in code — never behind a setting.
+            if (pd === '?') {
+                _osc52Notice('query',
+                    'blocked: ' + _osc52Who(req) + ' tried to READ your '
+                    + 'clipboard. Browserland never answers that request.',
+                    { sticky: true, type: 'error' });
+                return;
+            }
+            if (pd === '') return;                    // clear-selection: see below
+
+            // GATE 1 — per-host authorization. First refusal per host per page
+            // load says so out loud: learning that the TUI tried to copy, and
+            // where the switch is, is the other half of the original bug.
+            if (!isOsc52Allowed(req.hostId)) {
+                if (!_osc52.offeredHosts.has(req.hostId)) {
+                    _osc52.offeredHosts.add(req.hostId);
+                    showNotice(
+                        _osc52Who(req) + ' tried to set your clipboard. Allow it '
+                        + 'in Control Panel → that host’s tab → '
+                        + 'Clipboard (OSC 52).', { sticky: true });
+                }
+                return;
+            }
+            // GATE 2 — never write to a backgrounded tab.
+            if (!document.hasFocus()) return;
+            // GATE 3 — front terminal only.
+            if (frontId !== req.winId) return;
+            // GATE 4 — recent user input in THAT window.
+            if (!(Date.now() - (req.lastInputAt || 0) < OSC52_ACTIVITY_MS)) {
+                _osc52Notice('stale',
+                    'clipboard write from ' + _osc52Who(req)
+                    + ' ignored (no recent activity in that terminal)');
+                return;
+            }
+
+            const res = _osc52Decode(pd);
+            if (res.error) {
+                // Every rejection is visible. Distinct reasons get distinct
+                // advice; they are not interchangeable.
+                const who = _osc52Who(req);
+                const msg = {
+                    'too-large': 'clipboard copy from ' + who + ' refused: over '
+                        + '1 MiB. Nothing was copied (it is not truncated).',
+                    'not-utf8': 'clipboard copy from ' + who + ' refused: the '
+                        + 'text is not valid UTF-8.',
+                    'control-chars': 'clipboard copy from ' + who + ' refused: '
+                        + 'it contains control characters.',
+                    'bad-base64': 'clipboard copy from ' + who + ' refused: '
+                        + 'malformed payload.',
+                }[res.error];
+                // 'empty' is a no-op, not a refusal — see the deviation note
+                // below; it needs no notice.
+                if (msg) {
+                    _osc52Notice(res.error, msg, { sticky: true, type: 'error' });
+                }
+                return;
+            }
+
+            // GATE 5 — rate limit, browser-global.
+            const now = Date.now();
+            _osc52.accepted = _osc52.accepted.filter(
+                t => now - t < OSC52_RATE_WINDOW_MS);
+            if (_osc52.accepted.length >= OSC52_RATE_MAX) {
+                _osc52Notice('rate',
+                    'clipboard writes from ' + _osc52Who(req)
+                    + ' are coming too fast — ignoring for a moment.',
+                    { type: 'error' });
+                return;
+            }
+
+            if (!canWriteClipboardModern()) {
+                // Distinct from a permission denial: the API is not merely
+                // refusing, it does not exist on this origin, and the fix is a
+                // different one (https or localhost, e.g. `tailscale serve`).
+                _osc52Notice('insecure',
+                    'clipboard copy from ' + _osc52Who(req) + ' needs a secure '
+                    + 'origin — open Browserland over https or on '
+                    + 'localhost.', { sticky: true, type: 'error' });
+                return;
+            }
+            _osc52.accepted.push(now);
+            // Deliberately NOT copyTextToClipboard: its copyTextLegacy fallback
+            // stashes a hidden textarea and calls .select(), stealing focus and
+            // able to abort an in-flight IME composition. That is the right
+            // fallback for a user-initiated copy inside a gesture; it is the
+            // wrong one for an unprompted write driven by PTY output.
+            navigator.clipboard.writeText(res.text).then(() => {
+                // The focus and front-terminal gates were evaluated BEFORE this
+                // promise, which settles later — by now the front window may
+                // have changed. Re-checking here would be theatre (the write has
+                // already landed), so the fix is the other one the race allows:
+                // the notice reports the identity captured at REQUEST time, so
+                // it names the terminal that actually asked rather than whatever
+                // happens to be in front when the promise resolves.
+                _notifyClipboard('out', res.text);    // #106 history
+                showNotice('copied ' + res.text.length + ' chars from '
+                    + _osc52Who(req));
+            }).catch(() => {
+                _osc52Notice('denied',
+                    'clipboard copy from ' + _osc52Who(req)
+                    + ' was blocked by the browser.',
+                    { sticky: true, type: 'error' });
+            });
+        }
+        // Deviation from xterm, stated plainly: xterm treats an empty OR
+        // non-base64 Pd as "clear the selection". We do not clear. Silently
+        // wiping a user's clipboard because a program printed a malformed
+        // sequence is worse than doing nothing, and "a hostile program can
+        // erase your clipboard" is a nuisance primitive we decline to build.
 
         // ---- auth -----------------------------------------------------------
         // The password IS the broker's auth_token — one secret per broker,
