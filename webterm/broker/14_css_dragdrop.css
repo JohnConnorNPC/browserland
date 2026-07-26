@@ -158,6 +158,32 @@
             background: var(--accent-default);
             color: #000;
         }
+        /* #149: broker status rows in the launch menu. The leading .ctx-swatch
+           dot carries the state color (background and border the same, so the
+           dot just reads solid); a per-host identity color (strictHex, set
+           inline by renderMenu) replaces the FILL only, leaving the border as
+           a state-colored ring. State never rides the label text — the :hover
+           rule above flattens item text to #000, and touch has no hover.
+           'pending' has no rule on purpose: neutral dot, like the chip. */
+        #ctx-menu .ctx-swatch {
+            flex: 0 0 auto;
+            width: 9px;
+            height: 9px;
+            box-sizing: border-box;
+            border-radius: 50%;
+            border: 2px solid var(--fg-dim);
+            background: var(--fg-dim);
+        }
+        #ctx-menu .ctx-swatch.ok    { border-color: #5fbf7f; background: #5fbf7f; }
+        #ctx-menu .ctx-swatch.down  { border-color: #e96d6d; background: #e96d6d; }
+        #ctx-menu .ctx-swatch.auth  { border-color: #e0a93a; background: #e0a93a; }
+        #ctx-menu .ctx-swatch.lease { border-color: #6fa3e0; background: #6fa3e0; }
+        /* Hidden broker (focus mode): struck through + dimmed, mirroring the
+           taskbar chip's .off treatment. */
+        #ctx-menu .ctx-item.host-row.off .ctx-label {
+            text-decoration: line-through;
+            opacity: 0.55;
+        }
         #ctx-menu .ctx-item.disabled {
             color: var(--fg-dim);
             cursor: default;

@@ -238,6 +238,11 @@
         const ctxMenu = document.getElementById('ctx-menu');
         // Shared menu renderer — used by the desktop/taskbar layout menu and
         // the launch button's profile picker.
+        // #149 additive item fields (every consumer that doesn't set them is
+        // byte-identical): `cls` extra class tokens on the .ctx-item, `title`
+        // a tooltip, `swatch` a leading state dot (see below), `keepOpen`
+        // makes a click run the action WITHOUT closing the menu — the caller
+        // owns re-rendering the still-open menu afterwards.
         function renderMenu(items, x, y) {
             ctxMenu.innerHTML = '';
             for (const it of items) {
@@ -248,7 +253,12 @@
                     continue;
                 }
                 const el = document.createElement('div');
-                el.className = 'ctx-item' + (it.enabled ? '' : ' disabled');
+                // String concat, not classList.add: `cls` may carry several
+                // tokens ('host-row off') and is always our own literal, never
+                // user input (labels/URLs stay textContent-only below).
+                el.className = 'ctx-item' + (it.enabled ? '' : ' disabled')
+                    + (it.cls ? ' ' + it.cls : '');
+                if (it.title) el.title = it.title;
                 // #119: app-menu items carry an iconKey (a mod id). renderMenu
                 // resolves it HERE to the trusted, hardcoded SVG via appIconSvg —
                 // which returns '' for anything not in the APP_ICON_SVG registry —
@@ -269,12 +279,33 @@
                     lab.className = 'ctx-label';
                     lab.textContent = it.label;
                     el.appendChild(lab);
+                } else if (it.swatch) {
+                    // #149: leading state dot for the launch menu's broker
+                    // rows. `state` is one of our own hostMenuState tokens
+                    // (never user input); `color` is a strictHex per-host
+                    // identity color painted as the FILL only, so the state
+                    // class keeps the border as a state-colored ring. The
+                    // label stays textContent in its own span.
+                    const sw = document.createElement('span');
+                    sw.className = 'ctx-swatch'
+                        + (it.swatch.state ? ' ' + it.swatch.state : '');
+                    sw.setAttribute('aria-hidden', 'true');
+                    if (it.swatch.color) sw.style.background = it.swatch.color;
+                    el.appendChild(sw);
+                    const lab = document.createElement('span');
+                    lab.className = 'ctx-label';
+                    lab.textContent = it.label;
+                    el.appendChild(lab);
                 } else {
                     el.textContent = it.label;
                 }
                 if (it.enabled) {
                     el.addEventListener('click', () => {
-                        hideCtxMenu();
+                        // keepOpen: the action runs against the still-open
+                        // menu (the mousedown dismisser in 78 only fires for
+                        // targets OUTSIDE #ctx-menu, so an item click never
+                        // reaches it). Everything else closes first, as ever.
+                        if (!it.keepOpen) hideCtxMenu();
                         it.action();
                     });
                 }
