@@ -168,12 +168,31 @@
                 return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
             } catch (e) { return {}; }
         }
+        // The entry key binds the host id to the URL it pointed at when the user
+        // authorized it, so re-pointing an id REVOKES rather than inherits. Host
+        // ids are not as immutable as they look: the #65 broker-registry mod
+        // publishes prefs._hosts — ids included — between brokers, so an id you
+        // once trusted can come back attached to a different machine. What the
+        // user agreed to was that machine, not that string. A host whose record
+        // is gone returns null and therefore reads as OFF, so removal and any
+        // lookup with a junk id both fail SHUT.
+        // No "|| 'local'" default here, deliberately. openWindow always resolves
+        // a real hostId, so a missing one means something is wrong — and the one
+        // thing a security gate must not do when it is confused is fall back to
+        // the host the user is most likely to have authorized.
+        function _osc52HostKey(hostId) {
+            const h = hostById(hostId);
+            if (!h) return null;
+            return (h.id === 'local') ? 'local' : (h.id + '|' + (h.url || ''));
+        }
         function isOsc52Allowed(hostId) {
-            return loadOsc52Hosts()[String(hostId || 'local')] === true;
+            const k = _osc52HostKey(hostId);
+            return k !== null && loadOsc52Hosts()[k] === true;
         }
         function setOsc52Allowed(hostId, on) {
+            const k = _osc52HostKey(hostId);
+            if (k === null) return;
             const map = loadOsc52Hosts();
-            const k = String(hostId || 'local');
             if (on) map[k] = true; else delete map[k];
             try { localStorage.setItem(OSC52_HOSTS_KEY, JSON.stringify(map)); }
             catch (e) { /* quota/private mode: the gate stays shut, which is safe */ }
@@ -231,7 +250,13 @@
         function _osc52Decode(pd) {
             // Tolerate the shapes real emitters produce: base64(1) wraps at 76
             // columns, some tools omit padding, some use the URL-safe alphabet.
-            const b64 = String(pd).replace(/\s+/g, '')
+            //
+            // ASCII whitespace only, NOT \s. \s also matches U+00A0 and friends,
+            // which would let a payload carrying a non-breaking space decode
+            // here while the agent-side snapshot strip — which works on bytes
+            // and stops at \xc2 — leaves that same sequence in the ring replay.
+            // Keeping the two in step costs one character class.
+            const b64 = String(pd).replace(/[ \t\r\n\f\v]+/g, '')
                 .replace(/-/g, '+').replace(/_/g, '/');
             if (!b64) return { error: 'empty' };
             if (b64.length > OSC52_MAX_B64) return { error: 'too-large' };
@@ -273,6 +298,18 @@
             const pc = String(data).slice(0, semi);
             const pd = String(data).slice(semi + 1);
 
+            // The query form, checked FIRST — ahead of the Pc filter, because a
+            // read attempt is a read attempt whichever selection it names, and
+            // `p;?` would otherwise be dropped by the Pc filter without the user
+            // ever hearing that something tried to exfiltrate their clipboard.
+            // Refused here, in code — never behind a setting.
+            if (pd === '?') {
+                _osc52Notice('query',
+                    'blocked: ' + _osc52Who(req) + ' tried to READ your '
+                    + 'clipboard. Browserland never answers that request.',
+                    { sticky: true, type: 'error' });
+                return;
+            }
             // Pc is a LIST, not a scalar: zero or more of `c s p q 0-7`, and an
             // empty Pc means s0. tmux's copy-mode copy really does emit
             // `ESC]52;;<base64>BEL` with Pc EMPTY (captured under
@@ -286,14 +323,6 @@
             // disclosed rather than discovered: Neovim maps `+` to c and `*` to
             // p, so `"+y` works and `"*y` is ignored.
             if (pc !== '' && pc.indexOf('c') === -1 && pc.indexOf('s') === -1) {
-                return;
-            }
-            // The query form. Refused here, in code — never behind a setting.
-            if (pd === '?') {
-                _osc52Notice('query',
-                    'blocked: ' + _osc52Who(req) + ' tried to READ your '
-                    + 'clipboard. Browserland never answers that request.',
-                    { sticky: true, type: 'error' });
                 return;
             }
             if (pd === '') return;                    // clear-selection: see below

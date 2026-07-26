@@ -93,9 +93,12 @@ const focus = { on: true };
 def('document', { hasFocus: () => focus.on });
 const notices = [];
 globalThis.showNotice = (text, opts) => { notices.push({ text, opts: opts || null }); };
-globalThis.hostById = (id) => (id === 'local'
-    ? { id: 'local', label: 'this broker' }
-    : { id, label: 'HOSTLABEL-' + id });
+const hosts = new Map([
+    ['local', { id: 'local', label: 'this broker', url: '' }],
+    ['remote1', { id: 'remote1', label: 'HOSTLABEL-remote1',
+                  url: 'https://box-one:4445' }],
+]);
+globalThis.hostById = (id) => hosts.get(id) || null;
 globalThis.frontId = 'w1';
 
 __POLICY__
@@ -330,11 +333,51 @@ CASES.no_legacy_textarea_fallback = () => {
 
 // --- attribution ----------------------------------------------------------
 CASES.notice_attributes_without_the_title = () => {
-    reset({ host: 'remote1' });
+    reset();
     setOsc52Allowed('remote1', true);
-    globalThis.hostById = (id) => ({ id, label: 'HOSTLABEL-' + id });
     osc52Request(req({ hostId: 'remote1', sid: '42' }), 'c;aGVsbG8=');
-    return { notices: notices.map(n => n.text) };
+    return {};
+};
+
+// --- host identity: a re-pointed id must not inherit trust ----------------
+CASES.repointing_a_host_url_revokes_it = () => {
+    reset({ allow: false });
+    setOsc52Allowed('remote1', true);
+    osc52Request(req({ hostId: 'remote1' }), 'c;aGVsbG8=');
+    const before = clipboard.writes.slice();
+    // The #65 registry mod republishes prefs._hosts WITH ids, so the same id
+    // can come back attached to a different machine.
+    hosts.get('remote1').url = 'https://somewhere-else:4445';
+    osc52Request(req({ hostId: 'remote1' }), 'c;aGVsbG8=');
+    return { before, after: clipboard.writes };
+};
+CASES.unknown_host_fails_shut = () => {
+    reset();
+    setOsc52Allowed('local', true);
+    const out = {};
+    for (const id of ['ghost', undefined, null, '', 'app']) {
+        clipboard.writes.length = 0;
+        osc52Request(req({ hostId: id }), 'c;aGVsbG8=');
+        out[String(id)] = clipboard.writes.length;
+    }
+    return out;
+};
+
+// --- the activity stamp must not be self-servable -------------------------
+CASES.read_form_before_pc_filter = () => {
+    reset();
+    // `p;?` is a read attempt too -- the Pc filter must not swallow it before
+    // the user is told something tried to exfiltrate their clipboard.
+    osc52Request(req(), 'p;?');
+    return { writes: clipboard.writes };
+};
+CASES.nbsp_payload_does_not_sneak_through_as_whitespace = () => {
+    reset();
+    // U+00A0 matches JS \s but is \xc2\xa0 in bytes, where the agent-side strip
+    // stops. If the decoder treated it as padding whitespace the two would
+    // disagree about the same sequence.
+    osc52Request(req(), 'c;aGVs bG8=');
+    return { writes: clipboard.writes };
 };
 
 // --- #106 observers -------------------------------------------------------
@@ -699,4 +742,54 @@ def test_defaults_to_off():
     """Absent or junk entry must read as OFF, so a corrupted store fails shut."""
     body = _osc52_source()
     assert "=== true" in body, "authorization must be an explicit opt-in"
-    assert "|| 'local'" in body, "a missing hostId must resolve, not authorize"
+
+
+# ---- host identity ------------------------------------------------------------
+
+def test_repointing_a_host_url_revokes_its_authorization(harness):
+    """Host ids are not as immutable as they look: the #65 registry mod
+    republishes prefs._hosts WITH ids between brokers, so an id you once
+    trusted can come back attached to a different machine. What the user
+    authorized was that machine."""
+    r = run(harness, "repointing_a_host_url_revokes_it")
+    assert r["before"] == ["hello"]
+    assert r["after"] == ["hello"], "the re-pointed host must not write again"
+
+
+def test_unknown_or_missing_host_fails_shut(harness):
+    """Including a missing hostId: a confused security gate must not fall back
+    to the host the user is most likely to have authorized."""
+    r = run(harness, "unknown_host_fails_shut")
+    counts = {k: v for k, v in r.items() if not k.startswith("__")}
+    assert counts == {"ghost": 0, "undefined": 0, "null": 0, "": 0, "app": 0}
+
+
+# ---- the activity gate cannot be self-served ------------------------------------
+
+def test_activity_stamp_is_not_taken_from_term_ondata():
+    """onData looks like the obvious seam and is the wrong one: it carries
+    xterm's OWN automatic replies, so a program could emit a DA1 query
+    (`ESC[c`), collect xterm's answer through onData, and stamp the activity
+    gate by itself before sending its clipboard request."""
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    start = life.index("const onDataDisp = term.onData(")
+    body = life[start:life.index("\n", life.index(";", start))]
+    assert "markUserInput" not in body, (
+        "term.onData must not stamp the OSC 52 activity gate -- it fires for "
+        "xterm's automatic query replies too")
+    assert "isTrusted" in life, "the activity stamp must require a trusted event"
+    for ev in ("keydown", "mousedown", "touchstart", "compositionend"):
+        assert f"'{ev}'" in life, f"user-input stamp is missing {ev}"
+
+
+def test_read_form_is_reported_even_for_a_primary_only_request(harness):
+    r = run(harness, "read_form_before_pc_filter")
+    assert r["__clipboard"] == []
+    assert any("READ your clipboard" in t for t in r["__allNotices"])
+
+
+def test_only_ascii_whitespace_is_stripped_from_the_payload(harness):
+    """\\s would also match U+00A0, which the byte-level agent strip stops at --
+    the two must not disagree about the same sequence."""
+    r = run(harness, "nbsp_payload_does_not_sneak_through_as_whitespace")
+    assert r["__clipboard"] == []

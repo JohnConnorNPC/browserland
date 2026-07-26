@@ -239,8 +239,20 @@
             // anything the PTY can influence, and this also keeps the handler
             // free of a temporal-dead-zone reference to a `const` declared
             // later in the same scope.
+            //
+            // Stamped from TRUSTED DOM EVENTS ONLY, and specifically NOT from
+            // term.onData. onData looks like the obvious seam and is the wrong
+            // one: it carries xterm's OWN automatic replies as well as the
+            // user's typing, so a program could emit a DA1 query (`ESC[c`),
+            // collect xterm's `ESC[?1;2c` answer through onData, and have
+            // stamped the activity gate by itself — then send its clipboard
+            // request one byte later. Listening for user input directly closes
+            // that. Several event types rather than keydown alone, because a
+            // key-only check rejects touch and mouse-driven copies and misfires
+            // around IME composition.
             let lastUserInputAt = 0;
             const markUserInput = () => { lastUserInputAt = Date.now(); };
+            const onUserInputEv = (e) => { if (e.isTrusted) markUserInput(); };
             const oscDisp = term.parser.registerOscHandler(52, (data) => {
                 osc52Request({
                     hostId: hostId, sid: sid, winId: id,
@@ -306,8 +318,22 @@
             // so a leaked registration from a reopened terminal would stack.
             win.cleanups.push(() => { try { oscDisp.dispose(); } catch (_) {} });
 
+            // #153: the activity stamp the OSC 52 gate reads. Capture phase, so
+            // it lands whether or not the app or xterm consumes the event.
+            const USER_INPUT_EVENTS = ['keydown', 'mousedown', 'mouseup',
+                'touchstart', 'wheel', 'paste', 'compositionend'];
+            for (const t of USER_INPUT_EVENTS) {
+                dom.addEventListener(t, onUserInputEv, true);
+            }
+            win.cleanups.push(() => {
+                for (const t of USER_INPUT_EVENTS) {
+                    try { dom.removeEventListener(t, onUserInputEv, true); }
+                    catch (_) {}
+                }
+            });
+
             // bring to front on any mousedown inside the window dom
-            const onMouseDown = () => { markUserInput(); bringToFront(id); };
+            const onMouseDown = () => bringToFront(id);
             dom.addEventListener('mousedown', onMouseDown);
             win.cleanups.push(() => dom.removeEventListener('mousedown', onMouseDown));
 
@@ -742,18 +768,7 @@
 
             // term -> server (xterm.js delivers a Ctrl+V paste as one
             // onData string, so this path needs the chunking too)
-            //
-            // #153: this is also the activity stamp the OSC 52 gate reads. It
-            // is the right seam because it carries EVERY kind of user input —
-            // typing, a paste, and the mouse-report bytes an app that grabbed
-            // the mouse receives — where a keydown listener would reject touch
-            // and mouse-driven copies and misfire around IME composition. It
-            // deliberately does NOT fire for MCP send_input, which reaches the
-            // PTY over HTTP without passing through xterm at all.
-            const onDataDisp = term.onData((data) => {
-                markUserInput();
-                sendChunked('input', data);
-            });
+            const onDataDisp = term.onData((data) => sendChunked('input', data));
             win.cleanups.push(() => { try { onDataDisp.dispose(); } catch (_) {} });
 
             // Track IME composition so relayout never reparents (and aborts a
