@@ -180,19 +180,42 @@
         // a real hostId, so a missing one means something is wrong — and the one
         // thing a security gate must not do when it is confused is fall back to
         // the host the user is most likely to have authorized.
+        //
+        // JSON, not `id + '|' + url`: a separator that can appear in either half
+        // lets two different host records spell the same key.
         function _osc52HostKey(hostId) {
             const h = hostById(hostId);
             if (!h) return null;
-            return (h.id === 'local') ? 'local' : (h.id + '|' + (h.url || ''));
+            return JSON.stringify([h.id, h.url || '']);
+        }
+        // Every key that no longer names a CURRENT host is dropped, and the
+        // pruned map is written back. Without this, re-pointing a host's URL
+        // only SUSPENDS the grant — point it back and the stale entry re-arms
+        // it with no fresh consent, while the Control Panel box has been
+        // reporting "off" the whole time. Removing a host drops its grant too,
+        // so re-adding one always starts shut.
+        function _osc52PruneStale(map) {
+            let live;
+            try { live = new Set(getHosts().map(h => JSON.stringify([h.id, h.url || '']))); }
+            catch (e) { return map; }        // never fail a gate on a bad host list
+            let changed = false;
+            for (const k of Object.keys(map)) {
+                if (!live.has(k)) { delete map[k]; changed = true; }
+            }
+            if (changed) {
+                try { localStorage.setItem(OSC52_HOSTS_KEY, JSON.stringify(map)); }
+                catch (e) {}
+            }
+            return map;
         }
         function isOsc52Allowed(hostId) {
             const k = _osc52HostKey(hostId);
-            return k !== null && loadOsc52Hosts()[k] === true;
+            return k !== null && _osc52PruneStale(loadOsc52Hosts())[k] === true;
         }
         function setOsc52Allowed(hostId, on) {
             const k = _osc52HostKey(hostId);
             if (k === null) return;
-            const map = loadOsc52Hosts();
+            const map = _osc52PruneStale(loadOsc52Hosts());
             if (on) map[k] = true; else delete map[k];
             try { localStorage.setItem(OSC52_HOSTS_KEY, JSON.stringify(map)); }
             catch (e) { /* quota/private mode: the gate stays shut, which is safe */ }
@@ -223,16 +246,28 @@
         // exact symptom this whole feature exists to fix.
         const OSC52_NOTICE_THROTTLE_MS = 3000;
 
+        // How long before a host that is switched OFF may say so again. The
+        // one-shot must not be a ONE-shot-per-load: a program that emits an OSC
+        // 52 at startup would otherwise consume it, and the user's own copy ten
+        // minutes later would fail in exactly the silence this feature exists
+        // to remove.
+        const OSC52_REOFFER_MS = 60000;
+
         const _osc52 = {
             accepted: [],          // ms timestamps of accepted writes (rolling)
-            noticedAt: new Map(),  // reason -> last notice ms
-            offeredHosts: new Set(),  // hosts already told "it's off" this load
+            noticedAt: new Map(),  // reason+window -> last notice ms
+            offeredAt: new Map(),  // host key -> last "it's off" notice ms
         };
-        function _osc52Notice(reason, text, opts) {
+        // Coalesced per reason AND per window. Keying on the reason alone would
+        // let a hostile terminal swallow another terminal's refusal by firing
+        // the same reason first — the victim's copy would then do nothing, with
+        // nothing said, which is the original bug wearing a new hat.
+        function _osc52Notice(reason, req, text, opts) {
             const now = Date.now();
-            const last = _osc52.noticedAt.get(reason) || 0;
+            const k = reason + '\n' + (req ? req.winId : '');
+            const last = _osc52.noticedAt.get(k) || 0;
             if (now - last < OSC52_NOTICE_THROTTLE_MS) return;
-            _osc52.noticedAt.set(reason, now);
+            _osc52.noticedAt.set(k, now);
             showNotice(text, opts);
         }
         // Attribution comes from application-owned facts ONLY — the broker's
@@ -240,10 +275,18 @@
         // titles are settable straight from the PTY via OSC 0/2, so a hostile
         // program could otherwise forge the attribution on its own clipboard
         // write.
-        function _osc52Who(req) {
+        //
+        // An unknown host reads as "an unknown host", NOT as "this broker".
+        // Naming the local broker for a request that did not come from it would
+        // send a user following the advice to authorize the one host most worth
+        // protecting — the same fallback _osc52HostKey deliberately refuses.
+        function _osc52Where(req) {
             const h = hostById(req.hostId);
-            const where = (!h || h.id === 'local') ? 'this broker' : h.label;
-            return 'terminal #' + req.sid + ' on ' + where;
+            return !h ? 'an unknown host'
+                : (h.id === 'local' ? 'this broker' : h.label);
+        }
+        function _osc52Who(req) {
+            return 'terminal #' + req.sid + ' on ' + _osc52Where(req);
         }
 
         // Decode Pd. Returns {text} | {error}. Never throws.
@@ -256,6 +299,13 @@
             // here while the agent-side snapshot strip — which works on bytes
             // and stops at \xc2 — leaves that same sequence in the ring replay.
             // Keeping the two in step costs one character class.
+            // Length-check the RAW string first. The three rewrites below each
+            // allocate a full copy, and xterm buffers up to PAYLOAD_LIMIT (1e7)
+            // before handing it over — so checking after them would mean ~3
+            // copies of a payload we are about to reject. Whitespace can only
+            // shrink the string, so a raw length over the bound is over the
+            // bound however it is spelled.
+            if (String(pd).length > OSC52_MAX_B64) return { error: 'too-large' };
             const b64 = String(pd).replace(/[ \t\r\n\f\v]+/g, '')
                 .replace(/-/g, '+').replace(/_/g, '/');
             if (!b64) return { error: 'empty' };
@@ -304,7 +354,9 @@
             // ever hearing that something tried to exfiltrate their clipboard.
             // Refused here, in code — never behind a setting.
             if (pd === '?') {
-                _osc52Notice('query',
+                // The ONLY sticky notice this policy raises — see the note on
+                // the refusal notices below for why that matters.
+                _osc52Notice('query', req,
                     'blocked: ' + _osc52Who(req) + ' tried to READ your '
                     + 'clipboard. Browserland never answers that request.',
                     { sticky: true, type: 'error' });
@@ -316,6 +368,13 @@
             // TERM=xterm-256color), so a strict equality check against
             // {c,s,""} would reject the single most common real emitter.
             //
+            // Validated against the LEGAL ALPHABET first, then searched. A bare
+            // substring test would accept `c ` — and a non-ASCII byte in
+            // Pc is exactly what slips a sequence past the agent-side ring
+            // strip, whose body class stops at \xc2. Rejecting a malformed Pc
+            // here is both spec-correct and the thing that makes that gap
+            // harmless.
+            if (!/^[cspq0-7]*$/.test(pc)) return;
             // A request naming neither c nor s (`p`, `q`, `3`) is IGNORED: the
             // browser has one clipboard and no X11 PRIMARY to write, so
             // honouring a p-only request would let a selection the user aimed
@@ -331,12 +390,26 @@
             // load says so out loud: learning that the TUI tried to copy, and
             // where the switch is, is the other half of the original bug.
             if (!isOsc52Allowed(req.hostId)) {
-                if (!_osc52.offeredHosts.has(req.hostId)) {
-                    _osc52.offeredHosts.add(req.hostId);
+                // Keyed exactly the way the GRANT is, so the prompt and the
+                // switch it points at can never name different machines. Timed
+                // rather than burned once per page load: a program that emits
+                // one OSC 52 at startup would otherwise consume the only offer,
+                // and the user's own copy ten minutes later would fail in the
+                // very silence this feature exists to remove.
+                const hk = _osc52HostKey(req.hostId) || String(req.hostId);
+                const at = Date.now();
+                if (at - (_osc52.offeredAt.get(hk) || 0) >= OSC52_REOFFER_MS) {
+                    _osc52.offeredAt.set(hk, at);
+                    // Sticky, because it is ACTIONABLE and the user should not
+                    // have four seconds to catch it. Named by HOST, not by
+                    // terminal, so showNotice's identical-text dedupe collapses
+                    // every terminal on that host into one: per-terminal text
+                    // would let a broker with many sessions mint many distinct
+                    // stickies and push the `?` read warning out of the cap.
                     showNotice(
-                        _osc52Who(req) + ' tried to set your clipboard. Allow it '
-                        + 'in Control Panel → that host’s tab → '
-                        + 'Clipboard (OSC 52).', { sticky: true });
+                        'A program on ' + _osc52Where(req) + ' tried to set '
+                        + 'your clipboard. Allow it in Control Panel → that '
+                        + 'host’s tab → Clipboard (OSC 52).', { sticky: true });
                 }
                 return;
             }
@@ -346,7 +419,7 @@
             if (frontId !== req.winId) return;
             // GATE 4 — recent user input in THAT window.
             if (!(Date.now() - (req.lastInputAt || 0) < OSC52_ACTIVITY_MS)) {
-                _osc52Notice('stale',
+                _osc52Notice('stale', req,
                     'clipboard write from ' + _osc52Who(req)
                     + ' ignored (no recent activity in that terminal)');
                 return;
@@ -356,6 +429,14 @@
             if (res.error) {
                 // Every rejection is visible. Distinct reasons get distinct
                 // advice; they are not interchangeable.
+                //
+                // None of them are STICKY, on purpose. showNotice caps sticky
+                // notices at STICKY_NOTICE_MAX and drops the OLDEST, so a burst
+                // of refusals with distinct reasons — each one dodging the
+                // per-reason throttle — could push the `?` read warning off the
+                // screen within a single parse pass, and take other subsystems'
+                // sticky notices with it. The read warning is the one thing
+                // here that must survive, so it is the only sticky one.
                 const who = _osc52Who(req);
                 const msg = {
                     'too-large': 'clipboard copy from ' + who + ' refused: over '
@@ -370,7 +451,7 @@
                 // 'empty' is a no-op, not a refusal — see the deviation note
                 // below; it needs no notice.
                 if (msg) {
-                    _osc52Notice(res.error, msg, { sticky: true, type: 'error' });
+                    _osc52Notice(res.error, req, msg, { type: 'error' });
                 }
                 return;
             }
@@ -380,7 +461,7 @@
             _osc52.accepted = _osc52.accepted.filter(
                 t => now - t < OSC52_RATE_WINDOW_MS);
             if (_osc52.accepted.length >= OSC52_RATE_MAX) {
-                _osc52Notice('rate',
+                _osc52Notice('rate', req,
                     'clipboard writes from ' + _osc52Who(req)
                     + ' are coming too fast — ignoring for a moment.',
                     { type: 'error' });
@@ -391,10 +472,10 @@
                 // Distinct from a permission denial: the API is not merely
                 // refusing, it does not exist on this origin, and the fix is a
                 // different one (https or localhost, e.g. `tailscale serve`).
-                _osc52Notice('insecure',
+                _osc52Notice('insecure', req,
                     'clipboard copy from ' + _osc52Who(req) + ' needs a secure '
                     + 'origin — open Browserland over https or on '
-                    + 'localhost.', { sticky: true, type: 'error' });
+                    + 'localhost.', { type: 'error' });
                 return;
             }
             _osc52.accepted.push(now);
@@ -415,10 +496,9 @@
                 showNotice('copied ' + res.text.length + ' chars from '
                     + _osc52Who(req));
             }).catch(() => {
-                _osc52Notice('denied',
+                _osc52Notice('denied', req,
                     'clipboard copy from ' + _osc52Who(req)
-                    + ' was blocked by the browser.',
-                    { sticky: true, type: 'error' });
+                    + ' was blocked by the browser.', { type: 'error' });
             });
         }
         // Deviation from xterm, stated plainly: xterm treats an empty OR

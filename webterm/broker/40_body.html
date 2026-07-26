@@ -174,8 +174,11 @@
                         to do it. Off by default: everything downstream of the
                         terminal can send this, including a remote box you
                         don&#8217;t own. Authorised <b>per host</b> and stored in
-                        <b>this browser only</b> &#8212; a broker cannot switch
-                        it on for itself. Writes only, never reads; needs
+                        <b>this browser only</b>, so a <em>remote</em> broker
+                        cannot switch itself on by editing the settings it owns
+                        (nothing can protect you from the broker serving this
+                        page &#8212; it sends the code). Editing a host&#8217;s
+                        URL revokes it. Writes only, never reads; needs
                         https/localhost, the window focused, and recent activity
                         in the front terminal. Neovim&#8217;s <code>"+y</code>
                         works; <code>"*y</code> is ignored.</div>

@@ -130,14 +130,52 @@ def test_osc52_unterminated_absorbs_trailing_plain_text():
     assert raw.render(data, evicted=False) == raw.PREAMBLE + b""
 
 
-def test_osc52_unterminated_never_eats_a_following_escape_sequence():
-    # The case the bound exists for. An ESC after a truncated sequence ABORTS
-    # the OSC in xterm's parser, so everything from there really is on screen —
-    # a greedy "terminator optional" match would have eaten it.
+def test_bare_esc_terminates_an_osc52_so_it_must_be_stripped():
+    # Read out of the vendored parser table, not assumed: OSC_STRING routes
+    # [156,27,24,26,7] to OSC_END and the action is end(24!==r && 26!==r), so a
+    # BARE ESC ends the string with SUCCESS and the handler runs. An OSC 52
+    # followed by any escape sequence is a completed clipboard write.
     data = b"\x1b]52;c;QUFBQQ" + b"\x1b[31mred\x1b[0m rest"
     out = raw.render(data, evicted=False)
-    assert out == raw.PREAMBLE + data
-    assert b"\x1b[31mred" in out and b"rest" in out
+    assert b"]52;" not in out
+    # ...and the ESC itself is NOT eaten: the same byte re-enters the parser as
+    # the start of the next sequence (27===r && (n|=1)), so the colour survives.
+    assert out == raw.PREAMBLE + b"\x1b[31mred\x1b[0m rest"
+
+
+def test_st_terminated_form_consumes_the_backslash_too():
+    # ESC \ must be consumed whole rather than matched by the bare-ESC
+    # lookahead, or a stray ST would be left behind.
+    data = b"a\x1b]52;c;QUFB\x1b\\b"
+    assert raw.render(data, evicted=False) == raw.PREAMBLE + b"ab"
+
+
+# ---- splice hazards: deleting a span joins its neighbours -------------------
+
+
+def test_removing_an_osc52_cannot_manufacture_another_one():
+    # ESC]5 + <removed OSC 52> + 2;c;… spells a brand-new ESC]52;c;… at the
+    # join. re.sub never revisits a join, so the strip runs to a fixpoint.
+    data = b"\x1b]5" + b"\x1b]52;c;QUFB\x07" + b"2;c;YWJj\x07"
+    out = raw.render(data, evicted=False)
+    assert b"]52;" not in out
+    assert b"YWJj" not in out
+
+
+def test_removing_a_da_query_cannot_manufacture_an_osc52():
+    # The query strip can feed the OSC strip: deleting ESC[c joins the halves
+    # into a syntactically perfect clipboard write.
+    data = b"\x1b]5" + b"\x1b[c" + b"2;c;aGVsbG8=\x07"
+    out = raw.render(data, evicted=False)
+    assert b"]52;" not in out
+    assert b"aGVsbG8=" not in out
+
+
+def test_da_query_spliced_into_the_payload_cannot_reassemble():
+    data = b"\x1b]52;c;QU\x1b[cJD\x07"
+    out = raw.render(data, evicted=False)
+    assert b"]52;" not in out
+    assert b"QUJD" not in out
 
 
 def test_osc52_aborted_sequence_is_not_matched():

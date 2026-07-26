@@ -745,7 +745,16 @@
                         _notifyClipboard('in', text);   // #106 history
                     }
                 } catch (err) {
+                    // canReadClipboard() only proves readText EXISTS, not that
+                    // it is permitted — a blocked permission (or a browser that
+                    // gates it behind a prompt) rejects here. We have already
+                    // preventDefault'd the browser's own paste-as-plain-text by
+                    // then, so staying quiet would turn a working chord into a
+                    // dead key. Say so, and name the paths that still work.
                     console.error('paste read failed:', err);
+                    showNotice('Ctrl+Shift+V could not read the clipboard — '
+                        + 'use Ctrl+V, or right-click to paste.',
+                        { type: 'error' });
                 }
             };
             term.attachCustomKeyEventHandler(ev => {

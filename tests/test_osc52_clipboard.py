@@ -99,6 +99,7 @@ const hosts = new Map([
                   url: 'https://box-one:4445' }],
 ]);
 globalThis.hostById = (id) => hosts.get(id) || null;
+globalThis.getHosts = () => Array.from(hosts.values());
 globalThis.frontId = 'w1';
 
 __POLICY__
@@ -117,7 +118,7 @@ function reset(opts) {
     NOW.t += 60_000;                 // clear any rolling window / throttle
     _osc52.accepted.length = 0;
     _osc52.noticedAt.clear();
-    _osc52.offeredHosts.clear();
+    _osc52.offeredAt.clear();
     if (opts.allow !== false) setOsc52Allowed(opts.host || 'local', true);
 }
 
@@ -363,6 +364,89 @@ CASES.unknown_host_fails_shut = () => {
     return out;
 };
 
+// --- adversarial-review regressions ---------------------------------------
+CASES.pc_must_match_the_legal_alphabet = () => {
+    reset();
+    const out = {};
+    // A non-ASCII byte in Pc is exactly what slips a sequence past the
+    // agent-side ring strip (its body class stops at \xc2). It must not then
+    // be honoured here.
+    for (const pc of ['c\u00a0', 'c ', ' c', 'cX', 'c;', 'C', 'c\t']) {
+        clipboard.writes.length = 0;
+        osc52Request(req(), pc + ';aGVsbG8=');
+        out[JSON.stringify(pc)] = clipboard.writes.length;
+    }
+    return out;
+};
+CASES.refusal_notices_are_not_sticky = () => {
+    reset();
+    // Five DISTINCT reasons in one pass, each dodging the per-reason throttle.
+    osc52Request(req(), 'c;?');                                    // query
+    osc52Request(req(), 'c;' + 'A'.repeat(3 * 1024 * 1024));       // too-large
+    osc52Request(req(), 'c;' + Buffer.from([0xff, 0xfe]).toString('base64'));
+    osc52Request(req(), 'c;' + Buffer.from('a\x1bb').toString('base64'));
+    osc52Request(req(), 'c;!!!!');                                 // bad-base64
+    return {
+        stickyCount: notices.filter(n => n.opts && n.opts.sticky).length,
+        stickyTexts: notices.filter(n => n.opts && n.opts.sticky).map(n => n.text),
+        total: notices.length,
+    };
+};
+CASES.one_terminal_cannot_silence_anothers_refusal = () => {
+    reset();
+    // Attacker in w1 makes 'too-large' hot, then the user's own oversized copy
+    // in w2 must still be reported.
+    osc52Request(req({ winId: 'w1' }), 'c;' + 'A'.repeat(3 * 1024 * 1024));
+    const afterAttacker = notices.length;
+    globalThis.frontId = 'w2';
+    osc52Request(req({ winId: 'w2', sid: '99' }), 'c;' + 'A'.repeat(3 * 1024 * 1024));
+    return { afterAttacker, total: notices.length,
+             texts: notices.map(n => n.text) };
+};
+CASES.offer_is_reoffered_not_burned_once = () => {
+    reset({ allow: false });
+    osc52Request(req(), 'c;aGVsbG8=');
+    const first = notices.length;
+    osc52Request(req(), 'c;aGVsbG8=');           // immediately: suppressed
+    const immediate = notices.length;
+    NOW.t += 61_000;                              // ...and again a minute later
+    osc52Request(req(), 'c;aGVsbG8=');
+    return { first, immediate, afterWindow: notices.length };
+};
+CASES.offer_text_is_host_scoped_so_it_dedupes = () => {
+    reset({ allow: false });
+    osc52Request(req({ sid: '1' }), 'c;aGVsbG8=');
+    const t1 = notices[0] && notices[0].text;
+    NOW.t += 61_000;
+    osc52Request(req({ sid: '2' }), 'c;aGVsbG8=');
+    const t2 = notices[1] && notices[1].text;
+    return { t1, t2, identical: t1 === t2 };
+};
+CASES.unknown_host_is_not_called_this_broker = () => {
+    reset({ allow: false });
+    osc52Request(req({ hostId: 'ghost' }), 'c;aGVsbG8=');
+    return { texts: notices.map(n => n.text) };
+};
+CASES.repointing_and_back_does_not_rearm = () => {
+    reset({ allow: false });
+    setOsc52Allowed('remote1', true);
+    hosts.get('remote1').url = 'https://elsewhere:4445';
+    const whileAway = isOsc52Allowed('remote1');
+    hosts.get('remote1').url = 'https://box-one:4445';   // pointed back
+    const afterReturn = isOsc52Allowed('remote1');
+    osc52Request(req({ hostId: 'remote1' }), 'c;aGVsbG8=');
+    return { whileAway, afterReturn, writes: clipboard.writes,
+             store: store.get('webterm:osc52Hosts:v1') };
+};
+CASES.removing_a_host_drops_its_grant = () => {
+    reset({ allow: false });
+    setOsc52Allowed('remote1', true);
+    hosts.delete('remote1');
+    const stored = store.get('webterm:osc52Hosts:v1');
+    isOsc52Allowed('local');            // any check triggers the prune
+    return { before: stored, after: store.get('webterm:osc52Hosts:v1') };
+};
+
 // --- the activity stamp must not be self-servable -------------------------
 CASES.read_form_before_pc_filter = () => {
     reset();
@@ -467,7 +551,7 @@ def test_default_off_blocks_the_write_but_says_so(harness):
     assert r["__clipboard"] == []
     joined = " ".join(r["__allNotices"])
     assert "Control Panel" in joined and "Clipboard (OSC 52)" in joined
-    assert r["__stickyNotices"], "the one-shot offer must not auto-dismiss"
+    assert r["__stickyNotices"], "the offer is actionable — it must not auto-dismiss"
 
 
 def test_blocked_notice_is_one_shot_per_host(harness):
@@ -793,3 +877,78 @@ def test_only_ascii_whitespace_is_stripped_from_the_payload(harness):
     the two must not disagree about the same sequence."""
     r = run(harness, "nbsp_payload_does_not_sneak_through_as_whitespace")
     assert r["__clipboard"] == []
+
+
+# ---- adversarial-review regressions ---------------------------------------
+
+def test_pc_must_match_the_legal_alphabet(harness):
+    """A bare substring test accepted `c ` — and a NON-ASCII byte in Pc is
+    exactly what slips a sequence past the agent-side ring strip, whose body
+    class stops at \xc2. Rejecting a malformed Pc here is what makes that gap
+    harmless."""
+    r = run(harness, "pc_must_match_the_legal_alphabet")
+    counts = {k: v for k, v in r.items() if not k.startswith("__")}
+    assert set(counts.values()) == {0}, counts
+
+
+def test_refusal_notices_cannot_evict_the_read_warning(harness):
+    """showNotice caps sticky notices and drops the OLDEST, so a burst of
+    distinct-reason refusals could push the `?` read warning off screen inside
+    one parse pass. Only the read warning is sticky."""
+    r = run(harness, "refusal_notices_are_not_sticky")
+    assert r["stickyCount"] == 1, r["stickyTexts"]
+    assert "READ your clipboard" in r["stickyTexts"][0]
+    assert r["total"] >= 4, "every distinct refusal is still reported"
+
+
+def test_one_terminal_cannot_silence_anothers_refusal(harness):
+    """The throttle is keyed on reason AND window. Keyed on reason alone, a
+    hostile terminal firing first would swallow the victim's refusal — the
+    user's copy then does nothing, with nothing said."""
+    r = run(harness, "one_terminal_cannot_silence_anothers_refusal")
+    assert r["total"] > r["afterAttacker"], r["texts"]
+    assert any("#99" in t for t in r["texts"])
+
+
+def test_the_offer_is_reoffered_rather_than_burned_once(harness):
+    """A program emitting one OSC 52 at startup must not consume the only
+    prompt the user will ever get — their own copy ten minutes later would then
+    fail in the exact silence this feature removes."""
+    r = run(harness, "offer_is_reoffered_not_burned_once")
+    assert r["first"] == 1
+    assert r["immediate"] == 1, "still coalesced inside the window"
+    assert r["afterWindow"] == 2, "and offered again once the window passes"
+
+
+def test_offer_text_is_host_scoped_so_stickies_dedupe(harness):
+    """Per-terminal text would let a broker with many sessions mint many
+    distinct sticky notices and push the read warning out of the cap."""
+    r = run(harness, "offer_text_is_host_scoped_so_it_dedupes")
+    assert r["identical"] is True, (r["t1"], r["t2"])
+    assert "#" not in r["t1"], r["t1"]
+
+
+def test_unknown_host_is_never_described_as_this_broker(harness):
+    """Naming the local broker for a request that did not come from it would
+    send a user following the advice to authorize the host most worth
+    protecting."""
+    r = run(harness, "unknown_host_is_not_called_this_broker")
+    joined = " ".join(r["texts"])
+    assert "unknown host" in joined
+    assert "this broker" not in joined
+
+
+def test_repointing_a_host_url_and_back_does_not_rearm_the_grant(harness):
+    """Re-pointing must REVOKE, not suspend. A stale key that survives means
+    pointing the host back re-arms clipboard write with no fresh consent —
+    while the Control Panel box reported "off" the whole time."""
+    r = run(harness, "repointing_and_back_does_not_rearm")
+    assert r["whileAway"] is False
+    assert r["afterReturn"] is False, r["store"]
+    assert r["writes"] == []
+
+
+def test_removing_a_host_drops_its_grant(harness):
+    r = run(harness, "removing_a_host_drops_its_grant")
+    assert "remote1" in r["before"]
+    assert "remote1" not in r["after"]
