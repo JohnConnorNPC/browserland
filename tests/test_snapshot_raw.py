@@ -1,3 +1,5 @@
+import pytest
+
 from webterm.agent.snapshot import raw
 
 
@@ -164,6 +166,20 @@ def test_osc52_strip_runs_after_trim_and_with_query_strip():
             b"\x1b[31mred\x1b[0m")
     out = raw.render(data, evicted=True)
     assert out == raw.PREAMBLE + b"\x1b[2Jfresh \x1b[31mred\x1b[0m"
+
+
+def test_pyte_snapshot_mode_needs_no_strip_of_its_own():
+    """Only the RAW mode replays bytes, and it is the default. The tier-2 pyte
+    renderer feeds the ring to a screen model and emits the settled GRID, so an
+    OSC 52 in the ring is consumed by the model and can never be re-emitted --
+    which is why the strip lives in raw.py alone rather than in both."""
+    pyte = pytest.importorskip("pyte")
+    from webterm.agent.snapshot import pyte_snap
+
+    out = pyte_snap.render(b"hello\x1b]52;c;aGVsbG8=\x07world", 40, 4)
+    assert b"]52;" not in out
+    assert b"aGVsbG8=" not in out
+    assert b"hello" in out and b"world" in out
 
 
 def test_osc52_repeated_c1_introducers_do_not_blow_up():
