@@ -179,8 +179,9 @@
         #ctx-menu .ctx-swatch.auth  { border-color: #e0a93a; background: #e0a93a; }
         #ctx-menu .ctx-swatch.lease { border-color: #6fa3e0; background: #6fa3e0; }
         /* Hidden broker (focus mode): struck through + dimmed, mirroring the
-           taskbar chip's .off treatment. */
-        #ctx-menu .ctx-item.host-row.off .ctx-label {
+           taskbar chip's .off treatment. ('broker-row', because .host-row is
+           the settings pane's — unscoped — host list row class.) */
+        #ctx-menu .ctx-item.broker-row.off .ctx-label {
             text-decoration: line-through;
             opacity: 0.55;
         }

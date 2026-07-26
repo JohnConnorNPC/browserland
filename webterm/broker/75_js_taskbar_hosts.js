@@ -344,7 +344,10 @@
                 enabled: true,
                 action,
                 keepOpen: true,
-                cls: 'host-row' + (host.hidden ? ' off' : ''),
+                // 'broker-row', not 'host-row': the settings pane already
+                // owns an UNSCOPED .host-row rule (15_css_dialogs) that
+                // would silently restyle a menu row wearing that name.
+                cls: 'broker-row' + (host.hidden ? ' off' : ''),
                 title: hostChipTip(host, state),
                 swatch: { state, color: strictHex(host.color) },
             }];
