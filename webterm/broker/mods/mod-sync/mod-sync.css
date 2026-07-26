@@ -1,0 +1,96 @@
+        /* ---- mod: mod-sync (#158) ------------------------------------------
+           The Control Panel pane (a browser-mounted registerSettingsPane) is an
+           action row plus a persistent per-target result list; the push/pull
+           dialogs reuse the shared .app-dialog primitive (69_js_dialog.js), so
+           only the rows inside those dialogs and the result list need styling.
+           All theme-var driven, matching the Control Panel / host-row look.
+           Indentation matches the head <style> zone the mod-css splice lands in
+           (ui.py:_mod_css). */
+        .modsync-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .modsync-actions button { flex: 0 0 auto; }
+        .modsync-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 44vh;
+            overflow: auto;
+            margin: 8px 0;
+            padding: 4px;
+            border: 1px solid var(--bg-2);
+            border-radius: 4px;
+            background: var(--bg);
+        }
+        .modsync-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 8px;
+            padding: 4px 6px;
+            border-radius: 3px;
+        }
+        .modsync-row input[type="checkbox"] { flex: 0 0 auto; }
+        .modsync-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+        /* A host that cannot be a sync target at all (no saved password, or its
+           poll says the password is stale): shown, never selectable. */
+        .modsync-locked { color: var(--fg-dim); }
+        .modsync-tag {
+            flex: 0 0 auto;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--fg-dim);
+        }
+        /* One broker in the preview: its checkbox label plus the change list as a
+           SIBLING, never inside the <label> (every click in a label's subtree
+           toggles its checkbox, and the change list is meant to be read). */
+        .modsync-target { display: block; }
+        /* Per-target plan + per-mod/-setting change lines inside the preview. */
+        .modsync-plan {
+            width: 100%;
+            flex-basis: 100%;
+            margin: 2px 0 0 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+        }
+        .modsync-change {
+            font-size: 11px;
+            color: var(--fg-dim);
+            overflow-wrap: anywhere;
+        }
+        /* A change that WILL be written vs one that needs nothing. */
+        .modsync-write { color: #5fbf7f; }
+        .modsync-skip  { color: var(--fg-dim); }
+        .modsync-warn {
+            color: #e0a93a;
+            width: 100%;
+            flex-basis: 100%;
+        }
+        .modsync-danger { color: #e07b3a; }
+        /* The persistent result list in the pane. One row per target, so a
+           partial push is legible afterwards instead of living in a toast. */
+        .modsync-results { margin-top: 8px; }
+        .modsync-result {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 8px;
+            padding: 3px 6px;
+            border-left: 3px solid var(--bg-2);
+            border-radius: 3px;
+        }
+        .modsync-result-ok      { border-left-color: #5fbf7f; }
+        .modsync-result-partial { border-left-color: #e0a93a; }
+        .modsync-result-fail    { border-left-color: #e07b3a; }
+        .modsync-result button { flex: 0 0 auto; }
+        .modsync-detail {
+            width: 100%;
+            flex-basis: 100%;
+            font-size: 11px;
+            color: var(--fg-dim);
+            overflow-wrap: anywhere;
+        }

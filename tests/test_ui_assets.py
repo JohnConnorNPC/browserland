@@ -1761,6 +1761,120 @@ def test_mousemode_mod_packaged_and_manifest_agrees():
     assert ".mousemode-chip" in INDEX_HTML
 
 
+def test_mod_sync_mod_packaged_and_manifest_agrees():
+    # #158: pushes this broker's mod setup (which mods are on + the settings
+    # mods own) to selected peers, and adopts a peer's into this browser. The
+    # whole feature rides wires that already exist -- GET /info for a peer's
+    # catalog + pins (#157), POST /mods/policy to write them, GET/PUT /state for
+    # the settings blob -- so it adds NO broker endpoint.
+    import json
+    mod_dir = BROKER_DIR / "mods" / "mod-sync"
+    js = mod_dir / "mod-sync.js"
+    css = mod_dir / "mod-sync.css"
+    manifest = mod_dir / "mod.json"
+    help_md = mod_dir / "help.md"
+    assert js.is_file() and css.is_file() and manifest.is_file() \
+        and help_md.is_file()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "mod-sync"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "mod-sync.js"
+    assert meta["styles"] == ["mod-sync.css"]
+    assert meta["help"]["slug"] == "mod-sync"
+    assert "mods/mod-sync/mod-sync.js" in ui._MODS
+    # The mod id is also a POLICY KEY namespace, so it must satisfy the shape the
+    # broker enforces on /mods/policy keys (_MODSTORE_ID_RE) -- a pin naming a mod
+    # the broker would reject is unwritable.
+    assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", meta["id"])
+    src = js.read_text(encoding="utf-8")
+    # The negative assertions below are about CODE, not prose -- the mod's header
+    # comment names the alternatives it rejected.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "registerMod(" in src
+    assert "id: 'mod-sync'" in src
+    assert "ctxVersion: 1" in src
+    # Tiers match the order-sensitive _EXPECTED_TIERS guard above.
+    assert "tiers: ['settings']" in src
+    # Ships default-ON (no defaultEnabled:false): it is inert until a button is
+    # clicked, so it costs a single-broker user nothing.
+    assert "defaultEnabled" not in src
+    # It must NEVER disable itself: adopting a snapshot that turned mod-sync off
+    # would run this mod's own teardown mid-apply, with its dialog still open,
+    # orphaning the rest of the batch. Self is excluded in BOTH directions.
+    assert "const SELF = 'mod-sync';" in src
+    assert "if (m.id === SELF) continue;" in code
+    # --- the two anti-clobber properties #158 turns on ---
+    # 1. It must NOT reuse putHostState for the settings half: that helper's 409
+    #    rebase adopts the winner's rev+layout but re-PUTs the WHOLE settings
+    #    object it was handed, which would erase every key a concurrent editor
+    #    changed -- the blind overwrite the issue forbids. Its own writer
+    #    re-reads the live blob and re-applies only ITS keys, so the merge is
+    #    per-key. (fetchHostState is avoided for the second half of the same
+    #    reason: it normalizes a peer's blob with THIS build's rules in place.)
+    for forbidden in ("putHostState", "fetchHostState"):
+        assert forbidden not in code, \
+            f"mod-sync must own its /state merge, not reuse {forbidden!r}"
+    assert "async function writeSettings" in src
+    assert "clientId: CLIENT_ID" in src
+    # 2. A pin write goes through core's BATCH path (one POST /mods/policy per
+    #    broker, under that broker's own lock), shared with #157's per-host pin
+    #    editor rather than a second way to set the same field.
+    assert "saveModPins(" in code
+    assert "'/mods/policy'" not in code, \
+        "mod-sync must not POST /mods/policy itself -- it shares saveModPins"
+    # A peer's catalog is read through the SHARED fetcher, so this mod and the
+    # #157 pane can never disagree about what a broker serves.
+    assert "await fetchModCatalog(host)" in code
+    assert "modCatalogCache.get(host.id)" in code
+    # A pinned-ON mod implies its dependencies ON transitively, resolved on the
+    # TARGET over ITS catalog -- so "that broker's default already matches, leave
+    # it unpinned" is not always enough: a mod we want OFF can be dragged ON by a
+    # pinned-ON dependent, including one that only exists on that build. The plan
+    # mirrors the implied-pin resolution and writes an explicit pin where the
+    # implication contradicts the wish (an explicit pin always wins).
+    assert "modPolicyImplied(" in code
+    # Minimal pins, and self-cleaning: where a broker's own default already lands
+    # where we want, an existing pin is CLEARED rather than left locking that
+    # broker's checkbox forever.
+    assert "writes[m.id] = null;" in code
+    # Every target is re-resolved by id at write time: hostFetch(null, ...)
+    # silently resolves against our OWN origin with no token, so a host removed
+    # while a dialog was open must never reach it.
+    assert "hostById(plan.hostId)" in code
+    # Mod code is NEVER shipped over the wire (#158 scope A): no file API, no
+    # mod-store deposit, no new endpoint.
+    for forbidden in ("ctx.file", "ctx.serverStore", "mod-store"):
+        assert forbidden not in code, \
+            f"mod-sync must not ship mod code / add storage: {forbidden!r}"
+    # Ships in the served page, AFTER the mousemode mod (the last mod before it
+    # in _MODS), and its CSS rides the mod-css splice.
+    assert "id: 'mod-sync'" in INDEX_HTML
+    assert INDEX_HTML.index("id: 'mousemode'") \
+        < INDEX_HTML.index("id: 'mod-sync'")
+    assert ".modsync-actions" in INDEX_HTML
+
+
+def test_mod_policy_pin_write_is_batched_and_shared():
+    # #158: the pin write is ONE POST carrying the whole {set:{…}} map, so a bulk
+    # apply lands under the broker's own lock in one round trip instead of N
+    # writes leaving N partial states behind a failure. #157's per-host select
+    # keeps its one-key entry point as a thin wrapper, so there is exactly one
+    # write path for a mod pin.
+    cp = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+    assert "async function saveModPins(host, set, opts)" in cp
+    assert "function saveModPin(host, id, pin)" in cp
+    assert "return saveModPins(host, set)" in cp
+    # A null host must fail closed rather than reach hostFetch, which would
+    # resolve against our own origin and write THIS broker's policy.
+    assert "if (!host) return { ok: false, error: 'no_host' };" in cp
+    # Batch size is bounded by the same cap the broker enforces per call.
+    assert "ids.length > MAX_MOD_POLICY_KEYS" in cp
+    # The authoritative policy from the response still drives the cache, so a
+    # refused or partial write can never leave the editor showing a phantom.
+    assert "rec.policy = sanitizeModPolicy(j.policy);" in cp
+
+
 def test_editor_serialized_fields_preserved():
     # The hard #83 requirement: every editor serialized field round-trips. They
     # live in the SHARED core serializeAppWindow (54), unchanged by the extraction.
@@ -2871,6 +2985,14 @@ _EXPECTED_TIERS = {
     "recorder": ["window", "settings"],  # #140 per-terminal ⏺ capture (ctx.windows.onTerminalCreate) + library/player window kinds; storage is its own /recording/* (no ctx.file). #151 added the synced recorder.autoRecord toggle (ctx.settings.boolean)
     "host-registry": ["storage", "settings"],  # #65 durable server store (ctx.serverStore) + a browser-mounted registerSettingsPane
     "mousemode": ["window"],  # #155 per-terminal 🖱 chip via ctx.windows.onTerminalCreate; reads xterm's own modes getter, so no other capability
+    # #158 browser-mounted registerSettingsPane. NOTE the tier list
+    # under-describes this one: the mod also administers a PEER (its #157 mod
+    # pins via saveModPins, and its /state mod settings) over hostFetch, and
+    # _KNOWN_TIERS has no token for "configures another broker". Deliberately not
+    # inventing one -- the vocabulary mirrors the ctx.* capability families, and
+    # this mod uses no ctx family beyond settings; the cross-broker reach is
+    # core's own host plumbing, which every mod shares.
+    "mod-sync": ["settings"],
 }
 
 
