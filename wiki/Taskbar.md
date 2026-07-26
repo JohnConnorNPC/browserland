@@ -9,7 +9,7 @@ From left to right, the taskbar contains:
 | Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (sticky notes only when opted in — see below) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
-| Host status | Status chips for each connected broker host (see [[Hosts-and-Multi-Browser]]) |
+| Host status | One status chip for a single broker; with several, one aggregate badge that opens the broker menu (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
@@ -58,7 +58,7 @@ The launch button doubles as a Start button.
 By default:
 
 - **Left-click** launches a terminal using your **default host's** default profile. The default host is the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]).
-- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, scratchpad, session recorder, control panel, and help — with more entries, such as an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). With a single host the profiles are listed directly; with multiple hosts they are grouped under a header row per broker, so you can launch on a remote host from here.
+- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, scratchpad, session recorder, control panel, and help — with more entries, such as an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). Every broker leads with a **live status row** (its state, and the old chip's click actions — log in, take over the lease, or hide/show its windows, which keeps the menu open) with its profiles below it, so you can launch on a remote host from here. With several hosts attached, the taskbar's aggregate broker badge opens this same menu (see [[Hosts-and-Multi-Browser]]).
 
 ### Swapping the click gestures
 

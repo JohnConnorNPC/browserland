@@ -112,8 +112,9 @@ works great). One browser tab then fronts the whole fleet:
 - The right-click **+** menu groups launch profiles **per host** — open a
   PowerShell on the Windows box and a zsh on the Linux server from the same
   menu, and tile them next to each other.
-- Every window is badged with its host; per-host status chips in the taskbar
-  show at a glance which brokers are reachable.
+- Every window is badged with its host; the taskbar's broker status — a chip
+  for one host, a single aggregate badge for several — shows at a glance
+  which brokers are reachable, with per-broker detail in the **+** menu.
 - Each host keeps its own token, profiles, and file API — the UI fans out,
   the brokers stay independent. A machine going down takes its windows
   stale, not the desktop.
@@ -162,8 +163,8 @@ The desktop with tiled and floating terminals
   mod).
 - **Multi-host — the control plane**: attach the same UI to the brokers on all
   your other machines (e.g. over [Tailscale](https://tailscale.com/)) and run
-  their terminals side by side in one tab, with per-host status chips in the
-  taskbar. See [One tab, every machine](#one-tab-every-machine).
+  their terminals side by side in one tab, with live broker status in the
+  taskbar and launch menu. See [One tab, every machine](#one-tab-every-machine).
 - **Single active-browser lease**: exactly one browser drives input at a time,
   so two open tabs never fight over the keyboard.
 - **Opt-in MCP / AI agent access**: an MCP client or AI harness can list,

@@ -55,7 +55,7 @@ New here? Read [[Getting-Started]] first. Once you are in the desktop, click the
 
 | Page | What it covers |
 |---|---|
-| [[Hosts-and-Multi-Browser]] | Remote hosts, status chips, the active-browser lease |
+| [[Hosts-and-Multi-Browser]] | Remote hosts, broker status, the active-browser lease |
 | [[MCP-and-AI-Agents]] | Per-window MCP access, enabling it per host, the tools overview |
 
 ## For developers

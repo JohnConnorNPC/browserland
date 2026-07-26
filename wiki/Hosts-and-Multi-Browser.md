@@ -45,7 +45,7 @@ If you delete the host that was your START default, it falls back to **this brok
 
 ## Host status chips
 
-Browserland shows one status chip per broker — always, even for a single healthy local broker — in the host-status area of the taskbar. The chip displays the host's label; its state tells you whether that host is reachable and whether this browser holds its lease:
+With a **single broker**, Browserland shows its status chip in the host-status area of the taskbar — always, even for a healthy local broker. The chip displays the host's label; its state tells you whether that host is reachable and whether this browser holds its lease:
 
 | State | Meaning | Click does |
 |---|---|---|
@@ -54,7 +54,11 @@ Browserland shows one status chip per broker — always, even for a single healt
 | auth-needed | Up, but the password is missing or wrong. | Open the login prompt |
 | lease | Reachable, but another browser holds the active-writer lease. | Take over the lease |
 
-So the chips are interactive, not just indicators: an **auth-needed** chip is click-to-log-in, a **lease** chip is click-to-take-over, and an **ok**/**down** chip toggles whether that host's windows are shown or hidden in your desktop.
+With **two or more brokers**, the chips collapse into a single **aggregate badge** so they stop competing with the session buttons for taskbar width. The badge reads `N brokers`, colored by the worst state present (auth-needed, then down, then lease) — and it appends `· K need attention`, counting **every** host that is auth-needed, down, or lease, so one kind of fault never hides another. While first contact is still in flight it reads `· checking…`. Hovering the badge lists every host with its state; it is struck through only when every broker is hidden. **Click it** (or press Enter/Space — it is keyboard-focusable) to open the start (+) menu.
+
+There, each broker has a **live status row** above its profiles: a state-colored dot (a per-host identity color becomes the dot's fill, with the state as its ring), the host's label, and a state suffix such as `— down` or `— password required`. The row performs the chip's action for its state — an **auth-needed** row opens the login prompt, a **lease** row requests the take-over, and an **ok**/**down** row toggles that broker's windows hidden or shown. The hide toggle **keeps the menu open** (the row goes struck through and gains `— hidden`), so you can sweep several brokers in one visit; hiding masks windows, it never closes them. The same toggle also lives as a **hidden** checkbox on each host's row in **Control Panel → Hosts**.
+
+So the status surfaces stay interactive, not just indicators — and every recovery path that used to live on a chip (re-opening a cancelled login, taking back a lease, spotting a down broker) is one badge click away when several brokers are attached.
 
 ## Single active browser (the lease)
 

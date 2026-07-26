@@ -262,20 +262,23 @@ passwords live per-browser in localStorage. Requirements:
   a loopback bind fronted by `tailscale serve` / an https reverse proxy.
   Setting `auth_token` explicitly is worth it across a fleet so every host
   shares one password instead of a per-machine minted value;
-* **both brokers must run this webterm version** — a pre-CORS remote shows
-  up as a red "down" chip even when it's running;
+* **both brokers must run this webterm version** — a pre-CORS remote reads
+  as a red "down" broker even when it's running;
 * one scheme for the whole fleet — an https page fetching an http remote
   is blocked as mixed content, so cockpit + hosts must be all-https
   (preferred: unlocks secure-context features like clipboard image paste)
   or all-plain-http (see SETUP.md → Multiple machines over Tailscale).
 
-One status chip per broker is always shown in the taskbar — even for a
-single healthy local broker, so the per-broker hide toggle is always
-reachable. Four states: green ok / red down / amber password-needed /
-blue lease; ok/down chips toggle that host's window visibility, while
-auth and lease chips are click-to-log-in / take-over. Window prefs are
-keyed per host; a down host never closes or re-dials another host's
-windows.
+A single broker's status chip is always shown in the taskbar — even
+healthy and local, so the per-broker hide toggle is always reachable.
+Four states: green ok / red down / amber password-needed / blue lease;
+an ok/down chip toggles that host's window visibility, while auth and
+lease chips are click-to-log-in / take-over. With two or more brokers
+the chips collapse into one worst-state aggregate badge whose click
+opens the start (+) menu, where each broker has a live status row with
+the same per-host actions (the hide toggle keeps the menu open).
+Window prefs are keyed per host; a down host never closes or re-dials
+another host's windows.
 
 Remote agents against this broker:
 
