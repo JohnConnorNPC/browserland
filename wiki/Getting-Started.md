@@ -40,12 +40,14 @@ It opens as a moveable floating window — drag its title bar, resize it, or min
 | Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
 | MCP | AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
 | Keyboard shortcuts | Rebind any action (see [[Keyboard-Shortcuts]]) |
+| Clipboard (OSC 52) | Whether programs on that host may set your clipboard — off by default (see [[Keyboard-Shortcuts]]) |
 | Start button / taskbar | The + button's label, whether left/right-click gestures are swapped, the taskbar workspace filter, restore-on-refresh |
 
 ### Per-browser vs. per-host settings
 
 - **Browser-global settings** follow the browser you are sitting at — theme and background, the terminal font (an opt-in mod, off by default — turn it on under **Control Panel → Mods**), the start-button label, restore-on-refresh, the taskbar workspace filter, and the clock chip's time zone.
 - **Per-host settings** live on a tab per broker — window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path — so each broker remembers its own.
+- **Clipboard (OSC 52)** is per host like the settings above it, but is the one setting that is also **browser-local**: it never travels to a broker, in either direction. That is deliberate. It is the switch that decides whether a broker may write to your clipboard, so storing it on that broker would let the broker grant itself the permission. Turning it on for one host has no effect on any other, and it does not follow you to another browser.
 
 <!-- help:ignore-start -->
 <!-- Cross-nav to other wiki pages — in-app Help navigates via its section rail,

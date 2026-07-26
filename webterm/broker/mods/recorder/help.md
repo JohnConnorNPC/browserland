@@ -57,6 +57,15 @@ recording: check what is in it before sharing it. Turning on auto-record makes
 that guarantee more load-bearing, not less: everything every session prints is
 captured, including the sessions you would not have thought to record.
 
+**Clipboard copies are in the recording too.** When a program copies by asking
+the terminal to set your clipboard (the per-host **Clipboard (OSC 52)** setting
+— see the guide's Keyboard shortcuts page), capture happens *upstream* of the
+part that decodes it, so what lands in the file is the raw escape sequence with
+the copied text base64-encoded inside it. That is true whether or not you
+enabled the setting: the recorder captures the request, not the result. It is
+the same hazard as the paragraph above, minus the part where you can spot it by
+eye — so scan rather than skim.
+
 To check a saved recording for this broker's own token, run
 `python -m webterm.broker --scan-recordings`. It base64-decodes the output
 stream first -- a plain `grep` (or `zgrep`) over a recording finds nothing even

@@ -36,6 +36,16 @@ from webterm.broker import vendor
 VENDOR_DIR = Path(vendor.__file__).resolve().parent / "vendor"
 
 #: filename -> (upstream version, sha384 of the exact published bytes)
+#:
+#: UPGRADE NOTE (#153): we register our own OSC 52 handler on top of this build
+#: (``webterm/broker/67_js_window_lifecycle.js``, ``term.parser
+#: .registerOscHandler(52, …)``). 5.3.0 claims OSC 0/1/2/4/8/10/11/12/104/110/
+#: 111/112 and leaves 52 unclaimed, so there is no conflict today. Upstream has
+#: SINCE added first-party OSC 52 support and a clipboard addon: a bump past
+#: 5.3.0 must REMOVE our handler and adopt theirs, not run both. Two handlers
+#: for one identifier do not merge — xterm tries them newest-first with
+#: fallthrough, so ours would shadow theirs while the gates and the notices
+#: silently diverge from whatever the addon does.
 VENDORED = {
     "xterm.js": (
         "xterm@5.3.0",

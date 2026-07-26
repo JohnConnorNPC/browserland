@@ -12,6 +12,8 @@ By default the UI talks to the broker it was served from (`http://127.0.0.1:4445
 
 Each host you add gets its own settings tab in the Control Panel. Settings like window mode, drag hold delay, MCP, keyboard shortcuts, the default terminal profile, and the default start path are stored **per host**, so they can differ from broker to broker. A separate set of **browser-global** settings (theme and background, terminal font, the start-button label, restore-on-refresh, the taskbar workspace filter, and the clock chip's time zone) belong to the browser you are sitting at and are shared across every host. For more on opening the Control Panel and the rest of its tabs, see [[Getting-Started]].
 
+One per-host setting is stored differently from all the others: **Clipboard (OSC 52)**, which decides whether programs running on that host may set your clipboard. It is off by default, it is authorised for one host at a time, and unlike every setting above it, it is kept in **your browser only** and never written to the broker. The reason is that it is precisely the switch that grants a broker access to the computer you are sitting at, so a copy of it living on that broker would let the broker turn it on for itself. Trusting your own laptop's broker therefore does not extend to a remote box you attached to, and enabling it in one browser does not enable it in another. See [[Keyboard-Shortcuts]] for what a program can and cannot do once it is on.
+
 The password you enter is the broker's browser-login token. The bearer token AI agents use to drive terminals over MCP is a **separate** secret, configured on its own — if you plan to let agents work on this host, see [[MCP-and-AI-Agents]].
 
 ## Sharing your broker list
