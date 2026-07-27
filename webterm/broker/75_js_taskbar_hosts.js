@@ -13,7 +13,7 @@
         // from composeLabelParts each call so a toggle/order change converges on
         // the next tick. Each span keeps its per-part class (.ti-id dim color +
         // <110px container auto-hide, .ti-title ellipsis anchor). Re-insert
-        // BEFORE the trailing .ti-ws workspace badge (added by 62_js_workspaces)
+        // BEFORE the trailing .ti-ws workspace badge (added by 62b_js_workspaces)
         // so the badge + off-workspace dimming survive per-tick relabels. The
         // .ti-ws badge carries no .ti-part class, so the clear pass never removes
         // it and it never duplicates.
@@ -1011,3 +1011,74 @@
             }
         }
 
+        // Spatial rank per window key: a Map<key -> rank> built by walking the
+        // layout in the SAME render order the strip uses, so taskbar order can
+        // never disagree with the screen. For each workspace (in index order):
+        // its tiled columns L->R — columnKeys descends rows/cells/tabs in
+        // on-screen order, so hidden tabs of a tab group land adjacent at the
+        // group's slot — then that workspace's floating windows sorted top->left.
+        // Keys absent here (closed / remote-only sessions, all-workspaces floats
+        // whose windowWsId is null) trail as positionless in reorderTaskbarItems.
+        // O(layout + floats); reuses columnKeys/rowKeys — no per-chip scan.
+        function spatialKeyOrder() {
+            const order = new Map();
+            let rank = 0;
+            const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+            const L = getLayout();
+            for (const ws of L.workspaces) {
+                if (Array.isArray(ws.columns)) {
+                    for (const col of ws.columns) {
+                        for (const k of columnKeys(col)) {
+                            const key = String(k);
+                            if (!order.has(key)) order.set(key, rank++);
+                        }
+                    }
+                }
+                // Floating windows belonging to THIS workspace, in reading order
+                // (geom shape is {left,top,width,height}). all-workspaces floats
+                // (windowWsId === null) match no ws.id, so they stay positionless.
+                const floats = floatingOnWs(ws.id).slice().sort((a, b) => {
+                    const ga = a.geom || {}, gb = b.geom || {};
+                    return (num(ga.top) - num(gb.top)) || (num(ga.left) - num(gb.left));
+                });
+                for (const win of floats) {
+                    const key = String(win.id);
+                    if (!order.has(key)) order.set(key, rank++);
+                }
+            }
+            return order;
+        }
+
+        // Reorder #taskbar-items chips top-left -> bottom-right to match the
+        // on-screen tiling layout (incl. tab-group members, which are each their
+        // own chip). Stable-sort the live chips by (spatial rank, current DOM
+        // index): positionless chips get a finite sentinel (NOT Infinity, whose
+        // difference is NaN and corrupts the comparator) so they cluster at the
+        // end keeping their existing relative order. Idempotent — bails without
+        // touching the DOM when already ordered, so the 2s poll never churns the
+        // bar. Scoped to .taskbar-item, so #taskbar-empty is never moved.
+        function reorderTaskbarItems() {
+            const host = document.getElementById('taskbar-items');
+            if (!host) return;
+            const nodes = Array.from(host.querySelectorAll('.taskbar-item'));
+            if (nodes.length < 2) return;
+            const order = spatialKeyOrder();
+            const SENTINEL = Number.MAX_SAFE_INTEGER;
+            const decorated = nodes.map((el, i) => {
+                const r = order.get(el.dataset.sessionId || '');
+                return { el, rank: (typeof r === 'number') ? r : SENTINEL, i };
+            });
+            decorated.sort((a, b) => (a.rank - b.rank) || (a.i - b.i));
+            let changed = false;
+            for (let i = 0; i < decorated.length; i++) {
+                if (decorated[i].el !== nodes[i]) { changed = true; break; }
+            }
+            if (!changed) return;                 // already ordered — no churn
+            // appendChild MOVES an existing node (click closures survive).
+            for (const d of decorated) host.appendChild(d.el);
+            // Keep the "no sessions" placeholder trailing if it happens to
+            // coexist with chips (e.g. only floating app docs, no server
+            // sessions) — re-appending chips above would otherwise strand it.
+            const empty = document.getElementById('taskbar-empty');
+            if (empty && empty.parentElement === host) host.appendChild(empty);
+        }

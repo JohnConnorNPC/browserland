@@ -79,7 +79,14 @@ _ORDERED = [
     "59_js_tiled_drag.js",
     "60_js_strip_engine.js",
     "61_js_resize_gutters.js",
-    "62_js_workspaces.js",
+    # 62 was one 899-line fragment holding four unrelated concerns (#148). The
+    # strip scrollbar / floating scroll-lock / window lock / float<->tile layer
+    # moves are TILING core and stay in 62a; the workspace feature itself lives
+    # in 62b (extracted to mods/workspaces/ in #148); the taskbar-ordering pair
+    # (spatialKeyOrder/reorderTaskbarItems) moved into 75, where its only other
+    # caller already was.
+    "62a_js_strip_and_layers.js",
+    "62b_js_workspaces.js",
     "63_js_clipboard_auth.js",
     "64_js_sessions_poll_control.js",
     "65_js_display_theming.js",
