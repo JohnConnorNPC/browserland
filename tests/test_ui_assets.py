@@ -3277,7 +3277,7 @@ def test_float_workspace_decided_from_membership_not_css_class():
     start = ws.index("function windowOffActiveWs")
     body = ws[start:ws.index("function adoptFloatWorkspace")]
     assert "ws-hidden" not in body,         "windowOffActiveWs must not consult the ws-hidden class"
-    assert "activeWorkspace().id" in body
+    assert "activeWorkspaceId()" in body
 
 
 def test_creation_tails_are_factored_through_finish_window_placement():
@@ -3367,9 +3367,11 @@ def test_adopt_float_workspace_heals_dangling_membership():
     # was deleted is masked against a workspace nothing can switch to and only
     # appears when the next poll runs — "does nothing, then appears later", which
     # is worse than the flicker #152 set out to fix.
+    # #148: finishWindowPlacement / revealAndFocusWindow are CORE (62a) now;
+    # adoptFloatWorkspace is the workspace-side hook they call into.
     ws = (BROKER_DIR / "62b_js_workspaces.js").read_text(encoding="utf-8")
     body = ws[ws.index("function adoptFloatWorkspace"):
-              ws.index("function finishWindowPlacement")]
+              ws.index("function applyWorkspaceVisibility")]
     assert "liveWsIds" in body, "adoptFloatWorkspace must heal a dangling ws id"
     assert "applyTaskbarWorkspace()" in body,         "a freshly stamped window's taskbar ws badge must not lag a poll"
 

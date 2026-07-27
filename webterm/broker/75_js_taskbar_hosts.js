@@ -93,7 +93,7 @@
             // or not the window is currently open.
             const targetWs = workspaceIndexForKey(id);
             const switched = (targetWs !== null
-                && targetWs !== getLayout().activeWs);
+                && targetWs !== activeWorkspaceIndex());
             if (switched) switchWorkspace(targetWs);
             const win = windows.get(id);
             if (!win) {
@@ -113,7 +113,7 @@
             let revealed = false;
             if (!win.tiled && windowWsId(win) !== null
                 && win.dom.classList.contains('ws-hidden')) {
-                setWindowWs(win, activeWorkspace().id, true);  // reveal on active ws
+                setWindowWs(win, activeWorkspaceId(), true);   // reveal on active ws
                 revealed = true;
             }
             if (win.minimized) { restoreWindow(id); return; }
@@ -698,18 +698,16 @@
                 // Collect BEFORE mutating: removeKeyFromLayout rewrites the very
                 // rows/cells we would otherwise still be walking.
                 const seen = [];
-                for (const lws of getLayout().workspaces) {
-                    for (const lcol of (lws.columns || [])) {
-                        for (const lrow of (lcol.rows || [])) {
-                            for (const k of rowKeys(lrow)) {
-                                // `app:` is a reserved namespace, not a host — an
-                                // app window's content lives in the app store and
-                                // no session poll can attest to it. Skip it even if
-                                // some persisted host is literally called 'app'.
-                                if (k.slice(0, 4) === 'app:') continue;
-                                if (k.slice(0, prefix.length) !== prefix) continue;
-                                seen.push(k);
-                            }
+                for (const lcol of getLayout().columns) {
+                    for (const lrow of (lcol.rows || [])) {
+                        for (const k of rowKeys(lrow)) {
+                            // `app:` is a reserved namespace, not a host — an
+                            // app window's content lives in the app store and
+                            // no session poll can attest to it. Skip it even if
+                            // some persisted host is literally called 'app'.
+                            if (k.slice(0, 4) === 'app:') continue;
+                            if (k.slice(0, prefix.length) !== prefix) continue;
+                            seen.push(k);
                         }
                     }
                 }
@@ -1024,27 +1022,31 @@
             const order = new Map();
             let rank = 0;
             const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-            const L = getLayout();
-            for (const ws of L.workspaces) {
-                if (Array.isArray(ws.columns)) {
-                    for (const col of ws.columns) {
-                        for (const k of columnKeys(col)) {
-                            const key = String(k);
-                            if (!order.has(key)) order.set(key, rank++);
-                        }
-                    }
-                }
-                // Floating windows belonging to THIS workspace, in reading order
-                // (geom shape is {left,top,width,height}). all-workspaces floats
-                // (windowWsId === null) match no ws.id, so they stay positionless.
-                const floats = floatingOnWs(ws.id).slice().sort((a, b) => {
-                    const ga = a.geom || {}, gb = b.geom || {};
-                    return (num(ga.top) - num(gb.top)) || (num(ga.left) - num(gb.left));
-                });
-                for (const win of floats) {
-                    const key = String(win.id);
+            // #148: ONE desktop, so this is simply L.columns in layout order
+            // (a mod that groups them — workspaces — keeps each group's
+            // columns contiguous, so the bar still reads group by group),
+            // then every floating window in reading order. Floats are no
+            // longer interleaved per group and an all-workspaces float now
+            // gets a rank instead of trailing: both are taskbar-order
+            // cosmetics, and with nothing grouping the desktop this is
+            // byte-identical to the single-workspace behaviour it replaces.
+            for (const col of getLayout().columns) {
+                for (const k of columnKeys(col)) {
+                    const key = String(k);
                     if (!order.has(key)) order.set(key, rank++);
                 }
+            }
+            const floats = [];
+            for (const win of windows.values()) {
+                if (!win.disposed && !win.tiled) floats.push(win);
+            }
+            floats.sort((a, b) => {
+                const ga = a.geom || {}, gb = b.geom || {};
+                return (num(ga.top) - num(gb.top)) || (num(ga.left) - num(gb.left));
+            });
+            for (const win of floats) {
+                const key = String(win.id);
+                if (!order.has(key)) order.set(key, rank++);
             }
             return order;
         }

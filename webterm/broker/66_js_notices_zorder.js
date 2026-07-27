@@ -90,7 +90,7 @@
                     // tab strip so real clicks never land. Concede focus quietly.
                     if (_retry) return;
                     loc.row.activeTab = id;
-                    loc.ws.focusedCol = loc.colIndex;
+                    loc.desktop.focusedCol = visibleColIndex(loc.col);
                     savePrefs();
                     requestRelayout();
                     requestAnimationFrame(() => bringToFront(id, true));
@@ -104,16 +104,20 @@
                     && loc.cell.keys.length > 1 && loc.cell.activeTab !== id) {
                     if (_retry) return;
                     loc.cell.activeTab = id;
-                    loc.ws.focusedCol = loc.colIndex;
+                    loc.desktop.focusedCol = visibleColIndex(loc.col);
                     savePrefs();
                     requestRelayout();
                     requestAnimationFrame(() => bringToFront(id, true));
                     return;
                 }
-                if (loc && loc.wsIndex === getLayout().activeWs) {
-                    loc.ws.focusedCol = loc.colIndex;
+                // Only when the column is actually ON SCREEN: a filtered-out
+                // column (the workspaces mod hides the other workspaces') has
+                // no visible slot to focus or scroll to (#148).
+                const vci = loc ? visibleColIndex(loc.col) : -1;
+                if (vci !== -1) {
+                    loc.desktop.focusedCol = vci;
                     savePrefs();
-                    scrollColumnIntoView(loc.colIndex, true);
+                    scrollColumnIntoView(vci, true);
                 }
                 frontId = id;
                 updateTaskbarActive();

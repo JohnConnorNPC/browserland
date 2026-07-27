@@ -30,9 +30,9 @@
             e.preventDefault();
             e.stopPropagation();
             const g = e.currentTarget;
-            const ws = activeWorkspace();
-            const leftCol = ws.columns.find(c => c.id === g.dataset.leftColId);
-            const rightCol = ws.columns.find(c => c.id === g.dataset.rightColId);
+            const cols = getLayout().columns;
+            const leftCol = cols.find(c => c.id === g.dataset.leftColId);
+            const rightCol = cols.find(c => c.id === g.dataset.rightColId);
             if (!leftCol || !rightCol) return;
             const strip = document.getElementById('strip');
             const stripW = strip.clientWidth || 1;
@@ -127,7 +127,6 @@
             // Defer reparenting while a selection/composition is live; the
             // column widths are still safe to refresh, but moving nodes is not.
             const deferReparent = selectionActiveInStrip();
-            const ws = activeWorkspace();
             const stripW = strip.clientWidth || desktop.clientWidth || 1024;
 
             // Render set: per column, the live ROWS (a row is live if >=1 of its
@@ -136,7 +135,7 @@
             // filtered out of liveKeys here (isLiveKey is now a shared module-scope
             // helper, top of this fragment, so the preview mirrors it exactly).
             const renderCols = [];
-            for (const col of ws.columns) {
+            for (const col of visibleColumns()) {
                 const liveRows = [];
                 for (const row of col.rows) {
                     // rowKeys flattens a split row's cells (and falls back to flat
@@ -270,7 +269,7 @@
                         }
                     }
                 }
-                scrollColumnIntoView(ws.focusedCol, false);
+                scrollColumnIntoView(getLayout().focusedCol, false);
                 updateStripScrollbar();   // widths/columns changed → re-measure
             }));
             renderWorkspaces();
@@ -324,8 +323,7 @@
         // janky smooth motion.
         function scrollColumnIntoView(colIndex, smooth) {
             const strip = document.getElementById('strip');
-            const ws = activeWorkspace();
-            const col = ws.columns[colIndex];
+            const col = visibleColumns()[colIndex];
             if (!strip || !col) return;
             const el = strip.querySelector(
                 '.strip-col[data-col-id="' + cssEscape(col.id) + '"]');

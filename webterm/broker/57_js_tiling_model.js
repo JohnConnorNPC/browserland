@@ -1,10 +1,19 @@
         // ---- tiling layout (niri-style WM) --------------------------------
         // prefs._layout is the SINGLE source of truth for tiled placement.
         // Shape:
-        //   { mode:'floating'|'tiling', activeWs:int,
-        //     workspaces:[ { id, focusedCol:int,
-        //                    columns:[ { id, widthPreset:'1/3'|'1/2'|'2/3'|'max',
-        //                                keys:[winKey...], heights:[frac...] } ] } ] }
+        //   { mode:'floating'|'tiling', focusedCol:int,
+        //     columns:[ { id, widthPreset:'1/3'|'1/2'|'2/3'|'max',
+        //                 keys:[winKey...], heights:[frac...] } ] }
+        // ONE desktop, and every tiled column lives in `columns` exactly once —
+        // always (#148). Core does not know what a workspace is. A mod may HIDE
+        // some columns (registerColumnFilter, below) and may keep its own
+        // grouping metadata under `mods` — an opaque bag core writes once during
+        // the legacy migration and never reads. Because no column is ever moved
+        // or copied for it, a mod that is off / removed / broken simply stops
+        // filtering and every column is on screen again: nothing can become
+        // unreachable, and disabling is non-destructive AND reversible.
+        // `focusedCol` indexes the VISIBLE columns (what the strip draws), which
+        // is what every caller already meant by it.
         // A window's remembered tiled-vs-floating role lives in its per-session
         // pref (pref.tiled) and is only a FALLBACK used when _layout has no
         // membership for its key. getLayout() self-heals like
@@ -41,17 +50,24 @@
                     if (Number.isFinite(n) && n > max) max = n;
                 }
             };
-            for (const ws of (L.workspaces || [])) {
-                scan(ws && ws.id);
-                for (const col of ((ws && ws.columns) || [])) {
+            const scanCols = (cols) => {
+                for (const col of (cols || [])) {
                     scan(col && col.id);
                     // Split-cell ids (F-NESTSPLIT) also share the 'L'+n space and
                     // KEY row.widths, so a freshly minted col/cell id must never
-                    // collide with a stored cell.id. (No-op until P1 builds cells.)
+                    // collide with a stored cell.id.
                     for (const row of ((col && col.rows) || []))
                         for (const cell of ((row && row.cells) || []))
                             scan(cell && cell.id);
                 }
+            };
+            scanCols(L.columns);
+            // A pre-#148 blob still grouped its columns under `workspaces`; seed
+            // from those too so migrateLegacyWorkspaces can't mint a column id
+            // that collides with one it is about to adopt.
+            for (const ws of (L.workspaces || [])) {
+                scan(ws && ws.id);
+                scanCols(ws && ws.columns);
             }
             if (max > _layoutIdSeq) _layoutIdSeq = max;
         }
@@ -279,7 +295,7 @@
             key = String(key);
             const loc = findKeyInLayout(key);
             if (!loc) return null;
-            const { ws, col, colIndex, row, rowIndex } = loc;
+            const { desktop, col, colIndex, row, rowIndex } = loc;
             let rowCollapsed = false, colCollapsed = false;
             if (loc.cell) {
                 // (F-NESTSPLIT cells path) Drop the key from its cell, then collapse
@@ -343,13 +359,14 @@
                 }
             }
             if (col.rows.length === 0) {
-                ws.columns.splice(colIndex, 1);
+                // colIndex is a STORAGE index (into L.columns); focusedCol is a
+                // VISIBLE one, so it is re-clamped against the visible count.
+                desktop.columns.splice(colIndex, 1);
                 colCollapsed = true;
-                ws.focusedCol = Math.max(0,
-                    Math.min(ws.focusedCol, ws.columns.length - 1));
+                desktop.focusedCol = Math.max(0,
+                    Math.min(desktop.focusedCol, visibleColumns().length - 1));
             }
-            return { ws, wsIndex: loc.wsIndex, colIndex, rowIndex,
-                     rowCollapsed, colCollapsed };
+            return { desktop, colIndex, rowIndex, rowCollapsed, colCollapsed };
         }
         // Untab a tabbed tile: explode it into one single-window row per key,
         // splitting the tile's height evenly among them.
@@ -423,9 +440,6 @@
             normalizeSplitWidths(row);
             savePrefs();
             requestRelayout();
-        }
-        function newWorkspace() {
-            return { id: mintLayoutId(), focusedCol: 0, columns: [] };
         }
         // Clamp/normalize a heights[] array to exactly n positive fractions
         // summing to 1 (equal split when absent/garbage).
@@ -505,177 +519,303 @@
             delete row.keys;              // a split row carries NO keys (cells authoritative)
             return row;
         }
+        // ---- one-time legacy migration (#148) -----------------------------
+        // Before #148, columns were grouped into `workspaces:[...]` with an
+        // `activeWs` index and core owned that model. Core is single-desktop
+        // now, so the groups are CONCATENATED into L.columns in order: every
+        // column survives, in a stable order, and nothing becomes unreachable
+        // even if the workspaces mod never loads. The GROUPING is not thrown
+        // away either -- it is recorded IDS ONLY (no payload: a column lives in
+        // L.columns and nowhere else) under `wsLegacy`, which the mod adopts on
+        // its first init and deletes. Core never reads it.
+        //
+        // Running before loadMods() is the whole point. This is NON-DESTRUCTIVE,
+        // so unlike a "flatten when the mod is absent" it cannot lose a peer
+        // browser's workspaces in the boot race: whoever gets there first
+        // publishes the same columns, and a mods-on browser rebuilds its groups
+        // from `wsLegacy` (or, if a peer already consumed it, from the column
+        // ids it still holds). Idempotent and one-way -- an already-migrated
+        // blob has no `workspaces` key and is untouched.
+        function migrateLegacyWorkspaces(L) {
+            if (!Array.isArray(L.workspaces)) return;
+            const columns = Array.isArray(L.columns) ? L.columns.slice() : [];
+            const held = new Set();
+            for (const c of columns) if (c && typeof c.id === 'string') held.add(c.id);
+            const list = [];
+            for (const ws of L.workspaces) {
+                if (!ws || typeof ws !== 'object' || Array.isArray(ws)) continue;
+                const columnIds = [];
+                for (const col of (Array.isArray(ws.columns) ? ws.columns : [])) {
+                    if (!col || typeof col !== 'object' || Array.isArray(col)) continue;
+                    if (typeof col.id !== 'string' || !col.id) col.id = mintLayoutId();
+                    // Already in L.columns (an interrupted migration, or a blob
+                    // carrying both shapes): claimed, never duplicated.
+                    if (!held.has(col.id)) { held.add(col.id); columns.push(col); }
+                    columnIds.push(col.id);
+                }
+                const entry = {
+                    id: (typeof ws.id === 'string' && ws.id) ? ws.id : mintLayoutId(),
+                    columnIds: columnIds,
+                    focusedCol: Number.isInteger(ws.focusedCol) ? ws.focusedCol : 0,
+                };
+                if (typeof ws.name === 'string' && ws.name.trim()) {
+                    entry.name = ws.name.slice(0, 40);
+                }
+                list.push(entry);
+            }
+            L.columns = columns;
+            L.wsLegacy = {
+                activeWs: Number.isInteger(L.activeWs) ? L.activeWs : 0,
+                list: list,
+            };
+            delete L.workspaces;
+            delete L.activeWs;
+        }
         function reconcileLayout(L) {
             if (!L || typeof L !== 'object' || Array.isArray(L)) L = {};
             // Default to tiling: only fills an invalid/unset/missing mode, so a
             // saved 'floating' layout is preserved (the Control Panel toggle owns it
             // thereafter). New users and malformed/old blobs open tiled.
             if (L.mode !== 'tiling' && L.mode !== 'floating') L.mode = 'tiling';
-            if (!Array.isArray(L.workspaces) || L.workspaces.length === 0) {
-                L.workspaces = [newWorkspace()];
-            }
-            seedLayoutIdSeq(L);
-            const seen = new Set();             // global key dedupe across all ws/cols
+            seedLayoutIdSeq(L);          // seeds off BOTH shapes; must precede the migration
+            migrateLegacyWorkspaces(L);  // no-op once migrated
+            const seen = new Set();             // global key dedupe across every column
             const seenCellIds = new Set();      // global cell.id dedupe (keys row.widths)
-            const cleanWs = [];
-            for (const ws of L.workspaces) {
-                if (!ws || typeof ws !== 'object' || Array.isArray(ws)) continue;
-                if (typeof ws.id !== 'string' || !ws.id) ws.id = mintLayoutId();
-                // Optional workspace name (task 19); a non-string is dropped so
-                // it renders as its number.
-                if (typeof ws.name !== 'string' || !ws.name.trim()) delete ws.name;
-                else ws.name = ws.name.slice(0, 40);
-                const cleanCols = [];
-                const rawCols = Array.isArray(ws.columns) ? ws.columns : [];
-                for (const col of rawCols) {
-                    if (!col || typeof col !== 'object' || Array.isArray(col)) continue;
-                    if (typeof col.id !== 'string' || !col.id) col.id = mintLayoutId();
-                    if (WIDTH_PRESETS.indexOf(col.widthPreset) === -1) col.widthPreset = '1/2';
-                    // Free horizontal resize (task 9): a custom width fraction
-                    // overrides the preset. Drop a garbage/out-of-range value.
-                    if (typeof col.widthFrac !== 'number'
-                        || !(col.widthFrac > 0) || col.widthFrac > 1) {
-                        delete col.widthFrac;
-                    }
-                    // Nested-rows migration (per-tile tab groups). Idempotent
-                    // over three shapes; the legacy fields are dropped after so
-                    // a re-run is a no-op and the blob rides /state as col.rows.
-                    let rawRows;
-                    if (Array.isArray(col.rows) && col.rows.length) {
-                        // (a) already nested rows -> re-validate in place (row
-                        // OBJECT identity is preserved so the tile WeakMap holds).
-                        // A non-empty col.rows is authoritative; an EMPTY one
-                        // falls through so a partial {rows:[],keys:[...]} blob
-                        // still migrates its legacy keys instead of dropping them.
-                        rawRows = col.rows;
-                    } else if (Array.isArray(col.keys) && col.tabbed === true) {
-                        // (b) legacy whole-column tabbed -> one full-height tabbed
-                        // row (F-WINTAB becomes a degenerate single tabbed tile).
-                        rawRows = [{
-                            height: 1,
-                            keys: col.keys.slice(),
-                            mode: 'tabbed',
-                            activeTab: (typeof col.activeTab === 'string')
-                                ? col.activeTab : undefined,
-                        }];
-                    } else if (Array.isArray(col.keys)) {
-                        // (c) legacy stacked rows -> one single-window row per key,
-                        // seeding each row's height from the old per-key heights.
-                        const hs = normalizeHeights(col.heights, col.keys.length);
-                        rawRows = col.keys.map((k, i) => ({
-                            height: hs[i], keys: [k], mode: 'single',
-                        }));
-                    } else {
-                        rawRows = [];
-                    }
-                    delete col.keys; delete col.heights;
-                    delete col.tabbed; delete col.activeTab;
-                    const cleanRows = [];
-                    for (const row of rawRows) {
-                        if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
-                        // (F-NESTSPLIT) A split row already carrying cells is validated
-                        // by its own idempotent cleaner (cells are authoritative ONLY
-                        // for split rows — the invariant); the legacy keys-based path
-                        // below never sees it. DEAD until the migration commit makes
-                        // legacy splits synthesize cells.
-                        if (row.mode === 'split' && Array.isArray(row.cells)
-                            && row.cells.some(c => c && Array.isArray(c.keys)
-                                                   && c.keys.length)) {
-                            // At least one cell holds real keys -> cells authoritative.
-                            // (Cells that are all keyless garbage fall through so the
-                            // keys-path can still migrate any legacy row.keys — codex.)
-                            const cleaned = cleanSplitCellsRow(row, seen, seenCellIds);
-                            if (cleaned) cleanRows.push(cleaned);
-                            continue;
-                        }
-                        // Keys-authoritative path: purge any stray/empty cells so a
-                        // non-split row (or an empty-cells split) can never afterwards
-                        // look like a cells-row to findKeyInLayout (codex).
-                        delete row.cells;
-                        const rkeys = [];
-                        const rawKeys = Array.isArray(row.keys) ? row.keys : [];
-                        for (const k of rawKeys) {
-                            const key = String(k);
-                            // Global dedupe across all ws/cols/rows; dormant and
-                            // multi-host phantom keys are kept, dupes dropped.
-                            if (!key || seen.has(key)) continue;
-                            seen.add(key);
-                            rkeys.push(key);
-                        }
-                        if (rkeys.length === 0) continue;       // drop empty row
-                        const h = (typeof row.height === 'number' && row.height > 0)
-                            ? row.height : 1;
-                        // Canonicalize the row MODE: prefer a valid new enum
-                        // (so a saved {mode:'split'} survives, and a corrupt
-                        // {tabbed:true,mode:'split'} resolves to the explicit mode),
-                        // else migrate the legacy `tabbed` boolean from old blobs.
-                        let mode = (row.mode === 'single' || row.mode === 'tabbed'
-                            || row.mode === 'split')
-                            ? row.mode : (row.tabbed === true ? 'tabbed' : 'single');
-                        // Cardinality repair: split needs >=2 keys (a key dropped
-                        // by the global dedupe can leave a 1-key split → single).
-                        if (mode === 'split' && rkeys.length < 2) mode = 'single';
-                        if (mode !== 'tabbed' && mode !== 'split' && rkeys.length > 1) {
-                            // Invariant: a SINGLE row holds exactly one window.
-                            // Split a corrupt multi-key single row into one
-                            // single-window row per key (each window stays visible
-                            // as its own tile instead of being orphaned).
-                            const each = h / rkeys.length;
-                            for (const k of rkeys) cleanRows.push(newRow([k], each));
-                            continue;
-                        }
-                        row.keys = rkeys;
-                        row.height = h;
-                        delete row.tabbed;          // drop the legacy boolean
-                        setRowMode(row, mode);      // single writer: clears foreign fields
-                        if (mode === 'tabbed') {
-                            if (typeof row.activeTab !== 'string'
-                                || rkeys.indexOf(row.activeTab) === -1)
-                                row.activeTab = rkeys[0];   // heal to a present key
-                        } else if (mode === 'split') {
-                            // MIGRATE a legacy split (flat keys + window-keyed widths)
-                            // to the cells shape: one LEAF cell per surviving key,
-                            // carrying the old window-keyed width onto the new cell.id.
-                            // rkeys are ALREADY deduped via `seen`, so build inline —
-                            // do NOT route through cleanSplitCellsRow (it would re-dedupe
-                            // every key away). Idempotent: a 2nd reconcile finds cells
-                            // and takes the validator branch instead.
-                            const oldW = (row.widths && typeof row.widths === 'object'
-                                && !Array.isArray(row.widths)) ? row.widths : {};
-                            const cells = [];
-                            const widths = {};
-                            for (const k of rkeys) {
-                                const cell = makeCell([k]);     // leaf: {id, keys:[k]}
-                                seenCellIds.add(cell.id);       // freshly minted, but keep the set complete
-                                cells.push(cell);
-                                const v = Number(oldW[k]);
-                                if (Number.isFinite(v) && v > 0) widths[cell.id] = v;
-                            }
-                            row.cells = cells;
-                            row.widths = widths;
-                            normalizeSplitWidths(row);      // one frac per cell.id, sum 1
-                            delete row.keys;                // split rows carry NO keys
-                        }
-                        cleanRows.push(row);
-                    }
-                    if (cleanRows.length === 0) continue;       // collapse empty column
-                    col.rows = normalizeRowHeights(cleanRows);
-                    cleanCols.push(col);
+            const cleanCols = [];
+            const rawCols = Array.isArray(L.columns) ? L.columns : [];
+            for (const col of rawCols) {
+                if (!col || typeof col !== 'object' || Array.isArray(col)) continue;
+                if (typeof col.id !== 'string' || !col.id) col.id = mintLayoutId();
+                if (WIDTH_PRESETS.indexOf(col.widthPreset) === -1) col.widthPreset = '1/2';
+                // Free horizontal resize (task 9): a custom width fraction
+                // overrides the preset. Drop a garbage/out-of-range value.
+                if (typeof col.widthFrac !== 'number'
+                    || !(col.widthFrac > 0) || col.widthFrac > 1) {
+                    delete col.widthFrac;
                 }
-                ws.columns = cleanCols;
-                if (!Number.isInteger(ws.focusedCol)) ws.focusedCol = 0;
-                ws.focusedCol = Math.max(0,
-                    Math.min(ws.focusedCol, Math.max(0, cleanCols.length - 1)));
-                cleanWs.push(ws);
+                // Nested-rows migration (per-tile tab groups). Idempotent
+                // over three shapes; the legacy fields are dropped after so
+                // a re-run is a no-op and the blob rides /state as col.rows.
+                let rawRows;
+                if (Array.isArray(col.rows) && col.rows.length) {
+                    // (a) already nested rows -> re-validate in place (row
+                    // OBJECT identity is preserved so the tile WeakMap holds).
+                    // A non-empty col.rows is authoritative; an EMPTY one
+                    // falls through so a partial {rows:[],keys:[...]} blob
+                    // still migrates its legacy keys instead of dropping them.
+                    rawRows = col.rows;
+                } else if (Array.isArray(col.keys) && col.tabbed === true) {
+                    // (b) legacy whole-column tabbed -> one full-height tabbed
+                    // row (F-WINTAB becomes a degenerate single tabbed tile).
+                    rawRows = [{
+                        height: 1,
+                        keys: col.keys.slice(),
+                        mode: 'tabbed',
+                        activeTab: (typeof col.activeTab === 'string')
+                            ? col.activeTab : undefined,
+                    }];
+                } else if (Array.isArray(col.keys)) {
+                    // (c) legacy stacked rows -> one single-window row per key,
+                    // seeding each row's height from the old per-key heights.
+                    const hs = normalizeHeights(col.heights, col.keys.length);
+                    rawRows = col.keys.map((k, i) => ({
+                        height: hs[i], keys: [k], mode: 'single',
+                    }));
+                } else {
+                    rawRows = [];
+                }
+                delete col.keys; delete col.heights;
+                delete col.tabbed; delete col.activeTab;
+                const cleanRows = [];
+                for (const row of rawRows) {
+                    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+                    // (F-NESTSPLIT) A split row already carrying cells is validated
+                    // by its own idempotent cleaner (cells are authoritative ONLY
+                    // for split rows — the invariant); the legacy keys-based path
+                    // below never sees it. DEAD until the migration commit makes
+                    // legacy splits synthesize cells.
+                    if (row.mode === 'split' && Array.isArray(row.cells)
+                        && row.cells.some(c => c && Array.isArray(c.keys)
+                                               && c.keys.length)) {
+                        // At least one cell holds real keys -> cells authoritative.
+                        // (Cells that are all keyless garbage fall through so the
+                        // keys-path can still migrate any legacy row.keys — codex.)
+                        const cleaned = cleanSplitCellsRow(row, seen, seenCellIds);
+                        if (cleaned) cleanRows.push(cleaned);
+                        continue;
+                    }
+                    // Keys-authoritative path: purge any stray/empty cells so a
+                    // non-split row (or an empty-cells split) can never afterwards
+                    // look like a cells-row to findKeyInLayout (codex).
+                    delete row.cells;
+                    const rkeys = [];
+                    const rawKeys = Array.isArray(row.keys) ? row.keys : [];
+                    for (const k of rawKeys) {
+                        const key = String(k);
+                        // Global dedupe across all ws/cols/rows; dormant and
+                        // multi-host phantom keys are kept, dupes dropped.
+                        if (!key || seen.has(key)) continue;
+                        seen.add(key);
+                        rkeys.push(key);
+                    }
+                    if (rkeys.length === 0) continue;       // drop empty row
+                    const h = (typeof row.height === 'number' && row.height > 0)
+                        ? row.height : 1;
+                    // Canonicalize the row MODE: prefer a valid new enum
+                    // (so a saved {mode:'split'} survives, and a corrupt
+                    // {tabbed:true,mode:'split'} resolves to the explicit mode),
+                    // else migrate the legacy `tabbed` boolean from old blobs.
+                    let mode = (row.mode === 'single' || row.mode === 'tabbed'
+                        || row.mode === 'split')
+                        ? row.mode : (row.tabbed === true ? 'tabbed' : 'single');
+                    // Cardinality repair: split needs >=2 keys (a key dropped
+                    // by the global dedupe can leave a 1-key split → single).
+                    if (mode === 'split' && rkeys.length < 2) mode = 'single';
+                    if (mode !== 'tabbed' && mode !== 'split' && rkeys.length > 1) {
+                        // Invariant: a SINGLE row holds exactly one window.
+                        // Split a corrupt multi-key single row into one
+                        // single-window row per key (each window stays visible
+                        // as its own tile instead of being orphaned).
+                        const each = h / rkeys.length;
+                        for (const k of rkeys) cleanRows.push(newRow([k], each));
+                        continue;
+                    }
+                    row.keys = rkeys;
+                    row.height = h;
+                    delete row.tabbed;          // drop the legacy boolean
+                    setRowMode(row, mode);      // single writer: clears foreign fields
+                    if (mode === 'tabbed') {
+                        if (typeof row.activeTab !== 'string'
+                            || rkeys.indexOf(row.activeTab) === -1)
+                            row.activeTab = rkeys[0];   // heal to a present key
+                    } else if (mode === 'split') {
+                        // MIGRATE a legacy split (flat keys + window-keyed widths)
+                        // to the cells shape: one LEAF cell per surviving key,
+                        // carrying the old window-keyed width onto the new cell.id.
+                        // rkeys are ALREADY deduped via `seen`, so build inline —
+                        // do NOT route through cleanSplitCellsRow (it would re-dedupe
+                        // every key away). Idempotent: a 2nd reconcile finds cells
+                        // and takes the validator branch instead.
+                        const oldW = (row.widths && typeof row.widths === 'object'
+                            && !Array.isArray(row.widths)) ? row.widths : {};
+                        const cells = [];
+                        const widths = {};
+                        for (const k of rkeys) {
+                            const cell = makeCell([k]);     // leaf: {id, keys:[k]}
+                            seenCellIds.add(cell.id);       // freshly minted, but keep the set complete
+                            cells.push(cell);
+                            const v = Number(oldW[k]);
+                            if (Number.isFinite(v) && v > 0) widths[cell.id] = v;
+                        }
+                        row.cells = cells;
+                        row.widths = widths;
+                        normalizeSplitWidths(row);      // one frac per cell.id, sum 1
+                        delete row.keys;                // split rows carry NO keys
+                    }
+                    cleanRows.push(row);
+                }
+                if (cleanRows.length === 0) continue;       // collapse empty column
+                col.rows = normalizeRowHeights(cleanRows);
+                cleanCols.push(col);
             }
-            if (cleanWs.length === 0) cleanWs.push(newWorkspace());
-            L.workspaces = cleanWs;
-            if (!Number.isInteger(L.activeWs)) L.activeWs = 0;
-            L.activeWs = Math.max(0, Math.min(L.activeWs, L.workspaces.length - 1));
+            L.columns = cleanCols;
+            if (!Number.isInteger(L.focusedCol)) L.focusedCol = 0;
+            L.focusedCol = Math.max(0,
+                Math.min(L.focusedCol, Math.max(0, cleanCols.length - 1)));
             return L;
         }
         function getLayout() {
             const L = reconcileLayout(prefs._layout);
             prefs._layout = L;
             return L;
+        }
+        // ---- visible columns (#148) ---------------------------------------
+        // L.columns is STORAGE: every tiled column, exactly once, forever. What
+        // the strip DRAWS is the visible subset, and a mod may narrow it by
+        // registering one predicate (the workspaces mod shows only the active
+        // workspace's columns). This is the only thing core knows about
+        // workspaces, and it is pure presentation — no column is moved, copied
+        // or deleted for it, so dropping the filter puts everything back on
+        // screen. The filter is handed (col, L) so it never has to call
+        // getLayout() itself.
+        //
+        // TWO INDEX SPACES, and mixing them is the bug to watch for:
+        //   VISIBLE  — what the user sees and points at. `focusedCol`, the
+        //              drag-drop drop slots, moveColumn/scrollColumnIntoView and
+        //              the title-bar menu's column items all speak this.
+        //   STORAGE  — an index into L.columns. findKeyInLayout's `colIndex`,
+        //              and the splices in the mutators, speak this.
+        // Cross with visibleColIndex / storageColIndex, never by assuming they
+        // are equal (they are only equal when nothing is filtered).
+        let _columnFilter = null;
+        let _columnCreated = null;
+        // Called the instant a column is spliced into L.columns, BEFORE anyone
+        // reads a visible index back. A filtering mod must claim the newcomer
+        // here or it is born invisible. Never lets a throwing listener abort the
+        // mutation that created the column.
+        function registerColumnCreated(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('registerColumnCreated: fn must be a function');
+            }
+            if (_columnCreated) {
+                throw ModConflictError('a column-created listener is already registered');
+            }
+            _columnCreated = fn;
+            return function () { if (_columnCreated === fn) _columnCreated = null; };
+        }
+        function notifyColumnCreated(col) {
+            if (!_columnCreated) return;
+            try { _columnCreated(col); }
+            catch (e) { console.error('[tiling] column-created listener threw', e); }
+        }
+        function registerColumnFilter(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('registerColumnFilter: fn must be a function');
+            }
+            if (_columnFilter) {
+                throw ModConflictError('a column filter is already registered');
+            }
+            _columnFilter = fn;
+            requestRelayout();
+            return function () {
+                if (_columnFilter !== fn) return;
+                _columnFilter = null;
+                requestRelayout();      // unfiltered again: everything reappears
+            };
+        }
+        function visibleColumns() {
+            const L = getLayout();
+            if (!_columnFilter) return L.columns;
+            try {
+                return L.columns.filter(function (col) { return !!_columnFilter(col, L); });
+            } catch (e) {
+                // A throwing filter must never black out the desktop: fail OPEN
+                // (show everything), which is exactly the mod-absent behaviour.
+                console.error('[tiling] column filter threw — showing every column', e);
+                return L.columns;
+            }
+        }
+        // VISIBLE index of a column object, or -1 when it is filtered out/absent.
+        function visibleColIndex(col) {
+            return col ? visibleColumns().indexOf(col) : -1;
+        }
+        // VISIBLE insert slot -> the STORAGE index to splice at. Slot i means
+        // "immediately before the i-th visible column"; past the end (or with
+        // nothing visible) it appends, which keeps a brand-new column adjacent to
+        // the ones it was dropped beside rather than stranded at the far end.
+        function storageColIndex(visibleIndex) {
+            const L = getLayout();
+            const vis = visibleColumns();
+            if (vis === L.columns) {
+                return Math.max(0, Math.min(visibleIndex | 0, L.columns.length));
+            }
+            const i = visibleIndex | 0;
+            if (i <= 0) {
+                return vis.length ? L.columns.indexOf(vis[0]) : L.columns.length;
+            }
+            if (i >= vis.length) {
+                return vis.length
+                    ? L.columns.indexOf(vis[vis.length - 1]) + 1 : L.columns.length;
+            }
+            return L.columns.indexOf(vis[i]);
         }

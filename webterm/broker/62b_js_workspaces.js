@@ -1,33 +1,145 @@
-        // ---- vertical workspaces (P5) -------------------------------------
-        // Build the workspace dots (1..n + '+') into a container. The
-        // churn-guard sig lives on the container itself, so the right-edge
-        // rail and the taskbar pager keep INDEPENDENT guards (one rendering
-        // never short-circuits the other).
+        // ---- vertical workspaces (P5; extracted per #148) ------------------
+        // Workspaces are PRESENTATION over the one desktop core owns. Every
+        // tiled column lives in prefs._layout.columns exactly once, always;
+        // this file only decides WHICH of them the strip draws, by stamping a
+        // mod-owned `wsId` on each column and registering a column filter.
+        //
+        // Store (rides the /state-synced layout blob, like _layout.openTerms —
+        // core passes unknown top-level fields through untouched, so it is
+        // shared across every browser on this broker with no wire change):
+        //   _layout.mods.workspaces = { version:1, activeId,
+        //                               list:[ {id, name?, focusedCol:int} ] }
+        //   _layout.columns[i].wsId = '<workspace id>'   (mod-owned; core
+        //                               preserves it and never reads it)
+        // An UNSTAMPED column — one core made while this was off, or a peer
+        // browser without it — is adopted by the ACTIVE workspace on sight, so
+        // nothing is ever orphaned. Because the columns themselves never move
+        // between stores, turning this off simply drops the filter: every window
+        // reappears on one desktop, and turning it back on restores the groups.
+        //
+        // Floating windows are a separate axis: their membership lives in the
+        // browser-LOCAL prefs._floatWs (key -> wsId | null = all workspaces),
+        // because per-window placement is per-browser like floating geometry.
+        function wsStore() {
+            const L = getLayout();
+            if (!L.mods || typeof L.mods !== 'object' || Array.isArray(L.mods)) {
+                L.mods = {};
+            }
+            let st = L.mods.workspaces;
+            if (!st || typeof st !== 'object' || Array.isArray(st)) {
+                st = L.mods.workspaces = {};
+            }
+            st.version = 1;
+            if (!Array.isArray(st.list)) st.list = [];
+            // Heal the entries, dropping garbage and duplicate ids.
+            const seen = new Set();
+            st.list = st.list.filter(function (w) {
+                if (!w || typeof w !== 'object' || Array.isArray(w)) return false;
+                if (typeof w.id !== 'string' || !w.id || seen.has(w.id)) return false;
+                seen.add(w.id);
+                if (typeof w.name !== 'string' || !w.name.trim()) delete w.name;
+                else w.name = w.name.slice(0, 40);
+                if (!Number.isInteger(w.focusedCol) || w.focusedCol < 0) w.focusedCol = 0;
+                return true;
+            });
+            // #148 hand-off: core's one-time legacy migration left the old
+            // grouping (ids only) under L.wsLegacy. Adopt it once, then delete.
+            if (L.wsLegacy && typeof L.wsLegacy === 'object') {
+                adoptLegacyWorkspaces(L, st);
+                delete L.wsLegacy;
+            }
+            if (!st.list.length) st.list.push({ id: mintLayoutId(), focusedCol: 0 });
+            if (!seen.has(st.activeId)
+                && !st.list.some(function (w) { return w.id === st.activeId; })) {
+                st.activeId = st.list[0].id;
+            }
+            return st;
+        }
+        // Rebuild the workspace list from the pre-#148 blob core flattened. The
+        // columns are already all in L.columns; this only re-stamps the grouping.
+        function adoptLegacyWorkspaces(L, st) {
+            const legacy = L.wsLegacy;
+            const list = Array.isArray(legacy.list) ? legacy.list : [];
+            const byId = new Map();
+            for (const col of L.columns) if (col && col.id) byId.set(col.id, col);
+            for (const entry of list) {
+                if (!entry || typeof entry !== 'object') continue;
+                const id = (typeof entry.id === 'string' && entry.id)
+                    ? entry.id : mintLayoutId();
+                if (st.list.some(function (w) { return w.id === id; })) continue;
+                const w = { id: id,
+                    focusedCol: Number.isInteger(entry.focusedCol) ? entry.focusedCol : 0 };
+                if (typeof entry.name === 'string' && entry.name.trim()) {
+                    w.name = entry.name.slice(0, 40);
+                }
+                st.list.push(w);
+                for (const cid of (Array.isArray(entry.columnIds) ? entry.columnIds : [])) {
+                    const col = byId.get(cid);
+                    if (col && typeof col.wsId !== 'string') col.wsId = id;
+                }
+            }
+            if (st.list.length) {
+                const i = Number.isInteger(legacy.activeWs) ? legacy.activeWs : 0;
+                st.activeId = (st.list[Math.max(0, Math.min(i, st.list.length - 1))]
+                    || st.list[0]).id;
+            }
+        }
+        function wsList() { return wsStore().list; }
+        function activeWorkspaceId() { return wsStore().activeId; }
+        function activeWorkspaceIndex() {
+            const st = wsStore();
+            const i = st.list.findIndex(function (w) { return w.id === st.activeId; });
+            return i === -1 ? 0 : i;
+        }
+        function activeWorkspaceEntry() { return wsList()[activeWorkspaceIndex()]; }
+        // A column's workspace. Unstamped => the active one (adopted on sight),
+        // and so is a column stamped for a workspace that no longer exists.
+        function columnWsId(col, st) {
+            st = st || wsStore();
+            const id = col && col.wsId;
+            if (typeof id !== 'string') return st.activeId;
+            return st.list.some(function (w) { return w.id === id; }) ? id : st.activeId;
+        }
+        function workspaceColumns(wsId) {
+            const L = getLayout();
+            const st = wsStore();
+            return L.columns.filter(function (c) { return columnWsId(c, st) === wsId; });
+        }
+        function workspaceIndexById(id) {
+            return wsList().findIndex(function (w) { return w.id === id; });
+        }
+
+        // ---- workspace labels + the pager dots ----------------------------
         function wsLabel(ws, i) {
             if (getSettings().wsLabelMode === 'name') {
                 return (ws && ws.name) ? ws.name : ('WS' + (i + 1));
             }
             return String(i + 1);
         }
+        // Build the workspace dots (1..n + '+') into a container. The
+        // churn-guard sig lives on the container itself, so two containers keep
+        // INDEPENDENT guards (one rendering never short-circuits the other).
         function renderWsDots(container) {
             if (!container) return;
-            const L = getLayout();
+            const st = wsStore();
+            const list = st.list;
+            const active = activeWorkspaceIndex();
             const mode = getSettings().wsLabelMode;
             // Names + mode are part of the signature so a rename / mode toggle
             // forces a rebuild (not just the active-class fast path).
-            const sig = mode + '|' + L.activeWs + '|' + L.workspaces.length + '|'
-                + L.workspaces.map(w => w.name || '').join('');
+            const sig = mode + '|' + active + '|' + list.length + '|'
+                + list.map(w => w.name || '').join('');
             if (container.dataset.sig === sig) {
                 container.querySelectorAll('.ws-dot:not(.add)').forEach((d, i) => {
-                    d.classList.toggle('active', String(i) === String(L.activeWs));
+                    d.classList.toggle('active', i === active);
                 });
                 return;
             }
             container.dataset.sig = sig;
             container.innerHTML = '';
-            L.workspaces.forEach((ws, i) => {
+            list.forEach((ws, i) => {
                 const d = document.createElement('div');
-                d.className = 'ws-dot' + (i === L.activeWs ? ' active' : '')
+                d.className = 'ws-dot' + (i === active ? ' active' : '')
                     + (mode === 'name' ? ' named' : '');
                 d.textContent = wsLabel(ws, i);
                 d.title = (ws.name ? ws.name + ' — ' : '') + 'workspace ' + (i + 1)
@@ -52,16 +164,15 @@
 
         // ---- workspace rename / remove / label-mode (tasks 18, 19) --------
         function buildWorkspaceMenu(i, x, y) {
-            const L = getLayout();
+            const list = wsList();
             const mode = getSettings().wsLabelMode;
             const items = [
                 { label: 'Workspace ' + (i + 1)
-                    + (L.workspaces[i] && L.workspaces[i].name
-                        ? ' — ' + L.workspaces[i].name : ''),
+                    + (list[i] && list[i].name ? ' — ' + list[i].name : ''),
                   enabled: false },
                 { label: 'Rename…', enabled: true,
                   action: () => renameWorkspace(i) },
-                { label: 'Remove workspace', enabled: L.workspaces.length > 1,
+                { label: 'Remove workspace', enabled: list.length > 1,
                   action: () => removeWorkspace(i) },
                 { sep: true },
                 { label: (mode === 'name' ? '✓ ' : '   ') + 'Show names',
@@ -77,10 +188,10 @@
             getSettings().wsLabelMode = (mode === 'name') ? 'name' : 'number';
             savePrefs();
             renderWorkspaces();
+            applyTaskbarWorkspace();
         }
         async function renameWorkspace(i) {
-            const L = getLayout();
-            const ws = L.workspaces[i];
+            const ws = wsList()[i];
             if (!ws) return;
             const name = await openTextPrompt({
                 title: 'Rename workspace',
@@ -92,8 +203,7 @@
             if (name === null) return;          // cancelled
             // A state-sync poll-adopt during the await can swap prefs._layout
             // wholesale, so re-find the live workspace by id before mutating it.
-            const L2 = getLayout();
-            const ws2 = L2.workspaces.find(w => w.id === ws.id);
+            const ws2 = wsList().find(w => w.id === ws.id);
             if (!ws2) return;
             const t = name.trim();
             if (t) {
@@ -107,14 +217,13 @@
             applyTaskbarWorkspace();
         }
         async function removeWorkspace(i) {
-            const L = getLayout();
-            if (L.workspaces.length <= 1) {
+            if (wsList().length <= 1) {
                 showNotice('cannot remove the last workspace');
                 return;
             }
-            if (i < 0 || i >= L.workspaces.length) return;
-            const victim = L.workspaces[i];
-            const hasContent = (victim.columns && victim.columns.length)
+            const victim = wsList()[i];
+            if (!victim) return;
+            const hasContent = workspaceColumns(victim.id).length
                 || anyFloatingOnWs(victim.id);
             if (hasContent) {
                 const ok = await openConfirmDialog({
@@ -127,31 +236,24 @@
                 if (!ok) return;
             }
             // A state-sync poll-adopt during the await can replace prefs._layout
-            // wholesale, so the captured L / victim / i go stale. Re-acquire the
-            // live layout and re-locate the victim by id before mutating.
-            const L2 = getLayout();
-            if (L2.workspaces.length <= 1) return;
-            const vi = L2.workspaces.findIndex(w => w.id === victim.id);
+            // wholesale, so the captured list / index go stale. Re-acquire and
+            // re-locate the victim by id before mutating.
+            const st = wsStore();
+            if (st.list.length <= 1) return;
+            const vi = workspaceIndexById(victim.id);
             if (vi < 0) return;
-            const live = L2.workspaces[vi];
-            const neighborIdx = (vi > 0) ? vi - 1 : 1;
-            const neighbor = L2.workspaces[neighborIdx];
-            // Move tiled columns into the neighbor (keeps their windows).
-            for (const col of live.columns) neighbor.columns.push(col);
-            // Reassign floating windows locked to the victim -> neighbor (by id,
-            // so no index bookkeeping is needed across the splice).
-            reassignFloatingWs(live.id, neighbor.id);
-            // Park the victim's tiled windows first so the relayout below never
-            // tries to mount them under the now-removed workspace.
-            for (const col of live.columns) {
-                for (const k of columnKeys(col)) parkWindow(windows.get(k));
+            const neighbor = st.list[(vi > 0) ? vi - 1 : 1];
+            if (!neighbor) return;
+            // Re-stamp the victim's columns onto the neighbour — the columns
+            // themselves never move, so no window can be lost here.
+            for (const col of workspaceColumns(victim.id)) col.wsId = neighbor.id;
+            reassignFloatingWs(victim.id, neighbor.id);
+            const wasActive = (st.activeId === victim.id);
+            st.list.splice(vi, 1);
+            if (wasActive) {
+                st.activeId = neighbor.id;
+                applyWorkspaceView();
             }
-            L2.workspaces.splice(vi, 1);
-            // Fix the active index.
-            let active = L2.activeWs;
-            if (active === vi) active = Math.max(0, vi - 1);
-            else if (active > vi) active -= 1;
-            L2.activeWs = Math.max(0, Math.min(active, L2.workspaces.length - 1));
             savePrefs();
             renderWorkspaces();
             relayoutStrip();
@@ -166,8 +268,7 @@
         }
         function showWsPreview(i, anchor) {
             hideWsPreview();
-            const L = getLayout();
-            const ws = L.workspaces[i];
+            const ws = wsList()[i];
             if (!ws) return;
             const box = document.createElement('div');
             box.className = 'ws-preview';
@@ -184,7 +285,7 @@
             // rows, and per split row the live cells — each keyed off the SHARED
             // isLiveKey. Dormant keys stay in _layout (reconcile keeps them) but
             // are dropped here exactly as the strip drops them.
-            const cols = ws.columns || [];
+            const cols = workspaceColumns(ws.id);
             const renderCols = [];
             for (const col of cols) {
                 const liveRows = [];
@@ -335,7 +436,7 @@
             if (render) { applyWorkspaceVisibility(); applyTaskbarWorkspace(); }
         }
         function setWindowAllWorkspaces(win, all) {
-            setWindowWs(win, all ? null : activeWorkspace().id, true);
+            setWindowWs(win, all ? null : activeWorkspaceId(), true);
         }
         function floatingOnWs(wsId) {
             const out = [];
@@ -361,7 +462,7 @@
         function windowOffActiveWs(win) {
             if (!win || win.tiled) return false;
             const wsId = windowWsId(win);
-            return (typeof wsId === 'string') && wsId !== activeWorkspace().id;
+            return (typeof wsId === 'string') && wsId !== activeWorkspaceId();
         }
         // Stamp a floating window's workspace at CREATION, and mask it in the
         // same frame. Without this the stamp only lands later — from
@@ -369,7 +470,7 @@
         // inside switchWorkspace — with two consequences: a window that belongs
         // to another workspace paints where you are and flicks away a tick later,
         // and an unassigned window born on ws A just before a switch to B is
-        // stamped B (switchWorkspace sets activeWs BEFORE it applies visibility).
+        // stamped B (switchWorkspace sets activeId BEFORE it applies visibility).
         function adoptFloatWorkspace(win) {
             if (!win || win.disposed || win.tiled) return;
             const wsId = windowWsId(win);
@@ -382,10 +483,10 @@
             // poll would fix it a tick later, turning "paints then vanishes"
             // into "does nothing, then appears", which is worse in a throttled
             // background tab.
-            const liveWsIds = new Set(getLayout().workspaces.map(w => w.id));
+            const liveWsIds = new Set(wsList().map(w => w.id));
             if (wsId === undefined
                 || (typeof wsId === 'string' && !liveWsIds.has(wsId))) {
-                setWindowWs(win, activeWorkspace().id, false);   // masked below
+                setWindowWs(win, activeWorkspaceId(), false);   // masked below
             }
             const hide = windowOffActiveWs(win);
             win.dom.classList.toggle('ws-hidden', hide);
@@ -396,48 +497,11 @@
             if (hide && frontId === win.id) { frontId = null; updateTaskbarActive(); }
             applyTaskbarWorkspace();   // else the chip's ws badge lags a poll
         }
-        // The single creation tail every window factory ends with: a tiled window
-        // goes into its column, a float adopts the active workspace and takes
-        // focus. findKeyInLayout (not decideTiled) is deliberate — it is exactly
-        // the test the factories already made, so app windows keep floating
-        // unless the layout already holds a column for them.
-        function finishWindowPlacement(win) {
-            if (!win || win.disposed) return win;
-            if (findKeyInLayout(win.id)) placeWindowTiled(win);
-            else { adoptFloatWorkspace(win); bringToFront(win.id); }
-            return win;
-        }
-        // Open-or-focus for a window that ALREADY exists. Invoking one parked on
-        // another workspace must never silently do nothing — bringToFront hard-
-        // refuses a masked float and restoreWindow delegates to it:
-        //   float elsewhere  -> re-home it HERE (the #152 decision)
-        //   tiled elsewhere  -> go THERE instead; a tiled window's membership IS
-        //                       its column, so it cannot be re-homed without
-        //                       restructuring the layout
-        //   masked but ours  -> repair the stale mask
-        // An all-workspaces float (windowWsId === null) is never re-homed: it is
-        // not hidden by design.
-        function revealAndFocusWindow(id) {
-            const win = windows.get(id);
-            if (!win || win.disposed) return null;
-            if (win.tiled) {
-                const loc = findKeyInLayout(id);
-                if (loc && loc.wsIndex !== getLayout().activeWs) {
-                    switchWorkspace(loc.wsIndex);
-                }
-            } else if (windowOffActiveWs(win)) {
-                setWindowWs(win, activeWorkspace().id, true);   // re-home + render
-            } else if (win.dom.classList.contains('ws-hidden')) {
-                applyWorkspaceVisibility();                     // repair the mask
-            }
-            if (win.minimized) restoreWindow(id); else bringToFront(id);
-            return win;
-        }
         // Mask floating windows that don't belong to the active workspace;
         // lazily lock an unassigned (new / pre-feature) window to the current
         // workspace. Idempotent — safe to call every poll tick.
         function applyWorkspaceVisibility() {
-            const activeId = activeWorkspace().id;
+            const activeId = activeWorkspaceId();
             // Membership ids live in browser-local prefs._floatWs while the
             // workspace SET lives in the /state-synced layout; an adopt that
             // rebuilds the layout (minted fresh ws id) can leave a float
@@ -446,7 +510,7 @@
             // shows, and persist the heal so it can't recur. Snapshot the live
             // ws ids once — this runs every poll tick — and note setWindowWs
             // below never mutates the layout, so the set stays valid.
-            const liveWsIds = new Set(getLayout().workspaces.map(w => w.id));
+            const liveWsIds = new Set(wsList().map(w => w.id));
             let frontCleared = false;
             for (const win of windows.values()) {
                 if (win.disposed || win.tiled) continue;
@@ -474,23 +538,23 @@
         // lives on another workspace, so the bar indicates the active ws.
         function workspaceIndexForKey(key) {
             const loc = findKeyInLayout(key);
-            if (loc) return loc.wsIndex;            // tiled membership
+            if (loc) return workspaceIndexById(columnWsId(loc.col));  // tiled membership
             const wsId = keyWsId(key);
             if (typeof wsId === 'string') {
-                const idx = getLayout().workspaces.findIndex(w => w.id === wsId);
+                const idx = workspaceIndexById(wsId);
                 if (idx >= 0) return idx;
             }
             return null;                            // all-workspaces / unknown
         }
         function applyTaskbarWorkspace() {
-            const L = getLayout();
-            const active = L.activeWs;
+            const list = wsList();
+            const active = activeWorkspaceIndex();
             const hideOther = !!getSettings().hideTaskbarOtherWs;
             document.querySelectorAll('#taskbar-items .taskbar-item').forEach(el => {
                 const key = el.dataset.sessionId || '';
                 const wsi = workspaceIndexForKey(key);
                 let badge = el.querySelector('.ti-ws');
-                if (wsi === null) {
+                if (wsi === null || wsi < 0) {
                     if (badge) badge.remove();
                     el.classList.remove('other-ws');
                     el.classList.remove('ws-hidden');   // all-ws items never hidden
@@ -501,7 +565,7 @@
                     badge.className = 'ti-ws';
                     el.appendChild(badge);
                 }
-                const ws = L.workspaces[wsi];
+                const ws = list[wsi];
                 badge.textContent = (ws && ws.name) ? ws.name : ('ws' + (wsi + 1));
                 el.classList.toggle('other-ws', wsi !== active);
                 el.classList.toggle('ws-hidden', hideOther && wsi !== active);
@@ -509,30 +573,41 @@
             reorderTaskbarItems();
         }
 
-        // Render both switchers: the right-edge rail (CSS-gated to tiling mode)
-        // and the always-visible taskbar pager. Called from every
-        // workspace-state change, since the pager shows in floating mode too.
+        // Render the taskbar pager. Called from every workspace-state change,
+        // since the pager shows in floating mode too.
         function renderWorkspaces() {
             renderWsDots(document.getElementById('ws-pager'));
         }
-        function switchWorkspace(index) {
+        // Push the active workspace's remembered focused column back onto the
+        // layout. The strip's filter does the actual showing/hiding.
+        function applyWorkspaceView() {
             const L = getLayout();
-            if (index < 0 || index >= L.workspaces.length || index === L.activeWs) return;
-            // Park the currently-active workspace's live windows first, so the
-            // relayout's unused-colEl cleanup never removes a live window's dom.
-            const cur = L.workspaces[L.activeWs];
-            for (const col of cur.columns) {
+            const entry = activeWorkspaceEntry();
+            const n = workspaceColumns(activeWorkspaceId()).length;
+            L.focusedCol = Math.max(0,
+                Math.min(entry ? entry.focusedCol : 0, Math.max(0, n - 1)));
+        }
+        function switchWorkspace(index) {
+            const st = wsStore();
+            if (index < 0 || index >= st.list.length) return;
+            const target = st.list[index];
+            if (!target || target.id === st.activeId) return;
+            // Park the currently-visible windows first, so the relayout's
+            // unused-colEl cleanup never removes a live window's dom.
+            for (const col of visibleColumns()) {
                 for (const k of columnKeys(col)) parkWindow(windows.get(k));
             }
-            L.activeWs = index;
+            const cur = activeWorkspaceEntry();
+            if (cur) cur.focusedCol = getLayout().focusedCol;   // remember where we were
+            st.activeId = target.id;
+            applyWorkspaceView();
             savePrefs();
-            renderWorkspaces();               // pager/rail reflect the switch now
+            renderWorkspaces();               // pager reflects the switch now
             applyWorkspaceVisibility();       // show only this ws's floating wins
             relayoutStrip();                  // mounts the new workspace
             applyTaskbarWorkspace();          // taskbar dims off-ws items
             // Focus the new workspace's focused column.
-            const nws = L.workspaces[index];
-            const fcol = nws.columns[nws.focusedCol];
+            const fcol = visibleColumns()[target.focusedCol];
             if (fcol) {
                 // Prefer the focused column's active (visible) tab.
                 const fk = firstLiveKeyInColumn(fcol);
@@ -540,37 +615,104 @@
             }
         }
         function addWorkspace() {
-            const L = getLayout();
-            L.workspaces.push(newWorkspace());
+            const st = wsStore();
+            st.list.push({ id: mintLayoutId(), focusedCol: 0 });
             savePrefs();
             renderWorkspaces();               // new dot shows even before switch
-            switchWorkspace(L.workspaces.length - 1);
+            switchWorkspace(st.list.length - 1);
         }
-        // Move a tiled window to another workspace as a new column. It lands in
-        // an inactive workspace, so it is parked (not measured) until shown.
+        // Move a tiled window to another workspace. Its column is RE-STAMPED
+        // (and moved beside that workspace's other columns so the strip and the
+        // taskbar keep a sensible left-to-right order) — never copied, so no
+        // window can be lost. If the window shared a column, it is expelled into
+        // its own column first, exactly as "Move to own column" would.
         function sendWindowToWorkspace(win, targetIndex) {
             if (!win || win.disposed) return;
-            const L = getLayout();
-            if (targetIndex < 0 || targetIndex >= L.workspaces.length) return;
-            const loc = findKeyInLayout(win.id);
-            if (!loc || loc.wsIndex === targetIndex) return;
+            const st = wsStore();
+            const target = st.list[targetIndex];
+            if (!target) return;
+            let loc = findKeyInLayout(win.id);
+            if (!loc || columnWsId(loc.col, st) === target.id) return;
             const focusPrecap = (frontId === win.id)
                 ? captureTiledFocusContext(win.id) : null;
-            removeKeyFromLayout(win.id);       // collapse source row/col, heal focus
-            const tgt = L.workspaces[targetIndex];
-            const col = newColumn();
-            col.rows = [newRow([win.id], 1)];
-            tgt.columns.push(col);
-            tgt.focusedCol = tgt.columns.length - 1;
+            const L = getLayout();
+            const shared = (loc.col.rows.length > 1 || rowKeys(loc.row).length > 1);
+            if (shared) {
+                expelToNewColumn(win);        // its own column, adjacent to the old
+                loc = findKeyInLayout(win.id);
+                if (!loc) return;
+            }
+            const col = loc.col;
+            col.wsId = target.id;
+            // Re-seat it next to the target workspace's last column so storage
+            // order stays grouped (the taskbar's spatial order reads it).
+            const peers = workspaceColumns(target.id).filter(c => c !== col);
+            const at = peers.length
+                ? L.columns.indexOf(peers[peers.length - 1]) + 1 : L.columns.length;
+            const from = L.columns.indexOf(col);
+            if (from !== -1 && at !== from) {
+                L.columns.splice(from, 1);
+                L.columns.splice(at > from ? at - 1 : at, 0, col);
+            }
+            target.focusedCol = Math.max(0,
+                workspaceColumns(target.id).indexOf(col));
             savePrefs();
-            parkWindow(win);                  // belongs to an inactive ws now
+            parkWindow(win);                  // belongs to a hidden column now
             // The moved window is no longer visible, so it must not stay the
             // active/front window — drop frontId; reconcile may set a new one.
             if (frontId === win.id) frontId = null;
+            applyWorkspaceView();
             requestRelayout();
+            renderWorkspaces();
+            applyTaskbarWorkspace();
             updateTaskbarActive();
             if (focusPrecap) {
                 requestAnimationFrame(() => reconcileTiledFocus(focusPrecap));
             }
         }
-
+        // Send to a brand-new workspace (the title-bar menu's last entry).
+        function sendWindowToNewWorkspace(win) {
+            const st = wsStore();
+            st.list.push({ id: mintLayoutId(), focusedCol: 0 });
+            savePrefs();
+            sendWindowToWorkspace(win, st.list.length - 1);
+        }
+        // ---- wiring -------------------------------------------------------
+        // The strip draws only the active workspace's columns. Everything else
+        // in this file is bookkeeping on top of that one decision.
+        registerColumnFilter(function (col, L) {
+            const st = (L.mods && L.mods.workspaces) || null;
+            if (!st || !Array.isArray(st.list) || !st.list.length) return true;
+            const id = col && col.wsId;
+            if (typeof id !== 'string') return true;   // unstamped -> adopted here
+            if (!st.list.some(function (w) { return w.id === id; })) return true;
+            return id === st.activeId;
+        });
+        // A column core just created belongs to the workspace you are looking at.
+        registerColumnCreated(function (col) {
+            if (col && typeof col.wsId !== 'string') col.wsId = activeWorkspaceId();
+        });
+        registerPlacementHooks({
+            placed: adoptFloatWorkspace,
+            // Invoking a window parked elsewhere must never no-op:
+            //   tiled elsewhere -> go THERE (a tiled window's membership IS its
+            //                      column, so it cannot be re-homed without
+            //                      restructuring the layout)
+            //   float elsewhere -> re-home it HERE (the #152 decision)
+            //   masked but ours -> repair the stale mask
+            // An all-workspaces float (windowWsId === null) is never re-homed:
+            // it is not hidden by design.
+            reveal: function (win) {
+                if (win.tiled) {
+                    const loc = findKeyInLayout(win.id);
+                    if (loc && visibleColIndex(loc.col) === -1) {
+                        const wi = workspaceIndexById(columnWsId(loc.col));
+                        if (wi >= 0) switchWorkspace(wi);
+                    }
+                } else if (windowOffActiveWs(win)) {
+                    setWindowWs(win, activeWorkspaceId(), true);   // re-home + render
+                } else if (win.dom.classList.contains('ws-hidden')) {
+                    applyWorkspaceVisibility();                    // repair the mask
+                }
+            },
+        });

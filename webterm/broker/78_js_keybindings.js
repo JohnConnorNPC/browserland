@@ -39,16 +39,15 @@
         // floating, where there are no columns to walk).
         function focusColumnBy(dir) {
             if (!isTilingMode()) return;
-            const ws = activeWorkspace();
-            if (!ws.columns.length) return;
-            const j = Math.max(0, Math.min(ws.columns.length - 1,
-                ws.focusedCol + dir));
-            if (j === ws.focusedCol && firstLiveKeyInColumn(ws.columns[j])
-                === null) return;
-            ws.focusedCol = j;
+            const L = activeDesktop();
+            const vis = visibleColumns();
+            if (!vis.length) return;
+            const j = Math.max(0, Math.min(vis.length - 1, L.focusedCol + dir));
+            if (j === L.focusedCol && firstLiveKeyInColumn(vis[j]) === null) return;
+            L.focusedCol = j;
             savePrefs();
             scrollColumnIntoView(j, true);
-            const k = firstLiveKeyInColumn(ws.columns[j]);
+            const k = firstLiveKeyInColumn(vis[j]);
             if (k) bringToFront(k);
         }
         // Close the front window: app docs go through the save-aware path so a
@@ -67,13 +66,13 @@
             { id: 'focus-col-right', label: 'Focus column right',
               run: () => focusColumnBy(1) },
             { id: 'move-col-left',   label: 'Move column left',
-              run: () => moveColumn(activeWorkspace().focusedCol, -1) },
+              run: () => moveColumn(activeDesktop().focusedCol, -1) },
             { id: 'move-col-right',  label: 'Move column right',
-              run: () => moveColumn(activeWorkspace().focusedCol, 1) },
+              run: () => moveColumn(activeDesktop().focusedCol, 1) },
             { id: 'workspace-prev',  label: 'Previous workspace',
-              run: () => switchWorkspace(getLayout().activeWs - 1) },
+              run: () => switchWorkspace(activeWorkspaceIndex() - 1) },
             { id: 'workspace-next',  label: 'Next workspace',
-              run: () => switchWorkspace(getLayout().activeWs + 1) },
+              run: () => switchWorkspace(activeWorkspaceIndex() + 1) },
             { id: 'workspace-1',     label: 'Go to workspace 1',
               run: () => switchWorkspace(0) },
             { id: 'workspace-2',     label: 'Go to workspace 2',
@@ -389,7 +388,11 @@
             if (win.tiled) {
                 const loc = findKeyInLayout(win.id);
                 const cur = loc ? loc.col.widthPreset : DEFAULT_NEW_PRESET;
-                const ncols = loc ? loc.ws.columns.length : 0;
+                // Column items are about what is ON SCREEN, so they index the
+                // VISIBLE columns — loc.colIndex is a storage index (#148).
+                const vis = visibleColumns();
+                const vci = loc ? vis.indexOf(loc.col) : -1;
+                const ncols = vis.length;
                 const row = loc ? loc.row : null;
                 // Alone = the only key in the only row of its column.
                 const alone = loc
@@ -405,10 +408,10 @@
                 items.push({ sep: true });
                 // Vertical stacking: consume into a neighbor column / expel.
                 items.push({ label: 'Stack into left column',
-                             enabled: !!loc && loc.colIndex > 0,
+                             enabled: vci > 0,
                              action: () => consumeIntoAdjacentColumn(win, -1) });
                 items.push({ label: 'Stack into right column',
-                             enabled: !!loc && loc.colIndex < ncols - 1,
+                             enabled: vci !== -1 && vci < ncols - 1,
                              action: () => consumeIntoAdjacentColumn(win, 1) });
                 items.push({ label: 'Move to own column',
                              enabled: !!loc && !alone,
@@ -418,14 +421,13 @@
                 // Spawns a fresh column to the right; a no-op when already alone.
                 items.push({ label: 'Move to new column',
                              enabled: !!loc,
-                             action: () => dragDropNewColumn(win.id, loc.colIndex + 1) });
+                             action: () => dragDropNewColumn(win.id, vci + 1) });
                 // Per-tile tab groups: tab into the nearest live tile of a
                 // neighbor column, tab this window's tile (seed/extend a tab
                 // group), or untab the current tile back to single-window rows.
-                const leftCol = (loc && loc.colIndex > 0)
-                    ? loc.ws.columns[loc.colIndex - 1] : null;
-                const rightCol = (loc && loc.colIndex < ncols - 1)
-                    ? loc.ws.columns[loc.colIndex + 1] : null;
+                const leftCol = (vci > 0) ? vis[vci - 1] : null;
+                const rightCol = (vci !== -1 && vci < ncols - 1)
+                    ? vis[vci + 1] : null;
                 items.push({ label: 'Tab into left column',
                              enabled: !!leftCol && !!firstLiveKeyInColumn(leftCol),
                              action: () => tabWindowIntoTile(win.id,
@@ -462,16 +464,15 @@
                 }
                 items.push({ sep: true });
                 items.push({ label: 'Move column left',
-                             enabled: !!loc && loc.colIndex > 0,
-                             action: () => moveColumn(loc.colIndex, -1) });
+                             enabled: vci > 0,
+                             action: () => moveColumn(vci, -1) });
                 items.push({ label: 'Move column right',
-                             enabled: !!loc && loc.colIndex < ncols - 1,
-                             action: () => moveColumn(loc.colIndex, 1) });
+                             enabled: vci !== -1 && vci < ncols - 1,
+                             action: () => moveColumn(vci, 1) });
                 items.push({ sep: true });
                 // Send to another vertical workspace.
-                const L = getLayout();
-                const here = loc ? loc.wsIndex : L.activeWs;
-                L.workspaces.forEach((ws, wi) => {
+                const here = activeWorkspaceIndex();
+                wsList().forEach((ws, wi) => {
                     if (wi === here) return;
                     items.push({ label: 'Send to '
                                      + (ws.name ? ws.name : 'workspace ' + (wi + 1)),
@@ -479,12 +480,7 @@
                                  action: () => sendWindowToWorkspace(win, wi) });
                 });
                 items.push({ label: 'Send to new workspace', enabled: true,
-                             action: () => {
-                                 const LL = getLayout();
-                                 LL.workspaces.push(newWorkspace());
-                                 savePrefs();
-                                 sendWindowToWorkspace(win, LL.workspaces.length - 1);
-                             } });
+                             action: () => sendWindowToNewWorkspace(win) });
                 items.push({ sep: true });
                 items.push({ label: 'Float this window', enabled: true,
                              action: () => detachToFloat(win) });
@@ -603,12 +599,12 @@
             } else {
                 // Tiling mode: vertical-workspace switcher + bulk un-tile. The
                 // per-column controls live on each window's title-bar menu.
-                const L = getLayout();
-                L.workspaces.forEach((ws, wi) => {
+                const cur = activeWorkspaceIndex();
+                wsList().forEach((ws, wi) => {
                     items.push({
-                        label: (wi === L.activeWs ? '✓ ' : '   ')
+                        label: (wi === cur ? '✓ ' : '   ')
                             + (ws.name ? ws.name : 'Workspace ' + (wi + 1))
-                            + ' (' + ws.columns.length + ')',
+                            + ' (' + workspaceColumns(ws.id).length + ')',
                         enabled: true,
                         action: () => switchWorkspace(wi),
                     });
@@ -652,7 +648,7 @@
             items.push({ label: 'Focus', enabled: true, action: () => {
                 if (!windows.has(key)) {
                     const targetWs = workspaceIndexForKey(key);
-                    if (targetWs !== null && targetWs !== getLayout().activeWs)
+                    if (targetWs !== null && targetWs !== activeWorkspaceIndex())
                         switchWorkspace(targetWs);
                     if (appStore[key]) openAppWindow(appStore[key]);
                     else openWindow(key, sessions.get(key));

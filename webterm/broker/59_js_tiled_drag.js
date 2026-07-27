@@ -101,22 +101,22 @@
             const strip = document.getElementById('strip');
             const desktop = document.getElementById('desktop');
             const dRect = desktop.getBoundingClientRect();
-            const ws = activeWorkspace();
+            const vis = visibleColumns();
             if (allowFloat && cy > dRect.bottom - FLOAT_BAND) return { kind: 'float' };
             const colEls = Array.from(strip.querySelectorAll('.strip-col'));
             if (colEls.length === 0) return { kind: 'newcol', index: 0 };
             for (const colEl of colEls) {
                 const r = colEl.getBoundingClientRect();
                 if (cx >= r.left && cx < r.right) {
-                    const idx = ws.columns.findIndex(c => c.id === colEl.dataset.colId);
-                    if (idx === -1) return { kind: 'newcol', index: ws.columns.length };
+                    const idx = vis.findIndex(c => c.id === colEl.dataset.colId);
+                    if (idx === -1) return { kind: 'newcol', index: vis.length };
                     const edge = Math.min(60, r.width * 0.25);
                     if (cx < r.left + edge)
                         return { kind: 'newcol', index: idx, x: r.left };
                     if (cx > r.right - edge)
                         return { kind: 'newcol', index: idx + 1, x: r.right };
                     // Resolve the specific window under the cursor.
-                    const col = ws.columns.find(c => c.id === colEl.dataset.colId);
+                    const col = vis.find(c => c.id === colEl.dataset.colId);
                     const row = col ? windowRowAt(col, cx, cy) : null;
                     if (row) {
                         const wr = row.rect;
@@ -152,9 +152,9 @@
             if (cx < firstR.left) return { kind: 'newcol', index: 0, x: firstR.left };
             const lastEl = colEls[colEls.length - 1];
             const lastR = lastEl.getBoundingClientRect();
-            const li = ws.columns.findIndex(c => c.id === lastEl.dataset.colId);
+            const li = vis.findIndex(c => c.id === lastEl.dataset.colId);
             return { kind: 'newcol',
-                     index: (li === -1 ? ws.columns.length : li + 1), x: lastR.right };
+                     index: (li === -1 ? vis.length : li + 1), x: lastR.right };
         }
         function showDrop(target) {
             const { vbar, col, flt } = dropEls();

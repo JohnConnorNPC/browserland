@@ -448,8 +448,7 @@
             e.preventDefault();
             e.stopPropagation();
             const g = e.currentTarget;
-            const ws = activeWorkspace();
-            const col = ws.columns.find(c => c.id === g.dataset.colId);
+            const col = getLayout().columns.find(c => c.id === g.dataset.colId);
             if (!col) return;
             const aboveRow = rowOfKey(col, g.dataset.aboveKey);
             const belowRow = rowOfKey(col, g.dataset.belowKey);
@@ -508,8 +507,7 @@
             e.preventDefault();
             e.stopPropagation();
             const g = e.currentTarget;
-            const ws = activeWorkspace();
-            const col = ws.columns.find(c => c.id === g.dataset.colId);
+            const col = getLayout().columns.find(c => c.id === g.dataset.colId);
             if (!col) return;
             // (F-NESTSPLIT) The gutter is stamped with two CELL IDs. Find the split
             // row whose cells include the left id (top-level), and both adjacent cells.

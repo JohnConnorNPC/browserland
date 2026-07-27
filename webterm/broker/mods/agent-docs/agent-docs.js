@@ -116,16 +116,18 @@
             // from (a [terminal│AGENTS] tab group) instead of floating.
             // openAgentDocsWindow can bail before creating the window (sandbox /
             // read error), so guard on the window actually existing. Guard on the
-            // terminal living in the ACTIVE workspace, not merely existing in the
-            // layout: the file-read await above can interleave a workspace switch,
-            // and tabbing into an inactive-workspace tile would move the
-            // freshly-mounted docs DOM across workspaces (orphaning it until that
+            // terminal's column being ON SCREEN, not merely present in the
+            // layout: the file-read await above can interleave a workspace
+            // switch, and tabbing into a hidden tile would move the
+            // freshly-mounted docs DOM out of sight (orphaning it until that
             // workspace is revisited). A floating terminal (findKeyInLayout null)
             // or one the user navigated away from mid-open leaves the docs
-            // floating, as before.
+            // floating, as before. visibleColIndex is core's #148 seam for
+            // "is this column drawn"; it is -1 for a filtered-out column and,
+            // with no workspaces mod, never filters anything out.
             const docsWin = windows.get(aid);
             const termLoc = findKeyInLayout(termId);
-            if (docsWin && termLoc && termLoc.wsIndex === getLayout().activeWs) {
+            if (docsWin && termLoc && visibleColIndex(termLoc.col) !== -1) {
                 placeWindowTiled(docsWin);        // get the docs into the layout first
                 tabWindowIntoTile(aid, termId);   // relocate it as a tab beside the term
             }

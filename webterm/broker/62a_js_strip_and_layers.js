@@ -166,11 +166,11 @@
             win.dom.style.width = '';
             win.dom.style.height = '';
             win.dom.style.zIndex = '';
-            // A window whose membership is in an INACTIVE workspace (e.g. a
-            // reattach after reload into a parked workspace) is parked, not
-            // measured — it mounts and resizes when its workspace is shown.
+            // A window whose column is currently HIDDEN (the workspaces mod
+            // filters the strip down to one workspace, #148) is parked, not
+            // measured — it mounts and resizes when its column is shown again.
             const loc = findKeyInLayout(win.id);
-            if (loc && loc.wsIndex !== getLayout().activeWs) {
+            if (loc && visibleColIndex(loc.col) === -1) {
                 parkWindow(win);
                 return;
             }
@@ -251,4 +251,70 @@
             if (park && win && !win.disposed && win.dom.parentElement !== park) {
                 park.appendChild(win.dom);
             }
+        }
+
+        // ---- window placement seams (#148) --------------------------------
+        // The two points where "where does this window belong" is more than the
+        // one desktop core owns. Both are one-slot hooks that no-op with nobody
+        // registered, which IS core's single-desktop behaviour:
+        //   placed(win)  — a window was just placed as a FLOAT. The workspaces
+        //                  mod stamps its workspace and masks it in the same
+        //                  frame, so it never paints where it doesn't belong.
+        //   reveal(win)  — first refusal before revealAndFocusWindow focuses:
+        //                  switch to the workspace holding a tiled window, or
+        //                  re-home a float parked on another one (#152).
+        // A throwing hook must never strand the window, so both are guarded and
+        // core carries on with the focus it was going to give anyway.
+        let _placementHooks = { placed: null, reveal: null };
+        function registerPlacementHooks(hooks) {
+            if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) {
+                throw new Error('registerPlacementHooks: hooks must be an object');
+            }
+            for (const k of ['placed', 'reveal']) {
+                if (hooks[k] !== undefined && typeof hooks[k] !== 'function') {
+                    throw new Error('registerPlacementHooks: ' + k + ' must be a function');
+                }
+                if (hooks[k] && _placementHooks[k]) {
+                    throw ModConflictError('a placement "' + k + '" hook is already registered');
+                }
+            }
+            const taken = [];
+            for (const k of ['placed', 'reveal']) {
+                if (hooks[k]) { _placementHooks[k] = hooks[k]; taken.push(k); }
+            }
+            return function () {
+                for (const k of taken) {
+                    if (_placementHooks[k] === hooks[k]) _placementHooks[k] = null;
+                }
+            };
+        }
+        function _runPlacementHook(name, win) {
+            const fn = _placementHooks[name];
+            if (!fn) return;
+            try { fn(win); }
+            catch (e) { console.error('[tiling] placement "' + name + '" hook threw', e); }
+        }
+        // The single creation tail every window factory ends with: a tiled window
+        // goes into its column, a float takes focus. findKeyInLayout (not
+        // decideTiled) is deliberate — it is exactly the test the factories
+        // already made, so app windows keep floating unless the layout already
+        // holds a column for them.
+        function finishWindowPlacement(win) {
+            if (!win || win.disposed) return win;
+            if (findKeyInLayout(win.id)) placeWindowTiled(win);
+            else { _runPlacementHook('placed', win); bringToFront(win.id); }
+            return win;
+        }
+        // Open-or-focus for a window that ALREADY exists. Invoking one whose
+        // column is hidden, or one masked off the active workspace, must never
+        // silently do nothing — bringToFront hard-refuses a masked float and
+        // restoreWindow delegates to it. The reveal hook owns that policy; with
+        // no hook there is nothing to reveal, because there is one desktop and
+        // every column is on it.
+        function revealAndFocusWindow(id) {
+            const win = windows.get(id);
+            if (!win || win.disposed) return null;
+            _runPlacementHook('reveal', win);
+            if (win.minimized) restoreWindow(id); else bringToFront(id);
+            return win;
         }

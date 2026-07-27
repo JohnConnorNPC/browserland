@@ -27,52 +27,54 @@
             arr.splice(i, 1);
             savePrefs();
         }
-        function activeWorkspace() {
-            const L = getLayout();
-            return L.workspaces[L.activeWs];
+        // The one desktop (#148). Was activeWorkspace(); every caller only ever
+        // wanted `.columns` / `.focusedCol`, which the layout now carries itself.
+        function activeDesktop() {
+            return getLayout();
         }
-        // Find the tile (in any workspace) holding a given window key, or null.
-        // Returns { ws, wsIndex, col, colIndex, row, rowIndex, cell, cellIndex,
-        // tabIndex } where `row` is ALWAYS the top-level Row OBJECT (∈ col.rows)
-        // and `rowIndex` its index in col.rows. For a SPLIT row `cell` is the
+        // Find the tile holding a given window key, or null. Returns
+        // { desktop, col, colIndex, row, rowIndex, cell, cellIndex, tabIndex }
+        // where `row` is ALWAYS the top-level Row OBJECT (∈ col.rows) and
+        // `rowIndex` its index in col.rows. For a SPLIT row `cell` is the
         // holding cell, `cellIndex` its index in row.cells, and `tabIndex` the
         // key's index WITHIN that cell. For every other row (and a not-yet-
         // migrated legacy split) `cell`=null, `cellIndex`=-1, and `tabIndex` is
         // the key's index in row.keys (back-compat). NEVER returns a nested row.
+        //
+        // `colIndex` is a STORAGE index (into L.columns) — it is what the
+        // splices need. It is NOT a screen position: pass loc.col through
+        // visibleColIndex() for anything the user points at (#148).
         function findKeyInLayout(key) {
             const L = getLayout();
             key = String(key);
-            for (let wi = 0; wi < L.workspaces.length; wi++) {
-                const ws = L.workspaces[wi];
-                for (let ci = 0; ci < ws.columns.length; ci++) {
-                    const col = ws.columns[ci];
-                    const rows = col.rows || [];
-                    for (let ri = 0; ri < rows.length; ri++) {
-                        const row = rows[ri];
-                        // A split row carries keys inside cells: locate the cell and
-                        // set cell/cellIndex with tabIndex = index WITHIN that cell.
-                        // A non-split row (and a not-yet-migrated legacy split that
-                        // still has flat row.keys) keeps the back-compat contract:
-                        // cell=null, cellIndex=-1, tabIndex = index in row.keys.
-                        // loc.row is ALWAYS the top-level col.rows member.
-                        if (row && row.mode === 'split' && Array.isArray(row.cells)) {
-                            for (let cx = 0; cx < row.cells.length; cx++) {
-                                const cell = row.cells[cx];
-                                const ti = (cell && Array.isArray(cell.keys))
-                                    ? cell.keys.indexOf(key) : -1;
-                                if (ti !== -1) {
-                                    return { ws, wsIndex: wi, col, colIndex: ci,
-                                             row, rowIndex: ri,
-                                             cell, cellIndex: cx, tabIndex: ti };
-                                }
-                            }
-                        } else if (row && Array.isArray(row.keys)) {
-                            const ti = row.keys.indexOf(key);
+            for (let ci = 0; ci < L.columns.length; ci++) {
+                const col = L.columns[ci];
+                const rows = col.rows || [];
+                for (let ri = 0; ri < rows.length; ri++) {
+                    const row = rows[ri];
+                    // A split row carries keys inside cells: locate the cell and
+                    // set cell/cellIndex with tabIndex = index WITHIN that cell.
+                    // A non-split row (and a not-yet-migrated legacy split that
+                    // still has flat row.keys) keeps the back-compat contract:
+                    // cell=null, cellIndex=-1, tabIndex = index in row.keys.
+                    // loc.row is ALWAYS the top-level col.rows member.
+                    if (row && row.mode === 'split' && Array.isArray(row.cells)) {
+                        for (let cx = 0; cx < row.cells.length; cx++) {
+                            const cell = row.cells[cx];
+                            const ti = (cell && Array.isArray(cell.keys))
+                                ? cell.keys.indexOf(key) : -1;
                             if (ti !== -1) {
-                                return { ws, wsIndex: wi, col, colIndex: ci,
+                                return { desktop: L, col, colIndex: ci,
                                          row, rowIndex: ri,
-                                         cell: null, cellIndex: -1, tabIndex: ti };
+                                         cell, cellIndex: cx, tabIndex: ti };
                             }
+                        }
+                    } else if (row && Array.isArray(row.keys)) {
+                        const ti = row.keys.indexOf(key);
+                        if (ti !== -1) {
+                            return { desktop: L, col, colIndex: ci,
+                                     row, rowIndex: ri,
+                                     cell: null, cellIndex: -1, tabIndex: ti };
                         }
                     }
                 }
@@ -87,16 +89,22 @@
         // the strip rightward.
         const DEFAULT_NEW_PRESET = '1/2';
         function layoutAddColumn(key, preset, atIndex) {
-            const ws = activeWorkspace();
+            const L = activeDesktop();
             const col = newColumn();
             col.widthPreset = (WIDTH_PRESETS.indexOf(preset) !== -1)
                 ? preset : DEFAULT_NEW_PRESET;
             col.rows = [newRow([key], 1)];
-            const i = Number.isInteger(atIndex)
-                ? Math.max(0, Math.min(atIndex, ws.columns.length))
-                : ws.columns.length;
-            ws.columns.splice(i, 0, col);
-            ws.focusedCol = i;
+            // atIndex is a VISIBLE slot — drag-drop and the menus speak screen
+            // positions. Absent = append after the last visible column.
+            const vi = Number.isInteger(atIndex)
+                ? Math.max(0, Math.min(atIndex, visibleColumns().length))
+                : visibleColumns().length;
+            L.columns.splice(storageColIndex(vi), 0, col);
+            // Tell whatever filters the strip that this column is new BEFORE
+            // reading a visible index back: an unclaimed column is invisible, so
+            // focusedCol would otherwise land on the wrong tile (#148).
+            notifyColumnCreated(col);
+            L.focusedCol = Math.max(0, visibleColIndex(col));
             savePrefs();
             return col;
         }
@@ -126,16 +134,18 @@
             const key = win.id;
             const loc = findKeyInLayout(key);
             if (!loc) return;
-            const ws = loc.ws;
-            const tgtIndex = loc.colIndex + dir;
-            if (tgtIndex < 0 || tgtIndex >= ws.columns.length) return;
-            const tgtCol = ws.columns[tgtIndex];     // captured by reference
+            const L = loc.desktop;
+            // "Adjacent" means adjacent ON SCREEN, so walk the visible list.
+            const vis = visibleColumns();
+            const tgtIndex = vis.indexOf(loc.col) + dir;
+            if (tgtIndex < 0 || tgtIndex >= vis.length) return;
+            const tgtCol = vis[tgtIndex];            // captured by reference
             removeKeyFromLayout(key);
             // Land as a new bottom row (tile) of the target, equal-split among
             // its tiles so the consumed window gets a fair share.
             tgtCol.rows.push(newRow([key], 1));
             normalizeRowHeights(tgtCol.rows);
-            ws.focusedCol = ws.columns.indexOf(tgtCol);
+            L.focusedCol = visibleColIndex(tgtCol);
             savePrefs();
             requestRelayout();
             bringToFront(key);
@@ -149,16 +159,16 @@
             const loc = findKeyInLayout(key);
             if (!loc) return;
             if (loc.col.rows.length === 1 && rowKeys(loc.row).length === 1) return;
-            const ws = loc.ws;
+            const L = loc.desktop;
             const srcCol = loc.col;             // survives (>=1 other key remains)
             const preset = srcCol.widthPreset;
             removeKeyFromLayout(key);
             const newCol = newColumn();
             newCol.widthPreset = preset;
             newCol.rows = [newRow([key], 1)];
-            const insertAt = ws.columns.indexOf(srcCol) + 1;
-            ws.columns.splice(insertAt, 0, newCol);
-            ws.focusedCol = insertAt;
+            L.columns.splice(L.columns.indexOf(srcCol) + 1, 0, newCol);
+            notifyColumnCreated(newCol);
+            L.focusedCol = Math.max(0, visibleColIndex(newCol));
             savePrefs();
             requestRelayout();
             bringToFront(key);
@@ -185,8 +195,7 @@
             };
             let target = precap.below.find(isLive) || precap.above.find(isLive);
             if (!target) {
-                const ws = activeWorkspace();
-                const col = ws.columns[ws.focusedCol];
+                const col = visibleColumns()[activeDesktop().focusedCol];
                 if (col) target = columnKeys(col).find(isLive);
             }
             if (target) bringToFront(target);
@@ -197,13 +206,13 @@
         function dragDropConsume(key, colId) {
             const loc = findKeyInLayout(key);
             if (!loc) return;
-            const ws = loc.ws;
-            const tgtCol = ws.columns.find(c => c.id === colId);
+            const L = loc.desktop;
+            const tgtCol = L.columns.find(c => c.id === colId);
             if (!tgtCol || tgtCol === loc.col) return;   // already there
             removeKeyFromLayout(key);                    // captured tgtCol survives
             tgtCol.rows.push(newRow([key], 1));          // new bottom tile
             normalizeRowHeights(tgtCol.rows);            // equal split
-            ws.focusedCol = ws.columns.indexOf(tgtCol);
+            L.focusedCol = visibleColIndex(tgtCol);
             savePrefs();
             requestRelayout();
             bringToFront(key);
@@ -225,7 +234,7 @@
                 if (tloc.row.mode === 'split') return;
                 setRowMode(tloc.row, 'tabbed');
                 tloc.row.activeTab = dragKey;
-                tloc.ws.focusedCol = tloc.colIndex;
+                tloc.desktop.focusedCol = visibleColIndex(tloc.col);
                 savePrefs();
                 requestRelayout();
                 requestAnimationFrame(() => bringToFront(dragKey));
@@ -255,7 +264,7 @@
                 if (t2.row.keys.indexOf(dragKey) === -1) t2.row.keys.push(dragKey);
                 t2.row.activeTab = dragKey;
             }
-            t2.ws.focusedCol = t2.colIndex;
+            t2.desktop.focusedCol = visibleColIndex(t2.col);
             savePrefs();
             requestRelayout();
             requestAnimationFrame(() => bringToFront(dragKey));
@@ -265,11 +274,7 @@
         function tabWindowIntoColumn(key, colId) {
             key = String(key);
             const L = getLayout();
-            let tgtCol = null;
-            for (const ws of L.workspaces) {
-                const c = ws.columns.find(cc => cc.id === colId);
-                if (c) { tgtCol = c; break; }
-            }
+            const tgtCol = L.columns.find(cc => cc.id === colId);
             if (!tgtCol) return;
             const target = firstLiveKeyInColumn(tgtCol) || columnKeys(tgtCol)[0];
             if (!target) return;
@@ -288,15 +293,16 @@
             if (!findKeyInLayout(targetWin.id)) return;
             tabWindowIntoTile(dragWin.id, targetWin.id);
         }
-        // Drop a tiled window as a new 1-row column at ws.columns index
+        // Drop a tiled window as a new 1-row column at VISIBLE slot
         // `insertIndex` (measured against the layout BEFORE this move). If the
         // source column collapses and sat left of the target slot, the slot
-        // shifts left by one.
+        // shifts left by one. Every index here is a screen position (#148):
+        // the caller pointed at a gap between two columns it could SEE.
         function dragDropNewColumn(key, insertIndex) {
             const loc = findKeyInLayout(key);
             if (!loc) return;
-            const ws = loc.ws;
-            const srcIndex = loc.colIndex;
+            const L = loc.desktop;
+            const srcIndex = visibleColIndex(loc.col);
             const preset = loc.col.widthPreset;
             // "Alone" = the only key in the only row of its column.
             const srcAlone = (loc.col.rows.length === 1 && rowKeys(loc.row).length === 1);
@@ -310,13 +316,14 @@
             // the slot shifts left by one.
             const removedAt = (info && info.colCollapsed) ? srcIndex : -1;
             let idx = insertIndex;
-            if (removedAt !== -1 && removedAt < idx) idx -= 1;
-            idx = Math.max(0, Math.min(idx, ws.columns.length));
+            if (removedAt > -1 && removedAt < idx) idx -= 1;
+            idx = Math.max(0, Math.min(idx, visibleColumns().length));
             const col = newColumn();
             col.widthPreset = preset;
             col.rows = [newRow([key], 1)];
-            ws.columns.splice(idx, 0, col);
-            ws.focusedCol = idx;
+            L.columns.splice(storageColIndex(idx), 0, col);
+            notifyColumnCreated(col);
+            L.focusedCol = Math.max(0, visibleColIndex(col));
             savePrefs();
             requestRelayout();
             bringToFront(key);
@@ -332,8 +339,8 @@
             if (key === targetKey) return;
             const loc = findKeyInLayout(key);
             const tloc = findKeyInLayout(targetKey);
-            if (!loc || !tloc || tloc.ws !== loc.ws) return;
-            const ws = loc.ws;
+            if (!loc || !tloc) return;
+            const L = loc.desktop;
             const tgtCol = tloc.col;            // survives (holds targetKey != key)
             const tgtRow = tloc.row;            // split around this tile
             removeKeyFromLayout(key);
@@ -342,7 +349,7 @@
             const insertRow = after ? ri + 1 : ri;
             tgtCol.rows.splice(insertRow, 0, newRow([key], 1));
             normalizeRowHeights(tgtCol.rows);   // equal split
-            ws.focusedCol = ws.columns.indexOf(tgtCol);
+            L.focusedCol = visibleColIndex(tgtCol);
             savePrefs();
             requestRelayout();
             bringToFront(key);
@@ -358,7 +365,7 @@
             if (dragKey === targetKey) return;
             const dloc = findKeyInLayout(dragKey);
             const tloc = findKeyInLayout(targetKey);
-            if (!dloc || !tloc || tloc.ws !== dloc.ws) return;
+            if (!dloc || !tloc) return;
             // (F-NESTSPLIT) Same-row LEAF reorder: move the drag cell next to the
             // target cell, preserving every cell.id so widths follow. A drag tab OUT
             // of a GROUP cell (dloc.cell.keys.length>1) is NOT a reorder — it
@@ -388,14 +395,15 @@
                 // Target vanished (shouldn't in the sync flow) — never lose dragKey.
                 const ncol = newColumn();
                 ncol.rows = [newRow([dragKey], 1)];
-                dloc.ws.columns.push(ncol);
-                dloc.ws.focusedCol = dloc.ws.columns.length - 1;
+                dloc.desktop.columns.push(ncol);
+                notifyColumnCreated(ncol);
+                dloc.desktop.focusedCol = Math.max(0, visibleColIndex(ncol));
                 savePrefs();
                 requestRelayout();
                 bringToFront(dragKey);
                 return;
             }
-            const ws = t2.ws, tgtCol = t2.col, trow = t2.row;
+            const L = t2.desktop, tgtCol = t2.col, trow = t2.row;
             if (trow.mode === 'split' && t2.cell) {
                 // Insert a new LEAF cell beside the target cell, stealing half its
                 // width (every other cell keeps its width; renormalized after).
@@ -433,15 +441,15 @@
                 // Unexpected (e.g. a legacy split lacking cells) — never lose dragKey.
                 const ncol = newColumn();
                 ncol.rows = [newRow([dragKey], 1)];
-                const at = ws.columns.indexOf(tgtCol) + 1;
-                ws.columns.splice(at, 0, ncol);
-                ws.focusedCol = at;
+                L.columns.splice(L.columns.indexOf(tgtCol) + 1, 0, ncol);
+                notifyColumnCreated(ncol);
+                L.focusedCol = Math.max(0, visibleColIndex(ncol));
                 savePrefs();
                 requestRelayout();
                 bringToFront(dragKey);
                 return;
             }
-            ws.focusedCol = ws.columns.indexOf(tgtCol);
+            L.focusedCol = visibleColIndex(tgtCol);
             savePrefs();
             requestRelayout();
             bringToFront(dragKey);
@@ -457,15 +465,21 @@
             }
             dragDropSplitHoriz(dragKey, targetKey, dir === 'right');
         }
-        // Reorder the focused/given column left or right by one slot.
+        // Reorder the focused/given column left or right by one slot. Both
+        // indices are VISIBLE ones; the move exchanges the two columns' STORAGE
+        // positions, so hidden columns keep theirs and the column moves by
+        // exactly one slot on screen (#148).
         function moveColumn(colIndex, dir) {
-            const ws = activeWorkspace();
+            const L = activeDesktop();
+            const vis = visibleColumns();
             const j = colIndex + dir;
-            if (colIndex < 0 || colIndex >= ws.columns.length) return;
-            if (j < 0 || j >= ws.columns.length) return;
-            const [c] = ws.columns.splice(colIndex, 1);
-            ws.columns.splice(j, 0, c);
-            ws.focusedCol = j;
+            if (colIndex < 0 || colIndex >= vis.length) return;
+            if (j < 0 || j >= vis.length) return;
+            const a = vis[colIndex], b = vis[j];
+            const ia = L.columns.indexOf(a), ib = L.columns.indexOf(b);
+            if (ia === -1 || ib === -1) return;
+            L.columns[ia] = b; L.columns[ib] = a;
+            L.focusedCol = j;
             savePrefs();
             requestRelayout();
             scrollColumnIntoView(j, true);
