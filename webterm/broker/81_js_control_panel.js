@@ -275,7 +275,6 @@
             // Restore-on-refresh governs THIS browser's startup (not a remote
             // host), so it always reflects the LOCAL setting on every host tab.
             setRestore.checked = !!getSettings().restoreOnRefresh;
-            setHideOtherWs.checked = !!getSettings().hideTaskbarOtherWs;
 
             // Appearance is browser-global — reflect the LIVE local settings
             // (these controls are hidden on remote tabs, shown only on local).
@@ -1429,13 +1428,6 @@
         setRestore.addEventListener('change', () => {
             getSettings().restoreOnRefresh = setRestore.checked;
             savePrefs();
-        });
-        // Taskbar workspace filter: also LOCAL (this browser's chrome). Reapply
-        // immediately so the taskbar updates without a workspace switch.
-        setHideOtherWs.addEventListener('change', () => {
-            getSettings().hideTaskbarOtherWs = setHideOtherWs.checked;
-            savePrefs();
-            applyTaskbarWorkspace();
         });
 
         // Appearance (start label): browser-local like restore-on-refresh — write

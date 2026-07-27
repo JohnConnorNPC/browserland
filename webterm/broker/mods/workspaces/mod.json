@@ -1,0 +1,10 @@
+{
+  "id": "workspaces",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "title": "Workspaces",
+  "description": "Vertical workspaces: a taskbar pager with hover previews, per-workspace names, keyboard switching, and \"Send to workspace\" on any tiled window. Extracted from the tiling core (#148). Every tiled column still lives on the one desktop core owns — this only decides which of them the strip draws — so turning it off simply shows every window on a single desktop, and turning it back on restores the groups. Enabled by default.",
+  "entry": "workspaces.js",
+  "styles": ["workspaces.css"],
+  "author": "JohnConnorNPC"
+}

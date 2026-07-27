@@ -54,10 +54,10 @@
             if (!cd || typeof cd !== 'object' || !(cd.w > 0) || !(cd.h > 0)) {
                 s.cellDims = null;                // {w,h} last measured cell
             }
-            // Workspace label mode (task 19): show the number or the name.
-            if (s.wsLabelMode !== 'name' && s.wsLabelMode !== 'number') {
-                s.wsLabelMode = 'number';
-            }
+            // wsLabelMode / hideTaskbarOtherWs are deliberately absent (#148):
+            // the workspaces mod owns them via ctx.settings, which validates on
+            // READ and never writes a default into this synced blob -- same
+            // carve-out as theme / pattern / termFont below.
             // Restore-on-refresh (default on): on a browser reload, re-open the
             // terminals that were open and reattach to their live agents.
             if (typeof s.restoreOnRefresh !== 'boolean') s.restoreOnRefresh = true;
@@ -95,9 +95,6 @@
                     s.slideScreenMs = Math.max(120, Math.min(2000, Math.round(s.slideScreenMs)));
                 }
             }
-            // Hide (vs. dim) taskbar items for windows on other workspaces.
-            // Browser-global UI-chrome preference; default off (today's behavior).
-            if (typeof s.hideTaskbarOtherWs !== 'boolean') s.hideTaskbarOtherWs = false;
             // #88: when ON, a terminal window's × button terminates (hard-kills)
             // the session instead of the default soft-close (detach the view; the
             // session keeps running in the broker). App windows are unaffected.

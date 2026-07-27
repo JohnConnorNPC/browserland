@@ -27,7 +27,6 @@
         // t.s / t.save().
         const setOsc52 = document.getElementById('set-osc52');
         const setRestore = document.getElementById('set-restore-refresh');
-        const setHideOtherWs = document.getElementById('set-taskbar-hide-other-ws');
         const setDefaultProfile = document.getElementById('set-default-profile');
         const setKeybindingsEl = document.getElementById('set-keybindings');
         // Appearance controls (browser-local; bound to the LIVE local

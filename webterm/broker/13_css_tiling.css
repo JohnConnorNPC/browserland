@@ -78,60 +78,11 @@
             transition: none;
         }
         .term-window.tiled .rh { display: none; }
-        /* Vertical workspaces: inactive-workspace windows are parked here
+        /* Off-screen custody: a window the strip is not mounting lives here
            (display:none -> zero rect -> isResizable() blocks any resize while
-           parked) without destroying their xterm/WebSocket. */
+           parked) without destroying its xterm/WebSocket. Core owns #park and
+           parkWindow(); the workspaces mod (#148) is its heaviest user. */
         #park { display: none; }
-        .ws-dot {
-            width: 26px;
-            height: 26px;
-            border-radius: 4px;
-            border: 1px solid var(--bg-3);
-            background: var(--bg-2);
-            color: var(--fg-dim);
-            font-family: monospace;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            user-select: none;
-        }
-        .ws-dot:hover { border-color: var(--accent-default); color: var(--fg); }
-        .ws-dot.active {
-            background: var(--accent-default);
-            color: #000;
-            border-color: var(--accent-default);
-        }
-        .ws-dot.add { font-size: 16px; }
-        .ws-dot.named { width: auto; min-width: 26px; padding: 0 9px; }
-        /* Workspace hover preview (task 19): a scaled schematic of the columns
-           / rows in that workspace, like a Linux pager thumbnail. */
-        .ws-preview {
-            position: fixed;
-            z-index: 10000;
-            background: var(--bg-2);
-            border: 1px solid var(--bg-3);
-            border-radius: 5px;
-            padding: 6px;
-            box-shadow: 0 6px 22px rgba(0,0,0,0.5);
-            pointer-events: none;
-        }
-        .ws-preview .wsp-title { font: 11px monospace; color: var(--fg-dim); margin-bottom: 4px; }
-        .ws-preview .wsp-map {
-            position: relative; width: 168px; height: 104px;
-            background: var(--bg); border: 1px solid var(--bg-3);
-        }
-        .ws-preview .wsp-rect {
-            position: absolute; background: rgba(74,163,255,0.22);
-            border: 1px solid var(--accent-default); box-sizing: border-box;
-            overflow: hidden;
-        }
-        .ws-preview .wsp-rect span {
-            font: 8px monospace; color: var(--fg); opacity: 0.85;
-            padding: 1px 3px; display: block; white-space: nowrap;
-        }
-        .ws-preview .wsp-empty { font: 10px monospace; color: var(--fg-dim); padding: 10px 18px; }
         /* Engine-owned splitter between vertically-stacked rows in a column.
            Flex item with a fixed thickness; drag adjusts the two adjacent
            rows' height fractions. */
@@ -247,20 +198,5 @@
                 0 6px 24px rgba(0,0,0,0.6);
             transform: scale(1.03);
             z-index: 9998 !important;
-        }
-        /* Floating windows locked to a workspace (task 8): hidden off their
-           ws (display:none -> zero rect blocks resize, like #park). */
-        .term-window.ws-hidden { display: none; }
-        /* Taskbar items for windows on another workspace (task 16): dimmed +
-           a small workspace badge so the bar indicates the current ws. */
-        .taskbar-item.other-ws { opacity: 0.5; }
-        .taskbar-item.ws-hidden { display: none; }
-        .taskbar-item .ti-ws {
-            font-size: 9px;
-            opacity: 0.75;
-            margin-left: 3px;
-            padding: 0 3px;
-            border-radius: 3px;
-            background: rgba(255,255,255,0.10);
         }
 

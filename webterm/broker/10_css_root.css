@@ -78,15 +78,6 @@
             flex-shrink: 0;
         }
         #host-status:empty { display: none; }
-        /* Always-visible virtual-desktop pager (bottom-right of the taskbar,
-           left of the host status chip/badge). Shows in both floating and
-           tiling mode. Reuses .ws-dot. */
-        #ws-pager {
-            display: flex;
-            gap: 4px;
-            align-items: center;
-            flex-shrink: 0;
-        }
         .host-chip {
             font-family: monospace;
             font-size: 11px;

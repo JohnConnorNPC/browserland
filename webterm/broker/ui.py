@@ -79,14 +79,13 @@ _ORDERED = [
     "59_js_tiled_drag.js",
     "60_js_strip_engine.js",
     "61_js_resize_gutters.js",
-    # 62 was one 899-line fragment holding four unrelated concerns (#148). The
-    # strip scrollbar / floating scroll-lock / window lock / float<->tile layer
-    # moves are TILING core and stay in 62a; the workspace feature itself lives
-    # in 62b (extracted to mods/workspaces/ in #148); the taskbar-ordering pair
-    # (spatialKeyOrder/reorderTaskbarItems) moved into 75, where its only other
-    # caller already was.
+    # 62 was one 899-line fragment holding four unrelated concerns (#148). What
+    # is left here is TILING core: the strip scrollbar, the floating scroll-lock,
+    # the window lock, the float<->tile layer moves and parkWindow. The workspace
+    # feature went to mods/workspaces/ (see _MODS) and the taskbar-ordering pair
+    # (spatialKeyOrder/reorderTaskbarItems) into 75, where its only other caller
+    # already was.
     "62a_js_strip_and_layers.js",
-    "62b_js_workspaces.js",
     "63_js_clipboard_auth.js",
     "64_js_sessions_poll_control.js",
     "65_js_display_theming.js",
@@ -154,6 +153,7 @@ _MODS = [
     "mods/host-registry/host-registry.js",  # #65 optional shared broker list: publish/pull prefs._hosts via ctx.serverStore (opts.host routing + purgeRevisions); browser-mounted registerSettingsPane; ships host-registry.css
     "mods/mousemode/mousemode.js",  # #155 ambient 🖱 title-bar chip while an app owns the mouse: samples term.modes.mouseTrackingMode on term.onWriteParsed via ctx.windows.onTerminalCreate; default-ON (invisible until tracking is on); ships mousemode.css
     "mods/mod-sync/mod-sync.js",  # #158 push this broker's mod setup to selected peers (their #157 pins via saveModPins + their /state mod settings) / adopt a peer's into this browser; browser-mounted registerSettingsPane; ships mod-sync.css
+    "mods/workspaces/workspaces.js",  # #148 vertical workspaces, extracted from the tiling core: ctx.desktop.columnFilter picks which of the ONE desktop's columns the strip draws (nothing is moved, so a disable is non-destructive + reversible) + ctx.registerKeyActions/WindowMenuItems/DesktopMenuItems + ctx.taskbar.onItemsRendered/interceptActivate; default-ON; ships workspaces.css
 ]
 
 # The fragment the mod scripts are spliced in front of -- loadMods() must run

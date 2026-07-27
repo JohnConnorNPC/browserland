@@ -13,7 +13,7 @@
         // from composeLabelParts each call so a toggle/order change converges on
         // the next tick. Each span keeps its per-part class (.ti-id dim color +
         // <110px container auto-hide, .ti-title ellipsis anchor). Re-insert
-        // BEFORE the trailing .ti-ws workspace badge (added by 62b_js_workspaces)
+        // BEFORE the trailing .ti-ws workspace badge (added by the workspaces mod)
         // so the badge + off-workspace dimming survive per-tick relabels. The
         // .ti-ws badge carries no .ti-part class, so the clear pass never removes
         // it and it never duplicates.

@@ -7,7 +7,9 @@
         <button type="button" id="btn-launch"
                 title="new terminal &#8212; right-click for profiles &amp; broker status">+</button>
         <div id="taskbar-items"></div>
-        <div id="ws-pager"></div>
+        <!-- #148: the workspace pager moved to mods/workspaces/, which
+             creates #ws-pager at init in this slot (before #host-status)
+             and removes it on unload. -->
         <div id="host-status"></div>
         <button type="button" id="btn-fullscreen" title="Fullscreen" aria-label="Fullscreen">⛶</button>
         <!-- #78: the taskbar "?" Help chip moved to mods/help/help.js, which
@@ -190,13 +192,6 @@
                     <div class="set-hint">when this browser reloads, re-open the
                         terminals you had open and reattach to their running
                         agents. Governs this browser's startup.</div>
-                </div>
-                <div class="set-section set-browser-global">
-                    <div class="set-title">Taskbar workspace filter</div>
-                    <label class="set-check"><input type="checkbox" id="set-taskbar-hide-other-ws" />
-                        Hide windows on other workspaces</label>
-                    <div class="set-hint">show only the active workspace's windows in the
-                        taskbar. Governs this browser.</div>
                 </div>
                 <div class="set-section">
                     <div class="set-title">Default terminal profile</div>

@@ -3028,6 +3028,13 @@ _EXPECTED_TIERS = {
     # this mod uses no ctx family beyond settings; the cross-broker reach is
     # core's own host plumbing, which every mod shares.
     "mod-sync": ["settings"],
+    # #148 extracted from the tiling core. window: masks/parks windows and adds
+    # title-bar menu items; taskbar: badges + dims chips and intercepts
+    # activation; settings: owns wsLabelMode + hideTaskbarOtherWs. The desktop
+    # seams it uses (ctx.desktop.columnFilter/onColumnCreated/onPlaced/onReveal/
+    # onLayoutRender) have no tier token -- like mod-sync's cross-broker reach,
+    # the vocabulary mirrors the older ctx families and this one is new.
+    "workspaces": ["window", "taskbar", "settings"],
 }
 
 
@@ -3273,7 +3280,7 @@ def test_float_workspace_decided_from_membership_not_css_class():
     # setWindowWs(render=false) leaves stale in EITHER direction, so a class-only
     # test both misses a float that must move and refuses to repair one that must
     # not. windowOffActiveWs is the predicate that encodes it.
-    ws = (BROKER_DIR / "62b_js_workspaces.js").read_text(encoding="utf-8")
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
     start = ws.index("function windowOffActiveWs")
     body = ws[start:ws.index("function adoptFloatWorkspace")]
     assert "ws-hidden" not in body,         "windowOffActiveWs must not consult the ws-hidden class"
@@ -3326,7 +3333,7 @@ def test_revealed_float_refits_its_terminal():
     # bails on it. A window created already-masked therefore never sent ANY
     # cols/rows; one revealed by a workspace switch kept stale ones. The
     # hidden -> visible transition has to re-measure.
-    ws = (BROKER_DIR / "62b_js_workspaces.js").read_text(encoding="utf-8")
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
     vis = ws[ws.index("function applyWorkspaceVisibility"):
              ws.index("function workspaceIndexForKey")]
     assert "refitSoon(win)" in vis,         "a float revealed by a workspace switch must re-measure"
@@ -3369,7 +3376,7 @@ def test_adopt_float_workspace_heals_dangling_membership():
     # is worse than the flicker #152 set out to fix.
     # #148: finishWindowPlacement / revealAndFocusWindow are CORE (62a) now;
     # adoptFloatWorkspace is the workspace-side hook they call into.
-    ws = (BROKER_DIR / "62b_js_workspaces.js").read_text(encoding="utf-8")
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
     body = ws[ws.index("function adoptFloatWorkspace"):
               ws.index("function applyWorkspaceVisibility")]
     assert "liveWsIds" in body, "adoptFloatWorkspace must heal a dangling ws id"
