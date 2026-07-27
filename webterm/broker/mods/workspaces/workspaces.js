@@ -746,6 +746,10 @@
                     if (col && typeof col.wsId !== 'string') col.wsId = activeWorkspaceId();
                 });
                 ctx.desktop.onPlaced(adoptFloatWorkspace);
+                ctx.desktop.onForgotten(function (key) {
+                    delete floatWsMap()[key];
+                    savePrefsLocal();
+                });
                 // Invoking a window parked elsewhere must never no-op:
                 //   tiled elsewhere -> go THERE (a tiled window's membership IS
                 //                      its column, so it cannot be re-homed

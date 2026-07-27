@@ -814,13 +814,14 @@
             if (decideTiled(id)) {
                 placeWindowTiled(win);
             } else {
-                // Float: stamp workspace membership and mask NOW, in the frame
-                // the window is created (#152), so a terminal reattached into a
-                // parked workspace never paints before it hides. Masked means
-                // display:none, but sendResize bails on a 0x0 box and the
+                // Float: announce the placement NOW, in the frame the window is
+                // created (#152), so a mod that masks it (the workspaces mod
+                // stamps membership and hides an off-workspace float) does so
+                // before the first paint rather than a poll tick later. Masked
+                // means display:none, but sendResize bails on a 0x0 box and the
                 // hidden->visible transition refits, so nothing is measured
-                // wrong — it is measured when the workspace is shown.
-                adoptFloatWorkspace(win);
+                // wrong — it is measured when the window is shown.
+                notifyWindowPlaced(win);
             }
 
             // After two RAFs the term has measured itself.

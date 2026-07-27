@@ -459,6 +459,9 @@
                 //                      HERE, before anyone reads a visible index
                 //                      back, or it is born invisible.
                 //   onPlaced(fn)       a window was just placed as a FLOAT.
+                //   onForgotten(fn)    fn(key) -- a window was CLOSED and its
+                //                      key is gone for good; prune anything
+                //                      keyed off it. A reload is NOT this.
                 //   onReveal(fn)       first refusal before revealAndFocusWindow
                 //                      focuses an existing window.
                 //   onLayoutRender(fn) the strip was re-laid-out; repaint your
@@ -477,6 +480,9 @@
                     },
                     onPlaced: function (fn) {
                         return _modTrack(rec, registerPlacementHooks({ placed: fn }));
+                    },
+                    onForgotten: function (fn) {
+                        return _modTrack(rec, registerPlacementHooks({ forgotten: fn }));
                     },
                     onReveal: function (fn) {
                         return _modTrack(rec, registerPlacementHooks({ reveal: fn }));

@@ -563,7 +563,9 @@
                 }
                 list.push(entry);
             }
-            L.columns = columns;
+            if (!Array.isArray(L.columns)) L.columns = [];
+            L.columns.length = 0;                 // in place, as reconcile does
+            for (const c of columns) L.columns.push(c);
             L.wsLegacy = {
                 activeWs: Number.isInteger(L.activeWs) ? L.activeWs : 0,
                 list: list,
@@ -718,7 +720,17 @@
                 col.rows = normalizeRowHeights(cleanRows);
                 cleanCols.push(col);
             }
-            L.columns = cleanCols;
+            // Rewrite the array IN PLACE, never `L.columns = cleanCols`. A caller
+            // that has already resolved `L.columns` and then calls a helper which
+            // itself calls getLayout() (visibleColumns / storageColIndex both do)
+            // would otherwise splice into the array this reconcile just orphaned,
+            // and its column would vanish without a trace. Same identity, same
+            // contents -- and every holder of the array sees the healed layout.
+            if (!Array.isArray(L.columns)) L.columns = [];
+            if (L.columns !== cleanCols) {
+                L.columns.length = 0;
+                for (const c of cleanCols) L.columns.push(c);
+            }
             if (!Number.isInteger(L.focusedCol)) L.focusedCol = 0;
             L.focusedCol = Math.max(0,
                 Math.min(L.focusedCol, Math.max(0, cleanCols.length - 1)));

@@ -569,17 +569,17 @@
             if (win.term) { try { win.term.dispose(); } catch (_) {} }
             try { win.dom.remove(); } catch (_) {}
             windows.delete(id);
-            // Workspace membership is per-LIVE-window state, so a closed window
-            // forgets it and a reopen lands where the user is (#152). This is
-            // also the map's ONLY pruning — the prefs GC skips every _-prefixed
-            // key, so without it prefs._floatWs grows forever and a fixed id
-            // (app:recorder / app:clip / app:scratch / app:agents:<host>:<cwd>)
-            // inherits dead membership from a previous life. A page reload is
-            // unaffected: nothing is closed, the map just persists. So is a
-            // lease-loss rebuild — teardownView inlines its own teardown and
-            // never routes through here, so it restores windows where they were.
-            delete floatWsMap()[id];
-            savePrefsLocal();
+            // This key will never be seen again, so per-window bookkeeping keyed
+            // off it must be pruned. The workspaces mod's float membership is
+            // exactly that: a closed window forgets its workspace and a reopen
+            // lands where the user is (#152), and since the prefs GC skips every
+            // _-prefixed key this is that map's ONLY pruning — without it a fixed
+            // id (app:recorder / app:clip / app:scratch / app:agents:<host>:<cwd>)
+            // would inherit dead membership from a previous life. A page reload is
+            // deliberately unaffected: nothing is closed. So is a lease-loss
+            // rebuild — teardownView inlines its own teardown and never routes
+            // through here, so it restores windows where they were.
+            notifyWindowForgotten(id);
             // App windows are document-model: × close tears down the live
             // window AND its taskbar chip + synthetic session. The window kind's
             // retainOnClose decides keep-vs-discard (#80/S7): issue #11 keeps ONLY

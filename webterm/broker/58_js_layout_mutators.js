@@ -99,7 +99,8 @@
             const vi = Number.isInteger(atIndex)
                 ? Math.max(0, Math.min(atIndex, visibleColumns().length))
                 : visibleColumns().length;
-            L.columns.splice(storageColIndex(vi), 0, col);
+            const at = storageColIndex(vi);   // resolve BEFORE touching L.columns
+            L.columns.splice(at, 0, col);
             // Tell whatever filters the strip that this column is new BEFORE
             // reading a visible index back: an unclaimed column is invisible, so
             // focusedCol would otherwise land on the wrong tile (#148).
@@ -166,7 +167,8 @@
             const newCol = newColumn();
             newCol.widthPreset = preset;
             newCol.rows = [newRow([key], 1)];
-            L.columns.splice(L.columns.indexOf(srcCol) + 1, 0, newCol);
+            const at = L.columns.indexOf(srcCol) + 1;
+            L.columns.splice(at, 0, newCol);
             notifyColumnCreated(newCol);
             L.focusedCol = Math.max(0, visibleColIndex(newCol));
             savePrefs();
@@ -321,7 +323,8 @@
             const col = newColumn();
             col.widthPreset = preset;
             col.rows = [newRow([key], 1)];
-            L.columns.splice(storageColIndex(idx), 0, col);
+            const at = storageColIndex(idx);  // resolve BEFORE touching L.columns
+            L.columns.splice(at, 0, col);
             notifyColumnCreated(col);
             L.focusedCol = Math.max(0, visibleColIndex(col));
             savePrefs();
@@ -441,7 +444,8 @@
                 // Unexpected (e.g. a legacy split lacking cells) — never lose dragKey.
                 const ncol = newColumn();
                 ncol.rows = [newRow([dragKey], 1)];
-                L.columns.splice(L.columns.indexOf(tgtCol) + 1, 0, ncol);
+                const at = L.columns.indexOf(tgtCol) + 1;
+                L.columns.splice(at, 0, ncol);
                 notifyColumnCreated(ncol);
                 L.focusedCol = Math.max(0, visibleColIndex(ncol));
                 savePrefs();

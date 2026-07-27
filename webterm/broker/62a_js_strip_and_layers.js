@@ -263,14 +263,18 @@
         //   reveal(win)  — first refusal before revealAndFocusWindow focuses:
         //                  switch to the workspace holding a tiled window, or
         //                  re-home a float parked on another one (#152).
-        // A throwing hook must never strand the window, so both are guarded and
-        // core carries on with the focus it was going to give anyway.
-        let _placementHooks = { placed: null, reveal: null };
+        //   forgotten(key) — a window was CLOSED and its key is gone for good, so
+        //                  per-window bookkeeping keyed off it must be pruned. A
+        //                  reload is deliberately NOT this: nothing is closed.
+        // A throwing hook must never strand the window, so all three are guarded
+        // and core carries on with whatever it was going to do anyway.
+        const _PLACEMENT_HOOKS = ['placed', 'reveal', 'forgotten'];
+        let _placementHooks = { placed: null, reveal: null, forgotten: null };
         function registerPlacementHooks(hooks) {
             if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) {
                 throw new Error('registerPlacementHooks: hooks must be an object');
             }
-            for (const k of ['placed', 'reveal']) {
+            for (const k of _PLACEMENT_HOOKS) {
                 if (hooks[k] !== undefined && typeof hooks[k] !== 'function') {
                     throw new Error('registerPlacementHooks: ' + k + ' must be a function');
                 }
@@ -279,7 +283,7 @@
                 }
             }
             const taken = [];
-            for (const k of ['placed', 'reveal']) {
+            for (const k of _PLACEMENT_HOOKS) {
                 if (hooks[k]) { _placementHooks[k] = hooks[k]; taken.push(k); }
             }
             return function () {
@@ -288,12 +292,18 @@
                 }
             };
         }
-        function _runPlacementHook(name, win) {
+        function _runPlacementHook(name, arg) {
             const fn = _placementHooks[name];
             if (!fn) return;
-            try { fn(win); }
+            try { fn(arg); }
             catch (e) { console.error('[tiling] placement "' + name + '" hook threw', e); }
         }
+        // A window has just been placed as a FLOAT (a fresh one, or one the
+        // window factory restored). Public so the create path can announce it
+        // without knowing who -- if anyone -- cares.
+        function notifyWindowPlaced(win) { _runPlacementHook('placed', win); }
+        // Its key will never be seen again: prune anything keyed off it.
+        function notifyWindowForgotten(key) { _runPlacementHook('forgotten', key); }
         // The single creation tail every window factory ends with: a tiled window
         // goes into its column, a float takes focus. findKeyInLayout (not
         // decideTiled) is deliberate — it is exactly the test the factories
@@ -302,7 +312,7 @@
         function finishWindowPlacement(win) {
             if (!win || win.disposed) return win;
             if (findKeyInLayout(win.id)) placeWindowTiled(win);
-            else { _runPlacementHook('placed', win); bringToFront(win.id); }
+            else { notifyWindowPlaced(win); bringToFront(win.id); }
             return win;
         }
         // Open-or-focus for a window that ALREADY exists. Invoking one whose
