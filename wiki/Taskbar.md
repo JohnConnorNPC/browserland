@@ -8,7 +8,7 @@ From left to right, the taskbar contains:
 |---|---|
 | Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (sticky notes only when opted in — see below) — click to focus, right-click for per-window actions |
-| Pager dots | One dot per workspace — click to switch (see [[Workspaces]]) |
+| Pager dots | One dot per workspace — click to switch. From the Workspaces mod, enabled by default (see [[Workspaces]]) |
 | Host status | One status chip for a single broker; with several, one aggregate badge that opens the broker menu (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
@@ -78,4 +78,4 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 
 ## Pager dots
 
-The pager dots on the right of the taskbar (left of the host chips) are one-click workspace switchers, and their right-click menus rename or remove workspaces and toggle names vs. numbers. They are covered in full under [[Workspaces]].
+The pager dots on the right of the taskbar (left of the host chips) are one-click workspace switchers, and their right-click menus rename or remove workspaces and toggle names vs. numbers. They come from the **Workspaces** mod (enabled by default), so the dots are absent if you turn it off. They are covered in full under [[Workspaces]].

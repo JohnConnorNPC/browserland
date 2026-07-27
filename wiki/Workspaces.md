@@ -1,5 +1,7 @@
 Workspaces are virtual desktops. Each workspace is its own desktop of windows, so you can keep one set of terminals, notes, and editors on workspace 1 and a completely different set on workspace 2. Only one workspace is shown at a time.
 
+Workspaces are a **mod**, enabled by default — see [[Hosts-and-Multi-Browser]] for how mods are turned on and off. Everything on this page works out of the box; *Turning workspaces off* at the bottom covers what happens if you disable it.
+
 ## Switching workspaces
 
 You can move between workspaces a few ways:
@@ -74,6 +76,32 @@ Right-click a **pager dot** for that workspace's options:
 | `New workspace` | Append a fresh empty workspace. |
 
 `Show names` / `Show numbers` is a single toggle for how *all* dots are labeled; the active choice is marked with a `✓`.
+
+## Hover preview
+
+Hovering a pager dot pops up a small schematic of that workspace: its columns and rows drawn to scale and labelled with each window's title, a `(+N)` badge on a tabbed tile counting its hidden tabs, and a count of the workspace's floating windows underneath. It shows exactly what the strip would show — a minimized or disconnected window is left out of the preview the same way it is left out of the strip.
+
+## Taskbar behaviour
+
+Chips for windows on other workspaces are dimmed and carry a small badge naming their workspace, so the bar always indicates where you are. **Control Panel → Mods → Hide taskbar items from other workspaces** hides them outright instead of dimming. **Workspace labels** in the same place is the Control Panel twin of the pager dot's `Show names` / `Show numbers`.
+
+Clicking a chip for a window on another workspace switches there first, so a chip never does nothing — including a chip for a session that is currently closed.
+
+## What is shared, and what is per browser
+
+The set of workspaces, their names, and which columns belong to each are part of the broker's shared layout, so every browser looking at that broker sees the same workspaces. Which workspace a **floating** window belongs to is per browser, because a floating window's pixel geometry is per browser too.
+
+## Turning workspaces off
+
+Nothing is destroyed and nothing is hidden. Every tiled column lives on the one desktop the tiling core owns — workspaces only decide which of them the strip draws. Disable the mod (Control Panel → Mods) and:
+
+- every column from every workspace appears together on a single desktop;
+- the pager disappears;
+- the seven workspace shortcuts leave the Keyboard shortcuts list (your bindings are remembered, not deleted);
+- **Send to workspace** and **On all workspaces** leave the title-bar menus, and the workspace list leaves the empty-desktop menu;
+- any floating window that was masked to another workspace becomes visible.
+
+Re-enable it and your workspaces come back exactly as they were. A column created while the mod was off joins whichever workspace is active when you turn it back on.
 
 ## Related pages
 

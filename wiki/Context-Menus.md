@@ -85,7 +85,7 @@ Right-click a workspace dot at the bottom of the taskbar:
 - **Show names** / **Show numbers** — choose whether the dots display workspace names or numbers.
 - **New workspace** — append a fresh, empty workspace.
 
-Workspaces and the pager are covered on [[Workspaces]].
+Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click.
 
 ## Empty desktop / strip
 
@@ -106,7 +106,7 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - A row per workspace, showing its name and column count (the `✓` marks the active one); click to jump to it.
 - **New workspace** — append a fresh, empty workspace.
 
-Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace list on [[Workspaces]].
+Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace list on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
 
 ## Launch (+) button
 

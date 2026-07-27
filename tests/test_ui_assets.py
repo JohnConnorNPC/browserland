@@ -1890,6 +1890,238 @@ def test_mod_sync_mod_packaged_and_manifest_agrees():
     assert ".modsync-actions" in INDEX_HTML
 
 
+
+# --------------------------------------------------------------------------- #
+# workspaces mod (#148)
+# --------------------------------------------------------------------------- #
+
+def test_workspaces_mod_packaged_and_manifest_agrees():
+    import json
+    mod_dir = BROKER_DIR / "mods" / "workspaces"
+    js = mod_dir / "workspaces.js"
+    css = mod_dir / "workspaces.css"
+    manifest = mod_dir / "mod.json"
+    assert js.is_file() and css.is_file() and manifest.is_file()
+    # Deliberately NO help.md: wiki/Workspaces.md already owns the `workspaces`
+    # corpus slug (build_full_corpus raises BuildError on a duplicate) and five
+    # other wiki pages link to it, so a mod help.md would collide or duplicate.
+    assert not (mod_dir / "help.md").exists()
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    assert meta["id"] == "workspaces"
+    assert meta["ctxVersion"] == 1
+    assert meta["entry"] == "workspaces.js"
+    assert meta["styles"] == ["workspaces.css"]
+    assert "help" not in meta
+    assert "mods/workspaces/workspaces.js" in ui._MODS
+    src = js.read_text(encoding="utf-8")
+    assert "registerMod(" in src
+    assert "id: 'workspaces'" in src
+    assert "ctxVersion: 1" in src
+    # Tiers match the order-sensitive _EXPECTED_TIERS guard above.
+    assert "tiers: ['window', 'taskbar', 'settings']" in src
+    # Default ON — no behaviour change on upgrade. Asserted so flipping it off
+    # becomes a deliberate, reviewed change.
+    assert "defaultEnabled" not in src
+    # It owns its two settings by READ-THROUGH onto the same synced blob (the
+    # #126 termfont pattern), so an upgrading user's stored value survives.
+    assert "ctx.settings.select('wsLabelMode'" in src
+    assert "ctx.settings.boolean('hideTaskbarOtherWs'" in src
+    # ...and they are gone from core's normalizeSettings, which would otherwise
+    # write a default into the synced blob behind the mod's back.
+    model = (BROKER_DIR / "55_js_settings_model.js").read_text(encoding="utf-8")
+    assert "s.wsLabelMode" not in model
+    assert "s.hideTaskbarOtherWs" not in model
+    # The pager is created at init and removed on unload (the #clock-chip
+    # pattern); #park stays CORE, because parkWindow is a tiling API.
+    assert "pager.id = 'ws-pager'" in src
+    assert 'id="ws-pager"' not in (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    assert 'id="park"' in (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    assert "#park { display: none; }" in \
+        (BROKER_DIR / "13_css_tiling.css").read_text(encoding="utf-8")
+    # Ships in the served page.
+    assert "id: 'workspaces'" in INDEX_HTML
+
+
+def test_core_is_single_desktop():
+    # #148: core owns ONE desktop. No core fragment may name a workspace symbol
+    # or reach for the pre-#148 multi-workspace shape -- the ONLY exception is
+    # 57's one-time legacy migration, which exists precisely to erase it.
+    banned = (
+        "activeWorkspace(", "renderWorkspaces(", "switchWorkspace(",
+        "addWorkspace(", "sendWindowToWorkspace(", "workspaceIndexForKey(",
+        "applyWorkspaceVisibility(", "applyTaskbarWorkspace(",
+        "adoptFloatWorkspace(", "floatWsMap(", "windowWsId(", "setWindowWs(",
+        "newWorkspace(", "wsLabelMode", "hideTaskbarOtherWs",
+        ".workspaces[", ".activeWs", "wsIndex",
+    )
+    for name in ui._ORDERED:
+        if not name.endswith(".js"):
+            continue
+        text = (BROKER_DIR / name).read_text(encoding="utf-8")
+        code = "\n".join(l for l in text.splitlines()
+                          if not l.strip().startswith("//"))
+        if name == "57_js_tiling_model.js":
+            # The migration reads L.workspaces / L.activeWs exactly once, to
+            # delete them. Scope the check to everything else in the file.
+            i = code.index("function migrateLegacyWorkspaces")
+            j = code.index("function reconcileLayout")
+            code = code[:i] + code[j:]
+        for sym in banned:
+            assert sym not in code, f"{name} still names {sym!r} -- core is single-desktop"
+
+
+def test_layout_columns_array_is_rewritten_in_place():
+    # reconcileLayout used to REPLACE L.columns. A caller that resolved
+    # `L.columns` and then called a helper which itself calls getLayout()
+    # (visibleColumns and storageColIndex both do) spliced into the array
+    # reconcile had just orphaned, and its column vanished silently --
+    # layoutAddColumn hit this on the very first insert. Pin the in-place
+    # rewrite, and pin that the mutators resolve their index into a local
+    # BEFORE touching L.columns.
+    model = (BROKER_DIR / "57_js_tiling_model.js").read_text(encoding="utf-8")
+    recon = model[model.index("function reconcileLayout"):
+                  model.index("function getLayout")]
+    # CODE only -- the comment right there states the rule by quoting it.
+    recon = "\n".join(l for l in recon.splitlines()
+                      if not l.strip().startswith("//"))
+    assert "L.columns = cleanCols" not in recon, \
+        "reconcileLayout must not replace the columns array"
+    assert "L.columns.length = 0;" in recon and "L.columns.push(c);" in recon
+    mut = (BROKER_DIR / "58_js_layout_mutators.js").read_text(encoding="utf-8")
+    assert "L.columns.splice(storageColIndex(" not in mut, \
+        "resolve the storage index into a local before touching L.columns"
+
+
+def test_visible_and_storage_column_indexes_are_not_confused():
+    # Two index spaces exist now. findKeyInLayout's colIndex is a STORAGE index;
+    # everything the user points at is a VISIBLE one. The title-bar menu's column
+    # items must go through visibleColIndex, never loc.colIndex.
+    keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    menu = keys[keys.index("function buildWindowMenu"):
+                keys.index("function buildCtxMenu")]
+    assert "visibleColumns()" in menu
+    for bad in ("moveColumn(loc.colIndex", "dragDropNewColumn(win.id, loc.colIndex",
+                "loc.colIndex > 0", "loc.colIndex < ncols"):
+        assert bad not in menu, f"{bad!r} mixes the storage index into a screen position"
+    model = (BROKER_DIR / "57_js_tiling_model.js").read_text(encoding="utf-8")
+    assert "function visibleColumns" in model
+    assert "function visibleColIndex" in model
+    assert "function storageColIndex" in model
+
+
+def test_workspaces_off_leaves_no_window_unreachable():
+    # The whole point of the #148 model: nothing is ever MOVED for a workspace,
+    # so with the mod absent every column is simply drawn. Pin the three things
+    # that guarantee it.
+    model = (BROKER_DIR / "57_js_tiling_model.js").read_text(encoding="utf-8")
+    vis = model[model.index("function visibleColumns"):
+                model.index("function visibleColIndex")]
+    # 1. No filter -> the storage array itself, untouched.
+    assert "if (!_columnFilter) return L.columns;" in vis
+    # 2. A THROWING filter fails OPEN (shows everything), never blacks out.
+    assert "return L.columns;" in vis.split("catch")[1]
+    # 3. Dropping the filter relayouts, so the columns reappear immediately.
+    reg = model[model.index("function registerColumnFilter"):
+                model.index("function visibleColumns")]
+    assert reg.count("requestRelayout();") == 2
+    # And the mod's teardown clears only the presentation it applied -- it must
+    # never touch the store, or a disable would be destructive.
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    teardown = ws[ws.rindex("ctx.onUnload(function () {"):]
+    for bad in ("delete ", "splice(", "= null", "savePrefs("):
+        assert bad not in teardown, \
+            f"the workspaces teardown must not mutate state ({bad!r})"
+
+
+def test_legacy_workspace_blob_migrates_without_losing_a_column():
+    # A pre-#148 blob's columns are CONCATENATED into L.columns (nothing is
+    # dropped, so nothing becomes unreachable even if the mod never loads) and
+    # the grouping is handed to the mod as ids only. Running before loadMods()
+    # is safe precisely because it is non-destructive.
+    model = (BROKER_DIR / "57_js_tiling_model.js").read_text(encoding="utf-8")
+    mig = model[model.index("function migrateLegacyWorkspaces"):
+                model.index("function reconcileLayout")]
+    assert "columns.push(col)" in mig          # every legacy column is kept
+    assert "held.has(col.id)" in mig           # ...and never duplicated
+    assert "columnIds.push(col.id)" in mig     # grouping is IDS ONLY, no payload
+    assert "delete L.workspaces;" in mig and "delete L.activeWs;" in mig
+    assert "L.wsLegacy = {" in mig
+    # It runs from reconcileLayout, i.e. on the first getLayout() -- before mods
+    # load -- and is idempotent (an already-migrated blob has no `workspaces`).
+    assert "if (!Array.isArray(L.workspaces)) return;" in mig
+    recon = model[model.index("function reconcileLayout"):
+                  model.index("function getLayout")]
+    assert "migrateLegacyWorkspaces(L);" in recon
+    assert recon.index("seedLayoutIdSeq(L);") < recon.index("migrateLegacyWorkspaces(L);")
+    # The mod adopts it once and deletes it.
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    assert "adoptLegacyWorkspaces(L, st);" in ws
+    assert "delete L.wsLegacy;" in ws
+
+
+def test_workspace_key_action_ids_are_preserved_verbatim():
+    # User rebindings are stored BY ID, and DEFAULT_KEYBINDINGS (54) still
+    # carries the defaults, so a rebinding survives the mod being toggled off
+    # and comes back untouched. Renaming an id would silently drop it.
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    ids = ["workspace-prev", "workspace-next"] + [f"workspace-{n}" for n in range(1, 6)]
+    for i in ids:
+        assert f"id: '{i}'" in ws, f"the {i!r} action id must be preserved verbatim"
+    store = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    for i in ids:
+        assert f"'{i}':" in store, \
+            f"{i!r} must stay in DEFAULT_KEYBINDINGS so a rebinding survives a disable"
+    # Every KEY_ACTIONS reader goes through the live accessor -- the old const
+    # index was built at script eval, before any mod could contribute.
+    keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    assert "const CORE_KEY_ACTIONS = [" in keys
+    assert "KEY_ACTION_BY_ID" not in keys
+    assert "keyActionById(actionId)" in keys
+    for rel in ("80_js_help_window.js", "82_js_settings_keys_hosts.js"):
+        text = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert "for (const act of keyActions())" in text, \
+            f"{rel} must read the live action list"
+
+
+def test_desktop_and_menu_seams_present_in_loader():
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    for fam in ("columnFilter:", "onColumnCreated:", "onPlaced:", "onForgotten:",
+                "onReveal:", "onLayoutRender:", "onItemsRendered:",
+                "interceptActivate:", "registerKeyActions:",
+                "registerWindowMenuItems:", "registerDesktopMenuItems:"):
+        assert fam in loader, f"missing ctx seam {fam!r}"
+    # Every seam is register-and-remember, so a disable (or an initMod rollback
+    # after a later throw) releases the slot exactly once.
+    assert "function _modTrack(rec, off)" in loader
+    assert loader.count("_modTrack(rec, register") >= 11
+    # ...and every one is ONE slot: a second registration throws rather than
+    # letting two mods silently fight over the desktop.
+    for rel, fn in (("57_js_tiling_model.js", "registerColumnFilter"),
+                    ("57_js_tiling_model.js", "registerColumnCreated"),
+                    ("61_js_resize_gutters.js", "registerLayoutRendered"),
+                    ("75_js_taskbar_hosts.js", "registerTaskbarItemsRendered"),
+                    ("75_js_taskbar_hosts.js", "registerTaskbarActivateIntercept"),
+                    ("78_js_keybindings.js", "registerWindowMenuItems"),
+                    ("78_js_keybindings.js", "registerDesktopMenuItems")):
+        text = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        body = text[text.index("function " + fn):]
+        assert "ModConflictError" in body[:900], f"{fn} must refuse a second registration"
+
+
+def test_menus_are_unchanged_without_a_contributor():
+    # The menu seams are marked insertion points: with nobody registered they
+    # push nothing, so the built-in menus render exactly as before. The one
+    # visible consequence is that tiling mode's desktop menu can now be EMPTY,
+    # which must not leave a leading separator.
+    keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    ctx = keys[keys.index("function buildCtxMenu"):
+               keys.index("function buildTaskbarItemMenu")]
+    assert "_pushMenuItems(_desktopMenuItems, items, { tiling: true });" in ctx
+    assert "if (items.length) items.push({ sep: true });" in ctx
+    # A throwing contributor must not take the whole context menu down.
+    push = keys[keys.index("function _pushMenuItems"):]
+    assert "catch (e)" in push[:400]
+
 def test_mod_policy_pin_write_is_batched_and_shared():
     # #158: the pin write is ONE POST carrying the whole {set:{…}} map, so a bulk
     # apply lands under the broker's own lock in one round trip instead of N
@@ -3307,9 +3539,14 @@ def test_creation_tails_are_factored_through_finish_window_placement():
         assert "finishWindowPlacement(win);" in text,             f"{rel} does not use the factored creation tail"
         assert "if (findKeyInLayout(id)) placeWindowTiled(win);" not in text,             f"{rel} still carries the old unstamped creation tail"
     # openWindow (terminals) keeps its own decideTiled split — placement happens
-    # before the RAF measurement — so it adopts the workspace in the else branch.
+    # before the RAF measurement — so it ANNOUNCES the float placement in the
+    # else branch. #148 moved the workspace stamp itself into the mod: core says
+    # "this was placed as a float" and whoever cares (the workspaces mod, via
+    # ctx.desktop.onPlaced) masks it in that same frame.
     life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
-    assert "adoptFloatWorkspace(win);" in life
+    assert "notifyWindowPlaced(win);" in life
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    assert "ctx.desktop.onPlaced(adoptFloatWorkspace);" in ws
 
 
 def test_close_window_forgets_float_workspace_membership():
@@ -3317,10 +3554,17 @@ def test_close_window_forgets_float_workspace_membership():
     # prefs._floatWs gets. Without it the map grows without bound and a window
     # with a fixed id (app:recorder / app:clip / app:scratch) reopens onto the
     # workspace a previous instance died on.
+    #
+    # #148: core no longer names the map. closeWindow announces that the KEY is
+    # gone for good and the workspaces mod prunes its own bookkeeping — so the
+    # invariant is now "core announces exactly once, the mod deletes".
     rt = (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8")
     close = rt[rt.index("function closeWindow"):rt.index("async function requestCloseAppWindow")]
-    assert "delete floatWsMap()[id];" in close
-    assert "savePrefsLocal();" in close
+    assert "notifyWindowForgotten(id);" in close
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    forgotten = ws[ws.index("ctx.desktop.onForgotten"):]
+    assert "delete floatWsMap()[key];" in forgotten[:400]
+    assert "savePrefsLocal();" in forgotten[:400]
     # teardownView (remote-lease loss) must NOT route through closeWindow, or a
     # rebuild would re-home every window to the active workspace.
     alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")

@@ -4,6 +4,56 @@ Breaking changes, what they cost you, and how to recover. Newest first.
 
 ---
 
+## Workspaces became a mod, and the layout blob changed shape (#148)
+
+**Nothing to do, and nothing is lost.** This is here because the persisted
+layout changes shape on first load, and because the feature can now be turned
+off.
+
+### What changed
+
+`prefs._layout` used to group tiled columns under `workspaces:[...]` with an
+`activeWs` index, and the tiling core owned that model. It is now a single
+desktop:
+
+```
+before   { mode, activeWs, workspaces:[ {id, name?, focusedCol, columns:[...]} ] }
+after    { mode, focusedCol, columns:[...],
+           mods: { workspaces: { version:1, activeId, list:[{id,name?,focusedCol}] } } }
+```
+
+Every column lives in `columns` exactly once. Workspaces are a mod
+(`mods/workspaces/`, **enabled by default**) that stamps a `wsId` on each
+column and tells the strip which ones to draw.
+
+### What it costs you
+
+Nothing, on either path:
+
+- **Upgrading.** The first `getLayout()` concatenates your existing workspaces'
+  columns into `columns`, in order, and hands the grouping to the mod, which
+  rebuilds your workspaces from it. Names and the workspace you were last on
+  are preserved. The migration is one-way and idempotent, and it is
+  **non-destructive** — no column is dropped even if the mod never loads — so a
+  browser that migrates first cannot damage a peer that has not yet.
+- **Turning the mod off.** Every column from every workspace appears together
+  on one desktop; the pager, the seven workspace shortcuts and the
+  workspace menu items go away. Your grouping is kept, not deleted: turn it back
+  on and the workspaces return exactly as they were. The same is true of pinning
+  it off broker-wide (Control Panel -> Mods on this broker).
+
+Your keyboard bindings for `workspace-prev` / `workspace-next` /
+`workspace-1..5` are stored by action id and are untouched by any of this.
+
+### Downgrading
+
+An older build reads the new blob as a layout with no `workspaces` key, which
+its `reconcileLayout` heals into one workspace holding **no** columns — your
+windows come back as floating windows rather than tiled, and you would rebuild
+the layout. Keep a copy of `webterm_state.json` if you plan to roll back.
+
+---
+
 ## A token is required on every connection, including loopback (#142)
 
 **This breaks tokenless installs.** It cannot not break them — the whole point

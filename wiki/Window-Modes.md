@@ -26,7 +26,7 @@ In tiling mode, windows live in **columns** arranged along a horizontal strip. T
 
 There are three ways to move the strip left and right:
 
-- Use the **workspace scrollbar**.
+- Use the **strip scrollbar**.
 - **Drag a window near the strip edge** — dragging toward the left or right edge scrolls the strip in that direction.
 - Use the **focus-column** and **move-column** shortcuts to bring off-screen columns into view as you focus or move them.
 
