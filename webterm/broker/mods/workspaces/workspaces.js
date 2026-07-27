@@ -73,6 +73,10 @@
                     else taskbar.appendChild(pager);
                 }
                 ctx.onUnload(function () { pager.remove(); });
+            // Set by any wsStore()/adopt heal that mutated the store without
+            // saving; adoptUnstampedColumns() is the single place that turns it
+            // into one savePrefs().
+            let _wsDirty = false;
             function wsStore() {
                 const L = getLayout();
                 if (!L.mods || typeof L.mods !== 'object' || Array.isArray(L.mods)) {
@@ -84,9 +88,12 @@
                 }
                 st.version = 1;
                 if (!Array.isArray(st.list)) st.list = [];
-                // Heal the entries, dropping garbage and duplicate ids.
+                // Heal the entries, dropping garbage and duplicate ids. IN PLACE:
+                // a caller may hold st.list across something that re-reads the
+                // store, and a swapped-out array would orphan its mutation --
+                // the same hazard reconcileLayout has with L.columns.
                 const seen = new Set();
-                st.list = st.list.filter(function (w) {
+                const kept = st.list.filter(function (w) {
                     if (!w || typeof w !== 'object' || Array.isArray(w)) return false;
                     if (typeof w.id !== 'string' || !w.id || seen.has(w.id)) return false;
                     seen.add(w.id);
@@ -95,16 +102,31 @@
                     if (!Number.isInteger(w.focusedCol) || w.focusedCol < 0) w.focusedCol = 0;
                     return true;
                 });
+                if (kept.length !== st.list.length) _wsDirty = true;
+                st.list.length = 0;
+                for (const w of kept) st.list.push(w);
                 // #148 hand-off: core's one-time legacy migration left the old
                 // grouping (ids only) under L.wsLegacy. Adopt it once, then delete.
                 if (L.wsLegacy && typeof L.wsLegacy === 'object') {
                     adoptLegacyWorkspaces(L, st);
                     delete L.wsLegacy;
+                    // The adopt rebuilt the list AND stamped columns, none of it
+                    // saved yet. Flag it: without this the whole migration lives
+                    // in memory only and is redone from the server's blob on
+                    // every load, losing any stamp made since.
+                    _wsDirty = true;
                 }
-                if (!st.list.length) st.list.push({ id: mintLayoutId(), focusedCol: 0 });
-                if (!seen.has(st.activeId)
-                    && !st.list.some(function (w) { return w.id === st.activeId; })) {
+                if (!st.list.length) {
+                    st.list.push({ id: mintLayoutId(), focusedCol: 0 });
+                    // Freshly seeded. Flag it so it is persisted once: an id that
+                    // only ever lived in memory is re-minted on the next load, and
+                    // every column stamped with the old one would read as dangling
+                    // and lose its grouping.
+                    _wsDirty = true;
+                }
+                if (!st.list.some(function (w) { return w.id === st.activeId; })) {
                     st.activeId = st.list[0].id;
+                    _wsDirty = true;
                 }
                 return st;
             }
@@ -119,13 +141,20 @@
                     if (!entry || typeof entry !== 'object') continue;
                     const id = (typeof entry.id === 'string' && entry.id)
                         ? entry.id : mintLayoutId();
-                    if (st.list.some(function (w) { return w.id === id; })) continue;
-                    const w = { id: id,
-                        focusedCol: Number.isInteger(entry.focusedCol) ? entry.focusedCol : 0 };
-                    if (typeof entry.name === 'string' && entry.name.trim()) {
-                        w.name = entry.name.slice(0, 40);
+                    // An entry we already hold (a partly-adopted blob, or a peer
+                    // that got here first) is NOT skipped wholesale: only the list
+                    // entry is deduped. Its columnIds must still be stamped below,
+                    // or those columns stay unstamped and the active workspace
+                    // swallows them.
+                    if (!st.list.some(function (w) { return w.id === id; })) {
+                        const w = { id: id,
+                            focusedCol: Number.isInteger(entry.focusedCol)
+                                ? entry.focusedCol : 0 };
+                        if (typeof entry.name === 'string' && entry.name.trim()) {
+                            w.name = entry.name.slice(0, 40);
+                        }
+                        st.list.push(w);
                     }
-                    st.list.push(w);
                     for (const cid of (Array.isArray(entry.columnIds) ? entry.columnIds : [])) {
                         const col = byId.get(cid);
                         if (col && typeof col.wsId !== 'string') col.wsId = id;
@@ -136,6 +165,37 @@
                     st.activeId = (st.list[Math.max(0, Math.min(i, st.list.length - 1))]
                         || st.list[0]).id;
                 }
+            }
+            // Claim every column that has no workspace, or points at one that no
+            // longer exists, for the ACTIVE workspace -- and PERSIST it.
+            //
+            // Without this, "unstamped means the active workspace" is only ever a
+            // read-time default, so a column created by a browser WITHOUT this mod
+            // (or by core while it was disabled) would keep reading as unstamped
+            // and show up on every workspace at once. The dangling case is the
+            // same story as applyWorkspaceVisibility's heal for floats: a peer can
+            // remove a workspace this browser still has columns pointing at.
+            // Idempotent, and saves only when something actually changed, so it is
+            // safe on the every-relayout path.
+            function adoptUnstampedColumns() {
+                // A torn-down browser (another one holds the lease) must not write:
+                // its push is refused or 409s, the adopt replaces the layout with
+                // the peer's still-unstamped one, and the next relayout stamps and
+                // saves again -- churn that never converges. Reading is unaffected:
+                // columnWsId() already treats an unstamped column as the active
+                // workspace, so nothing is mis-drawn while we wait.
+                if (_deactivated) return false;
+                const st = wsStore();
+                const live = new Set(st.list.map(function (w) { return w.id; }));
+                let changed = _wsDirty;
+                _wsDirty = false;
+                for (const col of getLayout().columns) {
+                    if (typeof col.wsId === 'string' && live.has(col.wsId)) continue;
+                    col.wsId = st.activeId;
+                    changed = true;
+                }
+                if (changed) savePrefs();
+                return changed;
             }
             function wsList() { return wsStore().list; }
             function activeWorkspaceId() { return wsStore().activeId; }
@@ -180,8 +240,11 @@
                 const mode = wsLabelMode();
                 // Names + mode are part of the signature so a rename / mode toggle
                 // forces a rebuild (not just the active-class fast path).
+                // Length-prefix each name: a plain join lets ['ab','c'] and
+                // ['a','bc'] produce the same signature, so a real rename would
+                // hit the churn guard and leave a stale label on a live dot.
                 const sig = mode + '|' + active + '|' + list.length + '|'
-                    + list.map(w => w.name || '').join('');
+                    + list.map(w => (w.name || '').length + ':' + (w.name || '')).join('|');
                 if (container.dataset.sig === sig) {
                     container.querySelectorAll('.ws-dot:not(.add)').forEach((d, i) => {
                         d.classList.toggle('active', i === active);
@@ -639,6 +702,20 @@
                 L.focusedCol = Math.max(0,
                     Math.min(entry ? entry.focusedCol : 0, Math.max(0, n - 1)));
             }
+            // focusedCol means different things to us and to a browser WITHOUT
+            // this mod: it writes an index over ALL columns, we read one over the
+            // visible subset, and core's reconcile clamps only against the storage
+            // count. Clamp it to what is actually on screen (an out-of-range value
+            // focuses nothing at all), then mirror it into the active workspace
+            // entry so switching away and back returns to the right column.
+            function syncFocusedCol() {
+                const L = getLayout();
+                const n = visibleColumns().length;
+                const clamped = Math.max(0, Math.min(L.focusedCol | 0, Math.max(0, n - 1)));
+                if (L.focusedCol !== clamped) L.focusedCol = clamped;
+                const entry = activeWorkspaceEntry();
+                if (entry) entry.focusedCol = clamped;
+            }
             function switchWorkspace(index) {
                 const st = wsStore();
                 if (index < 0 || index >= st.list.length) return;
@@ -659,7 +736,7 @@
                 relayoutStrip();                  // mounts the new workspace
                 applyTaskbarWorkspace();          // taskbar dims off-ws items
                 // Focus the new workspace's focused column.
-                const fcol = visibleColumns()[target.focusedCol];
+                const fcol = visibleColumns()[getLayout().focusedCol];
                 if (fcol) {
                     // Prefer the focused column's active (visible) tab.
                     const fk = firstLiveKeyInColumn(fcol);
@@ -775,6 +852,8 @@
                 // rebuild, a layout undo and the float<->tile switch all
                 // converge there. All three calls are idempotent.
                 ctx.desktop.onLayoutRender(function () {
+                    adoptUnstampedColumns();
+                    syncFocusedCol();
                     renderWorkspaces();
                     applyWorkspaceVisibility();
                     applyTaskbarWorkspace();
@@ -869,7 +948,12 @@
                 ctx.onUnload(function () {
                     for (const win of windows.values()) {
                         if (win.disposed || !win.dom) continue;
+                        if (!win.dom.classList.contains('ws-hidden')) continue;
                         win.dom.classList.remove('ws-hidden');
+                        // .ws-hidden is display:none, so this window had a 0x0 box
+                        // and sendResize bailed on it. Re-measure now it has one,
+                        // else its PTY keeps whatever cols/rows it last saw.
+                        refitSoon(win);
                     }
                     document.querySelectorAll('#taskbar-items .taskbar-item')
                         .forEach(function (el) {
@@ -881,6 +965,7 @@
                     hideWsPreview();
                 });
 
+                adoptUnstampedColumns();
                 renderWorkspaces();      // pager populated from the first paint
                 applyWorkspaceVisibility();
             },

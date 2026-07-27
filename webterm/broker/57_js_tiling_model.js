@@ -548,9 +548,17 @@
                 for (const col of (Array.isArray(ws.columns) ? ws.columns : [])) {
                     if (!col || typeof col !== 'object' || Array.isArray(col)) continue;
                     if (typeof col.id !== 'string' || !col.id) col.id = mintLayoutId();
-                    // Already in L.columns (an interrupted migration, or a blob
-                    // carrying both shapes): claimed, never duplicated.
-                    if (!held.has(col.id)) { held.add(col.id); columns.push(col); }
+                    // The SAME object already in L.columns (an interrupted
+                    // migration, or a blob carrying both shapes) is claimed, not
+                    // duplicated. A DIFFERENT object wearing an id we already
+                    // hold is a corrupt blob -- remint rather than skip, or that
+                    // column and every window key in it would be dropped here,
+                    // which is the one thing this migration must never do.
+                    if (columns.indexOf(col) === -1) {
+                        if (held.has(col.id)) col.id = mintLayoutId();
+                        held.add(col.id);
+                        columns.push(col);
+                    }
                     columnIds.push(col.id);
                 }
                 const entry = {
@@ -717,7 +725,14 @@
                     cleanRows.push(row);
                 }
                 if (cleanRows.length === 0) continue;       // collapse empty column
-                col.rows = normalizeRowHeights(cleanRows);
+                // In place, for the same reason L.columns is (below): a caller
+                // may hold col.rows across a helper that re-reconciles.
+                const nrows = normalizeRowHeights(cleanRows);
+                if (!Array.isArray(col.rows)) col.rows = [];
+                if (col.rows !== nrows) {
+                    col.rows.length = 0;
+                    for (const r of nrows) col.rows.push(r);
+                }
                 cleanCols.push(col);
             }
             // Rewrite the array IN PLACE, never `L.columns = cleanCols`. A caller
@@ -731,6 +746,12 @@
                 L.columns.length = 0;
                 for (const c of cleanCols) L.columns.push(c);
             }
+            // focusedCol is a VISIBLE index, but this clamps it against the
+            // STORAGE count -- deliberately a safe SUPERSET. Narrowing it would
+            // mean calling visibleColumns() from inside reconcile, which calls
+            // getLayout(), which calls reconcile. Every consumer indexes
+            // visibleColumns() and guards the miss (`if (!col) return`), so an
+            // out-of-range value costs a no-op, never a wrong column.
             if (!Number.isInteger(L.focusedCol)) L.focusedCol = 0;
             L.focusedCol = Math.max(0,
                 Math.min(L.focusedCol, Math.max(0, cleanCols.length - 1)));

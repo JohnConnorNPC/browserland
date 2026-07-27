@@ -103,6 +103,8 @@ Nothing is destroyed and nothing is hidden. Every tiled column lives on the one 
 
 Re-enable it and your workspaces come back exactly as they were. A column created while the mod was off joins whichever workspace is active when you turn it back on.
 
+One thing to know if you run **two browsers on the same broker with the mod on in one and off in the other**: the browser without it sees every column on one desktop, so rearranging them there rearranges your workspaces too. Stacking a window from workspace 1 into a column that belongs to workspace 2 really does move it to workspace 2 — the column is the membership. That is the same thing happening either way round; it just isn't labelled as a workspace move in the browser that can't see workspaces.
+
 ## Related pages
 
 - [[Taskbar]] — where the pager and its dots live.
