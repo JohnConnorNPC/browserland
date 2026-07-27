@@ -60,7 +60,7 @@
             else closeWindow(frontId);
         }
 
-        const KEY_ACTIONS = [
+        const CORE_KEY_ACTIONS = [
             { id: 'focus-col-left',  label: 'Focus column left',
               run: () => focusColumnBy(-1) },
             { id: 'focus-col-right', label: 'Focus column right',
@@ -69,20 +69,6 @@
               run: () => moveColumn(activeDesktop().focusedCol, -1) },
             { id: 'move-col-right',  label: 'Move column right',
               run: () => moveColumn(activeDesktop().focusedCol, 1) },
-            { id: 'workspace-prev',  label: 'Previous workspace',
-              run: () => switchWorkspace(activeWorkspaceIndex() - 1) },
-            { id: 'workspace-next',  label: 'Next workspace',
-              run: () => switchWorkspace(activeWorkspaceIndex() + 1) },
-            { id: 'workspace-1',     label: 'Go to workspace 1',
-              run: () => switchWorkspace(0) },
-            { id: 'workspace-2',     label: 'Go to workspace 2',
-              run: () => switchWorkspace(1) },
-            { id: 'workspace-3',     label: 'Go to workspace 3',
-              run: () => switchWorkspace(2) },
-            { id: 'workspace-4',     label: 'Go to workspace 4',
-              run: () => switchWorkspace(3) },
-            { id: 'workspace-5',     label: 'Go to workspace 5',
-              run: () => switchWorkspace(4) },
             { id: 'new-terminal',    label: 'New terminal',
               run: () => launchProfile(localHost(),
                                        hostDefaultProfile(localHost())) },
@@ -102,8 +88,99 @@
             { id: 'toggle-help',     label: 'Toggle help',
               run: () => toggleHelpWindow() },
         ];
-        const KEY_ACTION_BY_ID = {};
-        for (const act of KEY_ACTIONS) KEY_ACTION_BY_ID[act.id] = act;
+        // ---- key-action registry (#148) -----------------------------------
+        // KEY_ACTIONS used to be one const array, with its id index built ONCE
+        // at script eval — i.e. before any mod init, so an action registered by
+        // a mod could render in the settings pane and still never fire. Every
+        // reader now goes through keyActions() / keyActionById(), which read the
+        // live list, and registration invalidates the open Keyboard-Shortcuts
+        // pane so a live enable/disable repaints.
+        //
+        // DEFAULT_KEYBINDINGS (54) deliberately keeps the workspace-* ids even
+        // though their actions moved out: it is a default-COMBO map keyed by id,
+        // not an action registry, and nothing prunes ids it does not recognise —
+        // so a user's rebinding survives the mod being off and comes back
+        // untouched when it returns.
+        let _modKeyActions = [];
+        function keyActions() {
+            return _modKeyActions.length
+                ? CORE_KEY_ACTIONS.concat(_modKeyActions) : CORE_KEY_ACTIONS;
+        }
+        function keyActionById(id) {
+            for (const act of keyActions()) if (act.id === id) return act;
+            return null;
+        }
+        // Contribute actions. Throws (so initMod rolls the mod back) on a bad
+        // spec or an id that already exists — last-wins would silently steal
+        // another owner's binding. Returns a disposer; the caller tracks it.
+        function registerKeyActions(actions) {
+            const list = Array.isArray(actions) ? actions : [actions];
+            const added = [];
+            for (const a of list) {
+                if (!a || typeof a !== 'object' || Array.isArray(a)
+                    || typeof a.id !== 'string' || !a.id
+                    || typeof a.label !== 'string' || !a.label
+                    || typeof a.run !== 'function') {
+                    throw new Error('registerKeyActions: each action needs '
+                        + '{id:string, label:string, run:function}');
+                }
+                if (keyActionById(a.id) || added.some(x => x.id === a.id)) {
+                    throw ModConflictError('key action "' + a.id + '" already exists');
+                }
+                added.push({ id: a.id, label: a.label, run: a.run });
+            }
+            _modKeyActions = _modKeyActions.concat(added);
+            _refreshKeybindingsPane();
+            return function () {
+                _modKeyActions = _modKeyActions.filter(x => added.indexOf(x) === -1);
+                _refreshKeybindingsPane();
+            };
+        }
+        function _refreshKeybindingsPane() {
+            try {
+                if (typeof renderKeybindings === 'function'
+                    && typeof settingsTarget !== 'undefined' && settingsTarget) {
+                    renderKeybindings();
+                }
+            } catch (_) {}
+        }
+
+        // ---- menu contributors (#148) -------------------------------------
+        // Two one-slot hooks a mod may fill to add items to the built-in menus.
+        // Each returns an ARRAY of renderMenu items (separators included, so the
+        // contributor owns its own grouping) and is called at a marked point, so
+        // with nobody registered the menus are byte-identical to before.
+        // A throwing contributor is swallowed: a broken mod must not take the
+        // whole context menu down with it.
+        let _windowMenuItems = null;
+        let _desktopMenuItems = null;
+        function registerWindowMenuItems(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('registerWindowMenuItems: fn must be a function');
+            }
+            if (_windowMenuItems) {
+                throw ModConflictError('a window-menu contributor is already registered');
+            }
+            _windowMenuItems = fn;
+            return function () { if (_windowMenuItems === fn) _windowMenuItems = null; };
+        }
+        function registerDesktopMenuItems(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('registerDesktopMenuItems: fn must be a function');
+            }
+            if (_desktopMenuItems) {
+                throw ModConflictError('a desktop-menu contributor is already registered');
+            }
+            _desktopMenuItems = fn;
+            return function () { if (_desktopMenuItems === fn) _desktopMenuItems = null; };
+        }
+        function _pushMenuItems(fn, items, arg) {
+            if (!fn) return;
+            let extra;
+            try { extra = fn(arg); }
+            catch (e) { console.error('[menu] contributor threw', e); return; }
+            if (Array.isArray(extra)) for (const it of extra) if (it) items.push(it);
+        }
 
         // Canonical combo string for a keydown: modifiers in a fixed order
         // (Ctrl, Alt, Shift, Meta) then the key. Pure modifier presses return
@@ -172,7 +249,7 @@
             for (const id of Object.keys(map)) {
                 if (map[id] === combo) { actionId = id; break; }
             }
-            const act = actionId && KEY_ACTION_BY_ID[actionId];
+            const act = actionId && keyActionById(actionId);
             if (!act) return;
             e.preventDefault();
             e.stopPropagation();
@@ -469,18 +546,11 @@
                 items.push({ label: 'Move column right',
                              enabled: vci !== -1 && vci < ncols - 1,
                              action: () => moveColumn(vci, 1) });
-                items.push({ sep: true });
-                // Send to another vertical workspace.
-                const here = activeWorkspaceIndex();
-                wsList().forEach((ws, wi) => {
-                    if (wi === here) return;
-                    items.push({ label: 'Send to '
-                                     + (ws.name ? ws.name : 'workspace ' + (wi + 1)),
-                                 enabled: true,
-                                 action: () => sendWindowToWorkspace(win, wi) });
-                });
-                items.push({ label: 'Send to new workspace', enabled: true,
-                             action: () => sendWindowToNewWorkspace(win) });
+                // Mod items for a TILED window (the workspaces mod's
+                // "Send to <workspace>" group). It brings its own leading
+                // separator, so with no contributor there is exactly one
+                // separator here instead of the two the old inline block left.
+                _pushMenuItems(_windowMenuItems, items, win);
                 items.push({ sep: true });
                 items.push({ label: 'Float this window', enabled: true,
                              action: () => detachToFloat(win) });
@@ -494,15 +564,9 @@
                     enabled: true,
                     action: () => toggleWindowLock(win),
                 });
-                // Workspace membership (task 8): locked to this ws, or shown on
-                // all. windowWsId null = all workspaces.
-                items.push({
-                    label: (windowWsId(win) === null)
-                        ? '✓ On all workspaces'
-                        : 'Show on all workspaces',
-                    enabled: true,
-                    action: () => setWindowAllWorkspaces(win, windowWsId(win) !== null),
-                });
+                // Mod items for a FLOATING window (the workspaces mod's
+                // "Show on all workspaces" toggle).
+                _pushMenuItems(_windowMenuItems, items, win);
             }
             // MCP access (per-window mode): only for terminal sessions — app
             // docs (notes/editor/etc.) are not server sessions. The ✓ prefers
@@ -597,22 +661,15 @@
                       enabled: hasFloats && floats.some(w => !w.minimized),
                       action: doMinimizeAll });
             } else {
-                // Tiling mode: vertical-workspace switcher + bulk un-tile. The
-                // per-column controls live on each window's title-bar menu.
-                const cur = activeWorkspaceIndex();
-                wsList().forEach((ws, wi) => {
-                    items.push({
-                        label: (wi === cur ? '✓ ' : '   ')
-                            + (ws.name ? ws.name : 'Workspace ' + (wi + 1))
-                            + ' (' + workspaceColumns(ws.id).length + ')',
-                        enabled: true,
-                        action: () => switchWorkspace(wi),
-                    });
-                });
-                items.push({ label: '   New workspace', enabled: true,
-                             action: addWorkspace });
+                // Tiling mode: whatever mods contribute (the workspaces mod's
+                // switcher list + New workspace). The per-column controls live
+                // on each window's title-bar menu, and the float<->tile switch
+                // is in the Control Panel, so core has nothing of its own here.
+                _pushMenuItems(_desktopMenuItems, items, { tiling: true });
             }
-            items.push({ sep: true });
+            // Guarded: with nothing contributed in tiling mode `items` is
+            // still empty, and a leading separator would render as a stray rule.
+            if (items.length) items.push({ sep: true });
             items.push({ label: '🎛 Control panel', enabled: true, action: launchControlPanel });
             if (lastLayoutSnapshot && !tiling) {
                 items.push({ sep: true });
@@ -647,9 +704,10 @@
             // a float parked elsewhere raised nothing at all.
             items.push({ label: 'Focus', enabled: true, action: () => {
                 if (!windows.has(key)) {
-                    const targetWs = workspaceIndexForKey(key);
-                    if (targetWs !== null && targetWs !== activeWorkspaceIndex())
-                        switchWorkspace(targetWs);
+                    // Same interceptor onTaskbarClick uses: the window does not
+                    // exist yet, so revealAndFocusWindow cannot help — a mod
+                    // gets the KEY and re-homes the view before it is reopened.
+                    runTaskbarActivateIntercept(key);
                     if (appStore[key]) openAppWindow(appStore[key]);
                     else openWindow(key, sessions.get(key));
                     return;

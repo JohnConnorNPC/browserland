@@ -434,6 +434,75 @@
                     addStatusItem: function (node) {
                         return _modAddStatusItem(rec, node);
                     },
+                    // #148: fires after EVERY chip rebuild (the 2 s poll and every
+                    // manual refresh), so a mod can badge / dim / reorder the bar
+                    // on the same tick the chips appear.
+                    onItemsRendered: function (cb) {
+                        return _modTrack(rec, registerTaskbarItemsRendered(cb));
+                    },
+                    // #148: fn(key) runs BEFORE core resolves a taskbar
+                    // activation and returns true if it changed what the desktop
+                    // shows. It takes a KEY, not a window: a chip for a CLOSED
+                    // session has no window, which is exactly the case
+                    // ctx.desktop.onReveal cannot cover.
+                    interceptActivate: function (fn) {
+                        return _modTrack(rec, registerTaskbarActivateIntercept(fn));
+                    },
+                },
+                // #148 (workspaces): the desktop model seams. Core owns ONE
+                // desktop whose columns all live in prefs._layout.columns; these
+                // let a mod change what is DRAWN without moving any of it.
+                //   columnFilter(fn)   fn(col, layout) -> show this column?
+                //                      Registering/dropping it relayouts, so a
+                //                      disable puts every column back on screen.
+                //   onColumnCreated(fn) a column was just spliced in — claim it
+                //                      HERE, before anyone reads a visible index
+                //                      back, or it is born invisible.
+                //   onPlaced(fn)       a window was just placed as a FLOAT.
+                //   onReveal(fn)       first refusal before revealAndFocusWindow
+                //                      focuses an existing window.
+                //   onLayoutRender(fn) the strip was re-laid-out; repaint your
+                //                      desktop chrome. Every path that changes
+                //                      placement converges here.
+                // Each family is ONE slot: a second registration throws
+                // ModConflictError so two mods can never silently fight over the
+                // desktop. Additive — ctxVersion stays 1; feature-detect
+                // `if (ctx.desktop)`.
+                desktop: {
+                    columnFilter: function (fn) {
+                        return _modTrack(rec, registerColumnFilter(fn));
+                    },
+                    onColumnCreated: function (fn) {
+                        return _modTrack(rec, registerColumnCreated(fn));
+                    },
+                    onPlaced: function (fn) {
+                        return _modTrack(rec, registerPlacementHooks({ placed: fn }));
+                    },
+                    onReveal: function (fn) {
+                        return _modTrack(rec, registerPlacementHooks({ reveal: fn }));
+                    },
+                    onLayoutRender: function (fn) {
+                        return _modTrack(rec, registerLayoutRendered(fn));
+                    },
+                },
+                // #148: contribute keyboard actions and menu items.
+                // registerKeyActions([{id,label,run}]) merges into the live action
+                // list every reader now goes through (the dispatcher, the Keyboard
+                // Shortcuts pane, the help corpus), and re-renders the open pane on
+                // register AND on teardown. A duplicate id throws rather than
+                // last-wins, so one mod can never steal another's binding.
+                // registerWindowMenuItems(fn) / registerDesktopMenuItems(fn) each
+                // return an ARRAY of renderMenu items (separators included, so the
+                // contributor owns its own grouping) from a marked insertion point;
+                // with no contributor the menus are byte-identical to before.
+                registerKeyActions: function (actions) {
+                    return _modTrack(rec, registerKeyActions(actions));
+                },
+                registerWindowMenuItems: function (fn) {
+                    return _modTrack(rec, registerWindowMenuItems(fn));
+                },
+                registerDesktopMenuItems: function (fn) {
+                    return _modTrack(rec, registerDesktopMenuItems(fn));
                 },
                 // #116 (S14): per-terminal-window lifecycle. onTerminalCreate(cb)
                 // subscribes a mod to EVERY terminal window — REPLAYED over those
@@ -597,6 +666,13 @@
         // (the DOM is removed by _controlSection's own onUnload). The list drives
         // reflect-on-open (renderModSettingsToggles) and /state convergence
         // (notifyModSettings).
+        // #148: register-and-remember. Every one-slot desktop/menu/keys seam
+        // returns a disposer; push it onto rec.unloads so a disable, or an
+        // initMod rollback after a later throw, releases the slot exactly once.
+        function _modTrack(rec, off) {
+            if (typeof off === 'function') rec.unloads.push(off);
+            return off;
+        }
         function _trackControl(rec, entry) {
             window.__mods.settingToggles.push(entry);
             rec.unloads.push(function () {

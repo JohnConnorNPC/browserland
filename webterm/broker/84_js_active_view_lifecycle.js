@@ -166,7 +166,6 @@
             if (_deactivated || epoch !== _viewEpoch) return;
             _stateReady = true;
             try { applyDisplaySettings(); } catch (_) {}
-            try { renderWorkspaces(); } catch (_) {}
             restoreAppWindows();
             seedRestoreQueue();
             refreshTaskbar();

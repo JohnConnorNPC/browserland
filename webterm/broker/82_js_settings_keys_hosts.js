@@ -7,7 +7,7 @@
             setKeybindingsEl.textContent = '';
             if (!t) return;
             const map = t.s.keybindings || {};
-            for (const act of KEY_ACTIONS) {
+            for (const act of keyActions()) {
                 const row = document.createElement('div');
                 row.className = 'kb-row';
                 const label = document.createElement('span');

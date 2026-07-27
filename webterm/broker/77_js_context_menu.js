@@ -379,8 +379,7 @@
             getLayout().mode = 'tiling';
             savePrefs();
             for (const win of floatingWindowsOrdered()) attachToStrip(win);
-            renderWorkspaces();
-            requestRelayout();
+            requestRelayout();       // #148: the layout-rendered seam repaints
         }
         // Reverse: float every tiled window back to its snapshotted geom and
         // leave tiling mode. Never silently destroys a hand-arranged layout —
@@ -391,7 +390,6 @@
             for (const win of liveWindowsOrdered()) {
                 if (win.tiled) detachToFloat(win);
             }
-            renderWorkspaces();
-            requestRelayout();
+            requestRelayout();       // #148: the layout-rendered seam repaints
         }
 

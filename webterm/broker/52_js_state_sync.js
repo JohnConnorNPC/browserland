@@ -129,14 +129,13 @@
                 _stateLastSerialized = _stateSerialize();
                 document.body.classList.toggle('size-locked', isSizeLocked());
                 applyDisplaySettings();
-                try { renderWorkspaces(); } catch (_) {}
+                // An adopted layout can change what belongs where, so a mod's
+                // desktop chrome (the workspaces pager, the floating mask, the
+                // taskbar ws badges) must be reconciled now rather than left
+                // stale until the next 2s poll. requestRelayout() lands on the
+                // #148 layout-rendered seam next frame, which is where that
+                // repaint now lives -- no named workspace call in core.
                 requestRelayout();
-                // An adopted layout can change activeWs / membership, so the
-                // floating-window workspace mask and the taskbar ws badges must
-                // be reconciled now, not left stale until the next 2s poll
-                // (Codex review). Track A helpers; guarded for load order.
-                try { applyWorkspaceVisibility(); } catch (_) {}
-                try { applyTaskbarWorkspace(); } catch (_) {}
                 // A remote browser may have edited the section library; re-render
                 // any open Sections panel + AGENTS.md checklist (last-writer-wins).
                 try { refreshOpenSectionUIs(); } catch (_) {}

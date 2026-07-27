@@ -120,6 +120,28 @@
             }
             return false;
         }
+        // ---- layout-rendered seam (#148) ----------------------------------
+        // Fires at the tail of every relayout, which is the one place every path
+        // that changes placement converges on: a /state adopt, the active-view
+        // rebuild, a layout undo and the float<->tile switch all requestRelayout().
+        // A mod that draws desktop chrome (the workspaces pager) repaints from
+        // here instead of core calling it by name.
+        let _layoutRendered = null;
+        function registerLayoutRendered(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('onLayoutRender: fn must be a function');
+            }
+            if (_layoutRendered) {
+                throw ModConflictError('a layout-rendered listener is already registered');
+            }
+            _layoutRendered = fn;
+            return function () { if (_layoutRendered === fn) _layoutRendered = null; };
+        }
+        function runLayoutRendered() {
+            if (!_layoutRendered) return;
+            try { _layoutRendered(); }
+            catch (e) { console.error('[tiling] layout-rendered listener threw', e); }
+        }
         function relayoutStrip() {
             const strip = document.getElementById('strip');
             const desktop = document.getElementById('desktop');
@@ -272,7 +294,7 @@
                 scrollColumnIntoView(getLayout().focusedCol, false);
                 updateStripScrollbar();   // widths/columns changed → re-measure
             }));
-            renderWorkspaces();
+            runLayoutRendered();     // #148: mods repaint their desktop chrome
             if (deferReparent) requestRelayout();   // retry once selection ends
             reorderTaskbarItems();   // taskbar tracks the tiling order
         }

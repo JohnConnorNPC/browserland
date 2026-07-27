@@ -72,7 +72,7 @@
                 && !isModEnabled(e.owner)));
             try {
                 const map = (getSettings().keybindings) || {};
-                for (const act of KEY_ACTIONS) {
+                for (const act of keyActions()) {
                     const combo = map[act.id] || '';
                     const body = combo ? ('Bound to ' + combo + '.')
                         : 'Unbound - assign a key in Control Panel -> Keyboard shortcuts.';

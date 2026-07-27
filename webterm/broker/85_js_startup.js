@@ -13,7 +13,6 @@
             if (!isTilingMode()) enterTilingMode();   // flips live + re-tiles + saves
             savePrefs();
         })();
-        renderWorkspaces();          // pager/rail visible from the first paint
         // Open the HOME control WS FIRST: the broker auto-activates a lone
         // browser (sends {active:true} -> bootActiveView), or reports
         // {active:false} so we show only the "Become active" button. The heavy

@@ -85,16 +85,56 @@
             return el;
         }
 
+        // ---- taskbar seams (#148) -------------------------------------
+        // interceptActivate(fn): fn(key) runs before core resolves a taskbar
+        // activation, and returns true if it changed what the desktop is
+        // showing. It takes a KEY, not a window, precisely because the window
+        // may not exist yet (a closed session's chip) -- that is the case
+        // revealAndFocusWindow cannot cover. onItemsRendered(cb): fires after
+        // every chip rebuild, so a mod can badge/dim/reorder the bar on the
+        // same tick the chips appear. Both no-op with nobody registered.
+        let _taskbarActivateIntercept = null;
+        let _taskbarItemsRendered = null;
+        function registerTaskbarActivateIntercept(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('interceptActivate: fn must be a function');
+            }
+            if (_taskbarActivateIntercept) {
+                throw ModConflictError('a taskbar activate interceptor is already registered');
+            }
+            _taskbarActivateIntercept = fn;
+            return function () {
+                if (_taskbarActivateIntercept === fn) _taskbarActivateIntercept = null;
+            };
+        }
+        function registerTaskbarItemsRendered(fn) {
+            if (typeof fn !== 'function') {
+                throw new Error('onItemsRendered: fn must be a function');
+            }
+            if (_taskbarItemsRendered) {
+                throw ModConflictError('a taskbar items-rendered listener is already registered');
+            }
+            _taskbarItemsRendered = fn;
+            return function () {
+                if (_taskbarItemsRendered === fn) _taskbarItemsRendered = null;
+            };
+        }
+        function runTaskbarActivateIntercept(key) {
+            if (!_taskbarActivateIntercept) return false;
+            try { return !!_taskbarActivateIntercept(key); }
+            catch (e) { console.error('[taskbar] activate interceptor threw', e); return false; }
+        }
+        function runTaskbarItemsRendered() {
+            if (!_taskbarItemsRendered) return;
+            try { _taskbarItemsRendered(); }
+            catch (e) { console.error('[taskbar] items-rendered listener threw', e); }
+        }
         function onTaskbarClick(id) {
-            // If the window lives on another (parked) workspace — tiled OR a
-            // workspace-locked floating window (task 8/16) — switch there first
-            // so it mounts visibly, instead of toggling minimize on a window
-            // that's hidden off the active workspace. Membership holds whether
-            // or not the window is currently open.
-            const targetWs = workspaceIndexForKey(id);
-            const switched = (targetWs !== null
-                && targetWs !== activeWorkspaceIndex());
-            if (switched) switchWorkspace(targetWs);
+            // A mod may re-home the view first — the workspaces mod switches to
+            // the workspace holding this key, so the chip mounts something
+            // visible instead of toggling minimize on a hidden window.
+            // Membership holds whether or not the window is currently open.
+            const switched = runTaskbarActivateIntercept(id);
             const win = windows.get(id);
             if (!win) {
                 // App docs (sticky note / editor) reopen via their own factory
@@ -111,10 +151,9 @@
             // design — and record the reveal so the minimize-toggle below does
             // not immediately round-trip it back to hidden.
             let revealed = false;
-            if (!win.tiled && windowWsId(win) !== null
-                && win.dom.classList.contains('ws-hidden')) {
-                setWindowWs(win, activeWorkspaceId(), true);   // reveal on active ws
-                revealed = true;
+            if (!win.tiled && win.dom.classList.contains('ws-hidden')) {
+                revealAndFocusWindow(id);   // the reveal hook owns the policy
+                revealed = !win.dom.classList.contains('ws-hidden');
             }
             if (win.minimized) { restoreWindow(id); return; }
             // Never minimize a window we just revealed (here or from another ws).
@@ -727,9 +766,9 @@
             if (layoutDropped) {
                 savePrefs();
                 // Layout mutations must be paired with a re-render; the dropped
-                // keys were dormant so the strip is unchanged, but the workspace
-                // dots/preview read `_layout` live.
-                renderWorkspaces();
+                // keys were dormant so the strip is unchanged, but a mod's
+                // switcher/preview reads the layout live. runTaskbarItemsRendered
+                // below covers that on this same tick.
             }
             for (const k of Object.keys(prefs)) {
                 if (k.charAt(0) === '_') continue;
@@ -888,9 +927,8 @@
             }
 
             applyHostVisibilityAll();
-            applyWorkspaceVisibility();   // assign/mask floating wins per ws (task 8)
             updateTaskbarActive();
-            applyTaskbarWorkspace();      // ws badges + off-ws dimming (task 16)
+            runTaskbarItemsRendered();    // #148: mod badges / dimming / order
             renderHostStatus();
 
             // ---- id-directed auto-open ----

@@ -716,3 +716,92 @@
                 }
             },
         });
+        // Repaint on every relayout: a /state adopt, the active-view rebuild, a
+        // layout undo and the float<->tile switch all converge there, so this one
+        // subscription replaces the by-name calls core used to make from 52/77/
+        // 84/85. All three are idempotent.
+        registerLayoutRendered(function () {
+            renderWorkspaces();
+            applyWorkspaceVisibility();
+            applyTaskbarWorkspace();
+        });
+        // ...and on every taskbar rebuild, which is what re-creates the chips the
+        // ws badges hang off.
+        registerTaskbarItemsRendered(function () {
+            applyWorkspaceVisibility();
+            applyTaskbarWorkspace();
+        });
+        // A chip for a window on another workspace switches there first, whether
+        // or not that window is currently open.
+        registerTaskbarActivateIntercept(function (key) {
+            const targetWs = workspaceIndexForKey(key);
+            if (targetWs === null || targetWs < 0
+                || targetWs === activeWorkspaceIndex()) return false;
+            switchWorkspace(targetWs);
+            return true;
+        });
+        // Title-bar menu: "Send to <workspace>" for a tiled window, the
+        // all-workspaces toggle for a floating one.
+        registerWindowMenuItems(function (win) {
+            if (!win) return [];
+            if (!win.tiled) {
+                // Workspace membership (task 8): locked to this ws, or shown on
+                // all. windowWsId null = all workspaces.
+                return [{
+                    label: (windowWsId(win) === null)
+                        ? '\u2713 On all workspaces'
+                        : 'Show on all workspaces',
+                    enabled: true,
+                    action: () => setWindowAllWorkspaces(win, windowWsId(win) !== null),
+                }];
+            }
+            const items = [{ sep: true }];
+            const here = activeWorkspaceIndex();
+            wsList().forEach((ws, wi) => {
+                if (wi === here) return;
+                items.push({ label: 'Send to '
+                                 + (ws.name ? ws.name : 'workspace ' + (wi + 1)),
+                             enabled: true,
+                             action: () => sendWindowToWorkspace(win, wi) });
+            });
+            items.push({ label: 'Send to new workspace', enabled: true,
+                         action: () => sendWindowToNewWorkspace(win) });
+            return items;
+        });
+        // Empty-desktop / strip menu (tiling mode): the switcher + New workspace.
+        registerDesktopMenuItems(function () {
+            const items = [];
+            const cur = activeWorkspaceIndex();
+            wsList().forEach((ws, wi) => {
+                items.push({
+                    label: (wi === cur ? '\u2713 ' : '   ')
+                        + (ws.name ? ws.name : 'Workspace ' + (wi + 1))
+                        + ' (' + workspaceColumns(ws.id).length + ')',
+                    enabled: true,
+                    action: () => switchWorkspace(wi),
+                });
+            });
+            items.push({ label: '   New workspace', enabled: true,
+                         action: addWorkspace });
+            return items;
+        });
+        // The seven shortcuts. Their ids are VERBATIM the pre-#148 ones: user
+        // rebindings are stored by id, and DEFAULT_KEYBINDINGS (54) still carries
+        // the same defaults, so nothing about a user's keyboard changes.
+        registerKeyActions([
+            { id: 'workspace-prev',  label: 'Previous workspace',
+              run: () => switchWorkspace(activeWorkspaceIndex() - 1) },
+            { id: 'workspace-next',  label: 'Next workspace',
+              run: () => switchWorkspace(activeWorkspaceIndex() + 1) },
+            { id: 'workspace-1',     label: 'Go to workspace 1',
+              run: () => switchWorkspace(0) },
+            { id: 'workspace-2',     label: 'Go to workspace 2',
+              run: () => switchWorkspace(1) },
+            { id: 'workspace-3',     label: 'Go to workspace 3',
+              run: () => switchWorkspace(2) },
+            { id: 'workspace-4',     label: 'Go to workspace 4',
+              run: () => switchWorkspace(3) },
+            { id: 'workspace-5',     label: 'Go to workspace 5',
+              run: () => switchWorkspace(4) },
+        ]);
+        renderWorkspaces();          // pager visible from the first paint
