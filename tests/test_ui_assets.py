@@ -2411,8 +2411,10 @@ def test_render_menu_resolves_iconkey_to_trusted_svg():
     # label stays textContent (the "labels are textContent only" rule).
     s77 = (BROKER_DIR / "77_js_context_menu.js").read_text(encoding="utf-8")
     assert "const iconSvg = it.iconKey ? appIconSvg(it.iconKey) : '';" in s77
-    assert "if (iconSvg) {" in s77
-    assert "ic.className = 'ctx-icon';" in s77
+    # #170 widened the branch to cover the text-glyph path; the SVG side is
+    # unchanged (registry lookup -> innerHTML, label -> textContent).
+    assert "if (iconSvg || iconText) {" in s77
+    assert "ic.className = iconSvg ? 'ctx-icon' : 'ctx-icon ctx-icon-text';" in s77
     assert "ic.innerHTML = iconSvg;" in s77
     assert "lab.textContent = it.label;" in s77
     # renderMenu never injects a raw pre-resolved SVG — the only innerHTML value is
@@ -2422,6 +2424,129 @@ def test_render_menu_resolves_iconkey_to_trusted_svg():
     css = (BROKER_DIR / "14_css_dragdrop.css").read_text(encoding="utf-8")
     assert "#ctx-menu .ctx-icon svg" in css
     assert "ctx-icon" in INDEX_HTML
+
+
+def _render_menu_body():
+    """The source text of renderMenu (77), from its `function renderMenu(` line
+    to the next top-level `function ` at the same indent."""
+    s77 = (BROKER_DIR / "77_js_context_menu.js").read_text(encoding="utf-8")
+    start = s77.index("        function renderMenu(items, x, y) {")
+    end = s77.index("\n        function ", start + 1)
+    return s77[start:end]
+
+
+def _css_rule(css, selector):
+    """One CSS rule's declaration block, so a `in` assertion can't be satisfied
+    by an unrelated rule further down the stylesheet (codex)."""
+    start = css.index(selector + " {") + len(selector) + 2
+    return css[start:css.index("}", start)]
+
+
+def test_mod_window_kind_may_declare_a_text_glyph_icon():
+    # #170: APP_ICON_SVG is a CLOSED table, so a mod-owned window kind can never
+    # have an entry in it. Instead of ctx.registerAppIcon(svg) -- which the issue
+    # rejects, because it would permanently forfeit renderMenu's "the only
+    # innerHTML is our own markup" invariant for a decorative icon -- a kind may
+    # declare a short TEXT glyph rendered with textContent.
+    s65 = (BROKER_DIR / "65_js_display_theming.js").read_text(encoding="utf-8")
+    assert "function appIconGlyph(" in s65
+    # Non-strings (and '') resolve to '', so an item that declares nothing, or
+    # declares junk, simply has no icon -- never a thrown render. The raw-length
+    # gate is BEFORE the scan, so a megabyte from a store blob is rejected
+    # without being copied on every repaint (codex).
+    assert "if (typeof text !== 'string' || !text) return '';" in s65
+    assert "const APP_GLYPH_RAW_MAX = 64;" in s65
+    assert "if (text.length > APP_GLYPH_RAW_MAX) return '';" in s65
+    # Capped at 12 CODE POINTS -- clears the longest RGI emoji sequence (10)
+    # whole -- iterated with Array.from so a surrogate PAIR is never sliced in
+    # half (which would emit a lone surrogate).
+    assert "const APP_GLYPH_MAX = 12;" in s65
+    assert "const cps = Array.from(cleaned);" in s65
+    assert "cps.slice(0, APP_GLYPH_MAX).join('')" in s65
+    # The drop-class: C0/C1 controls, every bidi control (an unterminated RLO in
+    # the icon slot would reverse the reading order of the label beside it), the
+    # invisible "bases" that would otherwise fake an empty-but-present icon, the
+    # tag block, lone surrogates, and whitespace (so a glyph can neither pad a
+    # row nor render blank as a fake separator).
+    i = s65.index("const APP_GLYPH_DROP")
+    drop = s65[i:s65.index("/gu;", i) + 4]
+    for rng in ("0000-", "001F", "007F-", "009F",   # C0 / DEL + C1
+                "061C", "200E", "200F",             # ALM, LRM, RLM
+                "202A-", "202E",                    # embeddings + OVERRIDES
+                "2066-", "2069",                    # isolates
+                "206A-", "206F",                    # deprecated format controls
+                "FFF9-", "FFFB",                    # interlinear annotation
+                "E0000}-", "E007F}",                # LANGUAGE TAG block
+                "D800-", "DFFF",                    # lone surrogates (u flag)
+                "00AD", "034F", "115F", "1160",     # invisible "bases"
+                "3164", "FFA0", "17B4", "17B5",
+                "180B-", "180E", "200B-", "200C", "2060-"):
+        assert rng in drop, f"APP_GLYPH_DROP misses {rng!r}"
+    # The u flag is load-bearing twice: astral ranges, and making the surrogate
+    # range match only UNPAIRED surrogates.
+    assert drop.endswith("/gu;")
+    assert "|" + chr(92) + "s/gu;" in drop, "APP_GLYPH_DROP must strip whitespace"
+    # ZWJ, the variation selectors and the skin-tone modifiers SURVIVE, so a
+    # multi-code-point emoji still renders as one grapheme, not its components.
+    for kept in ("200D", "FE0F", "1F3FB"):
+        assert kept not in drop, f"APP_GLYPH_DROP must not strip {kept}"
+    # ...but a string of NOTHING BUT joiners/variation selectors is not a glyph:
+    # it must resolve to '' rather than to a truthy, invisible icon that would
+    # still open the icon column (codex).
+    assert "const APP_GLYPH_VISIBLE = /[^" in s65
+    assert "if (!APP_GLYPH_VISIBLE.test(cleaned)) return '';" in s65
+    vis = s65[s65.index("const APP_GLYPH_VISIBLE"):]
+    vis = vis[:vis.index("\n")]
+    for ignorable in ("200D", "FE00-", "FE0F", "E0100}-", "E01EF}"):
+        assert ignorable in vis, f"APP_GLYPH_VISIBLE misses {ignorable!r}"
+
+    # renderMenu resolves the two into the {svg}/{text} tagged split the Help TOC
+    # already uses: registry SVG wins, and only it is markup.
+    s77 = (BROKER_DIR / "77_js_context_menu.js").read_text(encoding="utf-8")
+    assert "const iconText = iconSvg ? '' : appIconGlyph(it.iconGlyph);" in s77
+    assert "if (iconSvg) ic.innerHTML = iconSvg;" in s77
+    assert "else ic.textContent = iconText;" in s77
+    # THE invariant, checked structurally rather than by eyeballing one line:
+    # every HTML sink inside renderMenu is either the '' wipe or the trusted
+    # registry lookup. A glyph must never reach one. The sink list covers the
+    # sideways spellings too (codex: matching only `.innerHTML =` would let
+    # `outerHTML`/`insertAdjacentHTML` walk straight past this test).
+    body = _render_menu_body()
+    sinks = set(re.findall(r"\.(?:inner|outer)HTML\s*=\s*([^;]+);", body))
+    assert sinks == {"''", "iconSvg"}, f"renderMenu grew an HTML sink: {sinks}"
+    for sink in ("insertAdjacentHTML", "createContextualFragment",
+                 "document.write", "srcdoc", "DOMParser"):
+        assert sink not in body, f"renderMenu grew an HTML sink: {sink}"
+    for never in ("ic.innerHTML = iconText", "ic.innerHTML = it.iconGlyph",
+                  "innerHTML = appIconGlyph"):
+        assert never not in s77
+
+    # appMenuItems passes the kind's declared glyph through untouched (like
+    # iconKey: the item object never carries resolved markup). The launch menu's
+    # repaint fingerprint takes the NORMALIZED value, so it tracks what actually
+    # renders and can never be handed a non-string to String() (codex).
+    s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
+    assert "iconGlyph: m.iconGlyph || ''" in s76
+    assert "appIconGlyph(it.iconGlyph)," in s76
+    assert "it.iconGlyph || ''," not in s76
+
+    # The glyph sits in the same fixed 15px box as an SVG icon, clipped and
+    # bidi-isolated, so an oversized/stacked/RTL glyph can't grow a menu row,
+    # displace the label, or reorder it. Every containment property is stated on
+    # THIS rule rather than inherited from `.ctx-icon` (codex).
+    css = (BROKER_DIR / "14_css_dragdrop.css").read_text(encoding="utf-8")
+    rule = _css_rule(css, "#ctx-menu .ctx-icon.ctx-icon-text")
+    for decl in ("display: inline-flex;", "flex: 0 0 15px;",
+                 "box-sizing: border-box;", "width: 15px;", "max-width: 15px;",
+                 "height: 15px;", "max-height: 15px;", "overflow: hidden;",
+                 "white-space: nowrap;", "unicode-bidi: isolate;",
+                 "direction: ltr;"):
+        assert decl in rule, f".ctx-icon-text misses {decl!r}"
+
+    # And it all reaches the served page.
+    for needle in ("function appIconGlyph(", "iconGlyph: m.iconGlyph || ''",
+                   "ctx-icon-text", "unicode-bidi: isolate;"):
+        assert needle in INDEX_HTML, f"#170 glyph path missing from page: {needle!r}"
 
 
 def test_help_toc_resolves_svg_app_icons():
