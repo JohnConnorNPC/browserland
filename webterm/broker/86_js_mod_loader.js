@@ -41,11 +41,33 @@
             // `{}` until loadMods resolves it, so every reader sees "no pins"
             // rather than a TDZ/undefined during page-script eval.
             policy: {},
+            // #163: the RAW pin map /info reported, stashed unresolved. Pins are
+            // resolved only AFTER the installed packages have registered (see
+            // loadMods), because _resolvePins drops any pin whose id is not yet
+            // in `registered`; keeping the raw map lets _lateRegister re-resolve.
+            policyRaw: null,
             // Did the boot /mods actually answer? false after a 401 (no token
             // stored yet) / 404 (older broker) / network failure, which is what
             // lets a successful login re-ask instead of silently running the
             // page unpinned until the next reload.
             policyAuthoritative: false,
+            // #163: /info's `mods` — shipped rows first, then installed rows
+            // topologically sorted, every row carrying `source`. The boot
+            // snapshot the package loader, the prune and the status model read.
+            catalog: [],
+            // #163: id -> per-package LOAD record (installed mods only); id ->
+            // true for every package this page asked for (the _lateRegister
+            // gate); url -> in-flight load promise (the (id, gen, file) dedup);
+            // id -> 'cycle'|'blocked-by-cycle'; id -> deps outside shipped ∪
+            // installed. See 86b_js_mod_packages.js.
+            packages: {},
+            requested: {},
+            assetLoads: {},
+            cycleState: {},
+            missingRequires: {},
+            // The forward boot loop has finished, so a registerMod arriving now
+            // is a LATE one and routes through _lateRegister.
+            bootComplete: false,
         };
 
         // A duplicate id / slot claim is a hard error (no silent last-wins).
@@ -72,11 +94,29 @@
             if (typeof decl.init !== 'function') {
                 throw new Error('registerMod[' + id + ']: init(ctx) must be a function');
             }
+            // #163: bind the declaration to the PACKAGE whose script is running.
+            // A CORRECTNESS CONVENTION, NOT A BOUNDARY — fork-trust means the
+            // code could register from a timeout (currentScript null) or rewrite
+            // this outright. What it buys: an accepted "x-wrapper" package whose
+            // script registers `clock` cannot silently collide with the shipped
+            // registration, show the wrong provenance, and make the broker's
+            // dependency analysis disagree with the client's. A shipped mod runs
+            // inside the one inline <script>, which carries no package stamp, so
+            // it is unaffected. registerMod's duplicate-id ModConflictError is
+            // still the backstop, and fires FIRST for shipped ids because they
+            // register synchronously at page-script eval.
+            const pkgId = _currentPackageId();
+            if (pkgId && pkgId !== id) {
+                const pkg = window.__mods.packages && window.__mods.packages[pkgId];
+                if (pkg) { pkg.state = 'wrong-id'; pkg.wrongId = id; }
+                throw ModConflictError('registerMod: package "' + pkgId
+                    + '" declared mod id "' + id + '"');
+            }
             const reg = window.__mods.registered;
             if (reg.some((m) => m.id === id)) {
                 throw ModConflictError('registerMod: duplicate mod id "' + id + '"');
             }
-            reg.push({
+            const entry = {
                 id: id,
                 version: (typeof decl.version === 'string') ? decl.version : '0',
                 // null = "pin nothing" (still init); a number must match exactly.
@@ -112,7 +152,14 @@
                     ? decl.requires.filter(function (t) { return typeof t === 'string' && t; })
                     : [],
                 init: decl.init,
-            });
+            };
+            reg.push(entry);
+            // #163: a registration that lands AFTER the forward boot loop — a
+            // package that overran the load deadline, or one a 401'd boot never
+            // fetched. _lateRegister re-sorts, re-resolves the pins, repaints
+            // the Mods pane and brings the mod up, but only if this page asked
+            // for that package.
+            if (window.__mods.bootComplete) _lateRegister(entry);
         }
 
         // LIFO teardown: run a mod's onUnload callbacks newest-first, each
@@ -1701,10 +1748,14 @@
         // and scratchpad visibly blocked ("needs: editor") rather than silently
         // overriding the operator's own off.
         //
-        // The reverse walk works because of the loader's static ordering guard: a
-        // dependency is always registered EARLIER than its dependents, so walking
-        // registration order BACKWARDS visits every dependent before its
-        // dependencies and one pass closes a whole chain.
+        // The reverse walk works because a dependency is always registered
+        // EARLIER than its dependents, so walking registration order BACKWARDS
+        // visits every dependent before its dependencies and one pass closes a
+        // whole chain. #163: that used to be guaranteed by the static ordering
+        // guard over ui._MODS; it is now guaranteed at RUNTIME by
+        // _topoSortRegistered(), which loadMods calls BEFORE this. Resolving
+        // pins any earlier would silently drop every pin naming an installed
+        // mod (they are not in `registered` until their package has run).
         function _resolvePins(raw) {
             const pins = {};
             if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return pins;
@@ -1770,6 +1821,18 @@
             // leaving the mod safely blocked (no slot claimed, no partial init).
             // Default defensively — a raw test decl may skip registerMod's
             // normalization — so the documented never-throws contract still holds.
+            //
+            // #163: a mod _topoSortRegistered put IN a cycle can never satisfy
+            // its own precondition, so refuse it with its own structured reason
+            // rather than letting it read as an ordinary dependency block. A
+            // mod merely blocked BY a cycle falls through to the `requires`
+            // check below and reports as blocked, which is exactly what it is.
+            if (window.__mods.cycleState
+                    && window.__mods.cycleState[id] === 'cycle') {
+                console.error('[mods] refusing "' + id
+                    + '": it is in a dependency cycle');
+                return { ok: false, reason: 'cycle' };
+            }
             const reqs = Array.isArray(decl.requires) ? decl.requires : [];
             const missing = reqs.filter(function (dep) { return !window.__mods.active.has(dep); });
             if (missing.length) {
@@ -1846,7 +1909,16 @@
         }
         // A mod's DECLARED default (registerMod defaultEnabled). Unknown id ->
         // true (treated like a default-on mod so a stale id is inert, not stuck).
+        //
+        // #163: an INSTALLED mod's default comes from the CATALOG, not from its
+        // own registerMod call, and the broker reports it unconditionally false.
+        // Installing a mod on one broker must not silently switch it on for
+        // every browser that loads that broker's page — install is two steps
+        // (install, then enable), and a package is free to declare
+        // `defaultEnabled: true` (or omit it, which means true) in its own JS.
         function _modDefault(id) {
+            const row = _modCatalogRow(id);
+            if (row && row.source === 'installed') return row.default_enabled === true;
             const rec = window.__mods.registered.find(
                 function (m) { return m.id === id; });
             return rec ? rec.defaultEnabled !== false : true;
@@ -1989,47 +2061,91 @@
         // The reflect closure is registered via _trackControl (kind:'pane'), so it
         // re-syncs on Control Panel open AND on every /state pull (idempotent, read
         // only) like every other pane.
+        // #163: the rows are the UNION of catalog packages and registered
+        // declarations (_modStatusRows), NOT a walk of `registered` — a mod in a
+        // dependency cycle, one whose script 404'd and one whose SRI did not
+        // match never call registerMod, so a registered[]-driven pane cannot
+        // show them at all. And because _modRegisterPane calls spec.render()
+        // EXACTLY ONCE, the row set is rebuildable (_rebuildRows) so a late
+        // registration is not frozen out of a pane built before it landed.
         function _mountModsManagerPane() {
             if (window.__mods._managerMounted) return;
             window.__mods._managerMounted = true;
             const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
-            const rows = [];
+            let rows = [];
+            let listEl = null;
             function _reflectManager() {
+                const byId = Object.create(null);
+                for (const s of _modStatusRows()) byId[s.id] = s;
                 for (const r of rows) {
-                    const enabled = isModEnabled(r.id);   // default XOR override (#116)
-                    r.cb.checked = enabled;
+                    const s = byId[r.id];
+                    if (!s) continue;
+                    r.cb.checked = s.enabled;
                     // #157: a mod this broker PINS is not this browser's call —
-                    // show the pin and lock the box. Reflected (not decided) here:
-                    // the pin came from the boot policy snapshot, so this runs on
-                    // every /state pull without ever changing what is in force.
-                    const pin = _pin(r.id);
-                    r.cb.disabled = (pin !== null);
-                    r.pin.textContent = (pin === null) ? ''
-                        : (pin ? 'pinned on' : 'pinned off');
-                    r.pin.title = (pin === null) ? ''
-                        : ('this broker pins ' + r.id + ' ' + (pin ? 'on' : 'off')
+                    // show the pin and lock the box. #163 also locks a row with
+                    // no registration (nothing to init). Reflected (not decided)
+                    // here: the pin came from the boot policy snapshot, so this
+                    // runs on every /state pull without changing what is in force.
+                    r.cb.disabled = !s.toggleable;
+                    r.pin.textContent = (s.pin === null) ? ''
+                        : (s.pin ? 'pinned on' : 'pinned off');
+                    r.pin.title = (s.pin === null) ? ''
+                        : ('this broker pins ' + r.id + ' ' + (s.pin ? 'on' : 'off')
                            + ' for every browser that loads its page');
-                    let state, label;
-                    if (!enabled) { state = 'off'; label = state; }
-                    else if (window.__mods.active.has(r.id)) { state = 'active'; label = state; }
-                    else {
-                        // #121: enabled but not active. Distinguish a dependency
-                        // BLOCK (a declared `requires` mod is inactive) from an init
-                        // FAILURE (deps satisfied, init threw). READ-ONLY — this
-                        // reflects on every /state pull and must never init/teardown;
-                        // it only classifies + labels the row. `blocked` shows the
-                        // direct missing requires; a transitive root cause is visible
-                        // across the other rows (each shows its own missing deps).
-                        const rec = window.__mods.registered.find(
-                            function (m) { return m.id === r.id; });
-                        const missing = ((rec && rec.requires) || []).filter(
-                            function (d) { return !window.__mods.active.has(d); });
-                        if (missing.length) { state = 'blocked'; label = 'needs: ' + missing.join(', '); }
-                        else { state = 'failed'; label = state; }
-                    }
-                    r.status.textContent = label;
-                    r.status.dataset.state = state;
+                    r.status.textContent = s.label;
+                    r.status.dataset.state = s.state;
                 }
+            }
+            function _rebuildRows() {
+                if (!listEl) return;
+                rows = [];
+                listEl.textContent = '';
+                for (const s of _modStatusRows()) {
+                    const row = document.createElement('div');
+                    row.className = 'set-mod-row';
+                    row.dataset.modId = s.id;
+                    row.dataset.modSource = s.source;
+                    const label = document.createElement('label');
+                    label.className = 'set-check set-mod-toggle';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    const mid = s.id;
+                    cb.addEventListener('change', function () {
+                        setModEnabled(mid, cb.checked);
+                        _reflectManager();   // refresh status after the live toggle
+                    });
+                    label.appendChild(cb);
+                    const name = document.createElement('span');
+                    name.className = 'set-mod-name';
+                    name.textContent = s.id;
+                    label.appendChild(name);
+                    const status = document.createElement('span');
+                    status.className = 'set-mod-status';
+                    label.appendChild(status);
+                    const pin = document.createElement('span');   // #157
+                    pin.className = 'set-mod-pin';
+                    label.appendChild(pin);
+                    row.appendChild(label);
+                    const tiers = document.createElement('div');
+                    tiers.className = 'set-mod-tiers';
+                    if (s.tiers.length) {
+                        for (const t of s.tiers) {
+                            const b = document.createElement('span');
+                            b.className = 'set-mod-tier';
+                            b.textContent = t;
+                            tiers.appendChild(b);
+                        }
+                    } else {
+                        const b = document.createElement('span');
+                        b.className = 'set-mod-tier set-mod-tier-none';
+                        b.textContent = 'unspecified';
+                        tiers.appendChild(b);
+                    }
+                    row.appendChild(tiers);
+                    rows.push({ id: s.id, cb: cb, status: status, pin: pin });
+                    listEl.appendChild(row);
+                }
+                _reflectManager();
             }
             _modRegisterPane(rec, {
                 id: 'mods',
@@ -2044,91 +2160,92 @@
                         + 'once, and a mod this broker pins (see “Mods on this '
                         + 'broker”) is locked here.';
                     wrap.appendChild(hint);
-                    const list = document.createElement('div');
-                    list.className = 'set-mods-list';
-                    for (const m of window.__mods.registered) {
-                        const row = document.createElement('div');
-                        row.className = 'set-mod-row';
-                        row.dataset.modId = m.id;
-                        const label = document.createElement('label');
-                        label.className = 'set-check set-mod-toggle';
-                        const cb = document.createElement('input');
-                        cb.type = 'checkbox';
-                        const mid = m.id;
-                        cb.addEventListener('change', function () {
-                            setModEnabled(mid, cb.checked);
-                            _reflectManager();   // refresh status after the live toggle
-                        });
-                        label.appendChild(cb);
-                        const name = document.createElement('span');
-                        name.className = 'set-mod-name';
-                        name.textContent = m.id;
-                        label.appendChild(name);
-                        const status = document.createElement('span');
-                        status.className = 'set-mod-status';
-                        label.appendChild(status);
-                        const pin = document.createElement('span');   // #157
-                        pin.className = 'set-mod-pin';
-                        label.appendChild(pin);
-                        row.appendChild(label);
-                        const tiers = document.createElement('div');
-                        tiers.className = 'set-mod-tiers';
-                        const declTiers = (m.tiers && m.tiers.length) ? m.tiers : null;
-                        if (declTiers) {
-                            for (const t of declTiers) {
-                                const b = document.createElement('span');
-                                b.className = 'set-mod-tier';
-                                b.textContent = t;
-                                tiers.appendChild(b);
-                            }
-                        } else {
-                            const b = document.createElement('span');
-                            b.className = 'set-mod-tier set-mod-tier-none';
-                            b.textContent = 'unspecified';
-                            tiers.appendChild(b);
-                        }
-                        row.appendChild(tiers);
-                        rows.push({ id: m.id, cb: cb, status: status, pin: pin });
-                        list.appendChild(row);
-                    }
-                    wrap.appendChild(list);
+                    listEl = document.createElement('div');
+                    listEl.className = 'set-mods-list';
+                    _rebuildRows();
+                    wrap.appendChild(listEl);
                     return wrap;
                 },
                 reflect: function () { _reflectManager(); },
             });
             window.__mods._reflectManager = _reflectManager;
+            window.__mods._rebuildManagerRows = _rebuildRows;
         }
 
         // The boot entry (called once by 90_js_mod_boot.js). Gates on the
         // broker's mods_enabled (runtime, via the memoized /info; fail-open); when
         // enabled it mounts the Mods pane (#86), prunes any stale disabled ids, then
         // inits every per-mod-ENABLED registered mod, each isolated.
+        //
+        // #163 resequenced this, and the order is LOAD-BEARING, not cosmetic:
+        //   1. await localInfo() -> stash policyRaw + catalog. Do NOT resolve
+        //      pins yet.
+        //   2. master off -> return before a single script is fetched (the gate
+        //      stays absolute).
+        //   3. await _loadInstalledPackages(catalog) — the installed mods'
+        //      registerMod calls land here.
+        //   4. _topoSortRegistered() — re-establish dependency order over
+        //      shipped ∪ installed.
+        //   5. policy = _resolvePins(policyRaw). It MUST follow 3-4:
+        //      _resolvePins drops any pin whose id is not already in
+        //      `registered`, so resolving at the old position would silently
+        //      discard every pin naming an installed mod and mis-resolve the
+        //      implied set (its backward pass assumes dependency order).
+        //   6. _mountModsManagerPane() — also after 3, because _modRegisterPane
+        //      calls spec.render() exactly ONCE, so mounting before the
+        //      installed mods registered would freeze a stale row set.
+        //   7. prune -> the existing forward boot loop, unchanged.
         async function loadMods() {
             if (window.__mods.booted) return;
             window.__mods.booted = true;
+            // #163 rescue hatch. Before the /info fetch, before any package, and
+            // before the pane: an installed mod that bricks the desktop must not
+            // also be able to make the Control Panel unreachable. The alternative
+            // is a curl POST /mods/uninstall or mods_enabled:false in the config,
+            // and the latter needs the restart this issue exists to avoid.
+            if (_nomodsRequested()) {
+                window.__mods.masterEnabled = false;
+                window.__mods.policyResolved = true;
+                console.warn('[mods] ?nomods=1 — no mod was loaded, initialized'
+                    + ' or fetched on this page load');
+                return;
+            }
             let enabled = true;
             try {
                 const info = await localInfo();
                 if (info && info.mods_enabled === false) enabled = false;
-                // #157: the broker's pins, resolved ONCE here — before the gate,
-                // before any init — so every later reader (the boot loop, the
-                // Mods pane, setModEnabled) sees one frozen answer. An older
-                // broker has no mod_policy key and _resolvePins({}) is {}, i.e.
-                // byte-for-byte today's behaviour.
-                window.__mods.policy = _resolvePins(info && info.mod_policy);
+                // #157: the broker's pins — but only STASHED here. See step 5.
+                // An older broker has no mod_policy key and _resolvePins({}) is
+                // {}, i.e. byte-for-byte today's behaviour.
+                window.__mods.policyRaw = (info && info.mod_policy) || null;
+                window.__mods.catalog = (info && Array.isArray(info.mods))
+                    ? info.mods : [];
                 window.__mods.policyAuthoritative = !!localInfo._ok;
             } catch (_) {}
-            window.__mods.policyResolved = true;
             window.__mods.masterEnabled = enabled;
             if (!enabled) {
+                window.__mods.policyResolved = true;
                 console.info('[mods] disabled by broker (mods_enabled=false)');
                 return;
             }
+            await _loadInstalledPackages(window.__mods.catalog);
+            _topoSortRegistered();
+            window.__mods.policy = _resolvePins(window.__mods.policyRaw);
+            window.__mods.policyResolved = true;
             _mountModsManagerPane();
             // Prune ids for mods that no longer exist (renamed/removed) so the set
             // can never grow unbounded junk; write back only if it actually changed.
+            //
+            // #163 widened the keep-set to registered ∪ CATALOG ids. Pruning
+            // against `registered` alone would make an installed mod whose
+            // script 404s (or times out, or whose SRI did not match) lose the
+            // user's explicit "off" and come up enabled on the next page load —
+            // the one state a temporarily-unloadable mod must not silently move.
             const known = new Set(window.__mods.registered.map(
                 function (m) { return m.id; }));
+            for (const row of window.__mods.catalog) {
+                if (row && typeof row.id === 'string' && row.id) known.add(row.id);
+            }
             const disabled = _modsDisabled();
             let pruned = false;
             for (const id of Array.from(disabled)) {
@@ -2144,6 +2261,12 @@
                 }
                 initMod(decl);
             }
+            // #163: from here a registerMod call is a LATE one (a package that
+            // overran the load deadline) and routes through _lateRegister. Set
+            // AFTER the loop, so a package that registers during it is an
+            // ordinary boot registration.
+            window.__mods.bootComplete = true;
+            _renderManagerRows();
             // #169: mover 5 of 5 — boot itself. The theme mod is FIRST in
             // ui._MODS, so today every subscriber inits after the vars are
             // already applied and ctx.theme.get() in its init is right; this one
@@ -2225,7 +2348,22 @@
                     + '(mods_enabled=false); it applies on the next page load');
                 return;
             }
-            window.__mods.policy = _resolvePins(info && info.mod_policy);
+            // #163: a 401'd boot saw no catalog either, so it fetched NO
+            // installed package. Load them now — otherwise typing your password
+            // leaves every installed mod missing until a reload, which is
+            // exactly the hole #157 closed for the pins. Deduped on
+            // (id, gen, file), so a package the boot already loaded is never
+            // fetched or executed twice (D1).
+            window.__mods.policyRaw = (info && info.mod_policy) || null;
+            if (info && Array.isArray(info.mods)) window.__mods.catalog = info.mods;
+            await _loadInstalledPackages(window.__mods.catalog);
+            // Same order boot uses, and for the same reason: sort first, then
+            // resolve pins (a pin naming an installed mod is dropped unless that
+            // mod is already in `registered`). Any straggler that lands after
+            // this rides _lateRegister, which repeats both steps.
+            _topoSortRegistered();
+            window.__mods.policy = _resolvePins(window.__mods.policyRaw);
+            _renderManagerRows();
             _applyPolicyLive();
         }
 
@@ -2269,6 +2407,28 @@
             // pinning a dependent on also pins its dependency on.
             policy: function () { return Object.assign({}, window.__mods.policy); },
             pinOf: function (id) { return _pin(id); },
+            // #163: the union status model the Mods pane renders (and S5's
+            // provenance badges read) — one row per catalog package OR
+            // registration, joined on id. The acceptance asserts a cycle pair
+            // reads cycle/blocked-by-cycle, a 404'd script reads fetch-failed, a
+            // script that registers nothing reads no-register, and a package
+            // that registers the wrong id reads wrong-id — none of which have a
+            // `registered` entry to render from.
+            statusRows: function () { return _modStatusRows(); },
+            statusOf: function (id) {
+                return _modStatusRows().find(
+                    function (r) { return r.id === id; }) || null;
+            },
+            // The boot catalog snapshot and the resolved registration ORDER, so
+            // the acceptance can prove the runtime topological sort ran and left
+            // the shipped order byte-identical when nothing installed takes part.
+            catalog: function () { return (window.__mods.catalog || []).slice(); },
+            order: function () {
+                return window.__mods.registered.map(function (m) { return m.id; });
+            },
+            cycles: function () {
+                return Object.assign({}, window.__mods.cycleState);
+            },
             registered: function () {
                 return window.__mods.registered.map(function (m) {
                     // #106: expose the declared boot default so an acceptance test

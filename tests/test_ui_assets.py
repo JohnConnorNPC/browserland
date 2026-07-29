@@ -3520,36 +3520,57 @@ def test_requires_capability_present():
         # (structured result, never throws) — no slot claimed, no partial init.
         "reason: 'requires'",
         "return !window.__mods.active.has(dep);",
+        # #163: and a mod IN a dependency cycle gets its own structured reason,
+        # so it never reads as an ordinary dependency block.
+        "reason: 'cycle'",
         # setModEnabled cascades: a forward enable pass + a reverse disable pass.
         "regs.indexOf(decl) + 1",       # enable: init later deps-satisfied mods
         "const doomed = new Set([id]);",  # disable: transitive-dependent closure
-        # the Mods pane reflects a dependency block READ-ONLY (needs: <ids>).
-        "state = 'blocked'",
-        "'needs: '",
         # the test API surfaces declared deps for the Playwright acceptance.
         "requires: (m.requires || []).slice()",
     ):
         assert sym in loader, f"missing #121 requires loader symbol: {sym!r}"
+    # #163: the ordering invariant those cascades assume is no longer established
+    # by ui._MODS's position rule alone — it is re-established at RUNTIME by the
+    # topological sort, and the `blocked` classification moved into the union
+    # status model (a cycle row / a 404'd package has no registered[] entry to
+    # classify from). Both live in 86b_js_mod_packages.js.
+    pkgs = _packages_src()
+    for sym in (
+        "function _topoSortRegistered(",
+        "function _modKahn(",
+        "function _modCycleMembers(",
+        # the Mods pane reflects a dependency block READ-ONLY (needs: <ids>).
+        "state = 'blocked'",
+        "'needs: '",
+    ):
+        assert sym in pkgs, f"missing #163 requires symbol: {sym!r}"
     # ctxVersion is unchanged — requires is additive plumbing.
     assert "ctxVersion: 1" in loader
     # And the key symbols reach the served page.
     for sym in ("requires: Array.isArray(decl.requires)",
                 "reason: 'requires'",
+                "reason: 'cycle'",
                 "state = 'blocked'",
+                "function _topoSortRegistered(",
                 "requires: (m.requires || []).slice()"):
         assert sym in INDEX_HTML, \
             f"#121 requires symbol missing from served page: {sym!r}"
 
 
 def test_requires_declared_before_dependency_in_mods_list():
-    # #121: the static ordering guard that stands in for a runtime topological sort
-    # + cycle detection. For every in-repo mod that declares requires:[ids] in its
-    # registerMod, assert each listed id (i) is a KNOWN mod and (ii) is registered
-    # STRICTLY EARLIER in ui._MODS. This makes cycles, self-require, and missing
-    # dependencies unrepresentable, so boot's in-order loadMods loop is always
-    # deps-first and the loader needs no runtime cycle detection. With no consumer
-    # today this passes vacuously; it becomes load-bearing the moment #120 appends
-    # agent-docs (requires: ['editor']) after mods/editor/editor.js.
+    # For every in-repo mod that declares requires:[ids] in its registerMod,
+    # assert each listed id (i) is a KNOWN mod and (ii) is registered STRICTLY
+    # EARLIER in ui._MODS, which makes cycles, self-require and missing
+    # dependencies unrepresentable across the SHIPPED set.
+    #
+    # #163 changed what this guard MEANS. It used to stand in for a runtime
+    # topological sort: a runtime-installed set has no _MODS list, so the loader
+    # now sorts (Kahn) and splits cycles from blocked-by-cycle (Tarjan) at boot
+    # — see test_installed_package_topological_sort_present. The positional rule
+    # survives as a STYLE rule on the shipped set: it is still true, still cheap,
+    # and it keeps the shipped half of the graph readable top-to-bottom. What it
+    # is no longer is the only thing standing between us and a cycle.
     import re
     # Map every mod id -> its load index. The registrant is the mods/<id>/<id>.js
     # entry (a helper-only sibling like editor/codemirror.js registers nothing).
@@ -3820,6 +3841,16 @@ def test_mods_manager_pane_and_enable_api_present():
         "function _mountModsManagerPane",
         "window.__mods.masterEnabled",   # master-gate state the live setter honors
         "set-mods-list",                  # the pane's list container class
+        # #163: rows are the UNION of catalog packages and registrations, and
+        # they are REBUILDABLE — _modRegisterPane calls spec.render() exactly
+        # once, so a row set built before the installed mods registered would be
+        # frozen stale and a late registration would never appear.
+        "function _rebuildRows",
+        "for (const s of _modStatusRows())",
+        "window.__mods._rebuildManagerRows = _rebuildRows;",
+        # A row with no registration has nothing to init; the checkbox must not
+        # pretend otherwise (setModEnabled would refuse it anyway).
+        "r.cb.disabled = !s.toggleable;",
     ):
         assert sym in loader, f"missing S13 loader symbol: {sym!r}"
     # The pane is built on the S1 pane scaffold (reuse, not a parallel renderer).
@@ -3842,6 +3873,12 @@ def test_mods_manager_pane_styles_present():
                 ".set-mod-status"):
         assert sel in css, f"missing S13 pane style: {sel!r}"
     assert ".set-mods-list" in INDEX_HTML
+    # #163: every status a runtime-installed package can reach is styled, or a
+    # broken package would render as unremarkable muted grey.
+    for state in ("loading", "timeout", "blocked-by-cycle", "cycle",
+                  "fetch-failed", "no-register", "wrong-id"):
+        assert f'.set-mod-status[data-state="{state}"]' in css, \
+            f"missing #163 status style: {state!r}"
 
 
 def test_per_mod_enable_is_loader_private_not_state_schema():
@@ -4303,6 +4340,13 @@ def _text_src():
     # 2500-line per-fragment cap, same split 62 got. Same <script>, same scope.
     return (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
         encoding="utf-8")
+
+
+def _packages_src():
+    # #163's runtime-installed package machinery: the topological sort, the
+    # <script src="/mods/<id>/<gen>/<file>"> loader, late registration and the
+    # union status model. Its own fragment for the same 2500-line cap reason.
+    return (BROKER_DIR / "86b_js_mod_packages.js").read_text(encoding="utf-8")
 
 
 def _frag_fn(src, sig):

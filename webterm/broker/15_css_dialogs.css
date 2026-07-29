@@ -379,6 +379,19 @@
            red init-FAILURE state below. */
         .set-mod-status[data-state="blocked"] { color: #d29922; }
         .set-mod-status[data-state="failed"] { color: #f85149; }
+        /* #163: a runtime-INSTALLED package that never became a live mod. Amber
+           = "waiting / not this browser's fault" (still in flight, or held back
+           by a dependency cycle); red = "this package is broken on this broker"
+           (404 / SRI mismatch, loaded but registered nothing, or registered
+           somebody else's id). None of these rows has a registered[] entry, so
+           they exist only in the union status model (86b). */
+        .set-mod-status[data-state="loading"],
+        .set-mod-status[data-state="timeout"],
+        .set-mod-status[data-state="blocked-by-cycle"] { color: #d29922; }
+        .set-mod-status[data-state="cycle"],
+        .set-mod-status[data-state="fetch-failed"],
+        .set-mod-status[data-state="no-register"],
+        .set-mod-status[data-state="wrong-id"] { color: #f85149; }
         .set-mod-tiers { display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; }
         .set-mod-tier {
             font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;

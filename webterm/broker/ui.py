@@ -125,6 +125,11 @@ _ORDERED = [
     # passed the 2500-line per-fragment cap. Same <script>, same scope,
     # immediately after it -- see the fragment header.
     "86a_js_mod_settings_text.js",
+    # #163: runtime-INSTALLED mod packages -- the topological sort, the
+    # <script src="/mods/<id>/<gen>/<file>"> loader, the late-registration
+    # path and the union status model. Split out for the same 2500-line cap
+    # reason 86a was; same <script>, same scope, after it.
+    "86b_js_mod_packages.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",
