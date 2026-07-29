@@ -712,7 +712,14 @@
         // overridden — pinning `editor:false` under `scratchpad:true` leaves editor
         // off and scratchpad blocked, which is what the loader enforces.
         function modPolicyImplied(mods, policy) {
-            const implied = {};                 // id -> the mod that requires it
+            // Object.create(null), NOT {}: the ids here come off a PEER's /info
+            // and are not filtered by MOD_ID_RE on this path. On a plain object
+            // an id of "__proto__" would make `implied[id] = m.id` a silent
+            // no-op and `implied[id] !== undefined` read Object.prototype's own
+            // __proto__ accessor — i.e. every mod would look implied-on. A
+            // null-prototype map makes that unrepresentable rather than
+            // defended against (#163).
+            const implied = Object.create(null);  // id -> the mod that requires it
             const byId = new Set(mods.map((m) => m.id));
             for (let i = mods.length - 1; i >= 0; i--) {
                 const m = mods[i];
@@ -784,6 +791,26 @@
             if (rec && j && j.ok) rec.policy = sanitizeModPolicy(j.policy);
             return { ok: true };
         }
+        // #163: a mod's provenance as reported by the broker that serves it.
+        //
+        // SELF-ASSERTED, and rendered as such. `source` is a string that broker
+        // chose to put in its own /info; there is no way from here to check it,
+        // and this pane exists precisely to administer a broker somebody else
+        // controls. So the label QUOTES the claim ("peer reports: installed")
+        // and anything we do not recognise — a missing key, a non-string, a
+        // value from a future build, a value a hostile broker made up — renders
+        // `unknown`. It must never fall back to the more-trusted-looking label:
+        // "unknown => shipped" would let a broker present a third-party package
+        // as part of our own bundle by omitting one field.
+        //
+        // ONE label for every tab, including the local one. The local broker's
+        // rows arrive down the same /info fetch as everyone else's, and a second
+        // rendering path that trusts more is a second path to get wrong.
+        function peerModSource(source) {
+            if (source === 'installed') return 'peer reports: installed';
+            if (source === 'shipped') return 'peer reports: shipped';
+            return 'unknown';
+        }
         // One pin, for the per-host editor's select. Keeps the boolean contract
         // its change handler was written against.
         function saveModPin(host, id, pin) {
@@ -853,10 +880,22 @@
             // mod this broker does not ship is VISIBLE (and clearable) instead of
             // silently governing nothing. Capped: the row count must never be a
             // function of what a peer chose to send us.
-            const rows = rec.mods.filter(
-                (m) => m && typeof m.id === 'string' && MOD_ID_RE.test(m.id)
-            ).slice(0, MAX_MOD_POLICY_KEYS);
-            const served = new Set(rows.map((m) => m.id));
+            // UNIQUE ids, enforced here rather than assumed: a peer's /info is
+            // a JSON array it composed, and nothing stops it repeating an id.
+            // Two rows for one id would give one mod two selects whose change
+            // handlers write the same key, so the visible value would depend on
+            // which row was touched last. The `served` index is a Set (and
+            // `implied` a null-prototype map, above) so no id — "__proto__"
+            // included — can corrupt the lookup (#163).
+            const served = new Set();
+            const rows = [];
+            for (const m of rec.mods) {
+                if (rows.length >= MAX_MOD_POLICY_KEYS) break;
+                if (!m || typeof m.id !== 'string' || !MOD_ID_RE.test(m.id)) continue;
+                if (served.has(m.id)) continue;
+                served.add(m.id);
+                rows.push(m);
+            }
             for (const id of Object.keys(rec.policy)) {
                 if (rows.length >= MAX_MOD_POLICY_KEYS) break;
                 if (!served.has(id)) rows.push({ id: id, missing: true });
@@ -875,6 +914,18 @@
                     (s) => typeof s === 'string' && s).join(' — ');
                 if (desc) name.title = desc.slice(0, 400);
                 row.appendChild(name);
+                // #163: where that broker says the mod came from. A row with no
+                // peer claim at all (a pin naming a mod the broker does not
+                // serve) gets no badge — the "not installed on this broker"
+                // note below is that row's whole story.
+                if (!m.missing) {
+                    const src = document.createElement('span');
+                    src.className = 'set-mod-policy-source';
+                    src.textContent = peerModSource(m.source);
+                    src.title = 'this broker reports where it got the mod; '
+                        + 'nothing here verifies that claim';
+                    row.appendChild(src);
+                }
                 const sel = document.createElement('select');
                 sel.className = 'set-mod-policy-pin';
                 // "Default" has to say what the default IS: four shipped mods are
