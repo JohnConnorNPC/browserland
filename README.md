@@ -199,7 +199,7 @@ A mod's *settings* sync across your browsers via the broker's shared state;
 its *enable/disable* toggle is deliberately per-browser — flip it in
 **Control Panel → Mods**. A broker-side `mods_enabled` master switch gates
 the whole system, and a broker can *pin* individual mods on or off for every
-browser that loads its page. The desktop ships with eighteen:
+browser that loads its page. The desktop ships with nineteen:
 
 | Mod | What it adds | Default |
 |---|---|---|
@@ -217,6 +217,7 @@ browser that loads its page. The desktop ships with eighteen:
 | `host-registry` | optional shared broker list — publish/pull your host list across browsers | on |
 | `mousemode` | title-bar chip while a full-screen app owns the mouse | on |
 | `mod-sync` | copy this broker's mod setup to your other brokers (all or selected) | on |
+| `workspaces` | vertical workspaces — taskbar pager, per-workspace names, **Send to workspace** | on |
 | `git` | per-terminal git branch + dirty-state widget | off |
 | `aistatus` | AI-provider status chip + window | off |
 | `clipboard` | rolling history of copies/pastes made through the desktop | off |
