@@ -2,9 +2,9 @@
 
 A **mod** is a folder of JavaScript (plus optional CSS and an in-app help page)
 that extends the Browserland desktop: taskbar chips, app-window kinds, Control
-Panel settings, per-terminal title-bar widgets, menu items, key actions.
-Nineteen ship in the repo (`webterm/broker/mods/`), and a broker can also be
-handed one at runtime through `POST /mods/install`.
+Panel settings, per-terminal title-bar widgets, menu items, key actions. A set
+of them ships in the repo, under `webterm/broker/mods/` (the README lists them),
+and a broker can also be handed one at runtime through `POST /mods/install`.
 
 This document is the authoring contract. It is derived from
 `webterm/broker/86_js_mod_loader.js`, `86a_js_mod_settings_text.js`,
@@ -113,7 +113,7 @@ The rules that shape it:
   running. That isolation is why the "make it throw" bugs in §11 are so easy to
   ship without noticing.
 
-`registerMod` itself throws — synchronously, at page-script eval — on a
+`registerMod` itself throws — synchronously, as your script executes — on a
 malformed declaration (no object, no string `id`, no function `init`) or a
 duplicate id. Fields it normalizes: `version` (non-string → `'0'`),
 `ctxVersion` (non-number → `null`, meaning "pin nothing"), `tiers` and
@@ -131,20 +131,22 @@ fields therefore exist in both places, and a test
 (`test_mod_catalog_matches_the_registerMod_declarations`) keeps the copies
 honest in both directions.
 
+Every field at once — no real manifest uses all of them:
+
 ```jsonc
 {
-  "id": "clock",                    // the id; must equal the directory name in practice
+  "id": "notes",                    // the id; matches the directory name by convention
   "version": "1.0.0",
   "ctxVersion": 1,
-  "title": "Clock",                 // shown in the catalog / remote policy editor
-  "description": "Taskbar date & time chip.",
+  "title": "Notes",                 // shown in the catalog / remote policy editor
+  "description": "A short sentence an operator will read.",
   "defaultEnabled": false,          // optional; absent == true
   "requires": ["editor"],           // optional; ids of mods that must be ACTIVE
-  "styles": ["clock.css"],          // optional; bare filenames in this mod's dir
+  "styles": ["notes.css"],          // optional; bare filenames in this mod's dir
   "help": {                         // optional; only meaningful with a help.md
-    "slug": "clock", "label": "Clock", "order": 2050, "icon": "🕐"
+    "slug": "notes", "label": "Notes", "order": 2100, "icon": "📓"
   },
-  "entry": "clock.js",              // INERT — see below
+  "entry": "notes.js",              // INERT — see below
   "author": "JohnConnorNPC"         // INERT — see below
 }
 ```
@@ -158,10 +160,11 @@ Field by field:
   the id. These are what another broker's Control Panel shows when it edits this
   broker's mod pins, so write `description` for an operator, not for yourself.
 - **`ctxVersion`** — informational in `mod.json`. The one that *acts* is the
-  number in `registerMod`: a mismatch with the loader's `window.__mods.ctxVersion`
-  makes `initMod` refuse the mod outright. It is `1` and has never been bumped;
-  every capability added since has been additive, so feature-detect
-  (`if (ctx.theme)`) instead of raising it.
+  number in `registerMod`: a mismatch with the loader's
+  `window.__mods.ctxVersion` makes `initMod` refuse the mod outright, and
+  omitting it means "pin nothing". The contract is at `1`, and every capability
+  added to `ctx` since has been additive — so **feature-detect**
+  (`if (ctx.theme)`) rather than declaring a higher number.
 - **`defaultEnabled`** — `false` ships the mod off until the operator opts in.
   Absent means on. Mirrored in `registerMod`. For an **installed** mod this
   field is accepted and then ignored: the broker always reports
@@ -177,11 +180,10 @@ Field by field:
 - **`help`** — `slug` / `label` / `order` / `icon` for the in-app Help section
   (§9). All optional; slug defaults to the mod id, label to `title`, order to a
   computed value after the wiki pages.
-- **`entry`** — **inert.** All 19 shipped manifests declare it, and seventeen
-  assertions in the test suite pin its value, but **no runtime code reads it.**
-  What actually loads is
-  `ui._MODS`, an explicit list of `mods/<id>/<file>.js` paths. Editing `entry`
-  changes nothing. (The `editor` mod ships *two* scripts, `codemirror.js` and
+- **`entry`** — **inert.** Every shipped manifest declares it, and the test suite
+  pins its value for each one, but **no runtime code reads it.** What actually
+  loads is `ui._MODS`, an explicit list of `mods/<id>/<file>.js` paths. Editing
+  `entry` changes nothing. (The `editor` mod ships *two* scripts, `codemirror.js` and
   `editor.js`, which is exactly the case a single `entry` cannot express.)
   The installed-mod manifest replaces it with a required `scripts` **list**, and
   the install validator **rejects** `entry` as an unknown key.
@@ -269,12 +271,13 @@ reorder is what lets `_bringUp`, `_takeDown`, `_applyPolicyLive` and
 `test_requires_declared_before_dependency_in_mods_list` still asserts that every
 `requires` names a known mod appearing *strictly earlier* in `ui._MODS`. It used
 to be the only thing standing between the project and a cycle; now it is there
-because it keeps the shipped half of the graph readable top-to-bottom. Two
-things it *does* still enforce: a shipped `requires` may never name an `x-` id
-(so shipped→installed edges are unrepresentable, which is what lets `/info` emit
-every shipped row first), and a shipped dependency must exist.
+because it keeps the shipped half of the graph readable top-to-bottom. It still
+enforces all three of: the positional order, that the dependency exists, and
+that a shipped `requires` never names an `x-` id (so shipped→installed edges
+are unrepresentable, which is what lets `/info` emit every shipped row first).
 
-Today only `agent-docs` and `scratchpad` declare `requires`, both `['editor']`.
+`requires` is rare in the shipped set, and where it appears it is a mod reusing
+the `editor` mod's window kind and its single shared CodeMirror build.
 
 ---
 
@@ -303,9 +306,10 @@ Consequences you will hit:
   is the single most common way to waste an hour. (`curl` the served page and
   grep it if you are unsure what is actually being served.)
 - **Every mod script lands in ONE `<script>`, sharing one scope** with core and
-  with every other mod. Top-level `const`/`let`/`function` names are global.
-  A collision is a *compile* error for the whole bundle — a blank desktop, not a
-  broken mod. Prefix everything you declare at top level.
+  with every other mod. Top-level `const`/`let`/`function` names are global. A
+  `const`/`let`/`class` collision is a *compile* error for the whole bundle — a
+  blank desktop, not one broken mod — and a duplicate `function`/`var` is worse,
+  because it silently overwrites. Prefix everything you declare at top level.
 - **A literal `</script>` anywhere in a mod script terminates the element** and
   breaks the page. Split it (`'<' + '/script>'`).
 - **`_MODS` is an explicit list, not a glob**, and the drift guard
@@ -313,11 +317,11 @@ Consequences you will hit:
   every path in `_MODS` must exist, and every `*.js` under `mods/` must be
   declared. A new mod file that is not in `_MODS` fails CI; so does a stray
   scratch copy left in a mod directory.
-- The CSP is `script-src 'sha256-<hash of the inline script>' 'self'`. The hash
-  is computed from the very bytes served, so adding a mod moves it
-  automatically — but it also means the page has exactly **one** inline
-  `<script>`, and `ui.inline_script_hash` raises at import if that stops being
-  true.
+- The CSP is `script-src 'sha256-<hash of the inline script>' 'self';
+  frame-ancestors 'none'`. The hash is computed from the very bytes served, so
+  adding a mod moves it automatically — but it also means the page must have
+  exactly **one** inline `<script>`, and `ui.inline_script_hash` raises when the
+  app is built if that stops being true.
 - **A mod's CSS is spliced in regardless of whether the mod is enabled.** It is
   present-but-inert: its selectors match nothing until the mod's JS adds the
   markup. Same posture as the spliced-but-not-initialized JS.
@@ -391,8 +395,9 @@ bumping it.
   list every reader goes through (dispatcher, the Keyboard Shortcuts pane, the
   help corpus). A duplicate action id throws rather than last-wins.
 - **`ctx.registerWindowMenuItems(fn)` / `ctx.registerDesktopMenuItems(fn)`** —
-  each returns an **array** of `renderMenu` items (separators included, so you
-  own your own grouping). The desktop one is called in **both** window modes and
+  register a callback; the callback returns an **array** of `renderMenu` items
+  (separators included, so you own your own grouping — `renderMenu` does not
+  collapse a stray one). The desktop callback runs in **both** window modes and
   receives `{ tiling }` saying which — check it rather than assuming tiling.
 - **`ctx.windows.onTerminalCreate(cb)`** — subscribes to every terminal window,
   **replayed over those already open** and fired for future ones. `cb` gets
@@ -408,9 +413,10 @@ bumping it.
 
 All five are read-through accessors onto the **shared `/state` settings blob**
 (not namespaced localStorage), so a value syncs across your browsers, and all
-five return `{get, set, onChange}`. `opts` carries `label`, `title`, `def`,
-`isBrowserGlobal` (default true — hidden on remote-host tabs) and `mount`
-(`'mods'`, the default per-host pane, or `'browser'`). Reads are
+five return `{get, set, onChange}`. `opts` carries `label`, `title`, `def`
+(`boolean` takes its default as the second argument instead), `isBrowserGlobal`
+(default true — hidden on remote-host tabs) and `mount` (`'mods'`, the default
+per-host pane, or `'browser'`, beside the Hosts list). Reads are
 **non-destructive**: nothing writes the default back.
 
 `text` is the only primitive that is **not choice-constrained**, and that
@@ -431,8 +437,9 @@ domain and refuses anything outside it. `text` takes `options` as
    validator would accept everything, and the loader logs and rejects if you
    pass one.
 
-Writes are debounced 400 ms and flushed on teardown. `mods/clock/clock.js` is
-the worked example: its time-zone box uses `text` precisely because
+Writes are debounced, and a pending one is flushed on teardown.
+`mods/clock/clock.js` is the worked example: its time-zone box uses `text`
+precisely because
 `Intl.supportedValuesOf('timeZone')` is engine-dependent, and a `combo` refused
 zones that the same engine would happily *render*.
 
@@ -497,20 +504,25 @@ parse a number out of it.
   because a lease-loss rebuild re-runs it.
 
   **The launcher icon.** `menu.iconKey` names an entry in core's `APP_ICON_SVG`
-  table, which is **closed** — a mod id that is not shipped there resolves to
-  nothing. `menu.iconGlyph` is the mod-owned alternative: a short **text/emoji**
-  glyph that `renderMenu` paints with `textContent`, after stripping control
-  characters, bidi overrides, invisible-payload carriers and all whitespace, and
-  capping at 12 code points. There is deliberately **no
-  `ctx.registerAppIcon(svg)`** — a mod's icon must never be able to put markup
-  into the shared menu renderer, not least because the value a mod passes need
-  not be its own (it might come from a `/mod-store` blob or a peer's `/state`).
+  table, which is **closed** — a key core does not ship resolves to nothing.
+  `menu.iconGlyph` is the mod-owned alternative: a short **text/emoji** glyph
+  that `renderMenu` paints with `textContent`. It is normalized by core's
+  `appIconGlyph()`, which refuses an over-long raw string, strips control
+  characters, bidi controls, invisible-payload carriers, lone surrogates and all
+  whitespace, requires at least one substantive code point left over, and caps
+  the result at `APP_GLYPH_MAX` code points — read that function for the exact
+  rules rather than trusting this paragraph.
+
+  There is deliberately **no `ctx.registerAppIcon(svg)`**: the API offers no way
+  to put markup into the shared menu renderer, partly because the value a mod
+  passes need not be its own (it might come from a `/mod-store` blob or a peer's
+  `/state`). That is hygiene for this API — per §1 it constrains nothing a mod
+  could do by reaching into the DOM itself.
 
   Two traps: an `iconKey` is not *owned* by anyone, so a mod can name a shipped
   key and get that icon — only the **label** identifies a launcher; and
-  `iconKey` **wins** over `iconGlyph`, so a kind declaring an as-yet-unknown key
-  *plus* a glyph shows the glyph today and would silently switch to an SVG if
-  core ever shipped that key. Declare one or the other.
+  `iconKey` takes **precedence** over `iconGlyph`. Declare one or the other, and
+  do not rely on the fallback for a key core does not currently ship.
 
 - **`ctx.registerHelpCards(cards)`** — contribute typed Help cards. **Never raw
   HTML**: `{ slug, section, title, body:[block], keys?, search? }` where
@@ -532,7 +544,13 @@ has **both** files, turns it into a Help section tagged with the owning mod id
 is a hard `BuildError`.
 
 `webterm/broker/help_corpus.json` is the **packaged, tooling-generated**
-fallback, and it bakes the mod sections in. It is never hand-edited.
+fallback, and it bakes the *shipped* mod sections in. It is never hand-edited.
+
+An **installed** mod's `help.md` is captured into the broker's index at install
+or scan time and layered onto the served corpus at **serve time only** — never
+into the packaged JSON, which is why the regenerator's output does not depend on
+what happens to be installed on your machine. It is also the one part of an
+install that *does* appear without a page reload.
 
 > **If you add, remove or edit any `help.md` (or the `help` block in a
 > `mod.json`), you must run:**
@@ -546,9 +564,9 @@ the corpus and asserts a **byte-exact** match against the checked-in file. It
 fails on the smallest drift, and the fix is always to run the regenerator, never
 to edit the test.
 
-15 of the 19 shipped mods ship a `help.md`. The four that do not (`theme`,
-`pattern`, `termfont`, `workspaces`) are the ones whose behaviour is fully
-described by a single Control Panel control or by the desktop itself.
+`help.md` is optional. Skip it when the UI already explains the whole feature —
+a mod that *is* one Control Panel control has nothing a Help page would add.
+That is an authoring judgement, not a rule.
 
 ---
 
@@ -559,9 +577,11 @@ described by a single Control Panel control or by the desktop itself.
 **An id is reserved for first-party (shipped) mods iff it does *not* start with
 `x-`; an installed mod's id *must*.**
 
-Both id regexes are unchanged — `_MODSTORE_ID_RE` in `app.py` and `MOD_ID_RE`
-in the loader are `[a-z0-9][a-z0-9-]{0,63}`, and `x-notes` already matches. That
-is the point: **no key a shipped mod owns moves, and no regex changes.**
+The id *shape* is the same on both sides — `_MODSTORE_ID_RE` in `app.py` and
+`MOD_ID_RE` in the loader, both `[a-z0-9][a-z0-9-]{0,63}` — and `x-notes`
+already matched it before the rule existed. That is the point: the rule is a
+prefix convention layered on top, so **no key a shipped mod owns moves, and
+neither validator has to change.**
 
 What the one-character prefix buys is that a *single lexical test* separates all
 five namespaces a mod id keys, because all five derive from the same string:
@@ -573,17 +593,18 @@ five namespaces a mod id keys, because all five derive from the same string:
 5. the catalog — `ui._MODS` / `mods/<id>/` on one side, `<mods_dir>/<id>/` on
    the other.
 
-It is enforced in three places so it cannot rot: the install validator
-(`400 reserved_id`), the scanner (a non-`x-` directory in `mods_dir` is skipped
-with a loud log, so a hand-dropped `clock/` cannot shadow the shipped `clock`),
-and CI (no shipped id starts with `x-`, no shipped `requires` names an `x-` id).
+It is enforced in three places, and a change to the rule has to update all
+three: the install validator (`400 reserved_id`), the scanner (a non-`x-`
+directory in `mods_dir` is skipped with a loud log, so a hand-dropped `clock/`
+cannot shadow the shipped `clock`), and CI (no shipped id starts with `x-`, no
+shipped `requires` names an `x-` id).
 
 **`x-<author>-<name>` (e.g. `x-johnconnornpc-notes`) is a documented
 convention, not an enforced field.** Nothing validates the middle segment and
-there is no `vendor` key in the manifest; widening the id charset to carry a
-real scope component would mean widening both regexes, the policy sanitiser and
-the mod-store key filter, plus migrating every already-stored key — a migration,
-for a component nothing enforces.
+there is no `vendor` key in the manifest. Carrying a real scope component in the
+id would mean widening both validators, the policy sanitiser and the mod-store
+key filter in lockstep — four places to keep synchronized, for a component
+nothing would enforce anyway.
 
 **Not covered, plainly:** DOM ids a mod writes in its own markup. The
 loader-generated ids are built from the mod id and so are namespaced; a mod that
@@ -616,34 +637,41 @@ equivalent.** The real differences:
 | execution timing | page-script eval, before `loadMods()` | after `/info`, asynchronously, possibly after boot |
 | `document.currentScript` | the one inline `<script>` (no package stamp) | the injected element, carrying `dataset.modPackage` |
 | a literal `</script>` | **fatal** — closes the element, breaks the page | harmless |
-| a top-level name collision | a compile error for the **whole bundle** — blank desktop | a compile error for **that script only** — one dead mod |
+| a `const`/`let`/`class` name collision | a compile error for the **whole bundle** — blank desktop | a compile error for **that script only** — one dead mod |
 
 So the contract, if you want source that moves in both directions unchanged:
 
-1. **Top-level code does nothing but call `registerMod({…})`.** No DOM writes,
-   no fetches, no timers, no reads of desktop state — all work in `init(ctx)`.
+1. **Nothing at top level *runs* except the `registerMod({…})` call.** No DOM
+   writes, no fetches, no timers, no reads of desktop state — all work in
+   `init(ctx)`. Plain declarations are fine (see rule 5); side effects are not.
 2. **No top-level `"use strict"` directive.**
-3. **Nothing outside your package may depend on your top-level names.** Runtime
-   calls between mods are fine (they happen long after every script has run);
-   a top-level *call into* your functions from another fragment is not, because
-   as an installed package your declarations do not exist yet when the bundle
-   evaluates. (This is why some shipped mods are not portable as-is: core's
-   app-window store calls `openNoteOrEditorWindow`, which the `editor` mod
-   declares at top level.)
+3. **Nothing outside your package may depend on your top-level names.** A
+   top-level *call into* your functions from another fragment cannot work: as an
+   installed package, your declarations do not exist when the bundle evaluates.
+   Cross-mod calls at *runtime* are fine, but only once the provider is
+   **active** — declare it in `requires` and do not assume every package has
+   executed by the time boot finishes (the load deadline explicitly lets boot
+   proceed with a script still in flight). This is why some shipped mods are not
+   portable as-is: core's app-window store calls `openNoteOrEditorWindow`, which
+   the `editor` mod declares at top level.
 4. **No literal `</script>`.**
 5. **Prefix every top-level `const` / `let` / `function` name.** In-tree a
    collision with core kills the page; out of tree it kills your mod.
 
-Rules 1, 2 and 4 hold across all 19 shipped mods today. Rule 5 is followed but
-not mechanically checked, and rule 3 has known in-tree exceptions (`editor` ↔
-`sticky`/`scratchpad`/core). **None of the five is currently checked by CI** —
-they are authoring rules, not guarantees.
+A mod is expected to follow all five, but **CI verifies none of them** — they
+are authoring rules, not guarantees. Rules 1, 2 and 4 hold across the shipped
+set as written; rule 3 has known in-tree exceptions (`editor` ↔ `sticky` /
+`scratchpad` / core's app-window store), which is exactly why those mods could
+not be republished as installable packages unchanged. Check the five yourself
+before publishing.
 
 ### 10.3 Installing takes effect on the next page load — always
 
 `POST /mods/install`, `/mods/uninstall` and `/mods/rescan` change what the
-broker serves **immediately**; they change **nothing in an already-open
-desktop**. Every one of them answers `"applies": "next_page_load"`.
+broker serves **immediately** — the catalog, the asset routes and the Help
+corpus all swap at once — but they change **nothing in an already-open
+desktop**. Install and uninstall say so in their own response, with
+`"applies": "next_page_load"`.
 
 This is **forced, not unimplemented.** JavaScript global lexical bindings cannot
 be removed. A mod whose top level says `const DB = …` cannot be re-executed in
@@ -660,21 +688,32 @@ source edit. Drop a mod into a live broker, reload the tab, and it is there.
 
 Related loader behaviour worth knowing:
 
-- Scripts are injected `async` (**not** ordered-async) — ordering is irrelevant
-  because the topological sort runs afterwards, and ordered-async would let one
-  slow file head-of-line-block every other mod.
+- **Packages load in parallel; the scripts *within* one package load in
+  manifest order, one after the next.** Across packages, order is irrelevant
+  because the topological sort runs afterwards, and document-ordered async would
+  let one slow file head-of-line-block every other mod. Within a package the
+  topo sort says nothing at all — it orders mod *declarations*, not the files of
+  one mod — so `scripts` is honoured as an ordered list. **A multi-script
+  package must call `registerMod` from its LAST script**: a registration is
+  acted on the moment it arrives, so registering from the first file would let
+  the mod init before its siblings had loaded.
+- **Stylesheets are injected but not awaited**, and are live regardless of
+  enable, pin or init — deliberately the same posture as a shipped mod's CSS.
+  A teardown cannot remove them.
 - Each `(id, gen, file)` URL is fetched **at most once per page load**, through
   a shared in-flight promise map, so the post-login retry cannot double-execute
   a package.
-- `MOD_SCRIPT_TIMEOUT_MS` (5000) is a **proceed-anyway deadline, not a cancel** —
+- `MOD_SCRIPT_TIMEOUT_MS` is a **proceed-anyway deadline, not a cancel** —
   nothing can cancel an in-flight `<script>`. A package that lands later still
   executes, and `_lateRegister` brings it up if this page requested it.
 - `registerMod` binds a declaration to the package whose script is running
   (`document.currentScript.dataset.modPackage`) and refuses a declaration whose
   id is not that package's, with a `wrong-id` row. This is a **correctness
-  convention, not a boundary** — fork-trust means the code could register from a
-  timeout, where `currentScript` is `null`. What it buys is that an `x-wrapper`
-  package cannot silently register as `clock`.
+  convention, not a boundary**: while a stamped package script runs
+  synchronously, a declaration for a different id is refused instead of silently
+  colliding with (say) the shipped `clock`. A package that registers from a
+  promise or timeout has `currentScript === null` and is simply unattributable,
+  at which point the duplicate-id `ModConflictError` is the only backstop.
 - **`?nomods=1`** on the page URL makes `loadMods()` return before it fetches or
   inits anything. It is the rescue hatch for a mod that bricks the desktop and
   therefore makes the Control Panel — where you would uninstall it —
@@ -690,9 +729,12 @@ and that is forced rather than chosen: a `<script src>` cannot carry an
 workaround would need `blob:` in `script-src`. The posture is the existing one —
 `GET /` is public and already carries every shipped mod's source.
 
-So **an installed mod's source, its stylesheets and its help text are readable
-without a token**, and `/help-corpus.json` (also public) reveals the *ids* of
-installed mods that ship help. **Do not put a secret in a mod.**
+So **an installed mod's source and its stylesheets are readable without a
+token** — and its `help.md` is merged into `/help-corpus.json`, which is public
+for the same bootstrap reason `GET /` is, so its help text and the *ids* of the
+installed mods that ship help are readable without a token too. **Do not put a
+secret in a mod** — not in its code, not in its stylesheet, not in its help
+page.
 
 ### 10.5 The install API
 
@@ -726,14 +768,20 @@ Differences from a shipped manifest, all enforced:
 
 - `scripts` is **required** and is an ordered non-empty list of `.js` names, all
   present in `files`. `entry` is not accepted (`unknown_manifest_key`).
-- `id` must pass the id regex **and** start with `x-` (`reserved_id` otherwise).
+- `id` must pass the id regex (`bad_mod_id` otherwise) **and** start with `x-`
+  (`reserved_id` otherwise).
 - **Unknown keys are rejected**, not ignored.
-- `help.slug` is accepted and dropped — an installed section's slug is forced to
-  the mod id, so a collision with a wiki or shipped slug is impossible.
+- `help.slug` is accepted and dropped — an installed section's slug is **forced
+  to the mod id**, which is `x-`-prefixed, and CI pins that no wiki page stem
+  and no shipped mod's `help.slug` uses that prefix. The merge still checks for
+  a collision and drops the installed section if one somehow appears, because
+  merging installed help must never be able to blank the Help window.
 - `defaultEnabled` is accepted and ignored; the catalog always reports
-  `default_enabled: false`. Install is two steps — install, then enable — which
-  bounds the blast radius of a bad mod and matches how the shipped default-off
-  mods already behave.
+  `default_enabled: false`. Install and enable are separate steps, which matches
+  how the shipped default-off mods already behave. **This is not containment:**
+  an installed package's scripts are fetched and executed on every page load
+  whatever its enabled state — being off only means `init()` is not called, and
+  its stylesheets are live either way.
 - Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` with a `.js`/`.css`/`.md`
   suffix, must avoid `?`, `#`, `%` and `:` (an NTFS alternate data stream:
   `base.css:payload.js` passes a naive bare-name test), must not be a Windows
@@ -747,22 +795,30 @@ Differences from a shipped manifest, all enforced:
   CSP sets only `script-src` and `frame-ancestors`, so a stylesheet would
   otherwise be a silent egress channel. **Defence in depth, not a boundary** —
   the mod's own JS can `fetch()` anything.
-- Caps: 32 mods per broker, 32 files per mod, 256 KiB per file, 512 KiB per mod,
-  2 MiB request body (64 KiB for the other three endpoints).
+- Caps, at the time of writing: 32 mods per broker, 32 files per mod, 256 KiB
+  per file, 512 KiB per mod, 2 MiB request body (64 KiB for the uninstall and
+  rescan bodies). The constants in `modinstall.py` are authoritative, and
+  `GET /mods/installed` reports the live values under `limits` — read them from
+  there rather than from here.
 
-Refusal codes are distinct on purpose: `too_large` · `bad_json` · `bad_mod_id` ·
+Every refusal carries a distinct code, because "your mod was rejected" with no
+reason is a support ticket: `too_large` · `bad_json` · `bad_mod_id` ·
 `bad_generation` · `reserved_id` · `id_in_use` (409) · `not_installed` (404) ·
 `bad_file_name` · `reserved_file_name` · `too_many_files` · `file_too_large` ·
 `total_too_large` · `bad_encoding` · `bad_scripts` · `bad_styles` ·
 `bad_requires` · `bad_manifest_field` · `unknown_manifest_key` ·
 `css_external_reference` · `too_many_mods` (409) · `write_failed` (500).
+`modinstall.ERROR_STATUS` is the authoritative map; a client must tolerate a
+code it has not seen.
 
 **Generations.** A mod's assets live at `<mods_dir>/<id>/<gen>/`, where `gen` is
 a sha256 over the canonical manifest bytes plus the sorted `(name, sha256)`
-pairs — so the generation is in the URL, `Cache-Control: immutable` is honest,
-and SRI has something stable to pin. `<id>/CURRENT` is the atomic commit
-pointer; two generations are retained, so a page that started booting against
-generation A can never be handed a file from generation B mid-flight.
+pairs. Because that hash is **in the URL**, a replacement can never be served
+under the old URL — `Cache-Control: immutable` is honest and SRI has something
+stable to pin. `<id>/CURRENT` is the atomic commit pointer, and
+`RETAINED_GENERATIONS` older generations are kept so a page that started booting
+against one survives a replacement mid-flight; an old enough generation is
+eventually swept and then 404s.
 
 **Uninstall** is *not* idempotent at the HTTP level: a retry after a lost
 response answers `404 not_installed` even though the first attempt succeeded.
@@ -772,9 +828,11 @@ possible success. `purge: true` additionally clears this broker's
 code-last** so a crash leaves code without data rather than data without code.
 It cannot touch what other browsers hold in `localStorage`.
 
-**`POST /mods/rescan`** re-reads `mods_dir` and is an operator convenience, not
-a trust boundary — anyone who can write `mods_dir` can already write the
-broker's source tree. What the scanner does owe is coherence: it refuses
+**`POST /mods/rescan`** re-reads `mods_dir`. It is an operator convenience and
+**not a trust boundary**: it treats anyone who can write `mods_dir` as
+authorized to supply code the broker will serve and the desktop will execute
+with full authority. Keep that directory as protected as the broker's own
+configuration. What the scanner does owe is coherence: it refuses
 symlinks and reparse points, refuses anything whose realpath leaves `mods_dir`,
 refuses a non-`x-` directory, and validates every byte it captured under exactly
 the same rules an install obeys. The destructive sweep refuses to run at all in
@@ -784,10 +842,16 @@ broker first.
 
 ### 10.6 Status vocabulary
 
-The Mods pane renders the **union** of catalog packages and registered
-declarations, joined on id — cycle rows, 404s and SRI mismatches never call
-`registerMod`, so a pane driven off the registration list simply could not show
-them. Each row's `state` is one of:
+**Control Panel → Mods** is where an operator lives with all of this: it lists
+the union of catalog packages and registered declarations, joined on id, badges
+each row `shipped` or `installed`, and carries the **Install a mod…** and
+**Uninstall** actions. The union matters — cycle rows, 404s and SRI mismatches
+never call `registerMod`, so a pane driven off the registration list simply
+could not show them.
+
+Each row's `state` is one of the following. The vocabulary is produced by the
+loader's status model, so treat an unfamiliar value defensively rather than
+assuming this list is complete:
 
 `active` · `off` · `blocked` (enabled, but a `requires` is not active) ·
 `cycle` · `blocked-by-cycle` · `failed` (deps satisfied, `init()` threw) ·
@@ -799,13 +863,14 @@ the compile-error case, which still fires `load` on the element) · `wrong-id`.
 
 ## 11. Traps that have actually bitten this codebase
 
-**TDZ inside `init()` disables the whole mod.** A hoisted `function` that reads
-a `const`/`let` declared *later* in the same scope throws a `ReferenceError`
-("Cannot access X before initialization"), `initMod` catches it, and **the
-entire mod is disabled** — not the one feature. It has happened more than once.
-Declare mutable state *before* anything that could call the closures reading it,
-and prefer function-local declarations over fragment-level ones that a hoisted
-function reads.
+**TDZ inside `init()` disables the whole mod.** If a hoisted `function` is
+*invoked* before a `const`/`let` it reads has been initialized — typically
+because the declaration sits further down the same scope — the read throws a
+`ReferenceError` ("Cannot access X before initialization"), `initMod` catches
+it, and **the entire mod is disabled**, not the one feature. It has happened
+more than once. Declare mutable state *before* anything that could call the
+closures reading it, and prefer function-local declarations over fragment-level
+ones that a hoisted function reads.
 
 **CI never executes UI JavaScript.** The Python suite asserts *source text* and
 served bytes. A TDZ error, a typo in a callback or a wrong property name is
@@ -833,8 +898,10 @@ in-progress edit.
 conditionally, contribute your separator conditionally too, or you get a stray
 rule.
 
-**A per-mod enable is per-browser; a pin is per-broker.** Both outrank your
-`defaultEnabled`, and a pinned mod refuses `setModEnabled` outright.
+**A per-mod enable is per-browser; a pin is per-broker.** A broker pin outranks
+the per-browser set, which in turn outranks your `defaultEnabled`, and a pinned
+mod refuses `setModEnabled` outright. Your default is a starting point, not a
+promise about what any given browser is running.
 
 ---
 
@@ -850,8 +917,8 @@ rule.
 - [ ] `defaultEnabled` and `requires` **identical** in `mod.json` and
       `registerMod` — a test asserts both directions.
 - [ ] Path appended to `ui._MODS`, **after** anything it `requires`.
-- [ ] Any `.css` listed in `styles`, UTF-8, no BOM, newline-terminated,
-      ≤ 2500 lines, with **prefixed** selectors (§13).
+- [ ] Any `.css` listed in `styles`, UTF-8, no BOM, newline-terminated, within
+      `ui._MAX_LINES`, with **prefixed** selectors (§13).
 - [ ] Optional `help.md` + the `help` block — then run
       `python -m webterm.broker.help_corpus`.
 - [ ] `python -m pytest tests -q` clean, and the page loaded in a real browser
@@ -884,12 +951,12 @@ restyle:
 `13_css_tiling.css` and `14_css_dragdrop.css` (the tiling strip, gutters, drop
 zones), and any selector not listed above. It changes without notice.
 
-**Known debt, not a pattern to copy.** The `editor`, `file-manager`,
-`task-manager` and `sticky` mods are mods whose CSS still sits in core
-`11_css_apps.css` (`.app-editor*`, `.app-fm*`, `.tm-*`, `.app-note`) because
-they were extracted from core and their styles were left behind. That is a debt
-to unwind, not an example — a new mod ships its own stylesheet through the
-manifest's `styles`.
+**Known debt, not a pattern to copy.** Some mods that were *extracted* from core
+still leave their stylesheets behind in it — at the time of writing `editor`,
+`file-manager`, `task-manager` and `sticky` (`.app-editor*`, `.app-fm*`,
+`.tm-*`, `.app-note` in `11_css_apps.css`). That is migration debt to unwind,
+not an example: a new mod ships its own stylesheet through the manifest's
+`styles`.
 
 Prefer the theme variables (§8) over hardcoded colours: `--bg`, `--bg-2`,
 `--bg-3`, `--fg`, `--fg-dim`, `--accent-default`, `--sel-bg`, `--ok`, `--warn`,
