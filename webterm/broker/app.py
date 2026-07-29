@@ -288,7 +288,46 @@ MODSTORE_MAX_REVISIONS = 50         # revision-ring depth (per mod)
 # A mod id is the path segment in /mod-store/<modId>; keep it to the same shape a
 # mod dir uses (lowercase, digits, hyphen) so it can never traverse or collide
 # with a JSON metadata key. Compiled once; used by the loader + both handlers.
-_MODSTORE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+#
+# ANCHORED (#172). Every current call site uses .fullmatch(), so this changes
+# nothing observable today -- it exists so a future `.match()`, which is the
+# natural thing to write, cannot silently accept "clock/../../etc". It also puts
+# the pattern in step with its already-anchored JS twin, MOD_ID_RE
+# (50_js_constants.js). \A..\Z rather than ^..$ because $ also matches before a
+# trailing newline, i.e. "clock\n" would pass.
+_MODSTORE_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{0,63}\Z")
+
+# #172: ONE mod id keys five namespaces (the localStorage `webterm:mod:<id>:`
+# prefix, /mod-store/<id>, the mod_policy pin map, the source dir mods/<id>/, and
+# the loader-generated DOM ids), with no vendor or scope component anywhere. The
+# split is a RESERVED PREFIX rather than a wider charset: widening the id shape
+# would mean widening both regex twins, the policy sanitiser and _load_modstore's
+# key filter, plus migrating every already-stored key -- a migration, for a scope
+# component nothing enforces.
+#
+# The rule, in one lexical test that covers all five namespaces because all five
+# derive from the same string: an id is RESERVED for first-party (shipped) mods
+# iff it does NOT start with "x-"; a mod installed at runtime MUST. "x-foo"
+# already fullmatches the id shape above, so NEITHER regex changes and no key a
+# shipped mod owns moves. Second-level scoping ("x-<author>-<name>", e.g.
+# x-johnconnornpc-notes) stays a documented convention, not an enforced field.
+#
+# Enforced in three places so it cannot rot: the install validator (400
+# reserved_id), the installed-mod scanner (a non-"x-" directory is skipped with a
+# loud log, so a hand-dropped mods_dir/clock/ can never shadow the shipped
+# clock), and CI (tests/test_ui_assets.py: no shipped id starts with "x-", and no
+# shipped `requires` names an "x-" id -- so a shipped->installed dependency edge
+# is unrepresentable and shipped rows can always be emitted first).
+_INSTALLED_ID_PREFIX = "x-"
+
+
+def _is_reserved_mod_id(mod_id: str) -> bool:
+    """True iff ``mod_id`` is in the FIRST-PARTY (reserved) namespace, i.e. a
+    runtime-installed mod may not claim it. Non-strings are reserved too: the
+    caller's next step is always "refuse", and answering "not reserved" for junk
+    would invert that."""
+    return not (isinstance(mod_id, str)
+                and mod_id.startswith(_INSTALLED_ID_PREFIX))
 
 # #157: this broker's MOD POLICY -- {modId: bool}, the on/off this broker PINS
 # for every browser that loads its page (an absent id leaves the choice to that

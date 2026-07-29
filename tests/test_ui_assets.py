@@ -914,10 +914,36 @@ def test_mod_catalog_ids_are_valid_policy_keys():
     # A catalog id doubles as a mod-policy key in the /state settings blob, and
     # app.py only reports policy keys matching the mod-id shape -- an id outside
     # it could never be pinned. Kept as the same regex /mod-store/<modId> uses.
-    from webterm.broker.app import _MODSTORE_ID_RE
+    from webterm.broker.app import (_INSTALLED_ID_PREFIX, _MODSTORE_ID_RE,
+                                    _is_reserved_mod_id)
     for m in ui.mod_catalog():
         assert _MODSTORE_ID_RE.fullmatch(m["id"]), \
             f"mod id {m['id']!r} cannot be used as a mod-policy key"
+        # #172: the "x-" prefix is RESERVED for runtime-installed mods, so no
+        # shipped mod may claim one. Without this a later shipped mod could
+        # collide with an id somebody already installed -- inheriting its pins,
+        # its /mod-store value and its webterm:mod:<id>:* localStorage keys,
+        # which is the exact failure #172 describes.
+        assert not m["id"].startswith(_INSTALLED_ID_PREFIX), (
+            f"shipped mod id {m['id']!r} claims the reserved installed-mod "
+            f"prefix {_INSTALLED_ID_PREFIX!r}")
+        assert _is_reserved_mod_id(m["id"]), \
+            f"shipped mod id {m['id']!r} is not in the first-party namespace"
+
+
+def test_no_shipped_mod_requires_an_installed_mod_id():
+    # #172/#163: a shipped mod may never depend on an "x-" (runtime-installed)
+    # id. It keeps the shipped->installed dependency edge UNREPRESENTABLE, which
+    # is what lets the catalog emit every shipped row first and lets the shipped
+    # set keep its cheap positional ordering rule while the installed set is
+    # sorted topologically at runtime. A shipped mod that needed an installed one
+    # would also be broken on any broker that had not installed it.
+    from webterm.broker.app import _INSTALLED_ID_PREFIX
+    for m in ui.mod_catalog():
+        for dep in m["requires"]:
+            assert not dep.startswith(_INSTALLED_ID_PREFIX), (
+                f"shipped mod {m['id']!r} requires {dep!r}, which is in the "
+                f"runtime-installed namespace")
 
 
 def test_clock_mod_packaged_and_manifest_agrees():
