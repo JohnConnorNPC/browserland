@@ -187,13 +187,20 @@ The desktop's app windows and most of its optional chrome ship as **mods** —
 the terminal pipeline, window manager, the multi-host connection model, and
 MCP surfaces stay core (only the *optional sharing* of that host list across
 browsers is a mod). A mod is a self-contained folder under `webterm/broker/mods/<id>/`
-holding a manifest (`mod.json`), one entry script, and optional CSS + an
-in-app help page. Mods are trusted first-party code: the broker splices an
-explicit allow-list of them into the single served page (there is no runtime
-plugin install). Each registers through a versioned `ctx` API that exposes
-per-terminal-window hooks, app-window kinds (which appear in the **+** launch
-menu), taskbar chips, Control-Panel settings, a durable per-mod server store
-with revision history, an in-desktop copy/paste observer, and help cards.
+holding a manifest (`mod.json`), its script(s), and optional CSS + an in-app
+help page. The bundled ones are trusted first-party code, spliced from an
+explicit allow-list into the single served page; a broker can also be handed a
+mod at runtime (`POST /mods/install`, ids prefixed `x-`), which is served from
+its own same-origin URL and picked up on the next page load. Either way a mod
+registers through a versioned `ctx` API that exposes per-terminal-window hooks,
+app-window kinds (which appear in the **+** launch menu), taskbar chips,
+Control-Panel settings, a durable per-mod server store with revision history, an
+in-desktop copy/paste observer, and help cards.
+
+A mod is **not sandboxed** — it is same-origin code with the page's full
+authority, and `ctx` is a set of reviewed choke points rather than a boundary.
+Writing one (and the trust model behind installing one) is covered in
+**[docs/MODS.md](docs/MODS.md)**.
 
 A mod's *settings* sync across your browsers via the broker's shared state;
 its *enable/disable* toggle is deliberately per-browser — flip it in
@@ -401,7 +408,7 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 |---|---|
 | `webterm/agent/` | Headless producer: PTY backends, output ring buffer, OSC-title sniffer, reconnecting WebSocket client |
 | `webterm/broker/` | Web server: desktop UI (`ui.py` assembles the served page from ordered `*.html`/`*.css`/`*.js` fragments), `/ws` relay, producer WS, session list, profiles-only launch |
-| `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, entry script, optional CSS + in-app help page |
+| `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, script(s), optional CSS + in-app help page (authoring guide: [docs/MODS.md](docs/MODS.md)) |
 | `webterm/mcptool/` | The shipped stdio MCP server wrapping the broker's `/mcp/*` API |
 | `webterm/protocol.py` | The single source of truth for the JSON frame shapes |
 | `launchers/` | venv-bootstrapping run scripts (and systemd units) for both OSes |
@@ -426,6 +433,12 @@ Adding or editing launch profiles (WSL / zsh / PowerShell / Git-Bash) is covered
 in **[`docs/PROFILES.md`](docs/PROFILES.md)** — the recipe catalog, the three
 profile fields, the `webterm_profiles.json` sidecar-vs-`broker_config` rule, and
 the browser-realm-only editing model.
+
+Writing a mod — or installing somebody else's — is
+**[`docs/MODS.md`](docs/MODS.md)**: the trust posture (a mod is *not*
+sandboxed), every `mod.json` field, the whole `ctx` surface, CSS ownership, the
+`help.md` + corpus-regeneration rule, and the `x-` namespace and portable-mod
+contract an installable mod has to meet.
 
 The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)**:
 

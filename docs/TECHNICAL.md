@@ -154,7 +154,8 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 
 | Surface | Rule |
 |---|---|
-| `GET /`, `GET /help-corpus.json` | **the only unauthenticated responses.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. |
+| `GET /`, `GET /help-corpus.json` | **unauthenticated.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. |
+| `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source, styles and help text are publicly readable**, exactly as `GET /` already carries every shipped mod's source. |
 | `OPTIONS` preflights | unauthenticated by design (they carry no credentials). Explicit routes, because route resolution happens before request middleware. |
 | `WS /browserland` (producers) | token required, loopback included. Was the one gate the token never covered — and WebSockets are not CORS-gated, so any website could dial `ws://127.0.0.1:4445/browserland`, re-register a live `window_id` (kicking the real agent off with 1012) and inject fabricated terminal output. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
 | `POST /launch` | token required — never an open RCE on any bind. |
@@ -691,6 +692,90 @@ Seeded from `broker_config.json`'s `agent.profiles`; **once written it owns the
 set** (`agent.profiles` becomes seed-only). Self-heals — a missing/corrupt/empty
 sidecar falls back to the seed, never bricking startup or `/launch`. Full recipe
 catalog + the security rationale: **[PROFILES.md](PROFILES.md)**.
+
+### Mods (browser `auth_token`-gated) — #157 / #163 / #172
+
+The desktop's mod system. Authoring contract, the `ctx` API and the trust model:
+**[MODS.md](MODS.md)**. All of these are **`serve_ui`-gated** — a headless
+broker registers none of them and reports `mods: []` — and, like
+`/mcp/config`, they take the **browser** token, never the MCP one. They are
+deliberately **not** lease-gated: this is broker configuration, and the point is
+being able to administer a broker somebody else is using right now.
+
+**A mod is not sandboxed.** It runs same-origin with the page's full authority
+and can reach `/file/*`, `/session/*`, `/state` and `/mcp/*` directly; `ctx`
+grants it nothing it lacks. So the trust event is the **token-gated install**,
+not the fetch that follows.
+
+**`POST /mods/policy`** — this broker's mod *pins*, `{modId: bool}`, applied to
+every browser that loads its page (an absent id leaves the choice to that
+browser). Stored in the `webterm_mod_policy.json` sidecar beside the `/state`
+store (override with config `mod_policy_path`); reported by `GET /info` as
+`mod_policy`. Applies on the next page load.
+
+**`POST /mods/install`** — body
+`{"manifest": {…}, "files": {"<name>": "<text>"}, "replace": false}`, ≤ 2 MiB,
+validated **entirely in memory** before a byte is written. The mod id must match
+`[a-z0-9][a-z0-9-]{0,63}` **and start with `x-`** (`reserved_id` otherwise — the
+un-prefixed namespace is reserved for shipped mods). `manifest.scripts` is a
+required non-empty list of `.js` names; `entry` and every other unknown key are
+**rejected**, not ignored. Files are text only (`.js`/`.css`/`.md`), UTF-8,
+BOM-free, newline-terminated, ≤ `ui._MAX_LINES` lines; a `.css` may not
+`@import` or reference an absolute `url(http…)`. Caps: 32 mods, 32 files/mod,
+256 KiB/file, 512 KiB/mod. Returns
+`{"ok":true,"id","gen","replaced","adopts_existing_state":{"mod_store","pin"},
+"mod":{…},"applies":"next_page_load"}`. Errors (each distinct): `too_large`
+(413), `bad_json`, `bad_mod_id`, `bad_generation`, `reserved_id`, `id_in_use`
+(409), `bad_file_name`, `reserved_file_name`, `too_many_files`, `file_too_large`
+(413), `total_too_large` (413), `bad_encoding`, `bad_scripts`, `bad_styles`,
+`bad_requires`, `bad_manifest_field`, `unknown_manifest_key`,
+`css_external_reference`, `too_many_mods` (409), `write_failed` (500).
+
+**`POST /mods/uninstall`** — `{"id": "x-notes", "purge": false}`. `purge:true`
+also clears this broker's `/mod-store/<id>` and its pin (lock order
+`mods_install → mod_policy → modstore`, data-first/code-last); it cannot touch
+what other browsers hold in `localStorage`. **Not idempotent at the HTTP level**:
+a retry after a lost response answers `404 not_installed` even though the first
+attempt succeeded — treat that as possible success.
+
+**`POST /mods/rescan`** — re-read `mods_dir` and sweep litter. An operator
+convenience, **not a trust boundary** (anyone who can write `mods_dir` can write
+the broker's source tree); the scanner refuses symlinks/reparse points, refuses
+anything whose realpath leaves `mods_dir`, refuses a non-`x-` directory, and
+validates every byte under the same rules an install obeys. The destructive
+sweep refuses to run in a directory without the `.browserland-mods` marker.
+
+**`GET /mods/installed`** — the operator detail `/info` leaves out: `mods_dir`,
+per-file sizes and sha256s, `installed_at`, declared `tiers`, `has_help`, the
+effective `limits`, and **what was skipped and why**.
+
+**`GET /mods/<modId>/<gen>/<name>`** — one file of one generation of one
+installed mod. **Public**, and forced rather than chosen: a `<script src>`
+cannot carry an `Authorization` header, `?token=` is structurally banned (#144),
+and a `fetch`+`blob:` workaround would need `blob:` in `script-src`. Same
+posture as `GET /`, which already carries every shipped mod's source. Served
+from an in-memory allowlist dict keyed `"<id>/<gen>/<name>"` — a client-supplied
+segment can only ever hit a known key, so traversal is unrepresentable rather
+than defended against, and no blocking IO reaches the event loop. Only
+`.js`/`.css` are servable. `Cache-Control: public, max-age=31536000, immutable`
+is honest because `<gen>` is a content hash. **Installed source, styles and
+help are therefore publicly readable — do not put a secret in a mod.**
+
+**Store `mods_dir`** — runtime-installed mods live in a directory beside the
+`/state` store (default `<state dir>/webterm_mods`; override with config
+`mods_dir`), deliberately **not** `webterm/broker/mods/`, whose drift guard is
+bidirectional. Layout `<id>/CURRENT` (the atomic `{"gen": …}` commit pointer) +
+`<id>/<gen>/` holding `mod.json`, the mod's files and broker-written
+`.gen.json`. `gen` is a sha256 over the canonical manifest plus the sorted
+`(name, sha256)` pairs; **two generations are retained**, so a page that started
+booting against one cannot be handed a file from the next mid-flight.
+
+**Install/uninstall applies on the NEXT PAGE LOAD, never live**, and that is
+forced: global lexical bindings cannot be removed, so re-executing a mod script
+in the same page dies with `SyntaxError: Identifier … has already been
+declared`. `?nomods=1` on the desktop URL boots with no mod fetched or
+initialized at all — the rescue hatch when an installed mod makes the Control
+Panel unreachable.
 
 ### curl
 
