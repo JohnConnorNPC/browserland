@@ -1452,21 +1452,33 @@ def test_clock_tz_selector_packaged_and_manifest_agrees():
     assert meta["id"] == "clock"
     assert meta["ctxVersion"] == 1
     assert meta["entry"] == "clock.js"
-    # #104: the clock now owns a synced `clockTz` time-zone key through the new
-    # searchable combo API (browser-global, def '' == follow the viewing
-    # browser). The zone list is built dynamically from Intl.supportedValuesOf
-    # with a curated fallback (Asia/Tokyo is one of the fallback markers). The
-    # mod declares the `settings` tier on top of `taskbar` (order must match
-    # _EXPECTED_TIERS).
+    # #104: the clock owns a synced `clockTz` time-zone key (browser-global,
+    # def '' == follow the viewing browser). The zone list is built dynamically
+    # from Intl.supportedValuesOf with a curated fallback (Asia/Tokyo is one of
+    # the fallback markers). The mod declares the `settings` tier on top of
+    # `taskbar` (order must match _EXPECTED_TIERS).
+    #
+    # #168: it is ctx.settings.TEXT, not combo. That list is engine-dependent
+    # (~418 zones, or 15 without supportedValuesOf) and combo treats its list as
+    # the legal DOMAIN, so a zone picked in one browser evaporated in another;
+    # text takes the list as SUGGESTIONS and validates on write against the
+    # engine itself, which is the same authority render() already asks.
     src = js.read_text(encoding="utf-8")
     for needle in ("registerMod(", "id: 'clock'", "ctxVersion: 1",
                    "tiers: ['taskbar', 'settings']",
-                   "ctx.settings.combo('clockTz'", "def: ''",
-                   "(browser default)", "Intl.supportedValuesOf", "Asia/Tokyo"):
+                   "ctx.settings.text('clockTz'", "def: ''",
+                   "options: tzOptions", "placeholder: '(browser default)'",
+                   "new Intl.DateTimeFormat(undefined, { timeZone: v })",
+                   "Intl.supportedValuesOf", "Asia/Tokyo"):
         assert needle in src, f"missing clock-tz sentinel in mod src: {needle!r}"
-    # And it ships in the served page — the mod script + the combo primitive it
-    # relies on (the datalist-backed searchable input).
-    for needle in ("ctx.settings.combo('clockTz'", "def: ''",
+    # combo's option list was a domain, so it had to carry an ''-valued entry to
+    # make "follow this browser" selectable. text's placeholder says it instead —
+    # a stray empty option would put a blank row in the datalist.
+    assert "value: ''" not in src, \
+        "clock's zone list must be suggestions only, with no empty-value option"
+    # And it ships in the served page — the mod script + the datalist-backed
+    # input the text primitive builds for its suggestions.
+    for needle in ("ctx.settings.text('clockTz'", "def: ''",
                    "(browser default)", "Intl.supportedValuesOf", "Asia/Tokyo",
                    "createElement('datalist')"):
         assert needle in INDEX_HTML, f"missing clock-tz sentinel in page: {needle!r}"

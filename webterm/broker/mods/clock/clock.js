@@ -85,11 +85,23 @@
                     if (timer) { clearInterval(timer); timer = null; }
                 });
 
-                // #104: mount the searchable time-zone combo. Build the zone list
+                // #104/#168: mount the time-zone box. The zone list is built
                 // dynamically from Intl.supportedValuesOf('timeZone') (~418 IANA
                 // zones) when the engine has it, else a small curated fallback so
-                // the picker still works. The empty-value option is the default
-                // and, as the combo's placeholder, reads as "(browser default)".
+                // the picker still works. An empty box means "(browser default)".
+                //
+                // #168 — why this is ctx.settings.text and not ctx.settings.combo:
+                // that list is ENGINE-DEPENDENT (~418 entries, or 15 without
+                // supportedValuesOf), and combo treats its list as the legal
+                // DOMAIN. So a zone picked in Chrome failed combo's read() in a
+                // browser whose engine cannot enumerate it: the chip silently
+                // dropped back to browser-local time and the value could not be
+                // typed back in — even though this very file's render() would
+                // have shown it, since Intl.DateTimeFormat accepts far more zone
+                // names than supportedValuesOf lists. text() keeps the list as
+                // SUGGESTIONS and gates only on write, against the engine itself
+                // (validate below), so a stored zone survives every engine and
+                // the only zones refused are ones this engine truly cannot use.
                 let zones = null;
                 try {
                     if (typeof Intl.supportedValuesOf === 'function') {
@@ -109,17 +121,32 @@
                 // _normChoiceOptions and disable the whole mod (no chip). Dedup so
                 // a bad zone list can never nuke the clock.
                 zones = Array.from(new Set(zones));
-                const tzOptions = [{ value: '', label: '(browser default)' }]
-                    .concat(zones.map(function (z) {
-                        return { value: z, label: z };   // IANA id as value + label
-                    }));
+                const tzOptions = zones.map(function (z) {
+                    return { value: z, label: z };   // IANA id as value + label
+                });
                 // Owns the synced `clockTz` key (read-through onto the shared blob,
                 // like pattern owns `pattern`). def '' -> browser-local fallback.
-                const setting = ctx.settings.combo('clockTz', tzOptions, {
+                const setting = ctx.settings.text('clockTz', {
                     title: 'Time zone',
                     label: 'time zone',
                     def: '',
                     isBrowserGlobal: true,
+                    options: tzOptions,               // suggestions, NOT a domain
+                    placeholder: '(browser default)',
+                    maxLength: 64,                    // longest IANA id is ~32
+                    // The ENGINE is the authority, asked the same way render()
+                    // asks it — so anything the chip could display is storable,
+                    // and nothing it cannot is. Empty = follow this browser.
+                    validate: function (v) {
+                        if (v === '') return true;
+                        try {
+                            new Intl.DateTimeFormat(undefined, { timeZone: v });
+                            return true;
+                        } catch (_) {
+                            return 'this browser does not know the time zone "'
+                                + v + '"';
+                        }
+                    },
                 });
                 // Seed tz from the stored value, then repaint on every change —
                 // a local pick AND a cross-browser /state convergence both land
