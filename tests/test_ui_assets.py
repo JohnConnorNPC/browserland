@@ -4058,3 +4058,202 @@ def test_custom_restore_hook_contract_is_documented():
     assert "dedup-by-id" in spec and "rebuildView" in spec
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     assert "windows.get(rec.id)" in loader
+
+
+# --------------------------------------------------------------------------- #
+# ctx.theme -- the live theme + a change channel (#169)
+# --------------------------------------------------------------------------- #
+
+def _loader_src():
+    return (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+
+
+def _loader_fn(sig):
+    """The body of a top-level loader function, by its 8-space-indented
+    signature. Every declaration in the fragment sits at that indent and closes
+    on a bare 8-space '}', so the first one after the signature ends it."""
+    src = _loader_src()
+    start = src.index("\n        " + sig)
+    return src[start:src.index("\n        }\n", start)]
+
+
+def test_theme_ctx_api_present_in_loader():
+    # #169: a mod can read the live theme and subscribe to changes. Three calls,
+    # no more: get() is the cheap {name, dark}, vars() is the deliberately
+    # separate resolved-var read, onChange() is the subscription.
+    loader = _loader_src()
+    for sym in ("function _themeState(", "function _themeVars(",
+                "function _themeBgHex(", "function _themeAsHex(",
+                "function _themeSig(", "function _modThemeObserve(rec, fn)",
+                "function notifyModTheme(", "function _fireThemeSubs(subs)"):
+        assert sym in loader, f"missing #169 symbol: {sym!r}"
+    ctx = loader[loader.index("                theme: {"):]
+    ctx = ctx[:ctx.index("\n                },")]
+    assert "get: function () { return _themeState(); }" in ctx
+    assert "vars: function () { return _themeVars(); }" in ctx
+    assert "onChange: function (fn) { return _modThemeObserve(rec, fn); }" in ctx
+    # Additive: the ctx contract version does NOT move for a new family.
+    assert "ctxVersion: 1," in loader
+    # And it reaches the served page.
+    assert "function notifyModTheme(" in INDEX_HTML
+    assert "onChange: function (fn) { return _modThemeObserve(rec, fn); }" in INDEX_HTML
+
+
+def test_theme_state_derives_from_the_live_dom_not_the_stored_key():
+    # The whole point of #169's derivation: core stopped owning `theme` (#75), so
+    # the synced key is the theme MOD's key and says nothing when that mod is
+    # disabled/absent/replaced. `dark` therefore comes from a YIQ test on the
+    # LIVE --bg (core's hoisted isDarkAccent, 65 -- NOT a second luminance
+    # implementation), and `name` is only read out of the settings blob when an
+    # INLINE --bg proves some theme mod actually applied one.
+    body = _loader_fn("function _themeState(")
+    assert "root.style.getPropertyValue('--bg')" in body, \
+        "the INLINE var is the proof a theme was applied"
+    assert body.index("root.style.getPropertyValue('--bg')") < \
+        body.index("getSettings().theme"), \
+        "the stored key must be read only INSIDE the inline-var proof"
+    assert "isDarkAccent(hex)" in body, "dark must ride core's hoisted YIQ test"
+    assert "let name = 'night';" in body and "let dark = true;" in body, \
+        "the fallback is the shipped :root default, which #75 pins to night"
+    # Nothing unparsed may reach normalizeHex: it answers PALETTE[0] (a blue) for
+    # anything it cannot read, which would be a plausible-looking WRONG answer.
+    hexer = _loader_fn("function _themeAsHex(")
+    assert "return ''" in hexer
+
+
+def test_theme_vars_is_a_separate_call_carrying_the_public_contract():
+    # The issue's cost constraint: resolving the vars is one getPropertyValue per
+    # property, and a subscriber that only branches on `dark` must never pay it.
+    # So vars() is its own call and _themeState never builds the list.
+    body = _loader_fn("function _themeVars(")
+    for var in ("'--bg'", "'--bg-2'", "'--bg-3'", "'--fg'", "'--fg-dim'",
+                "'--accent-default'", "'--sel-bg'",
+                "'--ok'", "'--warn'", "'--danger'"):
+        assert var in body, f"the public var contract must carry {var}"
+    # Per-WINDOW and geometry vars are deliberately NOT part of it (the global
+    # accent fallback --accent-default, asserted above, is).
+    for var in ("'--accent'", "'--taskbar-h'", "'--title-h'",
+                "'--handle-thick'", "'--corner-size'"):
+        assert var not in body, f"{var} is not a global theme var"
+    assert "PUBLIC_VARS" not in _loader_fn("function _themeState("), \
+        "get() must not pay for the var list"
+    # TDZ: the list is function-local, not a fragment-level const a hoisted
+    # function could read before this fragment's top level has run.
+    loader = _loader_src()
+    assert "\n        const PUBLIC_VARS" not in loader
+    assert "            const PUBLIC_VARS = [" in body
+
+
+def test_theme_change_is_announced_from_every_mover():
+    # Four movers can change what is on screen, and the local one is the whole
+    # reason this can't just ride the /state convergence: _valueAccessor.set
+    # writes the blob and calls the mod's onChange DIRECTLY, never through
+    # applyThemeSettings. The fifth is boot itself (see the loadMods case below).
+    for sig in ("function _valueAccessor(", "function notifyModSettings(",
+                "function setModEnabled(", "function _applyPolicyLive(",
+                "async function loadMods("):
+        assert "notifyModTheme();" in _loader_fn(sig), \
+            f"{sig} must announce a possible theme change"
+    # In the local-pick path the announcement must come AFTER the mod's onChange
+    # -- that is where the theme mod writes the vars notifyModTheme reads back,
+    # so a subscriber can never be handed the pre-change DOM.
+    setter = _loader_fn("function _valueAccessor(")
+    assert setter.index("entry.onChange(value)") < setter.index("notifyModTheme();")
+    # In the convergence path it must come ONCE, after the whole loop: every
+    # control has converged by then, and one pull is one announcement.
+    conv = _loader_fn("function notifyModSettings(")
+    assert conv.count("notifyModTheme();") == 1
+    assert conv.index("t.onChange(cur)") < conv.index("notifyModTheme();")
+    # Boot: the theme mod is FIRST in _MODS today, so every subscriber inits
+    # after the vars exist -- but that is an ORDERING accident, and a reorder
+    # would otherwise strand a subscriber on the pre-theme answer forever.
+    assert ui._MODS[0] == "mods/theme/theme.js"
+    boot = _loader_fn("async function loadMods(")
+    assert boot.index("initMod(decl);") < boot.index("notifyModTheme();")
+
+
+def test_theme_subscribers_are_torn_down_with_their_mod():
+    # Hygiene 1 -- no leak: the unsubscribe goes on rec.unloads, exactly like
+    # _modClipboardObserve / _modAddStatusItem, so a disable, a #121 dependency
+    # cascade, or an initMod rollback drops the subscriber.
+    obs = _loader_fn("function _modThemeObserve(rec, fn)")
+    assert "rec.unloads.push(off)" in obs
+    assert "if (typeof fn !== 'function') return function () {};" in obs
+    # Idempotent both ways: unsubscribing by hand and then tearing down must not
+    # remove a SIBLING that happens to sit at the recycled index.
+    assert "const i = subs.indexOf(sub);" in obs and "if (i !== -1)" in obs
+    # Boxed entries, so the same fn registered twice keeps two identities, and
+    # the box carries `rec` so a fire can tell a mod that is MID-teardown from
+    # one that is merely still listed.
+    assert "const sub = { fn: fn, rec: rec };" in obs
+    # Not replayed on register -- which is only safe because the change detector
+    # is primed on the 0 -> 1 transition.
+    assert "if (!subs.length) {" in obs and "notifyModTheme._last" in obs
+
+
+def test_theme_notify_is_isolated_reentrant_safe_and_free_when_unused():
+    notify = _loader_fn("function notifyModTheme(")
+    # Free until a mod opts in: notifyModSettings runs on EVERY /state
+    # convergence, so the no-subscriber path must return before reading a style.
+    assert notify.index("if (!subs || !subs.length) return;") < \
+        notify.index("_fireThemeSubs(subs)")
+    assert "_themeState()" not in notify
+    # Hygiene 3 -- re-entrancy: a subscriber may change a setting from its
+    # handler, which re-enters through _valueAccessor.set. Coalesce + replay,
+    # BOUNDED so two subscribers fighting cannot livelock the UI thread.
+    assert "notifyModTheme._firing" in notify and "notifyModTheme._pending" in notify
+    assert "for (let pass = 0; pass < 4; pass++)" in notify
+    assert "} finally {" in notify, "the firing flag must be released on a throw"
+    assert "console.warn" in notify
+    # The pre-loader call (85_js_startup -> notifyModSettings, before this
+    # fragment's top level runs) stays a clean no-op.
+    assert "if (!window.__mods) return;" in notify
+    # Hygiene 2 -- one bad subscriber breaks neither the others nor the mover.
+    fire = _loader_fn("function _fireThemeSubs(subs)")
+    assert "catch (e) {" in fire and "console.error" in fire
+    # Snapshot + liveness re-check: a handler may unsubscribe or tear a mod down
+    # mid-fire, and a torn-down mod must not be called after its teardown.
+    assert "const list = subs.slice();" in fire
+    assert "if (subs.indexOf(sub) === -1) continue;" in fire
+    # ...nor may a mod be called while its OWN teardown is draining: the drain is
+    # LIFO, so a later-registered unload that changes a setting re-enters here
+    # while the earlier-registered observer is still listed.
+    assert "if (sub.rec && sub.rec.unloading) continue;" in fire
+    assert "rec.unloading = true;" in _loader_fn("function _runUnloads(rec)")
+    # The one guarantee this channel makes is that a callback sees the theme that
+    # is LIVE, so a pass that has been superseded (a subscriber moved the theme)
+    # must abort rather than hand the rest of the list a stale payload.
+    assert "if (notifyModTheme._pending) return;" in fire
+    assert fire.index("if (notifyModTheme._pending) return;") < \
+        fire.index("sub.fn({")
+    # Change-detected, and each subscriber gets its OWN object.
+    assert "if (sig === notifyModTheme._last) return;" in fire
+    assert "{ name: state.name, dark: state.dark }" in fire
+
+
+def test_theme_symbols_are_declared_exactly_once_in_the_assembled_page():
+    # Every fragment AND every mod script shares one function-declaration scope
+    # (ui.py concatenates them into a single <script>), so a mod that declared
+    # `function _themeState()` would silently REPLACE the loader's across the
+    # whole page -- including for calls that already ran. Python assertions are
+    # the only place that can catch it, because UI JS never executes in CI.
+    for sym in ("_themeState", "_themeVars", "_themeBgHex", "_themeAsHex",
+                "_themeSig", "_modThemeObserve", "notifyModTheme",
+                "_fireThemeSubs"):
+        n = INDEX_HTML.count("function " + sym + "(")
+        assert n == 1, f"{sym!r} is declared {n}x in the assembled page"
+
+
+def test_theme_subscriber_state_is_tdz_proof():
+    # The loader header's TDZ note: notifyModTheme rides notifyModSettings, which
+    # EARLIER fragments call before fragment 86's top-level assignment runs. So
+    # the subscriber list is a property of window.__mods (a plain read of a
+    # not-yet-created object is `undefined`, which the guard handles) and the
+    # change-detector state lives on the function object -- never a fragment
+    # `let`/`const`, which would throw a ReferenceError CI can never catch.
+    loader = _loader_src()
+    assert "themeSubs: []," in loader
+    for banned in ("\n        const _themeSubs", "\n        let _themeSubs",
+                   "\n        let _themeLast", "\n        const THEME_"):
+        assert banned not in loader, f"{banned.strip()!r} is a TDZ hazard here"
+    assert "window.__mods.themeSubs" in loader
