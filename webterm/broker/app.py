@@ -2234,14 +2234,21 @@ async def _vendor_codemirror_asset(request: Request, name: str):
 
 
 def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
-    """Publish an installed-mod index and the catalog derived from it, as ONE
-    visible step (#163).
+    """Publish an installed-mod index, the catalog derived from it and the Help
+    corpus derived from it, as ONE visible step (#163).
 
-    Both are COMPUTED first and only then assigned, back to back with no await
-    between, so no reader can observe the pair disagreeing -- ``/info`` reads
-    ``app.ctx.mod_catalog`` live and takes no lock, and the asset route reads
-    ``app.ctx.mods_index`` the same way. Every caller runs under
-    ``mods_install_lock``.
+    All three are COMPUTED first and only then assigned, back to back with no
+    await between, so no reader can observe them disagreeing -- ``/info`` reads
+    ``app.ctx.mod_catalog`` live and takes no lock, ``/help-corpus.json`` reads
+    ``app.ctx.help_corpus``, and the asset route reads ``app.ctx.mods_index``
+    the same way. Every caller runs under ``mods_install_lock``.
+
+    The Help half is merged HERE and nowhere else. ``help_corpus_base`` is the
+    wiki + shipped-mod corpus built once at import; the installed sections are
+    layered on at serve time only, never into ``build_full_corpus()`` and so
+    never into the packaged JSON (see help_corpus.merge_installed_sections).
+    A second, separately-swapped copy could disagree with the catalog about
+    which mods exist, so there is exactly one swap for all three.
 
     SHIPPED FIRST, and that is load-bearing, not cosmetic. ``modPolicyImplied``
     (81_js_control_panel.js) and #158's ``planFor`` both walk the catalog
@@ -2249,11 +2256,15 @@ def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
     ``requires`` may never name an ``x-`` id (CI-guarded), so no shipped row can
     depend on an installed one; the installed half is topologically sorted among
     itself by ``modinstall.catalog``."""
+    from .help_corpus import merge_installed_sections   # deferred (#87), as .ui
+
     shipped = app.ctx.shipped_mod_catalog
     catalog = list(shipped) + modinstall.catalog(
         index, [row["id"] for row in shipped])
+    corpus = merge_installed_sections(app.ctx.help_corpus_base, index)
     app.ctx.mods_index = index
     app.ctx.mod_catalog = catalog
+    app.ctx.help_corpus = corpus
 
 
 async def _mod_asset(request: Request, modId: str, gen: str, name: str):
@@ -2300,9 +2311,17 @@ async def _mod_asset(request: Request, modId: str, gen: str, name: str):
 
 
 async def _help_corpus(request: Request):
-    # The in-app Help guide's static cards, parsed from wiki/*.md (issue #60).
-    # Public like "/" (help content is non-sensitive); built once at import in
-    # help_corpus.py, so a wiki edit needs a broker restart to show up.
+    # The in-app Help guide's static cards, parsed from wiki/*.md (issue #60)
+    # plus each shipped mod's help.md (#113) plus each INSTALLED mod's (#163).
+    # The first two are built once at import in help_corpus.py, so a wiki edit
+    # needs a broker restart; the installed half is re-merged on every index
+    # swap (_swap_mods_index), so an install shows up here immediately.
+    #
+    # Public like "/", and that is a DISCLOSURE, stated rather than waved past:
+    # installed help text -- and therefore the set of installed mod ids -- is
+    # readable without a token, exactly as GET / already serves every shipped
+    # mod's source and /mods/<id>/<gen>/<name> serves every installed one's. Do
+    # not put a secret in a mod, or in its help.
     return sanic_json(request.app.ctx.help_corpus)
 
 
@@ -2357,6 +2376,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The SHIPPED half on its own, kept so the two halves can be re-concatenated
     # after an install/uninstall/rescan without re-reading the mod tree.
     app.ctx.shipped_mod_catalog = []
+    # The in-app Help corpus, split for exactly the same reason (#163):
+    # help_corpus_base is the wiki + shipped-mod corpus parsed once at import,
+    # and help_corpus is that plus the installed mods' help, recomputed on every
+    # index swap. Both are filled in the serve_ui block below -- a headless
+    # broker registers no GET /help-corpus.json, so these literal empties never
+    # reach a client; they only mean _swap_mods_index cannot trip over a missing
+    # attribute, and they cost no import of .help_corpus (#87).
+    app.ctx.help_corpus_base = {"sections": []}
+    app.ctx.help_corpus = {"sections": []}
     # Headless mode (#87): when off, the broker serves the full JSON/WS API but
     # not the desktop page (GET /) or the in-app Help corpus, and skips
     # assembling both UI constants entirely. Defaults ON so existing deploys are
@@ -6194,6 +6222,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # page — /mods is registered unconditionally (a headless broker is still
         # a host tab), so the handler must never be the thing that imports .ui.
         app.ctx.shipped_mod_catalog = mod_catalog()
+        # The wiki + shipped-mod Help corpus. It is the BASE the swap below
+        # layers installed help onto, so it must be in place BEFORE the first
+        # _swap_mods_index -- which is also what publishes app.ctx.help_corpus.
+        app.ctx.help_corpus_base = HELP_CORPUS
         # #163: the installed half. Scanned HERE, synchronously at create_app,
         # for ui.assemble()'s reason inverted -- the scan is PROTECTIVE (a
         # broken mod is skipped, never a failed boot), but doing it now means
@@ -6203,7 +6235,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         LOGGER.info("installed mods: %s (%d served, %d skipped)",
                     app.ctx.mods_dir, len(app.ctx.mods_index["mods"]),
                     len(app.ctx.mods_index["skipped"]))
-        app.ctx.help_corpus = HELP_CORPUS
         # #143: authorize OUR bundle by hash so script-src needs no
         # 'unsafe-inline'. Computed from the assembled page, here rather than at
         # module scope so a headless broker still never imports .ui (#87).

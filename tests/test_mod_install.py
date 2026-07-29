@@ -1593,6 +1593,103 @@ def test_installed_detail_stays_off_info(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# GET /help-corpus.json: the installed half is merged at SERVE time
+# --------------------------------------------------------------------------- #
+
+def _help_slugs(app):
+    _, r = app.test_client.get("/help-corpus.json")
+    assert r.status == 200
+    return [s["slug"] for s in r.json["sections"]]
+
+
+def test_installed_help_appears_in_the_served_corpus(tmp_path, monkeypatch):
+    # The install/uninstall path re-merges immediately: unlike the mod SCRIPT
+    # (D1 -- next page load), Help is server-side data with no lexical bindings
+    # to unpick, so the Help window shows it as soon as the page reloads it.
+    app = make_app(tmp_path, monkeypatch)
+    assert "x-notes" not in _help_slugs(app)
+    _, r = authed(app).post("/mods/install", json=payload())
+    assert r.status == 200
+    slugs = _help_slugs(app)
+    assert "x-notes" in slugs
+    assert "taskbar" in slugs, "the wiki sections must still be there"
+    sec = [s for s in app.ctx.help_corpus["sections"] if s["slug"] == "x-notes"]
+    assert sec and sec[0]["mod"] == "x-notes"
+    # ...and the packaged corpus the regenerator writes is unaffected: the
+    # merge is serve-time only, so the byte-exact drift guard in
+    # tests/test_help_corpus.py cannot become machine-specific.
+    from webterm.broker import help_corpus as hc
+    assert "x-notes" not in [s["slug"] for s in hc.HELP_CORPUS["sections"]]
+    assert "x-notes" not in [s["slug"]
+                             for s in hc.build_full_corpus()["sections"]]
+
+    _, r = authed(app).post("/mods/uninstall", json={"id": "x-notes"})
+    assert r.status == 200
+    assert "x-notes" not in _help_slugs(app)
+    assert "taskbar" in _help_slugs(app)
+
+
+def test_help_the_catalog_and_the_index_swap_together(tmp_path, monkeypatch):
+    # One assignment step for all three (#163 design 7): a second, separately
+    # swapped copy could disagree with the catalog about which mods exist.
+    plant(tmp_path / "mods", manifest(),
+          {"x-notes.js": "//\n", "help.md": "# Notes\n\nhelp\n"})
+    app = make_app(tmp_path, monkeypatch)
+
+    def installed_ids(_app):
+        return ({r["id"] for r in _app.ctx.mod_catalog
+                 if r.get("source") == "installed"},
+                set(_app.ctx.mods_index["mods"]),
+                {s["slug"] for s in _app.ctx.help_corpus["sections"]
+                 if "mod" in s} & set(_app.ctx.mods_index["mods"]))
+
+    cat, idx, help_ids = installed_ids(app)
+    assert cat == idx == help_ids == {"x-notes"}
+    plant(tmp_path / "mods",
+          manifest(mod_id="x-two", scripts=["x-two.js"]),
+          {"x-two.js": "//\n", "help.md": "# Two\n\nhelp\n"})
+    authed(app).post("/mods/rescan", json={})
+    cat, idx, help_ids = installed_ids(app)
+    assert cat == idx == help_ids == {"x-notes", "x-two"}
+
+
+def test_a_mod_with_unparseable_help_never_blanks_the_corpus(tmp_path,
+                                                             monkeypatch):
+    # A careless installed mod must not be able to empty the Help window: its
+    # own section is skipped and everything else is served unchanged.
+    app = make_app(tmp_path, monkeypatch)
+    before = _help_slugs(app)
+    body = payload()
+    body["files"]["help.md"] = "<!-- help:ignore-end -->\nunbalanced\n"
+    _, r = authed(app).post("/mods/install", json=body)
+    assert r.status == 200
+    assert _help_slugs(app) == before
+    # It is still installed and still served -- only its help is missing.
+    _, det = authed(app).get("/mods/installed")
+    assert det.json["mods"][0]["has_help"] is True
+
+
+def test_the_served_corpus_discloses_installed_ids_without_a_token(tmp_path,
+                                                                   monkeypatch):
+    # STATED, not waved past: /help-corpus.json is public like "/", so an
+    # installed mod's help text -- and therefore the set of installed ids -- is
+    # readable with no token, exactly as GET / already carries every shipped
+    # mod's source and /mods/<id>/<gen>/<name> every installed one's.
+    app = make_app(tmp_path, monkeypatch)
+    authed(app).post("/mods/install", json=payload())
+    _, r = app.test_client.get("/help-corpus.json")
+    assert r.status == 200
+    assert "x-notes" in [s["slug"] for s in r.json["sections"]]
+
+
+def test_a_headless_broker_serves_no_help_corpus(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch, serve_ui=False)
+    _, r = app.test_client.get("/help-corpus.json")
+    assert r.status == 404
+    assert app.ctx.help_corpus == {"sections": []}
+
+
+# --------------------------------------------------------------------------- #
 # realm + gating
 # --------------------------------------------------------------------------- #
 
