@@ -30,8 +30,10 @@ from pathlib import Path
 
 from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker import ui
-from webterm.broker.app import (MAX_MOD_POLICY_KEYS, _load_mod_policy,
-                                _sanitize_mod_policy, create_app)
+from webterm.broker.app import (MAX_MOD_POLICY_KEYS, _INSTALLED_ID_PREFIX,
+                                _MODSTORE_ID_RE, _is_reserved_mod_id,
+                                _load_mod_policy, _sanitize_mod_policy,
+                                create_app)
 
 SIDECAR = "webterm_mod_policy.json"
 
@@ -46,6 +48,45 @@ def _make_app(tmp_path, monkeypatch, **cfg):
             "auth_token": TEST_TOKEN}
     conf.update(cfg)
     return create_app(conf, name=f"webterm-modpolicy-test-{_app_seq}")
+
+
+# ---- the mod-id shape itself (#172) ---------------------------------------
+
+def test_mod_id_regex_is_anchored_at_both_ends():
+    """#172: the pattern is ANCHORED, so a future ``.match()`` cannot silently
+    accept a traversal.
+
+    Every call site today uses ``.fullmatch()`` and is therefore already safe --
+    which is exactly why the hazard is invisible: ``.match()`` is the natural
+    thing to write, and on the old unanchored pattern it would have accepted
+    ``clock/../../etc`` as a /mod-store path segment and a pin key. Also \\A..\\Z
+    rather than ^..$, because ``$`` matches before a trailing newline too."""
+    for bad in ("clock/../../etc", "clock/x", "clock\n", "clock\nx",
+                "../etc", "clock:stream", "clock\\x"):
+        assert _MODSTORE_ID_RE.match(bad) is None, \
+            f"{bad!r} must not even .match() the mod-id shape"
+        assert _MODSTORE_ID_RE.fullmatch(bad) is None
+    for good in ("clock", "mod-sync", "x-notes", "a", "0", "a" * 64):
+        assert _MODSTORE_ID_RE.match(good) is not None
+        assert _MODSTORE_ID_RE.fullmatch(good) is not None
+    assert _MODSTORE_ID_RE.fullmatch("a" * 65) is None      # cap still holds
+
+
+def test_installed_ids_are_exactly_the_x_prefixed_ones():
+    """#172's namespace split, as one lexical test. An id is RESERVED for
+    first-party mods iff it does not carry the prefix; a runtime-installed mod
+    must. Both regex twins stay unchanged because "x-foo" already fullmatches."""
+    assert _INSTALLED_ID_PREFIX == "x-"
+    for shipped in ("clock", "git", "mod-sync", "x", "xylophone", "xy-lo"):
+        assert _is_reserved_mod_id(shipped), shipped
+    for installed in ("x-notes", "x-johnconnornpc-notes", "x-a"):
+        assert not _is_reserved_mod_id(installed), installed
+        # ...and it is still a valid /mod-store segment + pin key, unchanged.
+        assert _MODSTORE_ID_RE.fullmatch(installed)
+        assert _sanitize_mod_policy({installed: True}) == {installed: True}
+    # Junk is RESERVED, never "installable": the caller's next step is to refuse.
+    for junk in (None, 7, b"x-notes", [], True):
+        assert _is_reserved_mod_id(junk)
 
 
 # ---- _sanitize_mod_policy / _load_mod_policy (pure) -----------------------
@@ -103,6 +144,13 @@ def test_info_reports_full_catalog_and_empty_policy_by_default(tmp_path, monkeyp
         assert isinstance(m["title"], str) and m["title"]
         assert isinstance(m["default_enabled"], bool)
         assert isinstance(m["requires"], list)
+        # #163: the catalog has TWO sources and every row says which. With
+        # nothing installed (this broker's mods_dir does not exist) the list is
+        # shipped-only, so this asserts what it USED to hold implicitly. Its
+        # companion -- ordering, provenance and default_enabled with a fixture
+        # mod actually installed -- is
+        # tests/test_mod_install.py::test_info_reports_shipped_then_installed_with_provenance.
+        assert m["source"] == "shipped"
     by_id = {m["id"]: m for m in body["mods"]}
     assert by_id["git"]["default_enabled"] is False      # ships off (#116)
     assert by_id["clock"]["default_enabled"] is True

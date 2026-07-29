@@ -173,11 +173,30 @@ TOKEN = "route-policy-token"
 #:                         the text editor silently falls back to a plain
 #:                         textarea rather than fails loudly.
 #:
+#: ``/mods/<modId>/<gen>/<name>``
+#:                         one file of one GENERATION of a runtime-installed mod
+#:                         (#163). Public for the SAME forced reason as
+#:                         /vendor/*: a <script src> / <link rel=stylesheet>
+#:                         cannot carry an Authorization header, ?token= in a URL
+#:                         is structurally banned by #144 (and pinned by
+#:                         test_no_http_request_puts_the_token_in_the_url), and a
+#:                         fetch+blob: workaround would need blob: in script-src
+#:                         — a materially weaker policy. The posture is the
+#:                         existing one: GET / is public and already carries
+#:                         every SHIPPED mod's source, so installed mod source
+#:                         and styles are publicly readable too, and documented
+#:                         as such. Served from the same in-memory allowlist
+#:                         dict, so an arbitrary segment cannot reach the
+#:                         filesystem — the worst it achieves is a dict miss.
+#:                         The three install POSTs and GET /mods/installed are
+#:                         NOT public and are covered by the enumerating test.
+#:
 #: OPTIONS preflights are also public — they carry no credentials by design and
 #: route resolution happens before request middleware, so they must be their own
 #: routes. They are filtered out below rather than listed here.
 PUBLIC_PATHS = {"/", "/help-corpus.json", "/vendor/<name:str>",
-                "/vendor/codemirror/<name:str>"}
+                "/vendor/codemirror/<name:str>",
+                "/mods/<modId:str>/<gen:str>/<name:str>"}
 
 _seq = 0
 

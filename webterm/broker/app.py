@@ -69,13 +69,16 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import auth, relay
+from . import auth, modinstall, relay
 from .launcher import LaunchError, Launcher, default_profiles
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
 # desktop page or parse the wiki. These are the only production importers, so the
 # deferral is what actually skips the work.
+# .modinstall (#163) is safe to import EAGERLY: its module scope is stdlib only,
+# and the one place it needs .ui (the shared line cap) is a deferred import
+# inside a function that a headless broker never reaches.
 
 LOGGER = logging.getLogger(__name__)
 
@@ -288,7 +291,46 @@ MODSTORE_MAX_REVISIONS = 50         # revision-ring depth (per mod)
 # A mod id is the path segment in /mod-store/<modId>; keep it to the same shape a
 # mod dir uses (lowercase, digits, hyphen) so it can never traverse or collide
 # with a JSON metadata key. Compiled once; used by the loader + both handlers.
-_MODSTORE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+#
+# ANCHORED (#172). Every current call site uses .fullmatch(), so this changes
+# nothing observable today -- it exists so a future `.match()`, which is the
+# natural thing to write, cannot silently accept "clock/../../etc". It also puts
+# the pattern in step with its already-anchored JS twin, MOD_ID_RE
+# (50_js_constants.js). \A..\Z rather than ^..$ because $ also matches before a
+# trailing newline, i.e. "clock\n" would pass.
+_MODSTORE_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{0,63}\Z")
+
+# #172: ONE mod id keys five namespaces (the localStorage `webterm:mod:<id>:`
+# prefix, /mod-store/<id>, the mod_policy pin map, the source dir mods/<id>/, and
+# the loader-generated DOM ids), with no vendor or scope component anywhere. The
+# split is a RESERVED PREFIX rather than a wider charset: widening the id shape
+# would mean widening both regex twins, the policy sanitiser and _load_modstore's
+# key filter, plus migrating every already-stored key -- a migration, for a scope
+# component nothing enforces.
+#
+# The rule, in one lexical test that covers all five namespaces because all five
+# derive from the same string: an id is RESERVED for first-party (shipped) mods
+# iff it does NOT start with "x-"; a mod installed at runtime MUST. "x-foo"
+# already fullmatches the id shape above, so NEITHER regex changes and no key a
+# shipped mod owns moves. Second-level scoping ("x-<author>-<name>", e.g.
+# x-johnconnornpc-notes) stays a documented convention, not an enforced field.
+#
+# Enforced in three places so it cannot rot: the install validator (400
+# reserved_id), the installed-mod scanner (a non-"x-" directory is skipped with a
+# loud log, so a hand-dropped mods_dir/clock/ can never shadow the shipped
+# clock), and CI (tests/test_ui_assets.py: no shipped id starts with "x-", and no
+# shipped `requires` names an "x-" id -- so a shipped->installed dependency edge
+# is unrepresentable and shipped rows can always be emitted first).
+_INSTALLED_ID_PREFIX = "x-"
+
+
+def _is_reserved_mod_id(mod_id: str) -> bool:
+    """True iff ``mod_id`` is in the FIRST-PARTY (reserved) namespace, i.e. a
+    runtime-installed mod may not claim it. Non-strings are reserved too: the
+    caller's next step is always "refuse", and answering "not reserved" for junk
+    would invert that."""
+    return not (isinstance(mod_id, str)
+                and mod_id.startswith(_INSTALLED_ID_PREFIX))
 
 # #157: this broker's MOD POLICY -- {modId: bool}, the on/off this broker PINS
 # for every browser that loads its page (an absent id leaves the choice to that
@@ -2191,6 +2233,72 @@ async def _vendor_codemirror_asset(request: Request, name: str):
     return await _vendor_asset(request, f"{vendor.CODEMIRROR}/{name}")
 
 
+def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
+    """Publish an installed-mod index and the catalog derived from it, as ONE
+    visible step (#163).
+
+    Both are COMPUTED first and only then assigned, back to back with no await
+    between, so no reader can observe the pair disagreeing -- ``/info`` reads
+    ``app.ctx.mod_catalog`` live and takes no lock, and the asset route reads
+    ``app.ctx.mods_index`` the same way. Every caller runs under
+    ``mods_install_lock``.
+
+    SHIPPED FIRST, and that is load-bearing, not cosmetic. ``modPolicyImplied``
+    (81_js_control_panel.js) and #158's ``planFor`` both walk the catalog
+    BACKWARDS assuming a dependency always precedes its dependent. A shipped
+    ``requires`` may never name an ``x-`` id (CI-guarded), so no shipped row can
+    depend on an installed one; the installed half is topologically sorted among
+    itself by ``modinstall.catalog``."""
+    shipped = app.ctx.shipped_mod_catalog
+    catalog = list(shipped) + modinstall.catalog(
+        index, [row["id"] for row in shipped])
+    app.ctx.mods_index = index
+    app.ctx.mod_catalog = catalog
+
+
+async def _mod_asset(request: Request, modId: str, gen: str, name: str):
+    """One file of one GENERATION of one installed mod (#163). Registered only
+    when ``serve_ui``.
+
+    PUBLIC, like ``/`` and ``/vendor/*`` — and forced, not chosen. A
+    ``<script src>`` cannot carry an Authorization header (see
+    ``_vendor_asset``); ``?token=`` is structurally banned by #144 and pinned by
+    ``test_no_http_request_puts_the_token_in_the_url``; and a fetch+``blob:``
+    workaround would need ``blob:`` in ``script-src``, a materially weaker
+    policy. The posture is the existing one: ``GET /`` is public and already
+    carries every shipped mod's source. So installed mod source, its
+    stylesheets, and (because ``/help-corpus.json`` is public) its help text and
+    therefore the set of installed ids are PUBLICLY READABLE. Do not put a
+    secret in a mod.
+
+    Served from the in-memory allowlist dict, exactly like ``_vendor_asset``: a
+    client-supplied segment can only ever hit a known key, so traversal is
+    unrepresentable rather than defended against, blocking IO stays off the
+    single event loop, and there is no request-time TOCTOU. Sanic's ``<x:str>``
+    matches ONE segment, so no parameter can express a path; the three are
+    re-validated anyway, before the dict get, so a crafted segment is a 404 and
+    never a lookup on attacker-shaped bytes.
+
+    ``immutable`` is honest here because the URL is content-addressed: the bytes
+    behind ``<gen>`` cannot change, and a replace publishes a NEW gen.
+
+    Four segments, so no collision with ``POST /mods/policy`` (two) or the three
+    install POSTs. A future single- or double-segment ``/mods/*`` route would
+    collide — check this one before adding it."""
+    if (not _MODSTORE_ID_RE.fullmatch(modId)
+            or not modinstall.GEN_RE.fullmatch(gen)
+            or modinstall.file_name_error(name) is not None
+            or modinstall.content_type(name) is None):
+        return sanic_json({"ok": False, "error": "not_found"}, status=404)
+    asset = request.app.ctx.mods_index["assets"].get(f"{modId}/{gen}/{name}")
+    if asset is None:
+        return sanic_json({"ok": False, "error": "not_found"}, status=404)
+    body, ctype = asset
+    return sanic_raw(body, content_type=ctype,
+                     headers={"Cache-Control":
+                              "public, max-age=31536000, immutable"})
+
+
 async def _help_corpus(request: Request):
     # The in-app Help guide's static cards, parsed from wiki/*.md (issue #60).
     # Public like "/" (help content is non-sensitive); built once at import in
@@ -2246,6 +2354,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # that (#87). So the default is the literal truth for a headless broker: it
     # serves no desktop page, hence no mods, and its /mods says so via serve_ui.
     app.ctx.mod_catalog = []
+    # The SHIPPED half on its own, kept so the two halves can be re-concatenated
+    # after an install/uninstall/rescan without re-reading the mod tree.
+    app.ctx.shipped_mod_catalog = []
     # Headless mode (#87): when off, the broker serves the full JSON/WS API but
     # not the desktop page (GET /) or the in-app Help corpus, and skips
     # assembling both UI constants entirely. Defaults ON so existing deploys are
@@ -2424,6 +2535,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     ).resolve()
     app.ctx.mod_policy = _load_mod_policy(app.ctx.mod_policy_path)
     app.ctx.mod_policy_lock = asyncio.Lock()
+    # #163: RUNTIME-INSTALLED mods. A broker-config'd directory beside the /state
+    # store ("mods_dir"), deliberately NOT webterm/broker/mods/ -- that tree is
+    # the reviewed first-party set and its drift guard is bidirectional, so an
+    # installed mod dropped there would break CI for every checkout.
+    #
+    # The index is the in-memory truth: the catalog rows /info reports, the help
+    # text, and the ASSET BYTES the /mods/<id>/<gen>/<name> route serves out of
+    # an allowlist dict. It is populated (and the directory scanned) only in the
+    # serve_ui block below -- a headless broker serves no page, so it loads no
+    # mods, exactly as it reports no shipped ones. The lock serializes the whole
+    # validate / write / commit / index-swap sequence, and is the OUTERMOST lock
+    # in the purge order mods_install -> mod_policy -> modstore.
+    app.ctx.mods_dir = Path(
+        config.get("mods_dir")
+        or (app.ctx.state_path.parent / "webterm_mods")).resolve()
+    app.ctx.mods_index = modinstall.empty_index()
+    app.ctx.mods_install_lock = asyncio.Lock()
     _mc = app.ctx.mcp_cfg
     LOGGER.info("MCP interface: %s (default_mode=%s allow_launch=%s)",
                 "enabled" if (_mc["enabled"] and _mc["token"]) else "disabled",
@@ -4854,6 +4982,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # declare (defaultEnabled/requires, drift-tested against the JS): a mod's
         # `tiers` stay JS-only, so the peer's trust badges are deliberately not
         # advertised here.
+        #
+        # #163: the catalog now has TWO sources and every row says which via
+        # `source` ("shipped" | "installed"). Shipped rows come first, installed
+        # rows follow topologically sorted, and an installed row additionally
+        # carries `gen`, `scripts`, `styles`, `integrity`, `error` and
+        # `missing_requires` -- everything the loader needs to fetch it, and
+        # nothing more. Administrative detail (file sizes, per-file hashes,
+        # installed_at, what was skipped) lives on the token-gated
+        # GET /mods/installed, so /info -- which every peer fetches -- stays
+        # small. An installed row's `default_enabled` is ALWAYS false.
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
                            "version": app.ctx.version,
                            "mods_enabled": app.ctx.mods_enabled,
@@ -4918,6 +5056,318 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": True, "policy": policy})
 
         return await _shielded_region(app.ctx.mod_policy_lock, _locked_write)
+
+    # ---- runtime mod install (/mods/install|uninstall|rescan, #163) -------
+    # An operator drops a mod into a LIVE broker: no source edit, no process
+    # restart. Three POSTs and one GET, all in the BROWSER realm
+    # (_gated_auth_error), all serve_ui-gated (a headless broker has no page to
+    # load a mod into), and all deliberately NOT lease-gated -- #157's argument
+    # for /mods/policy verbatim: this is broker CONFIGURATION, and the point is
+    # being able to administer a broker somebody else is using right now.
+    #
+    # THE TRUST EVENT IS THE INSTALL, not the fetch. #163 settled that `ctx` is
+    # not a boundary (the loader says so in five places, and mods reach core
+    # directly in ~250 places), so a mod is code you are choosing to run with
+    # this broker's full authority. What is gated is therefore this token, not
+    # the public asset route the browser then fetches.
+    #
+    # AN INSTALL TAKES EFFECT ON THE NEXT PAGE LOAD, and that is forced rather
+    # than chosen: JavaScript global lexical bindings cannot be removed, so a
+    # mod whose top level says `const DB = ...` cannot be re-executed in the
+    # same page, and `_takeDown()` is a teardown, not an unloader. Same contract
+    # #157's pins already ship.
+    def _mod_error(exc: "modinstall.ValidationError"):
+        return sanic_json({"ok": False, "error": exc.code, "detail": exc.detail},
+                          status=exc.status)
+
+    def _mod_code(code: str, detail: str = ""):
+        return sanic_json({"ok": False, "error": code, "detail": detail},
+                          status=modinstall.ERROR_STATUS.get(code, 400))
+
+    def _mod_body(request: Request, cap: int):
+        """``(parsed, error_response)``. Caps the body BEFORE the parse.
+
+        ``json.loads`` runs SYNCHRONOUSLY on the one event loop, so an
+        uncapped body -- even one whose extra megabytes are an ignored padding
+        key -- freezes every HTTP handler, WebSocket and terminal relay for the
+        length of the parse. The cap is per-endpoint because /mods/install
+        legitimately carries a mod and the other three carry an id.
+
+        ``RecursionError`` is caught alongside the JSON errors: it is what a
+        deeply nested value raises, it is not an ``Exception``, and unhandled
+        it would be a 500 for what is simply a malformed request."""
+        if len(request.body or b"") > cap:
+            return None, _mod_code("too_large", f"body over {cap} bytes")
+        try:
+            parsed = _json_object_body(request)
+        except (ValueError, RecursionError):
+            parsed = None
+        if parsed is None:
+            return None, _mod_code("bad_json")
+        return parsed, None
+
+    async def _mods_install_post(request: Request):
+        err = _gated_auth_error(request, "/mods/install")
+        if err is not None:
+            return err
+        body, err = _mod_body(request, modinstall.MAX_BODY_BYTES)
+        if err is not None:
+            return err
+        replace = body.get("replace", False)
+        if not isinstance(replace, bool):
+            return _mod_code("bad_manifest_field", "replace must be a bool")
+        files = body.get("files")
+        if isinstance(files, dict) and modinstall.MANIFEST_NAME in files:
+            # mod.json is BROKER-written from the canonical manifest, so a
+            # payload cannot ship one that disagrees with what was validated.
+            return _mod_code("reserved_file_name", modinstall.MANIFEST_NAME)
+        # 1. Validate ENTIRELY IN MEMORY, before the lock. Nothing here touches
+        # the store, so a refusal leaves it untouched by construction rather
+        # than by careful unwinding.
+        try:
+            manifest, records = modinstall.validate_package(
+                body.get("manifest"), files)
+        except modinstall.ValidationError as exc:
+            return _mod_error(exc)
+        mod_id = manifest["id"]
+        gen = modinstall.compute_gen(manifest, records)
+        # A fast fail on the state-dependent conditions. It is ONLY a fast
+        # fail: both are re-checked under the lock below, because two requests
+        # can otherwise both observe the id absent here and both install.
+        pre = _mods_state_refusal(mod_id, replace)
+        if pre is not None:
+            return pre
+
+        async def _locked_install():
+            # 2. THE REAL CHECK, under the lock.
+            refusal = _mods_state_refusal(mod_id, replace)
+            if refusal is not None:
+                return refusal
+            index = app.ctx.mods_index
+            was_installed = mod_id in index["mods"]
+            # The generation to keep ALONGSIDE the new one, written into
+            # CURRENT rather than inferred later from directory mtimes.
+            retained = modinstall.retained_after(index, mod_id, gen)
+            keep = [gen] + ([retained] if retained else [])
+            # 3 + 4: stage, publish under a FRESH name, then commit by
+            # replacing one small file. A crash anywhere in here leaves CURRENT
+            # naming a COMPLETE generation -- the old one or the new one.
+            try:
+                installed_at = await _off_loop(
+                    modinstall.commit_generation, app.ctx.mods_dir, mod_id,
+                    manifest, records, gen, retained)
+            except modinstall.ValidationError as exc:
+                return _mod_error(exc)
+            except OSError as exc:
+                LOGGER.warning("mod install %s failed: %s", mod_id, exc)
+                return _mod_code("write_failed", str(exc))
+            # 5. Rebuild from the bytes just written -- never re-read from
+            # disk, and pure, so it cannot fail on IO and leave the index half
+            # swapped. If a BUG here raised, the request would fail with the
+            # index unswapped and the next rescan would repair it.
+            _swap_mods_index(app, modinstall.index_with(
+                index, mod_id, manifest, records, gen, installed_at, retained))
+            # 6. GC to the retained generations. Best-effort by contract: the
+            # commit already landed, so failing the request for leftover litter
+            # would be a lie.
+            await _off_loop(modinstall.gc_generations, app.ctx.mods_dir,
+                            mod_id, keep)
+            row = next((r for r in app.ctx.mod_catalog if r["id"] == mod_id),
+                       None)
+            LOGGER.info("mod installed: %s gen %s (%d file%s)", mod_id,
+                        gen[:12], len(records), "" if len(records) == 1 else "s")
+            return sanic_json({
+                "ok": True, "id": mod_id, "gen": gen,
+                "replaced": was_installed,
+                # #172, said out loud rather than discovered later: /mod-store
+                # and the pin map ALREADY accept any id-shaped key, so a user
+                # can hold state under "x-notes" before anything named x-notes
+                # was installed (console code, a hand-edited sidecar, a locally
+                # hacked mod). Installing would silently adopt it. The Control
+                # Panel surfaces this BEFORE the operator confirms.
+                # localStorage cannot be inspected server-side and is not
+                # covered -- the dialog says so.
+                "adopts_existing_state": {
+                    "mod_store": mod_id in app.ctx.modstore,
+                    "pin": mod_id in app.ctx.mod_policy},
+                "mod": row,
+                # D1: no live install. Say it in the response so a client can
+                # never present this as "the mod is now running".
+                "applies": "next_page_load"})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_install)
+
+    def _mods_state_refusal(mod_id: str, replace: bool):
+        """The two STATE-dependent refusals, factored so the pre-lock fast fail
+        and the under-lock re-check cannot drift apart."""
+        installed = app.ctx.mods_index["mods"]
+        if mod_id in installed and not replace:
+            return _mod_code(
+                "id_in_use",
+                f"{mod_id} is already installed on this broker; uninstall it "
+                f"first (which is where the purge option lives), or POST with "
+                f'"replace": true to upgrade it')
+        if mod_id not in installed and len(installed) >= modinstall.MAX_MODS:
+            return _mod_code("too_many_mods",
+                             f"this broker already has {modinstall.MAX_MODS} "
+                             f"installed mods")
+        return None
+
+    async def _mods_uninstall_post(request: Request):
+        err = _gated_auth_error(request, "/mods/uninstall")
+        if err is not None:
+            return err
+        body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
+        if err is not None:
+            return err
+        mod_id = body.get("id")
+        if not isinstance(mod_id, str) or not _MODSTORE_ID_RE.fullmatch(mod_id):
+            return _mod_code("bad_mod_id", repr(mod_id))
+        purge = body.get("purge", False)
+        if not isinstance(purge, bool):
+            return _mod_code("bad_manifest_field", "purge must be a bool")
+
+        async def _remove_code():
+            """The uninstall itself: rename `<id>` aside, swap the index, then
+            reclaim. The rename IS the uninstall -- a crash right after it
+            leaves `.old-` litter, which is the intended end state anyway."""
+            try:
+                staged = await _off_loop(modinstall.stage_removal,
+                                         app.ctx.mods_dir, mod_id)
+            except OSError as exc:
+                LOGGER.warning("mod uninstall %s failed: %s", mod_id, exc)
+                return _mod_code("write_failed", str(exc))
+            _swap_mods_index(app,
+                             modinstall.index_without(app.ctx.mods_index,
+                                                      mod_id))
+            if staged is not None:
+                await _off_loop(modinstall.discard_staged, staged)
+            return None
+
+        async def _locked_uninstall():
+            index = app.ctx.mods_index
+            # A SKIPPED mod is uninstallable too. It is on disk and reported by
+            # GET /mods/installed, so the operator can see it -- refusing to
+            # remove the one thing they were just told about would leave the
+            # only cure "stop the broker and delete a directory", which is the
+            # restart this feature exists to avoid.
+            if mod_id not in index["mods"] and mod_id not in index["skipped"]:
+                # NOT idempotent at the HTTP-result level, deliberately: a
+                # retry after a lost response answers 404 even though the first
+                # attempt succeeded. Catching a typo is worth more than that
+                # ambiguity; the client treats "404 after a retry" as possible
+                # success and the docs say so.
+                return _mod_code("not_installed", mod_id)
+            if not purge:
+                failed = await _remove_code()
+                if failed is not None:
+                    return failed
+                LOGGER.info("mod uninstalled: %s", mod_id)
+                return sanic_json({"ok": True, "id": mod_id,
+                                   "purged": {"mod_store": False, "pin": False},
+                                   "applies": "next_page_load"})
+            # LOCK ORDER mods_install -> mod_policy -> modstore, fixed here and
+            # nowhere else so it cannot deadlock against any other writer, and
+            # both are HELD ACROSS the code removal: releasing them first would
+            # leave a window in which a concurrent /mods/policy or
+            # /mod-store PUT recreates the very state we just deleted, landing
+            # exactly on "data without code" -- the shape that silently
+            # re-adopts on the next install of that id. They are taken inside
+            # the already-shielded region rather than through _shielded_region:
+            # we are past the point where unwinding is the safe answer, and
+            # each write is one atomic sidecar replace.
+            async with app.ctx.mod_policy_lock, app.ctx.modstore_lock:
+                purged, unpurged = await _purge_mod_state(mod_id)
+                if unpurged:
+                    # DATA FIRST, CODE LAST -- so if the data could not go, the
+                    # code stays too. Removing it anyway would leave orphaned
+                    # state behind while telling the operator the purge
+                    # succeeded, which is the one outcome the ordering exists
+                    # to prevent.
+                    return _mod_code(
+                        "write_failed",
+                        f"could not delete {', '.join(sorted(unpurged))} for "
+                        f"{mod_id}; the mod is still installed")
+                failed = await _remove_code()
+                if failed is not None:
+                    return failed
+            LOGGER.info("mod uninstalled: %s (purged %s)", mod_id,
+                        sorted(k for k, v in purged.items() if v) or "nothing")
+            return sanic_json({"ok": True, "id": mod_id, "purged": purged,
+                               "applies": "next_page_load"})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_uninstall)
+
+    async def _purge_mod_state(mod_id: str):
+        """Delete this broker's server-side state for a mod: its /mod-store
+        value and its #157 pin. Returns ``(purged, unpurged)``.
+
+        The caller owns mods_install_lock, mod_policy_lock and modstore_lock,
+        in that order, and holds all three across the code removal that
+        follows -- see there for why. This is three sidecars and cannot be made
+        one transaction; the Control Panel checkbox is worded to say exactly
+        that, and neither this nor anything else can touch what OTHER BROWSERS
+        hold in localStorage."""
+        purged = {"mod_store": False, "pin": False}
+        unpurged = []
+        if mod_id in app.ctx.mod_policy:
+            policy = dict(app.ctx.mod_policy)
+            policy.pop(mod_id, None)
+            try:
+                await _off_loop(_write_state_atomic, app.ctx.mod_policy_path,
+                                {"policy": policy})
+                app.ctx.mod_policy = policy
+                purged["pin"] = True
+            except OSError as exc:
+                LOGGER.warning("purge %s: policy write failed: %s", mod_id, exc)
+                unpurged.append("pin")
+        if mod_id in app.ctx.modstore:
+            store = dict(app.ctx.modstore)
+            store.pop(mod_id, None)
+            try:
+                await _off_loop(_write_state_atomic, app.ctx.modstore_path,
+                                store)
+                app.ctx.modstore = store
+                purged["mod_store"] = True
+            except OSError as exc:
+                LOGGER.warning("purge %s: mod-store write failed: %s",
+                               mod_id, exc)
+                unpurged.append("mod_store")
+        return purged, unpurged
+
+    async def _mods_rescan_post(request: Request):
+        err = _gated_auth_error(request, "/mods/rescan")
+        if err is not None:
+            return err
+        _body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
+        if err is not None:
+            return err
+
+        async def _locked_rescan():
+            index = await _off_loop(modinstall.scan, app.ctx.mods_dir)
+            _swap_mods_index(app, index)
+            # The sweep runs AFTER the swap and only over what the fresh index
+            # says is live, so it can never delete a generation the broker is
+            # still serving. It refuses outright in a directory with no
+            # ownership marker.
+            await _off_loop(modinstall.sweep_store, app.ctx.mods_dir,
+                            modinstall.keep_map(index))
+            return sanic_json({"ok": True,
+                               **modinstall.installed_detail(
+                                   index, app.ctx.mods_dir)})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_rescan)
+
+    async def _mods_installed_get(request: Request):
+        err = _gated_auth_error(request, "/mods/installed")
+        if err is not None:
+            return err
+        return sanic_json({"ok": True,
+                           **modinstall.installed_detail(app.ctx.mods_index,
+                                                         app.ctx.mods_dir)})
 
     # ---- AI-provider status proxy (/status/fetch, #112) ------------------
     # The broker's ONLY outbound HTTP. Gated by the SAME token
@@ -5743,7 +6193,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #157: the served mod list, captured HERE for the same reason as the
         # page — /mods is registered unconditionally (a headless broker is still
         # a host tab), so the handler must never be the thing that imports .ui.
-        app.ctx.mod_catalog = mod_catalog()
+        app.ctx.shipped_mod_catalog = mod_catalog()
+        # #163: the installed half. Scanned HERE, synchronously at create_app,
+        # for ui.assemble()'s reason inverted -- the scan is PROTECTIVE (a
+        # broken mod is skipped, never a failed boot), but doing it now means
+        # the very first GET /info already reports what will be served, and the
+        # asset dict is populated before the route that reads it exists.
+        _swap_mods_index(app, modinstall.scan(app.ctx.mods_dir))
+        LOGGER.info("installed mods: %s (%d served, %d skipped)",
+                    app.ctx.mods_dir, len(app.ctx.mods_index["mods"]),
+                    len(app.ctx.mods_index["skipped"]))
         app.ctx.help_corpus = HELP_CORPUS
         # #143: authorize OUR bundle by hash so script-src needs no
         # 'unsafe-inline'. Computed from the assembled page, here rather than at
@@ -5760,6 +6219,26 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                       methods=["GET"])
         app.add_route(_vendor_codemirror_asset,
                       vendor.CODEMIRROR_PREFIX + "<name:str>", methods=["GET"])
+        # #163: installed-mod assets. FOUR segments, so it cannot shadow (or be
+        # shadowed by) POST /mods/policy. serve_ui-gated: a headless broker has
+        # no page to load them into, and 404 is the honest answer there.
+        app.add_route(_mod_asset, "/mods/<modId:str>/<gen:str>/<name:str>",
+                      methods=["GET"])
+        # The install API. serve_ui-gated for the same reason: a headless
+        # broker has no page to load a mod into, so accepting one would be
+        # storing bytes nothing can ever run. Preflights registered alongside
+        # (route resolution precedes request middleware, so an unrouted OPTIONS
+        # 405s), because the Control Panel driving these is cross-origin
+        # whenever the operator administers another broker.
+        app.add_route(_mods_install_post, "/mods/install", methods=["POST"])
+        app.add_route(_mods_uninstall_post, "/mods/uninstall", methods=["POST"])
+        app.add_route(_mods_rescan_post, "/mods/rescan", methods=["POST"])
+        app.add_route(_mods_installed_get, "/mods/installed", methods=["GET"])
+        for _path, _name in (("/mods/install", "preflight_mods_install"),
+                             ("/mods/uninstall", "preflight_mods_uninstall"),
+                             ("/mods/rescan", "preflight_mods_rescan"),
+                             ("/mods/installed", "preflight_mods_installed")):
+            app.add_route(_preflight, _path, methods=["OPTIONS"], name=_name)
     else:
         app.add_route(_index_headless, "/", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")
