@@ -1127,6 +1127,30 @@ def test_settings_text_primitive_contract():
     assert "maxLength: max," in body
 
 
+def test_mod_sync_accepts_the_text_kind():
+    # #168's mandatory companion: acceptedBy's DOM scrape cannot answer for a
+    # kind with no option set, and its default `return true` would plant a value
+    # read() then ignores -- the exact failure that function exists to prevent.
+    # The honest answer is read()'s own STRUCTURAL gate, taken from the loader so
+    # the two can never drift, and deliberately domain-free: a zone the sending
+    # engine knows and this one does not must still carry (that IS the bug).
+    src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "if (entry.kind === 'text') {" in code
+    assert "return _modTextOk(v, entry.maxLength);" in code
+    # Guarded like _localPin: a build without the predicate degrades to the
+    # scalar bound rather than throwing inside the adopt preview.
+    assert "if (typeof _modTextOk === 'function') {" in code
+    assert "return typeof v === 'string' && v.length <= STR_MAX;" in code
+    # And it is answered BEFORE the select/radio scrape, which would return
+    # false for every text value (a text section has no <option> of its own
+    # unless the mod supplied suggestions).
+    assert code.index("if (entry.kind === 'text') {") \
+        < code.index("if (entry.kind === 'select' || entry.kind === 'radio') {")
+
+
 def test_clock_symbols_removed_from_core_fragments():
     # The clock is now a mod: its core renderer/handlers/markup are gone. Scope
     # the check to the CORE fragments it was extracted from (the mod script

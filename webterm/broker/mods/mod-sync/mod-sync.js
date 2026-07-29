@@ -102,6 +102,26 @@
                 function acceptedBy(entry, v) {
                     if (!entry) return false;
                     if (entry.kind === 'boolean') return typeof v === 'boolean';
+                    if (entry.kind === 'text') {
+                        // #168: a text control has NO enumerable option set, so
+                        // the DOM scrape below cannot answer for it and the bare
+                        // `return true` at the bottom would plant a value read()
+                        // then ignores -- exactly the failure this function
+                        // exists to prevent. Its read-through gate is STRUCTURAL
+                        // and deliberately domain-free: it honours a value this
+                        // build's own validator would refuse (a zone the sending
+                        // engine knows and ours does not is the case #168 fixes),
+                        // so the honest answer here is that same gate, taken from
+                        // the loader rather than re-implemented. Guarded like
+                        // _localPin: a build without the predicate degrades to
+                        // the scalar bound isScalar already applied.
+                        try {
+                            if (typeof _modTextOk === 'function') {
+                                return _modTextOk(v, entry.maxLength);
+                            }
+                        } catch (_) { return false; }
+                        return typeof v === 'string' && v.length <= STR_MAX;
+                    }
                     if (entry.kind === 'select' || entry.kind === 'radio') {
                         if (typeof v !== 'string') return false;
                         let opts = [];
