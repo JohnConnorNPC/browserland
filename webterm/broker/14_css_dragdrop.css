@@ -154,6 +154,39 @@
             height: 15px;
             display: block;
         }
+        /* #170: a mod-owned kind's TEXT glyph occupies the SAME 15px box as an
+           SVG icon, so a menu that mixes both keeps its labels aligned. Every
+           containment property is restated here rather than inherited from the
+           rule above (codex: relying on that one for display/flex is hidden
+           coupling — edit it and the clipping silently stops working). The box
+           is fixed-size and clipped on purpose: it is the last line of defence
+           against a glyph that renders wider or taller than one character — a
+           full-width CJK ideograph, stacked combining marks — so no declared
+           glyph can grow a menu row or shove the label out of the menu.
+           unicode-bidi:isolate + direction:ltr are the REAL bidi containment:
+           appIconGlyph strips the bidi controls, but a strongly-RTL glyph is
+           still legal text, and clipping is a paint constraint that does not
+           isolate bidi resolution — the isolate stops it reordering the label
+           beside it. Text is centred and never wraps; the :hover { color:#000 }
+           rule DOES recolor it (unlike the explicit-fill SVGs), which is fine —
+           a monochrome glyph should follow the row. */
+        #ctx-menu .ctx-icon.ctx-icon-text {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 15px;
+            box-sizing: border-box;
+            width: 15px;
+            max-width: 15px;
+            height: 15px;
+            max-height: 15px;
+            overflow: hidden;
+            white-space: nowrap;
+            font-size: 13px;
+            line-height: 15px;
+            unicode-bidi: isolate;
+            direction: ltr;
+        }
         #ctx-menu .ctx-item:hover {
             background: var(--accent-default);
             color: #000;

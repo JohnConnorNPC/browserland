@@ -268,12 +268,30 @@
                 // textContent only" rule, see showHostPicker). Every other menu
                 // (layout, host/profile pickers) leaves iconKey unset, so those
                 // items stay a bare textContent label.
+                // #170: a MOD-owned window kind has no entry in that closed table
+                // and never will, so it may instead declare a short text glyph
+                // (iconGlyph). The two take the same {svg}/{text} TAGGED split the
+                // Help TOC already uses: the registry SVG is the ONLY thing that is
+                // ever injected as markup, and a glyph goes in with textContent —
+                // so a glyph that happens to LOOK like markup renders as literal
+                // characters and renderMenu's invariant is unchanged. appIconGlyph
+                // (65) normalizes it at THIS render site (a mod can hand items
+                // straight to the desktop/window menus, not just to a window kind):
+                // controls, bidi overrides and whitespace are dropped and the rest
+                // is capped at 8 code points. A trusted SVG WINS when an item
+                // somehow declares both; an item that declares NEITHER gets no icon
+                // span at all, exactly as before.
                 const iconSvg = it.iconKey ? appIconSvg(it.iconKey) : '';
-                if (iconSvg) {
+                const iconText = iconSvg ? '' : appIconGlyph(it.iconGlyph);
+                if (iconSvg || iconText) {
                     const ic = document.createElement('span');
-                    ic.className = 'ctx-icon';
+                    ic.className = iconSvg ? 'ctx-icon' : 'ctx-icon ctx-icon-text';
                     ic.setAttribute('aria-hidden', 'true');
-                    ic.innerHTML = iconSvg;
+                    // The ONLY innerHTML in this renderer, and its value is always
+                    // one of our own hardcoded APP_ICON_SVG strings. The glyph
+                    // branch is textContent-only — never innerHTML (#170).
+                    if (iconSvg) ic.innerHTML = iconSvg;
+                    else ic.textContent = iconText;
                     el.appendChild(ic);
                     const lab = document.createElement('span');
                     lab.className = 'ctx-label';

@@ -127,6 +127,82 @@
                 ? APP_ICON_SVG[key] : '';
         }
 
+        // #170: the mod-owned counterpart to that CLOSED table. A mod's window
+        // kind has no APP_ICON_SVG entry and never will, so it may instead
+        // declare a short TEXT glyph (an emoji, an arrow, a box-drawing char)
+        // which every render site sets with textContent — NEVER innerHTML.
+        // Deliberately NOT a ctx.registerAppIcon(svg): renderMenu's one-line
+        // invariant ("the only value injected as innerHTML is our own markup")
+        // is worth more than a decorative icon, and the value need not even be
+        // mod-authored — a mod can pass through a /mod-store blob or a peer's
+        // /state — so raw SVG would mean maintaining a security-critical
+        // sanitizer forever. This is the same {svg}/{text} split the Help TOC
+        // already uses for mod.json's help.icon (mods/help/help.js). NOTE this
+        // is data-flow hygiene, not a boundary: a same-origin mod owns the DOM
+        // anyway (the mod loader's preamble is explicit that ctx is hygiene).
+        // What it buys is that NO menu item field is an HTML sink, so a
+        // reviewer of an unrelated menu change can still read renderMenu and
+        // establish that in one line.
+        //
+        // Normalization happens HERE, at the RENDER site, not (only) at
+        // registration, because a mod can also hand renderMenu item objects
+        // directly (registerDesktopMenuItems / registerWindowMenuItems, 78), so
+        // "it was validated when the kind registered" is not true of every
+        // glyph that reaches the menu. In order:
+        //   1. Anything longer than APP_GLYPH_RAW_MAX UTF-16 units is REJECTED
+        //      outright, before the scan — a glyph is a character or two, so a
+        //      megabyte that arrived from a store blob is a mistake, not an
+        //      icon, and must not be scanned + copied on every menu repaint.
+        //   2. Dropped: C0/C1 controls; EVERY bidi control — ALM (U+061C),
+        //      LRM/RLM, the embeddings + OVERRIDES (U+202A-202E), the isolates
+        //      (U+2066-2069) — because an unterminated RLO would otherwise
+        //      reorder the LABEL beside it; the deprecated format controls
+        //      (U+206A-206F); the interlinear annotation controls
+        //      (U+FFF9-FFFB); the LANGUAGE TAG block (U+E0000-E007F), the
+        //      canonical invisible-payload carrier (cost: a subdivision flag
+        //      such as the Scotland flag degrades to a plain black flag);
+        //      the musical format controls; every "invisible base" that could
+        //      fake an empty-but-present icon (soft hyphen, CGJ, Hangul
+        //      fillers, Khmer inherent vowels, Mongolian FVS/MVS, ZWSP/ZWNJ,
+        //      word joiner + invisible operators); LONE surrogates — the u
+        //      flag makes the U+D800-U+DFFF range match only UNPAIRED ones —
+        //      and ALL whitespace (the whitespace class covers NBSP,
+        //      U+2000-200A, U+202F, U+3000, the BOM), so a glyph can neither
+        //      pad/indent a row nor blank itself into a fake separator.
+        //   3. What survives must contain at least one code point that is not a
+        //      joiner/variation selector, so a run of bare ZWJs or variation
+        //      selectors resolves to '' (no icon) rather than to a truthy but
+        //      invisible glyph that would still open the icon column.
+        //   4. Capped at APP_GLYPH_MAX CODE POINTS. Array.from iterates code
+        //      points, so a surrogate PAIR is never sliced in half. 12 clears
+        //      every RGI emoji sequence whole — the longest (a couple with two
+        //      skin tones and a variation selector) is 10 — while a 12-CHAR
+        //      string is still just a clipped smear in a 15px box. Deliberately
+        //      NOT Intl.Segmenter grapheme counting: the only input a code-
+        //      point cap can bisect is longer than any real emoji, i.e. already
+        //      nonsense, and a trailing joiner is inert.
+        // KEPT throughout: ZWJ (U+200D), the variation selectors + supplement,
+        // and the skin-tone modifiers, so a multi-code-point emoji stays ONE
+        // grapheme. (ZWNJ goes while ZWJ stays, on purpose: ZWJ composes a
+        // visible glyph, ZWNJ only suppresses a ligature — nothing an icon
+        // needs.) Anything that still renders wide or tall (a full-width CJK
+        // glyph, stacked combining marks) is contained by the .ctx-icon-text
+        // box, which is fixed-size, clipped and bidi-isolated.
+        const APP_GLYPH_MAX = 12;
+        const APP_GLYPH_RAW_MAX = 64;
+        const APP_GLYPH_DROP =
+            /[\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u115F\u1160\u3164\uFFA0\u17B4\u17B5\u180B-\u180E\u200B-\u200C\u2060-\u2064\u206A-\u206F\uFFF9-\uFFFB\uD800-\uDFFF\u{1D173}-\u{1D17A}\u{E0000}-\u{E007F}]|\s/gu;
+        const APP_GLYPH_VISIBLE = /[^\u200D\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+        function appIconGlyph(text) {
+            if (typeof text !== 'string' || !text) return '';
+            if (text.length > APP_GLYPH_RAW_MAX) return '';
+            const cleaned = text.replace(APP_GLYPH_DROP, '');
+            if (!APP_GLYPH_VISIBLE.test(cleaned)) return '';
+            const cps = Array.from(cleaned);
+            return cps.length > APP_GLYPH_MAX
+                ? cps.slice(0, APP_GLYPH_MAX).join('') : cleaned;
+        }
+
         // ---- start button label --------------------------------------------
         // The `+` launch button doubles as the Win-style Start button. The
         // visible label is set here; the tooltip's discoverability hint tracks

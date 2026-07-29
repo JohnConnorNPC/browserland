@@ -303,8 +303,17 @@
                     // #119: pass the kind's iconKey (a mod id) through untouched;
                     // renderMenu resolves it to the trusted APP_ICON_SVG glyph, so
                     // the raw SVG never travels on the item object.
+                    // #170: a mod-owned kind has no entry in that closed table, so
+                    // it may instead declare a short TEXT glyph (menu.iconGlyph) —
+                    // passed through the same way, normalized + rendered with
+                    // textContent by renderMenu. iconKey still wins when a kind
+                    // declares both; a kind that declares NEITHER simply gets no
+                    // icon (a bare label row, as today) — core synthesizes no
+                    // placeholder, because this same renderer paints the layout,
+                    // host and profile menus where every row is icon-less.
                     items.push({ label: m.label, enabled: true, action: m.launch,
-                                 iconKey: m.iconKey || '' });
+                                 iconKey: m.iconKey || '',
+                                 iconGlyph: m.iconGlyph || '' });
                 }
             }
             for (const k of kinds) {
@@ -360,6 +369,13 @@
         // Every rendered-or-behavioral field participates (#149): a row whose
         // label alone is unchanged can still have flipped its swatch state,
         // its strike-through class, or its identity color.
+        // #170: the glyph enters as what RENDERS (appIconGlyph's output), not as
+        // the raw declared value — a fingerprint of an input the renderer then
+        // normalizes away would claim a repaint is needed when nothing on screen
+        // moved, and (codex) a non-string iconGlyph would otherwise be
+        // String()-ed into this joined key, where a hostile toString or a
+        // contained U+001F could throw or collide. appIconGlyph returns '' for
+        // every non-string, so the field is always a short primitive.
         function launchMenuSig(items) {
             return items.map(it => it.sep ? '|'
                 : [(it.enabled ? '+' : '-') + it.label,
@@ -367,6 +383,7 @@
                    it.title || '',
                    it.keepOpen ? 'k' : '',
                    it.iconKey || '',
+                   appIconGlyph(it.iconGlyph),
                    it.swatch
                        ? (it.swatch.state || '') + ':'
                            + (it.swatch.color || '')
