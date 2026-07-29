@@ -1679,13 +1679,31 @@
                             + 'loaded — tick Replace to upgrade it.';
                         c.appendChild(el);
                     }
+                    // INSTALLING IS THE TRUST DECISION, and the copy has to say
+                    // so. An installed mod is reported default-OFF, but
+                    // _loadInstalledPackages fetches and EXECUTES every
+                    // installed package regardless: "off" means init() is not
+                    // called, and the package's stylesheets are live either
+                    // way. Wording that let "installed but not enabled" read as
+                    // a containment step would be false, and false in the
+                    // direction that gets somebody owned.
+                    const trust = document.createElement('div');
+                    trust.className = 'mod-install-warn';
+                    trust.textContent = 'Installing IS the decision to run this '
+                        + 'code. From the next page load its scripts execute and '
+                        + 'its stylesheets load whether or not you enable it — '
+                        + 'leaving it off only means its init() is not called. '
+                        + 'It runs same-origin with this broker’s full '
+                        + 'authority. Install only what you would put in the '
+                        + 'source tree.';
+                    c.appendChild(trust);
                     const tail = document.createElement('div');
                     tail.className = 'app-dialog-msg';
-                    tail.textContent = 'An installed mod is OFF by default '
-                        + 'whatever its manifest says — enable it in this list '
-                        + 'after the reload, or pin it on for every browser '
-                        + 'under “Mods on this broker”.\n\nIt appears on the '
-                        + 'NEXT page load. Nothing in this page changes.';
+                    tail.textContent = 'An installed mod is reported OFF by '
+                        + 'default whatever its manifest says — enable it in '
+                        + 'this list after the reload, or pin it on for every '
+                        + 'browser under “Mods on this broker”.\n\nIt appears on '
+                        + 'the NEXT page load. Nothing in this page changes.';
                     c.appendChild(tail);
                 },
                 buttons: [{ label: 'Install', value: true, primary: true },
@@ -1746,8 +1764,9 @@
                 lines.push('A pin this broker already held under that id now '
                     + 'applies to it.');
             }
-            lines.push('Installed mods are OFF by default. Enable it in this '
-                + 'list after the reload.');
+            lines.push('It is reported OFF by default — enable it in this list '
+                + 'after the reload. Its code runs from the next page load '
+                + 'either way; "off" only means its init() is not called.');
             lines.push('It appears on the NEXT page load. Nothing in this page '
                 + 'changed.');
             _modOpResult('Installed', lines, true);

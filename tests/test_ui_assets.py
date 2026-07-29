@@ -4317,6 +4317,150 @@ def test_mods_manager_pane_styles_present():
                   "fetch-failed", "no-register", "wrong-id"):
         assert f'.set-mod-status[data-state="{state}"]' in css, \
             f"missing #163 status style: {state!r}"
+    # #163 (S5): the provenance badge, the two operator controls, the install
+    # dialog's preview chrome, and the per-host pane's self-asserted badge. All
+    # in core fragment 15 -- an installed mod's own stylesheet must never be
+    # what makes the pane that manages it legible.
+    for sel in (".set-mod-source",
+                '.set-mod-source[data-mod-source="installed"]',
+                ".set-mods-head", ".set-mod-install", ".set-mod-uninstall",
+                ".set-mod-actions", ".mod-install-pre", ".mod-install-files",
+                ".mod-install-warn", ".mod-install-danger",
+                ".set-mod-policy-source"):
+        assert sel in css, f"missing #163 S5 style: {sel!r}"
+    for sel in (".set-mod-source", ".set-mod-install", ".set-mod-policy-source"):
+        assert sel in INDEX_HTML, f"S5 style missing from served page: {sel!r}"
+
+
+def test_mods_pane_provenance_is_reflected_not_decided():
+    # #163 (S5): the shipped/installed badge comes from _modStatusRows(), which
+    # reads the BOOT catalog snapshot plus this page's own package records. It
+    # is painted by _rebuildRows and never touched by _reflectManager, which
+    # runs on EVERY /state pull and must stay read-only -- a badge that
+    # re-derived itself there could change under a poll that has nothing to do
+    # with mods.
+    pkgs = _packages_src()
+    for sym in ("function _modSourceBadge(",
+                "el.dataset.modSource = s.source;",
+                "el.textContent = s.source;",
+                "'installed on this broker — v'",
+                "label.appendChild(_modSourceBadge(s));"):
+        assert sym in pkgs, f"missing S5 provenance symbol: {sym!r}"
+    badge = _frag_fn(pkgs, "function _modSourceBadge(")
+    # No fetch, no server read: the badge is a pure function of the row.
+    for banned in ("hostFetch", "await ", "fetch("):
+        assert banned not in badge, \
+            f"the provenance badge must not {banned!r} -- it is reflected"
+    reflect = _frag_nested_fn(pkgs, "function _reflectManager(")
+    assert "_modSourceBadge" not in reflect, \
+        "_reflectManager runs on every /state pull; it must not repaint the badge"
+    # A mod-supplied version rides a .title PROPERTY (never innerHTML) and is
+    # length-clamped -- registerMod's `version` is whatever the mod's object
+    # literal said and is capped nowhere else.
+    assert "_modClamp(s.version, 32)" in badge
+    assert "function _modClamp(" in pkgs
+
+
+def test_mods_pane_uninstall_is_installed_only_and_worded_verbatim():
+    # #163 (S5): Uninstall exists only on an INSTALLED row (a shipped mod lives
+    # in the page's own bundle; no broker call can remove it), and the purge
+    # checkbox's wording is verbatim from the design -- every clause is
+    # load-bearing: three sidecars, broker-side only, and no broker can reach
+    # another browser's localStorage.
+    pkgs = _packages_src()
+    rebuild = _frag_nested_fn(pkgs, "function _rebuildRows(")
+    assert "if (s.source === 'installed') {" in rebuild
+    assert "un.className = 'set-mod-uninstall';" in rebuild
+    wording = ("Also delete this mod's server-side data on this broker (its "
+               "/mod-store value and its pin). Data stored in other browsers "
+               "is not affected.")
+    joined = re.sub(r"['\"]\s*\+\s*['\"]", "", pkgs)
+    assert wording in joined, "the purge checkbox wording is not verbatim"
+    # Purge is read at COMMIT time off the checkbox itself, not captured when
+    # the dialog was built.
+    assert "purgeCb.checked" in pkgs
+
+
+def test_uninstall_never_reports_a_write_failed_purge_as_success():
+    # The broker purges DATA FIRST and CODE LAST, so a purge that cannot write
+    # answers 500 write_failed WITH THE MOD STILL INSTALLED. Presenting that as
+    # any flavour of success inverts the one guarantee that ordering buys.
+    pkgs = _packages_src()
+    run = _frag_fn(pkgs, "async function _modUninstallRun(")
+    assert "if (!r.ok || !j || j.ok !== true) {" in run
+    assert "code === 'write_failed'" in run
+    assert "is STILL INSTALLED" in run
+    # The success bag is only written AFTER the ok check, so a refusal can never
+    # grey out the button for a mod that is still there.
+    assert run.index("j.ok !== true") < run.index("_modBag('uninstalled')")
+    # 404 is documented as ambiguous rather than papered over: uninstall is
+    # deliberately not idempotent at the HTTP-result level.
+    assert "not_installed" in pkgs
+
+
+def test_install_dialog_previews_the_exact_payload():
+    # #163 (S5): the preview must not be able to describe a payload other than
+    # the one that is sent. So the manifest is rendered as its LITERAL JSON --
+    # not a prettified summary -- and the byte counts are the bytes the broker
+    # will write (TextEncoder over the decoded text), not File.size, which
+    # differs whenever the picked file carried a BOM.
+    pkgs = _packages_src()
+    preview = _frag_fn(pkgs, "async function _modInstallPreview(")
+    assert "JSON.stringify(pick.manifest, null, 2)" in preview
+    assert "pre.textContent = json;" in preview
+    assert "new TextEncoder().encode(text).length" in _frag_fn(
+        pkgs, "function _modByteLen(")
+    assert "_modByteLen(pick.files[n])" in preview
+    # ... and the POST sends that same object, not a re-derived one.
+    run = _frag_fn(pkgs, "async function _modInstallRun(")
+    assert "manifest: pick.manifest" in run
+    assert "files: pick.files" in run
+    assert "'/mods/install'" in run
+    # D1: the operator is told the truth about when it takes effect, and is
+    # offered the reload that is the only thing which makes it real.
+    assert "NEXT page load" in preview
+    assert "_modOpResult('Installed', lines, true)" in run
+    assert "window.location.reload()" in _frag_fn(pkgs, "function _modOpResult(")
+    # #172's residual: state can pre-exist an id, and the operator sees that
+    # BEFORE confirming, not only in the response.
+    assert "_modAdoptionCheck(id)" in preview
+    assert "localStorage cannot be inspected" in pkgs.replace(
+        "browser’s own localStorage cannot be inspected",
+        "localStorage cannot be inspected")
+
+
+def test_install_dialog_cannot_walk_a_huge_directory_on_the_ui_thread():
+    # A folder pick hands the page EVERY file under the chosen directory, so a
+    # mis-click on a home directory is tens of thousands of entries. The refusal
+    # is driven off FileList.length -- O(1) -- BEFORE any iteration, and the
+    # bytes actually decoded are bounded too. The single event loop is the whole
+    # app: a synchronous walk there freezes every terminal on screen.
+    pkgs = _packages_src()
+    folder = _frag_fn(pkgs, "async function _modReadFolder(")
+    assert "if (list.length > lim.entries) {" in folder
+    assert folder.index("lim.entries") < folder.index("for (let i = 0")
+    assert "if (bytes > lim.readBytes) {" in folder
+    limits = _frag_fn(pkgs, "function _modPickLimits(")
+    for key in ("entries:", "files:", "readBytes:"):
+        assert key in limits, f"missing pick limit: {key!r}"
+    # Function-LOCAL, never a fragment-level const (the 86-header TDZ rule).
+    assert "        const _MOD_PICK" not in pkgs
+
+
+def test_every_install_error_code_maps_to_a_sentence():
+    # A raw error code in the UI is a bug. This is a drift guard both ways: the
+    # broker's code table and the dialog's message table are edited in different
+    # files and would otherwise silently diverge the moment a new refusal lands.
+    from webterm.broker import modinstall
+    text = _frag_fn(_packages_src(), "function _modErrorText(")
+    for code in modinstall.ERROR_STATUS:
+        assert f"{code}:" in text, \
+            f"/mods/* can answer {code!r} and the Mods pane has no wording for it"
+    # An unknown code still degrades to a sentence rather than leaking the code
+    # alone, and the broker's own `detail` rides a text node, capped.
+    assert "this broker refused the request (HTTP" in text
+    assert "_modClamp(detail, 400)" in _frag_fn(
+        _packages_src(), "function _modFailLines(")
 
 
 def test_per_mod_enable_is_loader_private_not_state_schema():
@@ -4421,6 +4565,31 @@ def test_mod_policy_section_is_per_host_and_painted_on_tab_switch():
                 panel.index("// Populate the host-form fields")]
     assert tab.index("renderModPolicy()") < tab.index("await fetchHostState")
     assert tab.index("renderModPolicy()") < tab.index("if (tabId === 'browser')")
+    # #163 (S5): a peer's provenance is SELF-ASSERTED. It is rendered as a quote
+    # and anything unrecognised -- a missing key, a non-string, a value from a
+    # future build, a value a hostile broker invented -- falls back to `unknown`
+    # and NEVER to the more-trusted-looking label. "unknown => shipped" would
+    # let a broker present a third-party package as part of our own bundle just
+    # by omitting one field.
+    src = _frag_fn(panel, "function peerModSource(")
+    assert "if (source === 'installed') return 'peer reports: installed';" in src
+    assert "if (source === 'shipped') return 'peer reports: shipped';" in src
+    assert src.rstrip().endswith("return 'unknown';"), \
+        "the fallback must be `unknown`, and it must be the LAST word"
+    assert "src.textContent = peerModSource(m.source);" in panel
+    # Peer rows are unique-id enforced: two rows for one id would give one mod
+    # two selects writing the same key, so the value on screen would depend on
+    # which row was touched last. And the implied-pin index is prototype-free,
+    # so an id of "__proto__" cannot make every mod read as implied-on.
+    render = _frag_fn(panel, "function renderModPolicy(")
+    assert "if (served.has(m.id)) continue;" in render
+    assert "const implied = Object.create(null);" in \
+        _frag_fn(panel, "function modPolicyImplied(")
+    # The install control is deliberately NOT here: installing on a broker
+    # somebody else runs is a separate trust decision (design 11).
+    assert "/mods/install" not in panel
+    # ... and the uninstall-residue note the migration story leans on stays.
+    assert "not installed on this broker" in render
 
 
 def test_mod_policy_applies_after_a_first_login():
@@ -4795,6 +4964,14 @@ def _frag_fn(src, sig):
     return src[start:src.index("\n        }\n", start)]
 
 
+def _frag_nested_fn(src, sig, indent=12):
+    """``_frag_fn`` for a closure one level deeper -- the Mods pane's
+    _reflectManager / _rebuildRows live inside _mountModsManagerPane."""
+    pad = "\n" + " " * indent
+    start = src.index(pad + sig)
+    return src[start:src.index(pad + "}\n", start)]
+
+
 def _loader_fn(sig):
     return _frag_fn(_loader_src(), sig)
 
@@ -4979,3 +5156,269 @@ def test_theme_subscriber_state_is_tdz_proof():
                    "\n        let _themeLast", "\n        const THEME_"):
         assert banned not in loader, f"{banned.strip()!r} is a TDZ hazard here"
     assert "window.__mods.themeSubs" in loader
+
+
+# --------------------------------------------------------------------------- #
+# the portable-mod contract (#163 / design 4, lint from design 12)
+# --------------------------------------------------------------------------- #
+
+#: The heuristic for "is this ``/`` a division or the start of a regex
+#: literal?" -- the last significant character before it. Standard, and good
+#: enough for a LINT (this is not a parser and does not claim to be).
+_JS_REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>") | {""}
+
+
+def _js_blank_literals(src):
+    """``src`` with comments, string/template bodies and regex literals blanked.
+
+    Structure (brackets, semicolons, identifiers) survives; anything that could
+    make a ``//`` or a brace inside a string look like code does not. Newlines
+    are preserved so an offset still maps back to a line."""
+    out, i, n, prev = [], 0, len(src), ""
+    while i < n:
+        ch, two = src[i], src[i:i + 2]
+        if two == "//":
+            while i < n and src[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if two == "/*":
+            while i < n and src[i:i + 2] != "*/":
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            out.append("  ")
+            i += 2
+            continue
+        if ch in "'\"`":
+            out.append(ch)
+            i += 1
+            while i < n and src[i] != ch:
+                if src[i] == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            out.append(ch)
+            i += 1
+            prev = ch
+            continue
+        if ch == "/" and prev in _JS_REGEX_PREV:
+            out.append(" ")
+            i += 1
+            in_class = False
+            while i < n:
+                c = src[i]
+                if c == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    break
+                out.append(" ")
+                i += 1
+            out.append(" ")
+            i += 1
+            while i < n and src[i].isalpha():        # flags
+                out.append(" ")
+                i += 1
+            prev = "/"
+            continue
+        out.append(ch)
+        if not ch.isspace():
+            prev = ch
+        elif ch == "\n":
+            prev = "\n"
+        i += 1
+    return "".join(out)
+
+
+#: A top-level statement's SKELETON begins with one of these iff it is a
+#: declaration. Declarations are fine at top level -- they define names, they do
+#: not act. What the contract forbids is top-level code that RUNS.
+_JS_DECL_HEAD = re.compile(r"^(?:async)?function|^class|^(?:const|let|var)")
+_JS_DECL = re.compile(r"^(?:async)?function[A-Za-z_$]|^class[A-Za-z_$]"
+                      r"|^(?:const|let|var)[A-Za-z_$]")
+#: ... and the name it declares, so the cross-fragment lint below can ask who
+#: else reaches it.
+_JS_DECL_NAME = re.compile(r"^(?:async)?function([A-Za-z_$][\w$]*)"
+                           r"|^class([A-Za-z_$][\w$]*)"
+                           r"|^(?:const|let|var)([A-Za-z_$][\w$]*)")
+
+
+def _js_top_level_statements(src):
+    """The SKELETON of each top-level statement: its depth-0 characters only.
+
+    ``function f(a) { ... }`` -> ``functionf``; ``const A = {x: 1};`` ->
+    ``constA=``; ``registerMod({...});`` -> ``registerMod``; a bare
+    ``doThing();`` -> ``doThing``. Everything inside brackets is skipped, so
+    indentation and the body are irrelevant -- which is the point, since a
+    shipped mod is indented to sit inside the assembled inline script.
+
+    A statement ends at a depth-0 ``;``, or at the ``}`` that closes a
+    ``function``/``class`` declaration (which needs no semicolon).
+
+    KNOWN LIMIT, stated rather than discovered: an initializer's own call is not
+    separated out, so ``const X = f();`` reads as a declaration. The lint is
+    about top-level STATEMENTS, not about proving an initializer is pure."""
+    depth, cur, out = 0, [], []
+
+    def flush():
+        s = "".join(cur)
+        del cur[:]
+        if s:
+            out.append(s)
+
+    for ch in _js_blank_literals(src):
+        if ch in "([{":
+            depth += 1
+            continue
+        if ch in ")]}":
+            depth -= 1
+            if depth == 0 and ch == "}" and _JS_DECL_HEAD.match("".join(cur)):
+                flush()
+            continue
+        if depth == 0:
+            if ch == ";":
+                flush()
+            elif not ch.isspace():
+                cur.append(ch)
+    flush()
+    return out
+
+
+def _shipped_mod_scripts():
+    return sorted((BROKER_DIR / "mods").rglob("*.js"), key=lambda p: p.as_posix())
+
+
+def _mod_rel(path):
+    return path.relative_to(BROKER_DIR / "mods").as_posix()
+
+
+def test_shipped_mods_carry_no_use_strict_and_no_literal_script_close():
+    # Rules 2 and 4 of the portable-mod contract, and they hold for EVERY
+    # shipped mod with no exceptions -- a mod that breaks either is broken in
+    # one tree or the other, not merely non-portable:
+    #   * a leading "use strict" is INERT mid-bundle (it is not the first
+    #     directive of the assembled script) but becomes a real directive once
+    #     the file is loaded on its own, so the same bytes would run under
+    #     different semantics in the two trees;
+    #   * a literal </script> ends the inline script early and is fatal in-tree
+    #     while being harmless out of tree -- the sharpest possible version of
+    #     "these are not the same environment".
+    assert _shipped_mod_scripts(), "no shipped mod scripts found -- lint is inert"
+    for path in _shipped_mod_scripts():
+        src = path.read_text(encoding="utf-8")
+        assert "</script>" not in src, \
+            f"{_mod_rel(path)} carries a literal </script>"
+        assert not re.search(r"""(?m)^\s*(['"])use strict\1\s*;?\s*$""", src), \
+            f"{_mod_rel(path)} has a top-level 'use strict' directive"
+
+
+def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
+    # Rule 1: nothing at top level may RUN except the registerMod(...) call.
+    # DECLARATIONS ARE FINE -- six shipped mods declare top-level consts and
+    # functions and are correct to; a top-level function is exactly how a mod
+    # publishes a builder. What must not happen is top-level code that ACTS:
+    # spliced into the inline script it would run at parse time, and loaded as
+    # its own <script src> it would run after /info, against a desktop that is
+    # already up. Same bytes, different world.
+    #
+    # All 20 shipped mods pass. This is a forward guard, not a known-gap list.
+    offenders = {}
+    for path in _shipped_mod_scripts():
+        bad = [s for s in _js_top_level_statements(path.read_text(encoding="utf-8"))
+               if s != "registerMod" and not _JS_DECL.match(s)]
+        if bad:
+            offenders[_mod_rel(path)] = bad[:4]
+    assert not offenders, (
+        f"top-level code that RUNS, outside registerMod(...): {offenders}. "
+        "Move it into init(ctx) -- top level may only declare.")
+
+
+#: Every place a SHIPPED mod's top-level name is reached from outside that mod.
+#: This is rule 3 (no reliance on another fragment calling into this one's
+#: top-level functions) and rule 5 (top-level names must not collide), and it is
+#: the reason these mods are NOT republishable as installed mods today: a
+#: shipped mod is spliced into the one inline script, where every fragment
+#: shares one global lexical environment and every declaration is instantiated
+#: before any statement runs. A separately-loaded <script src> publishes its
+#: names only after /info returns, so a caller that runs earlier -- core's
+#: restore path, a keybinding, a sibling mod's init -- would find `undefined`.
+#:
+#: A DRIFT GUARD BOTH WAYS: a new edge fails here, and so does a stale one, so
+#: decoupling a mod forces this list to shrink. Not a rewrite request -- whether
+#: to break any of these couplings is a separate decision.
+_MOD_CROSS_FRAGMENT_CALL_INS = {
+    ("applyPattern", "pattern", "mod:theme/theme.js"),
+    ("editorFile", "editor", "mod:agent-docs/agent-docs.js"),
+    ("findHelpWindow", "help", "core:86_js_mod_loader.js"),
+    ("loadCodeMirror", "editor", "mod:scratchpad/scratchpad.js"),
+    ("openAgentDocsWindow", "agent-docs", "mod:editor/editor.js"),
+    ("openNoteOrEditorWindow", "editor", "core:54_js_app_windows_store.js"),
+    ("openNoteOrEditorWindow", "editor", "mod:sticky/sticky.js"),
+    ("refreshHelpCorpus", "help", "core:86_js_mod_loader.js"),
+    ("toggleHelpWindow", "help", "core:78_js_keybindings.js"),
+}
+
+
+def test_portable_mod_lint_cross_fragment_call_ins_are_known():
+    # Who owns which top-level name, then who else names it. Comments and
+    # strings are blanked first, so a name merely MENTIONED in a comment (there
+    # are several) is not an edge -- only real code is.
+    owner = {}
+    for path in _shipped_mod_scripts():
+        mod = _mod_rel(path).split("/")[0]
+        for stmt in _js_top_level_statements(path.read_text(encoding="utf-8")):
+            m = _JS_DECL_NAME.match(stmt)
+            if m:
+                owner[next(g for g in m.groups() if g)] = mod
+    assert "openNoteOrEditorWindow" in owner, "the name scan found nothing"
+    sources = ([("core:" + p.name, p) for p in sorted(BROKER_DIR.glob("*.js"))]
+               + [("mod:" + _mod_rel(p), p) for p in _shipped_mod_scripts()])
+    blanked = {label: _js_blank_literals(p.read_text(encoding="utf-8"))
+               for label, p in sources}
+    found = set()
+    for name, mod in owner.items():
+        pat = re.compile(r"\b" + re.escape(name) + r"\b")
+        for label, text in blanked.items():
+            if label.startswith("mod:") and label[4:].split("/")[0] == mod:
+                continue
+            if pat.search(text):
+                found.add((name, mod, label))
+    new = sorted(found - _MOD_CROSS_FRAGMENT_CALL_INS)
+    assert not new, (
+        f"new cross-fragment reaches into a mod's top-level name: {new}. That "
+        "works only because shipped mods are spliced into one script -- it "
+        "makes the owning mod unpublishable as an installed mod. Add it here "
+        "deliberately, or route it through ctx.")
+    stale = sorted(_MOD_CROSS_FRAGMENT_CALL_INS - found)
+    assert not stale, (
+        f"these couplings are gone: {stale}. Delete them from "
+        "_MOD_CROSS_FRAGMENT_CALL_INS.")
+
+
+def test_portable_mod_lint_actually_detects_a_violation():
+    # The lint is a hand-rolled scanner, so it gets its own proof that it can
+    # both fail and not false-positive: a "// const X" inside a string, or a
+    # brace inside a regex literal, must not fool it.
+    def top(src):
+        return _js_top_level_statements(src)
+    assert top("registerMod({ id: 'x' });\n") == ["registerMod"]
+    assert top("registerMod({ s: '// doThing();' });\n") == ["registerMod"]
+    assert top("registerMod({ r: /[{};]/g });\n") == ["registerMod"]
+    assert top("/* doThing(); */\nregisterMod({});\n") == ["registerMod"]
+    # Declarations are FINE and stay distinguishable from a call.
+    assert top("const A = 1;\nfunction f() { g(); }\nregisterMod({});\n") == [
+        "constA=1", "functionf", "registerMod"]
+    assert all(_JS_DECL.match(s) for s in top("const A = { x: 1 };\n"))
+    # ... and top-level code that RUNS is caught.
+    for bad in ('"use strict";\n', "applyPattern();\n",
+                "if (x) { boom(); }\n", "window.X = 1;\n"):
+        stmts = top(bad)
+        assert stmts and not all(s == "registerMod" or _JS_DECL.match(s)
+                                 for s in stmts), f"lint missed {bad!r}"

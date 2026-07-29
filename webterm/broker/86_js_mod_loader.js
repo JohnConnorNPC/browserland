@@ -159,12 +159,16 @@
                 defaultEnabled: (decl.defaultEnabled !== false),
                 // #121 (S15): declared mod dependencies — ids of OTHER mods that
                 // must be ACTIVE for this mod to init. Omitted => [] (every existing
-                // mod is dependency-free, so its meaning is unchanged). The static
-                // ordering guard in tests/test_ui_assets.py asserts every listed id
-                // is a KNOWN mod appearing EARLIER in ui._MODS, which makes cycles,
-                // self-require, and missing ids unrepresentable — so boot's in-order
-                // loop is always deps-first and no runtime topological sort / cycle
-                // detection is needed. Non-strings (and empty strings) dropped,
+                // mod is dependency-free, so its meaning is unchanged).
+                // #163: ordering is now established at RUNTIME by
+                // _topoSortRegistered() (86b), which sorts `registered` in place
+                // over the shipped ∪ installed graph and splits its residual into
+                // `cycle` / `blocked-by-cycle`. It used to be established only by
+                // the static ordering guard over ui._MODS, which made cycles,
+                // self-require and missing ids unrepresentable — that guard still
+                // holds for the SHIPPED set (it is a style rule now), but a
+                // runtime-installed set has no such list, so the sort is real and
+                // not merely defensive. Non-strings (and empty strings) dropped,
                 // mirroring `tiers`.
                 requires: Array.isArray(decl.requires)
                     ? decl.requires.filter(function (t) { return typeof t === 'string' && t; })
