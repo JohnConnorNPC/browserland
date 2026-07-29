@@ -252,6 +252,11 @@
                     return;
                 }
                 container.dataset.sig = sig;
+                // The rebuild below drops the dot the pointer may be resting on
+                // WITHOUT firing its mouseleave, so its body-level preview would
+                // hang around until the next hover or a reload. Same stranding
+                // the pager's hide path has to avoid (#162).
+                hideWsPreview();
                 container.innerHTML = '';
                 list.forEach((ws, i) => {
                     const d = document.createElement('div');
