@@ -626,6 +626,19 @@
                            + ' for every browser that loads its page');
                     r.status.textContent = s.label;
                     r.status.dataset.state = s.state;
+                    // #163 (S5): the Uninstall button's only live state. Read
+                    // ONLY from a bag this page writes when ITS OWN uninstall
+                    // succeeded — never from a fetch, never from server state,
+                    // so this stays a pure repaint on every /state pull.
+                    if (r.un) {
+                        const gone = !!_modBag('uninstalled')[r.id];
+                        r.un.disabled = gone;
+                        r.un.textContent = gone ? 'uninstalled' : 'Uninstall';
+                        r.un.title = gone
+                            ? 'uninstalled on this broker — still running in this '
+                              + 'page, gone on the next page load'
+                            : 'remove this mod from this broker';
+                    }
                 }
             }
             function _rebuildRows() {
@@ -651,6 +664,7 @@
                     name.className = 'set-mod-name';
                     name.textContent = s.id;
                     label.appendChild(name);
+                    label.appendChild(_modSourceBadge(s));
                     const status = document.createElement('span');
                     status.className = 'set-mod-status';
                     label.appendChild(status);
@@ -674,7 +688,26 @@
                         tiers.appendChild(b);
                     }
                     row.appendChild(tiers);
-                    rows.push({ id: s.id, cb: cb, status: status, pin: pin });
+                    // #163 (S5): Uninstall, on INSTALLED rows only. A shipped
+                    // mod is in the page's own bundle and cannot be removed by
+                    // any broker call, so offering the control there would be a
+                    // button that can only ever fail.
+                    const actions = document.createElement('div');
+                    actions.className = 'set-mod-actions';
+                    let un = null;
+                    if (s.source === 'installed') {
+                        un = document.createElement('button');
+                        un.type = 'button';
+                        un.className = 'set-mod-uninstall';
+                        un.textContent = 'Uninstall';
+                        un.addEventListener('click', function () {
+                            _modUninstallDialog(mid);
+                        });
+                        actions.appendChild(un);
+                    }
+                    row.appendChild(actions);
+                    rows.push({ id: s.id, cb: cb, status: status, pin: pin,
+                                un: un });
                     listEl.appendChild(row);
                 }
                 _reflectManager();
@@ -692,6 +725,25 @@
                         + 'once, and a mod this broker pins (see “Mods on this '
                         + 'broker”) is locked here.';
                     wrap.appendChild(hint);
+                    // #163 (S5): the operator entry point. It targets the LOCAL
+                    // broker — the one that served this page — so there is no
+                    // build skew to feature-detect: if this code is running,
+                    // that broker has /mods/install. (A headless broker serves
+                    // no page and a master-gate-off broker never mounts this
+                    // pane, so both are already excluded.)
+                    const head = document.createElement('div');
+                    head.className = 'set-mods-head';
+                    const install = document.createElement('button');
+                    install.type = 'button';
+                    install.className = 'set-mod-install';
+                    install.textContent = 'Install a mod…';
+                    install.title = 'add a mod to this broker from a folder or a '
+                        + 'single .js file';
+                    install.addEventListener('click', function () {
+                        _modInstallDialog();
+                    });
+                    head.appendChild(install);
+                    wrap.appendChild(head);
                     listEl = document.createElement('div');
                     listEl.className = 'set-mods-list';
                     _rebuildRows();
@@ -866,4 +918,837 @@
                 // so the checkbox must not pretend otherwise.
                 toggleable: !!decl && pin === null,
             };
+        }
+
+        // ---- provenance + install/uninstall UI (#163 / S5, design §9) -------
+        // Everything below drives the LOCAL broker only — the one that served
+        // this page. That is the whole reason there is no feature detection
+        // here: this fragment ships inside the page that broker assembled, so
+        // it cannot be talking to a build without /mods/install. Installing on
+        // a REMOTE broker is a separate trust decision and deliberately has no
+        // control (see the per-host pane in 81_js_control_panel.js).
+        //
+        // Every string that originates OUTSIDE this file — a mod's title or
+        // version, a manifest's own JSON, a broker error `detail`, a picked
+        // file's name — reaches the DOM through textContent or a .title
+        // property assignment and never through innerHTML. renderMenu's
+        // invariant (the only innerHTML in this app is our own markup) holds
+        // here too.
+
+        // The `shipped` / `installed` badge. REFLECTED, never decided: `s`
+        // comes from _modStatusRows(), which reads the BOOT catalog snapshot
+        // plus this page's own package records — no fetch, no server state, so
+        // a /state pull can never move it.
+        function _modSourceBadge(s) {
+            const el = document.createElement('span');
+            el.className = 'set-mod-source';
+            el.dataset.modSource = s.source;
+            el.textContent = s.source;
+            if (s.source === 'installed') {
+                // A mod-supplied version and a broker-supplied generation.
+                // .title is a PROPERTY assignment (no HTML parsing), but a
+                // registration's `version` is whatever the mod's own object
+                // literal said and is not length-capped anywhere, so clamp it
+                // rather than hand the tooltip a megabyte.
+                el.title = 'installed on this broker — v'
+                    + (_modClamp(s.version, 32) || '?') + ' · '
+                    + (_modClamp(s.gen, 8) || '?');
+            } else {
+                el.title = 'shipped in this broker’s own page bundle';
+            }
+            return el;
+        }
+
+        // A short, single-line, length-capped rendering of an untrusted string.
+        function _modClamp(v, n) {
+            if (typeof v !== 'string' || !v) return '';
+            return v.replace(/[\r\n\t]+/g, ' ').slice(0, n);
+        }
+
+        function _modFmtBytes(n) {
+            if (!(n > 0)) return '0 B';
+            if (n < 1024) return n + ' B';
+            return (n / 1024).toFixed(1) + ' KiB';
+        }
+
+        // The byte length the BROKER will write, not the length of the string
+        // and not the size on disk. Blob.text() UTF-8-decodes (and strips a
+        // BOM), so file.size can differ from what is actually sent; the preview
+        // must show what will be written or it is not a preview.
+        function _modByteLen(text) {
+            try { return new TextEncoder().encode(text).length; }
+            catch (_) { return (typeof text === 'string') ? text.length : 0; }
+        }
+
+        // Every refusal code the install/uninstall API can answer with, as a
+        // sentence. A raw error code in the UI is a bug: these are the words an
+        // operator can act on. An UNKNOWN code (a newer broker, which cannot
+        // happen for the local one, or a bug) still degrades to a sentence.
+        function _modErrorText(code, status) {
+            const map = {
+                too_large: 'that mod is too large to send in one request.',
+                bad_json: 'this broker could not parse the request.',
+                bad_mod_id: 'that mod id is not a legal id (lowercase letters, '
+                    + 'digits and hyphens).',
+                bad_generation: 'the files did not hash to the generation this '
+                    + 'broker expected.',
+                reserved_id: 'an installed mod id must start with “x-” — ids '
+                    + 'without that prefix are reserved for mods this broker '
+                    + 'ships itself.',
+                id_in_use: 'a mod with that id is already installed here. Tick '
+                    + '“Replace the copy already installed on this broker” to '
+                    + 'upgrade it, or uninstall it first (that is where the '
+                    + 'purge option lives).',
+                not_installed: 'this broker says that mod is not installed. If '
+                    + 'this was a retry after a failed attempt, the first '
+                    + 'attempt may already have removed it.',
+                bad_file_name: 'one of the file names is not accepted (ASCII '
+                    + 'letters, digits, dot, dash and underscore; .js, .css or '
+                    + '.md only).',
+                reserved_file_name: 'that file name belongs to the broker — it '
+                    + 'writes mod.json itself from the manifest.',
+                too_many_files: 'that package has more files than this broker '
+                    + 'accepts.',
+                file_too_large: 'one file is over this broker’s per-file limit.',
+                total_too_large: 'the package is over this broker’s per-mod '
+                    + 'size limit.',
+                bad_encoding: 'a file is not usable text: it must be UTF-8, '
+                    + 'must not start with a byte-order mark, and must end in a '
+                    + 'newline.',
+                bad_scripts: '`scripts` must be a non-empty ordered list of .js '
+                    + 'names that are all in the package (the shipped tree’s '
+                    + '`entry` field is not accepted here).',
+                bad_styles: '`styles` must be a list of .css names that are all '
+                    + 'in the package.',
+                bad_requires: '`requires` must be a list of mod ids, and a mod '
+                    + 'cannot require itself.',
+                bad_manifest_field: 'a manifest field has the wrong type or is '
+                    + 'too long.',
+                unknown_manifest_key: 'the manifest carries a key this broker '
+                    + 'does not accept. Unknown keys are refused rather than '
+                    + 'ignored, so a typo is loud.',
+                css_external_reference: 'a stylesheet loads from another origin '
+                    + '(@import, or an absolute url()). Installed CSS must be '
+                    + 'self-contained — data: and relative URLs are fine.',
+                too_many_mods: 'this broker already holds as many installed '
+                    + 'mods as it accepts.',
+                write_failed: 'this broker could not write to its mod store.',
+            };
+            if (map[code]) return map[code];
+            return 'this broker refused the request (HTTP ' + (status || '?')
+                + (code ? ', ' + _modClamp(code, 64) : '') + ').';
+        }
+
+        // The lines a failed install/uninstall shows: the mapped sentence, then
+        // the broker's own `detail` quoted and capped. `detail` echoes names
+        // that came from the picked mod, so it is untrusted text — it rides a
+        // text node, like everything else here.
+        function _modFailLines(r, j) {
+            const code = (j && typeof j.error === 'string') ? j.error : '';
+            const lines = [_modErrorText(code, r ? r.status : 0)];
+            const detail = (j && typeof j.detail === 'string') ? j.detail : '';
+            if (detail) lines.push('This broker said: ' + _modClamp(detail, 400));
+            return lines;
+        }
+
+        // A result modal: N text lines, and (for an outcome that only takes
+        // effect on the next page load) a reload button. D1 again — an install
+        // or uninstall NEVER changes this page, so the offer to reload is the
+        // honest end of the flow, not a nicety.
+        function _modOpResult(title, lines, offerReload) {
+            const buttons = [];
+            if (offerReload) {
+                buttons.push({ label: 'Reload now', value: 'reload',
+                               primary: true });
+            }
+            buttons.push({ label: 'Close', value: 'close',
+                           primary: !offerReload });
+            return openDialog({
+                title: title,
+                body: function (c) {
+                    for (const line of lines) {
+                        if (!line) continue;
+                        const p = document.createElement('div');
+                        p.className = 'app-dialog-msg';
+                        p.textContent = line;
+                        c.appendChild(p);
+                    }
+                },
+                buttons: buttons,
+            }).then(function (r) {
+                if (r && r.value === 'reload') {
+                    try { window.location.reload(); } catch (_) {}
+                }
+            });
+        }
+
+        // ---- uninstall ------------------------------------------------------
+        function _modUninstallDialog(id) {
+            let purgeCb = null;
+            openDialog({
+                title: 'Uninstall ' + id,
+                body: function (c) {
+                    const p = document.createElement('div');
+                    p.className = 'app-dialog-msg';
+                    p.textContent = 'Remove ' + id + ' from this broker.\n\n'
+                        + 'It keeps running in this page until you reload, and '
+                        + 'other browsers keep running it until they reload — '
+                        + 'an uninstall applies on the next page load.';
+                    c.appendChild(p);
+                    const lab = document.createElement('label');
+                    lab.className = 'set-check';
+                    purgeCb = document.createElement('input');
+                    purgeCb.type = 'checkbox';
+                    lab.appendChild(purgeCb);
+                    const t = document.createElement('span');
+                    // VERBATIM, and it must stay verbatim: the purge spans
+                    // three sidecars and cannot be one transaction, it is
+                    // BROKER-side only, and no broker can reach what other
+                    // browsers hold in their own localStorage. Every clause
+                    // here is load-bearing — do not reflow it.
+                    t.textContent = "Also delete this mod's server-side data on "
+                        + "this broker (its /mod-store value and its pin). Data "
+                        + "stored in other browsers is not affected.";
+                    lab.appendChild(t);
+                    c.appendChild(lab);
+                },
+                buttons: [
+                    { label: 'Uninstall', value: true, primary: true,
+                      danger: true },
+                    { label: 'Cancel', value: false },
+                ],
+            }).then(function (r) {
+                if (!r || !r.value) return;
+                // Read at COMMIT time from the element itself. The node is
+                // detached by then, but the closure still holds it and its
+                // .checked is the value the operator actually left.
+                return _modUninstallRun(id, !!(purgeCb && purgeCb.checked));
+            });
+        }
+
+        async function _modUninstallRun(id, purge) {
+            let r = null;
+            try {
+                r = await hostFetch(localHost(), '/mods/uninstall', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: id, purge: purge }),
+                });
+            } catch (e) {
+                _modOpResult('Uninstall failed',
+                    ['could not reach this broker. ' + id
+                     + ' is still installed.'], false);
+                return;
+            }
+            let j = null;
+            try { j = await r.json(); } catch (_) { j = null; }
+            if (!r.ok || !j || j.ok !== true) {
+                // A PURGE that could not write answers write_failed WITH THE
+                // MOD STILL INSTALLED — data-first, code-last, so the code is
+                // never removed while its data survives. Reporting that as any
+                // flavour of success would invert the one guarantee the
+                // ordering exists to give.
+                const lines = _modFailLines(r, j);
+                const code = (j && typeof j.error === 'string') ? j.error : '';
+                if (code === 'write_failed') {
+                    lines.push(id + ' is STILL INSTALLED and its server-side '
+                        + 'data is still there. Nothing was removed.');
+                } else if (code !== 'not_installed') {
+                    lines.push(id + ' is still installed.');
+                }
+                _modOpResult('Uninstall failed', lines, false);
+                return;
+            }
+            _modBag('uninstalled')[id] = true;
+            _renderManagerRows();
+            const purged = (j.purged && typeof j.purged === 'object')
+                ? j.purged : {};
+            const lines = [id + ' is uninstalled on this broker.'];
+            if (purge) {
+                const gone = [];
+                if (purged.mod_store) gone.push('its /mod-store value');
+                if (purged.pin) gone.push('its pin');
+                lines.push(gone.length
+                    ? 'Deleted ' + gone.join(' and ') + '.'
+                    : 'There was no server-side data on this broker to delete.');
+                lines.push('Data this mod stored in other browsers is not '
+                    + 'affected — no broker can reach it.');
+            }
+            lines.push('It is STILL RUNNING in this page. It disappears on the '
+                + 'next page load.');
+            _modOpResult('Uninstalled', lines, true);
+        }
+
+        // ---- install --------------------------------------------------------
+        // Bounds on what a PICK may hand us, function-local (the fragment rule:
+        // a hoisted function reading a not-yet-initialized fragment const throws
+        // a TDZ ReferenceError that kills the whole script).
+        //
+        // `entries` is the important one and it is checked from FileList.length,
+        // which is O(1), BEFORE any iteration: a folder pick hands us every file
+        // under the chosen directory, so a mis-click on a home directory is tens
+        // of thousands of entries and the walk would run synchronously on the
+        // one UI thread. `files` mirrors the broker's own cap so the refusal is
+        // immediate instead of a round trip, and `readBytes` bounds how much
+        // text we are willing to decode before the broker gets a say.
+        function _modPickLimits() {
+            return { entries: 2000, files: 32, readBytes: 2 * 1024 * 1024 };
+        }
+        function _modManifestKeys() {
+            return ['id', 'version', 'ctxVersion', 'title', 'description',
+                    'scripts', 'styles', 'requires', 'tiers', 'help',
+                    'defaultEnabled'];
+        }
+        function _modAllowedPickName(name) {
+            return /\.(?:js|css|md)$/i.test(name || '');
+        }
+        function _modCsvList(s) {
+            if (typeof s !== 'string') return [];
+            return s.split(',').map(function (v) { return v.trim(); })
+                .filter(function (v) { return !!v; });
+        }
+
+        // Stage 1: pick a folder or a single .js. Both inputs are REAL elements
+        // inside the dialog, so the click that opens the OS picker is directly
+        // the user's own gesture — routing it through a promise first would put
+        // the .click() outside the activation the browser requires.
+        function _modInstallDialog() {
+            let statusEl = null;
+            let folderIn = null;
+            let fileIn = null;
+            let busy = false;
+            const say = function (msg, cls) {
+                if (!statusEl) return;
+                statusEl.textContent = msg || '';
+                statusEl.className = cls || 'mod-install-note';
+            };
+            const lock = function (on) {
+                busy = on;
+                if (folderIn) folderIn.disabled = on;
+                if (fileIn) fileIn.disabled = on;
+            };
+            const onPicked = function (p) {
+                if (busy) return;
+                lock(true);
+                say('reading…');
+                p.then(function (pick) {
+                    if (!pick) { lock(false); say(''); return null; }
+                    say('checking this broker…');
+                    return _modInstallPreview(pick);
+                }).then(function () { lock(false); },
+                        function (e) {
+                            lock(false);
+                            say((e && e.message) ? e.message
+                                : 'could not read that.', 'mod-install-danger');
+                        });
+            };
+            openDialog({
+                title: 'Install a mod',
+                body: function (c) {
+                    const p = document.createElement('div');
+                    p.className = 'app-dialog-msg';
+                    p.textContent = 'Add a mod to this broker — no source edit '
+                        + 'and no restart.\n\nPick the mod’s own folder (it must '
+                        + 'contain mod.json), or a single .js file and type its '
+                        + 'manifest. You see exactly what will be sent before '
+                        + 'anything is written.\n\nAn install applies on the '
+                        + 'NEXT page load. Nothing in this page changes until '
+                        + 'you reload.';
+                    c.appendChild(p);
+                    const r1 = document.createElement('div');
+                    r1.className = 'set-row app-dialog-field';
+                    const l1 = document.createElement('label');
+                    l1.textContent = 'Folder';
+                    r1.appendChild(l1);
+                    folderIn = document.createElement('input');
+                    folderIn.type = 'file';
+                    // The property alone is not enough on every engine, and the
+                    // non-standard `directory` is what Firefox reads.
+                    try {
+                        folderIn.webkitdirectory = true;
+                        folderIn.setAttribute('webkitdirectory', '');
+                        folderIn.setAttribute('directory', '');
+                    } catch (_) {}
+                    folderIn.addEventListener('change', function () {
+                        onPicked(_modReadFolder(folderIn.files));
+                    });
+                    r1.appendChild(folderIn);
+                    c.appendChild(r1);
+                    const r2 = document.createElement('div');
+                    r2.className = 'set-row app-dialog-field';
+                    const l2 = document.createElement('label');
+                    l2.textContent = 'Single .js';
+                    r2.appendChild(l2);
+                    fileIn = document.createElement('input');
+                    fileIn.type = 'file';
+                    fileIn.accept = '.js';
+                    fileIn.addEventListener('change', function () {
+                        const f = fileIn.files && fileIn.files[0];
+                        if (!f) return;
+                        onPicked(_modReadSingle(f).then(function (one) {
+                            return one ? _modInstallFields(one) : null;
+                        }));
+                    });
+                    r2.appendChild(fileIn);
+                    c.appendChild(r2);
+                    statusEl = document.createElement('div');
+                    statusEl.className = 'mod-install-note';
+                    c.appendChild(statusEl);
+                },
+                buttons: [{ label: 'Cancel', value: false }],
+            });
+        }
+
+        // Read a picked directory into {manifest, files, notes}. Rejects with an
+        // Error whose message is shown to the operator verbatim.
+        async function _modReadFolder(list) {
+            const lim = _modPickLimits();
+            if (!list || !list.length) return null;
+            if (list.length > lim.entries) {
+                throw new Error('that folder holds ' + list.length + ' entries; '
+                    + 'pick the mod’s own folder (a mod is at most '
+                    + lim.files + ' files).');
+            }
+            const notes = [];
+            const picked = [];
+            let manifestFile = null;
+            let bytes = 0;
+            for (let i = 0; i < list.length; i++) {
+                const f = list[i];
+                const rel = (f && (f.webkitRelativePath || f.name)) || '';
+                const parts = rel.split('/');
+                const name = parts[parts.length - 1];
+                // A mod is ONE FLAT FOLDER: the filename grammar has no path
+                // separator, so a nested file has no name it could be installed
+                // under. Reported, never silently dropped.
+                if (parts.length > 2) {
+                    notes.push('not sent: ' + rel + ' (a mod is one flat folder)');
+                    continue;
+                }
+                if (name.toLowerCase() === 'mod.json') { manifestFile = f; continue; }
+                if (!_modAllowedPickName(name)) {
+                    notes.push('not sent: ' + name + ' (only .js, .css and .md)');
+                    continue;
+                }
+                picked.push({ name: name, file: f });
+                bytes += (f && f.size) || 0;
+            }
+            if (!manifestFile) {
+                throw new Error('that folder has no mod.json. Pick the mod’s own '
+                    + 'folder, or use the single-file option and type the '
+                    + 'manifest fields.');
+            }
+            if (!picked.length) {
+                throw new Error('that folder has no .js, .css or .md files.');
+            }
+            if (picked.length > lim.files) {
+                throw new Error(picked.length + ' files; this broker installs at '
+                    + 'most ' + lim.files + '.');
+            }
+            if (bytes > lim.readBytes) {
+                throw new Error('those files are ' + _modFmtBytes(bytes)
+                    + '; far over this broker’s per-mod limit.');
+            }
+            let manifest = null;
+            try { manifest = JSON.parse(await manifestFile.text()); }
+            catch (_) {
+                throw new Error('that folder’s mod.json is not valid JSON.');
+            }
+            if (!manifest || typeof manifest !== 'object'
+                    || Array.isArray(manifest)) {
+                throw new Error('that folder’s mod.json is not a JSON object.');
+            }
+            // Object.create(null) so a file literally named __proto__.* could
+            // not reach Object.prototype. The grammar already forbids a leading
+            // underscore, which is belt to this braces.
+            const files = Object.create(null);
+            for (const p of picked) files[p.name] = await p.file.text();
+            return { manifest: manifest, files: files, notes: notes };
+        }
+
+        async function _modReadSingle(file) {
+            const lim = _modPickLimits();
+            const name = (file && file.name) || '';
+            if (!/\.js$/i.test(name)) {
+                throw new Error('pick a .js file (the mod’s entry script).');
+            }
+            if (((file && file.size) || 0) > lim.readBytes) {
+                throw new Error('that file is ' + _modFmtBytes(file.size)
+                    + '; far over this broker’s per-file limit.');
+            }
+            return { name: name, text: await file.text() };
+        }
+
+        // A plausible starting id for a single-file pick. Only a default — the
+        // field is editable and its validator, not this, is what decides.
+        function _modGuessId(name) {
+            let base = String(name || '').replace(/\.js$/i, '').toLowerCase();
+            base = base.replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+            if (!base) base = 'mod';
+            return (base.slice(0, 2) === 'x-') ? base : ('x-' + base);
+        }
+
+        // Stage 2 (single-file path only): the manifest the broker will write.
+        // A SEPARATE stage rather than fields on the preview, so the preview can
+        // show the finished manifest — a preview built from half-typed fields
+        // would show something other than what is sent.
+        async function _modInstallFields(one) {
+            const r = await openDialog({
+                title: 'Manifest for ' + one.name,
+                body: function (c) {
+                    const p = document.createElement('div');
+                    p.className = 'app-dialog-msg';
+                    p.textContent = 'This broker writes mod.json itself from '
+                        + 'these fields. An installed mod id must start with '
+                        + '“x-”; ids without that prefix are reserved for mods '
+                        + 'the broker ships.\n\n`requires` and `tiers` are '
+                        + 'comma-separated.';
+                    c.appendChild(p);
+                },
+                fields: [
+                    { key: 'id', label: 'id', value: _modGuessId(one.name),
+                      placeholder: 'x-notes',
+                      validate: function (v) {
+                          const id = (v || '').trim();
+                          if (!MOD_ID_RE.test(id)) {
+                              return 'an id is lowercase letters, digits and '
+                                  + 'hyphens';
+                          }
+                          if (id.slice(0, 2) !== 'x-') {
+                              return 'an installed mod id must start with “x-”';
+                          }
+                          return '';
+                      } },
+                    { key: 'title', label: 'title', value: '' },
+                    { key: 'version', label: 'version', value: '' },
+                    { key: 'requires', label: 'requires',
+                      placeholder: 'editor, clock' },
+                    { key: 'tiers', label: 'tiers',
+                      placeholder: 'settings, window' },
+                ],
+                buttons: [{ label: 'Continue', value: true, primary: true },
+                          { label: 'Cancel', value: false }],
+            });
+            if (!r || !r.value) return null;
+            const f = r.fields;
+            const id = (f.id || '').trim();
+            const files = Object.create(null);
+            files[one.name] = one.text;
+            return {
+                manifest: {
+                    id: id,
+                    version: (f.version || '').trim(),
+                    ctxVersion: 1,
+                    title: (f.title || '').trim() || id,
+                    description: '',
+                    scripts: [one.name],
+                    styles: [],
+                    requires: _modCsvList(f.requires),
+                    tiers: _modCsvList(f.tiers),
+                },
+                files: files,
+                notes: [],
+            };
+        }
+
+        // What THIS BROKER already holds under that id. #172: /mod-store and the
+        // pin map have always accepted any id-shaped key, so state can pre-exist
+        // an install (console code, a hand-edited sidecar, a locally hacked mod)
+        // and installing would silently adopt it. The install response is the
+        // authoritative answer; this is the one the operator gets BEFORE
+        // confirming. `modStore: null` means "could not check" and says so —
+        // never "no".
+        async function _modAdoptionCheck(id) {
+            const out = { pin: false, modStore: null };
+            const raw = window.__mods.policyRaw;
+            if (raw && typeof raw === 'object' && !Array.isArray(raw)
+                    && typeof raw[id] === 'boolean') {
+                out.pin = true;
+            }
+            try {
+                const r = await hostFetch(localHost(),
+                    '/mod-store/' + encodeURIComponent(id), { cache: 'no-store' });
+                if (r.ok) {
+                    const j = await r.json();
+                    out.modStore = !!(j && (j.rev > 0 || j.value !== null));
+                }
+            } catch (_) { /* leave null — "could not check" */ }
+            return out;
+        }
+
+        // The refusals this payload is heading for, in the operator's words.
+        // Advisory ONLY: the broker's validator is authoritative and Install
+        // stays enabled, because a client-side gate that disagrees with the
+        // server is a worse bug than a round trip. Anything not listed here
+        // still comes back as a mapped error.
+        function _modInstallWarnings(pick, names, sizes, total) {
+            const lim = _modPickLimits();
+            const out = [];
+            const m = pick.manifest || {};
+            const id = m.id;
+            if (typeof id !== 'string' || !MOD_ID_RE.test(id)) {
+                out.push('the manifest has no usable `id`; this broker will '
+                    + 'refuse it.');
+            } else if (id.slice(0, 2) !== 'x-') {
+                out.push('`' + _modClamp(id, 64) + '` is in the first-party '
+                    + 'namespace — an installed mod id must start with “x-”, so '
+                    + 'this broker will refuse it.');
+            }
+            const known = _modManifestKeys();
+            const unknown = Object.keys(m).filter(function (k) {
+                return known.indexOf(k) === -1; });
+            if (unknown.length) {
+                out.push('the manifest carries key(s) this broker does not '
+                    + 'accept and will refuse: '
+                    + _modClamp(unknown.join(', '), 200)
+                    + '. (A shipped mod’s mod.json declares `entry`; an '
+                    + 'installed one declares `scripts`.)');
+            }
+            const scripts = Array.isArray(m.scripts) ? m.scripts : null;
+            if (!scripts || !scripts.length) {
+                out.push('`scripts` is required and must name at least one .js '
+                    + 'file in this package.');
+            } else {
+                for (const n of scripts) {
+                    if (names.indexOf(n) === -1) {
+                        out.push('`scripts` names ' + _modClamp(String(n), 80)
+                            + ', which is not one of the files above.');
+                    }
+                }
+            }
+            for (const n of (Array.isArray(m.styles) ? m.styles : [])) {
+                if (names.indexOf(n) === -1) {
+                    out.push('`styles` names ' + _modClamp(String(n), 80)
+                        + ', which is not one of the files above.');
+                }
+            }
+            for (const n of names) {
+                const text = pick.files[n];
+                if (typeof text !== 'string' || text.slice(-1) !== '\n') {
+                    out.push(n + ' does not end in a newline; this broker will '
+                        + 'refuse it.');
+                }
+                if (sizes[n] > 256 * 1024) {
+                    out.push(n + ' is ' + _modFmtBytes(sizes[n])
+                        + ', over the 256 KiB per-file limit.');
+                }
+            }
+            if (names.length > lim.files) {
+                out.push(names.length + ' files, over the ' + lim.files
+                    + '-file limit.');
+            }
+            if (total > 512 * 1024) {
+                out.push('the package is ' + _modFmtBytes(total)
+                    + ', over the 512 KiB per-mod limit.');
+            }
+            return out;
+        }
+
+        // Stage 3: show EXACTLY what will be POSTed, then send it. The manifest
+        // is rendered as its literal JSON — not a prettified summary — because
+        // the one thing this dialog must never do is describe a payload
+        // different from the one it sends. The broker writes mod.json from this
+        // object, so a mod.json that was in the picked folder is shown here and
+        // is otherwise not stored.
+        async function _modInstallPreview(pick) {
+            const names = Object.keys(pick.files).sort();
+            const sizes = Object.create(null);
+            let total = 0;
+            for (const n of names) {
+                sizes[n] = _modByteLen(pick.files[n]);
+                total += sizes[n];
+            }
+            const warnings = _modInstallWarnings(pick, names, sizes, total);
+            const id = (pick.manifest && typeof pick.manifest.id === 'string')
+                ? pick.manifest.id : '';
+            const adopt = (id && MOD_ID_RE.test(id))
+                ? await _modAdoptionCheck(id)
+                : { pin: false, modStore: null };
+            const installedRow = id ? _modCatalogRow(id) : null;
+            const alreadyHere = !!(installedRow
+                && installedRow.source === 'installed');
+            let json = '';
+            try { json = JSON.stringify(pick.manifest, null, 2); }
+            catch (_) { json = '(this manifest cannot be encoded as JSON)'; }
+            let replaceCb = null;
+            const r = await openDialog({
+                title: 'Install ' + (id || 'this mod'),
+                body: function (c) {
+                    const intro = document.createElement('div');
+                    intro.className = 'app-dialog-msg';
+                    intro.textContent = 'POST /mods/install to this broker. The '
+                        + 'manifest below is written to mod.json by the broker '
+                        + 'itself — this is literally what will be sent:';
+                    c.appendChild(intro);
+                    const pre = document.createElement('pre');
+                    pre.className = 'mod-install-pre';
+                    pre.textContent = json;
+                    c.appendChild(pre);
+                    const filesWrap = document.createElement('div');
+                    filesWrap.className = 'mod-install-files';
+                    for (const n of names) {
+                        const row = document.createElement('div');
+                        row.className = 'mod-install-file';
+                        const a = document.createElement('span');
+                        a.textContent = n;
+                        const b = document.createElement('span');
+                        b.textContent = _modFmtBytes(sizes[n]);
+                        row.appendChild(a);
+                        row.appendChild(b);
+                        filesWrap.appendChild(row);
+                    }
+                    c.appendChild(filesWrap);
+                    const totals = document.createElement('div');
+                    totals.className = 'mod-install-note';
+                    totals.textContent = names.length + ' file'
+                        + (names.length === 1 ? '' : 's') + ', '
+                        + _modFmtBytes(total)
+                        + ' as UTF-8 — the bytes the broker will write.';
+                    c.appendChild(totals);
+                    const notes = (pick.notes || []).slice(0, 8);
+                    for (const n of notes) {
+                        const el = document.createElement('div');
+                        el.className = 'mod-install-note';
+                        el.textContent = _modClamp(n, 200);
+                        c.appendChild(el);
+                    }
+                    if ((pick.notes || []).length > notes.length) {
+                        const el = document.createElement('div');
+                        el.className = 'mod-install-note';
+                        el.textContent = '…and '
+                            + ((pick.notes || []).length - notes.length)
+                            + ' more file(s) not sent.';
+                        c.appendChild(el);
+                    }
+                    for (const w of warnings) {
+                        const el = document.createElement('div');
+                        el.className = 'mod-install-danger';
+                        el.textContent = w;
+                        c.appendChild(el);
+                    }
+                    // #172's residual case, surfaced BEFORE the confirm.
+                    if (adopt.pin) {
+                        const el = document.createElement('div');
+                        el.className = 'mod-install-warn';
+                        el.textContent = 'This broker already pins “' + id
+                            + '”. That pin will apply to this mod.';
+                        c.appendChild(el);
+                    }
+                    const store = document.createElement('div');
+                    if (adopt.modStore === true) {
+                        store.className = 'mod-install-warn';
+                        store.textContent = 'This broker already holds '
+                            + '/mod-store data under “' + id + '”. This mod '
+                            + 'will inherit it — if it is a different author’s '
+                            + 'mod of the same id, uninstall the old one with '
+                            + 'the purge option first.';
+                    } else if (adopt.modStore === null) {
+                        store.className = 'mod-install-note';
+                        store.textContent = 'Could not check whether this broker '
+                            + 'already holds /mod-store data under “' + id
+                            + '”; if it does, this mod inherits it.';
+                    } else {
+                        store.className = 'mod-install-note';
+                        store.textContent = 'This broker holds no /mod-store '
+                            + 'data under “' + id + '”.';
+                    }
+                    c.appendChild(store);
+                    const ls = document.createElement('div');
+                    ls.className = 'mod-install-note';
+                    ls.textContent = 'What a mod of this id stored in a '
+                        + 'browser’s own localStorage cannot be inspected from '
+                        + 'here, and is not covered by any of this.';
+                    c.appendChild(ls);
+                    const lab = document.createElement('label');
+                    lab.className = 'set-check';
+                    replaceCb = document.createElement('input');
+                    replaceCb.type = 'checkbox';
+                    lab.appendChild(replaceCb);
+                    const rt = document.createElement('span');
+                    rt.textContent = 'Replace the copy already installed on this '
+                        + 'broker (sends "replace": true). Without this, an id '
+                        + 'that is already installed is refused.';
+                    lab.appendChild(rt);
+                    c.appendChild(lab);
+                    if (alreadyHere) {
+                        const el = document.createElement('div');
+                        el.className = 'mod-install-warn';
+                        el.textContent = id + ' v'
+                            + (_modClamp(installedRow.version, 32) || '?')
+                            + ' was already installed here when this page '
+                            + 'loaded — tick Replace to upgrade it.';
+                        c.appendChild(el);
+                    }
+                    const tail = document.createElement('div');
+                    tail.className = 'app-dialog-msg';
+                    tail.textContent = 'An installed mod is OFF by default '
+                        + 'whatever its manifest says — enable it in this list '
+                        + 'after the reload, or pin it on for every browser '
+                        + 'under “Mods on this broker”.\n\nIt appears on the '
+                        + 'NEXT page load. Nothing in this page changes.';
+                    c.appendChild(tail);
+                },
+                buttons: [{ label: 'Install', value: true, primary: true },
+                          { label: 'Cancel', value: false }],
+            });
+            if (!r || !r.value) return;
+            await _modInstallRun(pick, !!(replaceCb && replaceCb.checked));
+        }
+
+        async function _modInstallRun(pick, replace) {
+            let body = null;
+            try {
+                body = JSON.stringify({ manifest: pick.manifest,
+                                        files: pick.files,
+                                        replace: !!replace });
+            } catch (_) {
+                _modOpResult('Install failed',
+                    ['that mod could not be encoded as JSON; nothing was sent.'],
+                    false);
+                return;
+            }
+            let r = null;
+            try {
+                r = await hostFetch(localHost(), '/mods/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: body,
+                });
+            } catch (_) {
+                _modOpResult('Install failed',
+                    ['could not reach this broker. Nothing was installed.'],
+                    false);
+                return;
+            }
+            let j = null;
+            try { j = await r.json(); } catch (_) { j = null; }
+            if (!r.ok || !j || j.ok !== true) {
+                const lines = _modFailLines(r, j);
+                lines.push('Nothing was written — this broker validates the '
+                    + 'whole package before it writes a byte.');
+                _modOpResult('Install refused', lines, false);
+                return;
+            }
+            const adopts = (j.adopts_existing_state
+                && typeof j.adopts_existing_state === 'object')
+                ? j.adopts_existing_state : {};
+            const lines = [
+                _modClamp(String(j.id || ''), 64)
+                    + (j.replaced ? ' was replaced' : ' is installed')
+                    + ' on this broker.',
+                'Generation ' + _modClamp(String(j.gen || ''), 12) + '.',
+            ];
+            if (adopts.mod_store) {
+                lines.push('It inherited /mod-store data this broker already '
+                    + 'held under that id.');
+            }
+            if (adopts.pin) {
+                lines.push('A pin this broker already held under that id now '
+                    + 'applies to it.');
+            }
+            lines.push('Installed mods are OFF by default. Enable it in this '
+                + 'list after the reload.');
+            lines.push('It appears on the NEXT page load. Nothing in this page '
+                + 'changed.');
+            _modOpResult('Installed', lines, true);
         }
