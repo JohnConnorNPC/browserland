@@ -392,6 +392,57 @@
         .set-mod-status[data-state="fetch-failed"],
         .set-mod-status[data-state="no-register"],
         .set-mod-status[data-state="wrong-id"] { color: #f85149; }
+        /* #163 (S5): where a mod CAME FROM. Muted for `shipped` (it is in the
+           page you are already running); accent for `installed` (a package this
+           broker holds on disk and serves separately), whose title carries the
+           version + generation prefix. REFLECTED from the boot catalog snapshot,
+           never decided at paint time — _reflectManager runs on every /state pull
+           and must stay read-only. */
+        .set-mod-source {
+            font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;
+            border: 1px solid var(--bg-3); background: var(--bg); color: var(--fg-dim);
+        }
+        .set-mod-source[data-mod-source="installed"] {
+            color: var(--accent-default); border-color: var(--accent-default);
+        }
+        /* The pane's operator controls: "Install a mod…" in the header and a
+           per-row Uninstall on installed rows only. Both act on the LOCAL broker
+           — the one that served this page — so there is no version skew to
+           feature-detect. Chrome mirrors the #file-modal buttons. */
+        .set-mods-head {
+            display: flex; align-items: center; justify-content: flex-end;
+            gap: 8px; margin-top: 6px;
+        }
+        .set-mod-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+        .set-mod-install, .set-mod-uninstall {
+            background: var(--bg); border: 1px solid var(--bg-3); border-radius: 3px;
+            color: var(--fg); font-family: monospace; font-size: 11px;
+            padding: 3px 8px; cursor: pointer; flex: 0 0 auto;
+        }
+        .set-mod-install:hover:not(:disabled),
+        .set-mod-uninstall:hover:not(:disabled) {
+            background: #262626; border-color: #6a8;
+        }
+        .set-mod-uninstall:disabled, .set-mod-install:disabled {
+            opacity: .55; cursor: default;
+        }
+        /* The install dialog's PREVIEW: the literal manifest JSON that will be
+           POSTed, the per-file byte counts as they will be written, and the
+           refusals/adoptions the operator should see before confirming. */
+        .mod-install-pre {
+            max-height: 170px; overflow: auto; margin: 0; padding: 6px;
+            background: var(--bg); border: 1px solid var(--bg-3); border-radius: 3px;
+            font-family: monospace; font-size: 11px; white-space: pre;
+            color: var(--fg-dim);
+        }
+        .mod-install-files { max-height: 140px; overflow: auto; }
+        .mod-install-file {
+            display: flex; justify-content: space-between; gap: 10px;
+            font-family: monospace; font-size: 11px; color: var(--fg-dim);
+        }
+        .mod-install-note { font-size: 11px; color: var(--fg-dim); }
+        .mod-install-warn { font-size: 11px; color: #d29922; }
+        .mod-install-danger { font-size: 11px; color: var(--danger); }
         .set-mod-tiers { display: flex; flex-wrap: wrap; gap: 4px; flex: 0 0 auto; }
         .set-mod-tier {
             font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;
@@ -413,6 +464,16 @@
             display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
         }
         .set-mod-policy-name { font-weight: 600; flex: 0 0 auto; }
+        /* #163 (S5): a REMOTE broker's provenance is SELF-ASSERTED — it is a
+           string that broker chose to put in its /info. So it is rendered as a
+           quote ("peer reports: …") and anything unrecognised renders `unknown`,
+           never the more-trusted-looking label. Deliberately the same muted grey
+           for both values: this badge reports a claim, it does not rank it. */
+        .set-mod-policy-source {
+            font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 8px;
+            border: 1px solid var(--bg-3); background: var(--bg); color: var(--fg-dim);
+            flex: 0 0 auto;
+        }
         .set-mod-policy-pin { flex: 0 0 auto; }
         .set-mod-policy-note {
             font-size: 11px; color: var(--fg-dim); flex: 1 1 auto; min-width: 0;

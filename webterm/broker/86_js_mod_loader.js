@@ -60,13 +60,25 @@
             // gate); url -> in-flight load promise (the (id, gen, file) dedup);
             // id -> 'cycle'|'blocked-by-cycle'; id -> deps outside shipped ∪
             // installed. See 86b_js_mod_packages.js.
-            packages: {},
-            requested: {},
-            assetLoads: {},
-            cycleState: {},
-            missingRequires: {},
-            // The forward boot loop has finished, so a registerMod arriving now
-            // is a LATE one and routes through _lateRegister.
+            //
+            // Object.create(null), not {}: these are keyed by MOD ID, and a
+            // truthy inherited `constructor`/`toString` would make a lookup say
+            // "yes" for an id nothing ever put there — which for `requested` is
+            // the gate _lateRegister trusts. Installed ids are regex-constrained
+            // server-side, so this is belt and braces, but the bag is the wrong
+            // place to rely on that.
+            packages: Object.create(null),
+            requested: Object.create(null),
+            assetLoads: Object.create(null),
+            cycleState: Object.create(null),
+            missingRequires: Object.create(null),
+            // _topoSortRegistered() has run, so a registerMod arriving now is a
+            // LATE one and routes through _lateRegister (which re-sorts). It is
+            // NOT "boot finished": a mod that registers another from its own
+            // init() lands DURING the boot loop and must still be sorted.
+            sorted: false,
+            // The forward boot loop has finished. Observable only — the
+            // late-registration gate is `sorted` above.
             bootComplete: false,
         };
 
@@ -96,15 +108,21 @@
             }
             // #163: bind the declaration to the PACKAGE whose script is running.
             // A CORRECTNESS CONVENTION, NOT A BOUNDARY — fork-trust means the
-            // code could register from a timeout (currentScript null) or rewrite
-            // this outright. What it buys: an accepted "x-wrapper" package whose
-            // script registers `clock` cannot silently collide with the shipped
-            // registration, show the wrong provenance, and make the broker's
-            // dependency analysis disagree with the client's. A shipped mod runs
-            // inside the one inline <script>, which carries no package stamp, so
-            // it is unaffected. registerMod's duplicate-id ModConflictError is
-            // still the backstop, and fires FIRST for shipped ids because they
-            // register synchronously at page-script eval.
+            // code can bypass it. What it buys: an accepted "x-wrapper" package
+            // whose script registers `clock` cannot silently collide with the
+            // shipped registration, show the wrong provenance, and make the
+            // broker's dependency analysis disagree with the client's. A shipped
+            // mod runs inside the one inline <script>, which carries no package
+            // stamp, so it is unaffected.
+            //
+            // Two limits, both inherent and both stated rather than papered
+            // over: (a) document.currentScript is null in a callback, so a
+            // package registering from a promise/timeout is UNATTRIBUTABLE and
+            // this check simply does not apply to it — the duplicate-id
+            // ModConflictError below is then the only backstop; (b) the check
+            // runs BEFORE that duplicate check, so a wrong-id collision reports
+            // as wrong-id rather than as a duplicate. That ordering is
+            // deliberate: it names the package at fault.
             const pkgId = _currentPackageId();
             if (pkgId && pkgId !== id) {
                 const pkg = window.__mods.packages && window.__mods.packages[pkgId];
@@ -154,12 +172,18 @@
                 init: decl.init,
             };
             reg.push(entry);
-            // #163: a registration that lands AFTER the forward boot loop — a
-            // package that overran the load deadline, or one a 401'd boot never
-            // fetched. _lateRegister re-sorts, re-resolves the pins, repaints
+            // #163: a registration that lands after the topological sort has
+            // already run — a package that overran the load deadline, one a
+            // 401'd boot never fetched, or a mod calling registerMod from its
+            // own init(). _lateRegister re-sorts, re-resolves the pins, repaints
             // the Mods pane and brings the mod up, but only if this page asked
             // for that package.
-            if (window.__mods.bootComplete) _lateRegister(entry);
+            //
+            // Gated on `sorted`, NOT on "boot finished": a declaration appended
+            // after the sort but during the boot loop would otherwise never be
+            // sorted at all, permanently breaking the dependency-precedes-
+            // dependent invariant every cascade assumes.
+            if (window.__mods.sorted) _lateRegister(entry);
         }
 
         // LIFO teardown: run a mod's onUnload callbacks newest-first, each
@@ -2049,129 +2073,6 @@
             return on;
         }
 
-        // ---- "Mods" Control Panel pane (#86 / S13) --------------------------
-        // CORE loader UI (NOT a toggleable mod) listing every registered mod with
-        // an enable checkbox + its declared trust tiers + live status (active /
-        // off / failed). Built on the S1 pane scaffold (_modRegisterPane) through a
-        // STATIC loader-owned rec whose teardown never runs — the pane is permanent
-        // core chrome, so it never appears in registered/active and can't disable
-        // itself. Idempotent: a second loadMods() can't double-mount it. Mounted
-        // ONLY when the master gate is on (loadMods returns before here when off),
-        // so master-off means no mod UI at all and the gate's meaning stays crisp.
-        // The reflect closure is registered via _trackControl (kind:'pane'), so it
-        // re-syncs on Control Panel open AND on every /state pull (idempotent, read
-        // only) like every other pane.
-        // #163: the rows are the UNION of catalog packages and registered
-        // declarations (_modStatusRows), NOT a walk of `registered` — a mod in a
-        // dependency cycle, one whose script 404'd and one whose SRI did not
-        // match never call registerMod, so a registered[]-driven pane cannot
-        // show them at all. And because _modRegisterPane calls spec.render()
-        // EXACTLY ONCE, the row set is rebuildable (_rebuildRows) so a late
-        // registration is not frozen out of a pane built before it landed.
-        function _mountModsManagerPane() {
-            if (window.__mods._managerMounted) return;
-            window.__mods._managerMounted = true;
-            const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
-            let rows = [];
-            let listEl = null;
-            function _reflectManager() {
-                const byId = Object.create(null);
-                for (const s of _modStatusRows()) byId[s.id] = s;
-                for (const r of rows) {
-                    const s = byId[r.id];
-                    if (!s) continue;
-                    r.cb.checked = s.enabled;
-                    // #157: a mod this broker PINS is not this browser's call —
-                    // show the pin and lock the box. #163 also locks a row with
-                    // no registration (nothing to init). Reflected (not decided)
-                    // here: the pin came from the boot policy snapshot, so this
-                    // runs on every /state pull without changing what is in force.
-                    r.cb.disabled = !s.toggleable;
-                    r.pin.textContent = (s.pin === null) ? ''
-                        : (s.pin ? 'pinned on' : 'pinned off');
-                    r.pin.title = (s.pin === null) ? ''
-                        : ('this broker pins ' + r.id + ' ' + (s.pin ? 'on' : 'off')
-                           + ' for every browser that loads its page');
-                    r.status.textContent = s.label;
-                    r.status.dataset.state = s.state;
-                }
-            }
-            function _rebuildRows() {
-                if (!listEl) return;
-                rows = [];
-                listEl.textContent = '';
-                for (const s of _modStatusRows()) {
-                    const row = document.createElement('div');
-                    row.className = 'set-mod-row';
-                    row.dataset.modId = s.id;
-                    row.dataset.modSource = s.source;
-                    const label = document.createElement('label');
-                    label.className = 'set-check set-mod-toggle';
-                    const cb = document.createElement('input');
-                    cb.type = 'checkbox';
-                    const mid = s.id;
-                    cb.addEventListener('change', function () {
-                        setModEnabled(mid, cb.checked);
-                        _reflectManager();   // refresh status after the live toggle
-                    });
-                    label.appendChild(cb);
-                    const name = document.createElement('span');
-                    name.className = 'set-mod-name';
-                    name.textContent = s.id;
-                    label.appendChild(name);
-                    const status = document.createElement('span');
-                    status.className = 'set-mod-status';
-                    label.appendChild(status);
-                    const pin = document.createElement('span');   // #157
-                    pin.className = 'set-mod-pin';
-                    label.appendChild(pin);
-                    row.appendChild(label);
-                    const tiers = document.createElement('div');
-                    tiers.className = 'set-mod-tiers';
-                    if (s.tiers.length) {
-                        for (const t of s.tiers) {
-                            const b = document.createElement('span');
-                            b.className = 'set-mod-tier';
-                            b.textContent = t;
-                            tiers.appendChild(b);
-                        }
-                    } else {
-                        const b = document.createElement('span');
-                        b.className = 'set-mod-tier set-mod-tier-none';
-                        b.textContent = 'unspecified';
-                        tiers.appendChild(b);
-                    }
-                    row.appendChild(tiers);
-                    rows.push({ id: s.id, cb: cb, status: status, pin: pin });
-                    listEl.appendChild(row);
-                }
-                _reflectManager();
-            }
-            _modRegisterPane(rec, {
-                id: 'mods',
-                title: 'Mods',
-                isBrowserGlobal: true,    // per-browser state -> local tab only
-                render: function () {
-                    const wrap = document.createElement('div');
-                    const hint = document.createElement('div');
-                    hint.className = 'set-hint';
-                    hint.textContent = 'Enable or disable installed mods (this '
-                        + 'browser). The broker’s master switch can disable all at '
-                        + 'once, and a mod this broker pins (see “Mods on this '
-                        + 'broker”) is locked here.';
-                    wrap.appendChild(hint);
-                    listEl = document.createElement('div');
-                    listEl.className = 'set-mods-list';
-                    _rebuildRows();
-                    wrap.appendChild(listEl);
-                    return wrap;
-                },
-                reflect: function () { _reflectManager(); },
-            });
-            window.__mods._reflectManager = _reflectManager;
-            window.__mods._rebuildManagerRows = _rebuildRows;
-        }
-
         // The boot entry (called once by 90_js_mod_boot.js). Gates on the
         // broker's mods_enabled (runtime, via the memoized /info; fail-open); when
         // enabled it mounts the Mods pane (#86), prunes any stale disabled ids, then
@@ -2228,30 +2129,68 @@
                 console.info('[mods] disabled by broker (mods_enabled=false)');
                 return;
             }
-            await _loadInstalledPackages(window.__mods.catalog);
-            _topoSortRegistered();
+            // Isolated: a defect anywhere in the installed-package machinery
+            // must not cost the SHIPPED mods their init. loadMods is
+            // fire-and-forget (90_js_mod_boot.js), so a throw escaping here
+            // would skip the boot loop entirely and leave the desktop with no
+            // mods at all — a strictly worse outcome than "the installed ones
+            // are missing". _loadInstalledPackages already never rejects; this
+            // covers the rest.
+            try {
+                await _loadInstalledPackages(window.__mods.catalog);
+                _topoSortRegistered();
+            } catch (e) {
+                console.error('[mods] loading installed packages failed'
+                    + ' — continuing with the shipped mods:', e);
+            }
+            // From here every registration routes through _lateRegister, which
+            // re-runs the sort. Set even if the block above threw: an unsorted
+            // late arrival is worse than a refused one.
+            window.__mods.sorted = true;
             window.__mods.policy = _resolvePins(window.__mods.policyRaw);
             window.__mods.policyResolved = true;
-            _mountModsManagerPane();
+            try { _mountModsManagerPane(); }
+            catch (e) { console.error('[mods] the Mods pane failed to mount:', e); }
             // Prune ids for mods that no longer exist (renamed/removed) so the set
             // can never grow unbounded junk; write back only if it actually changed.
             //
-            // #163 widened the keep-set to registered ∪ CATALOG ids. Pruning
-            // against `registered` alone would make an installed mod whose
-            // script 404s (or times out, or whose SRI did not match) lose the
-            // user's explicit "off" and come up enabled on the next page load —
-            // the one state a temporarily-unloadable mod must not silently move.
-            const known = new Set(window.__mods.registered.map(
-                function (m) { return m.id; }));
-            for (const row of window.__mods.catalog) {
-                if (row && typeof row.id === 'string' && row.id) known.add(row.id);
+            // #163 widened the keep-set to registered ∪ CATALOG ids. The set
+            // holds ids TOGGLED AWAY from their declared default (#116), so
+            // dropping an entry means "put this mod back to its default" —
+            // which for an installed mod (default OFF) is off, and for a shipped
+            // one is usually on. Either way it silently DISCARDS a choice the
+            // operator made. Pruning against `registered` alone would do exactly
+            // that to every installed mod whose script 404s, times out, or fails
+            // SRI: the one page load on which the mod cannot speak for itself is
+            // the one that would forget what you asked for.
+            //
+            // Residual, stated rather than hidden: an id survives an uninstall
+            // and REINSTALL that both happen before this browser sees a catalog
+            // without it, so the new package inherits the old one's toggle.
+            // localStorage is browser-local and cannot be inspected server-side,
+            // which is why the install dialog reports adopts_existing_state for
+            // the halves that CAN be (the /mod-store value and the pin) and says
+            // so about the half that cannot.
+            //
+            // ...and the whole pass is skipped unless the boot /info actually
+            // ANSWERED. A 401 (no token stored yet) / network failure gives an
+            // EMPTY catalog, and pruning against that would delete every
+            // installed mod's choice on exactly the page load that could not see
+            // that they exist. Pruning is pure hygiene; it must never run from a
+            // view it knows is incomplete.
+            if (window.__mods.policyAuthoritative) {
+                const known = new Set(window.__mods.registered.map(
+                    function (m) { return m.id; }));
+                for (const row of window.__mods.catalog) {
+                    if (row && typeof row.id === 'string' && row.id) known.add(row.id);
+                }
+                const disabled = _modsDisabled();
+                let pruned = false;
+                for (const id of Array.from(disabled)) {
+                    if (!known.has(id)) { disabled.delete(id); pruned = true; }
+                }
+                if (pruned) _writeModsDisabled(disabled);
             }
-            const disabled = _modsDisabled();
-            let pruned = false;
-            for (const id of Array.from(disabled)) {
-                if (!known.has(id)) { disabled.delete(id); pruned = true; }
-            }
-            if (pruned) _writeModsDisabled(disabled);
             for (const decl of window.__mods.registered.slice()) {
                 // #116: gate on the resolved enable state (default XOR override),
                 // so a default-off mod (git) stays off until the operator opts in.
@@ -2259,12 +2198,17 @@
                     console.info('[mods] "' + decl.id + '" disabled by operator');
                     continue;
                 }
+                // #163: a mod that registered another one from its own init()
+                // reaches _lateRegister, which may already have brought this one
+                // up. Skipping is not cosmetic — initMod on an active id is a
+                // ModConflictError, which would report a real conflict where
+                // there is none.
+                if (window.__mods.active.has(decl.id)) continue;
                 initMod(decl);
             }
-            // #163: from here a registerMod call is a LATE one (a package that
-            // overran the load deadline) and routes through _lateRegister. Set
-            // AFTER the loop, so a package that registers during it is an
-            // ordinary boot registration.
+            // Observable "the boot loop is done" marker (the acceptance reads
+            // it). The LATE-registration gate is `sorted`, set earlier — see
+            // registerMod.
             window.__mods.bootComplete = true;
             _renderManagerRows();
             // #169: mover 5 of 5 — boot itself. The theme mod is FIRST in
@@ -2331,6 +2275,11 @@
         async function notifyModsHostAuth(hostId) {
             if (!window.__mods || !window.__mods.policyResolved) return;
             if (window.__mods.policyAuthoritative) return;
+            // #163: this page has no mods and is not going to get any — the
+            // broker's master gate said so, or ?nomods=1 did. Without this the
+            // rescue hatch would still FETCH every installed package the moment
+            // the user logged in, which is exactly the thing it exists to stop.
+            if (window.__mods.masterEnabled === false) return;
             let lh = null;
             try { lh = localHost(); } catch (_) {}
             if (!lh || hostId !== lh.id) return;
@@ -2352,8 +2301,17 @@
             // installed package. Load them now — otherwise typing your password
             // leaves every installed mod missing until a reload, which is
             // exactly the hole #157 closed for the pins. Deduped on
-            // (id, gen, file), so a package the boot already loaded is never
-            // fetched or executed twice (D1).
+            // (kind, id, gen, file), so a package the boot already loaded is
+            // never fetched or executed twice (D1).
+            //
+            // This is not a violation of D1's "next page load" rule, and the
+            // distinction is worth being precise about: it is the SAME page load
+            // finishing a boot it could not perform without a token. The window
+            // it opens is real but tiny and inherited from #157 — if another
+            // client installs a mod between this page's 401 and this login, this
+            // page picks that mod up rather than the set that existed at load.
+            // The alternative is a browser that must be reloaded after every
+            // first login, which is the bug #157 fixed.
             window.__mods.policyRaw = (info && info.mod_policy) || null;
             if (info && Array.isArray(info.mods)) window.__mods.catalog = info.mods;
             await _loadInstalledPackages(window.__mods.catalog);

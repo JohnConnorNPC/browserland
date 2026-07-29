@@ -2206,6 +2206,52 @@ def test_mod_sync_mod_packaged_and_manifest_agrees():
     assert ".modsync-actions" in INDEX_HTML
 
 
+def test_mod_sync_never_adopts_a_mod_this_build_does_not_have():
+    # #163 out-of-scope guard: mod-sync carries pins and settings, NEVER mod
+    # code, and that has to survive one broker having an installed `x-` mod the
+    # other has never seen.
+    #
+    # adopt walks OUR OWN window.__mods.registered (via localMods), never the
+    # peer's catalog, so an id we do not have has no local switch to flip and is
+    # structurally unadoptable -- rather than being "handled" somewhere later.
+    # planFor is the mirror image: it skips a mod absent from the peer's catalog
+    # in BOTH minimal and lockAll modes, so no pin naming a mod that broker does
+    # not serve is ever written.
+    src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    adopt = code[code.index("async function adoptPlan("):
+                 code.index("function applyAdopt(")]
+    assert "for (const m of localMods())" in adopt
+    # The ONLY iteration over the peer's catalog in adopt builds the lookup map;
+    # nothing walks it to produce a row, so a peer-only id cannot become one.
+    assert "for (const m of cat) byId.set(m.id, m);" in adopt
+    assert adopt.count("for (const m of cat)") == 1
+    assert "of byId" not in adopt and "of rec.mods" not in adopt
+    # localMods IS window.__mods.registered, so "absent from registered" and
+    # "not adoptable" are the same statement.
+    assert "for (const m of window.__mods.registered) {" in code
+    # A mod we have and the peer does not is REPORTED, not silently dropped: an
+    # omitted row reads as agreement about a mod that broker never heard of.
+    assert "note: 'not installed there'" in code
+    assert "} else if (r.action === 'missing') {" in code
+    # ...including when there is nothing else to preview, where the skip lines
+    # are never rendered at all.
+    assert "' Left alone: '" in code
+    # appendLines truncates at DETAIL_MAX from the FRONT, so the new skip rows
+    # must not be able to push the writes this dialog exists to confirm out of
+    # view: the two lists are built separately and concatenated writes-first.
+    assert "const lines = writes.concat(skips);" in code
+    assert "if (!writes.length) {" in code
+    # planFor's half, unchanged and pinned here so it cannot rot: a mod absent
+    # from the peer's catalog is skipped before any pin is computed, in BOTH
+    # modes (one shared loop), and reported as a row.
+    plan_for = code[code.index("async function planFor("):
+                    code.index("async function readState(")]
+    assert "if (!cat) continue;" in plan_for
+    assert "note: 'not installed on that broker'" in plan_for
+
 
 # --------------------------------------------------------------------------- #
 # workspaces mod (#148)
@@ -3667,12 +3713,18 @@ def test_loadmods_sequence_puts_pin_resolution_after_the_package_load():
         "resolving pins before the packages load drops every installed-mod pin"
     # policyResolved gates notifyModsHostAuth, so it must not go up before the
     # policy it advertises exists.
-    assert body.index("window.__mods.policyResolved = true;\n            _mountModsManagerPane();") \
-        > body.index("window.__mods.policy = _resolvePins(")
+    assert body.rindex("window.__mods.policyResolved = true;") \
+        > body.index("window.__mods.policy = _resolvePins("), \
+        "policyResolved must follow the pin resolution it advertises"
     # The master-off early return still marks it resolved (unchanged #157
     # behaviour: a mods-off broker has answered, there is nothing to re-ask).
     off = body[gate:body.index("await _loadInstalledPackages(")]
     assert "window.__mods.policyResolved = true;" in off
+    # A defect in the installed-package machinery must not cost the SHIPPED mods
+    # their init: loadMods is fire-and-forget, so a throw here would skip the
+    # boot loop entirely and leave the desktop with no mods at all.
+    assert "try {\n                await _loadInstalledPackages(" in body
+    assert "try { _mountModsManagerPane(); }" in body
 
 
 def test_disabled_prune_keeps_catalog_ids_not_just_registered_ones():
@@ -3688,6 +3740,13 @@ def test_disabled_prune_keeps_catalog_ids_not_just_registered_ones():
     prune = body[body.index("const known = new Set("):]
     assert prune.index("known.add(row.id)") < prune.index("if (!known.has(id))"), \
         "the catalog ids must join the keep-set BEFORE the prune walks it"
+    # ...and the whole pass is SKIPPED unless the boot /info answered. A 401 (no
+    # token stored yet) gives an EMPTY catalog, and pruning against that would
+    # delete every installed mod's choice on exactly the page load that could
+    # not see that they exist.
+    assert body.index("if (window.__mods.policyAuthoritative) {") \
+        < body.index("const known = new Set("), \
+        "the prune must not run from a view it knows is incomplete"
 
 
 def test_installed_package_topological_sort_present():
@@ -3739,28 +3798,44 @@ def test_installed_packages_load_once_async_and_sri_pinned():
     for banned in ("\n        const MOD_SCRIPT_TIMEOUT_MS",
                    "\n        let MOD_SCRIPT_TIMEOUT_MS"):
         assert banned not in pkgs, f"{banned.strip()!r} is a TDZ hazard here"
-    assert "s.async = true;" in body
-    assert "s.async = false" not in pkgs, "ordered-async head-of-line blocks"
-    assert "s.dataset.modPackage = pkg.id;" in body
-    assert "if (sri) s.integrity = sri;" in body
-    assert "if (sri) link.integrity = sri;" in body
-    assert "link.rel = 'stylesheet';" in body
-    # A row the broker marked broken is NOT fetched at all.
-    assert "if (row.error) {" in body
-    skip = body[body.index("if (row.error) {"):]
-    assert skip.index("continue;") < skip.index("_loadModAsset("), \
-        "a cycle row must never reach the network"
     # The deadline proceeds; it cannot cancel an in-flight <script>.
     assert "if (!pkg.done) pkg.state = 'timeout';" in body
     assert "PROCEED-ANYWAY deadline, NOT a cancel" in body
-    # Deduplicated on the URL, which encodes (id, gen, file) -- the post-login
-    # retry re-walks the whole catalog and must not execute anything twice (D1).
+    # One bad row must not cost the others their load.
+    assert "console.error('[mods] could not start installed package'," in body
+    start = _frag_fn(pkgs, "function _startPackage(")
+    assert "s.async = true;" in start
+    assert "s.async = false" not in pkgs, "ordered-async head-of-line blocks"
+    assert "s.dataset.modPackage = pkg.id;" in start
+    assert "if (sri) s.integrity = sri;" in start
+    assert "if (sri) link.integrity = sri;" in start
+    assert "link.rel = 'stylesheet';" in start
+    # A row the broker marked broken is NOT fetched at all.
+    assert "if (row.error) {" in start
+    skip = start[start.index("if (row.error) {"):]
+    assert skip.index("return null;") < skip.index("_loadModAsset("), \
+        "a cycle row must never reach the network"
+    # A package's OWN scripts run in manifest order: the topo sort orders mod
+    # DECLARATIONS, not the files of one mod, so a package whose second file
+    # reads a global its first defined would work or not by network timing.
+    assert "let chain = Promise.resolve(true);" in start
+    assert "chain = chain.then(function (okSoFar) {" in start
+    assert "return okSoFar && r.ok;" in start, \
+        "any failed file must fail the whole package"
+    # Deduplicated on KIND + URL, and the URL encodes (id, gen, file) -- the
+    # post-login retry re-walks the whole catalog and must not execute anything
+    # twice (D1).
     asset = _frag_fn(pkgs, "function _loadModAsset(")
-    assert "if (inflight[url]) return inflight[url];" in asset
-    assert "inflight[url] = p;" in asset
-    # Never rejects: load -> ok, error (404 / transport / SRI MISMATCH) -> !ok.
+    assert "const key = kind + ' ' + url;" in asset
+    assert "if (inflight[key]) return inflight[key];" in asset
+    assert "inflight[key] = p;" in asset
+    # Never rejects: load -> ok, error (404 / transport / SRI MISMATCH) -> !ok,
+    # and a DOM that refuses the insertion -> !ok rather than a rejection.
     assert "resolve({ ok: ok, url: url });" in asset
     assert "reject" not in asset
+    assert asset.index("try {") < asset.index("appendChild(el);") \
+        < asset.index("} catch (e) {"), \
+        "element construction AND insertion must be inside the try"
     # Same-origin, generation-qualified, every segment encoded.
     url = _frag_fn(pkgs, "function _modAssetUrl(")
     assert "return '/mods/' + encodeURIComponent(id) + '/'" in url
@@ -3775,7 +3850,17 @@ def test_late_registration_is_gated_on_what_this_page_requested():
     loader = _loader_src()
     pkgs = _packages_src()
     reg = _frag_fn(loader, "function registerMod(")
-    assert "if (window.__mods.bootComplete) _lateRegister(entry);" in reg
+    # Gated on `sorted`, NOT on "the boot loop finished": a mod that registers
+    # another from its own init() lands DURING the loop, and a declaration
+    # appended after the one sort but never sorted itself would permanently
+    # break the dependency-precedes-dependent invariant every cascade assumes.
+    assert "if (window.__mods.sorted) _lateRegister(entry);" in reg
+    boot = _loader_fn("async function loadMods(")
+    assert boot.index("window.__mods.sorted = true;") \
+        < boot.index("for (const decl of window.__mods.registered.slice()) {")
+    # ...and the boot loop must then tolerate a mod the nested path already
+    # brought up, or initMod reports a ModConflictError that is not one.
+    assert "if (window.__mods.active.has(decl.id)) continue;" in boot
     body = _frag_fn(pkgs, "function _lateRegister(")
     assert "if (!_modBag('requested')[decl.id]) {" in body
     assert "reg.splice(i, 1);" in body, \
@@ -3788,11 +3873,19 @@ def test_late_registration_is_gated_on_what_this_page_requested():
               "_topoSortRegistered();",
               "window.__mods.policy = _resolvePins(window.__mods.policyRaw);",
               "_renderManagerRows();",
+              "if (_modPinSig(window.__mods.policy) !== before) {",
+              "_applyPolicyLive();",
               "if (isModEnabled(decl.id)) {",
               "_bringUp(decl);")
+    # If the pin map MOVED, the whole policy is reconciled rather than just this
+    # mod: a pin naming it pins its `requires` on too, and those dependencies
+    # are registered EARLIER -- which _bringUp cannot reach, because it inits
+    # `decl` and then walks FORWARD only. For a deadline straggler no later
+    # _applyPolicyLive ever runs, so without this both stay inactive forever.
+    assert "function _modPinSig(" in pkgs
     # The master gate stays absolute: a late arrival cannot init past it.
     assert body.index("if (window.__mods.masterEnabled === false) {") \
-        < body.index("_bringUp(decl);")
+        < body.index("_applyPolicyLive();")
     # Its second caller: the post-login path loads the packages a 401'd boot
     # never saw -- otherwise typing your password leaves every installed mod
     # missing until a reload (the hole #157 closed for the pins).
@@ -3852,6 +3945,39 @@ def test_mod_status_model_is_a_union_not_a_registered_walk():
     assert "statusRows: function () { return _modStatusRows(); }," in _loader_src()
 
 
+def test_a_partly_loaded_package_is_never_reported_as_merely_active():
+    # #163 (adversarial review): a package with SEVERAL scripts can have one
+    # register while another 404s or fails SRI. The mod is live, but the package
+    # is incomplete -- and a row that read `active` would hide the asset failure
+    # completely. So the package check is made BEFORE the "is it registered?"
+    # branch, and the label says which case it is.
+    body = _frag_fn(_packages_src(), "function _modStatusRow(")
+    assert body.index("pkg.state === 'fetch-failed'") < body.index("} else if (!decl) {")
+    assert "label = decl ? 'fetch failed (partly loaded)' : 'fetch failed';" in body
+
+
+def test_installed_css_parity_with_shipped_mod_css_is_stated():
+    # #163 (adversarial review): an installed mod's stylesheet is injected for
+    # every fetchable package, before any enable/pin check, and no teardown can
+    # remove it. That is not an oversight -- it is exactly what ui.py already
+    # does for SHIPPED mod CSS (spliced at assembly time, "present but inert",
+    # independent of the runtime gate), and the parity has to be written down or
+    # the next reader will "fix" one of the two.
+    pkgs = _packages_src()
+    doc = pkgs[:pkgs.index("function _loadInstalledPackages(")]
+    assert "present but inert" in doc
+    assert "STYLES are injected but NOT awaited" in doc
+    # ...and they really are outside the awaited set: only scripts feed `chain`.
+    start = _frag_fn(pkgs, "function _startPackage(")
+    assert start.index("for (const name of pkg.styles) {") \
+        < start.index("let chain = Promise.resolve(true);")
+    assert "chain" not in start[start.index("for (const name of pkg.styles) {"):
+                                start.index("let chain = Promise.resolve(true);")]
+    # ui.py's own statement of the same rule, so the two cannot silently diverge.
+    ui_src = (BROKER_DIR / "ui.py").read_text(encoding="utf-8")
+    assert "present-but-inert" in ui_src
+
+
 def test_installed_mods_are_default_off_whatever_they_declare():
     # #163 / design §2: installing a mod on one broker must not silently switch
     # it on for every browser that loads that broker's page. The broker reports
@@ -3879,6 +4005,11 @@ def test_nomods_escape_hatch_present():
         "?nomods=1 must return before the /info fetch, not merely before the boot loop"
     assert "return;" in boot[boot.index("if (_nomodsRequested()) {"):]
     assert "function _nomodsRequested(" in INDEX_HTML
+    # ...and the post-login path must honour it too, or logging in would fetch
+    # every installed package on the very page that asked for none.
+    auth = _loader_fn("async function notifyModsHostAuth(")
+    assert auth.index("if (window.__mods.masterEnabled === false) return;") \
+        < auth.index("await _loadInstalledPackages(")
 
 
 def test_installed_mods_are_not_in_the_bundle():
@@ -4138,23 +4269,30 @@ def test_mods_manager_pane_and_enable_api_present():
         "function _writeModsDisabled",
         "function isModEnabled",
         "function setModEnabled",
-        "function _mountModsManagerPane",
         "window.__mods.masterEnabled",   # master-gate state the live setter honors
+    ):
+        assert sym in loader, f"missing S13 loader symbol: {sym!r}"
+    # #163 moved the pane itself into 86b_js_mod_packages.js, beside the union
+    # status model it now renders — 86 was at the 2500-line per-fragment cap.
+    pkgs = _packages_src()
+    for sym in (
+        "function _mountModsManagerPane",
         "set-mods-list",                  # the pane's list container class
-        # #163: rows are the UNION of catalog packages and registrations, and
-        # they are REBUILDABLE — _modRegisterPane calls spec.render() exactly
-        # once, so a row set built before the installed mods registered would be
-        # frozen stale and a late registration would never appear.
+        # rows are the UNION of catalog packages and registrations, and they are
+        # REBUILDABLE — _modRegisterPane calls spec.render() exactly once, so a
+        # row set built before the installed mods registered would be frozen
+        # stale and a late registration would never appear.
         "function _rebuildRows",
         "for (const s of _modStatusRows())",
         "window.__mods._rebuildManagerRows = _rebuildRows;",
         # A row with no registration has nothing to init; the checkbox must not
         # pretend otherwise (setModEnabled would refuse it anyway).
         "r.cb.disabled = !s.toggleable;",
+        # The pane is built on the S1 pane scaffold (reuse, not a parallel
+        # renderer) — which lives in 86 and is called from here.
+        "_modRegisterPane(rec, {",
     ):
-        assert sym in loader, f"missing S13 loader symbol: {sym!r}"
-    # The pane is built on the S1 pane scaffold (reuse, not a parallel renderer).
-    assert "_modRegisterPane(rec, {" in loader
+        assert sym in pkgs, f"missing S13 pane symbol: {sym!r}"
     # The per-mod enable test surface the acceptance drives.
     for sym in ("setEnabled: function", "isEnabled: function",
                 "disabledIds: function", "masterEnabled: function"):
@@ -4224,7 +4362,7 @@ def test_mod_policy_pins_outrank_the_per_browser_toggle():
     # The pin is consulted and returned BEFORE the disabled-set is even read.
     assert enabled.index("_pin(id)") < enabled.index("_modsDisabled()")
     setter = loader[loader.index("function setModEnabled"):
-                    loader.index("function _mountModsManagerPane")]
+                    loader.index("// The boot entry")]
     assert setter.index("_pin(id)") < setter.index("_writeModsDisabled(")
     # A pinned-ON mod's dependencies are pinned too, or "pinned on" is a lie the
     # moment a browser has the dependency locally disabled (#121 leaves the
@@ -4588,7 +4726,7 @@ def test_mid_session_mod_enable_restores_its_windows():
                    loader.index("function _takeDown(id)")]
     assert "restoreAppWindowsAfterMods" not in bring,         "_bringUp itself must not restore -- _applyPolicyLive calls it N times"
     setter = loader[loader.index("function setModEnabled"):
-                    loader.index('// ---- "Mods" Control Panel pane')]
+                    loader.index("// The boot entry")]
     assert "restoreAppWindowsAfterMods();" in setter
     assert "_takeDown(id);" in setter and setter.index("_bringUp(decl);") <         setter.index("restoreAppWindowsAfterMods();")
     policy = loader[loader.index("function _applyPolicyLive"):

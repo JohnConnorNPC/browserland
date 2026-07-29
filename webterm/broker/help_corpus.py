@@ -38,8 +38,11 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 # Repo layout: this file is webterm/broker/help_corpus.py, so parents[2] is the
 # repo root (parents[0]=broker, [1]=webterm, [2]=repo) — NOT the process cwd,
@@ -572,6 +575,172 @@ def build_full_corpus() -> dict:
         seen.add(sec["slug"])
     merged.sort(key=lambda s: (s["order"], s["slug"]))
     return {"sections": merged}
+
+
+# --------------------------------------------------------------------------- #
+# Installed-mod help (#163): merged at SERVE time, and ONLY at serve time.
+#
+# ``build_full_corpus`` above stays SHIPPED-ONLY on purpose. It is what
+# ``python -m webterm.broker.help_corpus`` writes into the packaged JSON and
+# what tests/test_help_corpus.py byte-matches; folding in whatever happens to be
+# installed on the box running the regenerator would make that drift guard
+# machine-specific. So installed sections are merged onto ``app.ctx.help_corpus``
+# at runtime instead — from the modinstall INDEX, never from a second walk of
+# mods_dir. The index captured each mod's help text at install/scan time from
+# the very bytes being served, so there is exactly ONE read and no second
+# traversal that could disagree with it.
+# --------------------------------------------------------------------------- #
+
+# Installed sections sort after the wiki (orders are small) AND after the
+# shipped mods (_MOD_ORDER_BASE + n). A mod may still override with help.order.
+_INSTALLED_ORDER_BASE = 3000
+# modinstall caps every file at 256 KiB and the store at 32 mods, on the install
+# path AND the scan path, and a str is never longer than its UTF-8 encoding — so
+# both ceilings are already enforced upstream. They are restated locally, looser
+# rather than tighter, only so that a HAND-BUILT index cannot hand the parser an
+# unbounded string or an unbounded number of them. They are not a second policy,
+# and they are what bounds the worst-case parse this does on the event loop
+# (32 x 256 KiB, and only for mods whose help text is not already cached).
+_MAX_INSTALLED_HELP_CHARS = 256 * 1024
+_MAX_INSTALLED_SECTIONS = 32
+
+# help.md text -> parsed cards, rebuilt to EXACTLY the currently-merged set on
+# every call. Parsing is a pure function of the text, so a content key can never
+# go stale; rebuilding rather than accumulating means the cache holds the same
+# card objects the live corpus already holds, so it costs no steady-state
+# memory and cannot outgrow the index. It earns its keep because a swap runs ON
+# THE EVENT LOOP under mods_install_lock: without it, one install would re-parse
+# every other installed mod's help before the loop turns. Measured at the
+# ceiling (32 mods x 251 KiB of DISTINCT help): 1650 ms cold, 1 ms to add one
+# more mod. The cold parse itself is paid at create_app, before the loop exists;
+# what is left on the loop is a rescan that finds every help.md changed, which
+# is an operator editing 8 MiB of their own markdown and is priced accordingly.
+#
+# Two mods with byte-identical help.md therefore SHARE one cards list, as do a
+# section and its predecessor across a swap. That is safe because cards are
+# write-once plain data — the corpus is only ever serialized, never annotated.
+# If that ever stops being true, key the cache by (id, text) and copy.
+_installed_cards: dict = {}
+
+
+def _installed_section(mod_id: str, record: dict, offset: int,
+                       cards_out: dict) -> dict | None:
+    """One installed mod's Help section, or ``None`` if it has none to give.
+
+    Every field is re-derived defensively from the record: this reads an index
+    a hand-populated store could have contributed to, and the caller's contract
+    is that nothing in here can blank Help.
+    """
+    if not isinstance(mod_id, str) or not mod_id:
+        return None
+    help_md = record.get("help_md") if isinstance(record, dict) else None
+    if not isinstance(help_md, str) or not help_md.strip():
+        return None
+    if len(help_md) > _MAX_INSTALLED_HELP_CHARS:
+        LOGGER.warning("installed mod %s: help.md over %d chars, not merged",
+                       mod_id, _MAX_INSTALLED_HELP_CHARS)
+        return None
+    cards = cards_out.get(help_md)
+    if cards is None:
+        cards = _installed_cards.get(help_md)
+    if cards is None:
+        cards = parse_page(help_md)
+    cards_out[help_md] = cards
+    if not cards:
+        return None
+    manifest = record.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = {}
+    block = manifest.get("help")
+    if not isinstance(block, dict):
+        block = {}
+    label = block.get("label") or manifest.get("title")
+    if not isinstance(label, str) or not label:
+        label = _humanize(mod_id)
+    order = block.get("order")
+    # Reject a non-int (or a bool) so sorting stays total across sections.
+    if not isinstance(order, int) or isinstance(order, bool):
+        order = _INSTALLED_ORDER_BASE + offset
+    # The slug is FORCED to the mod id. modinstall already drops help.slug from
+    # the canonical manifest, so this is the second of two places that make a
+    # collision with a wiki or shipped slug structurally impossible rather than
+    # handled after the fact: an installed id must start with "x-", and no wiki
+    # page stem or shipped mod id does.
+    section = {"slug": mod_id, "label": label, "order": order,
+               "cards": cards, "mod": mod_id}
+    icon = block.get("icon")
+    if isinstance(icon, str) and icon:
+        section["icon"] = icon
+    return section
+
+
+def _section_sort_key(section: dict):
+    """A TOTAL order over sections from any source, so the merge sort cannot
+    raise on a section carrying an unexpected order/slug type."""
+    order = section.get("order")
+    if not isinstance(order, int) or isinstance(order, bool):
+        order = _INSTALLED_ORDER_BASE
+    slug = section.get("slug")
+    return (order, slug if isinstance(slug, str) else "")
+
+
+def merge_installed_sections(corpus: dict, index: dict) -> dict:
+    """``corpus`` plus one Help section per installed mod that shipped a help.md.
+
+    Takes the modinstall INDEX, not a directory: the help text was captured at
+    install/scan time from the bytes being served, so this is one read and there
+    is no second traversal to disagree with.
+
+    Returns a NEW corpus dict with a new section list; ``corpus`` is never
+    mutated, because the base is the import-time ``HELP_CORPUS`` reused by every
+    swap. When nothing is merged the base is returned unchanged.
+
+    NEVER RAISES — which is why this exists instead of a call into
+    ``build_mod_sections`` (that one raises BuildError on a duplicate slug, and
+    a careless installed mod must not be able to blank the Help window). A
+    record whose ``help_md`` is absent, not a str, blank, oversized or
+    unparseable is skipped; anything unforeseen degrades to the unmerged corpus.
+    """
+    global _installed_cards
+    try:
+        base = list(corpus.get("sections") or [])
+        seen = {sec.get("slug") for sec in base if isinstance(sec, dict)}
+        records = (index or {}).get("mods") or {}
+        # Filter to str keys BEFORE sorting: a hand-built index carrying one
+        # non-str key would otherwise raise inside sorted() and discard every
+        # OTHER mod's help along with it.
+        ids = sorted(mid for mid in records if isinstance(mid, str))
+        cards_out: dict = {}
+        added: list = []
+        for offset, mod_id in enumerate(ids[:_MAX_INSTALLED_SECTIONS]):
+            try:
+                section = _installed_section(mod_id, records[mod_id], offset,
+                                             cards_out)
+            except Exception:  # noqa: BLE001 - one bad mod, not a blank Help
+                LOGGER.warning("installed mod %s: help.md not merged",
+                               mod_id, exc_info=True)
+                continue
+            if section is None:
+                continue
+            # Unreachable, and guarded on the OTHER side too: an installed id
+            # must start with "x-", and test_no_shipped_help_slug_is_in_the_
+            # installed_namespace pins that no wiki page stem and no shipped
+            # mod's help.slug ever does. Kept anyway because "never raises" has
+            # to also mean "never silently emits two sections under one slug" —
+            # and note the base wins, so a collision loses the INSTALLED help.
+            if section["slug"] in seen:
+                LOGGER.warning("installed mod %s: help slug already taken",
+                               mod_id)
+                continue
+            seen.add(section["slug"])
+            added.append(section)
+        _installed_cards = cards_out
+        if not added:
+            return corpus
+        return {"sections": sorted(base + added, key=_section_sort_key)}
+    except Exception:  # noqa: BLE001 - Help degrades, never blanks
+        LOGGER.warning("installed mod help could not be merged", exc_info=True)
+        return corpus
 
 
 def serialize_corpus(corpus: dict) -> bytes:

@@ -479,6 +479,173 @@ def test_bad_mod_manifest_does_not_crash(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# installed-mod help (#163): merged at SERVE time only
+# --------------------------------------------------------------------------- #
+
+def _installed_index(mods):
+    """A modinstall index carrying the given installed mods.
+
+    ``mods`` maps id -> (manifest extras, help.md text or None). Built through
+    the REAL validator/index builders, so what the merge sees here is shaped
+    exactly like what an install or a scan produces.
+    """
+    from webterm.broker import modinstall
+    index = modinstall.empty_index()
+    for mod_id, (extra, help_md) in mods.items():
+        files = {"%s.js" % mod_id: "//\n"}
+        if help_md is not None:
+            files["help.md"] = help_md
+        meta = {"id": mod_id, "version": "1.0.0", "ctxVersion": 1,
+                "scripts": ["%s.js" % mod_id]}
+        meta.update(extra)
+        canonical, records = modinstall.validate_package(meta, files)
+        index = modinstall.index_with(
+            index, mod_id, canonical, records,
+            modinstall.compute_gen(canonical, records), 1_700_000_000)
+    return index
+
+
+def test_installed_help_sections_are_serve_time_only():
+    # THE constraint of #163's help slice: what is installed on this machine may
+    # never reach build_full_corpus() or the packaged JSON, or the byte-exact
+    # drift guard above becomes machine-specific.
+    index = _installed_index({
+        "x-notes": ({"title": "Notes", "help": {"icon": "📓"}},
+                    "A note pad.\n\n## Writing a note\n\nType and it saves.\n"),
+    })
+    base = hc.build_full_corpus()
+    base_slugs = [s["slug"] for s in base["sections"]]
+    assert "x-notes" not in base_slugs, \
+        "build_full_corpus must never consult the installed index"
+
+    merged = hc.merge_installed_sections(base, index)
+    sec = {s["slug"]: s for s in merged["sections"]}["x-notes"]
+    assert sec["mod"] == "x-notes"          # tagged, so Help hides it when off
+    assert sec["label"] == "Notes"          # manifest title
+    assert sec["icon"] == "📓"
+    assert sec["cards"], "help.md should yield at least one card"
+    assert sec["order"] > max(s["order"] for s in base["sections"])
+
+    # The base is untouched — it is the import-time HELP_CORPUS, reused by every
+    # index swap — and the packaged bytes still match a fresh shipped-only build.
+    assert [s["slug"] for s in base["sections"]] == base_slugs
+    assert hc.PACKAGED_JSON.read_bytes() == \
+        hc.serialize_corpus(hc.build_full_corpus())
+
+
+def test_no_shipped_help_slug_is_in_the_installed_namespace():
+    # This is what makes "an installed section can never shadow a shipped one"
+    # STRUCTURAL rather than a hope. An installed section's slug is forced to
+    # its mod id and an installed id must start with "x-", so the other half of
+    # the proof is that nothing on the shipped side ever claims an "x-" slug.
+    #
+    # It is not implied by the CI rule that no shipped mod ID starts with "x-":
+    # a wiki page could be named X-Notes.md, and a shipped mod.json may set an
+    # explicit help.slug unrelated to its id (mod-sync does). Both land in
+    # build_full_corpus, so guard the built slugs, not the ids.
+    #
+    # If this ever fails, the collision is not a crash — merge_installed_sections
+    # keeps the shipped section and silently drops the installed mod's help.
+    for sec in hc.build_full_corpus()["sections"]:
+        assert not sec["slug"].startswith("x-"), \
+            "%s claims a slug in the installed namespace" % sec["slug"]
+
+
+def test_an_installed_section_never_displaces_a_base_section():
+    # The unreachable-by-construction branch above, exercised anyway: if a base
+    # section somehow already owns the slug, the BASE wins and the corpus is
+    # otherwise untouched — one section per slug, never two, never a raise.
+    index = _installed_index({"x-notes": ({"title": "Notes"}, "installed\n")})
+    base = {"sections": [{"slug": "x-notes", "label": "Squatter", "order": 5,
+                          "cards": [{"title": "Base", "body": [],
+                                     "search": "base"}]}]}
+    merged = hc.merge_installed_sections(base, index)
+    assert len(merged["sections"]) == 1
+    assert merged["sections"][0]["label"] == "Squatter"
+    assert "mod" not in merged["sections"][0]
+
+
+def test_installed_help_slug_is_forced_to_the_mod_id():
+    # help.slug is dropped by modinstall's canonical manifest and ignored here,
+    # so an installed section can never land on a wiki or shipped slug.
+    index = _installed_index({"x-taskbar": ({"title": "Nope"}, "prose\n")})
+    index["mods"]["x-taskbar"]["manifest"]["help"] = {"slug": "taskbar",
+                                                      "label": "Taskbar"}
+    merged = hc.merge_installed_sections(hc.build_full_corpus(), index)
+    slugs = [s["slug"] for s in merged["sections"]]
+    assert "x-taskbar" in slugs
+    assert slugs.count("taskbar") == 1
+    taskbar = next(s for s in merged["sections"] if s["slug"] == "taskbar")
+    assert "mod" not in taskbar, "the wiki section must survive intact"
+
+
+def test_installed_help_never_raises_or_blanks_help():
+    # A careless installed mod must not be able to empty the Help window: every
+    # malformed shape is SKIPPED and the rest of the corpus is served.
+    base = hc.build_full_corpus()
+    index = _installed_index({"x-good": ({}, "prose\n")})
+    good = index["mods"]["x-good"]
+    _MAX = hc._MAX_INSTALLED_SECTIONS
+    for broken in (None, 7, b"bytes", "", "   \n", "\n\n",
+                   "x" * (hc._MAX_INSTALLED_HELP_CHARS + 1)):
+        bad = {"mods": {"x-bad": dict(good, id="x-bad", help_md=broken),
+                        "x-good": good}}
+        merged = hc.merge_installed_sections(base, bad)
+        slugs = [s["slug"] for s in merged["sections"]]
+        assert "x-bad" not in slugs, repr(broken)[:40]
+        assert "x-good" in slugs
+        assert len(slugs) == len(base["sections"]) + 1
+
+    # ...and a wholly malformed index / corpus degrades to the base, not a throw.
+    for junk in (None, {}, {"mods": None}, {"mods": {"x-a": None}},
+                 {"mods": {"x-a": {"help_md": "p\n", "manifest": 7}}},
+                 {"mods": {7: {"help_md": "p\n"}}}):
+        assert len(hc.merge_installed_sections(base, junk)["sections"]) \
+            >= len(base["sections"])
+    assert hc.merge_installed_sections({"sections": []}, index)["sections"]
+    assert hc.merge_installed_sections(None, index) is None
+
+    # One unusable KEY must not take the whole merge down with it: sorting a
+    # mixed-type key set raises, and the outer guard would then drop every
+    # OTHER mod's help too.
+    mixed = hc.merge_installed_sections(base, {"mods": {7: {"help_md": "p\n"},
+                                                        "x-good": good}})
+    assert "x-good" in [s["slug"] for s in mixed["sections"]]
+
+    # The aggregate parse this does on the event loop is bounded even for an
+    # index no validator ever saw.
+    many = {"mods": {"x-%03d" % n: dict(good, help_md="mod %d prose\n" % n)
+                     for n in range(_MAX + 5)}}
+    merged = hc.merge_installed_sections(base, many)
+    assert len(merged["sections"]) == len(base["sections"]) + _MAX
+
+
+def test_installed_help_falls_back_and_sorts_deterministically():
+    index = _installed_index({
+        "x-zed": ({}, "zed prose\n"),
+        "x-aaa": ({"help": {"order": 10}}, "aaa prose\n"),
+        "x-mid": ({"title": "Middle"}, "mid prose\n"),
+        "x-nohelp": ({}, None),
+    })
+    merged = hc.merge_installed_sections({"sections": []}, index)
+    rows = {s["slug"]: s for s in merged["sections"]}
+    assert "x-nohelp" not in rows                    # no help.md, no section
+    # No help.label and no title -> the canonical manifest already defaulted
+    # title to the id, so the label is the id (the _humanize fallback below it
+    # only fires for a hand-built index carrying no manifest at all).
+    assert rows["x-zed"]["label"] == "x-zed"
+    assert rows["x-mid"]["label"] == "Middle"        # manifest title
+    assert rows["x-aaa"]["order"] == 10              # explicit help.order wins
+    # Sorted by (order, slug): the explicit 10 sorts before the derived bases.
+    assert [s["slug"] for s in merged["sections"]] == \
+        ["x-aaa", "x-mid", "x-zed"]
+    # Deterministic and idempotent across repeated swaps (the parse cache is
+    # keyed by the help TEXT, so it can never serve a stale section).
+    again = hc.merge_installed_sections({"sections": []}, index)
+    assert hc.serialize_corpus(again) == hc.serialize_corpus(merged)
+
+
+# --------------------------------------------------------------------------- #
 # frontend XSS-safety: Help render path uses no innerHTML on corpus content
 # --------------------------------------------------------------------------- #
 
