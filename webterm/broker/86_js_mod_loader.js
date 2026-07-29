@@ -24,6 +24,13 @@
             registered: [],           // [{id, version, ctxVersion, init}] in decl order
             active: new Map(),        // id -> { id, version, unloads:[] }  (the "slot")
             settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
+            // #169: ctx.theme.onChange subscribers, [{fn}] boxes. Lives on the
+            // loader object (NOT a fragment-level `const`) for the same TDZ
+            // reason the note above gives: notifyModTheme() rides notifyModSettings,
+            // which earlier fragments call before this assignment runs — a plain
+            // property read of a not-yet-created window.__mods is `undefined`,
+            // which notifyModTheme guards, where a TDZ `const` would throw.
+            themeSubs: [],
             helpCards: [],            // #78: mod-contributed Help cards (ctx.registerHelpCards), sanitized typed entries the Help mod merges with the core corpus
             booted: false,
             // #157: this broker's MOD POLICY as resolved at boot — {id: bool},
@@ -112,6 +119,14 @@
         // isolated, mirroring win.cleanups (73_js_window_runtime.js:439). Drains
         // the list so a re-run is a no-op.
         function _runUnloads(rec) {
+            // #169: mark the record DEAD for the whole drain, and leave it dead.
+            // A teardown callback is allowed to change a setting, which reaches
+            // notifyModTheme through _valueAccessor.set — and because the drain
+            // is LIFO, a LATER-registered unload runs while an EARLIER-registered
+            // ctx.theme subscriber is still on the list. Without this flag that
+            // mod's own theme callback would run mid-teardown, after resources it
+            // registered later have already been released.
+            rec.unloading = true;
             const fns = rec.unloads.splice(0).reverse();
             for (const fn of fns) { try { fn(); } catch (_) {} }
         }
@@ -564,6 +579,30 @@
                         return _modSettingChoice(rec, 'combo', key, options, opts);
                     },
                 },
+                // #169: the LIVE theme, and a subscription to changes. See the
+                // "#169: the live theme" block below for the derivation rule and
+                // the public CSS-variable contract vars() resolves.
+                //   get()         -> {name, dark}. Derived from the DOM, so it is
+                //                    right with the theme mod disabled, absent or
+                //                    replaced. `dark` is the honest half; `name`
+                //                    is a hint (see below).
+                //   vars()        -> {'--bg': '#1e1e1e', …}. A SEPARATE call on
+                //                    purpose: it costs a getPropertyValue per
+                //                    public var plus an object, which a
+                //                    subscriber that only branches on `dark`
+                //                    should never pay.
+                //   onChange(fn)  -> unsubscribe fn. fn({name, dark}) runs AFTER
+                //                    the new vars are on screen, only on a real
+                //                    change, and is NOT replayed on register
+                //                    (call get() in your init). ALSO auto-dropped
+                //                    on this mod's teardown, like
+                //                    ctx.clipboard.observe.
+                // Additive — ctxVersion stays 1; feature-detect `if (ctx.theme)`.
+                theme: {
+                    get: function () { return _themeState(); },
+                    vars: function () { return _themeVars(); },
+                    onChange: function (fn) { return _modThemeObserve(rec, fn); },
+                },
                 // #74: a full custom Control Panel section, for controls richer
                 // than a single boolean/radio/select. spec.render() builds the
                 // widget DOM (returned node is appended); spec.reflect(settings)
@@ -653,6 +692,308 @@
             return off;
         }
 
+        // ---- #169: the live theme, and a channel that announces changes ------
+        // A mod that must know whether the desktop is light or dark (an iframe
+        // hint through the frame URL, a canvas it paints itself) has no honest
+        // source today. Core stopped owning `theme` when #75 extracted the engine,
+        // so the synced key is the theme MOD's private key and says nothing when
+        // that mod is disabled, absent, or replaced; a duplicate
+        // ctx.settings.radio('theme', …) silently mounts a SECOND Control Panel
+        // widget for the same key (there is no duplicate-key guard); and there is
+        // no DOM event to listen to (this app dispatches none, by design — a
+        // document-level listener is not removable by a mod's teardown in
+        // practice).
+        //
+        // So derive from the LIVE DOM, which dissolves the "who owns the key"
+        // problem entirely:
+        //
+        //   dark   a YIQ test (core's hoisted isDarkAccent, 65) on the COMPUTED
+        //          --bg. Whatever painted it — the theme mod, a replacement, or
+        //          the :root defaults — that is what the user is looking at.
+        //   name   the synced `theme` key, but ONLY when an INLINE --bg on
+        //          documentElement proves a theme mod actually applied one
+        //          (mods/theme/theme.js writes the six chrome vars there and
+        //          nowhere else). With no inline var the :root defaults are live,
+        //          and by the #75 contract they reproduce `night` EXACTLY — so
+        //          reporting a stored `theme` there would name a scheme that is
+        //          NOT on screen (the theme mod disabled with `day` saved is
+        //          precisely that case). `name` is therefore a HINT, only as
+        //          trustworthy as whichever mod claims the key; `dark` is the
+        //          half to branch on. Three ways `name` can be imprecise, all of
+        //          them the same missing fact — nothing in the DOM records WHICH
+        //          theme wrote those vars, so no derivation off the DOM can do
+        //          better, and `dark` stays honest through all of them:
+        //            - disable the theme mod and THEN let a /state pull move the
+        //              key (verified live): `name` reports the pulled scheme
+        //              while the screen still shows the last applied one;
+        //            - the stored value is one this build's theme mod does not
+        //              know. Its radio read() is NON-destructive, so the widget
+        //              shows night and applies night while the blob keeps the
+        //              unknown string — which is what `name` reports;
+        //            - a replacement theme mod keys off something OTHER than
+        //              `theme`, or another mod writes an inline --bg of its own.
+        //          A mod that needs certainty should key off `dark`.
+        //
+        // Two limits worth stating plainly, both deliberate:
+        //   - The channel is change-detected on {name, dark} ONLY. A change that
+        //     moves a public var without moving either (a hypothetical accent-
+        //     only setting) does NOT call subscribers, so a mod refreshing
+        //     ctx.theme.vars() from onChange would miss it. Signing the full var
+        //     set would make every announcement pay the read that vars() exists
+        //     to keep optional; no shipped setting does this.
+        //   - A theme mod must apply its vars SYNCHRONOUSLY from its settings
+        //     onChange (as mods/theme/theme.js does). Every mover announces on
+        //     the same tick it fires, so a mod that deferred the write to a
+        //     rAF/timeout would be announced BEFORE it painted. That mirrors the
+        //     synchronous-init contract initMod already relies on.
+        //
+        // Fired from the four movers that can change what is on screen —
+        // _valueAccessor.set (a LOCAL pick, which never routes through
+        // applyThemeSettings), notifyModSettings (/state convergence),
+        // setModEnabled and _applyPolicyLive (a theme mod coming up or going
+        // down) — plus once at the end of boot, so a subscriber whose mod inits
+        // BEFORE the theme mod is not left holding the pre-theme answer.
+        //
+        // Hooked at those CALLERS rather than inside initMod/disableMod, for the
+        // reason #167 gives for restoreAppWindowsAfterMods: _bringUp/_takeDown
+        // run in loops, and one announcement after the whole cascade settles
+        // beats N interleaved with mid-flight inits — and it keeps a subscriber's
+        // handler off the stack in the middle of a dependency cascade. The cost
+        // is that the __test.run/__test.disable inspectors, which bypass
+        // setModEnabled by design, do not announce; that is deliberate (they
+        // exist to drive initMod/disableMod in isolation) — an acceptance test
+        // that wants the channel should drive __test.setEnabled or a real pick.
+
+        // The PUBLIC CSS-variable contract, resolved off documentElement:
+        //
+        //   --bg / --bg-2 / --bg-3     surfaces, back to front
+        //   --fg / --fg-dim            ink, primary + de-emphasized
+        //   --accent-default           the accent to use when there is no window one
+        //   --sel-bg                   selected / active rows, tabs, buttons
+        //   --ok / --warn / --danger   the #173 semantic status trio
+        //
+        // Deliberately NOT here:
+        //   --accent   is per-WINDOW, not global — there is no document-level
+        //              value to resolve. Inside a window's DOM, write
+        //              `var(--accent, var(--accent-default))` in CSS.
+        //   --taskbar-h / --title-h / --handle-thick / --corner-size are
+        //              GEOMETRY, not theme; no theme mod writes them.
+        // Everything else in the stylesheets is private core and may change
+        // without notice. Mods should consume these instead of the hardcoded
+        // semantic hexes several of them still carry.
+        //
+        // Values come back as the CSSOM reports a CUSTOM PROPERTY, which is a
+        // substituted token stream and NOT a resolved color: the six a theme
+        // writes are hexes, but the derived four read back as e.g.
+        // 'color-mix(in srgb, #4aa3ff 28%, #1e1e1e)' (verified live). That is a
+        // valid CSS color string — assign it to a style property and it paints —
+        // but do NOT expect to parse a number out of it; branch on `dark` from
+        // get() instead. A var the page somehow lacks is simply absent.
+        function _themeVars() {
+            // Declared INSIDE the function on purpose: a fragment-level `const`
+            // read by a hoisted function is the TDZ hazard the header note warns
+            // about, and this list is small enough that rebuilding it per call
+            // (vars() is the deliberately-rare path) costs nothing.
+            const PUBLIC_VARS = ['--bg', '--bg-2', '--bg-3', '--fg', '--fg-dim',
+                                 '--accent-default', '--sel-bg',
+                                 '--ok', '--warn', '--danger'];
+            const out = {};
+            try {
+                const cs = getComputedStyle(document.documentElement);
+                for (const n of PUBLIC_VARS) {
+                    const v = String(cs.getPropertyValue(n) || '').trim();
+                    if (v) out[n] = v;
+                }
+            } catch (_) {}
+            return out;
+        }
+
+        // {name, dark} from the live DOM — see the derivation above. Never
+        // throws: a missing --bg, a color syntax we cannot read, or a document
+        // mid-teardown all fall back to the shipped default (night / dark), which
+        // is exactly what :root paints when nothing else has.
+        function _themeState() {
+            let name = 'night';
+            let dark = true;
+            try {
+                const root = document.documentElement;
+                const inline = String(
+                    root.style.getPropertyValue('--bg') || '').trim();
+                if (inline) {
+                    const v = getSettings().theme;
+                    if (typeof v === 'string' && v) name = v;
+                }
+                const hex = _themeBgHex(root);
+                if (hex) dark = isDarkAccent(hex);
+            } catch (_) {}
+            return { name: name, dark: dark };
+        }
+
+        // The live background as a hex isDarkAccent can read, or '' if it cannot
+        // be determined. Reads --bg FIRST: it is what a theme mod writes, and no
+        // CSS transition can make it stale — an UNREGISTERED custom property (this
+        // app declares no @property, which is what would make one interpolate) is
+        // a token substitution, so a mid-transition read already reports the
+        // destination. Falls back to the RESOLVED html background, which
+        // 10_css_root.css pins to var(--bg), so a theme that writes --bg in a
+        // syntax we cannot read still has a second chance at a number.
+        //
+        // normalizeHex answers PALETTE[0] for anything it cannot parse — a
+        // plausible-looking WRONG color — so nothing unparsed is handed to it: a
+        // theme in a color space the CSSOM serializes as-is (oklch(), color(),
+        // lab()) reads as '' here and `dark` keeps its documented default rather
+        // than being invented. Every shipped palette is plain hex.
+        function _themeBgHex(root) {
+            const cs = getComputedStyle(root);
+            const fromVar = _themeAsHex(
+                String(cs.getPropertyValue('--bg') || '').trim());
+            if (fromVar) return fromVar;
+            return _themeAsHex(String(cs.backgroundColor || '').trim());
+        }
+        // '#abc' / '#aabbcc' / 'rgb(r,g,b)' / 'rgba(r,g,b,a)' -> a hex string
+        // (3-digit passes through; normalizeHex expands it). '' for anything
+        // else, including an unresolved color-mix()/var() token, a modern
+        // color-space form, and a FULLY TRANSPARENT color: alpha 0 is what an
+        // invalid --bg computes `background: var(--bg)` down to, and calling that
+        // opaque black would report `dark` off a surface nobody can see.
+        function _themeAsHex(v) {
+            if (/^#[0-9a-fA-F]{3}$/.test(v) || /^#[0-9a-fA-F]{6}$/.test(v)) return v;
+            const m = v.match(
+                /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+))?/);
+            if (!m) return '';
+            if (m[4] !== undefined && parseFloat(m[4]) === 0) return '';
+            let s = '#';
+            for (let i = 1; i <= 3; i++) {
+                const n = Math.max(0, Math.min(255, Math.round(parseFloat(m[i]))));
+                s += (n < 16 ? '0' : '') + n.toString(16);
+            }
+            return s;
+        }
+        function _themeSig(state) {
+            return state.name + '|' + (state.dark ? 'd' : 'l');
+        }
+
+        // Subscribe a mod to theme changes (ctx.theme.onChange). Returns an
+        // unsubscribe fn AND pushes it onto rec.unloads, mirroring
+        // _modAddStatusItem / _modClipboardObserve: a disable, a dependency
+        // cascade, or an initMod rollback drops the subscriber, so a torn-down
+        // mod is never called again. Both paths are idempotent (indexOf === -1),
+        // so unsubscribing by hand and then tearing down is safe. A non-function
+        // is a clean no-op returning a no-op remover.
+        //
+        // The entry is a BOX ({fn}), not the bare fn, so identity survives a mod
+        // registering the SAME function twice — one unsubscribe then removes one
+        // registration rather than the wrong one.
+        function _modThemeObserve(rec, fn) {
+            if (typeof fn !== 'function') return function () {};
+            const subs = window.__mods.themeSubs;
+            // Priming on the 0 -> 1 transition is what makes "not replayed on
+            // register" safe: the change detector starts at what is on screen
+            // NOW, so the next mover calls fn only if the theme really moved, and
+            // a subscribe that follows the last unsubscribe cannot inherit a
+            // signature that went stale while nobody was listening.
+            if (!subs.length) {
+                try { notifyModTheme._last = _themeSig(_themeState()); }
+                catch (_) { notifyModTheme._last = null; }
+            }
+            // `rec` rides along so a fire can skip a mod that is mid-teardown
+            // (see _runUnloads), not just one already unsubscribed.
+            const sub = { fn: fn, rec: rec };
+            subs.push(sub);
+            const off = function () {
+                const i = subs.indexOf(sub);
+                if (i !== -1) subs.splice(i, 1);
+            };
+            rec.unloads.push(off);   // subscriber dropped when the mod tears down
+            return off;
+        }
+
+        // Announce a possible theme change to every subscriber. Guarded so the
+        // early-boot notifyModSettings call (from 85_js_startup.js, before this
+        // fragment ran) is a clean no-op, exactly like notifyModSettings itself.
+        //
+        // With no subscriber this returns BEFORE touching any style, so the whole
+        // feature costs nothing until a mod opts in — which matters because one
+        // of its call sites (notifyModSettings) runs on every /state convergence.
+        // Deliveries are change-detected on {name, dark}, so a mover that did not
+        // move the theme (any other setting converging, any other mod toggling)
+        // calls nobody.
+        function notifyModTheme() {
+            if (!window.__mods) return;
+            const subs = window.__mods.themeSubs;
+            if (!subs || !subs.length) return;
+            // Re-entrancy: a subscriber is explicitly allowed to change a setting
+            // from its handler, which re-enters here through _valueAccessor.set.
+            // The nested call only raises _pending; the pass in flight aborts as
+            // soon as it sees that (so nobody is handed a state that is no longer
+            // on screen) and this loop re-runs it against the new one, so a
+            // handler that picks a theme settles in two passes.
+            //
+            // BOUNDED, so two subscribers fighting over the theme cannot livelock
+            // the UI thread. Exhausting the bound is a deliberate abandonment, not
+            // a lost update: _last still holds the last state that was DELIVERED,
+            // so whatever the runaway settled on differs from it and the next
+            // mover announces it (and if it settled back, subscribers already have
+            // that value). Cheap to reason about; the warning is the real signal.
+            //
+            // State lives on the function (not a fragment `const`) for the TDZ
+            // reason in the header note.
+            if (notifyModTheme._firing) { notifyModTheme._pending = true; return; }
+            notifyModTheme._firing = true;
+            try {
+                for (let pass = 0; pass < 4; pass++) {
+                    notifyModTheme._pending = false;
+                    _fireThemeSubs(subs);
+                    if (!notifyModTheme._pending) break;
+                }
+                if (notifyModTheme._pending) {
+                    console.warn('[mods] theme subscribers keep moving the theme;'
+                        + ' stopped after 4 passes — the next theme change will'
+                        + ' announce whatever it settled on');
+                }
+            } finally {
+                notifyModTheme._firing = false;
+                notifyModTheme._pending = false;
+            }
+        }
+
+        // One delivery pass. `_last` is updated BEFORE the loop so a re-entrant
+        // notify compares against what is being announced, not the previous
+        // announcement. Iterates a SNAPSHOT (a handler may subscribe, unsubscribe
+        // or tear a mod down mid-fire — never skip or revisit). Each subscriber is
+        // isolated — a throw is logged and the others still run, and it can never
+        // break the mover that fired us — and gets its OWN object, so one cannot
+        // mutate what the next sees.
+        //
+        // Three reasons a snapshot entry is skipped rather than called:
+        //   - it was unsubscribed since the snapshot (an earlier subscriber tore
+        //     its mod down);
+        //   - its mod is mid-teardown (_runUnloads set rec.unloading; see there);
+        //   - a subscriber already moved the theme, so the state in hand is NO
+        //     LONGER on screen. Handing the rest of the list an obsolete payload
+        //     would break the one guarantee this channel makes — that a callback
+        //     sees the theme that is live — so the pass ABORTS and notifyModTheme
+        //     re-runs it against the new state. The subscribers already called
+        //     with the superseded state get the new one on that replay.
+        function _fireThemeSubs(subs) {
+            let state;
+            try { state = _themeState(); } catch (_) { return; }
+            const sig = _themeSig(state);
+            if (sig === notifyModTheme._last) return;
+            notifyModTheme._last = sig;
+            const list = subs.slice();
+            for (let i = 0; i < list.length; i++) {
+                if (notifyModTheme._pending) return;          // state moved: replay
+                const sub = list[i];
+                if (subs.indexOf(sub) === -1) continue;       // gone mid-fire
+                if (sub.rec && sub.rec.unloading) continue;   // mod mid-teardown
+                try { sub.fn({ name: state.name, dark: state.dark }); }
+                catch (e) {
+                    console.error('[mods] theme subscriber failed:', e);
+                }
+            }
+        }
+
         // ---- Control Panel settings extension (#71 boolean; #74 radio/select/
         // pane) --------------------------------------------------------------
         // Shared scaffold: a titled .set-section mounted into #set-mods. It is
@@ -733,6 +1074,14 @@
                     entry.last = value;
                     entry.reflect();
                     if (entry.onChange) { try { entry.onChange(value); } catch (_) {} }
+                    // #169: mover 1 of 5. A LOCAL pick never routes through
+                    // applyThemeSettings, so hooking only the /state convergence
+                    // would leave it unannounced until the next pull. AFTER
+                    // entry.onChange on purpose — that is where the theme mod
+                    // writes the vars notifyModTheme reads back, so a subscriber
+                    // can never see the pre-change DOM. Cheap: it returns before
+                    // reading any style unless a mod has subscribed.
+                    notifyModTheme();
                 },
                 onChange: function (fn) {
                     entry.onChange = (typeof fn === 'function') ? fn : null;
@@ -1259,6 +1608,12 @@
                     }
                 }
             }
+            // #169: mover 2 of 5 — a cross-browser /state convergence that
+            // carried a new `theme`. Once, AFTER the whole loop, not per entry:
+            // every control has converged by here, so the DOM the subscribers
+            // read is final, and one pull can only ever produce one
+            // announcement.
+            notifyModTheme();
         }
 
         // Reflect every mod control's widget from the live settings when the
@@ -1593,6 +1948,12 @@
             // typeof-guarded no-op when Help is closed or the help mod is absent);
             // harmless double-refresh for card-registering mods.
             _refreshHelpIfOpen();
+            // #169: mover 3 of 5. Enabling a theme mod applies its vars inside
+            // _bringUp; disabling one puts :root back if (unlike today's theme
+            // mod) it unloads them, and can take a theme mod down as a #121
+            // dependency cascade. Change-detected, so toggling any OTHER mod
+            // calls nobody.
+            notifyModTheme();
             return on;
         }
 
@@ -1763,6 +2124,15 @@
                 }
                 initMod(decl);
             }
+            // #169: mover 5 of 5 — boot itself. The theme mod is FIRST in
+            // ui._MODS, so today every subscriber inits after the vars are
+            // already applied and ctx.theme.get() in its init is right; this one
+            // line makes that independent of _MODS ORDER, which is otherwise a
+            // silent trap (a subscriber ordered ahead of the theme mod would read
+            // the pre-theme :root defaults and never be told otherwise). A no-op
+            // in the ordered case: the change detector was primed at subscribe
+            // time with the same state.
+            notifyModTheme();
         }
 
         // Reconcile every registered mod with the CURRENT resolved policy, using
@@ -1797,6 +2167,9 @@
                 try { window.__mods._reflectManager(); } catch (_) {}
             }
             _refreshHelpIfOpen();
+            // #169: mover 4 of 5 — a post-login pin apply (#157) that brought a
+            // theme mod up or took one down. Once, after the whole reconcile.
+            notifyModTheme();
         }
 
         // #157: a host just authenticated (called from the login overlay, 63).
@@ -1852,6 +2225,15 @@
             // the registry and a fixture mod's kind appears/disappears with it.
             windowKinds: function () {
                 return windowKindMenuList().map(function (k) { return k.appKind; });
+            },
+            // #169: the derived theme and the live subscriber COUNT — the
+            // acceptance asserts that a fixture mod's ctx.theme.onChange fires on
+            // a pick and that disabling the mod drops its subscriber (the count
+            // returns to what it was), which is the one hygiene property no
+            // source-text test can prove.
+            theme: function () { return _themeState(); },
+            themeSubscribers: function () {
+                return (window.__mods.themeSubs || []).length;
             },
             // #86 (S13): the per-mod enable surface the Mods-pane acceptance drives.
             // setEnabled persists + applies live (master-gated) via the SAME path
