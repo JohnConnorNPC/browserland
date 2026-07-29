@@ -35,13 +35,17 @@ a shape invented for the test.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from .auth_helpers import TEST_TOKEN, authed
+import webterm.broker.app as app_mod
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable, with_token
 from webterm.broker import modinstall, ui
 from webterm.broker.app import create_app
 
@@ -54,8 +58,26 @@ JS_CTYPE = "application/javascript; charset=utf-8"
 # fixtures
 # --------------------------------------------------------------------------- #
 
+def content_address(manifest_obj, raw_files):
+    """The ``gen`` these bytes hash to, or ``None`` if they are not a valid
+    package at all. Used so a raw-planted VALID package still lands in a
+    correctly named directory -- the scanner refuses a generation whose name
+    does not content-address its own bytes."""
+    try:
+        # Only the files the SCANNER would capture: it ignores inert junk
+        # (unknown suffixes, a stray .DS_Store) rather than refusing the mod, so
+        # the junk must not contribute to the hash either.
+        captured = {n: d.decode("utf-8") for n, d in raw_files.items()
+                    if modinstall.file_name_error(n) is None}
+        canonical, records = modinstall.validate_package(manifest_obj, captured)
+    except (modinstall.ValidationError, UnicodeDecodeError, AttributeError):
+        return None
+    return modinstall.compute_gen(canonical, records)
+
+
 def plant_raw(mods_dir, mod_id, manifest_obj, raw_files, *, gen=None,
-              installed_at=1_700_000_000, current=True, marker=True):
+              previous=None, installed_at=1_700_000_000, current=True,
+              marker=True):
     """Write one generation into the store WITHOUT validating it first.
 
     The primitive behind ``plant``: it is what lets a test plant a BOM, a
@@ -65,7 +87,7 @@ def plant_raw(mods_dir, mod_id, manifest_obj, raw_files, *, gen=None,
     mods_dir.mkdir(parents=True, exist_ok=True)
     if marker:
         (mods_dir / modinstall.MARKER_NAME).write_bytes(b"")
-    gen = gen or ("a" * 64)
+    gen = gen or content_address(manifest_obj, raw_files) or ("a" * 64)
     gdir = mods_dir / mod_id / gen
     gdir.mkdir(parents=True, exist_ok=True)
     if manifest_obj is not None:
@@ -78,14 +100,21 @@ def plant_raw(mods_dir, mod_id, manifest_obj, raw_files, *, gen=None,
         encoding="utf-8")
     if current:
         (mods_dir / mod_id / modinstall.CURRENT_NAME).write_text(
-            json.dumps({"gen": gen}), encoding="utf-8")
+            json.dumps({"gen": gen, "previous": previous}), encoding="utf-8")
     return gen
 
 
 def plant(mods_dir, manifest, files, **kw):
-    """Write a VALID mod, content-addressed exactly as an install would."""
+    """Write a VALID mod, content-addressed exactly as an install would.
+
+    Successive calls chain the retention pointer, so replacing v1 with v2 leaves
+    CURRENT naming v2 with v1 as its retained predecessor -- exactly what the
+    installer writes."""
     canonical, records = modinstall.validate_package(manifest, files)
     gen = kw.pop("gen", None) or modinstall.compute_gen(canonical, records)
+    if "previous" not in kw:
+        live, _ = modinstall.read_current(Path(mods_dir) / canonical["id"])
+        kw["previous"] = live if live and live != gen else None
     plant_raw(mods_dir, canonical["id"], canonical,
               {name: rec["data"] for name, rec in records.items()},
               gen=gen, **kw)
@@ -218,6 +247,11 @@ def test_byte_rules_reject_bom_missing_newline_and_oversize():
         ("\ufeffregisterMod({});\n", "bad_encoding"),        # UTF-8 BOM
         ("registerMod({});", "bad_encoding"),                # no final newline
         ("\n" * (ui._MAX_LINES + 1), "file_too_large"),      # over the line cap
+        # JavaScript ends a line on CR, U+2028 and U+2029 too, so counting only
+        # "\n" would wave a 100k-line wall of code straight through the cap.
+        ("\r" * (ui._MAX_LINES + 1) + "\n", "file_too_large"),
+        ("\u2028" * (ui._MAX_LINES + 1) + "\n", "file_too_large"),
+        ("\u2029" * (ui._MAX_LINES + 1) + "\n", "file_too_large"),
         ("/" * (modinstall.MAX_FILE_BYTES + 1) + "\n", "file_too_large"),
         (b"registerMod({});\n", "bad_encoding"),             # not a str
         ("\ud800\n", "bad_encoding"),                        # lone surrogate
@@ -231,6 +265,11 @@ def test_byte_rules_reject_bom_missing_newline_and_oversize():
     modinstall.validate_package(manifest(), {"x-notes.js": ok})
     modinstall.validate_package(manifest(),
                                 {"x-notes.js": "\n" * ui._MAX_LINES})
+    # CRLF is ONE line terminator, not two -- a file written on Windows must
+    # not count double against the cap.
+    modinstall.validate_package(manifest(),
+                                {"x-notes.js": "\r\n" * ui._MAX_LINES})
+    assert modinstall.count_lines("a\r\nb\rc\nd") == 3
 
 
 def test_package_totals_are_capped():
@@ -264,6 +303,16 @@ def test_installed_css_may_not_reference_an_external_origin():
         ".a { background: url(//evil.example/p.png); }\n",
         '.a { background: url("//evil.example/p.png"); }\n',
         "@font-face { src: url(https://evil.example/f.woff2); }\n",
+        # No url() at all -- an enumerate-the-syntax rule sails straight past
+        # image-set(), src(), and whatever CSS adds next.
+        '.a { background: image-set("https://evil.example/p.png" 1x); }\n',
+        '.a { background: -webkit-image-set("//evil.example/p.png" 1x); }\n',
+        '@font-face { src: src("https://evil.example/f.woff2"); }\n',
+        # A comment stripper that does not know about strings reads the "/*" as
+        # an unterminated comment and drops everything after it -- so the load
+        # on the next line is never seen. The browser reads it as a string.
+        '.a::before { content: "/*"; }\n'
+        ".b { background: url(https://evil.example/p.png); }\n",
     ]
     for css in refused:
         with pytest.raises(modinstall.ValidationError) as exc:
@@ -282,6 +331,31 @@ def test_installed_css_may_not_reference_an_external_origin():
         modinstall.validate_package(
             manifest(styles=["x-notes.css"]),
             {"x-notes.js": "//\n", "x-notes.css": css})
+
+
+def test_css_validation_is_linear_on_hostile_input():
+    """It runs ON THE EVENT LOOP against up to 256 KiB of attacker-chosen text.
+
+    The obvious ``/\\*.*?\\*/`` and ``url\\((.*?)\\)`` are QUADRATIC on input
+    that opens thousands of comments (or ``url(``) and never closes them -- one
+    installed stylesheet would stall every terminal on the broker for minutes.
+    Deadlined rather than eyeballed, because the failure mode is "slow", which
+    is exactly what a passing-but-quadratic implementation looks like on a small
+    fixture.
+    """
+    for filler in ("/*", "url(", "/*url("):
+        css = (filler * 40_000) + "\n"
+        started = time.monotonic()
+        modinstall.validate_package(manifest(styles=["x-notes.css"]),
+                                    {"x-notes.js": "//\n", "x-notes.css": css})
+        assert time.monotonic() - started < 2.0, \
+            f"{filler!r} x 40000 took too long -- the scan is not linear"
+    # An unterminated comment runs to end of file, exactly as a browser reads
+    # it, so what it hides is genuinely hidden.
+    modinstall.validate_package(
+        manifest(styles=["x-notes.css"]),
+        {"x-notes.js": "//\n",
+         "x-notes.css": "/* @import url(https://evil.example/x);\n"})
 
 
 # --------------------------------------------------------------------------- #
@@ -410,12 +484,22 @@ def test_scan_reads_a_planted_mod(tmp_path):
     assert rec["gen"] == gen
     assert rec["installed_at"] == 1_700_000_000        # from .gen.json, not mtime
     assert rec["help_md"].startswith("# Notes")
+    assert rec["previous"] is None
     assert set(rec["files"]) == {"x-notes.js", "x-notes.css", "help.md"}
     # Only .js/.css are servable; help.md is a broker-side input, never a URL.
     assert set(index["assets"]) == {f"x-notes/{gen}/x-notes.js",
                                     f"x-notes/{gen}/x-notes.css"}
     assert index["assets"][f"x-notes/{gen}/x-notes.js"][1] == JS_CTYPE
     assert index["skipped"] == {}
+
+
+def test_help_is_captured_case_insensitively(tmp_path):
+    # "Help.md" passes the grammar, so an exact "help.md" lookup would capture
+    # nothing and the mod's help would silently never appear.
+    plant(tmp_path / "mods", manifest(),
+          {"x-notes.js": "//\n", "Help.md": "# Notes\n\nhelp\n"})
+    rec = modinstall.scan(tmp_path / "mods")["mods"]["x-notes"]
+    assert rec["help_md"].startswith("# Notes")
 
 
 def test_scan_of_a_missing_or_empty_dir_is_empty(tmp_path):
@@ -806,3 +890,932 @@ def test_a_broken_mod_never_breaks_boot(tmp_path, monkeypatch):
         == ["x-notes"]
     assert app.ctx.mods_index["skipped"] == {"x-bad": "bad_encoding",
                                              "x-junk": "not_installed"}
+
+
+# --------------------------------------------------------------------------- #
+# POST /mods/install -- the commit protocol
+# --------------------------------------------------------------------------- #
+
+def payload(**kw):
+    out = {"manifest": manifest(styles=["x-notes.css"]),
+           "files": {"x-notes.js": "registerMod({ id: 'x-notes' });\n",
+                     "x-notes.css": ".notes { color: red; }\n",
+                     "help.md": "# Notes\n\nhelp\n"}}
+    out.update(kw)
+    return out
+
+
+def test_install_writes_the_store_commits_and_serves_it(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/install", json=payload())
+    assert r.status == 200, r.json
+    gen = r.json["gen"]
+    assert modinstall.GEN_RE.fullmatch(gen)
+    assert r.json["id"] == "x-notes" and r.json["replaced"] is False
+    # D1: global lexical bindings cannot be removed, so there is no live
+    # install. The response says so rather than letting a client imply it.
+    assert r.json["applies"] == "next_page_load"
+    assert r.json["adopts_existing_state"] == {"mod_store": False, "pin": False}
+    assert r.json["mod"]["source"] == "installed"
+    assert r.json["mod"]["default_enabled"] is False
+
+    root = tmp_path / "mods"
+    assert (root / modinstall.MARKER_NAME).is_file()      # written on first use
+    gdir = root / "x-notes" / gen
+    # CURRENT is the commit; it names a COMPLETE generation, and the retained
+    # predecessor is WRITTEN rather than inferred from directory mtimes.
+    assert json.loads((root / "x-notes" / modinstall.CURRENT_NAME)
+                      .read_text(encoding="utf-8")) == {"gen": gen,
+                                                        "previous": None}
+    assert (gdir / "x-notes.js").read_bytes() == \
+        b"registerMod({ id: 'x-notes' });\n"
+    # mod.json is BROKER-written from the canonical manifest.
+    written = json.loads((gdir / modinstall.MANIFEST_NAME)
+                         .read_text(encoding="utf-8"))
+    assert written["id"] == "x-notes" and "defaultEnabled" not in written
+    meta = json.loads((gdir / modinstall.GEN_META_NAME)
+                      .read_text(encoding="utf-8"))
+    assert meta["gen"] == gen and isinstance(meta["installed_at"], int)
+
+    # Live, with no restart: the asset route serves it immediately.
+    _, a = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+    assert a.status == 200 and a.body == b"registerMod({ id: 'x-notes' });\n"
+    _, info = authed(app).get("/info")
+    assert [m["id"] for m in info.json["mods"]][-1] == "x-notes"
+
+    # And a restart re-derives exactly the same state off disk.
+    again = make_app(tmp_path, monkeypatch)
+    assert again.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    assert again.ctx.mods_index["skipped"] == {}
+
+
+def test_install_refuses_a_payload_supplied_mod_json(tmp_path, monkeypatch):
+    # mod.json is broker-written from the CANONICAL manifest, so a payload can
+    # never ship one that disagrees with what was validated.
+    app = make_app(tmp_path, monkeypatch)
+    body = payload()
+    body["files"][modinstall.MANIFEST_NAME] = '{"id":"x-evil"}\n'
+    _, r = authed(app).post("/mods/install", json=body)
+    assert r.status == 400 and r.json["error"] == "reserved_file_name"
+    assert app.ctx.mods_index["mods"] == {}
+
+
+def test_install_error_matrix(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    big = "x" * (modinstall.MAX_FILE_BYTES + 1) + "\n"
+    cases = [
+        ({}, 400, "bad_json"),
+        ({"manifest": [], "files": {}}, 400, "bad_json"),
+        (payload(files=[]), 400, "bad_json"),
+        (payload(replace="yes"), 400, "bad_manifest_field"),
+        ({"manifest": manifest(id="clock"), "files": {"clock.js": "//\n"}},
+         400, "reserved_id"),
+        ({"manifest": manifest(id="Clock"), "files": {"clock.js": "//\n"}},
+         400, "bad_mod_id"),
+        ({"manifest": manifest(), "files": {"../x.js": "//\n"}},
+         400, "bad_file_name"),
+        ({"manifest": manifest(), "files": {"CURRENT": "//\n"}},
+         400, "reserved_file_name"),
+        ({"manifest": manifest(),
+          "files": {f"f{i}.js": "//\n"
+                    for i in range(modinstall.MAX_FILES + 1)}},
+         400, "too_many_files"),
+        ({"manifest": manifest(), "files": {"x-notes.js": big}},
+         413, "file_too_large"),
+        ({"manifest": manifest(),
+          "files": {"x-notes.js": "x" * (modinstall.MAX_FILE_BYTES - 1) + "\n",
+                    "b.js": "x" * (modinstall.MAX_FILE_BYTES - 1) + "\n",
+                    "c.js": "x" * (modinstall.MAX_FILE_BYTES - 1) + "\n"}},
+         413, "total_too_large"),
+        ({"manifest": manifest(), "files": {"x-notes.js": "no newline"}},
+         400, "bad_encoding"),
+        ({"manifest": manifest(), "files": {"x-notes.js": 7}},
+         400, "bad_encoding"),
+        ({"manifest": {"id": "x-notes"}, "files": {"x-notes.js": "//\n"}},
+         400, "bad_scripts"),
+        ({"manifest": manifest(styles=["nope.css"]),
+          "files": {"x-notes.js": "//\n"}}, 400, "bad_styles"),
+        ({"manifest": manifest(requires=["x-notes"]),
+          "files": {"x-notes.js": "//\n"}}, 400, "bad_requires"),
+        ({"manifest": manifest(tiers=["x" * 33]),
+          "files": {"x-notes.js": "//\n"}}, 400, "bad_manifest_field"),
+        ({"manifest": manifest(nope=1), "files": {"x-notes.js": "//\n"}},
+         400, "unknown_manifest_key"),
+        ({"manifest": manifest(styles=["x-notes.css"]),
+          "files": {"x-notes.js": "//\n",
+                    "x-notes.css": "@import url(https://evil.example/x);\n"}},
+         400, "css_external_reference"),
+    ]
+    for body, status, code in cases:
+        _, r = client.post("/mods/install", json=body)
+        assert r.status == status, (code, r.status, r.json)
+        assert r.json["error"] == code, (code, r.json)
+    # Not a byte was written by any of them.
+    assert app.ctx.mods_index["mods"] == {}
+    assert not (tmp_path / "mods").exists()
+    # Non-JSON at all.
+    _, r = client.post("/mods/install", data="not json")
+    assert r.status == 400 and r.json["error"] == "bad_json"
+
+
+def test_install_body_cap_is_checked_before_the_parse(tmp_path, monkeypatch):
+    # A 200 MiB "manifest" must not be JSON-decoded just to be rejected.
+    app = make_app(tmp_path, monkeypatch)
+    oversized = "x" * (modinstall.MAX_BODY_BYTES + 64)
+    _, r = authed(app).post(
+        "/mods/install",
+        json={"manifest": manifest(), "files": {"x-notes.js": oversized}})
+    assert r.status == 413 and r.json["error"] == "too_large"
+    assert app.ctx.mods_index["mods"] == {}
+
+
+def test_install_needs_the_token(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    for path, body in (("/mods/install", payload()),
+                       ("/mods/uninstall", {"id": "x-notes"}),
+                       ("/mods/rescan", {})):
+        _, r = app.test_client.post(path, json=body)
+        assert r.status == 401, path
+        assert r.json["error"] == "auth_required"
+    _, r = app.test_client.get("/mods/installed")
+    assert r.status == 401
+    assert not (tmp_path / "mods").exists()
+
+
+def test_a_second_install_of_an_id_in_use_is_refused(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, first = client.post("/mods/install", json=payload())
+    assert first.status == 200
+    _, second = client.post("/mods/install", json=payload())
+    assert second.status == 409 and second.json["error"] == "id_in_use"
+    # The operator must uninstall first -- which is where the purge option is,
+    # and where a DIFFERENT author's x-notes gets noticed.
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == first.json["gen"]
+
+
+def test_replace_upgrades_and_retains_the_previous_generation(tmp_path,
+                                                              monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, v1 = client.post("/mods/install", json=payload())
+    body = payload()
+    body["files"]["x-notes.js"] = "registerMod({ id: 'x-notes' }); // v2\n"
+    body["replace"] = True
+    _, v2 = client.post("/mods/install", json=body)
+    assert v2.status == 200 and v2.json["replaced"] is True
+    assert v2.json["gen"] != v1.json["gen"]
+    # A page that started booting against v1 must not be handed a v2 file, so
+    # both generations stay resolvable.
+    for gen, marker in ((v1.json["gen"], b"registerMod({ id: 'x-notes' });\n"),
+                        (v2.json["gen"], b"// v2\n")):
+        _, r = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+        assert r.status == 200 and r.body.endswith(marker)
+    # ...but only the current one is advertised.
+    _, info = authed(app).get("/info")
+    assert [m for m in info.json["mods"]
+            if m["id"] == "x-notes"][0]["gen"] == v2.json["gen"]
+    # A third install GCs the oldest: RETAINED_GENERATIONS on disk, no more.
+    body["files"]["x-notes.js"] = "registerMod({ id: 'x-notes' }); // v3\n"
+    _, v3 = client.post("/mods/install", json=body)
+    assert v3.status == 200
+    on_disk = {d.name for d in (tmp_path / "mods" / "x-notes").iterdir()
+               if d.is_dir()}
+    assert on_disk == {v2.json["gen"], v3.json["gen"]}
+    _, gone = app.test_client.get(f"/mods/x-notes/{v1.json['gen']}/x-notes.js")
+    assert gone.status == 404
+
+
+def test_reinstalling_identical_bytes_never_destroys_the_live_generation(
+        tmp_path, monkeypatch):
+    # The generation name is CONTENT-ADDRESSED, so a replace with identical
+    # bytes targets the directory CURRENT already names. It must be repaired in
+    # place, never rmtree'd and rebuilt.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, first = client.post("/mods/install", json=payload())
+    gen = first.json["gen"]
+    body = payload()
+    body["replace"] = True
+    _, second = client.post("/mods/install", json=body)
+    assert second.status == 200 and second.json["gen"] == gen
+    gdir = tmp_path / "mods" / "x-notes" / gen
+    assert (gdir / "x-notes.js").read_bytes() == \
+        b"registerMod({ id: 'x-notes' });\n"
+    assert not [p for p in gdir.iterdir() if p.name.startswith(".w-")]
+    _, r = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+    assert r.status == 200
+
+
+def test_too_many_mods_is_refused(tmp_path, monkeypatch):
+    root = tmp_path / "mods"
+    for i in range(modinstall.MAX_MODS):
+        mid = f"x-m{i:03d}"
+        plant(root, manifest(mod_id=mid, scripts=[f"{mid}.js"]),
+              {f"{mid}.js": "//\n"})
+    app = make_app(tmp_path, monkeypatch)
+    assert len(app.ctx.mods_index["mods"]) == modinstall.MAX_MODS
+    _, r = authed(app).post("/mods/install", json=payload())
+    assert r.status == 409 and r.json["error"] == "too_many_mods"
+    # ...but REPLACING one of the existing mods still works: the cap is on the
+    # count, not on writing.
+    mid = "x-m000"
+    _, ok = authed(app).post("/mods/install", json={
+        "manifest": manifest(mod_id=mid, scripts=[f"{mid}.js"]),
+        "files": {f"{mid}.js": "// v2\n"}, "replace": True})
+    assert ok.status == 200
+
+
+def test_install_surfaces_state_it_would_adopt(tmp_path, monkeypatch):
+    # #172, said out loud: /mod-store and the pin map already accept any
+    # id-shaped key, so a user CAN hold state under "x-notes" before anything
+    # named x-notes was installed. Installing would silently adopt it, so the
+    # operator is told before they confirm.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, p = client.post("/mods/policy", json={"set": {"x-notes": True}})
+    assert p.status == 200
+    _, s = client.put("/mod-store/x-notes",
+                      json={"baseRev": 0, "value": {"note": "hi"}})
+    assert s.status == 200, s.json
+    _, r = client.post("/mods/install", json=payload())
+    assert r.status == 200
+    assert r.json["adopts_existing_state"] == {"mod_store": True, "pin": True}
+
+
+# --------------------------------------------------------------------------- #
+# concurrency: the under-lock re-check
+# --------------------------------------------------------------------------- #
+
+def test_two_concurrent_installs_of_one_id_cannot_both_win(tmp_path,
+                                                           monkeypatch):
+    """The pre-lock check is ONLY a fast fail.
+
+    Both requests observe the id absent before either takes the lock, so
+    without the re-check INSIDE the critical section both would commit -- the
+    second silently replacing a mod the operator never asked to replace, with
+    no id_in_use anywhere. The commit is slowed so the second request is
+    provably still queued when the first swaps the index.
+    """
+    app = make_app(tmp_path, monkeypatch)
+    real = modinstall.commit_generation
+
+    def slow_commit(*args):
+        time.sleep(0.4)                    # in the executor, not on the loop
+        return real(*args)
+
+    monkeypatch.setattr(modinstall, "commit_generation", slow_commit)
+    with authed_reusable(app) as client:
+        url = with_token(f"http://{client.host}:{client.port}/mods/install",
+                         app.ctx.auth_token)
+
+        async def _drive():
+            return await asyncio.gather(
+                client._session.post(url, json=payload(), timeout=30),
+                client._session.post(url, json=payload(), timeout=30))
+
+        first, second = client._loop.run_until_complete(_drive())
+    statuses = sorted([first.status_code, second.status_code])
+    assert statuses == [200, 409], statuses
+    loser = first if first.status_code == 409 else second
+    assert loser.json()["error"] == "id_in_use"
+    assert len(app.ctx.mods_index["mods"]) == 1
+
+
+def test_a_cancelled_install_still_finishes_its_critical_section(tmp_path,
+                                                                 monkeypatch):
+    """The ``_shielded_region`` contract, on this endpoint (#160).
+
+    Sanic cancels the handler task on ``connection_lost``, and a RUNNING
+    executor future cannot be cancelled. Unshielded, a cancel landing on the
+    ``_off_loop`` hop would release ``mods_install_lock`` while the worker was
+    still writing the generation, and the post-await accounting -- the index and
+    catalog swap -- would never run: the store would hold a committed mod the
+    broker did not know it was serving, until a restart.
+    """
+    app = make_app(tmp_path, monkeypatch)
+    real = modinstall.commit_generation
+    inside = threading.Event()
+
+    def blocking_commit(*args):
+        inside.set()
+        time.sleep(0.5)                    # long enough to be cancelled inside
+        return real(*args)
+
+    monkeypatch.setattr(modinstall, "commit_generation", blocking_commit)
+    with authed_reusable(app) as client:
+        url = with_token(f"http://{client.host}:{client.port}/mods/install",
+                         app.ctx.auth_token)
+
+        async def _drive():
+            task = asyncio.ensure_future(client._session.post(url,
+                                                              json=payload()))
+            for _ in range(500):           # deadlined: an inert patch must FAIL
+                if inside.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert inside.is_set(), "the worker never entered its hop"
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 - cancellation is the point
+                pass
+            assert task.cancelled(), \
+                "the request completed instead of being cancelled mid-hop"
+            for _ in range(500):           # the shielded section drains
+                if "x-notes" in app.ctx.mods_index["mods"]:
+                    break
+                await asyncio.sleep(0.01)
+
+        client._loop.run_until_complete(_drive())
+    # The side effects are what the shield buys -- never the Response.
+    assert "x-notes" in app.ctx.mods_index["mods"], \
+        "the cancelled section never ran its accounting"
+    assert not app.ctx.mods_install_lock.locked(), \
+        "the shielded task released the lock in the caller, not in itself"
+    gen = app.ctx.mods_index["mods"]["x-notes"]["gen"]
+    assert json.loads((tmp_path / "mods" / "x-notes" /
+                       modinstall.CURRENT_NAME).read_text())["gen"] == gen
+    assert [r["id"] for r in app.ctx.mod_catalog][-1] == "x-notes"
+
+
+# --------------------------------------------------------------------------- #
+# crash recovery: a failure injected at every step of the commit protocol
+# --------------------------------------------------------------------------- #
+
+def _installed_v1(tmp_path, monkeypatch):
+    """A broker with x-notes v1 committed -- the state every injection below
+    must leave INTACT."""
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/install", json=payload())
+    assert r.status == 200
+    return app, r.json["gen"]
+
+
+def _v2_body():
+    body = payload()
+    body["files"]["x-notes.js"] = "registerMod({ id: 'x-notes' }); // v2\n"
+    body["replace"] = True
+    return body
+
+
+def _current_gen(tmp_path):
+    return json.loads((tmp_path / "mods" / "x-notes" /
+                       modinstall.CURRENT_NAME).read_text(encoding="utf-8"))["gen"]
+
+
+def test_crash_at_step_3_leaves_the_old_generation_live(tmp_path, monkeypatch):
+    # Staging fails: nothing was published, so CURRENT is untouched and the
+    # only residue is a .tmp- directory.
+    app, v1 = _installed_v1(tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(modinstall, "_write_generation_dir", boom)
+    _, r = authed(app).post("/mods/install", json=_v2_body())
+    assert r.status == 500 and r.json["error"] == "write_failed"
+    assert _current_gen(tmp_path) == v1
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == v1
+    _, served = app.test_client.get(f"/mods/x-notes/{v1}/x-notes.js")
+    assert served.status == 200
+
+
+def test_crash_at_step_4_the_commit_leaves_the_old_generation_live(tmp_path,
+                                                                   monkeypatch):
+    # The new generation is fully written but CURRENT never moves. That is the
+    # WHOLE point of a one-small-file commit: the half-done state is a complete
+    # unreferenced directory, not a half-replaced mod.
+    app, v1 = _installed_v1(tmp_path, monkeypatch)
+    real_write = app_mod._write_state_atomic
+
+    def boom(path, state):
+        if path.name == modinstall.CURRENT_NAME:
+            raise OSError("power cut")
+        return real_write(path, state)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", boom)
+    _, r = authed(app).post("/mods/install", json=_v2_body())
+    assert r.status == 500 and r.json["error"] == "write_failed"
+    assert _current_gen(tmp_path) == v1
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == v1
+    orphan = next(d.name for d in (tmp_path / "mods" / "x-notes").iterdir()
+                  if d.is_dir() and d.name != v1)
+    monkeypatch.undo()
+    # A restart adopts the OLD generation, not the orphan: CURRENT is the only
+    # thing that decides which generations exist, and it never moved.
+    again = make_app(tmp_path, monkeypatch)
+    assert again.ctx.mods_index["mods"]["x-notes"]["gen"] == v1
+    assert again.ctx.mods_index["mods"]["x-notes"]["previous"] is None
+    assert [r["gen"] for r in again.ctx.mod_catalog
+            if r["id"] == "x-notes"] == [v1]
+    # ...and the orphan is NOT served, even though it is a complete, newer
+    # directory. If retention were inferred from mtimes it would have taken the
+    # retained slot -- displacing the real predecessor, so a page mid-boot
+    # against that one starts 404ing and the next sweep deletes it. Here it is
+    # simply litter, and the rescan reclaims it.
+    assert not [k for k in again.ctx.mods_index["assets"] if orphan in k]
+    _, rescanned = authed(again).post("/mods/rescan", json={})
+    assert rescanned.status == 200
+    assert {d.name for d in (tmp_path / "mods" / "x-notes").iterdir()
+            if d.is_dir()} == {v1}
+
+
+def test_crash_at_step_5_commits_disk_and_leaves_memory_repairable(tmp_path,
+                                                                   monkeypatch):
+    # Step 5 is a PURE function of in-memory bytes, so it cannot fail on IO --
+    # but if a bug in it raised, the commit has already landed. The contract is
+    # that the request fails with the index UNSWAPPED (never half-swapped) and
+    # the next scan repairs it.
+    app, v1 = _installed_v1(tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("a bug in the index rebuild")
+
+    monkeypatch.setattr(modinstall, "index_with", boom)
+    _, r = authed(app).post("/mods/install", json=_v2_body())
+    assert r.status == 500
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == v1     # not swapped
+    assert [row["gen"] for row in app.ctx.mod_catalog
+            if row["id"] == "x-notes"] == [v1]                    # nor half
+    v2 = _current_gen(tmp_path)
+    assert v2 != v1                                               # disk ahead
+    monkeypatch.undo()
+    _, rescanned = authed(app).post("/mods/rescan", json={})
+    assert rescanned.status == 200
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == v2      # repaired
+
+
+def test_a_failing_gc_never_fails_the_request(tmp_path, monkeypatch):
+    # Step 6 is best-effort BY CONTRACT: the commit already landed, so failing
+    # the request over leftover litter would be a lie.
+    app, v1 = _installed_v1(tmp_path, monkeypatch)
+
+    def boom(_path):
+        raise OSError("in use by another process")
+
+    monkeypatch.setattr(modinstall, "_rmtree_if_ours", boom)
+    body = _v2_body()
+    body["files"]["x-notes.js"] = "// v2\n"
+    _, r = authed(app).post("/mods/install", json=body)
+    assert r.status == 200
+    body["files"]["x-notes.js"] = "// v3\n"
+    _, r3 = authed(app).post("/mods/install", json=body)
+    assert r3.status == 200
+    # v1 is now litter that could not be reclaimed -- and that is all it is.
+    assert v1 in {d.name for d in (tmp_path / "mods" / "x-notes").iterdir()
+                  if d.is_dir()}
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == r3.json["gen"]
+
+
+# --------------------------------------------------------------------------- #
+# POST /mods/uninstall
+# --------------------------------------------------------------------------- #
+
+def test_uninstall_removes_the_code_and_leaves_data_by_default(tmp_path,
+                                                               monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, r = client.post("/mods/install", json=payload())
+    gen = r.json["gen"]
+    client.post("/mods/policy", json={"set": {"x-notes": True}})
+    client.put("/mod-store/x-notes", json={"baseRev": 0, "value": {"a": 1}})
+
+    _, u = client.post("/mods/uninstall", json={"id": "x-notes"})
+    assert u.status == 200
+    assert u.json["purged"] == {"mod_store": False, "pin": False}
+    assert u.json["applies"] == "next_page_load"
+    assert app.ctx.mods_index["mods"] == {}
+    assert not (tmp_path / "mods" / "x-notes").exists()
+    assert not [p for p in (tmp_path / "mods").iterdir()
+                if p.name.startswith(modinstall.OLD_PREFIX)]
+    _, gone = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+    assert gone.status == 404
+    # Data survives an ordinary uninstall -- deleting it is a separate, explicit
+    # choice, because a reinstall is the common case.
+    assert app.ctx.mod_policy == {"x-notes": True}
+    assert "x-notes" in app.ctx.modstore
+
+
+def test_uninstall_with_purge_clears_this_brokers_state(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    client.post("/mods/install", json=payload())
+    client.post("/mods/policy", json={"set": {"x-notes": True}})
+    client.put("/mod-store/x-notes", json={"baseRev": 0, "value": {"a": 1}})
+
+    _, u = client.post("/mods/uninstall", json={"id": "x-notes",
+                                                "purge": True})
+    assert u.status == 200
+    assert u.json["purged"] == {"mod_store": True, "pin": True}
+    assert app.ctx.mod_policy == {}
+    assert "x-notes" not in app.ctx.modstore
+    # Both sidecars, not just memory.
+    assert json.loads((tmp_path / "webterm_mod_policy.json")
+                      .read_text())["policy"] == {}
+    assert "x-notes" not in json.loads(
+        (tmp_path / "webterm_modstore.json").read_text())
+    _, info = authed(app).get("/info")
+    assert info.json["mod_policy"] == {}
+
+
+def test_purge_is_data_first_and_code_last(tmp_path, monkeypatch):
+    """It is three sidecars and cannot be one transaction, so the ORDER is the
+    only guarantee available: a crash leaves code without data (trivially
+    recoverable -- uninstall again) rather than data without code, which is the
+    shape that silently re-adopts on the next install of that id."""
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    client.post("/mods/install", json=payload())
+    client.post("/mods/policy", json={"set": {"x-notes": True}})
+    client.put("/mod-store/x-notes", json={"baseRev": 0, "value": {"a": 1}})
+
+    def boom(*_a, **_k):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(modinstall, "stage_removal", boom)
+    _, u = client.post("/mods/uninstall", json={"id": "x-notes",
+                                                "purge": True})
+    assert u.status == 500 and u.json["error"] == "write_failed"
+    # Data went first, so it is gone; the code is still installed and serving.
+    assert app.ctx.mod_policy == {}
+    assert "x-notes" not in app.ctx.modstore
+    assert "x-notes" in app.ctx.mods_index["mods"]
+
+
+def test_uninstall_of_an_unknown_id_is_a_404(tmp_path, monkeypatch):
+    # NOT idempotent at the HTTP-result level, deliberately: catching a typo is
+    # worth more than the ambiguity of a retry after a lost response.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, r = client.post("/mods/uninstall", json={"id": "x-nope"})
+    assert r.status == 404 and r.json["error"] == "not_installed"
+    _, shipped = client.post("/mods/uninstall", json={"id": "clock"})
+    assert shipped.status == 404, "a SHIPPED mod is not uninstallable"
+    assert [m["id"] for m in ui.mod_catalog() if m["id"] == "clock"]
+    for bad in ("../x", "Bad", "", None, 7):
+        _, r = client.post("/mods/uninstall", json={"id": bad})
+        assert r.status == 400 and r.json["error"] == "bad_mod_id", bad
+    _, r = client.post("/mods/uninstall", json={"id": "x-a", "purge": "yes"})
+    assert r.status == 400 and r.json["error"] == "bad_manifest_field"
+
+
+# --------------------------------------------------------------------------- #
+# POST /mods/rescan + the sweep
+# --------------------------------------------------------------------------- #
+
+def test_rescan_picks_up_a_hand_dropped_mod(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["mods"] == {}
+    gen = plant(tmp_path / "mods", manifest(), files())
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    assert [m["id"] for m in r.json["mods"]] == ["x-notes"]
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    _, served = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+    assert served.status == 200
+
+
+def test_rescan_sweeps_staging_and_superseded_generations(tmp_path,
+                                                          monkeypatch):
+    root = tmp_path / "mods"
+    old = plant(root, manifest(), {"x-notes.js": "// v1\n"})
+    new = plant(root, manifest(), {"x-notes.js": "// v2\n"})
+    third = plant(root, manifest(), {"x-notes.js": "// v3\n"})
+    (root / (modinstall.TMP_PREFIX + "abandoned")).mkdir()
+    (root / (modinstall.OLD_PREFIX + "x-gone-dead")).mkdir()
+    (root / "x-notes" / (modinstall.TMP_PREFIX + "half")).mkdir()
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    top = {p.name for p in root.iterdir()}
+    assert not [n for n in top if n.startswith(modinstall.TMP_PREFIX)
+                or n.startswith(modinstall.OLD_PREFIX)]
+    kept = {d.name for d in (root / "x-notes").iterdir() if d.is_dir()}
+    assert third in kept and new in kept and old not in kept
+    assert len(kept) == modinstall.RETAINED_GENERATIONS
+
+
+def test_the_sweep_refuses_a_directory_it_does_not_own(tmp_path, monkeypatch):
+    # A mods_dir mis-set to an existing user directory must not be able to lose
+    # anything. The marker is what the sweep insists on.
+    root = tmp_path / "mods"
+    old = plant(root, manifest(), {"x-notes.js": "// v1\n"})
+    plant(root, manifest(), {"x-notes.js": "// v2\n"})
+    (root / (modinstall.OLD_PREFIX + "precious")).mkdir()
+    (root / (modinstall.OLD_PREFIX + "precious") / "notes.txt").write_text(
+        "do not delete\n", encoding="utf-8")
+    (root / modinstall.MARKER_NAME).unlink()
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    assert (root / (modinstall.OLD_PREFIX + "precious") / "notes.txt").is_file()
+    assert (root / "x-notes" / old).is_dir()
+    # ...and the scan itself still works, so an unmarked store is READ but never
+    # written destructively.
+    assert "x-notes" in app.ctx.mods_index["mods"]
+
+
+def test_the_sweep_never_deletes_a_mod_it_merely_refused(tmp_path, monkeypatch):
+    # A directory the scanner refused is somebody's half-unpacked archive or a
+    # typo, not litter. GET /mods/installed reports it; the sweep leaves it.
+    root = tmp_path / "mods"
+    plant(root, manifest(), files())
+    plant_raw(root, "x-broken", {"id": "x-broken", "scripts": ["a.js"]},
+              {"a.js": b"no newline"})
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    assert r.json["skipped"] == {"x-broken": "bad_encoding"}
+    assert (root / "x-broken").is_dir()
+
+
+def test_a_refused_mod_can_still_be_uninstalled(tmp_path, monkeypatch):
+    # GET /mods/installed reports it, so the operator can see it; refusing to
+    # remove the one thing they were just told about would leave "stop the
+    # broker and delete a directory" as the only cure -- the restart this
+    # feature exists to avoid.
+    plant_raw(tmp_path / "mods", "x-broken",
+              {"id": "x-broken", "scripts": ["a.js"]}, {"a.js": b"no newline"})
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {"x-broken": "bad_encoding"}
+    _, r = authed(app).post("/mods/uninstall", json={"id": "x-broken"})
+    assert r.status == 200
+    assert not (tmp_path / "mods" / "x-broken").exists()
+    assert app.ctx.mods_index["skipped"] == {}
+
+
+def test_rescan_rejects_a_non_json_body(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/mods/rescan", data="not json")
+    assert r.status == 400 and r.json["error"] == "bad_json"
+
+
+# --------------------------------------------------------------------------- #
+# GET /mods/installed
+# --------------------------------------------------------------------------- #
+
+def test_installed_detail_is_the_operator_view(tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    _, ins = authed(app).post("/mods/install", json=payload())
+    plant_raw(tmp_path / "mods", "x-broken",
+              {"id": "x-broken", "scripts": ["a.js"]}, {"a.js": b"no newline"})
+    authed(app).post("/mods/rescan", json={})
+    _, r = authed(app).get("/mods/installed")
+    assert r.status == 200
+    assert r.json["mods_dir"] == str(tmp_path / "mods")
+    row = r.json["mods"][0]
+    assert row["id"] == "x-notes" and row["gen"] == ins.json["gen"]
+    assert isinstance(row["installed_at"], int) and row["installed_at"] > 0
+    assert row["has_help"] is True
+    names = [f["name"] for f in row["files"]]
+    assert names == ["help.md", "x-notes.css", "x-notes.js"]
+    assert all(len(f["sha256"]) == 64 and f["bytes"] > 0 for f in row["files"])
+    assert row["total_bytes"] == sum(f["bytes"] for f in row["files"])
+    # A mod that silently vanishes is worse than one that says why.
+    assert r.json["skipped"] == {"x-broken": "bad_encoding"}
+    assert r.json["limits"]["max_lines"] == ui._MAX_LINES
+    assert r.json["limits"]["max_mods"] == modinstall.MAX_MODS
+
+
+def test_installed_detail_stays_off_info(tmp_path, monkeypatch):
+    # /info is fetched by every peer, so the administrative detail lives on the
+    # token-gated operator route instead.
+    app = make_app(tmp_path, monkeypatch)
+    authed(app).post("/mods/install", json=payload())
+    _, info = authed(app).get("/info")
+    row = [m for m in info.json["mods"] if m["id"] == "x-notes"][0]
+    assert set(row) == {"id", "title", "description", "version",
+                        "default_enabled", "requires", "source", "gen",
+                        "scripts", "styles", "integrity", "error",
+                        "missing_requires"}
+
+
+# --------------------------------------------------------------------------- #
+# realm + gating
+# --------------------------------------------------------------------------- #
+
+def test_the_install_api_is_not_lease_gated(tmp_path, monkeypatch):
+    # #157's argument for /mods/policy, verbatim. With another browser holding
+    # this broker's single-active lease a /state PUT is refused 409 not_active,
+    # permanently -- and that is exactly the broker an operator wants to
+    # administer. Installing a mod is broker CONFIGURATION, not shared UI state.
+    app = make_app(tmp_path, monkeypatch)
+    app.ctx.active_client_id = "some-other-browser"
+    client = authed(app)
+    _, denied = client.put("/state", json={"baseRev": 0, "settings": {},
+                                           "layout": {}, "clientId": "me"})
+    assert denied.status == 409 and denied.json["error"] == "not_active"
+    _, r = client.post("/mods/install", json=payload())
+    assert r.status == 200
+    _, detail = client.get("/mods/installed")
+    assert detail.status == 200
+    _, rescan = client.post("/mods/rescan", json={})
+    assert rescan.status == 200
+    _, u = client.post("/mods/uninstall", json={"id": "x-notes"})
+    assert u.status == 200
+
+
+def test_the_install_api_is_absent_on_a_headless_broker(tmp_path, monkeypatch):
+    # #87: no page, so nothing could ever run an installed mod. Accepting one
+    # would be storing bytes with no consumer.
+    app = make_app(tmp_path, monkeypatch, serve_ui=False)
+    for path in ("/mods/install", "/mods/uninstall", "/mods/rescan"):
+        _, r = authed(app).post(path, json=payload())
+        assert r.status == 404, path
+    _, r = authed(app).get("/mods/installed")
+    assert r.status == 404
+    # ...but /mods/policy is NOT serve_ui-gated: a headless broker is still a
+    # host tab, and pinning is meaningful for the browsers that federate to it.
+    _, p = authed(app).post("/mods/policy", json={"set": {"clock": False}})
+    assert p.status == 200
+
+
+def test_reinstalling_an_identical_generation_keeps_the_real_predecessor(
+        tmp_path, monkeypatch):
+    """A no-op replace must not silently delete the retained generation.
+
+    v1 is retained behind v2. POSTing the exact v2 package again computes the
+    same content-addressed name, so a naive "previous == gen, therefore retain
+    nothing" drops v1 from the index AND garbage-collects it -- every page
+    mid-boot against v1 starts 404ing, for an install that changed nothing.
+    """
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, first = client.post("/mods/install", json=payload())
+    v1 = first.json["gen"]
+    v2_body = _v2_body()
+    _, second = client.post("/mods/install", json=v2_body)
+    v2 = second.json["gen"]
+    _, again = client.post("/mods/install", json=v2_body)     # byte-identical
+    assert again.status == 200 and again.json["gen"] == v2
+    for gen in (v1, v2):
+        _, served = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+        assert served.status == 200, gen
+    assert app.ctx.mods_index["mods"]["x-notes"]["previous"] == v1
+    assert {d.name for d in (tmp_path / "mods" / "x-notes").iterdir()
+            if d.is_dir()} == {v1, v2}
+
+
+def test_a_corrupt_newer_directory_cannot_suppress_the_predecessor(tmp_path,
+                                                                   monkeypatch):
+    # Retention is read from CURRENT, so a malformed directory with a newer
+    # mtime is simply litter. Inferring it from mtimes would have picked the
+    # corrupt one, failed to load it, and left the real predecessor unserved --
+    # and then swept it.
+    root = tmp_path / "mods"
+    v1 = plant(root, manifest(), {"x-notes.js": "// v1\n"})
+    v2 = plant(root, manifest(), {"x-notes.js": "// v2\n"})
+    junk = root / "x-notes" / ("c" * 64)
+    junk.mkdir()
+    (junk / "x-notes.js").write_bytes(b"// junk\n")     # no mod.json at all
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["mods"]["x-notes"]["previous"] == v1
+    for gen in (v1, v2):
+        _, served = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+        assert served.status == 200, gen
+    _, rescanned = authed(app).post("/mods/rescan", json={})
+    assert rescanned.status == 200
+    assert {d.name for d in (root / "x-notes").iterdir()
+            if d.is_dir()} == {v1, v2}
+
+
+def test_a_generation_must_content_address_its_own_bytes(tmp_path, monkeypatch):
+    """``gen`` is in the URL, that URL is ``immutable`` for a year, and S4 pins
+    an SRI hash of these very bytes.
+
+    So editing a file in place without renaming its directory would republish
+    different content behind an identical, already-cached URL: browsers holding
+    the old copy fail SRI and the mod does not load at all. Fatal, not a warning
+    -- otherwise "the same gen" stops implying "the same bytes", which is the
+    one property the generation scheme exists to provide.
+    """
+    root = tmp_path / "mods"
+    gen = plant(root, manifest(), files())
+    app = make_app(tmp_path, monkeypatch)
+    assert "x-notes" in app.ctx.mods_index["mods"]
+    (root / "x-notes" / gen / "x-notes.js").write_bytes(b"// tampered\n")
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    assert r.json["skipped"] == {"x-notes": "bad_generation"}
+    assert app.ctx.mods_index["mods"] == {}
+    _, gone = app.test_client.get(f"/mods/x-notes/{gen}/x-notes.js")
+    assert gone.status == 404
+
+
+def test_the_repair_branch_removes_stale_files(tmp_path, monkeypatch):
+    # Reinstalling over an existing content-addressed directory writes the
+    # expected files -- and REMOVES anything else, so a leftover from an install
+    # that died mid-write cannot end up served under a generation whose hash it
+    # never contributed to.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, first = client.post("/mods/install", json=payload())
+    gen = first.json["gen"]
+    stale = tmp_path / "mods" / "x-notes" / gen / "old.js"
+    stale.write_bytes(b"// debris\n")
+    body = payload()
+    body["replace"] = True
+    _, again = client.post("/mods/install", json=body)
+    assert again.status == 200 and again.json["gen"] == gen
+    assert not stale.exists()
+    _, r = client.post("/mods/rescan", json={})
+    assert r.json["skipped"] == {}
+    _, served = app.test_client.get(f"/mods/x-notes/{gen}/old.js")
+    assert served.status == 404
+
+
+def test_a_lone_surrogate_in_the_manifest_is_a_400_not_a_500(tmp_path,
+                                                             monkeypatch):
+    # JSON can carry "\ud800"; Python holds it happily as a str and it only
+    # explodes at .encode("utf-8") -- which happens in compute_gen, OUTSIDE the
+    # validation try/except. Worse, the same manifest on disk would then throw
+    # during a scan and take out a startup.
+    app = make_app(tmp_path, monkeypatch)
+    body = json.dumps({"manifest": {"id": "x-notes", "title": "\ud800",
+                                    "scripts": ["x-notes.js"]},
+                       "files": {"x-notes.js": "//\n"}})
+    _, r = authed(app).post("/mods/install", data=body,
+                            headers={"content-type": "application/json"})
+    assert r.status == 400, r.json
+    assert r.json["error"] == "bad_encoding"
+    assert app.ctx.mods_index["mods"] == {}
+
+
+def test_every_mod_endpoint_caps_its_body_before_parsing(tmp_path, monkeypatch):
+    # json.loads runs SYNCHRONOUSLY on the one event loop, so an uncapped body
+    # -- even one whose extra megabytes are an ignored padding key -- freezes
+    # every HTTP handler, WebSocket and terminal relay for the length of the
+    # parse.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    padding = "x" * (modinstall.MAX_SMALL_BODY_BYTES + 64)
+    for path, body in (
+            ("/mods/uninstall", {"id": "x-notes", "pad": padding}),
+            ("/mods/rescan", {"pad": padding})):
+        _, r = client.post(path, json=body)
+        assert r.status == 413, (path, r.status)
+        assert r.json["error"] == "too_large"
+    # ...and install's own, larger cap still applies.
+    _, r = client.post("/mods/install",
+                       json={"manifest": manifest(),
+                             "files": {"x-notes.js":
+                                       "x" * (modinstall.MAX_BODY_BYTES + 64)}})
+    assert r.status == 413 and r.json["error"] == "too_large"
+
+
+def test_a_failed_purge_leaves_the_code_installed(tmp_path, monkeypatch):
+    # DATA FIRST, CODE LAST -- so if the data could not go, the code stays too.
+    # Removing it anyway would leave orphaned state while telling the operator
+    # the purge succeeded, which is the one outcome the ordering prevents.
+    app = make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    client.post("/mods/install", json=payload())
+    client.post("/mods/policy", json={"set": {"x-notes": True}})
+    client.put("/mod-store/x-notes", json={"baseRev": 0, "value": {"a": 1}})
+    real = app_mod._write_state_atomic
+
+    def boom(path, state):
+        if path == app.ctx.mod_policy_path:
+            raise OSError("sharing violation")
+        return real(path, state)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", boom)
+    _, r = client.post("/mods/uninstall", json={"id": "x-notes",
+                                                "purge": True})
+    assert r.status == 500 and r.json["error"] == "write_failed"
+    assert "pin" in r.json["detail"]
+    assert "x-notes" in app.ctx.mods_index["mods"]
+    assert app.ctx.mod_policy == {"x-notes": True}
+
+
+def test_a_dangling_link_can_be_uninstalled(tmp_path, monkeypatch):
+    # Path.exists() is FALSE for a dangling symlink, so an exists()-based check
+    # would report a successful uninstall and leave the entry on disk for the
+    # next scan to resurrect.
+    root = tmp_path / "mods"
+    root.mkdir()
+    (root / modinstall.MARKER_NAME).write_bytes(b"")
+    try:
+        os.symlink(str(tmp_path / "nowhere"), str(root / "x-dangling"),
+                   target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {"x-dangling": "bad_mod_id"}
+    _, r = authed(app).post("/mods/uninstall", json={"id": "x-dangling"})
+    assert r.status == 200
+    assert not os.path.lexists(str(root / "x-dangling"))
+    assert app.ctx.mods_index["skipped"] == {}
+
+
+def test_the_install_api_answers_its_preflights(tmp_path, monkeypatch):
+    # The Control Panel driving these is cross-origin whenever the operator
+    # administers another broker, and a JSON POST is never a "simple" request.
+    app = make_app(tmp_path, monkeypatch)
+    for path in ("/mods/install", "/mods/uninstall", "/mods/rescan",
+                 "/mods/installed"):
+        _, r = authed(app).options(path)
+        assert r.status == 204, path
+        assert r.headers.get("Access-Control-Allow-Origin") == "*"

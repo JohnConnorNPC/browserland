@@ -2233,13 +2233,15 @@ async def _vendor_codemirror_asset(request: Request, name: str):
     return await _vendor_asset(request, f"{vendor.CODEMIRROR}/{name}")
 
 
-def _refresh_mod_catalog(app: Sanic) -> None:
-    """Rebuild ``app.ctx.mod_catalog`` = shipped rows + installed rows (#163).
+def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
+    """Publish an installed-mod index and the catalog derived from it, as ONE
+    visible step (#163).
 
-    ONE assignment, never a mutation: ``/info`` reads ``app.ctx.mod_catalog``
-    live and takes no lock, so a reader must never observe the list
-    half-rewritten. Callers that also swap the index/help must do all of it
-    under ``mods_install_lock``, in one visible step.
+    Both are COMPUTED first and only then assigned, back to back with no await
+    between, so no reader can observe the pair disagreeing -- ``/info`` reads
+    ``app.ctx.mod_catalog`` live and takes no lock, and the asset route reads
+    ``app.ctx.mods_index`` the same way. Every caller runs under
+    ``mods_install_lock``.
 
     SHIPPED FIRST, and that is load-bearing, not cosmetic. ``modPolicyImplied``
     (81_js_control_panel.js) and #158's ``planFor`` both walk the catalog
@@ -2248,8 +2250,10 @@ def _refresh_mod_catalog(app: Sanic) -> None:
     depend on an installed one; the installed half is topologically sorted among
     itself by ``modinstall.catalog``."""
     shipped = app.ctx.shipped_mod_catalog
-    app.ctx.mod_catalog = list(shipped) + modinstall.catalog(
-        app.ctx.mods_index, [row["id"] for row in shipped])
+    catalog = list(shipped) + modinstall.catalog(
+        index, [row["id"] for row in shipped])
+    app.ctx.mods_index = index
+    app.ctx.mod_catalog = catalog
 
 
 async def _mod_asset(request: Request, modId: str, gen: str, name: str):
@@ -5053,6 +5057,318 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
         return await _shielded_region(app.ctx.mod_policy_lock, _locked_write)
 
+    # ---- runtime mod install (/mods/install|uninstall|rescan, #163) -------
+    # An operator drops a mod into a LIVE broker: no source edit, no process
+    # restart. Three POSTs and one GET, all in the BROWSER realm
+    # (_gated_auth_error), all serve_ui-gated (a headless broker has no page to
+    # load a mod into), and all deliberately NOT lease-gated -- #157's argument
+    # for /mods/policy verbatim: this is broker CONFIGURATION, and the point is
+    # being able to administer a broker somebody else is using right now.
+    #
+    # THE TRUST EVENT IS THE INSTALL, not the fetch. #163 settled that `ctx` is
+    # not a boundary (the loader says so in five places, and mods reach core
+    # directly in ~250 places), so a mod is code you are choosing to run with
+    # this broker's full authority. What is gated is therefore this token, not
+    # the public asset route the browser then fetches.
+    #
+    # AN INSTALL TAKES EFFECT ON THE NEXT PAGE LOAD, and that is forced rather
+    # than chosen: JavaScript global lexical bindings cannot be removed, so a
+    # mod whose top level says `const DB = ...` cannot be re-executed in the
+    # same page, and `_takeDown()` is a teardown, not an unloader. Same contract
+    # #157's pins already ship.
+    def _mod_error(exc: "modinstall.ValidationError"):
+        return sanic_json({"ok": False, "error": exc.code, "detail": exc.detail},
+                          status=exc.status)
+
+    def _mod_code(code: str, detail: str = ""):
+        return sanic_json({"ok": False, "error": code, "detail": detail},
+                          status=modinstall.ERROR_STATUS.get(code, 400))
+
+    def _mod_body(request: Request, cap: int):
+        """``(parsed, error_response)``. Caps the body BEFORE the parse.
+
+        ``json.loads`` runs SYNCHRONOUSLY on the one event loop, so an
+        uncapped body -- even one whose extra megabytes are an ignored padding
+        key -- freezes every HTTP handler, WebSocket and terminal relay for the
+        length of the parse. The cap is per-endpoint because /mods/install
+        legitimately carries a mod and the other three carry an id.
+
+        ``RecursionError`` is caught alongside the JSON errors: it is what a
+        deeply nested value raises, it is not an ``Exception``, and unhandled
+        it would be a 500 for what is simply a malformed request."""
+        if len(request.body or b"") > cap:
+            return None, _mod_code("too_large", f"body over {cap} bytes")
+        try:
+            parsed = _json_object_body(request)
+        except (ValueError, RecursionError):
+            parsed = None
+        if parsed is None:
+            return None, _mod_code("bad_json")
+        return parsed, None
+
+    async def _mods_install_post(request: Request):
+        err = _gated_auth_error(request, "/mods/install")
+        if err is not None:
+            return err
+        body, err = _mod_body(request, modinstall.MAX_BODY_BYTES)
+        if err is not None:
+            return err
+        replace = body.get("replace", False)
+        if not isinstance(replace, bool):
+            return _mod_code("bad_manifest_field", "replace must be a bool")
+        files = body.get("files")
+        if isinstance(files, dict) and modinstall.MANIFEST_NAME in files:
+            # mod.json is BROKER-written from the canonical manifest, so a
+            # payload cannot ship one that disagrees with what was validated.
+            return _mod_code("reserved_file_name", modinstall.MANIFEST_NAME)
+        # 1. Validate ENTIRELY IN MEMORY, before the lock. Nothing here touches
+        # the store, so a refusal leaves it untouched by construction rather
+        # than by careful unwinding.
+        try:
+            manifest, records = modinstall.validate_package(
+                body.get("manifest"), files)
+        except modinstall.ValidationError as exc:
+            return _mod_error(exc)
+        mod_id = manifest["id"]
+        gen = modinstall.compute_gen(manifest, records)
+        # A fast fail on the state-dependent conditions. It is ONLY a fast
+        # fail: both are re-checked under the lock below, because two requests
+        # can otherwise both observe the id absent here and both install.
+        pre = _mods_state_refusal(mod_id, replace)
+        if pre is not None:
+            return pre
+
+        async def _locked_install():
+            # 2. THE REAL CHECK, under the lock.
+            refusal = _mods_state_refusal(mod_id, replace)
+            if refusal is not None:
+                return refusal
+            index = app.ctx.mods_index
+            was_installed = mod_id in index["mods"]
+            # The generation to keep ALONGSIDE the new one, written into
+            # CURRENT rather than inferred later from directory mtimes.
+            retained = modinstall.retained_after(index, mod_id, gen)
+            keep = [gen] + ([retained] if retained else [])
+            # 3 + 4: stage, publish under a FRESH name, then commit by
+            # replacing one small file. A crash anywhere in here leaves CURRENT
+            # naming a COMPLETE generation -- the old one or the new one.
+            try:
+                installed_at = await _off_loop(
+                    modinstall.commit_generation, app.ctx.mods_dir, mod_id,
+                    manifest, records, gen, retained)
+            except modinstall.ValidationError as exc:
+                return _mod_error(exc)
+            except OSError as exc:
+                LOGGER.warning("mod install %s failed: %s", mod_id, exc)
+                return _mod_code("write_failed", str(exc))
+            # 5. Rebuild from the bytes just written -- never re-read from
+            # disk, and pure, so it cannot fail on IO and leave the index half
+            # swapped. If a BUG here raised, the request would fail with the
+            # index unswapped and the next rescan would repair it.
+            _swap_mods_index(app, modinstall.index_with(
+                index, mod_id, manifest, records, gen, installed_at, retained))
+            # 6. GC to the retained generations. Best-effort by contract: the
+            # commit already landed, so failing the request for leftover litter
+            # would be a lie.
+            await _off_loop(modinstall.gc_generations, app.ctx.mods_dir,
+                            mod_id, keep)
+            row = next((r for r in app.ctx.mod_catalog if r["id"] == mod_id),
+                       None)
+            LOGGER.info("mod installed: %s gen %s (%d file%s)", mod_id,
+                        gen[:12], len(records), "" if len(records) == 1 else "s")
+            return sanic_json({
+                "ok": True, "id": mod_id, "gen": gen,
+                "replaced": was_installed,
+                # #172, said out loud rather than discovered later: /mod-store
+                # and the pin map ALREADY accept any id-shaped key, so a user
+                # can hold state under "x-notes" before anything named x-notes
+                # was installed (console code, a hand-edited sidecar, a locally
+                # hacked mod). Installing would silently adopt it. The Control
+                # Panel surfaces this BEFORE the operator confirms.
+                # localStorage cannot be inspected server-side and is not
+                # covered -- the dialog says so.
+                "adopts_existing_state": {
+                    "mod_store": mod_id in app.ctx.modstore,
+                    "pin": mod_id in app.ctx.mod_policy},
+                "mod": row,
+                # D1: no live install. Say it in the response so a client can
+                # never present this as "the mod is now running".
+                "applies": "next_page_load"})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_install)
+
+    def _mods_state_refusal(mod_id: str, replace: bool):
+        """The two STATE-dependent refusals, factored so the pre-lock fast fail
+        and the under-lock re-check cannot drift apart."""
+        installed = app.ctx.mods_index["mods"]
+        if mod_id in installed and not replace:
+            return _mod_code(
+                "id_in_use",
+                f"{mod_id} is already installed on this broker; uninstall it "
+                f"first (which is where the purge option lives), or POST with "
+                f'"replace": true to upgrade it')
+        if mod_id not in installed and len(installed) >= modinstall.MAX_MODS:
+            return _mod_code("too_many_mods",
+                             f"this broker already has {modinstall.MAX_MODS} "
+                             f"installed mods")
+        return None
+
+    async def _mods_uninstall_post(request: Request):
+        err = _gated_auth_error(request, "/mods/uninstall")
+        if err is not None:
+            return err
+        body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
+        if err is not None:
+            return err
+        mod_id = body.get("id")
+        if not isinstance(mod_id, str) or not _MODSTORE_ID_RE.fullmatch(mod_id):
+            return _mod_code("bad_mod_id", repr(mod_id))
+        purge = body.get("purge", False)
+        if not isinstance(purge, bool):
+            return _mod_code("bad_manifest_field", "purge must be a bool")
+
+        async def _remove_code():
+            """The uninstall itself: rename `<id>` aside, swap the index, then
+            reclaim. The rename IS the uninstall -- a crash right after it
+            leaves `.old-` litter, which is the intended end state anyway."""
+            try:
+                staged = await _off_loop(modinstall.stage_removal,
+                                         app.ctx.mods_dir, mod_id)
+            except OSError as exc:
+                LOGGER.warning("mod uninstall %s failed: %s", mod_id, exc)
+                return _mod_code("write_failed", str(exc))
+            _swap_mods_index(app,
+                             modinstall.index_without(app.ctx.mods_index,
+                                                      mod_id))
+            if staged is not None:
+                await _off_loop(modinstall.discard_staged, staged)
+            return None
+
+        async def _locked_uninstall():
+            index = app.ctx.mods_index
+            # A SKIPPED mod is uninstallable too. It is on disk and reported by
+            # GET /mods/installed, so the operator can see it -- refusing to
+            # remove the one thing they were just told about would leave the
+            # only cure "stop the broker and delete a directory", which is the
+            # restart this feature exists to avoid.
+            if mod_id not in index["mods"] and mod_id not in index["skipped"]:
+                # NOT idempotent at the HTTP-result level, deliberately: a
+                # retry after a lost response answers 404 even though the first
+                # attempt succeeded. Catching a typo is worth more than that
+                # ambiguity; the client treats "404 after a retry" as possible
+                # success and the docs say so.
+                return _mod_code("not_installed", mod_id)
+            if not purge:
+                failed = await _remove_code()
+                if failed is not None:
+                    return failed
+                LOGGER.info("mod uninstalled: %s", mod_id)
+                return sanic_json({"ok": True, "id": mod_id,
+                                   "purged": {"mod_store": False, "pin": False},
+                                   "applies": "next_page_load"})
+            # LOCK ORDER mods_install -> mod_policy -> modstore, fixed here and
+            # nowhere else so it cannot deadlock against any other writer, and
+            # both are HELD ACROSS the code removal: releasing them first would
+            # leave a window in which a concurrent /mods/policy or
+            # /mod-store PUT recreates the very state we just deleted, landing
+            # exactly on "data without code" -- the shape that silently
+            # re-adopts on the next install of that id. They are taken inside
+            # the already-shielded region rather than through _shielded_region:
+            # we are past the point where unwinding is the safe answer, and
+            # each write is one atomic sidecar replace.
+            async with app.ctx.mod_policy_lock, app.ctx.modstore_lock:
+                purged, unpurged = await _purge_mod_state(mod_id)
+                if unpurged:
+                    # DATA FIRST, CODE LAST -- so if the data could not go, the
+                    # code stays too. Removing it anyway would leave orphaned
+                    # state behind while telling the operator the purge
+                    # succeeded, which is the one outcome the ordering exists
+                    # to prevent.
+                    return _mod_code(
+                        "write_failed",
+                        f"could not delete {', '.join(sorted(unpurged))} for "
+                        f"{mod_id}; the mod is still installed")
+                failed = await _remove_code()
+                if failed is not None:
+                    return failed
+            LOGGER.info("mod uninstalled: %s (purged %s)", mod_id,
+                        sorted(k for k, v in purged.items() if v) or "nothing")
+            return sanic_json({"ok": True, "id": mod_id, "purged": purged,
+                               "applies": "next_page_load"})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_uninstall)
+
+    async def _purge_mod_state(mod_id: str):
+        """Delete this broker's server-side state for a mod: its /mod-store
+        value and its #157 pin. Returns ``(purged, unpurged)``.
+
+        The caller owns mods_install_lock, mod_policy_lock and modstore_lock,
+        in that order, and holds all three across the code removal that
+        follows -- see there for why. This is three sidecars and cannot be made
+        one transaction; the Control Panel checkbox is worded to say exactly
+        that, and neither this nor anything else can touch what OTHER BROWSERS
+        hold in localStorage."""
+        purged = {"mod_store": False, "pin": False}
+        unpurged = []
+        if mod_id in app.ctx.mod_policy:
+            policy = dict(app.ctx.mod_policy)
+            policy.pop(mod_id, None)
+            try:
+                await _off_loop(_write_state_atomic, app.ctx.mod_policy_path,
+                                {"policy": policy})
+                app.ctx.mod_policy = policy
+                purged["pin"] = True
+            except OSError as exc:
+                LOGGER.warning("purge %s: policy write failed: %s", mod_id, exc)
+                unpurged.append("pin")
+        if mod_id in app.ctx.modstore:
+            store = dict(app.ctx.modstore)
+            store.pop(mod_id, None)
+            try:
+                await _off_loop(_write_state_atomic, app.ctx.modstore_path,
+                                store)
+                app.ctx.modstore = store
+                purged["mod_store"] = True
+            except OSError as exc:
+                LOGGER.warning("purge %s: mod-store write failed: %s",
+                               mod_id, exc)
+                unpurged.append("mod_store")
+        return purged, unpurged
+
+    async def _mods_rescan_post(request: Request):
+        err = _gated_auth_error(request, "/mods/rescan")
+        if err is not None:
+            return err
+        _body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
+        if err is not None:
+            return err
+
+        async def _locked_rescan():
+            index = await _off_loop(modinstall.scan, app.ctx.mods_dir)
+            _swap_mods_index(app, index)
+            # The sweep runs AFTER the swap and only over what the fresh index
+            # says is live, so it can never delete a generation the broker is
+            # still serving. It refuses outright in a directory with no
+            # ownership marker.
+            await _off_loop(modinstall.sweep_store, app.ctx.mods_dir,
+                            modinstall.keep_map(index))
+            return sanic_json({"ok": True,
+                               **modinstall.installed_detail(
+                                   index, app.ctx.mods_dir)})
+
+        return await _shielded_region(app.ctx.mods_install_lock,
+                                      _locked_rescan)
+
+    async def _mods_installed_get(request: Request):
+        err = _gated_auth_error(request, "/mods/installed")
+        if err is not None:
+            return err
+        return sanic_json({"ok": True,
+                           **modinstall.installed_detail(app.ctx.mods_index,
+                                                         app.ctx.mods_dir)})
+
     # ---- AI-provider status proxy (/status/fetch, #112) ------------------
     # The broker's ONLY outbound HTTP. Gated by the SAME token
     # policy as /info & /state (browser realm). The client passes ONLY allowlist
@@ -5883,8 +6199,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # broken mod is skipped, never a failed boot), but doing it now means
         # the very first GET /info already reports what will be served, and the
         # asset dict is populated before the route that reads it exists.
-        app.ctx.mods_index = modinstall.scan(app.ctx.mods_dir)
-        _refresh_mod_catalog(app)
+        _swap_mods_index(app, modinstall.scan(app.ctx.mods_dir))
         LOGGER.info("installed mods: %s (%d served, %d skipped)",
                     app.ctx.mods_dir, len(app.ctx.mods_index["mods"]),
                     len(app.ctx.mods_index["skipped"]))
@@ -5909,6 +6224,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # no page to load them into, and 404 is the honest answer there.
         app.add_route(_mod_asset, "/mods/<modId:str>/<gen:str>/<name:str>",
                       methods=["GET"])
+        # The install API. serve_ui-gated for the same reason: a headless
+        # broker has no page to load a mod into, so accepting one would be
+        # storing bytes nothing can ever run. Preflights registered alongside
+        # (route resolution precedes request middleware, so an unrouted OPTIONS
+        # 405s), because the Control Panel driving these is cross-origin
+        # whenever the operator administers another broker.
+        app.add_route(_mods_install_post, "/mods/install", methods=["POST"])
+        app.add_route(_mods_uninstall_post, "/mods/uninstall", methods=["POST"])
+        app.add_route(_mods_rescan_post, "/mods/rescan", methods=["POST"])
+        app.add_route(_mods_installed_get, "/mods/installed", methods=["GET"])
+        for _path, _name in (("/mods/install", "preflight_mods_install"),
+                             ("/mods/uninstall", "preflight_mods_uninstall"),
+                             ("/mods/rescan", "preflight_mods_rescan"),
+                             ("/mods/installed", "preflight_mods_installed")):
+            app.add_route(_preflight, _path, methods=["OPTIONS"], name=_name)
     else:
         app.add_route(_index_headless, "/", methods=["GET"])
     app.add_websocket_route(_browser_ws, "/ws")

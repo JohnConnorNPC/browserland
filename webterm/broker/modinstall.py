@@ -62,9 +62,12 @@ import json
 import logging
 import os
 import re
+import secrets
+import shutil
 import stat
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,7 +77,16 @@ LOGGER = logging.getLogger(__name__)
 #: does not carry it, so a ``mods_dir`` mis-set to an existing user directory
 #: cannot have unrelated trees deleted out from under it.
 MARKER_NAME = ".browserland-mods"
-#: The atomic pointer naming the live generation: ``{"gen": "<sha256 hex>"}``.
+#: The atomic pointer naming the live generation AND its retained predecessor:
+#: ``{"gen": "<sha256 hex>", "previous": "<sha256 hex>"|null}``.
+#:
+#: ``previous`` is written, not inferred. The obvious "keep the newest OTHER
+#: directory by mtime" is wrong in two ways that both lose data: an install that
+#: dies between the generation rename and the commit leaves a NEWER directory
+#: that was never live, and it would displace the real predecessor -- so a page
+#: mid-boot against that predecessor starts 404ing and the next sweep deletes
+#: it; and a predecessor whose newer neighbour fails validation is never even
+#: considered. CURRENT is the ONLY thing that decides which generations exist.
 CURRENT_NAME = "CURRENT"
 #: Broker-WRITTEN manifest. A reserved key in an install payload, so a payload
 #: can never ship a manifest that disagrees with the one that was validated.
@@ -97,6 +109,14 @@ MAX_FILES = 32                      # files per mod
 MAX_FILE_BYTES = 256 * 1024         # per file
 MAX_TOTAL_BYTES = 512 * 1024        # per mod, all files
 MAX_BODY_BYTES = 2 * 2**20          # POST /mods/install body, checked pre-parse
+#: Every OTHER mod endpoint's body: an id and two booleans need nothing more.
+#: json.loads runs SYNCHRONOUSLY on the one event loop, so an uncapped body on
+#: /mods/uninstall or /mods/rescan would let a padded object freeze every HTTP
+#: handler, WebSocket and terminal relay for as long as the parse takes.
+MAX_SMALL_BODY_BYTES = 64 * 1024
+#: CURRENT / mod.json / .gen.json. Capped BEFORE json.loads for the same reason
+#: -- and because a scan must never pull an arbitrarily large file into memory.
+MAX_META_BYTES = 64 * 1024
 MAX_REQUIRES = 32
 MAX_TIERS = 8
 MAX_TIER_LEN = 32
@@ -130,6 +150,7 @@ ERROR_STATUS: Dict[str, int] = {
     "too_large": 413,               # body over MAX_BODY_BYTES (pre-parse)
     "bad_json": 400,
     "bad_mod_id": 400,
+    "bad_generation": 400,          # bytes do not content-address to their dir
     "reserved_id": 400,             # not "x-"-prefixed (#172)
     "id_in_use": 409,
     "not_installed": 404,
@@ -146,7 +167,6 @@ ERROR_STATUS: Dict[str, int] = {
     "unknown_manifest_key": 400,
     "css_external_reference": 400,
     "too_many_mods": 409,
-    "no_mods_dir": 500,
     "write_failed": 500,
 }
 
@@ -269,41 +289,134 @@ def _reject_casefold_collisions(names: Sequence[str]) -> None:
 
 # ---- CSS: no external origin ----------------------------------------------
 
-_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+#: ``@import`` is a literal plus a word boundary -- no quantifier, so it scans
+#: linearly. The comment/string walk below is hand-written for the same reason:
+#: the obvious ``/\*.*?\*/`` and ``url\((.*?)\)`` are QUADRATIC on input that
+#: opens thousands of comments (or ``url(``) and never closes them, and this
+#: runs ON THE EVENT LOOP against up to 256 KiB of attacker-chosen text. One
+#: installed stylesheet could otherwise stall every terminal on the broker.
 _CSS_IMPORT_RE = re.compile(r"@import\b", re.I)
-_CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I | re.S)
-_CSS_ABSOLUTE_RE = re.compile(r"\A\s*(?:[a-z][a-z0-9+.\-]*:)?//", re.I)
-_CSS_HTTP_RE = re.compile(r"\A\s*https?:", re.I)
+#: ``//host`` at the start of a URL-ish token: protocol-relative, so it inherits
+#: the page's scheme and reaches an external origin just as ``https://`` does.
+_CSS_PROTOCOL_RELATIVE_RE = re.compile(r"\A\s*(?:[a-z][a-z0-9+.\-]*:)?//", re.I)
+
+
+def _strip_css_comments(text: str) -> Tuple[str, List[str]]:
+    """One linear, STRING-AWARE pass. Returns ``(text with comments blanked,
+    every quoted string literal found outside a comment)``.
+
+    String awareness is load-bearing, not pedantry: ``content: "/*"`` is a
+    perfectly ordinary declaration, and a comment stripper that does not know
+    about strings treats it as an unterminated comment and silently drops the
+    REST OF THE FILE -- so the external ``url()`` on the next line is never
+    seen. An unterminated comment that really is one runs to end of file, which
+    is what a browser does."""
+    out: List[str] = []
+    strings: List[str] = []
+    pos, length = 0, len(text)
+    while pos < length:
+        ch = text[pos]
+        if ch == "/" and text.startswith("/*", pos):
+            end = text.find("*/", pos + 2)
+            out.append(" ")
+            if end < 0:
+                break                      # unterminated: comment to EOF
+            pos = end + 2
+            continue
+        if ch in "\"'":
+            end = pos + 1
+            while end < length:
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == ch or text[end] == "\n":
+                    break
+                end += 1
+            strings.append(text[pos + 1:min(end, length)])
+            out.append(text[pos:min(end + 1, length)])
+            pos = end + 1
+            continue
+        out.append(ch)
+        pos += 1
+    return "".join(out), strings
+
+
+def _css_url_values(text: str) -> List[str]:
+    """Every ``url(…)`` argument, unquoted and trimmed. One linear pass."""
+    lowered = text.casefold()
+    out: List[str] = []
+    pos = 0
+    while True:
+        start = lowered.find("url(", pos)
+        if start < 0:
+            return out
+        end = text.find(")", start + 4)
+        if end < 0:
+            return out
+        value = text[start + 4:end].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].strip()
+        out.append(value)
+        pos = end + 1
 
 
 def _reject_css_external_references(name: str, text: str) -> None:
-    """Refuse ``@import`` and any absolute ``url(http…)`` / ``url(//…)``.
+    """Refuse ``@import`` and any reference to an external origin.
 
     The app's CSP sets ONLY ``script-src`` and ``frame-ancestors`` -- there is
     no ``default-src`` and no ``style-src`` -- so a stylesheet's ``@import``,
     ``url()`` and ``@font-face`` are entirely unrestricted, and would be a
     SILENT egress channel out of a broker whose only outbound HTTP is the
-    deliberately-closed ``/status/fetch``. This is defence in depth, not a
-    boundary (the mod's own JS can ``fetch()`` anything, and #163 settled that
-    ``ctx`` is not a boundary) -- but CSS egress is the silent one, and this
-    preserves the "no third-party origin loads in this page" property #143/#146
-    bought. ``data:`` and relative URLs pass.
+    deliberately-closed ``/status/fetch``.
 
-    Comments are stripped first, exactly as a CSS parser would, so a commented
-    -out ``@import`` is not a false refusal."""
-    stripped = _CSS_COMMENT_RE.sub(" ", text)
+    The rule is deliberately BROADER than "no absolute url()": an installed
+    stylesheet may not contain ``http://`` or ``https://`` outside a comment AT
+    ALL, and no ``url()`` argument or string literal may start with ``//``.
+    Enumerating URL-bearing syntax instead (``url()``, ``@import``,
+    ``image-set()``, ``-webkit-image-set()``, ``src()``, whatever CSS adds next)
+    is a list that is wrong the moment it is written -- ``image-set("https://…"
+    1x)`` contains no ``url()`` at all and would sail through. One coarse rule
+    is enforceable, statable in a sentence, and has an obvious workaround
+    (``data:`` or a relative path).
+
+    DEFENCE IN DEPTH, NOT A BOUNDARY: the mod's own JS can ``fetch()`` anything,
+    and #163 settled that ``ctx`` is not a boundary, so a determined author
+    evades this with a CSS escape (``@\\69mport``) or a runtime-built
+    stylesheet. What it buys is that the silent channel is not the ACCIDENTAL
+    one -- it preserves the "no third-party origin loads in this page" property
+    #143/#146 bought, and an author who trips it learns the rule."""
+    stripped, strings = _strip_css_comments(text)
     if _CSS_IMPORT_RE.search(stripped):
         raise ValidationError("css_external_reference",
                               f"{name}: @import may not be used")
-    for match in _CSS_URL_RE.finditer(stripped):
-        value = match.group(2)
-        if _CSS_ABSOLUTE_RE.match(value) or _CSS_HTTP_RE.match(value):
+    lowered = stripped.casefold()
+    for scheme in ("http://", "https://"):
+        found = lowered.find(scheme)
+        if found >= 0:
             raise ValidationError(
                 "css_external_reference",
-                f"{name}: url({value[:64]}…) names an external origin")
+                f"{name}: {stripped[found:found + 64]} names an external "
+                f"origin (use a relative path or a data: URI)")
+    for value in _css_url_values(stripped) + strings:
+        if _CSS_PROTOCOL_RELATIVE_RE.match(value):
+            raise ValidationError(
+                "css_external_reference",
+                f"{name}: {value[:64]} is protocol-relative, so it names an "
+                f"external origin")
 
 
 # ---- per-file byte rules ---------------------------------------------------
+
+def count_lines(text: str) -> int:
+    """Lines by ECMAScript's definition, not by ``\\n`` alone.
+
+    JavaScript ends a line on LF, CR, U+2028 and U+2029, and treats CRLF as one
+    -- so a file of 100k CR-separated lines with a single trailing LF counts as
+    ONE line to a naive ``text.count("\\n")`` and walks straight through a cap
+    whose whole purpose is "no fragment is a 100k-line wall of code"."""
+    return (text.count("\n") + text.count("\r") - text.count("\r\n")
+            + text.count("\u2028") + text.count("\u2029"))
+
 
 def _file_bytes(name: str, text: Any) -> bytes:
     """The UTF-8 bytes of one file, or a ``ValidationError``.
@@ -328,7 +441,7 @@ def _file_bytes(name: str, text: Any) -> bytes:
         raise ValidationError("file_too_large",
                               f"{name}: {len(data)} > {MAX_FILE_BYTES} bytes")
     cap = line_cap()
-    if text.count("\n") > cap:
+    if count_lines(text) > cap:
         raise ValidationError("file_too_large",
                               f"{name}: over {cap} lines")
     return data
@@ -473,17 +586,30 @@ def _canonical_manifest(meta: Any, files: Dict[str, Any]) -> Dict[str, Any]:
         raise ValidationError("bad_manifest_field",
                               "defaultEnabled must be a bool")
 
-    return {"id": mod_id,
-            "version": _text_field(meta, "version", MAX_VERSION_LEN),
-            "ctxVersion": ctx_version,
-            "title": _text_field(meta, "title", MAX_TITLE_LEN) or mod_id,
-            "description": _text_field(meta, "description",
-                                       MAX_DESCRIPTION_LEN),
-            "scripts": scripts,
-            "styles": styles,
-            "requires": requires,
-            "tiers": tiers,
-            "help": help_block}
+    out = {"id": mod_id,
+           "version": _text_field(meta, "version", MAX_VERSION_LEN),
+           "ctxVersion": ctx_version,
+           "title": _text_field(meta, "title", MAX_TITLE_LEN) or mod_id,
+           "description": _text_field(meta, "description",
+                                      MAX_DESCRIPTION_LEN),
+           "scripts": scripts,
+           "styles": styles,
+           "requires": requires,
+           "tiers": tiers,
+           "help": help_block}
+    # ONE encodability check over the whole result, because every string in it
+    # has to survive both the generation hash and the mod.json write. JSON can
+    # carry a LONE SURROGATE ("\ud800"), Python happily holds it as a str, and
+    # it only explodes at .encode("utf-8") -- which happens in compute_gen,
+    # OUTSIDE the caller's validation try/except. That would be a 500 for a
+    # malformed payload, and worse, the same manifest on disk would then throw
+    # during a scan and take out a startup or a rescan.
+    try:
+        json.dumps(out, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValidationError(
+            "bad_encoding", f"manifest carries unencodable text: {exc}") from None
+    return out
 
 
 def validate_package(manifest: Any, files: Any) -> Tuple[Dict[str, Any],
@@ -579,14 +705,23 @@ def assets_for(mod_id: str, gen: str,
 
 
 def make_record(manifest: Dict[str, Any], records: Dict[str, Dict[str, Any]],
-                gen: str, installed_at: int) -> Dict[str, Any]:
+                gen: str, installed_at: int,
+                previous: Optional[str] = None) -> Dict[str, Any]:
     """One ``index["mods"]`` entry. ``help_md`` is captured HERE, at scan or
     install time, so Help is built from the very bytes being served instead of
-    from a second traversal that could disagree."""
-    help_rec = records.get(HELP_NAME)
+    from a second traversal that could disagree.
+
+    ``previous`` is the retained predecessor generation (or ``None``), carried
+    in memory as well as in CURRENT so the GC and the sweep never have to guess
+    which other directory is still live."""
+    # Case-folded, because "Help.md" passes the grammar and would otherwise be
+    # captured as a servable-nothing file whose help silently never appears.
+    help_rec = next((rec for name, rec in records.items()
+                     if name.casefold() == HELP_NAME), None)
     return {
         "id": manifest["id"],
         "gen": gen,
+        "previous": previous,
         "manifest": manifest,
         "installed_at": installed_at,
         "files": {name: {"sha256": rec["sha256"],
@@ -628,22 +763,53 @@ def _within(root_real: str, path: str) -> bool:
     return real == root or real.startswith(root + os.sep)
 
 
-def read_current(mod_path: Path) -> Optional[str]:
-    """The generation named by ``<mod>/CURRENT``, or ``None``.
+def _read_json_capped(path: Path, cap: int = MAX_META_BYTES) -> Any:
+    """Read at most ``cap`` bytes and parse them as JSON, or ``None``.
+
+    Capped BEFORE the parse and never with ``read_bytes()``: a scan must not be
+    able to pull an arbitrarily large file into memory (a 10 GB ``mod.json``
+    dropped in ``mods_dir`` would otherwise OOM a startup), and it must not be
+    able to raise -- a hand-mangled sidecar degrades to "that mod is not
+    served", never to a broker that will not boot. ``RecursionError`` is caught
+    too: it is what a deeply nested JSON value raises, and it is not an
+    ``Exception`` subclass most callers remember to name."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(cap + 1)
+        if len(raw) > cap:
+            LOGGER.warning("installed mod metadata over %d bytes (%s)",
+                           cap, path)
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError,
+            json.JSONDecodeError, ValueError, RecursionError):
+        return None
+
+
+def read_current(mod_path: Path) -> Tuple[Optional[str], Optional[str]]:
+    """``(gen, previous)`` from ``<mod>/CURRENT``, or ``(None, None)``.
 
     The pointer IS the commit, so this is deliberately strict: anything that is
     not a JSON object carrying a well-formed sha256 hex ``gen`` means "this mod
     has no live generation", which is the same answer a crash mid-install
-    leaves behind."""
-    try:
-        with open(mod_path / CURRENT_NAME, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
-        return None
+    leaves behind.
+
+    ``previous`` names the ONE retained predecessor. It is read from here and
+    never inferred from directory mtimes -- see CURRENT_NAME for why guessing
+    loses data. A pointer without it (hand-written, or from a broker predating
+    this) simply retains nothing, which is safe: the live generation is intact
+    and only a page mid-boot across a replace would have wanted the other."""
+    data = _read_json_capped(mod_path / CURRENT_NAME)
     if not isinstance(data, dict):
-        return None
+        return None, None
     gen = data.get("gen")
-    return gen if isinstance(gen, str) and GEN_RE.fullmatch(gen) else None
+    if not isinstance(gen, str) or not GEN_RE.fullmatch(gen):
+        return None, None
+    previous = data.get("previous")
+    if not isinstance(previous, str) or not GEN_RE.fullmatch(previous) \
+            or previous == gen:
+        previous = None
+    return gen, previous
 
 
 def _read_generation(gen_path: Path, root_real: str
@@ -654,7 +820,16 @@ def _read_generation(gen_path: Path, root_real: str
     IGNORED with a log rather than refusing the mod: a stray ``.DS_Store`` or a
     leftover editor backup is inert junk, and refusing a whole mod over it is
     hostile. A file the manifest actually DECLARES is a different matter -- it
-    will not be in the map, and the declaration check refuses the mod."""
+    will not be in the map, and the declaration check refuses the mod.
+
+    THE DIRECTORY NAME MUST CONTENT-ADDRESS ITS OWN BYTES. A mismatch is fatal,
+    not a warning, because ``gen`` is in the URL and that URL is served
+    ``immutable`` for a year with an SRI hash derived from these very bytes.
+    Tolerating a mismatch means editing a file in place silently republishes
+    different content behind an identical, already-cached URL -- browsers
+    holding the old copy then fail SRI and the mod does not load at all. It also
+    means "the same gen" stops implying "the same bytes", which is the one
+    property the whole generation scheme exists to provide."""
     if _lstat_is_link_or_reparse(str(gen_path)) or not _within(root_real,
                                                               str(gen_path)):
         raise ValidationError("bad_mod_id", f"{gen_path}: not a plain directory")
@@ -675,8 +850,11 @@ def _read_generation(gen_path: Path, root_real: str
             continue
         if len(files) >= MAX_FILES:
             raise ValidationError("too_many_files", str(gen_path))
+        # Capped READ, not a read-then-check: read_bytes() on a 10 GB file
+        # dropped in mods_dir would OOM the scan before the cap ever ran.
         try:
-            raw = (gen_path / entry.name).read_bytes()
+            with open(gen_path / entry.name, "rb") as fh:
+                raw = fh.read(MAX_FILE_BYTES + 1)
         except OSError as exc:
             raise ValidationError("bad_encoding",
                                   f"{entry.name}: {exc}") from None
@@ -687,14 +865,18 @@ def _read_generation(gen_path: Path, root_real: str
         except UnicodeDecodeError as exc:
             raise ValidationError("bad_encoding",
                                   f"{entry.name}: {exc}") from None
-    try:
-        with open(gen_path / MANIFEST_NAME, "r", encoding="utf-8") as fh:
-            manifest_raw = json.load(fh)
-    except (FileNotFoundError, OSError, json.JSONDecodeError,
-            ValueError, UnicodeDecodeError) as exc:
+    manifest_raw = _read_json_capped(gen_path / MANIFEST_NAME)
+    if manifest_raw is None:
         raise ValidationError("bad_json",
-                              f"{gen_path}/{MANIFEST_NAME}: {exc}") from None
+                              f"{gen_path}/{MANIFEST_NAME} unreadable")
     manifest, records = validate_package(manifest_raw, files)
+    computed = compute_gen(manifest, records)
+    if computed != gen_path.name:
+        raise ValidationError(
+            "bad_generation",
+            f"{gen_path.name[:12]} does not content-address its own bytes "
+            f"(they hash to {computed[:12]}) -- install through POST "
+            f"/mods/install rather than writing mods_dir by hand")
     return manifest, records, _read_installed_at(gen_path)
 
 
@@ -705,14 +887,10 @@ def _read_installed_at(gen_path: Path) -> int:
     filesystem mtime does not. The mtime is only the fallback for a
     hand-populated generation, where there is no better answer and the stamp is
     honestly unstable."""
-    try:
-        with open(gen_path / GEN_META_NAME, "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
-        stamp = meta.get("installed_at") if isinstance(meta, dict) else None
-        if isinstance(stamp, int) and not isinstance(stamp, bool) and stamp >= 0:
-            return stamp
-    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
-        pass
+    meta = _read_json_capped(gen_path / GEN_META_NAME)
+    stamp = meta.get("installed_at") if isinstance(meta, dict) else None
+    if isinstance(stamp, int) and not isinstance(stamp, bool) and stamp >= 0:
+        return stamp
     try:
         return int(gen_path.stat().st_mtime)
     except OSError:
@@ -793,7 +971,7 @@ def _scan_one(mods_dir: Path, name: str, root_real: str,
         LOGGER.warning("mods_dir: skipping %r -- resolves outside mods_dir",
                        name)
         return "bad_mod_id"
-    gen = read_current(mod_path)
+    gen, previous = read_current(mod_path)
     if gen is None:
         LOGGER.warning("mods_dir: skipping %r -- no usable %s pointer",
                        name, CURRENT_NAME)
@@ -808,44 +986,470 @@ def _scan_one(mods_dir: Path, name: str, root_real: str,
         LOGGER.warning("mods_dir: skipping %r -- its manifest claims id %r",
                        name, manifest["id"])
         return "bad_mod_id"
-    computed = compute_gen(manifest, records)
-    if computed != gen:
-        # Not fatal: the URL is whatever CURRENT names, and hand-population is
-        # explicitly not a trust boundary. But it means these bytes were not
-        # produced by an install, so say so once, loudly.
-        LOGGER.warning("mods_dir: %r generation %s does not content-address to "
-                       "its own bytes (computed %s) -- hand-populated?",
-                       name, gen[:12], computed[:12])
-    index["mods"][name] = make_record(manifest, records, gen, installed_at)
+    retained = _load_retained_generation(mod_path, name, previous, root_real,
+                                         index)
+    index["mods"][name] = make_record(manifest, records, gen, installed_at,
+                                      retained)
     index["assets"].update(assets_for(name, gen, records))
-    _load_retained_generations(mod_path, name, gen, root_real, index)
     return None
 
 
-def _load_retained_generations(mod_path: Path, mod_id: str, live_gen: str,
-                               root_real: str, index: Dict[str, Any]) -> None:
-    """Also serve the retained PREVIOUS generation's assets.
+def _load_retained_generation(mod_path: Path, mod_id: str,
+                              previous: Optional[str], root_real: str,
+                              index: Dict[str, Any]) -> Optional[str]:
+    """Also serve the retained PREVIOUS generation's assets, if CURRENT names
+    one. Returns the generation actually loaded, or ``None``.
 
     A page that started booting against generation A must not be handed a file
     from generation B, and a broker restart in that window is the one case the
     install path's in-memory carry-over cannot cover. Assets only -- the
-    catalog, Help and the policy all describe CURRENT and nothing else. A
-    predecessor that no longer validates is simply dropped: it is not the live
-    generation, so there is nothing to be loud about."""
+    catalog, Help and the policy all describe CURRENT and nothing else.
+
+    The predecessor is READ FROM CURRENT, never chosen by mtime. Guessing loses
+    data twice over: an install that died between the generation rename and the
+    commit leaves a NEWER directory that was never live and would displace the
+    real predecessor (which the next sweep then deletes), and a predecessor
+    whose newer neighbour merely fails validation would never be reached at all.
+
+    A predecessor that no longer validates is dropped without noise: it is not
+    the live generation, so nothing depends on it being there."""
+    if previous is None:
+        return None
+    gen_path = mod_path / previous
+    if not gen_path.is_dir():
+        return None
     try:
-        entries = sorted((e for e in os.scandir(mod_path)
-                          if e.name != live_gen
-                          and GEN_RE.fullmatch(e.name)
-                          and e.is_dir(follow_symlinks=False)),
-                         key=lambda e: e.stat().st_mtime, reverse=True)
+        _, records, _ = _read_generation(gen_path, root_real)
+    except (ValidationError, OSError):
+        LOGGER.debug("mods_dir: %s retained generation %s is unusable",
+                     mod_id, previous[:12])
+        return None
+    index["assets"].update(assets_for(mod_id, previous, records))
+    return previous
+
+
+# ---- writing: the commit protocol -----------------------------------------
+#
+# 1. validate the payload IN MEMORY and compute the content-addressed `gen`
+#    (done by the caller, before the lock -- a pure fast fail);
+# 2. re-check the STATE-DEPENDENT conditions (id_in_use, too_many_mods) UNDER
+#    the lock, because the pre-lock check is only a fast fail and two requests
+#    can otherwise both observe the id absent;
+# 3. write `<id>/.tmp-<rand>/` and rename it to `<id>/<gen>/` -- a FRESH name,
+#    so this step can never destroy anything;
+# 4. `_write_state_atomic(<id>/CURRENT, {"gen": …, "previous": …})` -- THIS IS
+#    THE COMMIT;
+# 5. rebuild the in-memory index from the bytes just written (never re-read
+#    from disk) -- a pure function, so it cannot fail on IO;
+# 6. GC to RETAINED_GENERATIONS, best-effort.
+#
+# Crash recovery is total and unambiguous: CURRENT names a complete generation
+# (the old one or the new one) or does not exist. If step 4 never runs, the old
+# CURRENT is still live and step 3's directory is litter. Nothing here ever
+# renames a directory OVER another, which is what the earlier "two renames"
+# shape got wrong -- it lost the last good copy on a crash in between.
+#
+# SCOPE OF THE GUARANTEE: this is PROCESS-crash safe, not power-loss durable.
+# Nothing here fsyncs, exactly like `_write_bytes_atomic` and every other write
+# in this broker ("visibility only -- crash durability is deliberately not
+# promised"). After a host power cut NTFS may have recovered the CURRENT replace
+# while the generation's contents are still missing or short; the scan then
+# refuses that generation and reports it, rather than serving truncated code.
+
+def _has_marker(mods_dir: Path) -> bool:
+    return (Path(mods_dir) / MARKER_NAME).is_file()
+
+
+def ensure_store(mods_dir: Path) -> None:
+    """Create ``mods_dir`` and drop the ownership marker. BLOCKING.
+
+    The marker is what the destructive sweep refuses to run without, so a
+    ``mods_dir`` mis-set to an existing user directory cannot have unrelated
+    trees deleted out from under it. Writing it on FIRST USE (an install)
+    rather than at startup means a mis-set path stays un-marked until somebody
+    deliberately installs into it."""
+    mods_dir = Path(mods_dir)
+    mods_dir.mkdir(parents=True, exist_ok=True)
+    marker = mods_dir / MARKER_NAME
+    if not marker.exists():
+        marker.write_text(
+            "This directory holds Browserland's runtime-installed mods.\n"
+            "The broker will delete generation directories and .tmp-/.old-\n"
+            "staging inside it. Do not point mods_dir at a directory you care\n"
+            "about; deleting this marker disables the sweep.\n", encoding="utf-8")
+
+
+def _generation_payload(manifest: Dict[str, Any],
+                        records: Dict[str, Dict[str, Any]],
+                        gen: str, installed_at: int) -> Dict[str, bytes]:
+    """Every byte one generation directory holds, name -> bytes.
+
+    ``mod.json`` is BROKER-WRITTEN from the canonical manifest (and is a
+    reserved key in an install payload), so an installed mod's manifest always
+    says exactly what was validated -- a payload cannot ship one that
+    disagrees. ``.gen.json`` carries the stamp and the per-file hashes."""
+    out = {name: rec["data"] for name, rec in records.items()}
+    out[MANIFEST_NAME] = (json.dumps(manifest, sort_keys=True, indent=2,
+                                     ensure_ascii=False) + "\n").encode("utf-8")
+    out[GEN_META_NAME] = (json.dumps(
+        {"gen": gen, "installed_at": installed_at,
+         "files": {name: rec["sha256"] for name, rec in records.items()}},
+        sort_keys=True, indent=2) + "\n").encode("utf-8")
+    return out
+
+
+def _verify_distinct_identities(dir_path: Path, names: Sequence[str]) -> None:
+    """Assert the files we just wrote are distinct FILES, not distinct NAMES.
+
+    The grammar already refuses every shape that can collapse two names onto
+    one file (case folding, trailing dots, 8.3, alternate data streams), but
+    that is a lexical argument about a filesystem whose rules are not fully
+    lexical. This is the empirical check, run right after the write and before
+    anything is published: two names sharing one ``(st_dev, st_ino)`` means one
+    of them silently overwrote the other, and the mod would ship bytes nobody
+    reviewed under a name the manifest still lists."""
+    seen: Dict[Tuple[int, int], str] = {}
+    for name in names:
+        try:
+            st = os.stat(dir_path / name)
+        except OSError as exc:
+            raise ValidationError("write_failed", f"{name}: {exc}") from None
+        key = (st.st_dev, st.st_ino)
+        if st.st_ino and key in seen:
+            raise ValidationError(
+                "bad_file_name",
+                f"{name!r} and {seen[key]!r} are the same file on this volume")
+        seen[key] = name
+
+
+def _write_generation_dir(dir_path: Path, payload: Dict[str, bytes],
+                          atomic: bool) -> None:
+    """Materialize one generation directory.
+
+    ``atomic=False`` is the staging path: the directory is brand new and
+    private, so a plain write is enough and the whole thing is published by
+    ONE rename. ``atomic=True`` is the repair path for a target that already
+    exists -- the name is content-addressed, so it is either the same bytes or
+    the debris of an install that died between the rename and the commit, and
+    either way the correct content is what we hold. It is written file by file
+    through temp+``os.replace`` and the directory is NEVER removed, because
+    CURRENT may already name it.
+
+    The repair is EXACT: anything in the directory that is not in the payload is
+    removed too. Overwriting only the expected entries would leave a stale
+    ``old.js`` behind -- absent from the in-memory index, but picked up by the
+    next scan, which would then be serving bytes that never contributed to this
+    generation's hash under that generation's URL."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    for name, data in payload.items():
+        target = dir_path / name
+        if not atomic:
+            target.write_bytes(data)
+            continue
+        tmp = dir_path / f"{TMP_PREFIX}w-{secrets.token_hex(6)}"
+        try:
+            tmp.write_bytes(data)
+            os.replace(str(tmp), str(target))
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+    if atomic:
+        _prune_to_payload(dir_path, payload)
+    _verify_distinct_identities(dir_path, list(payload))
+
+
+def _prune_to_payload(dir_path: Path, payload: Dict[str, bytes]) -> None:
+    """Remove every entry of ``dir_path`` that is not in ``payload``.
+
+    Only ever called on a generation directory the broker itself owns, so a
+    stray entry is by definition debris. Failures are logged, not raised: the
+    content that matters is already correct, and the extra file is at worst
+    served under a URL nothing links to."""
+    try:
+        entries = list(os.scandir(dir_path))
     except OSError:
         return
-    for entry in entries[:RETAINED_GENERATIONS - 1]:
-        try:
-            _, records, _ = _read_generation(mod_path / entry.name, root_real)
-        except (ValidationError, OSError):
+    for entry in entries:
+        if entry.name in payload:
             continue
-        index["assets"].update(assets_for(mod_id, entry.name, records))
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                os.unlink(entry.path)
+        except OSError as exc:
+            LOGGER.warning("mods_dir: stale %s left in %s: %s",
+                           entry.name, dir_path, exc)
+
+
+def commit_generation(mods_dir: Path, mod_id: str, manifest: Dict[str, Any],
+                      records: Dict[str, Dict[str, Any]], gen: str,
+                      previous: Optional[str] = None) -> int:
+    """Steps 3 and 4: stage, publish, commit. Returns ``installed_at``.
+
+    ``previous`` is the generation to retain alongside this one; it is written
+    into CURRENT so nothing downstream has to infer it.
+
+    BLOCKING -- call it through ``_off_loop``, inside the shielded region that
+    holds ``mods_install_lock``."""
+    mods_dir = Path(mods_dir)
+    ensure_store(mods_dir)
+    mod_path = mods_dir / mod_id
+    mod_path.mkdir(parents=True, exist_ok=True)
+    installed_at = int(time.time())
+    payload = _generation_payload(manifest, records, gen, installed_at)
+    target = mod_path / gen
+
+    if target.exists():
+        _write_generation_dir(target, payload, atomic=True)
+    else:
+        staging = mod_path / (TMP_PREFIX + secrets.token_hex(8))
+        try:
+            _write_generation_dir(staging, payload, atomic=False)
+            try:
+                os.rename(str(staging), str(target))
+            except OSError:
+                # Lost a race with something that created the target under us
+                # (not possible while the lock is held, but a rename that fails
+                # for any other reason must not leave a half-published mod).
+                if not target.is_dir():
+                    raise
+                _write_generation_dir(target, payload, atomic=True)
+                shutil.rmtree(staging, ignore_errors=True)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    # 4. THE COMMIT. One small-file atomic replace; everything before it is
+    # invisible, everything after it is bookkeeping.
+    from .app import _write_state_atomic
+    _write_state_atomic(mod_path / CURRENT_NAME,
+                        {"gen": gen, "previous": previous})
+    return installed_at
+
+
+def retained_after(index: Dict[str, Any], mod_id: str,
+                   gen: str) -> Optional[str]:
+    """Which generation to keep ALONGSIDE ``gen`` when installing it.
+
+    Replacing B with C retains B. Re-installing B over itself (identical bytes,
+    so an identical content-addressed name) must retain whatever B was already
+    retaining -- treating it as "previous == gen, so retain nothing" would
+    delete the real predecessor A and 404 every page mid-boot against it, for
+    an install that changed nothing at all."""
+    previous = index["mods"].get(mod_id)
+    if previous is None:
+        return None
+    if previous["gen"] != gen:
+        return previous["gen"]
+    return previous.get("previous")
+
+
+def index_with(index: Dict[str, Any], mod_id: str, manifest: Dict[str, Any],
+               records: Dict[str, Dict[str, Any]], gen: str,
+               installed_at: int,
+               previous: Optional[str] = None) -> Dict[str, Any]:
+    """Step 5: a NEW index carrying the bytes just written. Pure -- no IO, so
+    it cannot fail halfway and leave the broker disagreeing with its disk.
+
+    The retained generation's assets are CARRIED OVER, which is the whole point
+    of retention: a page that is mid-boot against the old generation keeps
+    resolving its URLs instead of getting a 404 for half its files."""
+    keep = {gen} | ({previous} if previous else set())
+    assets = {key: val for key, val in index["assets"].items()
+              if key.split("/", 2)[0] != mod_id or key.split("/", 2)[1] in keep}
+    assets.update(assets_for(mod_id, gen, records))
+    mods = dict(index["mods"])
+    mods[mod_id] = make_record(manifest, records, gen, installed_at, previous)
+    skipped = dict(index["skipped"])
+    skipped.pop(mod_id, None)
+    return {"mods": mods, "assets": assets, "skipped": skipped}
+
+
+def index_without(index: Dict[str, Any], mod_id: str) -> Dict[str, Any]:
+    """The uninstall twin of :func:`index_with`. Pure."""
+    return {
+        "mods": {mid: rec for mid, rec in index["mods"].items()
+                 if mid != mod_id},
+        "assets": {key: val for key, val in index["assets"].items()
+                   if key.split("/", 2)[0] != mod_id},
+        "skipped": {mid: code for mid, code in index["skipped"].items()
+                    if mid != mod_id},
+    }
+
+
+def keep_map(index: Dict[str, Any]) -> Dict[str, Set[str]]:
+    """mod id -> the generations the index is still serving. What the sweep
+    must not delete."""
+    out: Dict[str, Set[str]] = {}
+    for key in index["assets"]:
+        mid, gen, _rest = key.split("/", 2)
+        out.setdefault(mid, set()).add(gen)
+    for mid, rec in index["mods"].items():
+        out.setdefault(mid, set()).add(rec["gen"])
+    return out
+
+
+def _rmtree_if_ours(path: Path) -> None:
+    """Remove a directory the BROKER created, refusing to follow a link out of
+    the store. Best-effort and silent-on-failure by design: leftover litter is
+    a cosmetic problem, a failed sweep that propagates is not."""
+    try:
+        if _lstat_is_link_or_reparse(str(path)):
+            try:
+                os.unlink(str(path))
+            except OSError:
+                try:
+                    os.rmdir(str(path))
+                except OSError:
+                    pass
+            return
+        shutil.rmtree(path, ignore_errors=True)
+    except OSError as exc:
+        LOGGER.warning("mods_dir: could not remove %s: %s", path, exc)
+
+
+def gc_generations(mods_dir: Path, mod_id: str,
+                   keep: Sequence[str]) -> None:
+    """Step 6: drop everything under ``<id>/`` that is neither a retained
+    generation nor the pointer.
+
+    NEVER propagates an IO failure. The commit has already landed by the time
+    this runs, so failing the request over litter that could not be reclaimed
+    would report a failure for an install that actually succeeded. The litter
+    is reclaimed by the next install or rescan instead."""
+    mods_dir = Path(mods_dir)
+    if not _has_marker(mods_dir):
+        LOGGER.warning("mods_dir %s has no %s marker; not sweeping",
+                       mods_dir, MARKER_NAME)
+        return
+    keep_set = set(keep)
+    try:
+        entries = list(os.scandir(mods_dir / mod_id))
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        if name in keep_set or name == CURRENT_NAME:
+            continue
+        if GEN_RE.fullmatch(name) or name.startswith(TMP_PREFIX):
+            try:
+                _rmtree_if_ours(Path(entry.path))
+            except OSError as exc:
+                LOGGER.warning("mods_dir: could not reclaim %s: %s",
+                               entry.path, exc)
+
+
+def sweep_store(mods_dir: Path, keep: Dict[str, Set[str]]) -> None:
+    """Drop install/uninstall staging and superseded generations across the
+    whole store. NEVER raises.
+
+    REFUSES without the ownership marker -- this is the one walk that touches
+    the top level, so a ``mods_dir`` mis-set to an existing user directory must
+    not be able to lose anything.
+
+    A directory that is not in ``keep`` is LEFT ALONE, deliberately. It is a
+    mod the scanner refused (a typo in an id, a mangled manifest, a half-
+    unpacked archive), and deleting somebody's tree because we would not serve
+    it is the wrong answer -- ``GET /mods/installed`` reports it instead."""
+    mods_dir = Path(mods_dir)
+    if not _has_marker(mods_dir):
+        LOGGER.warning("mods_dir %s has no %s marker; not sweeping",
+                       mods_dir, MARKER_NAME)
+        return
+    try:
+        entries = list(os.scandir(mods_dir))
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        if name.startswith(TMP_PREFIX) or name.startswith(OLD_PREFIX):
+            try:
+                _rmtree_if_ours(Path(entry.path))
+            except OSError as exc:
+                LOGGER.warning("mods_dir: could not reclaim %s: %s",
+                               entry.path, exc)
+            continue
+        if name in keep:
+            gc_generations(mods_dir, name, keep[name])
+
+
+def stage_removal(mods_dir: Path, mod_id: str) -> Optional[str]:
+    """Move ``<id>/`` aside to ``.old-<id>-<rand>/`` and return that path.
+
+    The rename IS the uninstall: it is one atomic step, and a crash right after
+    it leaves ``.old-`` litter -- which is the intended end state anyway, just
+    not yet reclaimed. The caller removes the staged directory afterwards,
+    best-effort. Returns ``None`` if there was nothing there."""
+    mods_dir = Path(mods_dir)
+    mod_path = mods_dir / mod_id
+    # lexists, not exists: a DANGLING symlink (which the scanner reports as
+    # skipped, so the operator can see it and ask for it to go) is not
+    # `exists()`, and answering "nothing here" would report a successful
+    # uninstall while leaving the entry on disk for the next scan to resurrect.
+    if not os.path.lexists(str(mod_path)):
+        return None
+    staged = mods_dir / f"{OLD_PREFIX}{mod_id}-{secrets.token_hex(8)}"
+    os.rename(str(mod_path), str(staged))
+    return str(staged)
+
+
+def discard_staged(path: str) -> None:
+    """Reclaim a directory :func:`stage_removal` moved aside. BLOCKING, and
+    best-effort: the uninstall already happened at the rename, so a failure
+    here is unreclaimed litter that the next sweep picks up, never a failed
+    uninstall."""
+    try:
+        _rmtree_if_ours(Path(path))
+    except OSError as exc:
+        LOGGER.warning("mods_dir: could not reclaim %s: %s", path, exc)
+
+
+def installed_detail(index: Dict[str, Any],
+                     mods_dir: Optional[Path]) -> Dict[str, Any]:
+    """The token-gated operator view (``GET /mods/installed``).
+
+    Everything ``/info`` deliberately leaves out -- per-file sizes and hashes,
+    ``installed_at``, the tiers a mod declares, and WHAT WAS SKIPPED AND WHY.
+    /info is fetched by every peer, so it stays small; this is fetched by one
+    Control Panel and can afford to be complete. A mod that silently vanishes
+    is worse than one that says why it was refused."""
+    mods = []
+    for mid in sorted(index["mods"]):
+        rec = index["mods"][mid]
+        meta = rec["manifest"]
+        mods.append({
+            "id": mid,
+            "gen": rec["gen"],
+            "title": meta.get("title", mid),
+            "description": meta.get("description", ""),
+            "version": meta.get("version", ""),
+            "ctx_version": meta.get("ctxVersion"),
+            "installed_at": rec["installed_at"],
+            "requires": list(meta.get("requires", [])),
+            "tiers": list(meta.get("tiers", [])),
+            "scripts": list(meta.get("scripts", [])),
+            "styles": list(meta.get("styles", [])),
+            "has_help": rec["help_md"] is not None,
+            "files": [{"name": name, "bytes": meta_f["bytes"],
+                       "sha256": meta_f["sha256"]}
+                      for name, meta_f in sorted(rec["files"].items())],
+            "total_bytes": sum(f["bytes"] for f in rec["files"].values()),
+        })
+    return {
+        "mods_dir": str(mods_dir) if mods_dir is not None else None,
+        "mods": mods,
+        "skipped": dict(index["skipped"]),
+        "limits": {"max_mods": MAX_MODS, "max_files": MAX_FILES,
+                   "max_file_bytes": MAX_FILE_BYTES,
+                   "max_total_bytes": MAX_TOTAL_BYTES,
+                   "max_body_bytes": MAX_BODY_BYTES,
+                   "max_lines": line_cap(),
+                   "retained_generations": RETAINED_GENERATIONS},
+    }
 
 
 # ---- the catalog -----------------------------------------------------------
