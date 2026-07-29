@@ -2206,6 +2206,47 @@ def test_mod_sync_mod_packaged_and_manifest_agrees():
     assert ".modsync-actions" in INDEX_HTML
 
 
+def test_mod_sync_never_adopts_a_mod_this_build_does_not_have():
+    # #163 out-of-scope guard: mod-sync carries pins and settings, NEVER mod
+    # code, and that has to survive one broker having an installed `x-` mod the
+    # other has never seen.
+    #
+    # adopt walks OUR OWN window.__mods.registered (via localMods), never the
+    # peer's catalog, so an id we do not have has no local switch to flip and is
+    # structurally unadoptable -- rather than being "handled" somewhere later.
+    # planFor is the mirror image: it skips a mod absent from the peer's catalog
+    # in BOTH minimal and lockAll modes, so no pin naming a mod that broker does
+    # not serve is ever written.
+    src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    adopt = code[code.index("async function adoptPlan("):
+                 code.index("function applyAdopt(")]
+    assert "for (const m of localMods())" in adopt
+    # The ONLY iteration over the peer's catalog in adopt builds the lookup map;
+    # nothing walks it to produce a row, so a peer-only id cannot become one.
+    assert "for (const m of cat) byId.set(m.id, m);" in adopt
+    assert adopt.count("for (const m of cat)") == 1
+    assert "of byId" not in adopt and "of rec.mods" not in adopt
+    # localMods IS window.__mods.registered, so "absent from registered" and
+    # "not adoptable" are the same statement.
+    assert "for (const m of window.__mods.registered) {" in code
+    # A mod we have and the peer does not is REPORTED, not silently dropped: an
+    # omitted row reads as agreement about a mod that broker never heard of.
+    assert "note: 'not installed there'" in code
+    assert "} else if (r.action === 'missing') {" in code
+    # ...including when there is nothing else to preview, where the skip lines
+    # are never rendered at all.
+    assert "' Left alone: '" in code
+    # planFor's half, unchanged and pinned here so it cannot rot: a mod absent
+    # from the peer's catalog is skipped before any pin is computed, in BOTH
+    # modes (one shared loop), and reported as a row.
+    plan_for = code[code.index("async function planFor("):
+                    code.index("async function readState(")]
+    assert "if (!cat) continue;" in plan_for
+    assert "note: 'not installed on that broker'" in plan_for
+
 
 # --------------------------------------------------------------------------- #
 # workspaces mod (#148)

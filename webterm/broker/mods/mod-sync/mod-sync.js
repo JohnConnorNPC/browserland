@@ -684,10 +684,18 @@
                     const byId = new Map();
                     for (const m of cat) byId.set(m.id, m);
                     const implied = modPolicyImplied(cat, rec.policy);
+                    // Walking OUR OWN registered mods, never the peer's catalog,
+                    // is what keeps #163's installed mods out of adopt: a mod
+                    // this build has never loaded has no local id to switch, so
+                    // an `x-` package only that broker has is not adoptable and
+                    // is not silently half-adopted either. #158's stance is
+                    // unchanged -- pins and settings travel, code never does.
+                    // A mod we have and it does not is REPORTED, not dropped:
+                    // an omitted row reads as agreement.
                     for (const m of localMods()) {
                         if (!byId.has(m.id)) {
                             plan.modRows.push({ id: m.id, action: 'missing',
-                                note: 'that broker does not have it' });
+                                note: 'not installed there' });
                             continue;
                         }
                         const want = sourceWants(rec, byId, implied, m.id);
@@ -1032,11 +1040,17 @@
                         return;
                     }
                     const lines = [];
+                    let missing = 0;
                     for (const r of plan.modRows) {
                         if (r.action === 'write') {
                             lines.push(['write', r.id + ' → '
                                 + (r.want ? 'on' : 'off')]);
                         } else if (r.action === 'pinned-here') {
+                            lines.push(['skip', r.id + ' — ' + r.note]);
+                        } else if (r.action === 'missing') {
+                            // Say it. Omitting the row makes a mod that broker
+                            // has never heard of look like one it agrees about.
+                            missing += 1;
                             lines.push(['skip', r.id + ' — ' + r.note]);
                         }
                     }
@@ -1056,10 +1070,18 @@
                             + 'so only the on/off state above is compared']);
                     }
                     if (!lines.filter((l) => l[0] === 'write').length) {
-                        showNotice(plan.settingsUnreadable
+                        // Nothing to preview, so the skip lines above are never
+                        // shown — carry the "not installed there" count into the
+                        // notice rather than reporting a bare clean match.
+                        showNotice((plan.settingsUnreadable
                             ? ('This browser matches ' + plan.name + '’s mod '
                                 + 'on/off state; its settings could not be read.')
-                            : ('This browser already matches ' + plan.name + '.'));
+                            : ('This browser already matches ' + plan.name + '.'))
+                            + (missing
+                                ? (' Left alone: ' + missing + ' mod'
+                                    + (missing === 1 ? '' : 's')
+                                    + ' not installed there.')
+                                : ''));
                         return;
                     }
                     const ok = await openDialog({
