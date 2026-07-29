@@ -23,7 +23,7 @@
             ctxVersion: 1,            // bump when the ctx/win contract changes
             registered: [],           // [{id, version, ctxVersion, init}] in decl order
             active: new Map(),        // id -> { id, version, unloads:[] }  (the "slot")
-            settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|pane)
+            settingToggles: [],       // mod Control Panel controls: [{modId, kind, key, read, reflect, onChange, last, section}] (kind: boolean|radio|select|combo|text|pane; text also carries maxLength)
             // #169: ctx.theme.onChange subscribers, [{fn}] boxes. Lives on the
             // loader object (NOT a fragment-level `const`) for the same TDZ
             // reason the note above gives: notifyModTheme() rides notifyModSettings,
@@ -566,6 +566,16 @@
                     //   combo(key,  [{value,label}], {label,title,def,isBrowserGlobal})
                     //     -> searchable <input list>+<datalist> (type-to-filter a
                     //        long list; the empty-value option becomes placeholder)
+                    //   text(key, {label,title,def,isBrowserGlobal,options,
+                    //              placeholder,maxLength,validate})
+                    //     -> #168: FREE text, optionally with a suggestion
+                    //        datalist (a superset of combo, whose list is a
+                    //        domain where this one is only a shortcut). The only
+                    //        primitive that is not choice-constrained: read-
+                    //        through is structural so a stored value never
+                    //        evaporates, validate() is write-only and its
+                    //        rejection is visible, writes are debounced 400 ms
+                    //        and flushed on teardown. See _modSettingText.
                     boolean: function (key, def, opts) {
                         return _modSettingBoolean(rec, key, def, opts);
                     },
@@ -577,6 +587,9 @@
                     },
                     combo: function (key, options, opts) {
                         return _modSettingChoice(rec, 'combo', key, options, opts);
+                    },
+                    text: function (key, opts) {
+                        return _modSettingText(rec, key, opts);
                     },
                 },
                 // #169: the LIVE theme, and a subscription to changes. See the
@@ -995,7 +1008,7 @@
         }
 
         // ---- Control Panel settings extension (#71 boolean; #74 radio/select/
-        // pane) --------------------------------------------------------------
+        // pane; #104 combo; #168 text) ----------------------------------------
         // Shared scaffold: a titled .set-section mounted into #set-mods. It is
         // browser-global (hidden on remote host tabs by applyBrowserGlobalVisi-
         // bility, 81_js_control_panel.js) unless opts.isBrowserGlobal === false,
@@ -1062,13 +1075,20 @@
         // then writes getSettings()[key] + savePrefs(), updates `last` BEFORE
         // anything else can observe it (so the /state convergence pass won't
         // re-fire), reflects the widget, and calls the mod's onChange.
-        function _valueAccessor(entry, key, read, coerce, valid) {
+        //
+        // #168: `unchanged` is an OPTIONAL override for the no-op test only.
+        // Omitted (every caller but text) it is read()-equality, byte-for-byte
+        // today's behaviour. text needs its own because its read() answers with
+        // the fallback for a structurally broken stored value, which would make
+        // an explicit "clear this" indistinguishable from a no-op and strand the
+        // junk in the synced blob — see _modSettingText.
+        function _valueAccessor(entry, key, read, coerce, valid, unchanged) {
             const accessor = {
                 get: function () { return read(); },
                 set: function (value) {
                     value = coerce(value);
                     if (!valid(value)) return;
-                    if (read() === value) return;
+                    if (unchanged ? unchanged(value) : (read() === value)) return;
                     getSettings()[key] = value;
                     savePrefs();                 // localStorage + /state push
                     entry.last = value;

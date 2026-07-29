@@ -121,6 +121,10 @@ _ORDERED = [
     # all core JS so a mod's init(ctx) sees the finished desktop, but BEFORE the
     # in-repo mod scripts (which call registerMod) and the boot fragment.
     "86_js_mod_loader.js",
+    # #168: the free-text settings primitive, split out when the loader
+    # passed the 2500-line per-fragment cap. Same <script>, same scope,
+    # immediately after it -- see the fragment header.
+    "86a_js_mod_settings_text.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

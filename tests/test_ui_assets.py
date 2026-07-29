@@ -957,16 +957,174 @@ def test_settings_extension_api_present():
         "function _modRegisterPane",
         "function _controlSection",
         "function _normChoiceOptions",
+        "function _modSettingText",
     ):
         assert sym in INDEX_HTML, f"missing settings-extension symbol: {sym!r}"
-    # ctx.settings now exposes radio/select/combo next to the unchanged boolean.
+    # ctx.settings now exposes radio/select/combo/text next to the unchanged
+    # boolean.
     for sym in ("boolean: function", "radio: function", "select: function",
-                "combo: function"):
+                "combo: function", "text: function"):
         assert sym in INDEX_HTML, f"missing ctx.settings widget: {sym!r}"
     # The #set-mods host is no longer itself browser-global (visibility is now
     # per-mounted-section, driven by each control's isBrowserGlobal opt), so a
     # non-global mod control can show on a remote host tab.
     assert '<div class="set-section" id="set-mods"></div>' in INDEX_HTML
+
+
+def test_settings_text_primitive_contract():
+    # #168: ctx.settings.text is the only settings primitive with no domain, and
+    # the only NEW writer on _valueAccessor -- the single path into the synced
+    # blob. UI JS never executes in CI, so its four load-bearing rules are locked
+    # by source assertion, the same way #169's are.
+    loader = _loader_src()
+    text = _text_src()
+    body = _frag_fn(text, "function _modSettingText(rec, key, opts) {")
+    # The primitive is its own fragment, spliced into the SAME <script> right
+    # after the loader (so it shares scope with _controlSection / _trackControl
+    # / _valueAccessor) and before the mod scripts that call it.
+    assert ui._ORDERED.index("86_js_mod_loader.js") + 1 \
+        == ui._ORDERED.index("86a_js_mod_settings_text.js")
+    assert ui._ORDERED.index("86a_js_mod_settings_text.js") \
+        < ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
+
+    # 1. READ-THROUGH IS STRUCTURAL AND NON-DESTRUCTIVE. read() gates a stored
+    #    (or a peer's) value on shape alone and never writes -- so a value that
+    #    no longer passes the mod's validator is NOT destroyed, it is simply not
+    #    shown. That is the whole clockTz fix: validate on write only.
+    assert "return _modTextOk(v, max) ? v : fallback;" in body
+    ok = _frag_fn(text, "function _modTextOk(v, max) {")
+    assert "userValidate" not in ok and "validate" not in ok, \
+        "read()'s gate must be structural -- a domain check here evaporates a " \
+        "value that was legal under an older validator / another engine"
+    assert "getSettings()[key] =" not in body, \
+        "only _valueAccessor.set may write the blob"
+
+    # 2. COERCE + A HARD CAP. String -> strip control chars -> trim -> cap, the
+    #    treatment core gives startLabel/startPath, and a ceiling no mod can
+    #    raise. The cap counts UTF-16 code units -- the SAME unit mod-sync's
+    #    STR_MAX counts -- so anything storable survives a cross-broker carry.
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    assert "const MAX_MOD_TEXT_LEN = 1024;" in consts
+    assert re.search(r"const MAX_MOD_POLICY_KEYS[^\n]*\n(?:\s*//[^\n]*\n)*"
+                     r"\s*const MAX_MOD_TEXT_LEN", consts), \
+        "the text cap belongs beside MAX_MOD_POLICY_KEYS"
+    sync_src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    str_max = int(re.search(r"const STR_MAX = (\d+);", sync_src).group(1))
+    text_max = int(re.search(r"const MAX_MOD_TEXT_LEN = (\d+);", consts).group(1))
+    assert text_max < str_max, \
+        f"MAX_MOD_TEXT_LEN {text_max} must sit under mod-sync's STR_MAX {str_max}"
+    coerce = _frag_fn(text, "function _modTextCoerce(v, max) {")
+    assert "try { s = (v == null) ? '' : String(v); } catch (_) { return ''; }" \
+        in coerce, "a throwing toString must not escape a settings write"
+    assert r"_modTextDropLone(s.replace(/[\u0000-\u001F\u007F]/g, '')).trim();" \
+        in coerce
+    assert "if (s.length > max) s = _modTextDropLone(s.slice(0, max)).trim();" \
+        in coerce
+    assert "Math.min(Math.floor(opts.maxLength), MAX_MOD_TEXT_LEN)" in body, \
+        "a mod may ask for LESS than the ceiling, never more"
+    # Well-formedness is part of the STRUCTURE, not a nicety. Cutting at a
+    # code-unit boundary can split a surrogate PAIR, and a peer can send an
+    # already-broken one; a lone surrogate survives JSON only as an escape and
+    # could never be retyped, so coerce drops it and the gate refuses it.
+    # Hand-rolled because the regex forms need lookbehind (ES2018) or
+    # isWellFormed (ES2024) -- and an old engine is this feature's whole point.
+    paired = _frag_fn(text, "function _modTextPaired(s) {")
+    assert "if (c > 0xDBFF) return false;" in paired
+    assert "if (!(n >= 0xDC00 && n <= 0xDFFF)) return false;" in paired
+    assert "return _modTextPaired(v);" in ok
+    assert "lookbehind" in text and "isWellFormed" in text
+
+    # 3. A VISIBLE REJECTION, reusing the error affordance that already exists
+    #    (.set-err / .set-err.show, 15_css_dialogs.css) rather than inventing a
+    #    second one -- and the rejected draft STAYS on screen, because a silent
+    #    drop is what made this user-hostile in the first place.
+    css = (BROKER_DIR / "15_css_dialogs.css").read_text(encoding="utf-8")
+    assert ".set-err {" in css and ".set-err.show {" in css
+    assert "err.className = 'set-err';" in body
+    assert "err.classList.add('show');" in body
+    # A validator that throws is caught and fails CLOSED -- it must never
+    # propagate out of savePrefs, and it must not be trusted either.
+    assert "catch (e) {" in body and "validate threw" in body
+    # The verdict is recorded by valid() -- the one place that sees the coerced
+    # value the shared writer judges -- so commit() can show it without the
+    # shared writer growing a rejection path of its own.
+    assert "function (v) { rejectMsg = check(v); return rejectMsg === ''; }," \
+        in body
+    assert "if (rejectMsg) setErr(rejectMsg);" in body
+    # An `async` validator returns a PROMISE, which is truthy: under the
+    # forgiving "anything else accepts" rule it would wave every value through.
+    # Fail closed on a thenable, loudly.
+    assert "if (r && typeof r.then === 'function') {" in body
+    # A rejected draft must NOT gate reflect(). notifyModSettings sets
+    # entry.last BEFORE reflecting, so one skip is permanent -- every later poll
+    # sees cur === last and never retries, stranding the box on a draft that
+    # will never be stored while the mod has already moved on.
+    ref = body[body.index("function reflect() {"):]
+    ref = ref[:ref.index("\n            }")]
+    assert "if (drafting) return;" not in ref, \
+        "a draft must not permanently mask convergence"
+    assert "setErr('');" in ref and "input.value = read();" in ref
+
+    # 4. DEBOUNCE, FLUSHED BOTH WAYS. Core's start-path cadence: 400 ms on
+    #    'input', flush on 'change'. Plus a flush on TEARDOWN -- the value
+    #    outlives the mod, so a keystroke inside the window is data loss.
+    assert "timer = setTimeout(commit, 400);" in body
+    assert "input.addEventListener('change', function () {" in body
+    assert "rec.unloads.push(function () { if (timer) commit(); });" in body
+    # ...and that flush is pushed AFTER _trackControl, so the LIFO drain runs it
+    # FIRST, while the entry is still tracked (entry.last stays truthful).
+    assert body.index("_trackControl(rec, entry);") \
+        < body.index("rec.unloads.push(function () { if (timer) commit(); });")
+    # Teardown cannot cover a reload / tab close inside the 400 ms window.
+    # savePrefs writes localStorage synchronously, so a pagehide flush keeps the
+    # keystroke even when the /state PUT never leaves. Removed with the mod.
+    assert "window.addEventListener('pagehide', onPageHide);" in body
+    assert "window.removeEventListener('pagehide', onPageHide);" in body
+
+    # Combo's two hard-won bits, kept: the focus guard (a /state convergence must
+    # not clobber an in-progress edit) and the blur reconcile (an edit that ends
+    # with no change event must not leave a remote value stale).
+    assert "if (document.activeElement === input) return;" in body
+    blur = body[body.index("input.addEventListener('blur', function () {"):]
+    blur = blur[:blur.index("\n            });")]
+    # The blur reconcile is a DATA-LOSS path unless it flushes first: with a
+    # commit still pending it would put the OLD stored value in the box and the
+    # timer would then commit that, silently reverting the edit. 'change'
+    # normally fires first and clears the timer -- "normally" is not a contract
+    # worth betting an edit on (a programmatic blur, a hidden section).
+    assert blur.index("if (timer) commit();") < blur.index("input.value = read();")
+
+    # 5. THE NO-OP TEST IS THE RAW VALUE, not read(). read() answers with the
+    #    FALLBACK for a structurally broken stored value, so the shared writer's
+    #    default read()-equality would make "clear the box" indistinguishable
+    #    from a no-op against exactly the junk that most needs clearing -- and
+    #    leave it in the synced blob, re-pushed by every savePrefs.
+    setter = _loader_fn("function _valueAccessor(")
+    assert "function _valueAccessor(entry, key, read, coerce, valid, unchanged) {" \
+        in loader
+    assert "if (unchanged ? unchanged(value) : (read() === value)) return;" \
+        in setter, "omitting `unchanged` must be byte-for-byte the old behaviour"
+    assert "return raw === v || (raw === undefined && v === fallback);" in body, \
+        "with nothing stored, committing the default must still write nothing"
+    # Only text passes it: the other two call sites still close on their `valid`
+    # argument, so they keep read()-equality untouched.
+    assert "function () { return true; });          // valid (any boolean)" \
+        in loader
+    assert "function (v) { return valid[v] === true; });" in loader
+    # The mutable state is function-LOCAL, never a fragment-level let/const: a
+    # hoisted function reading a not-yet-initialized fragment `let` throws a TDZ
+    # ReferenceError that disables the whole mod, and CI never runs this JS.
+    for banned in ("\n        let _modText", "\n        const _MOD_TEXT",
+                   "\n        let _textDraft"):
+        for frag in (loader, text):
+            assert banned not in frag, \
+                f"{banned.strip()!r} is a TDZ hazard here"
+    # ctx surface + the entry shape mod-sync reads.
+    assert "text: function (key, opts) {" in loader
+    assert "return _modSettingText(rec, key, opts);" in loader
+    assert "kind: 'text', key: key, read: read," in body
+    assert "maxLength: max," in body
 
 
 def test_clock_symbols_removed_from_core_fragments():
@@ -4068,13 +4226,23 @@ def _loader_src():
     return (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
 
 
-def _loader_fn(sig):
-    """The body of a top-level loader function, by its 8-space-indented
-    signature. Every declaration in the fragment sits at that indent and closes
-    on a bare 8-space '}', so the first one after the signature ends it."""
-    src = _loader_src()
+def _text_src():
+    # #168's free-text primitive rides its own fragment: the loader passed the
+    # 2500-line per-fragment cap, same split 62 got. Same <script>, same scope.
+    return (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
+        encoding="utf-8")
+
+
+def _frag_fn(src, sig):
+    """The body of a top-level function, by its 8-space-indented signature.
+    Every declaration in these fragments sits at that indent and closes on a
+    bare 8-space '}', so the first one after the signature ends it."""
     start = src.index("\n        " + sig)
     return src[start:src.index("\n        }\n", start)]
+
+
+def _loader_fn(sig):
+    return _frag_fn(_loader_src(), sig)
 
 
 def test_theme_ctx_api_present_in_loader():

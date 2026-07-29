@@ -52,6 +52,14 @@
         // cap bounds the row count (and the blob) no matter what a peer sends.
         const MOD_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
         const MAX_MOD_POLICY_KEYS = 256;
+        // #168: the hard ceiling on a ctx.settings.text value — a mod may ask for
+        // LESS (opts.maxLength), never more. Counted in UTF-16 code units
+        // (String.length), which is the SAME unit mod-sync's STR_MAX (4096)
+        // counts, and well under it: a value this cap admits therefore always
+        // survives a cross-broker carry, whatever it is made of. (Code POINTS
+        // would be a different, smaller number for astral text and would let a
+        // 4096-code-unit value through; bytes would be a third. One unit, shared.)
+        const MAX_MOD_TEXT_LEN = 1024;
         // A session missing from MISSING_POLLS_CLOSE consecutive successful
         // polls closes its open window (~12 s at POLL_MS — above the agent's
         // 10 s reconnect cap, so a broker restart never mass-closes).
