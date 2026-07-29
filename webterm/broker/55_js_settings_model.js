@@ -54,10 +54,10 @@
             if (!cd || typeof cd !== 'object' || !(cd.w > 0) || !(cd.h > 0)) {
                 s.cellDims = null;                // {w,h} last measured cell
             }
-            // wsLabelMode / hideTaskbarOtherWs are deliberately absent (#148):
-            // the workspaces mod owns them via ctx.settings, which validates on
-            // READ and never writes a default into this synced blob -- same
-            // carve-out as theme / pattern / termFont below.
+            // wsLabelMode / hideTaskbarOtherWs / hideWsPager are deliberately
+            // absent (#148, #162): the workspaces mod owns them via ctx.settings,
+            // which validates on READ and never writes a default into this synced
+            // blob -- same carve-out as theme / pattern / termFont below.
             // Restore-on-refresh (default on): on a browser reload, re-open the
             // terminals that were open and reattach to their live agents.
             if (typeof s.restoreOnRefresh !== 'boolean') s.restoreOnRefresh = true;

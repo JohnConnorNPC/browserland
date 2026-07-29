@@ -39,19 +39,44 @@
             ctxVersion: 1,
             // window: masks/parks windows and adds title-bar menu items;
             // taskbar: badges + dims chips and intercepts activation;
-            // settings: owns wsLabelMode + hideTaskbarOtherWs.
+            // settings: owns wsLabelMode + hideTaskbarOtherWs + hideWsPager.
             tiers: ['window', 'taskbar', 'settings'],
             init: function (ctx) {
-                // The two settings this mod owns, read through onto the SAME
+                // The three settings this mod owns, read through onto the SAME
                 // synced blob they always lived in (no new schema field, the
                 // #126 termfont pattern) -- an upgrading user's stored value is
-                // preserved and neither key is written by a mere read.
+                // preserved and no key is written by a mere read.
+                //
+                // A `title:` on the FIRST one only: ctx.settings.* gives every
+                // control its own .set-section, and they are appended to
+                // #set-mods in creation order, so one mod's controls are always
+                // contiguous -- the heading labels the block (the aistatus mod
+                // does the same). Later ones pass none, or each would repeat it.
                 const labelMode = ctx.settings.select('wsLabelMode', [
                     { value: 'number', label: 'Numbers' },
                     { value: 'name', label: 'Names' },
-                ], { label: 'Workspace labels', def: 'number' });
+                ], { title: 'Workspaces', label: 'Workspace labels', def: 'number' });
                 const hideOther = ctx.settings.boolean('hideTaskbarOtherWs', false, {
                     label: 'Hide taskbar items from other workspaces',
+                });
+                // #162: hide JUST the pager, for people who drive workspaces
+                // from the keyboard and want the taskbar space back.
+                //
+                // This is NOT the per-mod visibility toggle #101/#102 removed.
+                // Those went on the rule "the chip's lifecycle IS the mod's
+                // lifecycle" -- for the clock and help chips the chip is the
+                // whole mod, so the enable switch already WAS the show/hide
+                // control. Workspaces is not that shape: disabling the mod also
+                // collapses every workspace onto one desktop, drops the taskbar
+                // badges and dimming, removes Send to workspace / On all
+                // workspaces from the title-bar menus, unmasks floating windows
+                // that were hiding, and delists the seven shortcuts. "Disable
+                // the mod" and "hide the pager" are genuinely different asks.
+                //
+                // Hide-prefixed and default-off to match hideTaskbarOtherWs: an
+                // absent key means today's behaviour.
+                const hidePager = ctx.settings.boolean('hideWsPager', false, {
+                    label: 'Hide the workspace pager from the taskbar',
                 });
                 function wsLabelMode() { return labelMode.get(); }
                 function setWsLabelModeValue(v) { labelMode.set(v); }
@@ -60,6 +85,7 @@
                     renderWorkspaces(); applyTaskbarWorkspace();
                 });
                 hideOther.onChange(function () { applyTaskbarWorkspace(); });
+                hidePager.onChange(function () { applyPagerVisibility(); });
 
                 // The pager lives in the taskbar between the chips and the host
                 // status, exactly where the core markup used to put it. Created
@@ -72,7 +98,46 @@
                     if (hostStatus) taskbar.insertBefore(pager, hostStatus);
                     else taskbar.appendChild(pager);
                 }
+                // Registered the instant the node is in the DOM, BEFORE anything
+                // below can throw: initMod rolls a failed init back by running
+                // the unloads it got, so a throw in between would strand this
+                // pager in the taskbar with no mod behind it. Same reason
+                // _controlSection registers its own removal before the caller
+                // builds a widget.
                 ctx.onUnload(function () { pager.remove(); });
+                // #162: ONE node for the mod's lifetime, shown/hidden by
+                // display. Deliberately not remove-and-recreate: the unload
+                // above closes over THIS node, so after one hide/show cycle
+                // teardown would remove a detached node and leave a live pager
+                // behind, its dot handlers still calling switchWorkspace inside
+                // a torn-down mod. display:none (not "render nothing into it")
+                // because #taskbar is a flex row with gap:6px, so an empty but
+                // present pager would still eat a gap slot -- the same trap core
+                // fixed for #host-status with `:empty { display: none; }`.
+                //
+                // `atInit` exists for one reason: hideWsPreview() reads the
+                // `let _wsPreviewEl` declared further down, which is still in its
+                // temporal dead zone while init runs. Calling it from here would
+                // throw ReferenceError -- and because that throw happens inside
+                // init, it would DISABLE THE WHOLE MOD for anyone who had the
+                // setting on, on every load. There is provably no preview to
+                // strand at creation: nothing has hovered a dot yet.
+                function applyPagerVisibility(atInit) {
+                    const hide = hidePager.get();
+                    pager.style.display = hide ? 'none' : '';
+                    // The hover preview is a document.body child with
+                    // pointer-events:none whose only removers are a dot's
+                    // mouseleave, the next showWsPreview and unload. Hiding
+                    // while the pointer rests on a dot -- which happens for free
+                    // when the value arrives from another browser on the poll --
+                    // would strand the thumbnail on screen until a reload.
+                    if (hide && !atInit) hideWsPreview();
+                }
+                // Apply the stored value at CREATION: onChange never fires at
+                // init (the control entry is seeded with last: read()), so
+                // otherwise a user who hid the pager would see it again on
+                // every load.
+                applyPagerVisibility(true);
             // Set by any wsStore()/adopt heal that mutated the store without
             // saving; adoptUnstampedColumns() is the single place that turns it
             // into one savePrefs().
@@ -906,21 +971,80 @@
                                  action: () => sendWindowToNewWorkspace(win) });
                     return items;
                 });
-                // Empty-desktop / strip menu (tiling mode): switcher + New.
-                ctx.registerDesktopMenuItems(function () {
+                // Empty-desktop / strip menu, in BOTH window modes (#162 taught
+                // core to call this from the floating branch too). The one
+                // pointer surface that is always reachable: right-clicking the
+                // empty part of the TASKBAR opens this same menu, and the
+                // taskbar is always on screen even when windows cover the
+                // desktop -- which is what makes it a safe home for the
+                // workspace management that used to live only on a pager dot.
+                ctx.registerDesktopMenuItems(function (info) {
+                    const tiling = !!(info && info.tiling);
                     const items = [];
                     const cur = activeWorkspaceIndex();
+                    const curWs = wsList()[cur];
                     wsList().forEach((ws, wi) => {
+                        // The count means whatever this mode actually shows: a
+                        // workspace's tiled columns, or -- in floating mode,
+                        // where enterFloatingMode has detached every live window
+                        // out of the strip -- its floating windows, counted by
+                        // the same helper the hover preview's "+ N floating"
+                        // line uses, so the two surfaces never disagree.
+                        const n = tiling ? workspaceColumns(ws.id).length
+                                         : countFloatingOnWs(ws.id);
+                        // By id, not the captured index: a context menu is a
+                        // frozen snapshot that can sit open across a poll, and a
+                        // peer removing a LOWER-indexed workspace would slide
+                        // this row's target onto its neighbour. The pager dots
+                        // can capture an index because renderWsDots rebuilds
+                        // them whenever the list changes; a menu never does.
+                        const wsId = ws.id;
                         items.push({
                             label: (wi === cur ? '\u2713 ' : '   ')
                                 + (ws.name ? ws.name : 'Workspace ' + (wi + 1))
-                                + ' (' + workspaceColumns(ws.id).length + ')',
+                                + ' (' + n + ')',
                             enabled: true,
-                            action: () => switchWorkspace(wi),
+                            action: () => {
+                                const i = workspaceIndexById(wsId);
+                                if (i >= 0) switchWorkspace(i);
+                            },
                         });
                     });
                     items.push({ label: '   New workspace', enabled: true,
                                  action: addWorkspace });
+                    // Rename / remove for the workspace this menu was BUILT on.
+                    // #162: buildWorkspaceMenu (a pager dot's right-click) used
+                    // to be the only caller of either, so with the pager hidden
+                    // they would be unreachable -- and they are worth having
+                    // here even with the pager showing.
+                    //
+                    // The label NAMES its target and the action re-resolves that
+                    // workspace BY ID at click time: a poll or a shortcut can
+                    // switch workspaces while this menu sits open, and an
+                    // unqualified "the active workspace" would then rename or
+                    // remove one the user never saw marked. A workspace removed
+                    // out from under us resolves to -1 and does nothing.
+                    if (curWs) {
+                        const curId = curWs.id;
+                        const what = curWs.name ? curWs.name : 'workspace ' + (cur + 1);
+                        items.push({ sep: true });
+                        items.push({ label: '   Rename ' + what + '\u2026',
+                                     enabled: true,
+                                     action: () => {
+                                         const i = workspaceIndexById(curId);
+                                         if (i >= 0) renameWorkspace(i);
+                                     } });
+                        // Disabled on the last workspace -- presentation only;
+                        // removeWorkspace re-checks the count after its confirm
+                        // dialog, so a peer removing the other one meanwhile
+                        // cannot leave us at zero.
+                        items.push({ label: '   Remove ' + what,
+                                     enabled: wsList().length > 1,
+                                     action: () => {
+                                         const i = workspaceIndexById(curId);
+                                         if (i >= 0) removeWorkspace(i);
+                                     } });
+                    }
                     return items;
                 });
                 // The seven shortcuts. Their ids are VERBATIM the pre-#148 ones:
