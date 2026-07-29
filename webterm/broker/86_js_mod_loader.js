@@ -501,6 +501,10 @@
                 // return an ARRAY of renderMenu items (separators included, so the
                 // contributor owns its own grouping) from a marked insertion point;
                 // with no contributor the menus are byte-identical to before.
+                // #162: the desktop one is called in BOTH window modes and gets
+                // { tiling } saying which — it used to run only in tiling mode, so
+                // a contributor that offers tiling-only actions must check the flag
+                // rather than assume. Core owns the separator above the block.
                 registerKeyActions: function (actions) {
                     return _modTrack(rec, registerKeyActions(actions));
                 },

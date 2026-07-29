@@ -150,6 +150,8 @@
         // Each returns an ARRAY of renderMenu items (separators included, so the
         // contributor owns its own grouping) and is called at a marked point, so
         // with nobody registered the menus are byte-identical to before.
+        // The desktop one is called in BOTH window modes (#162) and receives
+        // { tiling: bool }; a contributor with tiling-only actions must check it.
         // A throwing contributor is swallowed: a broken mod must not take the
         // whole context menu down with it.
         let _windowMenuItems = null;
@@ -660,6 +662,26 @@
                     { label: 'Minimize All Windows',
                       enabled: hasFloats && floats.some(w => !w.minimized),
                       action: doMinimizeAll });
+                // #162: mods contribute in floating mode too, not only tiling.
+                // Before this the workspaces mod had NO menu route here at all,
+                // so hiding its pager left floating mode with no pointer way to
+                // reach another workspace. The contributor is told which mode it
+                // is in.
+                //
+                // Collected into a scratch array so core can own the join: the
+                // block gets its own separator only when it has a real item, and
+                // the contributor's own boundary separators are trimmed. Neither
+                // side has to know what the other produced, and renderMenu --
+                // which draws every {sep:true} it is handed, adjacent or not --
+                // can never be given a stray rule here.
+                const extra = [];
+                _pushMenuItems(_desktopMenuItems, extra, { tiling: false });
+                while (extra.length && extra[0].sep) extra.shift();
+                while (extra.length && extra[extra.length - 1].sep) extra.pop();
+                if (extra.length) {
+                    items.push({ sep: true });
+                    for (const it of extra) items.push(it);
+                }
             } else {
                 // Tiling mode: whatever mods contribute (the workspaces mod's
                 // switcher list + New workspace). The per-column controls live
