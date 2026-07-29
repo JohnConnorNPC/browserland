@@ -2258,7 +2258,10 @@ def test_window_kind_sites_use_registry():
     assert "rec.appKind === 'sticky-note'" not in s73
 
     s84 = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
-    assert "lookupWindowKind(rec && rec.appKind)" in s84
+    # #167 split the per-record body out into _restoreOneAppWindow, which
+    # null-checks the record up front, so the lookup no longer needs `rec &&`.
+    assert "const kind = lookupWindowKind(rec.appKind);" in s84
+    assert "if (!rec || rec.open === false) return;" in s84
     assert "=== 'task-manager'" not in s84   # the old explicit skip list is gone
 
     s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
