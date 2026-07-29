@@ -658,12 +658,24 @@ So the contract, if you want source that moves in both directions unchanged:
 5. **Prefix every top-level `const` / `let` / `function` name.** In-tree a
    collision with core kills the page; out of tree it kills your mod.
 
-A mod is expected to follow all five, but **CI verifies none of them** — they
-are authoring rules, not guarantees. Rules 1, 2 and 4 hold across the shipped
-set as written; rule 3 has known in-tree exceptions (`editor` ↔ `sticky` /
-`scratchpad` / core's app-window store), which is exactly why those mods could
-not be republished as installable packages unchanged. Check the five yourself
-before publishing.
+Rules 1, 2 and 4 are enforced by the portable-mod lint in
+`tests/test_ui_assets.py`, and every shipped mod passes them. Rule 3's known
+in-tree exceptions are pinned there too, as an exact set of nine edges:
+
+| top-level name (owner) | reached from |
+|---|---|
+| `openNoteOrEditorWindow` (`editor`) | core `54_js_app_windows_store.js`, `sticky` |
+| `loadCodeMirror` (`editor`) | `scratchpad` |
+| `editorFile` (`editor`) | `agent-docs` |
+| `applyPattern` (`pattern`) | `theme` |
+| `openAgentDocsWindow` (`agent-docs`) | `editor` |
+| `findHelpWindow`, `refreshHelpCorpus` (`help`) | core `86_js_mod_loader.js` |
+| `toggleHelpWindow` (`help`) | core `78_js_keybindings.js` |
+
+So `editor`, `help`, `pattern` and `agent-docs` cannot be republished as
+installable packages unchanged. **Rule 5 is not enforced** — check it yourself.
+The lint is a floor, not a proof: it reads source text, so it cannot see a
+call hidden inside `registerMod`'s own argument.
 
 ### 10.3 Installing takes effect on the next page load — always
 
