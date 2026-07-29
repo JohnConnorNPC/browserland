@@ -80,7 +80,7 @@
         }
         .set-row { display: flex; align-items: center; gap: 6px; }
         .set-hint { color: var(--fg-dim); font-size: 11px; font-style: italic; }
-        .set-err { color: #e96d6d; font-family: monospace; font-size: 12px; display: none; }
+        .set-err { color: var(--danger); font-family: monospace; font-size: 12px; display: none; }
         .set-err.show { display: block; }
         .set-check {
             display: flex;
@@ -181,9 +181,9 @@
            inherited from the shared #settings-modal groups above. */
         .app-dialog .set-foot { gap: 8px; }
         .app-dialog button.primary { border-color: var(--accent-default); }
-        .app-dialog button.danger { color: #e96d6d; border-color: #e96d6d; }
+        .app-dialog button.danger { color: var(--danger); border-color: var(--danger); }
         .app-dialog button.danger:hover {
-            background: #3a2020; border-color: #e96d6d;
+            background: #3a2020; border-color: var(--danger);
         }
         .app-dialog-field label { color: var(--fg-dim); flex: 0 0 auto; }
         .app-dialog-msg { white-space: pre-wrap; line-height: 1.4; }

@@ -174,9 +174,9 @@
             border: 2px solid var(--fg-dim);
             background: var(--fg-dim);
         }
-        #ctx-menu .ctx-swatch.ok    { border-color: #5fbf7f; background: #5fbf7f; }
-        #ctx-menu .ctx-swatch.down  { border-color: #e96d6d; background: #e96d6d; }
-        #ctx-menu .ctx-swatch.auth  { border-color: #e0a93a; background: #e0a93a; }
+        #ctx-menu .ctx-swatch.ok    { border-color: var(--ok); background: var(--ok); }
+        #ctx-menu .ctx-swatch.down  { border-color: var(--danger); background: var(--danger); }
+        #ctx-menu .ctx-swatch.auth  { border-color: var(--warn); background: var(--warn); }
         #ctx-menu .ctx-swatch.lease { border-color: #6fa3e0; background: #6fa3e0; }
         /* Hidden broker (focus mode): struck through + dimmed, mirroring the
            taskbar chip's .off treatment. ('broker-row', because .host-row is

@@ -10,6 +10,53 @@
                selection-blue. References the theme's accent + bg, so it recolors with every
                scheme. (color-mix is already required by .taskbar-item.active + container queries.) */
             --sel-bg: color-mix(in srgb, var(--accent-default) 28%, var(--bg));
+            /* Semantic status palette (#173): ok / warn / danger. Derived the same
+               way --sel-bg is, so they recolor with the theme instead of being the
+               same dark-theme hex copy-pasted across core and four mods. Core AND
+               mods consume these — do NOT re-hardcode the literals.
+
+               Each base is mixed 72% with the theme's own ink (var(--fg)), so a
+               light palette (day: --fg #1a1a1a) darkens the hue until it reads on a
+               light surface, while a dark palette leaves it essentially untouched.
+
+               The base hexes are PRE-COMPENSATED for that 72/28 mix against night's
+               --fg (#ddd): on `night` they round to the historical
+               #5fbf7f / #e0a93a / #e96d6d, so the default theme is unchanged at
+               8-bit (warn lands on #e0a93e — its raw base clips the blue floor at 0
+               — a 4/255 drift, well below the just-noticeable threshold). The bases
+               are therefore MORE saturated than anything that renders; do not
+               "correct" them to the colors you see. test_ui_assets.py locks this
+               round-trip, so changing the 72% or night's --fg fails a test rather
+               than silently shifting the default palette.
+
+               Measured WCAG 2.1 contrast, worst of the three roles, was -> is:
+                              on --bg        on --bg-2
+                 night      5.46 -> 5.45    4.70 -> 4.69
+                 day        1.73 -> 3.34    1.46 -> 2.82
+                 redmond    1.56 -> 1.03    1.17 -> 2.48
+                 midnight   5.69 -> 5.82    4.83 -> 4.94
+                 sunday     5.06 -> 5.37    3.72 -> 3.95
+               This is an improvement, NOT a compliance claim: most of these are
+               normal-size text, which wants 4.5:1, and `day` reaches that only for
+               danger. Two known soft spots, both pre-existing and deliberately left
+               alone here (see #173):
+                 - `redmond` --bg is #008080 teal, mid-luminance — even --fg on it
+                   is only 4.40:1. Only near-black hues (~#003200) clear 3:1 on BOTH
+                   teal and its #c0c0c0 --bg-2, and those no longer read as a status
+                   color, so one token cannot serve both surfaces. The mix trades
+                   redmond's already-failing teal for a doubled --bg-2, which is
+                   where the menus, dialogs and mod panes carrying most status text
+                   actually sit.
+                 - the hardcoded dark hover surfaces (.host-chip:hover #262626,
+                   .app-dialog button.danger:hover #3a2020) do not theme, so on the
+                   light palettes they now sit under a darkened status color: day
+                   .host-chip.down:hover measures 2.52 (was 4.95). Theming those
+                   backgrounds was measured and is NOT a win — it drops redmond's
+                   hovered chip to ~1.0 and the (still-literal) .lease #6fa3e0 to
+                   ~1.9 — so they need their own pass, not a rider on this one. */
+            --ok:     color-mix(in srgb, #2eb35a 72%, var(--fg));
+            --warn:   color-mix(in srgb, #e19500 72%, var(--fg));
+            --danger: color-mix(in srgb, #ee4141 72%, var(--fg));
             --taskbar-h: 40px;
             --title-h: 26px;
             --handle-thick: 6px;
@@ -94,9 +141,9 @@
             cursor: pointer;
         }
         .host-chip:hover { background: #262626; }
-        .host-chip.ok { border-color: #3a6a4a; color: #5fbf7f; }
-        .host-chip.down { border-color: #a66; color: #e96d6d; }
-        .host-chip.auth { border-color: #a8842c; color: #e0a93a; }
+        .host-chip.ok { border-color: #3a6a4a; color: var(--ok); }
+        .host-chip.down { border-color: #a66; color: var(--danger); }
+        .host-chip.auth { border-color: #a8842c; color: var(--warn); }
         /* "lease" = reachable, but ANOTHER browser is the active one on this
            remote broker; click to take over. Its windows are masked. */
         .host-chip.lease { border-color: #3a5a8a; color: #6fa3e0; }
