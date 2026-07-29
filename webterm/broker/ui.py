@@ -300,6 +300,14 @@ def mod_catalog(mods=_MODS, base: Path = _DIR):
     convention -- `mods/<id>/`), because "this mod is served" is true whether or
     not its manifest parses.
 
+    Every row carries ``"source": "shipped"`` (#163). The catalog gained a
+    SECOND source -- runtime-installed mods, from ``modinstall.catalog()`` --
+    and provenance has to be a fact on the row rather than something the reader
+    infers, because the Control Panel labels it and a peer's rows are
+    self-asserted. This function stays SHIPPED-ONLY: it is derived from _MODS,
+    so it can never advertise a mod the page does not carry, and app.py
+    concatenates the two halves.
+
     ``default_enabled`` and ``requires`` are the manifest's declarations of what
     the mod's registerMod() call says in JS. They are duplicated deliberately:
     without the default, the remote policy editor's "Default" option cannot say
@@ -328,6 +336,7 @@ def mod_catalog(mods=_MODS, base: Path = _DIR):
         out.append({"id": mid, "title": _text("title", mid),
                     "description": _text("description"),
                     "version": _text("version"),
+                    "source": "shipped",
                     # Absent == the registerMod default (on); only an explicit
                     # `false` ships a mod off, matching the JS's `!== false`.
                     "default_enabled": meta.get("defaultEnabled") is not False,

@@ -3244,6 +3244,16 @@ def test_requires_declared_before_dependency_in_mods_list():
         if not m:
             continue  # no requires: declared -> nothing to order-check
         for dep in re.findall(r"'([a-z0-9-]+)'", m.group(1)):
+            # #172/#163: a SHIPPED mod may never depend on an "x-" (runtime-
+            # installed) id. It keeps shipped->installed edges unrepresentable,
+            # which is what lets /info emit every shipped row first while the
+            # installed half is sorted topologically after it -- and a shipped
+            # mod that needed an installed one would be broken on any broker
+            # that had not installed it. Asserted against the JS here and
+            # against mod.json in test_no_shipped_mod_requires_an_installed_mod_id.
+            assert not dep.startswith("x-"), (
+                f"mod {mod_id!r} requires {dep!r}, which is in the "
+                f"runtime-installed namespace")
             assert dep in id_to_index, (
                 f"mod {mod_id!r} requires unknown mod id {dep!r} "
                 f"(not a registrant in ui._MODS)")

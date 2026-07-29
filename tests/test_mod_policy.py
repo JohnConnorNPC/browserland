@@ -144,6 +144,13 @@ def test_info_reports_full_catalog_and_empty_policy_by_default(tmp_path, monkeyp
         assert isinstance(m["title"], str) and m["title"]
         assert isinstance(m["default_enabled"], bool)
         assert isinstance(m["requires"], list)
+        # #163: the catalog has TWO sources and every row says which. With
+        # nothing installed (this broker's mods_dir does not exist) the list is
+        # shipped-only, so this asserts what it USED to hold implicitly. Its
+        # companion -- ordering, provenance and default_enabled with a fixture
+        # mod actually installed -- is
+        # tests/test_mod_install.py::test_info_reports_shipped_then_installed_with_provenance.
+        assert m["source"] == "shipped"
     by_id = {m["id"]: m for m in body["mods"]}
     assert by_id["git"]["default_enabled"] is False      # ships off (#116)
     assert by_id["clock"]["default_enabled"] is True
