@@ -174,7 +174,14 @@
         // launch menu. Each entry:
         //   { appKind, factory(appData)->win, serialize(win)->record|null,
         //     restore?(record), retainOnClose?(record)->bool, menu? }
-        //   menu = { label, launch(), closedItems?()->[menuItem] }
+        //   menu = { label, launch(), iconKey?, iconGlyph?,
+        //            closedItems?()->[menuItem] }
+        // iconKey names a hardcoded APP_ICON_SVG entry (65) — a CLOSED table, so
+        // only the shipped keys resolve; iconGlyph (#170) is a mod's alternative,
+        // a short text/emoji glyph rendered with textContent. Both are passed to
+        // the launch menu untouched and resolved/normalized by renderMenu (77);
+        // neither is validated here, because renderMenu is the choke point that
+        // every menu item — including ones a mod builds by hand — goes through.
         // The one CORE built-in (control-panel) is registered as a default (NOT
         // through a mod) so it behaves with mods_enabled=false exactly as the old
         // hardcoded branch did; a mod adds a brand-new kind through

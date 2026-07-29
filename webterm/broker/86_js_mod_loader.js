@@ -594,6 +594,25 @@
                 // a mod kind is a first-class window everywhere the registry is
                 // consulted. A duplicate appKind throws (initMod rolls the mod
                 // back); the kind is removed from the registry on teardown.
+                // #170 — the launch-menu icon: `menu.iconKey` names an entry in
+                // core's CLOSED APP_ICON_SVG table (65), so a mod id that isn't
+                // shipped there resolves to nothing; `menu.iconGlyph` is the
+                // mod-owned alternative — a SHORT text/emoji glyph (controls,
+                // bidi overrides + whitespace stripped, capped at 8 code points)
+                // that renderMenu paints with textContent. There is deliberately
+                // no ctx.registerAppIcon(svg): a mod's icon must never be able to
+                // put markup into the shared menu renderer, not least because the
+                // value a mod passes need not be its own (a /mod-store blob, a
+                // peer's /state). Declare neither and the launcher is a bare
+                // label row — core synthesizes no placeholder, because the same
+                // renderer paints the layout/host/profile menus, whose rows are
+                // all icon-less by design.
+                // Two traps worth knowing: (a) an iconKey is NOT owned by
+                // anyone, so a mod may name a SHIPPED key and get that icon —
+                // only the LABEL identifies a launcher; and (b) iconKey WINS, so
+                // a kind that declares an as-yet-unknown iconKey plus a glyph
+                // shows the glyph today and would silently switch to the SVG if
+                // core ever ships that key. Declare one or the other.
                 registerWindowKind: function (spec) {
                     return _modRegisterWindowKind(rec, spec);
                 },
