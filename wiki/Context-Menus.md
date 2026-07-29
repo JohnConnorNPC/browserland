@@ -85,7 +85,7 @@ Right-click a workspace dot at the bottom of the taskbar:
 - **Show names** / **Show numbers** — choose whether the dots display workspace names or numbers.
 - **New workspace** — append a fresh, empty workspace.
 
-Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click.
+Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click. Hiding the pager (Control Panel → Mods → Workspaces) removes the dots too, but rename and remove are on the empty desktop / taskbar menu below as well, so they survive that. Disabling the mod takes both menus away together.
 
 ## Empty desktop / strip
 
@@ -101,12 +101,16 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - **Minimize All Windows**
 - **Undo &lt;action&gt;** — appears after an arrange, to reverse the most recent one (single-level).
 
-**In tiling mode** — a workspace switcher:
+**Both modes** then show the workspace block:
 
-- A row per workspace, showing its name and column count (the `✓` marks the active one); click to jump to it.
+- A row per workspace, showing its name and a count of what it holds — columns in tiling mode, floating windows in floating mode (the `✓` marks the active one); click to jump to it.
 - **New workspace** — append a fresh, empty workspace.
+- **Rename &lt;workspace&gt;…** — rename the workspace you are on.
+- **Remove &lt;workspace&gt;** — delete the workspace you are on (disabled when only one remains).
 
-Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace list on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
+Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
+
+Because this menu also opens from an empty part of the **taskbar**, it is the one workspace surface that is always reachable — no window can cover it — which is what makes hiding the pager safe.
 
 ## Launch (+) button
 

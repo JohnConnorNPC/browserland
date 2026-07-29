@@ -49,7 +49,7 @@ To change it, open **Control Panel → Taskbar / title labels**. Each component 
 
 ### Items for other workspaces
 
-By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide windows on other workspaces** under Control Panel → Taskbar workspace filter. This setting governs your browser.
+By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Mods → Workspaces. This setting governs your browser.
 
 ## The launch button (+)
 
@@ -79,3 +79,5 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 ## Pager dots
 
 The pager dots on the right of the taskbar (left of the host chips) are one-click workspace switchers, and their right-click menus rename or remove workspaces and toggle names vs. numbers. They come from the **Workspaces** mod (enabled by default), so the dots are absent if you turn it off. They are covered in full under [[Workspaces]].
+
+To keep workspaces but reclaim the space the dots take, turn on **Hide the workspace pager from the taskbar** under Control Panel → Mods → Workspaces. Only the pager goes — the chip badges and dimming, the shortcuts, and **Send to workspace** all stay, and the workspace menu (right-click an empty part of the taskbar or the desktop) still switches, adds, renames, and removes workspaces.

@@ -1922,15 +1922,21 @@ def test_workspaces_mod_packaged_and_manifest_agrees():
     # Default ON — no behaviour change on upgrade. Asserted so flipping it off
     # becomes a deliberate, reviewed change.
     assert "defaultEnabled" not in src
-    # It owns its two settings by READ-THROUGH onto the same synced blob (the
+    # It owns its three settings by READ-THROUGH onto the same synced blob (the
     # #126 termfont pattern), so an upgrading user's stored value survives.
     assert "ctx.settings.select('wsLabelMode'" in src
     assert "ctx.settings.boolean('hideTaskbarOtherWs'" in src
+    assert "ctx.settings.boolean('hideWsPager', false" in src        # #162
+    # One heading for the block: ctx.settings.* gives each control its own
+    # .set-section and they are appended in creation order, so the title on the
+    # FIRST one labels all three (and only one may carry it).
+    assert src.count("title: 'Workspaces'") == 1
     # ...and they are gone from core's normalizeSettings, which would otherwise
     # write a default into the synced blob behind the mod's back.
     model = (BROKER_DIR / "55_js_settings_model.js").read_text(encoding="utf-8")
     assert "s.wsLabelMode" not in model
     assert "s.hideTaskbarOtherWs" not in model
+    assert "s.hideWsPager" not in model
     # The pager is created at init and removed on unload (the #clock-chip
     # pattern); #park stays CORE, because parkWindow is a tiling API.
     assert "pager.id = 'ws-pager'" in src
@@ -1951,7 +1957,7 @@ def test_core_is_single_desktop():
         "addWorkspace(", "sendWindowToWorkspace(", "workspaceIndexForKey(",
         "applyWorkspaceVisibility(", "applyTaskbarWorkspace(",
         "adoptFloatWorkspace(", "floatWsMap(", "windowWsId(", "setWindowWs(",
-        "newWorkspace(", "wsLabelMode", "hideTaskbarOtherWs",
+        "newWorkspace(", "wsLabelMode", "hideTaskbarOtherWs", "hideWsPager",
         ".workspaces[", ".activeWs", "wsIndex",
     )
     for name in ui._ORDERED:
@@ -2031,6 +2037,72 @@ def test_workspaces_off_leaves_no_window_unreachable():
     for bad in ("delete ", "splice(", "= null", "savePrefs("):
         assert bad not in teardown, \
             f"the workspaces teardown must not mutate state ({bad!r})"
+
+
+def test_hiding_the_pager_leaves_workspaces_reachable():
+    # #162: `hideWsPager` hides ONLY #ws-pager. Since the pager's dots were the
+    # sole pointer route to rename/remove (and, in floating mode, to another
+    # workspace at all), the setting only ships alongside the two things that
+    # keep everything reachable without it.
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.js").read_text(encoding="utf-8")
+    # 1. ONE node, toggled by display -- never remove-and-recreate: the unload
+    #    closes over the original node, so a recreate would leave a live pager
+    #    behind after a hide/show cycle plus a disable.
+    vis = ws[ws.index("function applyPagerVisibility"):
+             ws.index("let _wsDirty = false;")]
+    assert "pager.style.display = hide ? 'none' : '';" in vis
+    assert "pager.remove()" not in vis and "createElement" not in vis
+    # ...and the pager's removal is registered BEFORE anything that can throw:
+    # initMod rolls a failed init back with the unloads it got, so a later throw
+    # would otherwise strand the node in the taskbar with no mod behind it.
+    assert ws.index("ctx.onUnload(function () { pager.remove(); });") \
+        < ws.index("function applyPagerVisibility")
+    # ...and display, not an emptied node: #taskbar is a flex row with a gap, so
+    # a present-but-empty pager would still eat a gap slot (the same trap core
+    # fixed for its neighbour with `#host-status:empty { display: none; }`).
+    root_css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    bar = root_css[root_css.index("#taskbar {"):]
+    assert "gap: 6px;" in bar[:bar.index("}")]
+    # 2. The hover preview is a document.body child; hiding while the pointer
+    #    rests on a dot (which a peer's change on the poll does for free) would
+    #    strand it on screen. But NOT at init: hideWsPreview reads the
+    #    `let _wsPreviewEl` declared further down, still in its temporal dead
+    #    zone while init runs, and that ReferenceError would disable the whole
+    #    mod on every load for anyone who had the setting on. (Nothing has
+    #    hovered a dot at creation, so there is provably nothing to strand.)
+    assert "if (hide && !atInit) hideWsPreview();" in vis
+    assert ws.index("function applyPagerVisibility") < ws.index("let _wsPreviewEl = null;")
+    # 3. Applied at CREATION, not only from onChange -- onChange never fires at
+    #    init (the control entry is seeded with `last: read()`), so otherwise a
+    #    hidden pager would reappear on every load.
+    assert "applyPagerVisibility(true);" in vis, \
+        "the stored value must be applied when the pager is created"
+    assert "hidePager.onChange(function () { applyPagerVisibility(); });" in ws
+    # 4. renderWsDots is left alone: clearing innerHTML without clearing
+    #    dataset.sig would trip its churn guard and leave the pager permanently
+    #    empty on re-show.
+    dots = ws[ws.index("function renderWsDots"):ws.index("function buildWorkspaceMenu")]
+    assert "container.dataset.sig = sig;" in dots
+    assert "hideWsPager" not in dots and "style.display" not in dots
+    # 5. Rename/remove also live on the desktop menu now, resolved BY ID at
+    #    click time (the menu can outlive the workspace switch it was built on).
+    contrib = ws[ws.index("ctx.registerDesktopMenuItems"):
+                 ws.index("ctx.registerKeyActions")]
+    assert "renameWorkspace(i)" in contrib and "removeWorkspace(i)" in contrib
+    assert contrib.count("workspaceIndexById(curId)") == 2, \
+        "both actions must re-resolve their workspace by id at click time"
+    assert "activeWorkspaceIndex()" in contrib          # ...marked at build time
+    # Same for the switcher rows: a menu is a frozen snapshot that can sit open
+    # across a poll, and a peer removing a lower-indexed workspace would slide a
+    # captured index onto its neighbour. (The pager dots may capture an index --
+    # renderWsDots rebuilds them whenever the list changes; a menu never does.)
+    assert "action: () => switchWorkspace(wi)" not in contrib
+    assert "workspaceIndexById(wsId)" in contrib
+    # 6. ...and that menu is offered in BOTH window modes, counting whatever the
+    #    mode actually shows.
+    assert "const tiling = !!(info && info.tiling);" in contrib
+    assert "tiling ? workspaceColumns(ws.id).length" in contrib
+    assert "countFloatingOnWs(ws.id)" in contrib
 
 
 def test_legacy_workspace_blob_migrates_without_losing_a_column():
@@ -2118,6 +2190,15 @@ def test_menus_are_unchanged_without_a_contributor():
                keys.index("function buildTaskbarItemMenu")]
     assert "_pushMenuItems(_desktopMenuItems, items, { tiling: true });" in ctx
     assert "if (items.length) items.push({ sep: true });" in ctx
+    # #162: the floating branch pushes too, into a SCRATCH array so core owns the
+    # join -- renderMenu draws every {sep:true} it is handed, adjacent or not, so
+    # an unconditional separator would leave a stray rule under "Minimize All
+    # Windows" whenever no mod contributes, and a contributor's own boundary
+    # separator would double core's.
+    assert "_pushMenuItems(_desktopMenuItems, extra, { tiling: false });" in ctx
+    assert "while (extra.length && extra[0].sep) extra.shift();" in ctx
+    assert "while (extra.length && extra[extra.length - 1].sep) extra.pop();" in ctx
+    assert "if (extra.length) {" in ctx
     # A throwing contributor must not take the whole context menu down.
     push = keys[keys.index("function _pushMenuItems"):]
     assert "catch (e)" in push[:400]

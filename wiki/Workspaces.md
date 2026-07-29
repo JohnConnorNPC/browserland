@@ -7,6 +7,7 @@ Workspaces are a **mod**, enabled by default — see [[Hosts-and-Multi-Browser]]
 You can move between workspaces a few ways:
 
 - **Pager dots** — Click a dot in the pager at the bottom of the taskbar. Each dot is one workspace; the active one is highlighted.
+- **The workspace menu** — Right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar, and pick a workspace from the list. It works in both window modes, and because the taskbar is always on screen it stays reachable even when windows cover the desktop — so it still works with the pager hidden.
 - **Previous / Next shortcuts** — Step to the workspace before or after the current one.
 - **Go to workspace 1–5** — Jump straight to a numbered workspace.
 
@@ -22,7 +23,7 @@ You can move between workspaces a few ways:
 
 All of these are rebindable — see [[Keyboard-Shortcuts]].
 
-In tiling mode, you can also right-click the empty strip or desktop. The menu lists every workspace (with its column count) so you can jump to one, plus a **New workspace** item. For more on the tiling strip, see [[Window-Modes]].
+Each row of the workspace menu shows that workspace's name and a count of what it holds — its columns in tiling mode, its floating windows in floating mode — with a `✓` on the one you are on. Below the list the menu adds, renames, and removes workspaces too; see the sections below. For more on the tiling strip, see [[Window-Modes]].
 
 ## Adding a workspace
 
@@ -30,7 +31,7 @@ There are a few ways to append a fresh, empty workspace:
 
 - Click the **+** dot at the end of the pager.
 - Choose **New workspace** from the pager-dot right-click menu.
-- In tiling mode, choose **New workspace** from the empty-strip / empty-desktop menu.
+- Choose **New workspace** from the workspace menu (right-click the empty desktop, strip, or taskbar).
 
 ## Sending a window to another workspace
 
@@ -75,7 +76,16 @@ Right-click a **pager dot** for that workspace's options:
 | `Show numbers` | Show workspace numbers on the dots instead. |
 | `New workspace` | Append a fresh empty workspace. |
 
-`Show names` / `Show numbers` is a single toggle for how *all* dots are labeled; the active choice is marked with a `✓`.
+`Show names` / `Show numbers` is a single toggle for how *all* dots are labeled; the active choice is marked with a `✓`. It is also **Workspace labels** under **Control Panel → Mods → Workspaces**.
+
+The workspace menu — right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar — renames and removes too, naming its target so there is no doubt which workspace it acts on:
+
+| Menu item | What it does |
+|---|---|
+| `Rename <workspace>…` | Rename the workspace you are on. |
+| `Remove <workspace>` | Delete the workspace you are on (disabled when only one remains). |
+
+These are the same two actions as the pager-dot menu, on a surface that does not depend on the pager — so they still work with the pager hidden.
 
 ## Hover preview
 
@@ -83,9 +93,23 @@ Hovering a pager dot pops up a small schematic of that workspace: its columns an
 
 ## Taskbar behaviour
 
-Chips for windows on other workspaces are dimmed and carry a small badge naming their workspace, so the bar always indicates where you are. **Control Panel → Mods → Hide taskbar items from other workspaces** hides them outright instead of dimming. **Workspace labels** in the same place is the Control Panel twin of the pager dot's `Show names` / `Show numbers`.
+Chips for windows on other workspaces are dimmed and carry a small badge naming their workspace, so the bar always indicates where you are. The mod's three settings all live together under **Control Panel → Mods → Workspaces**:
+
+| Setting | What it does |
+|---|---|
+| **Workspace labels** | Numbers or names on the pager dots — the Control Panel twin of the pager dot menu's `Show names` / `Show numbers`. |
+| **Hide taskbar items from other workspaces** | Leave out chips for windows on other workspaces entirely, instead of dimming them. |
+| **Hide the workspace pager from the taskbar** | Remove the pager dots from the taskbar and give the space back. Off by default. |
 
 Clicking a chip for a window on another workspace switches there first, so a chip never does nothing — including a chip for a session that is currently closed.
+
+### Hiding the pager
+
+If you switch workspaces from the keyboard, **Hide the workspace pager from the taskbar** reclaims the space the dots take up. It hides the pager and nothing else — the badges and dimming, the chip-click workspace switch, **Send to workspace**, floating-window masking, and the seven shortcuts all keep working exactly as before.
+
+Everything the dots could do is still reachable: the workspace menu (right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar) switches, adds, renames, and removes workspaces, and the shortcuts above switch. Turn the setting back off and the pager returns with its workspaces unchanged.
+
+Like the other two, this setting follows the browser you set it from, and every browser viewing the same broker converges on it.
 
 ## What is shared, and what is per browser
 
@@ -93,12 +117,15 @@ The set of workspaces, their names, and which columns belong to each are part of
 
 ## Turning workspaces off
 
-Nothing is destroyed and nothing is hidden. Every tiled column lives on the one desktop the tiling core owns — workspaces only decide which of them the strip draws. Disable the mod (Control Panel → Mods) and:
+Disabling the mod is a different thing from hiding the pager, and much bigger. **Hide the workspace pager from the taskbar** (above) removes the dots and leaves everything else running; disabling the mod removes the feature.
+
+Nothing is destroyed and nothing is hidden either way. Every tiled column lives on the one desktop the tiling core owns — workspaces only decide which of them the strip draws. Disable the mod (Control Panel → Mods) and:
 
 - every column from every workspace appears together on a single desktop;
 - the pager disappears;
 - the seven workspace shortcuts leave the Keyboard shortcuts list (your bindings are remembered, not deleted);
-- **Send to workspace** and **On all workspaces** leave the title-bar menus, and the workspace list leaves the empty-desktop menu;
+- **Send to workspace** and **On all workspaces** leave the title-bar menus, and the whole workspace block leaves the empty-desktop / taskbar menu;
+- the mod's three settings leave **Control Panel → Mods**;
 - any floating window that was masked to another workspace becomes visible.
 
 Re-enable it and your workspaces come back exactly as they were. A column created while the mod was off joins whichever workspace is active when you turn it back on.
