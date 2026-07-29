@@ -4386,16 +4386,131 @@ def test_uninstall_never_reports_a_write_failed_purge_as_success():
     # answers 500 write_failed WITH THE MOD STILL INSTALLED. Presenting that as
     # any flavour of success inverts the one guarantee that ordering buys.
     pkgs = _packages_src()
-    run = _frag_fn(pkgs, "async function _modUninstallRun(")
+    run = _frag_fn(pkgs, "async function _modUninstallPost(")
     assert "if (!r.ok || !j || j.ok !== true) {" in run
     assert "code === 'write_failed'" in run
     assert "is STILL INSTALLED" in run
+    # ... and it must NOT claim the data survived either. The purge is three
+    # separate sidecar writes and cannot be one transaction, so a failure can
+    # land after deleting the /mod-store value and before dropping the pin.
+    # "Nothing was removed" would be a guess dressed as a fact.
+    assert "may have been PARTIAL" in run
+    assert "Nothing was removed" not in run
     # The success bag is only written AFTER the ok check, so a refusal can never
     # grey out the button for a mod that is still there.
     assert run.index("j.ok !== true") < run.index("_modBag('uninstalled')")
     # 404 is documented as ambiguous rather than papered over: uninstall is
     # deliberately not idempotent at the HTTP-result level.
     assert "not_installed" in pkgs
+
+
+def test_a_lost_response_is_reported_as_unknown_not_as_a_failure():
+    # A POST can COMMIT and then lose its answer -- a dropped connection, or a
+    # 2xx whose body will not parse. "Nothing was installed" / "is still
+    # installed" would be a claim this client cannot make, and it is the claim
+    # that gets an operator to retry a mutation that already landed.
+    pkgs = _packages_src()
+    unknown = _frag_fn(pkgs, "function _modUnknownOutcomeLines(")
+    assert "UNKNOWN" in unknown
+    for fn in ("async function _modInstallRun(",
+               "async function _modUninstallPost("):
+        body = _frag_fn(pkgs, fn)
+        assert "_modUnknownOutcomeLines(" in body, f"{fn} claims a lost outcome"
+        assert "if (r.ok && !parsed) {" in body, \
+            f"{fn} treats an unparseable 2xx as a definite refusal"
+    # And an install refusal only claims "nothing was written" for the codes
+    # that PROVE it -- the validator runs entirely in memory, write_failed does
+    # not, and an unrecognised code proves nothing at all.
+    proves = _frag_fn(pkgs, "function _modRefusalProvesNoWrite(")
+    assert "'write_failed'" not in proves
+    assert "'not_installed'" not in proves
+    from webterm.broker import modinstall
+    for code, status in modinstall.ERROR_STATUS.items():
+        if status == 500 or code == "not_installed":
+            continue
+        assert f"'{code}'" in proves, \
+            f"{code} refuses before any write; say so"
+
+
+def test_a_dialog_whose_body_threw_cannot_commit():
+    # openDialog SWALLOWS a throw from spec.body (69_js_dialog.js). A half-drawn
+    # preview would otherwise leave an Install button that still sends the
+    # payload -- defeating the one promise the dialog makes -- and a half-drawn
+    # uninstall would leave Uninstall over a dialog that never showed the purge
+    # wording or its checkbox.
+    pkgs = _packages_src()
+    for fn in ("async function _modInstallPreview(",
+               "function _modUninstallDialog("):
+        body = _frag_fn(pkgs, fn)
+        assert "let bodyOk = false;" in body, f"{fn} has no render flag"
+        assert "bodyOk = true;" in body
+        assert "if (!bodyOk) {" in body, f"{fn} commits without checking it"
+
+
+def test_a_cancelled_install_cannot_reopen_over_another_dialog():
+    # openDialog is a SINGLETON: a continuation that outlives its own
+    # cancellation would later open a dialog OVER -- and so silently cancel --
+    # whatever the operator opened instead. Every await boundary in the install
+    # flow re-checks the token, and `advanced` distinguishes the handover
+    # between stages (which also resolves the previous dialog) from a real
+    # cancel.
+    pkgs = _packages_src()
+    dlg = _frag_fn(pkgs, "function _modInstallDialog(")
+    assert "const flow = _modFlow();" in dlg
+    assert "if (!flow.live) return null;" in dlg
+    assert "if (!flow.advanced) flow.live = false;" in dlg
+    preview = _frag_fn(pkgs, "async function _modInstallPreview(")
+    assert "if (flow && !flow.live) return;" in preview
+    assert "flow.advanced = true" in preview
+    # A second POST for the same mod while the first is in flight would race it
+    # (one wins, the other 404s, and the singleton leaves only the failure).
+    assert "if (_modOpBusy(id)) return;" in _frag_fn(
+        pkgs, "async function _modUninstallRun(")
+    assert "_modBag('opInFlight')" in pkgs
+
+
+def test_untrusted_strings_cannot_stall_or_escape_the_pane():
+    pkgs = _packages_src()
+    # _modClamp slices BEFORE it normalizes: a registration's `version` is
+    # whatever its object literal said and is capped nowhere, so normalizing
+    # first would scan the whole string on every repaint to show 32 chars.
+    clamp = _frag_fn(pkgs, "function _modClamp(")
+    assert "v.slice(0, n + 8).replace(" in clamp
+    # _modErrorText's table is an object literal, so map['constructor'] is
+    # INHERITED and truthy -- a typeof-string check, not truthiness.
+    assert "typeof map[code] === 'string'" in _frag_fn(
+        pkgs, "function _modErrorText(")
+    # The byte count never falls back to String.length (UTF-16 code units would
+    # report an emoji as 2 bytes); Blob.size is the UTF-8 length, and -1 means
+    # genuinely unknown and renders as such.
+    blen = _frag_fn(pkgs, "function _modByteLen(")
+    assert "new Blob([text]).size" in blen
+    assert "text.length" not in blen
+    assert "if (n < 0) return 'size unknown';" in _frag_fn(
+        pkgs, "function _modFmtBytes(")
+    # A dialog TITLE is a text node in openDialog (head.textContent), and the
+    # values that reach it are clamped anyway.
+    dialog = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    assert "head.textContent = spec.title;" in dialog
+    assert "'Install ' + (_modClamp(id, 64) || 'this mod')" in pkgs
+    assert "'Manifest for ' + _modClamp(one.name, 64)" in pkgs
+
+
+def test_the_folder_pick_bounds_the_manifest_and_the_warning_list():
+    # mod.json is NOT one of the package `files`, so the byte budget does not
+    # cover it: without its own bound, a folder holding a small script beside a
+    # multi-gigabyte mod.json would be read and JSON.parse'd synchronously on
+    # the one UI thread. And a hostile manifest's `scripts`/`styles`/key set can
+    # be thousands of entries, i.e. thousands of DOM nodes.
+    pkgs = _packages_src()
+    folder = _frag_fn(pkgs, "async function _modReadFolder(")
+    assert "lim.manifestBytes" in folder
+    assert folder.index("lim.manifestBytes") < folder.index("JSON.parse(")
+    assert "manifestBytes:" in _frag_fn(pkgs, "function _modPickLimits(")
+    warn = _frag_fn(pkgs, "function _modInstallWarnings(")
+    assert "raw.slice(0, lim.warnings)" in warn
+    raw = _frag_fn(pkgs, "function _modInstallWarningsRaw(")
+    assert ".slice(0, 64)" in raw
 
 
 def test_install_dialog_previews_the_exact_payload():
@@ -4585,6 +4700,12 @@ def test_mod_policy_section_is_per_host_and_painted_on_tab_switch():
     assert "if (served.has(m.id)) continue;" in render
     assert "const implied = Object.create(null);" in \
         _frag_fn(panel, "function modPolicyImplied(")
+    # `missing` is OUR sentinel, never a wire field: a peer sending
+    # `missing:true` on a mod it DOES serve would suppress its own provenance
+    # badge and collect the "not installed on this broker" note -- a served mod
+    # dressed as an absent one. The row is rebuilt from named fields.
+    assert "missing: false });" in render
+    assert "rows.push(m);" not in render
     # The install control is deliberately NOT here: installing on a broker
     # somebody else runs is a separate trust decision (design 11).
     assert "/mods/install" not in panel
@@ -5166,6 +5287,17 @@ def test_theme_subscriber_state_is_tdz_proof():
 #: literal?" -- the last significant character before it. Standard, and good
 #: enough for a LINT (this is not a parser and does not claim to be).
 _JS_REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>") | {""}
+#: ... and after these KEYWORDS. Without them ``return /}/`` reads as a
+#: division, the regex body is scanned as code, its ``}`` corrupts the bracket
+#: depth and its closing ``/`` starts a phantom regex that blanks the rest of
+#: the file -- i.e. the lint silently stops seeing anything after it.
+_JS_REGEX_KEYWORDS = ("return", "typeof", "case", "in", "of", "new", "delete",
+                      "void", "instanceof", "do", "else", "yield", "await",
+                      "throw")
+#: Matched against a BOUNDED window ending at the ``/`` (never the whole prefix,
+#: which would make the scan quadratic).
+_JS_KEYWORD_BEFORE = re.compile(
+    r"(?:^|[^\w$])(?:" + "|".join(_JS_REGEX_KEYWORDS) + r")\s*$")
 
 
 def _js_blank_literals(src):
@@ -5203,7 +5335,8 @@ def _js_blank_literals(src):
             i += 1
             prev = ch
             continue
-        if ch == "/" and prev in _JS_REGEX_PREV:
+        if ch == "/" and (prev in _JS_REGEX_PREV
+                          or _JS_KEYWORD_BEFORE.search(src[max(0, i - 24):i])):
             out.append(" ")
             i += 1
             in_class = False
@@ -5313,10 +5446,20 @@ def test_shipped_mods_carry_no_use_strict_and_no_literal_script_close():
     assert _shipped_mod_scripts(), "no shipped mod scripts found -- lint is inert"
     for path in _shipped_mod_scripts():
         src = path.read_text(encoding="utf-8")
-        assert "</script>" not in src, \
-            f"{_mod_rel(path)} carries a literal </script>"
-        assert not re.search(r"""(?m)^\s*(['"])use strict\1\s*;?\s*$""", src), \
-            f"{_mod_rel(path)} has a top-level 'use strict' directive"
+        # The HTML parser matches a script end tag ASCII-CASE-INSENSITIVELY and
+        # accepts tab / LF / FF / CR / space / "/" / ">" after the name, so
+        # `</SCRIPT>`, `</script >` and `</script/` all terminate the inline
+        # script just as `</script>` does. A plain substring test would miss
+        # every one of them.
+        m = re.search(r"</script[\t\n\f\r />]", src, re.IGNORECASE)
+        assert not m, \
+            f"{_mod_rel(path)} carries a literal {m.group(0)!r} script terminator"
+        # A directive is a top-level STRING STATEMENT, so the statement scan is
+        # what actually decides -- a textual line match misses
+        # `"use strict"; // why` and `"use strict"/*why*/;`. That scan is the
+        # rule-1 test below; here we only need the source-text sanity check.
+        assert '"use strict"' not in src and "'use strict'" not in src, \
+            f"{_mod_rel(path)} mentions a 'use strict' directive"
 
 
 def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
@@ -5412,6 +5555,13 @@ def test_portable_mod_lint_actually_detects_a_violation():
     assert top("registerMod({ s: '// doThing();' });\n") == ["registerMod"]
     assert top("registerMod({ r: /[{};]/g });\n") == ["registerMod"]
     assert top("/* doThing(); */\nregisterMod({});\n") == ["registerMod"]
+    # A regex AFTER A KEYWORD. Read as division, its `}` would corrupt the
+    # bracket depth and its closing `/` would start a phantom regex that blanks
+    # everything after it -- so the lint would stop seeing the file.
+    assert top("function f() { return /}/; }\nconst A = 1;\n") == [
+        "functionf", "constA=1"]
+    assert top("function f() { return 1 / x / y; }\nconst A = 1;\n") == [
+        "functionf", "constA=1"]
     # Declarations are FINE and stay distinguishable from a call.
     assert top("const A = 1;\nfunction f() { g(); }\nregisterMod({});\n") == [
         "constA=1", "functionf", "registerMod"]

@@ -632,12 +632,15 @@
                     // so this stays a pure repaint on every /state pull.
                     if (r.un) {
                         const gone = !!_modBag('uninstalled')[r.id];
-                        r.un.disabled = gone;
-                        r.un.textContent = gone ? 'uninstalled' : 'Uninstall';
+                        const busy = !!_modBag('opInFlight')[r.id];
+                        r.un.disabled = gone || busy;
+                        r.un.textContent = gone ? 'uninstalled'
+                            : (busy ? 'working…' : 'Uninstall');
                         r.un.title = gone
                             ? 'uninstalled on this broker — still running in this '
                               + 'page, gone on the next page load'
-                            : 'remove this mod from this broker';
+                            : (busy ? 'a request for this mod is in flight'
+                                    : 'remove this mod from this broker');
                     }
                 }
             }
@@ -960,12 +963,17 @@
         }
 
         // A short, single-line, length-capped rendering of an untrusted string.
+        // SLICE FIRST, then normalize: a registration's `version` is whatever
+        // the mod's own object literal said and is capped nowhere, so
+        // normalizing before slicing would scan the whole string on every
+        // repaint to show 32 characters of it.
         function _modClamp(v, n) {
             if (typeof v !== 'string' || !v) return '';
-            return v.replace(/[\r\n\t]+/g, ' ').slice(0, n);
+            return v.slice(0, n + 8).replace(/[\r\n\t]+/g, ' ').slice(0, n);
         }
 
         function _modFmtBytes(n) {
+            if (n < 0) return 'size unknown';
             if (!(n > 0)) return '0 B';
             if (n < 1024) return n + ' B';
             return (n / 1024).toFixed(1) + ' KiB';
@@ -975,9 +983,16 @@
         // and not the size on disk. Blob.text() UTF-8-decodes (and strips a
         // BOM), so file.size can differ from what is actually sent; the preview
         // must show what will be written or it is not a preview.
+        //
+        // NEVER text.length as a fallback: that is UTF-16 code units, so "é"
+        // would read as 1 byte instead of 2 and an emoji as 2 instead of 4 — a
+        // preview that is quietly wrong about bytes is worse than one that says
+        // it does not know. Blob's size IS the UTF-8 length, so it is an exact
+        // second source; -1 means genuinely unknown and renders as such.
         function _modByteLen(text) {
-            try { return new TextEncoder().encode(text).length; }
-            catch (_) { return (typeof text === 'string') ? text.length : 0; }
+            if (typeof text !== 'string') return 0;
+            try { return new TextEncoder().encode(text).length; } catch (_) {}
+            try { return new Blob([text]).size; } catch (_) { return -1; }
         }
 
         // Every refusal code the install/uninstall API can answer with, as a
@@ -1034,9 +1049,57 @@
                     + 'mods as it accepts.',
                 write_failed: 'this broker could not write to its mod store.',
             };
-            if (map[code]) return map[code];
+            // typeof-string, not truthiness: `map` is an object literal, so
+            // map['constructor'] / map['toString'] / map['__proto__'] are
+            // INHERITED and truthy. A broker answering error:"toString" would
+            // otherwise put a native function's source into the dialog.
+            if (typeof map[code] === 'string') return map[code];
             return 'this broker refused the request (HTTP ' + (status || '?')
                 + (code ? ', ' + _modClamp(code, 64) : '') + ').';
+        }
+
+        // Whether a refusal PROVES nothing was written. The validator runs
+        // entirely in memory before a single byte is written, so every
+        // validation code does prove it — write_failed and an unrecognised code
+        // do not, and claiming otherwise would be the install half of the
+        // purge-reported-as-success bug.
+        function _modRefusalProvesNoWrite(code) {
+            return [
+                'too_large', 'bad_json', 'bad_mod_id', 'bad_generation',
+                'reserved_id', 'id_in_use', 'bad_file_name',
+                'reserved_file_name', 'too_many_files', 'file_too_large',
+                'total_too_large', 'bad_encoding', 'bad_scripts', 'bad_styles',
+                'bad_requires', 'bad_manifest_field', 'unknown_manifest_key',
+                'css_external_reference', 'too_many_mods',
+            ].indexOf(code) !== -1;
+        }
+
+        // What to say when a request's OUTCOME IS UNKNOWN: the transport failed,
+        // or a 2xx arrived whose body would not parse. A POST can commit and
+        // then lose its response, so "nothing was installed" is a claim this
+        // client is not entitled to make. Reload and read the list instead.
+        function _modUnknownOutcomeLines(what) {
+            return ['this broker could not be reached, or answered something '
+                    + 'unreadable, so the outcome of the ' + what + ' is '
+                    + 'UNKNOWN — the request may have been carried out before '
+                    + 'the answer was lost.',
+                    'Reload and check this list before trying again.'];
+        }
+
+        // One flow at a time, and cancelling it cancels everything it started.
+        // openDialog is a SINGLETON: a continuation that survives its own
+        // cancellation would later open a dialog over — and silently cancel —
+        // whatever the operator opened in the meantime. `advanced` marks the
+        // handover between stages, so the singleton cancelling the previous
+        // stage is not mistaken for the operator backing out.
+        function _modFlow() {
+            return { live: true, advanced: false };
+        }
+        // Per-mod mutation guard: a second click while a POST is in flight
+        // would race the first (one succeeds, the other 404s, and only the
+        // failure's dialog survives the singleton).
+        function _modOpBusy(id) {
+            return !!_modBag('opInFlight')[id];
         }
 
         // The lines a failed install/uninstall shows: the mapped sentence, then
@@ -1084,7 +1147,13 @@
 
         // ---- uninstall ------------------------------------------------------
         function _modUninstallDialog(id) {
+            if (_modOpBusy(id)) return;
             let purgeCb = null;
+            // openDialog SWALLOWS a throw from spec.body. Without this flag a
+            // body that died halfway would leave an Uninstall button over a
+            // dialog that never showed the purge wording or its checkbox — and
+            // the operator would be confirming something they were never told.
+            let bodyOk = false;
             openDialog({
                 title: 'Uninstall ' + id,
                 body: function (c) {
@@ -1111,6 +1180,7 @@
                         + "stored in other browsers is not affected.";
                     lab.appendChild(t);
                     c.appendChild(lab);
+                    bodyOk = true;
                 },
                 buttons: [
                     { label: 'Uninstall', value: true, primary: true,
@@ -1119,14 +1189,33 @@
                 ],
             }).then(function (r) {
                 if (!r || !r.value) return;
+                if (!bodyOk) {
+                    return _modOpResult('Uninstall cancelled',
+                        ['this dialog could not be drawn, so nothing was sent.'],
+                        false);
+                }
                 // Read at COMMIT time from the element itself. The node is
                 // detached by then, but the closure still holds it and its
                 // .checked is the value the operator actually left.
                 return _modUninstallRun(id, !!(purgeCb && purgeCb.checked));
+            }).catch(function (e) {
+                console.error('[mods] uninstall dialog failed:', e);
             });
         }
 
         async function _modUninstallRun(id, purge) {
+            if (_modOpBusy(id)) return;
+            _modBag('opInFlight')[id] = true;
+            _renderManagerRows();
+            try {
+                await _modUninstallPost(id, purge);
+            } finally {
+                delete _modBag('opInFlight')[id];
+                _renderManagerRows();
+            }
+        }
+
+        async function _modUninstallPost(id, purge) {
             let r = null;
             try {
                 r = await hostFetch(localHost(), '/mods/uninstall', {
@@ -1135,13 +1224,22 @@
                     body: JSON.stringify({ id: id, purge: purge }),
                 });
             } catch (e) {
-                _modOpResult('Uninstall failed',
-                    ['could not reach this broker. ' + id
-                     + ' is still installed.'], false);
+                // The POST may have LANDED and only its answer been lost. This
+                // client is not entitled to say what happened.
+                _modOpResult('Uninstall outcome unknown',
+                    _modUnknownOutcomeLines('uninstall of ' + id), true);
                 return;
             }
             let j = null;
-            try { j = await r.json(); } catch (_) { j = null; }
+            let parsed = true;
+            try { j = await r.json(); } catch (_) { j = null; parsed = false; }
+            if (r.ok && !parsed) {
+                // A 2xx whose body will not parse is not a success we can
+                // describe — same unknown as a dropped connection.
+                _modOpResult('Uninstall outcome unknown',
+                    _modUnknownOutcomeLines('uninstall of ' + id), true);
+                return;
+            }
             if (!r.ok || !j || j.ok !== true) {
                 // A PURGE that could not write answers write_failed WITH THE
                 // MOD STILL INSTALLED — data-first, code-last, so the code is
@@ -1151,8 +1249,15 @@
                 const lines = _modFailLines(r, j);
                 const code = (j && typeof j.error === 'string') ? j.error : '';
                 if (code === 'write_failed') {
-                    lines.push(id + ' is STILL INSTALLED and its server-side '
-                        + 'data is still there. Nothing was removed.');
+                    // Only the FIRST clause is guaranteed. The purge walks three
+                    // sidecars and cannot be one transaction, so it may have
+                    // deleted the /mod-store value and failed on the pin, or the
+                    // other way round — "nothing was removed" would be a
+                    // guess dressed as a fact.
+                    lines.push(id + ' is STILL INSTALLED. The server-side data '
+                        + 'deletion may have been PARTIAL — it is three separate '
+                        + 'writes and cannot be one transaction. Check its pin '
+                        + 'under “Mods on this broker” before retrying.');
                 } else if (code !== 'not_installed') {
                     lines.push(id + ' is still installed.');
                 }
@@ -1191,8 +1296,14 @@
         // one UI thread. `files` mirrors the broker's own cap so the refusal is
         // immediate instead of a round trip, and `readBytes` bounds how much
         // text we are willing to decode before the broker gets a say.
+        // `manifestBytes` mirrors the broker's own MAX_META_BYTES and is the
+        // ONLY bound on mod.json — it is not one of the package `files`, so it
+        // is not covered by `readBytes`, and without this a folder holding a
+        // small script beside a multi-gigabyte mod.json would be read and
+        // JSON.parse'd synchronously on the one UI thread.
         function _modPickLimits() {
-            return { entries: 2000, files: 32, readBytes: 2 * 1024 * 1024 };
+            return { entries: 2000, files: 32, readBytes: 2 * 1024 * 1024,
+                     manifestBytes: 64 * 1024, warnings: 12 };
         }
         function _modManifestKeys() {
             return ['id', 'version', 'ctxVersion', 'title', 'description',
@@ -1213,6 +1324,7 @@
         // the user's own gesture — routing it through a promise first would put
         // the .click() outside the activation the browser requires.
         function _modInstallDialog() {
+            const flow = _modFlow();
             let statusEl = null;
             let folderIn = null;
             let fileIn = null;
@@ -1232,12 +1344,18 @@
                 lock(true);
                 say('reading…');
                 p.then(function (pick) {
+                    // The operator can cancel (Escape / backdrop / Cancel)
+                    // WHILE the read is in flight. Without this the continuation
+                    // would open the preview afterwards — over, and therefore
+                    // cancelling, whatever they opened instead.
+                    if (!flow.live) return null;
                     if (!pick) { lock(false); say(''); return null; }
                     say('checking this broker…');
-                    return _modInstallPreview(pick);
+                    return _modInstallPreview(pick, flow);
                 }).then(function () { lock(false); },
                         function (e) {
                             lock(false);
+                            if (!flow.live) return;
                             say((e && e.message) ? e.message
                                 : 'could not read that.', 'mod-install-danger');
                         });
@@ -1286,7 +1404,8 @@
                         const f = fileIn.files && fileIn.files[0];
                         if (!f) return;
                         onPicked(_modReadSingle(f).then(function (one) {
-                            return one ? _modInstallFields(one) : null;
+                            if (!one || !flow.live) return null;
+                            return _modInstallFields(one, flow);
                         }));
                     });
                     r2.appendChild(fileIn);
@@ -1296,6 +1415,15 @@
                     c.appendChild(statusEl);
                 },
                 buttons: [{ label: 'Cancel', value: false }],
+            }).then(function () {
+                // Cancel / Escape / backdrop kills the whole flow. A later
+                // STAGE opening its own dialog also resolves this promise (the
+                // openDialog singleton), which is what `advanced` distinguishes
+                // — otherwise the handover would cancel itself.
+                if (!flow.advanced) flow.live = false;
+            }).catch(function (e) {
+                flow.live = false;
+                console.error('[mods] install dialog failed:', e);
             });
         }
 
@@ -1349,6 +1477,11 @@
                 throw new Error('those files are ' + _modFmtBytes(bytes)
                     + '; far over this broker’s per-mod limit.');
             }
+            if (((manifestFile && manifestFile.size) || 0) > lim.manifestBytes) {
+                throw new Error('that folder’s mod.json is '
+                    + _modFmtBytes(manifestFile.size) + '; a manifest is at most '
+                    + _modFmtBytes(lim.manifestBytes) + '.');
+            }
             let manifest = null;
             try { manifest = JSON.parse(await manifestFile.text()); }
             catch (_) {
@@ -1392,9 +1525,10 @@
         // A SEPARATE stage rather than fields on the preview, so the preview can
         // show the finished manifest — a preview built from half-typed fields
         // would show something other than what is sent.
-        async function _modInstallFields(one) {
+        async function _modInstallFields(one, flow) {
+            if (flow) flow.advanced = true;      // the handover, not a cancel
             const r = await openDialog({
-                title: 'Manifest for ' + one.name,
+                title: 'Manifest for ' + _modClamp(one.name, 64),
                 body: function (c) {
                     const p = document.createElement('div');
                     p.className = 'app-dialog-msg';
@@ -1459,11 +1593,16 @@
         // confirming. `modStore: null` means "could not check" and says so —
         // never "no".
         async function _modAdoptionCheck(id) {
-            const out = { pin: false, modStore: null };
+            // pinValue is kept SEPARATE from "a pin exists": a pin of `false`
+            // and a pin of `true` are opposite outcomes for the mod about to be
+            // installed, and collapsing them into a boolean would let the
+            // dialog imply the wrong one.
+            const out = { pin: false, pinValue: null, modStore: null };
             const raw = window.__mods.policyRaw;
             if (raw && typeof raw === 'object' && !Array.isArray(raw)
                     && typeof raw[id] === 'boolean') {
                 out.pin = true;
+                out.pinValue = raw[id];
             }
             try {
                 const r = await hostFetch(localHost(),
@@ -1481,8 +1620,21 @@
         // stays enabled, because a client-side gate that disagrees with the
         // server is a worse bug than a round trip. Anything not listed here
         // still comes back as a mapped error.
+        // CAPPED, and every list it walks is sliced: `scripts`, `styles` and the
+        // manifest's own key set come from a picked mod.json and can be
+        // thousands of entries, which would be thousands of DOM nodes built
+        // synchronously.
         function _modInstallWarnings(pick, names, sizes, total) {
             const lim = _modPickLimits();
+            const raw = _modInstallWarningsRaw(pick, names, sizes, total, lim);
+            if (raw.length <= lim.warnings) return raw;
+            const out = raw.slice(0, lim.warnings);
+            out.push('…and ' + (raw.length - lim.warnings)
+                + ' more problem(s) with this package.');
+            return out;
+        }
+
+        function _modInstallWarningsRaw(pick, names, sizes, total, lim) {
             const out = [];
             const m = pick.manifest || {};
             const id = m.id;
@@ -1495,7 +1647,7 @@
                     + 'this broker will refuse it.');
             }
             const known = _modManifestKeys();
-            const unknown = Object.keys(m).filter(function (k) {
+            const unknown = Object.keys(m).slice(0, 64).filter(function (k) {
                 return known.indexOf(k) === -1; });
             if (unknown.length) {
                 out.push('the manifest carries key(s) this broker does not '
@@ -1509,14 +1661,15 @@
                 out.push('`scripts` is required and must name at least one .js '
                     + 'file in this package.');
             } else {
-                for (const n of scripts) {
+                for (const n of scripts.slice(0, 64)) {
                     if (names.indexOf(n) === -1) {
                         out.push('`scripts` names ' + _modClamp(String(n), 80)
                             + ', which is not one of the files above.');
                     }
                 }
             }
-            for (const n of (Array.isArray(m.styles) ? m.styles : [])) {
+            const styles = Array.isArray(m.styles) ? m.styles.slice(0, 64) : [];
+            for (const n of styles) {
                 if (names.indexOf(n) === -1) {
                     out.push('`styles` names ' + _modClamp(String(n), 80)
                         + ', which is not one of the files above.');
@@ -1550,20 +1703,25 @@
         // different from the one it sends. The broker writes mod.json from this
         // object, so a mod.json that was in the picked folder is shown here and
         // is otherwise not stored.
-        async function _modInstallPreview(pick) {
+        async function _modInstallPreview(pick, flow) {
             const names = Object.keys(pick.files).sort();
             const sizes = Object.create(null);
             let total = 0;
+            let exact = true;
             for (const n of names) {
                 sizes[n] = _modByteLen(pick.files[n]);
-                total += sizes[n];
+                if (sizes[n] < 0) exact = false;
+                else total += sizes[n];
             }
             const warnings = _modInstallWarnings(pick, names, sizes, total);
             const id = (pick.manifest && typeof pick.manifest.id === 'string')
                 ? pick.manifest.id : '';
             const adopt = (id && MOD_ID_RE.test(id))
                 ? await _modAdoptionCheck(id)
-                : { pin: false, modStore: null };
+                : { pin: false, pinValue: null, modStore: null };
+            // Cancelled while the adoption check was in flight: opening now
+            // would cancel whatever the operator opened instead.
+            if (flow && !flow.live) return;
             const installedRow = id ? _modCatalogRow(id) : null;
             const alreadyHere = !!(installedRow
                 && installedRow.source === 'installed');
@@ -1571,8 +1729,13 @@
             try { json = JSON.stringify(pick.manifest, null, 2); }
             catch (_) { json = '(this manifest cannot be encoded as JSON)'; }
             let replaceCb = null;
+            // openDialog SWALLOWS a throw from spec.body. Without this flag a
+            // half-drawn preview would still leave an Install button that sends
+            // `pick` — which defeats the one promise this dialog makes.
+            let bodyOk = false;
+            if (flow) flow.advanced = true;      // the handover, not a cancel
             const r = await openDialog({
-                title: 'Install ' + (id || 'this mod'),
+                title: 'Install ' + (_modClamp(id, 64) || 'this mod'),
                 body: function (c) {
                     const intro = document.createElement('div');
                     intro.className = 'app-dialog-msg';
@@ -1602,8 +1765,10 @@
                     totals.className = 'mod-install-note';
                     totals.textContent = names.length + ' file'
                         + (names.length === 1 ? '' : 's') + ', '
-                        + _modFmtBytes(total)
-                        + ' as UTF-8 — the bytes the broker will write.';
+                        + (exact ? (_modFmtBytes(total)
+                                    + ' as UTF-8 — the bytes the broker will '
+                                    + 'write.')
+                                 : 'total size could not be measured here.');
                     c.appendChild(totals);
                     const notes = (pick.notes || []).slice(0, 8);
                     for (const n of notes) {
@@ -1630,8 +1795,15 @@
                     if (adopt.pin) {
                         const el = document.createElement('div');
                         el.className = 'mod-install-warn';
+                        // The pin's VALUE, not merely its existence: "pinned
+                        // on" and "pinned off" are opposite outcomes for the
+                        // mod about to be installed.
                         el.textContent = 'This broker already pins “' + id
-                            + '”. That pin will apply to this mod.';
+                            + '” ' + (adopt.pinValue ? 'ON' : 'OFF')
+                            + '. That pin takes the choice away from every '
+                            + 'browser, so this mod will come up '
+                            + (adopt.pinValue ? 'ENABLED' : 'disabled')
+                            + ' regardless of the default below.';
                         c.appendChild(el);
                     }
                     const store = document.createElement('div');
@@ -1699,17 +1871,30 @@
                     c.appendChild(trust);
                     const tail = document.createElement('div');
                     tail.className = 'app-dialog-msg';
-                    tail.textContent = 'An installed mod is reported OFF by '
-                        + 'default whatever its manifest says — enable it in '
-                        + 'this list after the reload, or pin it on for every '
-                        + 'browser under “Mods on this broker”.\n\nIt appears on '
+                    // The DEFAULT, stated separately from the OUTCOME: this
+                    // browser may already hold an enable choice for that id
+                    // (uninstalling does not clear localStorage), and a broker
+                    // pin outranks both. Saying "you will have to enable it"
+                    // would be wrong in exactly the case above.
+                    tail.textContent = 'An installed mod’s reported DEFAULT is '
+                        + 'off, whatever its manifest says. What actually runs '
+                        + 'after the reload is this browser’s own choice for '
+                        + 'that id — which may survive from an earlier install '
+                        + '— unless a broker pin overrides it.\n\nIt appears on '
                         + 'the NEXT page load. Nothing in this page changes.';
                     c.appendChild(tail);
+                    bodyOk = true;
                 },
                 buttons: [{ label: 'Install', value: true, primary: true },
                           { label: 'Cancel', value: false }],
             });
             if (!r || !r.value) return;
+            if (!bodyOk) {
+                _modOpResult('Install cancelled',
+                    ['the preview could not be drawn, so nothing was sent.'],
+                    false);
+                return;
+            }
             await _modInstallRun(pick, !!(replaceCb && replaceCb.checked));
         }
 
@@ -1733,17 +1918,30 @@
                     body: body,
                 });
             } catch (_) {
-                _modOpResult('Install failed',
-                    ['could not reach this broker. Nothing was installed.'],
-                    false);
+                _modOpResult('Install outcome unknown',
+                    _modUnknownOutcomeLines('install'), true);
                 return;
             }
             let j = null;
-            try { j = await r.json(); } catch (_) { j = null; }
+            let parsed = true;
+            try { j = await r.json(); } catch (_) { j = null; parsed = false; }
+            if (r.ok && !parsed) {
+                _modOpResult('Install outcome unknown',
+                    _modUnknownOutcomeLines('install'), true);
+                return;
+            }
             if (!r.ok || !j || j.ok !== true) {
                 const lines = _modFailLines(r, j);
-                lines.push('Nothing was written — this broker validates the '
-                    + 'whole package before it writes a byte.');
+                const code = (j && typeof j.error === 'string') ? j.error : '';
+                // Only a VALIDATION refusal proves nothing was written — the
+                // validator runs entirely in memory before a single byte. A
+                // write_failed happened mid-commit and an unrecognised code is
+                // unrecognised, so neither may claim it.
+                lines.push(_modRefusalProvesNoWrite(code)
+                    ? 'Nothing was written — this broker validates the whole '
+                      + 'package before it writes a byte.'
+                    : 'This broker may have written part of it; reload and '
+                      + 'check this list before trying again.');
                 _modOpResult('Install refused', lines, false);
                 return;
             }
@@ -1764,9 +1962,10 @@
                 lines.push('A pin this broker already held under that id now '
                     + 'applies to it.');
             }
-            lines.push('It is reported OFF by default — enable it in this list '
-                + 'after the reload. Its code runs from the next page load '
-                + 'either way; "off" only means its init() is not called.');
+            lines.push('Its reported default is off — check this list after the '
+                + 'reload for what it actually came up as. Its code runs from '
+                + 'the next page load either way; "off" only means its init() '
+                + 'is not called.');
             lines.push('It appears on the NEXT page load. Nothing in this page '
                 + 'changed.');
             _modOpResult('Installed', lines, true);

@@ -894,7 +894,17 @@
                 if (!m || typeof m.id !== 'string' || !MOD_ID_RE.test(m.id)) continue;
                 if (served.has(m.id)) continue;
                 served.add(m.id);
-                rows.push(m);
+                // `missing` is OUR sentinel for "the policy names it but the
+                // broker does not serve it", built below. It must never be read
+                // off the wire: a peer that sent `missing:true` on a row it DID
+                // serve would suppress its own provenance badge AND get the
+                // "not installed on this broker" note — a served mod dressed as
+                // an absent one. Rebuilt here so a peer field cannot survive.
+                rows.push({ id: m.id, title: m.title,
+                            description: m.description,
+                            source: m.source,
+                            default_enabled: m.default_enabled,
+                            missing: false });
             }
             for (const id of Object.keys(rec.policy)) {
                 if (rows.length >= MAX_MOD_POLICY_KEYS) break;
