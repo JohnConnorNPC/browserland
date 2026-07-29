@@ -47,9 +47,9 @@
                 // Chip color bands — border + text only, background stays the theme
                 // bg, so it reads on any theme exactly like the .host-chip states.
                 const BANDS = {
-                    green: { border: '#3a6a4a', fg: '#5fbf7f' },
-                    amber: { border: '#a8842c', fg: '#e0a93a' },
-                    red:   { border: '#a66',    fg: '#e96d6d' },
+                    green: { border: '#3a6a4a', fg: 'var(--ok)' },
+                    amber: { border: '#a8842c', fg: 'var(--warn)' },
+                    red:   { border: '#a66',    fg: 'var(--danger)' },
                     grey:  { border: 'var(--bg-3)', fg: 'var(--fg-dim)' },
                 };
 

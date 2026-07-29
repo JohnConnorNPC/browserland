@@ -63,10 +63,10 @@
             overflow-wrap: anywhere;
         }
         /* A change that WILL be written vs one that needs nothing. */
-        .modsync-write { color: #5fbf7f; }
+        .modsync-write { color: var(--ok); }
         .modsync-skip  { color: var(--fg-dim); }
         .modsync-warn {
-            color: #e0a93a;
+            color: var(--warn);
             width: 100%;
             flex-basis: 100%;
         }
@@ -83,8 +83,8 @@
             border-left: 3px solid var(--bg-2);
             border-radius: 3px;
         }
-        .modsync-result-ok      { border-left-color: #5fbf7f; }
-        .modsync-result-partial { border-left-color: #e0a93a; }
+        .modsync-result-ok      { border-left-color: var(--ok); }
+        .modsync-result-partial { border-left-color: var(--warn); }
         .modsync-result-fail    { border-left-color: #e07b3a; }
         .modsync-result button { flex: 0 0 auto; }
         .modsync-detail {

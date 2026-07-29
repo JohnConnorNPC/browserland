@@ -46,7 +46,7 @@
             color: var(--fg-dim);
             font-size: 11px;
         }
-        .app-ais-err { color: #e0a93a; }
+        .app-ais-err { color: var(--warn); }
         .app-ais-note {
             color: var(--fg-dim);
             font-style: italic;
@@ -61,8 +61,8 @@
             box-sizing: border-box;
             border: 1px solid rgba(0, 0, 0, 0.4);
         }
-        .ais-dot.ais-none     { background: #5fbf7f; }
-        .ais-dot.ais-minor    { background: #e0a93a; }
+        .ais-dot.ais-none     { background: var(--ok); }
+        .ais-dot.ais-minor    { background: var(--warn); }
         .ais-dot.ais-major    { background: #e07b3a; }
         .ais-dot.ais-critical { background: #e05050; }
         .ais-dot.ais-unknown  { background: var(--fg-dim); }

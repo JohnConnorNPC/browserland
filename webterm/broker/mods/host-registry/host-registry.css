@@ -34,8 +34,8 @@
             overflow-wrap: anywhere;
         }
         /* Classification accents in the pull dialog. */
-        .hostreg-new    { border-left: 3px solid #5fbf7f; }
-        .hostreg-differs{ border-left: 3px solid #e0a93a; }
+        .hostreg-new    { border-left: 3px solid var(--ok); }
+        .hostreg-differs{ border-left: 3px solid var(--warn); }
         .hostreg-identical {
             border-left: 3px solid var(--bg-2);
             color: var(--fg-dim);
@@ -48,13 +48,13 @@
             color: var(--fg-dim);
         }
         .hostreg-haspw {
-            color: #e0a93a;
+            color: var(--warn);
             font-size: 11px;
         }
         /* The include-passwords opt-in + its warning. */
         .hostreg-danger { color: #e07b3a; }
         .hostreg-warn {
-            color: #e0a93a;
+            color: var(--warn);
             width: 100%;
             flex-basis: 100%;
         }
