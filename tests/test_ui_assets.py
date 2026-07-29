@@ -3606,6 +3606,306 @@ def test_requires_declared_before_dependency_in_mods_list():
 
 
 # --------------------------------------------------------------------------- #
+# runtime-installed mod packages -- the loader half (#163 / S4)
+# --------------------------------------------------------------------------- #
+
+def _order_in(body, *needles):
+    """Every needle appears, in this order, in `body`. Returns the offsets so a
+    failure can name what actually came first."""
+    at = []
+    for n in needles:
+        assert n in body, f"missing: {n!r}"
+        at.append(body.index(n))
+    assert at == sorted(at), (
+        "out of order: " + ", ".join(f"{n!r}@{i}" for n, i in zip(needles, at)))
+    return at
+
+
+def test_loadmods_sequence_puts_pin_resolution_after_the_package_load():
+    # #163: the boot resequencing, which is LOAD-BEARING and not cosmetic.
+    #
+    #   1 await localInfo()            stash policyRaw + catalog, resolve NOTHING
+    #   2 master gate                  return BEFORE a single script is fetched
+    #   3 await _loadInstalledPackages the installed registerMod calls land here
+    #   4 _topoSortRegistered()        re-establish dependency order
+    #   5 _resolvePins(policyRaw)      MUST follow 3-4: _resolvePins drops any
+    #                                  pin whose id is not already in
+    #                                  `registered`, so resolving at the old
+    #                                  position would silently discard every pin
+    #                                  naming an installed mod
+    #   6 _mountModsManagerPane()      MUST follow 3: _modRegisterPane calls
+    #                                  spec.render() exactly ONCE, so mounting
+    #                                  first would freeze a stale row set
+    #   7 prune -> the forward boot loop
+    body = _loader_fn("async function loadMods(")
+    _order_in(
+        body,
+        "if (_nomodsRequested()) {",              # 0 - before everything
+        "const info = await localInfo();",        # 1
+        "window.__mods.policyRaw = (info && info.mod_policy) || null;",
+        "window.__mods.catalog = (info && Array.isArray(info.mods))",
+        "if (!enabled) {",                        # 2 - the absolute master gate
+        "await _loadInstalledPackages(window.__mods.catalog);",   # 3
+        "_topoSortRegistered();",                                  # 4
+        "window.__mods.policy = _resolvePins(window.__mods.policyRaw);",  # 5
+        "_mountModsManagerPane();",                                # 6
+        "const disabled = _modsDisabled();",                       # 7
+        "initMod(decl);",
+        "window.__mods.bootComplete = true;",
+    )
+    # The master-off return really is before the fetch, not merely before the
+    # boot loop: nothing is requested from a broker that disables mods.
+    gate = body.index("if (!enabled) {")
+    assert body.index("await _loadInstalledPackages(") > gate
+    # The pins are STASHED at step 1, never resolved there. (Comments stripped:
+    # the block deliberately EXPLAINS _resolvePins, it just must not call it.)
+    stash = "\n".join(
+        line for line in body[body.index("const info = await localInfo();"):
+                              body.index("await _loadInstalledPackages(")].splitlines()
+        if not line.strip().startswith("//"))
+    assert "_resolvePins" not in stash, \
+        "resolving pins before the packages load drops every installed-mod pin"
+    # policyResolved gates notifyModsHostAuth, so it must not go up before the
+    # policy it advertises exists.
+    assert body.index("window.__mods.policyResolved = true;\n            _mountModsManagerPane();") \
+        > body.index("window.__mods.policy = _resolvePins(")
+    # The master-off early return still marks it resolved (unchanged #157
+    # behaviour: a mods-off broker has answered, there is nothing to re-ask).
+    off = body[gate:body.index("await _loadInstalledPackages(")]
+    assert "window.__mods.policyResolved = true;" in off
+
+
+def test_disabled_prune_keeps_catalog_ids_not_just_registered_ones():
+    # #163: an installed mod whose script 404s / times out / fails SRI is NOT in
+    # `registered`, so the old prune would drop its id from
+    # webterm:mods:disabled and the mod would come up ENABLED on the next page
+    # load -- silently discarding the user's explicit "off" for exactly the mod
+    # that most needs it off.
+    body = _loader_fn("async function loadMods(")
+    assert "for (const row of window.__mods.catalog) {" in body
+    assert "if (row && typeof row.id === 'string' && row.id) known.add(row.id);" \
+        in body
+    prune = body[body.index("const known = new Set("):]
+    assert prune.index("known.add(row.id)") < prune.index("if (!known.has(id))"), \
+        "the catalog ids must join the keep-set BEFORE the prune walks it"
+
+
+def test_installed_package_topological_sort_present():
+    # #163 / design §6. Ordering used to be positional in ui._MODS; a runtime-
+    # installed set has no such list, so the invariant moves from
+    # test-established to runtime-established.
+    pkgs = _packages_src()
+    body = _frag_fn(pkgs, "function _topoSortRegistered(")
+    # ONE graph over shipped u installed. An edge to an id in NEITHER is dropped
+    # from the sort and recorded -- it must not contribute an indegree, or an
+    # installed mod requiring a SHIPPED mod would come out marked cyclic.
+    assert "const universe = new Set(index.keys());" in body
+    assert "universe.add(row.id)" in body
+    assert "} else if (!universe.has(dep)) {" in body
+    assert "absent.push(dep);" in body
+    assert "window.__mods.missingRequires = missing;" in body
+    # Kahn's residual is NOT the cycle set (A->B, B->A, C->A leaves {A,B,C} but
+    # C is merely blocked BY a cycle), so the residual is SPLIT with Tarjan.
+    assert "const order = _modKahn(regs, edges, index);" in body
+    assert "const inCycle = _modCycleMembers(residual, edges);" in body
+    assert "cycleState[id] = inCycle.has(id) ? 'cycle' : 'blocked-by-cycle';" in body
+    kahn = _frag_fn(pkgs, "function _modKahn(")
+    assert "if (index.get(ready[i]) < index.get(ready[best])) best = i;" in kahn, \
+        "ties must break on the CURRENT index or the shipped order is not preserved"
+    scc = _frag_fn(pkgs, "function _modCycleMembers(")
+    assert "component.length > 1" in scc and ".indexOf(node) !== -1" in scc, \
+        "an SCC of size > 1 OR a self-loop is what makes a node in-cycle"
+    assert "const work = [[root, 0]];" in scc, \
+        "Tarjan must be iterative so a deep graph cannot blow the stack"
+    # Reordered IN PLACE: _bringUp / _takeDown / _applyPolicyLive / _resolvePins
+    # all hold the same array and all assume dependency-precedes-dependent.
+    assert "regs.length = 0;" in body and "for (const m of sorted) regs.push(m);" in body
+    assert "window.__mods.registered = " not in pkgs, \
+        "replacing the array would strand every holder of the old one"
+
+
+def test_installed_packages_load_once_async_and_sri_pinned():
+    # #163 / design §5. One request per (id, gen, file), script.async = true (NOT
+    # ordered-async -- ordering is irrelevant because the topo sort runs
+    # afterwards, and ordered-async lets one slow file head-of-line block every
+    # mod), SRI from the catalog, a <link> per style at the same generation URL,
+    # and a deadline that PROCEEDS rather than cancelling.
+    pkgs = _packages_src()
+    body = _frag_fn(pkgs, "function _loadInstalledPackages(")
+    assert "const MOD_SCRIPT_TIMEOUT_MS = 5000;" in body
+    # Function-LOCAL, never a fragment-level let/const: a hoisted function
+    # reading a not-yet-initialized fragment binding throws a TDZ ReferenceError
+    # that disables the whole mod, and CI never runs this JS (#169's rule).
+    for banned in ("\n        const MOD_SCRIPT_TIMEOUT_MS",
+                   "\n        let MOD_SCRIPT_TIMEOUT_MS"):
+        assert banned not in pkgs, f"{banned.strip()!r} is a TDZ hazard here"
+    assert "s.async = true;" in body
+    assert "s.async = false" not in pkgs, "ordered-async head-of-line blocks"
+    assert "s.dataset.modPackage = pkg.id;" in body
+    assert "if (sri) s.integrity = sri;" in body
+    assert "if (sri) link.integrity = sri;" in body
+    assert "link.rel = 'stylesheet';" in body
+    # A row the broker marked broken is NOT fetched at all.
+    assert "if (row.error) {" in body
+    skip = body[body.index("if (row.error) {"):]
+    assert skip.index("continue;") < skip.index("_loadModAsset("), \
+        "a cycle row must never reach the network"
+    # The deadline proceeds; it cannot cancel an in-flight <script>.
+    assert "if (!pkg.done) pkg.state = 'timeout';" in body
+    assert "PROCEED-ANYWAY deadline, NOT a cancel" in body
+    # Deduplicated on the URL, which encodes (id, gen, file) -- the post-login
+    # retry re-walks the whole catalog and must not execute anything twice (D1).
+    asset = _frag_fn(pkgs, "function _loadModAsset(")
+    assert "if (inflight[url]) return inflight[url];" in asset
+    assert "inflight[url] = p;" in asset
+    # Never rejects: load -> ok, error (404 / transport / SRI MISMATCH) -> !ok.
+    assert "resolve({ ok: ok, url: url });" in asset
+    assert "reject" not in asset
+    # Same-origin, generation-qualified, every segment encoded.
+    url = _frag_fn(pkgs, "function _modAssetUrl(")
+    assert "return '/mods/' + encodeURIComponent(id) + '/'" in url
+    assert "token" not in url, "an asset URL must never carry the token (#144)"
+
+
+def test_late_registration_is_gated_on_what_this_page_requested():
+    # #163: a package that overran the load deadline still executes -- nothing
+    # can cancel an in-flight <script>. _lateRegister is the only way in, and it
+    # accepts ONLY an id this page asked for, so a script landing minutes later
+    # for a package this page never requested cannot bring a mod up.
+    loader = _loader_src()
+    pkgs = _packages_src()
+    reg = _frag_fn(loader, "function registerMod(")
+    assert "if (window.__mods.bootComplete) _lateRegister(entry);" in reg
+    body = _frag_fn(pkgs, "function _lateRegister(")
+    assert "if (!_modBag('requested')[decl.id]) {" in body
+    assert "reg.splice(i, 1);" in body, \
+        "a refused late registration must be un-registered, not merely ignored"
+    assert "reason: 'not-requested'" in body
+    # On accept: re-sort, THEN re-resolve the pins (a pin naming this mod is
+    # dropped by _resolvePins until the mod is in `registered`), then repaint
+    # the pane, then bring it up.
+    _order_in(body,
+              "_topoSortRegistered();",
+              "window.__mods.policy = _resolvePins(window.__mods.policyRaw);",
+              "_renderManagerRows();",
+              "if (isModEnabled(decl.id)) {",
+              "_bringUp(decl);")
+    # The master gate stays absolute: a late arrival cannot init past it.
+    assert body.index("if (window.__mods.masterEnabled === false) {") \
+        < body.index("_bringUp(decl);")
+    # Its second caller: the post-login path loads the packages a 401'd boot
+    # never saw -- otherwise typing your password leaves every installed mod
+    # missing until a reload (the hole #157 closed for the pins).
+    auth = _frag_fn(loader, "async function notifyModsHostAuth(")
+    _order_in(auth,
+              "await _loadInstalledPackages(window.__mods.catalog);",
+              "_topoSortRegistered();",
+              "window.__mods.policy = _resolvePins(window.__mods.policyRaw);",
+              "_applyPolicyLive();")
+
+
+def test_registration_is_bound_to_its_package_by_currentScript():
+    # #163: a declaration whose id is not the executing package's id is refused
+    # with a `wrong-id` row. A CORRECTNESS CONVENTION, NOT A BOUNDARY -- and the
+    # source has to say so, because fork-trust means the code can bypass it.
+    loader = _loader_src()
+    reg = _frag_fn(loader, "function registerMod(")
+    assert "const pkgId = _currentPackageId();" in reg
+    assert "if (pkgId && pkgId !== id) {" in reg
+    assert "pkg.state = 'wrong-id'; pkg.wrongId = id;" in reg
+    assert "CORRECTNESS CONVENTION, NOT A BOUNDARY" in reg
+    # A shipped mod runs inside the ONE inline <script>, which carries no
+    # package stamp -- so the check cannot fire for it.
+    cur = _frag_fn(_packages_src(), "function _currentPackageId(")
+    assert "el.dataset.modPackage || null" in cur
+    assert "document.currentScript" in cur
+
+
+def test_mod_status_model_is_a_union_not_a_registered_walk():
+    # #163 / design §5. A cycle row, a 404'd script and an SRI mismatch never
+    # call registerMod, so they have NO entry in registered[] -- a pane driven
+    # off that array simply cannot show them. The model is the union of catalog
+    # packages and registrations, joined on id.
+    pkgs = _packages_src()
+    rows = _frag_fn(pkgs, "function _modStatusRows(")
+    assert "for (const row of cat) {" in rows and \
+        "for (const m of window.__mods.registered) {" in rows, \
+        "the row set must be a UNION of both sides"
+    body = _frag_fn(pkgs, "function _modStatusRow(")
+    for state in ("'active'", "'off'", "'blocked'", "'cycle'",
+                  "'blocked-by-cycle'", "'failed'", "'fetch-failed'",
+                  "'timeout'", "'no-register'", "'wrong-id'"):
+        assert f"state = {state};" in body, f"missing status: {state}"
+    # `blocked` distinguishes a dep that IS here but off from one that never
+    # loaded, and from one this broker does not have at all.
+    assert "if (_modIsRegistered(dep)) return dep;" in body
+    assert "' (not installed)'" in body and "' (not loaded)'" in body
+    # Provenance on every row, and the two states that must not offer a toggle.
+    assert "source: source," in body
+    assert "toggleable: !!decl && pin === null," in body
+    # The broker's own verdict is honoured but the client's wins (the client
+    # sees the whole shipped u installed graph; the broker only sorts installed).
+    assert "catRow.error === 'requires_cycle'" in body
+    assert "catRow.error === 'blocked_by_cycle'" in body
+    # S5 renders this; it must reach the served page and the test API.
+    assert "function _modStatusRows(" in INDEX_HTML
+    assert "statusRows: function () { return _modStatusRows(); }," in _loader_src()
+
+
+def test_installed_mods_are_default_off_whatever_they_declare():
+    # #163 / design §2: installing a mod on one broker must not silently switch
+    # it on for every browser that loads that broker's page. The broker reports
+    # default_enabled false for every installed row; the loader must take the
+    # default from the CATALOG for an installed mod, because a package is free
+    # to declare `defaultEnabled: true` -- or omit it, which means true -- in its
+    # own registerMod call.
+    body = _loader_fn("function _modDefault(")
+    _order_in(body,
+              "const row = _modCatalogRow(id);",
+              "if (row && row.source === 'installed') return row.default_enabled === true;",
+              "return rec ? rec.defaultEnabled !== false : true;")
+
+
+def test_nomods_escape_hatch_present():
+    # #163: the answer to "an installed mod bricked the desktop and the Control
+    # Panel is unreachable". Read-only -- never written to localStorage or
+    # /state, so it cannot become sticky.
+    pkgs = _packages_src()
+    body = _frag_fn(pkgs, "function _nomodsRequested(")
+    assert ".get('nomods') === '1'" in body
+    assert "localStorage" not in body and "savePrefs" not in body
+    boot = _loader_fn("async function loadMods(")
+    assert boot.index("if (_nomodsRequested()) {") < boot.index("await localInfo()"), \
+        "?nomods=1 must return before the /info fetch, not merely before the boot loop"
+    assert "return;" in boot[boot.index("if (_nomodsRequested()) {"):]
+    assert "function _nomodsRequested(" in INDEX_HTML
+
+
+def test_installed_mods_are_not_in_the_bundle():
+    # #163's central packaging property: an installed mod never enters
+    # INDEX_HTML. That is what keeps the CSP hash, the one-inline-<script>
+    # assertion, the byte-identity tests, the _MODS drift guard and the per-
+    # fragment line caps all working unmodified -- "stale INDEX_HTML" is a
+    # non-problem by construction, because the page does not change when a mod
+    # is installed.
+    # Still exactly ONE inline <script> (inline_script_hash raises otherwise).
+    # Strip that block before looking for tags: the loader's own comments
+    # legitimately quote the asset-URL shape.
+    ui.inline_script_hash(INDEX_HTML)
+    import re as _re
+    markup = _re.sub(r"<script>.*?</script>", "", INDEX_HTML, flags=_re.S)
+    assert 'src="/mods/' not in markup
+    assert 'href="/mods/' not in markup
+    # ui.mod_catalog() stays SHIPPED-ONLY: it is derived from _MODS, so it can
+    # never advertise a mod the page does not carry. app.py concatenates the
+    # installed half from modinstall.catalog() at request time.
+    assert all(row["source"] == "shipped" for row in ui.mod_catalog())
+    # The asset route is the only way installed bytes reach the page, and the
+    # loader builds those URLs itself -- there is no assembly-time splice.
+    assert "'/mods/' + encodeURIComponent(id)" in INDEX_HTML
+
+
+# --------------------------------------------------------------------------- #
 # clipboard mod + ctx.clipboard observer seam (#106)
 # --------------------------------------------------------------------------- #
 
