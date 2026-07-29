@@ -594,6 +594,9 @@
                 // a mod kind is a first-class window everywhere the registry is
                 // consulted. A duplicate appKind throws (initMod rolls the mod
                 // back); the kind is removed from the registry on teardown.
+                // An optional `restore` is called directly, so it does NOT get
+                // openAppWindow's dedup-by-id: it must check windows.get(rec.id)
+                // itself, because a lease-loss rebuild re-runs the restore (#167).
                 registerWindowKind: function (spec) {
                     return _modRegisterWindowKind(rec, spec);
                 },

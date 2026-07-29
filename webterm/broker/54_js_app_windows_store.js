@@ -175,6 +175,13 @@
         //   { appKind, factory(appData)->win, serialize(win)->record|null,
         //     restore?(record), retainOnClose?(record)->bool, menu? }
         //   menu = { label, launch(), closedItems?()->[menuItem] }
+        // `restore` is called DIRECTLY, so unlike the factory path it never gets
+        // openAppWindow's dedup-by-id. It is invoked at most ONCE per view
+        // generation — #167's post-loader retry deliberately re-attempts only the
+        // records whose kind was UNREGISTERED, and an unregistered kind has no
+        // hook to call — but a lease loss + rebuildView is a new generation and
+        // does call it again, so a hook must still check windows.get(record.id)
+        // (or route through openAppWindow). No shipped kind defines one today.
         // The one CORE built-in (control-panel) is registered as a default (NOT
         // through a mod) so it behaves with mods_enabled=false exactly as the old
         // hardcoded branch did; a mod adds a brand-new kind through
@@ -357,12 +364,24 @@
             // Unknown/unregistered appKind. The hoisted note/editor builder
             // (mods/editor/) is the default ONLY for the note/editor kinds and a
             // legacy record with no appKind (a build before app windows carried a
-            // kind). Coercing some OTHER persisted kind whose mod is DISABLED —
-            // e.g. a file-manager (#84/S11) with mods off — into a sticky note
-            // would mis-render it AND rewrite its stored record to 'sticky-note'
-            // on the next saveAppWindow, silently destroying it. Leave such a
-            // record intact (return null -> restoreAppWindows skips it) so
-            // re-enabling its mod restores it faithfully.
+            // kind). Coercing some OTHER persisted kind whose mod is not
+            // registered here — file-manager (#84/S11) or scratchpad, the two
+            // persisted mod-owned kinds — into a sticky note would mis-render it
+            // AND rewrite its stored record to 'sticky-note' on the next
+            // saveAppWindow, silently destroying it. Leave such a record intact
+            // (return null -> restoreAppWindows skips it) so re-enabling its mod
+            // restores it faithfully.
+            //
+            // "not registered here" is THREE cases, not one (#167). Mods off
+            // (mods_enabled=false, or that mod toggled/pinned off) is the durable
+            // one. Mods merely SLOW is the third and least obvious: the loader
+            // waits on GET /info while restore waits on the lease + the /state
+            // adopt, so a mod-owned kind can simply not exist YET — a silent,
+            // intermittent vanishing act. This null is what restoreAppWindows
+            // reads to remember the record and retry it once the loader settles
+            // (restoreAppWindowsAfterMods, 84_js_active_view_lifecycle), so it
+            // must keep returning null rather than guessing: the retry has
+            // nothing to rebuild from if the record is gone or rewritten.
             const ak = appData.appKind;
             if (ak && ak !== 'sticky-note' && ak !== 'text-editor') return null;
             return openNoteOrEditorWindow(appData);
