@@ -533,6 +533,38 @@ def test_installed_help_sections_are_serve_time_only():
         hc.serialize_corpus(hc.build_full_corpus())
 
 
+def test_no_shipped_help_slug_is_in_the_installed_namespace():
+    # This is what makes "an installed section can never shadow a shipped one"
+    # STRUCTURAL rather than a hope. An installed section's slug is forced to
+    # its mod id and an installed id must start with "x-", so the other half of
+    # the proof is that nothing on the shipped side ever claims an "x-" slug.
+    #
+    # It is not implied by the CI rule that no shipped mod ID starts with "x-":
+    # a wiki page could be named X-Notes.md, and a shipped mod.json may set an
+    # explicit help.slug unrelated to its id (mod-sync does). Both land in
+    # build_full_corpus, so guard the built slugs, not the ids.
+    #
+    # If this ever fails, the collision is not a crash — merge_installed_sections
+    # keeps the shipped section and silently drops the installed mod's help.
+    for sec in hc.build_full_corpus()["sections"]:
+        assert not sec["slug"].startswith("x-"), \
+            "%s claims a slug in the installed namespace" % sec["slug"]
+
+
+def test_an_installed_section_never_displaces_a_base_section():
+    # The unreachable-by-construction branch above, exercised anyway: if a base
+    # section somehow already owns the slug, the BASE wins and the corpus is
+    # otherwise untouched — one section per slug, never two, never a raise.
+    index = _installed_index({"x-notes": ({"title": "Notes"}, "installed\n")})
+    base = {"sections": [{"slug": "x-notes", "label": "Squatter", "order": 5,
+                          "cards": [{"title": "Base", "body": [],
+                                     "search": "base"}]}]}
+    merged = hc.merge_installed_sections(base, index)
+    assert len(merged["sections"]) == 1
+    assert merged["sections"][0]["label"] == "Squatter"
+    assert "mod" not in merged["sections"][0]
+
+
 def test_installed_help_slug_is_forced_to_the_mod_id():
     # help.slug is dropped by modinstall's canonical manifest and ignored here,
     # so an installed section can never land on a wiki or shipped slug.
@@ -553,6 +585,7 @@ def test_installed_help_never_raises_or_blanks_help():
     base = hc.build_full_corpus()
     index = _installed_index({"x-good": ({}, "prose\n")})
     good = index["mods"]["x-good"]
+    _MAX = hc._MAX_INSTALLED_SECTIONS
     for broken in (None, 7, b"bytes", "", "   \n", "\n\n",
                    "x" * (hc._MAX_INSTALLED_HELP_CHARS + 1)):
         bad = {"mods": {"x-bad": dict(good, id="x-bad", help_md=broken),
@@ -564,12 +597,27 @@ def test_installed_help_never_raises_or_blanks_help():
         assert len(slugs) == len(base["sections"]) + 1
 
     # ...and a wholly malformed index / corpus degrades to the base, not a throw.
-    for junk in (None, {}, {"mods": None}, {"mods": {"x": None}},
-                 {"mods": {"x": {"help_md": "p\n", "manifest": 7}}},
+    for junk in (None, {}, {"mods": None}, {"mods": {"x-a": None}},
+                 {"mods": {"x-a": {"help_md": "p\n", "manifest": 7}}},
                  {"mods": {7: {"help_md": "p\n"}}}):
-        assert hc.merge_installed_sections(base, junk)["sections"]
+        assert len(hc.merge_installed_sections(base, junk)["sections"]) \
+            >= len(base["sections"])
     assert hc.merge_installed_sections({"sections": []}, index)["sections"]
     assert hc.merge_installed_sections(None, index) is None
+
+    # One unusable KEY must not take the whole merge down with it: sorting a
+    # mixed-type key set raises, and the outer guard would then drop every
+    # OTHER mod's help too.
+    mixed = hc.merge_installed_sections(base, {"mods": {7: {"help_md": "p\n"},
+                                                        "x-good": good}})
+    assert "x-good" in [s["slug"] for s in mixed["sections"]]
+
+    # The aggregate parse this does on the event loop is bounded even for an
+    # index no validator ever saw.
+    many = {"mods": {"x-%03d" % n: dict(good, help_md="mod %d prose\n" % n)
+                     for n in range(_MAX + 5)}}
+    merged = hc.merge_installed_sections(base, many)
+    assert len(merged["sections"]) == len(base["sections"]) + _MAX
 
 
 def test_installed_help_falls_back_and_sorts_deterministically():

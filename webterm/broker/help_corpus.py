@@ -594,11 +594,15 @@ def build_full_corpus() -> dict:
 # Installed sections sort after the wiki (orders are small) AND after the
 # shipped mods (_MOD_ORDER_BASE + n). A mod may still override with help.order.
 _INSTALLED_ORDER_BASE = 3000
-# modinstall caps every file at 256 KiB, on the install path AND the scan path,
-# and a str is never longer than its UTF-8 encoding — so this ceiling is already
-# enforced upstream. Restated locally only so a hand-built index still cannot
-# hand the parser an unbounded string; it is not a second policy.
+# modinstall caps every file at 256 KiB and the store at 32 mods, on the install
+# path AND the scan path, and a str is never longer than its UTF-8 encoding — so
+# both ceilings are already enforced upstream. They are restated locally, looser
+# rather than tighter, only so that a HAND-BUILT index cannot hand the parser an
+# unbounded string or an unbounded number of them. They are not a second policy,
+# and they are what bounds the worst-case parse this does on the event loop
+# (32 x 256 KiB, and only for mods whose help text is not already cached).
 _MAX_INSTALLED_HELP_CHARS = 256 * 1024
+_MAX_INSTALLED_SECTIONS = 32
 
 # help.md text -> parsed cards, rebuilt to EXACTLY the currently-merged set on
 # every call. Parsing is a pure function of the text, so a content key can never
@@ -606,7 +610,16 @@ _MAX_INSTALLED_HELP_CHARS = 256 * 1024
 # card objects the live corpus already holds, so it costs no steady-state
 # memory and cannot outgrow the index. It earns its keep because a swap runs ON
 # THE EVENT LOOP under mods_install_lock: without it, one install would re-parse
-# every other installed mod's help (up to 32 x 256 KiB) before the loop turns.
+# every other installed mod's help before the loop turns. Measured at the
+# ceiling (32 mods x 251 KiB of DISTINCT help): 1650 ms cold, 1 ms to add one
+# more mod. The cold parse itself is paid at create_app, before the loop exists;
+# what is left on the loop is a rescan that finds every help.md changed, which
+# is an operator editing 8 MiB of their own markdown and is priced accordingly.
+#
+# Two mods with byte-identical help.md therefore SHARE one cards list, as do a
+# section and its predecessor across a swap. That is safe because cards are
+# write-once plain data — the corpus is only ever serialized, never annotated.
+# If that ever stops being true, key the cache by (id, text) and copy.
 _installed_cards: dict = {}
 
 
@@ -693,9 +706,13 @@ def merge_installed_sections(corpus: dict, index: dict) -> dict:
         base = list(corpus.get("sections") or [])
         seen = {sec.get("slug") for sec in base if isinstance(sec, dict)}
         records = (index or {}).get("mods") or {}
+        # Filter to str keys BEFORE sorting: a hand-built index carrying one
+        # non-str key would otherwise raise inside sorted() and discard every
+        # OTHER mod's help along with it.
+        ids = sorted(mid for mid in records if isinstance(mid, str))
         cards_out: dict = {}
         added: list = []
-        for offset, mod_id in enumerate(sorted(records)):
+        for offset, mod_id in enumerate(ids[:_MAX_INSTALLED_SECTIONS]):
             try:
                 section = _installed_section(mod_id, records[mod_id], offset,
                                              cards_out)
@@ -705,9 +722,12 @@ def merge_installed_sections(corpus: dict, index: dict) -> dict:
                 continue
             if section is None:
                 continue
-            # Unreachable while ids are "x-"-prefixed and slugs are forced to
-            # them (see _installed_section); kept because "never raises" must
-            # also mean "never silently emits two sections under one slug".
+            # Unreachable, and guarded on the OTHER side too: an installed id
+            # must start with "x-", and test_no_shipped_help_slug_is_in_the_
+            # installed_namespace pins that no wiki page stem and no shipped
+            # mod's help.slug ever does. Kept anyway because "never raises" has
+            # to also mean "never silently emits two sections under one slug" —
+            # and note the base wins, so a collision loses the INSTALLED help.
             if section["slug"] in seen:
                 LOGGER.warning("installed mod %s: help slug already taken",
                                mod_id)

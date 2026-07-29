@@ -2318,10 +2318,14 @@ async def _help_corpus(request: Request):
     # swap (_swap_mods_index), so an install shows up here immediately.
     #
     # Public like "/", and that is a DISCLOSURE, stated rather than waved past:
-    # installed help text -- and therefore the set of installed mod ids -- is
-    # readable without a token, exactly as GET / already serves every shipped
-    # mod's source and /mods/<id>/<gen>/<name> serves every installed one's. Do
-    # not put a secret in a mod, or in its help.
+    # the ids of installed mods that ship help, their help text, and the label
+    # and icon their manifest declares are all readable WITHOUT A TOKEN. The
+    # bytes were already public -- GET / carries every shipped mod's source and
+    # /mods/<id>/<gen>/<name> every installed one's -- but that route needs the
+    # id AND the generation AND the file name, whereas this one is directly
+    # ENUMERABLE, so what this adds is discovery. #163 accepts that (its design
+    # says installed source, styles and help are publicly readable); the honest
+    # statement of the rule is: do not put a secret in a mod, or in its help.
     return sanic_json(request.app.ctx.help_corpus)
 
 
@@ -2382,7 +2386,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # index swap. Both are filled in the serve_ui block below -- a headless
     # broker registers no GET /help-corpus.json, so these literal empties never
     # reach a client; they only mean _swap_mods_index cannot trip over a missing
-    # attribute, and they cost no import of .help_corpus (#87).
+    # attribute. They cost no import of .help_corpus (#87), and neither does a
+    # headless broker at any later point: _swap_mods_index is the only thing
+    # that imports it, and its only callers are the serve_ui block below and
+    # the install/uninstall/rescan routes, which are themselves serve_ui-gated
+    # (test_the_install_api_is_absent_on_a_headless_broker).
     app.ctx.help_corpus_base = {"sections": []}
     app.ctx.help_corpus = {"sections": []}
     # Headless mode (#87): when off, the broker serves the full JSON/WS API but

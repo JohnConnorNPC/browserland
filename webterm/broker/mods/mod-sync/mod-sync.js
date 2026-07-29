@@ -1039,37 +1039,43 @@
                             { sticky: true, type: 'error' });
                         return;
                     }
-                    const lines = [];
+                    // Two lists, concatenated writes-first. appendLines truncates
+                    // at DETAIL_MAX from the FRONT, so interleaving them would
+                    // let a long tail of "not installed there" skips push the
+                    // changes this dialog exists to confirm out of view.
+                    const writes = [];
+                    const skips = [];
                     let missing = 0;
                     for (const r of plan.modRows) {
                         if (r.action === 'write') {
-                            lines.push(['write', r.id + ' → '
+                            writes.push(['write', r.id + ' → '
                                 + (r.want ? 'on' : 'off')]);
                         } else if (r.action === 'pinned-here') {
-                            lines.push(['skip', r.id + ' — ' + r.note]);
+                            skips.push(['skip', r.id + ' — ' + r.note]);
                         } else if (r.action === 'missing') {
                             // Say it. Omitting the row makes a mod that broker
                             // has never heard of look like one it agrees about.
                             missing += 1;
-                            lines.push(['skip', r.id + ' — ' + r.note]);
+                            skips.push(['skip', r.id + ' — ' + r.note]);
                         }
                     }
                     for (const r of plan.setRows) {
                         if (r.action === 'rejected') {
-                            lines.push(['skip', r.key + ' — that broker\'s value ('
+                            skips.push(['skip', r.key + ' — that broker\'s value ('
                                 + showValue(r.value) + ') is not one '
                                 + r.modId + ' accepts here, so it is left alone']);
                             continue;
                         }
                         if (r.action !== 'write') continue;
-                        lines.push(['write', r.key + ': ' + showValue(r.cur)
+                        writes.push(['write', r.key + ': ' + showValue(r.cur)
                             + ' → ' + showValue(r.value)]);
                     }
                     if (plan.settingsUnreadable) {
-                        lines.push(['skip', 'its mod settings could not be read, '
+                        skips.push(['skip', 'its mod settings could not be read, '
                             + 'so only the on/off state above is compared']);
                     }
-                    if (!lines.filter((l) => l[0] === 'write').length) {
+                    const lines = writes.concat(skips);
+                    if (!writes.length) {
                         // Nothing to preview, so the skip lines above are never
                         // shown — carry the "not installed there" count into the
                         // notice rather than reporting a bare clean match.

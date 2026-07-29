@@ -2239,6 +2239,11 @@ def test_mod_sync_never_adopts_a_mod_this_build_does_not_have():
     # ...including when there is nothing else to preview, where the skip lines
     # are never rendered at all.
     assert "' Left alone: '" in code
+    # appendLines truncates at DETAIL_MAX from the FRONT, so the new skip rows
+    # must not be able to push the writes this dialog exists to confirm out of
+    # view: the two lists are built separately and concatenated writes-first.
+    assert "const lines = writes.concat(skips);" in code
+    assert "if (!writes.length) {" in code
     # planFor's half, unchanged and pinned here so it cannot rot: a mod absent
     # from the peer's catalog is skipped before any pin is computed, in BOTH
     # modes (one shared loop), and reported as a row.

@@ -1637,11 +1637,15 @@ def test_help_the_catalog_and_the_index_swap_together(tmp_path, monkeypatch):
     app = make_app(tmp_path, monkeypatch)
 
     def installed_ids(_app):
+        # The help set is read as "every section in the INSTALLED namespace",
+        # NOT as an intersection with the index -- intersecting would hide the
+        # very failure this is here to catch, a section left behind for a mod
+        # the index no longer has.
         return ({r["id"] for r in _app.ctx.mod_catalog
                  if r.get("source") == "installed"},
                 set(_app.ctx.mods_index["mods"]),
                 {s["slug"] for s in _app.ctx.help_corpus["sections"]
-                 if "mod" in s} & set(_app.ctx.mods_index["mods"]))
+                 if s["slug"].startswith("x-")})
 
     cat, idx, help_ids = installed_ids(app)
     assert cat == idx == help_ids == {"x-notes"}
@@ -1651,6 +1655,31 @@ def test_help_the_catalog_and_the_index_swap_together(tmp_path, monkeypatch):
     authed(app).post("/mods/rescan", json={})
     cat, idx, help_ids = installed_ids(app)
     assert cat == idx == help_ids == {"x-notes", "x-two"}
+    _, r = authed(app).post("/mods/uninstall", json={"id": "x-two"})
+    assert r.status == 200
+    cat, idx, help_ids = installed_ids(app)
+    assert cat == idx == help_ids == {"x-notes"}
+
+
+def test_replacing_a_mod_replaces_its_help_text(tmp_path, monkeypatch):
+    # The merge memoizes parsed cards, so this is the case that would break if
+    # the memo were keyed by anything but the help TEXT itself: same id, same
+    # slug, new generation, different words.
+    app = make_app(tmp_path, monkeypatch)
+    body = payload()
+    body["files"]["help.md"] = "# Notes\n\n## Old\n\nthe old words\n"
+    assert authed(app).post("/mods/install", json=body)[1].status == 200
+
+    def titles():
+        _, r = app.test_client.get("/help-corpus.json")
+        sec = [s for s in r.json["sections"] if s["slug"] == "x-notes"][0]
+        return [c["title"] for c in sec["cards"]]
+
+    assert titles() == ["Overview", "Old"]     # the H1 becomes an Overview card
+    body["files"]["help.md"] = "# Notes\n\n## New\n\nthe new words\n"
+    body["replace"] = True
+    assert authed(app).post("/mods/install", json=body)[1].status == 200
+    assert titles() == ["Overview", "New"]
 
 
 def test_a_mod_with_unparseable_help_never_blanks_the_corpus(tmp_path,
@@ -1659,27 +1688,42 @@ def test_a_mod_with_unparseable_help_never_blanks_the_corpus(tmp_path,
     # own section is skipped and everything else is served unchanged.
     app = make_app(tmp_path, monkeypatch)
     before = _help_slugs(app)
+    # A well-behaved installed mod alongside it, so this proves the bad one is
+    # skipped rather than that the whole installed half was dropped.
+    good = payload()
+    good["manifest"] = manifest(mod_id="x-fine", scripts=["x-fine.js"])
+    good["files"] = {"x-fine.js": "//\n", "help.md": "# Fine\n\nhelp\n"}
+    assert authed(app).post("/mods/install", json=good)[1].status == 200
     body = payload()
     body["files"]["help.md"] = "<!-- help:ignore-end -->\nunbalanced\n"
     _, r = authed(app).post("/mods/install", json=body)
     assert r.status == 200
-    assert _help_slugs(app) == before
+    assert _help_slugs(app) == before + ["x-fine"]
     # It is still installed and still served -- only its help is missing.
     _, det = authed(app).get("/mods/installed")
-    assert det.json["mods"][0]["has_help"] is True
+    rows = {m["id"]: m for m in det.json["mods"]}
+    assert rows["x-notes"]["has_help"] is True
 
 
 def test_the_served_corpus_discloses_installed_ids_without_a_token(tmp_path,
                                                                    monkeypatch):
-    # STATED, not waved past: /help-corpus.json is public like "/", so an
-    # installed mod's help text -- and therefore the set of installed ids -- is
-    # readable with no token, exactly as GET / already carries every shipped
-    # mod's source and /mods/<id>/<gen>/<name> every installed one's.
+    # STATED, not waved past: /help-corpus.json is public like "/", so the ids
+    # of installed mods that ship help, their help text, and the label/icon
+    # their manifest declares are all readable with no token -- and unlike
+    # /mods/<id>/<gen>/<name>, which needs the id AND the generation AND the
+    # file name, this one is directly ENUMERABLE. The underlying bytes were
+    # already public (GET / carries every shipped mod's source); what this adds
+    # is discovery. Accepted by #163's design; do not put a secret in a mod.
     app = make_app(tmp_path, monkeypatch)
-    authed(app).post("/mods/install", json=payload())
+    body = payload()
+    body["manifest"]["help"] = {"label": "Notes", "icon": "N"}
+    body["files"]["help.md"] = "# Notes\n\n## Secretish\n\nplain as day\n"
+    authed(app).post("/mods/install", json=body)
     _, r = app.test_client.get("/help-corpus.json")
     assert r.status == 200
-    assert "x-notes" in [s["slug"] for s in r.json["sections"]]
+    sec = [s for s in r.json["sections"] if s["slug"] == "x-notes"]
+    assert sec and sec[0]["label"] == "Notes" and sec[0]["icon"] == "N"
+    assert "plain as day" in json.dumps(sec[0])
 
 
 def test_a_headless_broker_serves_no_help_corpus(tmp_path, monkeypatch):
