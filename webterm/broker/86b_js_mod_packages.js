@@ -112,47 +112,76 @@
 
         // Inject one asset element and resolve when it settles. NEVER rejects —
         // {ok:true} on `load`, {ok:false} on `error` (a 404, a transport
-        // failure, or an SRI MISMATCH all arrive as `error`).
+        // failure, or an SRI MISMATCH all arrive as `error`). The ENTIRE body,
+        // element construction through appendChild, is inside the try: a promise
+        // that can reject is a promise a caller has to defend against, and this
+        // one's whole contract is that it does not.
         //
-        // Deduplicated on the URL, which encodes (id, gen, file): the post-login
-        // retry re-walks the whole catalog, and without this it would inject a
-        // second copy of every script the boot already loaded — a second
-        // execution, which D1 says is fatal.
-        function _loadModAsset(url, build) {
+        // Deduplicated on KIND + URL, and the URL encodes (id, gen, file): the
+        // post-login retry re-walks the whole catalog, and without this it would
+        // inject a second copy of every script the boot already loaded — a
+        // second execution, which D1 says is fatal. The kind is in the key
+        // because a <link> and a <script> are different injections; the install
+        // grammar already forces .css/.js apart, so this only stops a future
+        // relaxation there from silently turning a script into a stylesheet's
+        // cached promise and never inserting the <script> at all.
+        function _loadModAsset(kind, url, build) {
             const inflight = _modBag('assetLoads');
-            if (inflight[url]) return inflight[url];
+            const key = kind + ' ' + url;
+            if (inflight[key]) return inflight[key];
             const p = new Promise(function (resolve) {
-                let el;
-                try { el = build(url); }
-                catch (e) {
-                    console.error('[mods] could not build the element for', url, e);
-                    resolve({ ok: false, url: url });
-                    return;
-                }
-                let settled = false;
                 const finish = function (ok) {
-                    if (settled) return;
-                    settled = true;
+                    if (finish.settled) return;
+                    finish.settled = true;
                     resolve({ ok: ok, url: url });
                 };
-                el.addEventListener('load', function () { finish(true); });
-                el.addEventListener('error', function () {
-                    console.error('[mods] failed to load', url);
+                try {
+                    const el = build(url);
+                    el.addEventListener('load', function () { finish(true); });
+                    el.addEventListener('error', function () {
+                        console.error('[mods] failed to load', url);
+                        finish(false);
+                    });
+                    (document.head || document.documentElement).appendChild(el);
+                } catch (e) {
+                    console.error('[mods] could not inject', url, e);
                     finish(false);
-                });
-                (document.head || document.documentElement).appendChild(el);
+                }
             });
-            inflight[url] = p;
+            inflight[key] = p;
             return p;
         }
 
         // Fetch every installed package the catalog names. Resolves (never
         // rejects) when every script has settled OR the deadline passes.
         //
-        // script.async = true — NOT ordered-async (`async = false`). Ordering is
-        // irrelevant because _topoSortRegistered() sorts the registrations
-        // afterwards, and ordered-async would let ONE slow file head-of-line
-        // block every other mod on the page.
+        // PACKAGES load in parallel; a package's OWN scripts load in its
+        // manifest order, one after the next. Both halves matter and they are
+        // different problems:
+        //   - Across packages, ordering is irrelevant because
+        //     _topoSortRegistered() sorts the REGISTRATIONS afterwards, and
+        //     document-ordered async (`script.async = false`) would let one slow
+        //     file head-of-line block every other mod on the page.
+        //   - Within a package the topo sort says nothing at all — it orders mod
+        //     declarations, not the files of one mod. A package whose second
+        //     file reads a global its first file defined would work or not
+        //     depending on network timing, which is exactly the class of bug
+        //     that is impossible to reproduce. `scripts` is an ORDERED list in
+        //     the manifest; this honours that. A single-script package (the
+        //     common case) pays nothing.
+        // A package that spans several scripts should still call registerMod
+        // from its LAST one: a registration is acted on the moment it arrives,
+        // so registering from the first file would let the mod init before its
+        // siblings had loaded.
+        //
+        // STYLES are injected but NOT awaited and NOT part of the package's
+        // state. This mirrors shipped mod CSS exactly (ui.py splices every mod's
+        // stylesheet into the page at assembly time, independent of the runtime
+        // gate — "present but inert", because a disabled mod's selectors match
+        // nothing until its JS adds the markup). So an installed mod's CSS is
+        // also live regardless of enable/pin/init, and a teardown cannot remove
+        // it — the same posture, deliberately, not an oversight. A style that
+        // 404s or fails SRI is logged by _loadModAsset and is not fatal.
         //
         // A row carrying a broker-side `error` (requires_cycle /
         // blocked_by_cycle) is NOT FETCHED AT ALL — it gets a status row and
@@ -167,63 +196,15 @@
             const pending = [];
             const started = [];
             for (const row of rows) {
-                if (!row || typeof row !== 'object') continue;
-                if (row.source !== 'installed') continue;
-                if (typeof row.id !== 'string' || !row.id) continue;
-                const pkg = _modPackage(row);
-                if (pkg.done) continue;          // already settled this page load
-                if (row.error) {
-                    pkg.state = (row.error === 'requires_cycle')
-                        ? 'cycle' : 'blocked-by-cycle';
-                    pkg.done = true;
-                    continue;
+                // One bad row must not cost the others their load — the loop
+                // builds URLs and elements, and every one of those can throw.
+                try {
+                    const p = _startPackage(row);
+                    if (p) { started.push(p.pkg); pending.push(p.wait); }
+                } catch (e) {
+                    console.error('[mods] could not start installed package',
+                        row && row.id, e);
                 }
-                if (!pkg.gen || !pkg.scripts.length) {
-                    console.error('[mods] installed row "' + row.id
-                        + '" carries no generation/scripts; skipping it');
-                    pkg.state = 'fetch-failed';
-                    pkg.done = true;
-                    continue;
-                }
-                // This page ASKED for this package — the gate _lateRegister
-                // checks, so a script that lands minutes later for something
-                // this page never requested cannot bring a mod up.
-                _modBag('requested')[row.id] = true;
-                started.push(pkg);
-                for (const name of pkg.styles) {
-                    _loadModAsset(_modAssetUrl(pkg.id, pkg.gen, name),
-                        function (url) {
-                            const link = document.createElement('link');
-                            link.rel = 'stylesheet';
-                            const sri = pkg.integrity[name];
-                            if (sri) link.integrity = sri;
-                            link.href = url;
-                            return link;
-                        });
-                }
-                const waits = pkg.scripts.map(function (name) {
-                    return _loadModAsset(_modAssetUrl(pkg.id, pkg.gen, name),
-                        function (url) {
-                            const s = document.createElement('script');
-                            s.async = true;
-                            // Binds the REGISTRATION to the package: registerMod
-                            // reads document.currentScript and refuses a
-                            // declaration whose id is not this one.
-                            s.dataset.modPackage = pkg.id;
-                            const sri = pkg.integrity[name];
-                            if (sri) s.integrity = sri;
-                            s.src = url;
-                            return s;
-                        });
-                });
-                pending.push(Promise.all(waits).then(function (results) {
-                    pkg.done = true;
-                    // A wrong-id refusal is a verdict on the package, not on the
-                    // transport — do not overwrite it with a load outcome.
-                    if (pkg.state === 'wrong-id') return;
-                    pkg.state = results.some(function (r) { return !r.ok; })
-                        ? 'fetch-failed' : 'loaded';
-                }));
             }
             if (!pending.length) return Promise.resolve();
             return new Promise(function (resolve) {
@@ -250,6 +231,82 @@
                     function () { clearTimeout(timer); finish(); },
                     function () { clearTimeout(timer); finish(); });
             });
+        }
+
+        // Begin ONE installed package: mark it requested, inject its styles, and
+        // chain its scripts in manifest order. Returns {pkg, wait} or null when
+        // the row is not fetchable (already settled, a broker-side cycle error,
+        // or a malformed row). `wait` never rejects.
+        function _startPackage(row) {
+            if (!row || typeof row !== 'object') return null;
+            if (row.source !== 'installed') return null;
+            if (typeof row.id !== 'string' || !row.id) return null;
+            const pkg = _modPackage(row);
+            if (pkg.done) return null;          // already settled this page load
+            if (row.error) {
+                pkg.state = (row.error === 'requires_cycle')
+                    ? 'cycle' : 'blocked-by-cycle';
+                pkg.done = true;
+                return null;
+            }
+            if (!pkg.gen || !pkg.scripts.length) {
+                console.error('[mods] installed row "' + row.id
+                    + '" carries no generation/scripts; skipping it');
+                pkg.state = 'fetch-failed';
+                pkg.done = true;
+                return null;
+            }
+            // This page ASKED for this package — the gate _lateRegister checks,
+            // so a script that lands minutes later for something this page never
+            // requested cannot bring a mod up.
+            _modBag('requested')[row.id] = true;
+            for (const name of pkg.styles) {
+                _loadModAsset('css', _modAssetUrl(pkg.id, pkg.gen, name),
+                    function (url) {
+                        const link = document.createElement('link');
+                        link.rel = 'stylesheet';
+                        const sri = pkg.integrity[name];
+                        if (sri) link.integrity = sri;
+                        link.href = url;
+                        return link;
+                    });
+            }
+            let chain = Promise.resolve(true);
+            for (const name of pkg.scripts) {
+                chain = chain.then(function (okSoFar) {
+                    return _loadModAsset('js', _modAssetUrl(pkg.id, pkg.gen, name),
+                        function (url) {
+                            const s = document.createElement('script');
+                            // async, NOT document-ordered: this package's files
+                            // are already serialized by the chain, and ordering
+                            // it against OTHER packages is what would head-of-
+                            // line block them.
+                            s.async = true;
+                            // Binds the REGISTRATION to the package: registerMod
+                            // reads document.currentScript and refuses a
+                            // declaration whose id is not this one.
+                            s.dataset.modPackage = pkg.id;
+                            const sri = pkg.integrity[name];
+                            if (sri) s.integrity = sri;
+                            s.src = url;
+                            return s;
+                        }).then(function (r) { return okSoFar && r.ok; });
+                });
+            }
+            const wait = chain.then(function (ok) {
+                pkg.done = true;
+                // A wrong-id refusal is a verdict on the package, not on the
+                // transport — do not overwrite it with a load outcome.
+                if (pkg.state !== 'wrong-id') {
+                    pkg.state = ok ? 'loaded' : 'fetch-failed';
+                }
+                // A package that settles AFTER boot (a deadline straggler, or
+                // the post-login batch) has no other repaint: if it registers,
+                // _lateRegister repaints, but a package that loads and registers
+                // NOTHING would otherwise sit on a stale `timeout` row.
+                if (window.__mods.sorted) _renderManagerRows();
+            });
+            return { pkg: pkg, wait: wait };
         }
 
         // The package id of the script currently executing, or null.
@@ -289,6 +346,14 @@
         // identity permutation and the shipped order is byte-preserved. That is
         // what lets _bringUp, _takeDown, _applyPolicyLive and _resolvePins keep
         // working verbatim: they all assume dependency-precedes-dependent.
+        //
+        // One documented gap, which no ordering can close: cycle members are
+        // appended in their existing relative order and are NOT in dependency
+        // order (they cannot be), so _resolvePins's single backward pass does
+        // not propagate an implied pin THROUGH a cycle member. It does not
+        // matter — a mod in a cycle never inits, so a pin implied by one governs
+        // nothing; an EXPLICIT pin on the far side is unaffected because
+        // explicit always wins.
         function _topoSortRegistered() {
             const regs = window.__mods.registered;
             const index = new Map();
@@ -466,10 +531,23 @@
             // in `registered`, so a pin naming this mod only becomes real here
             // (the same hole #157 closed for the post-login path).
             _topoSortRegistered();
+            const before = _modPinSig(window.__mods.policy);
             window.__mods.policy = _resolvePins(window.__mods.policyRaw);
             _renderManagerRows();
             if (window.__mods.masterEnabled === false) {
                 return { ok: true, id: decl.id, brought: false };
+            }
+            // If the pin map MOVED, reconcile everything — not just this mod.
+            // A pin naming this mod pins its `requires` on too, and those
+            // dependencies are registered EARLIER, which _bringUp cannot reach:
+            // it inits `decl` and then walks FORWARD only. Without this, pinning
+            // a late-arriving mod on while its dependency is locally off leaves
+            // BOTH inactive forever, because for a deadline straggler no later
+            // _applyPolicyLive ever runs.
+            if (_modPinSig(window.__mods.policy) !== before) {
+                _applyPolicyLive();      // reconciles, repaints, announces
+                return { ok: true, id: decl.id,
+                         brought: window.__mods.active.has(decl.id) };
             }
             let brought = false;
             if (isModEnabled(decl.id)) {
@@ -484,6 +562,13 @@
             notifyModTheme();
             return { ok: true, id: decl.id, brought: brought };
         }
+        // A stable signature of a resolved pin map, so "did the pins move?" is
+        // one string compare over a small flat {id: bool}.
+        function _modPinSig(pins) {
+            if (!pins) return '';
+            return Object.keys(pins).sort().map(
+                function (id) { return id + '=' + (pins[id] ? 1 : 0); }).join(',');
+        }
 
         // Rebuild the Mods pane's rows. _modRegisterPane calls spec.render()
         // EXACTLY ONCE, so a row set built before the installed mods registered
@@ -494,6 +579,129 @@
             if (typeof fn !== 'function') return;
             try { fn(); }
             catch (e) { console.error('[mods] Mods pane rebuild failed:', e); }
+        }
+
+        // ---- "Mods" Control Panel pane (#86 / S13) --------------------------
+        // CORE loader UI (NOT a toggleable mod) listing every registered mod with
+        // an enable checkbox + its declared trust tiers + live status (active /
+        // off / failed). Built on the S1 pane scaffold (_modRegisterPane) through a
+        // STATIC loader-owned rec whose teardown never runs — the pane is permanent
+        // core chrome, so it never appears in registered/active and can't disable
+        // itself. Idempotent: a second loadMods() can't double-mount it. Mounted
+        // ONLY when the master gate is on (loadMods returns before here when off),
+        // so master-off means no mod UI at all and the gate's meaning stays crisp.
+        // The reflect closure is registered via _trackControl (kind:'pane'), so it
+        // re-syncs on Control Panel open AND on every /state pull (idempotent, read
+        // only) like every other pane.
+        // #163: the rows are the UNION of catalog packages and registered
+        // declarations (_modStatusRows), NOT a walk of `registered` — a mod in a
+        // dependency cycle, one whose script 404'd and one whose SRI did not
+        // match never call registerMod, so a registered[]-driven pane cannot
+        // show them at all. And because _modRegisterPane calls spec.render()
+        // EXACTLY ONCE, the row set is rebuildable (_rebuildRows) so a late
+        // registration is not frozen out of a pane built before it landed.
+        function _mountModsManagerPane() {
+            if (window.__mods._managerMounted) return;
+            window.__mods._managerMounted = true;
+            const rec = { id: '__mods_manager__', unloads: [] };  // permanent; unloads never run
+            let rows = [];
+            let listEl = null;
+            function _reflectManager() {
+                const byId = Object.create(null);
+                for (const s of _modStatusRows()) byId[s.id] = s;
+                for (const r of rows) {
+                    const s = byId[r.id];
+                    if (!s) continue;
+                    r.cb.checked = s.enabled;
+                    // #157: a mod this broker PINS is not this browser's call —
+                    // show the pin and lock the box. #163 also locks a row with
+                    // no registration (nothing to init). Reflected (not decided)
+                    // here: the pin came from the boot policy snapshot, so this
+                    // runs on every /state pull without changing what is in force.
+                    r.cb.disabled = !s.toggleable;
+                    r.pin.textContent = (s.pin === null) ? ''
+                        : (s.pin ? 'pinned on' : 'pinned off');
+                    r.pin.title = (s.pin === null) ? ''
+                        : ('this broker pins ' + r.id + ' ' + (s.pin ? 'on' : 'off')
+                           + ' for every browser that loads its page');
+                    r.status.textContent = s.label;
+                    r.status.dataset.state = s.state;
+                }
+            }
+            function _rebuildRows() {
+                if (!listEl) return;
+                rows = [];
+                listEl.textContent = '';
+                for (const s of _modStatusRows()) {
+                    const row = document.createElement('div');
+                    row.className = 'set-mod-row';
+                    row.dataset.modId = s.id;
+                    row.dataset.modSource = s.source;
+                    const label = document.createElement('label');
+                    label.className = 'set-check set-mod-toggle';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    const mid = s.id;
+                    cb.addEventListener('change', function () {
+                        setModEnabled(mid, cb.checked);
+                        _reflectManager();   // refresh status after the live toggle
+                    });
+                    label.appendChild(cb);
+                    const name = document.createElement('span');
+                    name.className = 'set-mod-name';
+                    name.textContent = s.id;
+                    label.appendChild(name);
+                    const status = document.createElement('span');
+                    status.className = 'set-mod-status';
+                    label.appendChild(status);
+                    const pin = document.createElement('span');   // #157
+                    pin.className = 'set-mod-pin';
+                    label.appendChild(pin);
+                    row.appendChild(label);
+                    const tiers = document.createElement('div');
+                    tiers.className = 'set-mod-tiers';
+                    if (s.tiers.length) {
+                        for (const t of s.tiers) {
+                            const b = document.createElement('span');
+                            b.className = 'set-mod-tier';
+                            b.textContent = t;
+                            tiers.appendChild(b);
+                        }
+                    } else {
+                        const b = document.createElement('span');
+                        b.className = 'set-mod-tier set-mod-tier-none';
+                        b.textContent = 'unspecified';
+                        tiers.appendChild(b);
+                    }
+                    row.appendChild(tiers);
+                    rows.push({ id: s.id, cb: cb, status: status, pin: pin });
+                    listEl.appendChild(row);
+                }
+                _reflectManager();
+            }
+            _modRegisterPane(rec, {
+                id: 'mods',
+                title: 'Mods',
+                isBrowserGlobal: true,    // per-browser state -> local tab only
+                render: function () {
+                    const wrap = document.createElement('div');
+                    const hint = document.createElement('div');
+                    hint.className = 'set-hint';
+                    hint.textContent = 'Enable or disable installed mods (this '
+                        + 'browser). The broker’s master switch can disable all at '
+                        + 'once, and a mod this broker pins (see “Mods on this '
+                        + 'broker”) is locked here.';
+                    wrap.appendChild(hint);
+                    listEl = document.createElement('div');
+                    listEl.className = 'set-mods-list';
+                    _rebuildRows();
+                    wrap.appendChild(listEl);
+                    return wrap;
+                },
+                reflect: function () { _reflectManager(); },
+            });
+            window.__mods._reflectManager = _reflectManager;
+            window.__mods._rebuildManagerRows = _rebuildRows;
         }
 
         // ---- the status model (#163 / §5) -----------------------------------
@@ -521,9 +729,14 @@
         //   timeout           still in flight when the boot deadline passed
         //   loading           in flight (transient; only visible on the
         //                     post-login path, which repaints when it settles)
-        //   no-register       the script loaded but never called registerMod —
-        //                     the compile-error case, which still fires `load`
-        //                     on the element and reports to window.onerror
+        //   no-register       the script loaded but never called registerMod.
+        //                     Includes a top-level throw and — the case D1
+        //                     makes likely — a global name collision with core
+        //                     ("Identifier 'X' has already been declared"),
+        //                     which is raised at INSTANTIATION: the element
+        //                     still fires `load` and the failure is reported to
+        //                     window.onerror. (A genuine PARSE error fires
+        //                     `error` instead, so it reads as fetch-failed.)
         //   wrong-id          the package registered a DIFFERENT mod id
         function _modStatusRows() {
             const byId = Object.create(null);
@@ -581,14 +794,18 @@
             } else if (cyc) {
                 state = 'blocked-by-cycle';
                 label = 'blocked by a dependency cycle';
+            } else if (pkg && pkg.state === 'fetch-failed') {
+                // Checked BEFORE the registration branch on purpose. A package
+                // with several scripts can have one register while another 404s
+                // or fails SRI: the mod is live but the package is incomplete,
+                // and a row reading `active` would hide that completely.
+                state = 'fetch-failed';
+                label = decl ? 'fetch failed (partly loaded)' : 'fetch failed';
             } else if (!decl) {
                 if (pkg && pkg.state === 'wrong-id') {
                     state = 'wrong-id';
                     label = 'wrong id: the package registered "'
                         + (pkg.wrongId || '?') + '"';
-                } else if (pkg && pkg.state === 'fetch-failed') {
-                    state = 'fetch-failed';
-                    label = 'fetch failed';
                 } else if (pkg && pkg.state === 'timeout') {
                     state = 'timeout';
                     label = 'timed out';
