@@ -2354,7 +2354,10 @@ def test_window_kind_sites_use_registry():
     assert "rec.appKind === 'sticky-note'" not in s73
 
     s84 = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
-    assert "lookupWindowKind(rec && rec.appKind)" in s84
+    # #167 split the per-record body out into _restoreOneAppWindow, which
+    # null-checks the record up front, so the lookup no longer needs `rec &&`.
+    assert "const kind = lookupWindowKind(rec.appKind);" in s84
+    assert "if (!rec || rec.open === false) return;" in s84
     assert "=== 'task-manager'" not in s84   # the old explicit skip list is gone
 
     s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
@@ -3928,3 +3931,130 @@ def test_adopt_float_workspace_heals_dangling_membership():
     assert "liveWsIds" in body, "adoptFloatWorkspace must heal a dangling ws id"
     assert "applyTaskbarWorkspace()" in body,         "a freshly stamped window's taskbar ws badge must not lag a poll"
 
+
+def test_app_window_restore_retries_after_the_mod_loader():
+    # #167: restore and the mod loader are independent async chains (the lease +
+    # the /state adopt vs GET /info). When restore wins, a persisted mod-owned
+    # kind (file-manager / scratchpad) is not registered yet, buildAppWindow
+    # returns null and the window silently vanishes for the whole page load.
+    alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    block = alv[alv.index("function restoreAppWindows"):alv.index("// Restore-on-refresh")]
+    # The generation restore records the ids the race skipped, and ONLY those:
+    # a null from a kind that WAS registered is a failure, not a race, and a
+    # builder that THREW must be told apart from the deliberate null (else a
+    # partial build is replayed on every later mod enable).
+    assert "if (!kind && !win && !threw && deferred) deferred.add(appId);" in block
+    assert "catch (e) { threw = true;" in block
+    # ...published for exactly one _viewEpoch, captured at ENTRY (mod code in a
+    # factory can synchronously bump it), and never by a superseded pass.
+    assert "const epoch = _viewEpoch;" in block
+    assert "if (!_deactivated && epoch === _viewEpoch) {" in block
+    assert "_deferredRestore = { epoch: epoch, ids: deferred };" in block
+    # ...and drained immediately, because the set does not exist until that line:
+    # a kind registered DURING the loop raced past the cursor with nothing left
+    # to trigger it.
+    assert block.index("_deferredRestore = { epoch: epoch, ids: deferred };") <         block.index("restoreAppWindowsAfterMods();")
+    # The retry re-attempts exactly that set.
+    retry = block[block.index("function restoreAppWindowsAfterMods"):]
+    assert "pending.epoch !== _viewEpoch" in retry
+    assert "pending.ids.delete(appId);" in retry,         "an id must be unreachable while its own build is in flight"
+    assert "_restoreOneAppWindow(appId, pending.ids);" in retry
+
+
+def test_restore_retry_guards_on_state_ready_not_just_booted():
+    # Constraint 4 of #167: bootActiveView sets _booted BEFORE its
+    # `await _stateReadyPromise`, so keying the retry on _booted alone could
+    # restore against a layout the /state adopt has not applied yet.
+    alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    retry = alv[alv.index("function restoreAppWindowsAfterMods"):
+                alv.index("// Restore-on-refresh")]
+    assert "if (_deactivated) return;" in retry
+    assert "if (!_stateReady) return;" in retry
+    code = "\n".join(ln for ln in retry.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    assert "_booted" not in code, "the retry must not key on _booted"
+    # ...and a re-entrancy latch, because a factory is mod code that can reach
+    # back into the loader (setModEnabled -> _bringUp -> this) mid-build.
+    assert "if (_restoreRetrying) { _restoreRetryAgain = true; return; }" in retry,         "a request arriving while busy must set a wakeup, not be swallowed"
+    assert "_restoreRetrying = true;" in retry
+    assert "} finally { _restoreRetrying = false; _restoreRetryAgain = false; }" in retry
+    # The drain is bounded, and re-checks the generation on EVERY record: a
+    # factory can synchronously tear the view down mid-loop, and finishing an
+    # old generation's records after teardownView cleared `windows` would strand
+    # them behind the inactive overlay.
+    assert "for (let round = 0; round < 8; round++) {" in retry
+    assert "if (_deactivated || _viewEpoch !== epoch) return;" in retry
+    # A throw from outside the builder (a registry lookup) must put the id back,
+    # or delete-before-build becomes delete-and-lose.
+    assert "pending.ids.add(appId);" in retry
+
+
+def test_restore_retry_is_hooked_outside_loadmods():
+    # Constraint 5: the retry must survive mods_enabled:false (loadMods returns
+    # EARLY, before it inits anything) and a loader throw, or a mods-off browser
+    # loses restore entirely -- strictly worse than the bug being fixed. So it
+    # hangs off loadMods()'s settlement in 90, not off its tail in 86.
+    boot = (BROKER_DIR / "90_js_mod_boot.js").read_text(encoding="utf-8")
+    assert "loadMods().then(" in boot
+    assert boot.count("restoreAppWindowsAfterMods()") == 2,         "both the fulfil AND the reject handler must run the retry"
+    assert ").catch(function (e) {" in boot,         "a throw from the reject handler would otherwise be an unhandled rejection"
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    body = loader[loader.index("async function loadMods"):
+                  loader.index("function _applyPolicyLive")]
+    assert "restoreAppWindowsAfterMods" not in body,         "loadMods's own body would skip the retry on its mods_enabled=false return"
+    # And the rejected design stays rejected: boot must not wait on the loader.
+    alv = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(encoding="utf-8")
+    ba = alv[alv.index("async function bootActiveView"):alv.index("function teardownView")]
+    for banned in ("loadMods", "localInfo", "__mods"):
+        assert banned not in ba,             f"bootActiveView must not put mod readiness ({banned}) on the restore path"
+
+
+def test_mid_session_mod_enable_restores_its_windows():
+    # #167 scope call: a mid-session bring-up is a deferred boot in all but name
+    # (#157's post-login _applyPolicyLive brings pinned mods up with NO reload),
+    # so it must run the same retry -- otherwise the "re-enabling its mod restores
+    # it faithfully" promise buildAppWindow's null return is documented on is only
+    # true across a page reload. Hooked at the two CALLERS of _bringUp, not inside
+    # it: _applyPolicyLive calls _bringUp in a loop.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    bring = loader[loader.index("function _bringUp(decl)"):
+                   loader.index("function _takeDown(id)")]
+    assert "restoreAppWindowsAfterMods" not in bring,         "_bringUp itself must not restore -- _applyPolicyLive calls it N times"
+    setter = loader[loader.index("function setModEnabled"):
+                    loader.index('// ---- "Mods" Control Panel pane')]
+    assert "restoreAppWindowsAfterMods();" in setter
+    assert "_takeDown(id);" in setter and setter.index("_bringUp(decl);") <         setter.index("restoreAppWindowsAfterMods();")
+    policy = loader[loader.index("function _applyPolicyLive"):
+                    loader.index("async function notifyModsHostAuth")]
+    assert "if (broughtUp) restoreAppWindowsAfterMods();" in policy
+    assert policy.index("_bringUp(m);") < policy.index("if (broughtUp)"),         "the retry must run AFTER the whole bring-up cascade"
+
+
+def test_restore_ordering_comments_are_not_backwards():
+    # Two comments asserted the ordering as settled fact, in the direction that is
+    # less likely -- and a false invariant in a comment is how the next person
+    # builds on it. Both must now describe it as the race it is (#167).
+    sticky = (BROKER_DIR / "mods/sticky/sticky.js").read_text(encoding="utf-8")
+    assert "restoreAppWindows runs BEFORE loadMods" not in sticky
+    assert "#167" in sticky
+    # The store's fallback comment blamed "mods off" alone; mods being SLOW has
+    # the identical effect, and scratchpad has the identical exposure to
+    # file-manager. Both must be named.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    fallback = s54[s54.index("function buildAppWindow"):s54.index("migratePrefKeys")]
+    assert "scratchpad" in fallback
+    assert "not exist YET" in fallback
+    # The null return is what the retry reads -- it must stay a null.
+    assert "if (ak && ak !== 'sticky-note' && ak !== 'text-editor') return null;" in s54
+
+
+def test_custom_restore_hook_contract_is_documented():
+    # Constraint 7: a kind's own `restore` is called DIRECTLY, so it never gets
+    # openAppWindow's dedup-by-id. The retry is scoped to unregistered kinds (which
+    # by definition have no hook), so the hook keeps its once-per-generation
+    # contract -- but a lease-loss rebuild IS a new generation.
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    spec = s54[s54.index("// ---- window-kind registry"):s54.index("function _windowKindRegistry")]
+    assert "dedup-by-id" in spec and "rebuildView" in spec
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "windows.get(rec.id)" in loader

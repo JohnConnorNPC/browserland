@@ -598,8 +598,9 @@
                 // core's CLOSED APP_ICON_SVG table (65), so a mod id that isn't
                 // shipped there resolves to nothing; `menu.iconGlyph` is the
                 // mod-owned alternative — a SHORT text/emoji glyph (controls,
-                // bidi overrides + whitespace stripped, capped at 8 code points)
-                // that renderMenu paints with textContent. There is deliberately
+                // bidi overrides + whitespace stripped, capped at APP_GLYPH_MAX
+                // code points) that renderMenu paints with textContent. There is
+                // deliberately
                 // no ctx.registerAppIcon(svg): a mod's icon must never be able to
                 // put markup into the shared menu renderer, not least because the
                 // value a mod passes need not be its own (a /mod-store blob, a
@@ -613,6 +614,9 @@
                 // a kind that declares an as-yet-unknown iconKey plus a glyph
                 // shows the glyph today and would silently switch to the SVG if
                 // core ever ships that key. Declare one or the other.
+                // An optional `restore` is called directly, so it does NOT get
+                // openAppWindow's dedup-by-id: it must check windows.get(rec.id)
+                // itself, because a lease-loss rebuild re-runs the restore (#167).
                 registerWindowKind: function (spec) {
                     return _modRegisterWindowKind(rec, spec);
                 },
@@ -1563,7 +1567,25 @@
             if (on === _modDefault(id)) set.delete(id); else set.add(id);
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
-                if (on) _bringUp(decl); else _takeDown(id);
+                if (on) {
+                    _bringUp(decl);
+                    // #167: the cascade just registered this mod's window kinds,
+                    // so a persisted record that boot had to skip (its kind was
+                    // unregistered then, so buildAppWindow returned null and left
+                    // the record intact) can finally be built — which is exactly
+                    // the "re-enabling its mod restores it faithfully" promise
+                    // that null return is documented on (54_js_app_windows_store).
+                    // Placed at the CALLER, not inside _bringUp: _applyPolicyLive
+                    // calls _bringUp in a loop, and one pass after the whole
+                    // cascade beats N passes interleaved with mid-flight inits.
+                    // Sound only because init is SYNCHRONOUS by contract (initMod
+                    // calls init(ctx) and ignores any returned promise), so every
+                    // kind the cascade brings up is registered by the time we get
+                    // here — an async init would re-open this very race.
+                    restoreAppWindowsAfterMods();
+                } else {
+                    _takeDown(id);
+                }
             }
             // #113: a mod that ships help.md but registers no help CARDS (e.g.
             // clock) has no teardown that refreshes Help, so toggling it wouldn't
@@ -1757,11 +1779,20 @@
                     _takeDown(m.id);
                 }
             }
+            let broughtUp = false;
             for (const m of regs.slice()) {
                 if (!window.__mods.active.has(m.id) && isModEnabled(m.id)) {
                     _bringUp(m);
+                    broughtUp = true;
                 }
             }
+            // #167: this path (a post-login pin apply, #157) is a deferred boot in
+            // all but name — mods come up with no reload, so without this a
+            // browser that booted with file-manager/scratchpad off would run
+            // without the windows their records describe until the user happens to
+            // refresh. Same self-guarded, idempotent pass boot uses; only after a
+            // bring-up, since a teardown-only reconcile has nothing new to build.
+            if (broughtUp) restoreAppWindowsAfterMods();
             if (window.__mods._reflectManager) {
                 try { window.__mods._reflectManager(); } catch (_) {}
             }

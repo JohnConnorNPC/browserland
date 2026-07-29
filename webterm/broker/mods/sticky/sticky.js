@@ -147,12 +147,22 @@
                     }
                     updateTaskbarActive();
                 });
-                // Notes already open when this init runs get their chips NOW:
-                // restoreAppWindows runs BEFORE loadMods on a reload (restored
-                // notes go through the unknown-kind fallback, never this mod's
-                // factory), and a mid-session re-enable replays here too. The
-                // add-only pass (no remove) keeps init side-effect-free when
-                // the toggle is off.
+                // Notes already open when this init runs get their chips NOW.
+                // Whether any exist yet is a RACE, not an ordering (#167):
+                // restoreAppWindows waits on the control-WS lease + the /state
+                // adopt, loadMods on GET /info, and nothing sequences the two —
+                // in practice /info is usually already in flight from
+                // learnLocalBrokerId (85) before the lease lands, so loadMods
+                // more often wins and this pass finds nothing. Either order is
+                // fine: notes restored BEFORE this mod inits go through the
+                // unknown-kind fallback (never this mod's factory) and are picked
+                // up here, notes restored AFTER go through the factory below,
+                // which adds the chip itself. #167's post-loader retry never
+                // covers a note — it re-attempts only records that built NOTHING,
+                // and the fallback always builds a note — so this pass, plus a
+                // mid-session re-enable landing on the same pass, is what chips
+                // them. The add-only pass (no remove) keeps init side-effect-free
+                // when the toggle is off, and makes the overlap harmless.
                 if (taskbarSetting.get()) {
                     for (const w of noteWindows()) addChip(w.id);
                 }
