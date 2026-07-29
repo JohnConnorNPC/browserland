@@ -1040,6 +1040,102 @@ def test_theme_mod_packaged_and_manifest_agrees():
 
 
 # --------------------------------------------------------------------------- #
+# semantic status palette (#173)
+# --------------------------------------------------------------------------- #
+
+# The historical ok / warn / danger literals, which #173 replaced with the
+# --ok / --warn / --danger vars. `night` must keep rendering exactly these.
+_STATUS_HISTORICAL = {"ok": "#5fbf7f", "warn": "#e0a93a", "danger": "#e96d6d"}
+
+
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _strip_css_comments(text):
+    import re
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+
+def test_status_vars_defined_as_theme_derived_mixes():
+    # #173: the status palette is three color-mix() derivations on :root, beside
+    # --sel-bg, so it recolors with the theme instead of being a dark-theme hex
+    # copy-pasted across core and four mods.
+    import re
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    for role in _STATUS_HISTORICAL:
+        m = re.search(
+            r"--%s:\s*color-mix\(in srgb, (#[0-9a-fA-F]{6}) (\d+)%%, var\(--fg\)\);"
+            % role, css)
+        assert m, f"--{role} must be a color-mix(... var(--fg)) derivation on :root"
+    assert "--ok:" in INDEX_HTML and "--warn:" in INDEX_HTML \
+        and "--danger:" in INDEX_HTML, "the status vars must reach the served page"
+
+
+def test_status_vars_round_trip_to_the_historical_night_palette():
+    # The base hexes are PRE-COMPENSATED for the mix against `night`'s --fg, so
+    # the default theme is unchanged at 8-bit. That is the whole reason the bases
+    # look wrong to the naked eye, so lock it: editing the percentage, a base, or
+    # night's --fg must fail HERE rather than silently restyle every status color
+    # in the app. color-mix(in srgb, ...) is a plain lerp of the gamma-encoded
+    # channels (both inputs opaque), which is what this reproduces.
+    import re
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    theme = (BROKER_DIR / "mods" / "theme" / "theme.js").read_text(encoding="utf-8")
+
+    night = re.search(r"night:.*?'--fg':\s*'(#[0-9a-fA-F]{3,6})'", theme, re.S)
+    assert night, "could not read night's --fg out of the theme mod"
+    fg = _hex_to_rgb(night.group(1))
+
+    for role, historical in _STATUS_HISTORICAL.items():
+        m = re.search(
+            r"--%s:\s*color-mix\(in srgb, (#[0-9a-fA-F]{6}) (\d+)%%, var\(--fg\)\);"
+            % role, css)
+        base, pct = _hex_to_rgb(m.group(1)), int(m.group(2)) / 100.0
+        mixed = tuple(round(pct * base[i] + (1 - pct) * fg[i]) for i in range(3))
+        want = _hex_to_rgb(historical)
+        # warn's raw base clips the blue floor at 0, so it lands 4/255 off — far
+        # below the just-noticeable threshold, but pin the tolerance so a real
+        # drift cannot hide behind it.
+        for i in range(3):
+            assert abs(mixed[i] - want[i]) <= 4, (
+                f"--{role} resolves to {mixed} on night, but the historical color "
+                f"is {want} ({historical}); the default theme would visibly shift")
+
+
+def test_status_literals_not_re_hardcoded_in_any_stylesheet():
+    # The point of #173: adding/changing a status color must be a one-line edit,
+    # not seven. Comments are stripped first -- 10_css_root.css documents the
+    # historical values on purpose. 50_js_constants.js is deliberately NOT in
+    # scope: its #5fbf7f / #e96d6d are entries in PALETTE, the per-window ACCENT
+    # picker, which is persisted and parsed by hexToRgb()/isDarkAccent(), so a
+    # var() string there would be a NaN, not a color.
+    for name in (*(n for n in ui._ORDERED if n.endswith(".css")),
+                 *_declared_mod_css()):
+        text = _strip_css_comments(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        for role, literal in _STATUS_HISTORICAL.items():
+            assert literal not in text.lower(), (
+                f"{name} hardcodes {literal}; use var(--{role}) instead")
+
+
+def test_aistatus_chip_bands_use_the_status_vars():
+    # The one real JS call site (#173): the aistatus taskbar chip sets its color
+    # from an inline style, so it must hand the CSSOM a var() string -- exactly
+    # what the pre-existing grey band already does with var(--bg-3)/var(--fg-dim).
+    src = (BROKER_DIR / "mods" / "aistatus" / "aistatus.js").read_text(
+        encoding="utf-8")
+    for var in ("var(--ok)", "var(--warn)", "var(--danger)"):
+        assert var in src, f"aistatus BANDS should carry {var}"
+    for literal in _STATUS_HISTORICAL.values():
+        assert literal not in src.lower(), (
+            f"aistatus.js still hardcodes {literal}")
+
+
+# --------------------------------------------------------------------------- #
 # pattern mod (#76 / S3)
 # --------------------------------------------------------------------------- #
 
