@@ -1597,6 +1597,15 @@ def test_installed_detail_stays_off_info(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def _help_slugs(app):
+    # AUTHENTICATED, always: the installed half is served only to a caller
+    # holding the token (#173), so a tokenless read here would assert the
+    # public response and quietly stop covering the merge at all.
+    _, r = authed(app).get("/help-corpus.json")
+    assert r.status == 200
+    return [s["slug"] for s in r.json["sections"]]
+
+
+def _public_help_slugs(app):
     _, r = app.test_client.get("/help-corpus.json")
     assert r.status == 200
     return [s["slug"] for s in r.json["sections"]]
@@ -1671,7 +1680,7 @@ def test_replacing_a_mod_replaces_its_help_text(tmp_path, monkeypatch):
     assert authed(app).post("/mods/install", json=body)[1].status == 200
 
     def titles():
-        _, r = app.test_client.get("/help-corpus.json")
+        _, r = authed(app).get("/help-corpus.json")
         sec = [s for s in r.json["sections"] if s["slug"] == "x-notes"][0]
         return [c["title"] for c in sec["cards"]]
 
@@ -1705,25 +1714,76 @@ def test_a_mod_with_unparseable_help_never_blanks_the_corpus(tmp_path,
     assert rows["x-notes"]["has_help"] is True
 
 
-def test_the_served_corpus_discloses_installed_ids_without_a_token(tmp_path,
-                                                                   monkeypatch):
-    # STATED, not waved past: /help-corpus.json is public like "/", so the ids
-    # of installed mods that ship help, their help text, and the label/icon
-    # their manifest declares are all readable with no token -- and unlike
-    # /mods/<id>/<gen>/<name>, which needs the id AND the generation AND the
-    # file name, this one is directly ENUMERABLE. The underlying bytes were
-    # already public (GET / carries every shipped mod's source); what this adds
-    # is discovery. Accepted by #163's design; do not put a secret in a mod.
+def test_the_served_corpus_withholds_installed_help_without_a_token(tmp_path,
+                                                                    monkeypatch):
+    # #173, the inversion of what #163 shipped. The route stays PUBLIC (gating
+    # it would 401 the Help window of the very login page the token is typed
+    # into) but it now serves TWO bodies: no token -> the wiki + shipped-mod
+    # corpus alone; token -> that plus the installed sections.
+    #
+    # What the public body must not carry is DISCOVERY. The installed BYTES stay
+    # reachable on purpose -- /mods/<id>/<gen>/<name> is forced public because a
+    # <script src> cannot carry an Authorization header -- but that route needs
+    # the id AND the generation AND the file name, whereas a merged corpus is a
+    # directly enumerable list of every installed id.
     app = make_app(tmp_path, monkeypatch)
     body = payload()
     body["manifest"]["help"] = {"label": "Notes", "icon": "N"}
     body["files"]["help.md"] = "# Notes\n\n## Secretish\n\nplain as day\n"
-    authed(app).post("/mods/install", json=body)
-    _, r = app.test_client.get("/help-corpus.json")
-    assert r.status == 200
-    sec = [s for s in r.json["sections"] if s["slug"] == "x-notes"]
+    assert authed(app).post("/mods/install", json=body)[1].status == 200
+
+    _, public = app.test_client.get("/help-corpus.json")
+    assert public.status == 200                      # still public, just less
+    blob = json.dumps(public.json)
+    assert "x-notes" not in blob                     # no id, anywhere
+    assert "plain as day" not in blob                # no help text
+    # No label and no icon either. Checked structurally, not by substring:
+    # "Notes" is an ordinary word the wiki itself uses.
+    sections = public.json["sections"]
+    assert not [s for s in sections if s["slug"].startswith("x-")]
+    assert not [s for s in sections
+                if s.get("label") == "Notes" or s.get("icon") == "N"]
+    assert [s for s in sections if s["slug"] == "taskbar"], \
+        "the wiki sections must still be public"
+    # ...and it is the pre-#163 response EXACTLY, not merely a filtered one:
+    # the very object the wiki parse produced, byte for byte.
+    assert public.json == app.ctx.help_corpus_base
+
+    # The same URL, with the token, is the merged corpus.
+    _, privileged = authed(app).get("/help-corpus.json")
+    assert privileged.status == 200
+    sec = [s for s in privileged.json["sections"] if s["slug"] == "x-notes"]
     assert sec and sec[0]["label"] == "Notes" and sec[0]["icon"] == "N"
     assert "plain as day" in json.dumps(sec[0])
+
+    # A WRONG token is not a 401 here, it is the public body -- the whole point
+    # of leaving the route public is that it never refuses the login page.
+    _, wrong = app.test_client.get(
+        "/help-corpus.json", headers={"Authorization": "Bearer nope"})
+    assert wrong.status == 200 and wrong.json == app.ctx.help_corpus_base
+
+
+def test_the_served_corpus_is_never_cached_across_the_two_audiences(tmp_path,
+                                                                    monkeypatch):
+    # One URL, two bodies (#173). Nothing between the broker and the browser --
+    # a `tailscale serve` in front of a loopback bind, a corporate proxy, the
+    # browser's own disk cache -- may keep one audience's body and hand it to
+    # the other. Sanic sets no ETag/Last-Modified/freshness of its own and the
+    # CORS middleware adds none, so these two headers are the whole cache story.
+    app = make_app(tmp_path, monkeypatch)
+    assert authed(app).post("/mods/install", json=payload())[1].status == 200
+    for label, (_, r) in (("public", app.test_client.get("/help-corpus.json")),
+                          ("authed", authed(app).get("/help-corpus.json"))):
+        assert r.status == 200, label
+        assert r.headers.get("Cache-Control") == "no-store", label
+        assert r.headers.get("Vary") == "Authorization", label
+        # Nothing a heuristic cache could key freshness or a revalidation off.
+        assert r.headers.get("ETag") is None, label
+        assert r.headers.get("Last-Modified") is None, label
+        assert r.headers.get("Expires") is None, label
+    # And the two bodies really are different, or the assertions above would be
+    # guarding a distinction that no longer exists.
+    assert _public_help_slugs(app) != _help_slugs(app)
 
 
 def test_a_headless_broker_serves_no_help_corpus(tmp_path, monkeypatch):

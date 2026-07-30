@@ -13,7 +13,9 @@ There is no loopback exemption and no opt-out; with nothing configured the
 broker mints one into ``webterm_token.json`` beside the state store. The ONLY
 unauthenticated responses are ``GET /`` (the token is typed into that page, and
 auth is query/header-only with no cookies, so gating the document would 401
-every reload, bookmark and new tab forever), ``GET /help-corpus.json``, and the
+every reload, bookmark and new tab forever), ``GET /help-corpus.json`` (which
+answers without a token but serves LESS: the wiki + shipped-mod corpus only,
+never the installed mods' help or their ids — see ``_help_corpus``), and the
 OPTIONS preflights. ``/mcp/*`` is a separate realm with its own token.
 
 CORS posture: the UI's multi-host mode has the BROWSER fetch /sessions and
@@ -2250,6 +2252,11 @@ def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
     A second, separately-swapped copy could disagree with the catalog about
     which mods exist, so there is exactly one swap for all three.
 
+    BOTH corpora stay live, and that is now load-bearing rather than incidental:
+    ``base`` is what an unauthenticated ``GET /help-corpus.json`` is served and
+    the merged one what an authenticated one gets (#173), so the merge must keep
+    returning a new object and leaving the base alone.
+
     SHIPPED FIRST, and that is load-bearing, not cosmetic. ``modPolicyImplied``
     (81_js_control_panel.js) and #158's ``planFor`` both walk the catalog
     BACKWARDS assuming a dependency always precedes its dependent. A shipped
@@ -2277,10 +2284,12 @@ async def _mod_asset(request: Request, modId: str, gen: str, name: str):
     ``test_no_http_request_puts_the_token_in_the_url``; and a fetch+``blob:``
     workaround would need ``blob:`` in ``script-src``, a materially weaker
     policy. The posture is the existing one: ``GET /`` is public and already
-    carries every shipped mod's source. So installed mod source, its
-    stylesheets, and (because ``/help-corpus.json`` is public) its help text and
-    therefore the set of installed ids are PUBLICLY READABLE. Do not put a
-    secret in a mod.
+    carries every shipped mod's source. So installed mod source and its
+    stylesheets are PUBLICLY READABLE. Do not put a secret in a mod.
+
+    Its help text is not enumerable, though: ``/help-corpus.json`` serves the
+    installed sections only to a caller holding the token (#173), so reaching a
+    file here still takes the id AND the generation AND the file name.
 
     Served from the in-memory allowlist dict, exactly like ``_vendor_asset``: a
     client-supplied segment can only ever hit a known key, so traversal is
@@ -2317,16 +2326,50 @@ async def _help_corpus(request: Request):
     # needs a broker restart; the installed half is re-merged on every index
     # swap (_swap_mods_index), so an install shows up here immediately.
     #
-    # Public like "/", and that is a DISCLOSURE, stated rather than waved past:
-    # the ids of installed mods that ship help, their help text, and the label
-    # and icon their manifest declares are all readable WITHOUT A TOKEN. The
-    # bytes were already public -- GET / carries every shipped mod's source and
-    # /mods/<id>/<gen>/<name> every installed one's -- but that route needs the
-    # id AND the generation AND the file name, whereas this one is directly
-    # ENUMERABLE, so what this adds is discovery. #163 accepts that (its design
-    # says installed source, styles and help are publicly readable); the honest
-    # statement of the rule is: do not put a secret in a mod, or in its help.
-    return sanic_json(request.app.ctx.help_corpus)
+    # PUBLIC, but it now serves TWO bodies (#173). The route stays in
+    # PUBLIC_PATHS -- gating it outright would 401 the Help window of the very
+    # login page the token is typed into -- yet the installed half is served
+    # only to a caller that already holds the token:
+    #
+    #   no token  -> ctx.help_corpus_base, the wiki + shipped-mod corpus, which
+    #                is byte-for-byte the response this route gave before #163
+    #                existed. Nothing host-, session- or install-derived.
+    #   token     -> ctx.help_corpus, that plus one section per installed mod
+    #                that shipped a help.md.
+    #
+    # #163 shipped the merged corpus to everyone, which made the ids of
+    # installed mods that ship help -- plus their help text and their manifest's
+    # label and icon -- ENUMERABLE with no token. The underlying BYTES stay
+    # public on purpose (a <script src> cannot carry an Authorization header, so
+    # /mods/<id>/<gen>/<name> is forced open), but that route needs the id AND
+    # the generation AND the file name; this one handed over the list. Discovery
+    # is the part that is withheld here, not the content.
+    #
+    # Exactly ONE notion of "authenticated" in this process: the same
+    # auth.request_token_ok(ctx.auth_token) every gated route runs through
+    # _gated_auth_error. This is not a gate, though -- a missing/wrong token is
+    # a smaller 200, never a 401 -- so it calls the predicate directly rather
+    # than the 401-and-log helper (and, being module level, it could not reach
+    # that create_app-local closure anyway).
+    #
+    # One URL, two bodies, so it must never be cached and never be reused across
+    # the two audiences. Sanic sets no validators or freshness of its own here,
+    # and the CORS response middleware adds none, so these two headers are the
+    # whole cache story for this route:
+    #   no-store  -- no shared proxy (tailscale serve, a corporate MITM) and no
+    #                browser disk cache may keep either body around to hand to
+    #                the other audience. It costs nothing: with no ETag and no
+    #                Last-Modified there was no validator to revalidate with, so
+    #                this response was already effectively uncacheable, and the
+    #                frontend memoizes the corpus per page load anyway.
+    #   Vary      -- correctness for anything that stores despite no-store. The
+    #                ?token=/?auth= forms of the credential are already part of
+    #                the cache key (they are in the URL); Authorization is not.
+    corpus = (request.app.ctx.help_corpus
+              if auth.request_token_ok(request, request.app.ctx.auth_token)
+              else request.app.ctx.help_corpus_base)
+    return sanic_json(corpus, headers={"Cache-Control": "no-store",
+                                       "Vary": "Authorization"})
 
 
 async def _index_headless(request: Request):

@@ -153,7 +153,16 @@ TOKEN = "route-policy-token"
 #:                        probes hit.
 #: ``/help-corpus.json``  wiki-derived static help text, served alongside the
 #:                        page. Neither response carries host- or
-#:                        session-derived data.
+#:                        session-derived data. Public but AUTH-SENSITIVE since
+#:                        #173: without a token it serves the wiki +
+#:                        shipped-mod corpus ONLY. The sections contributed by
+#:                        runtime-INSTALLED mods (their help text, their
+#:                        manifest label/icon, and hence the list of installed
+#:                        ids) need the token — see
+#:                        test_mod_install.py::test_the_served_corpus_withholds_
+#:                        installed_help_without_a_token. It stays listed here
+#:                        because it still answers 200 unauthenticated; it just
+#:                        answers with less.
 #:
 #: ``/vendor/<name>``      vendored xterm (#143). The browser fetches these to
 #:                         render the login page itself, before any token

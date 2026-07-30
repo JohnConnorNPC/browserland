@@ -18,6 +18,14 @@ that page and auth is query/header-only with no cookies, so gating the document
 itself would 401 every reload, bookmark and new tab forever. Neither response
 carries host- or session-derived data.
 
+``/help-corpus.json`` is public but AUTH-SENSITIVE (#173): without a token it
+serves the wiki + shipped-mod corpus alone — the same bytes it served before
+runtime mod install existed — and the sections contributed by INSTALLED mods
+(their help text, their manifest label/icon, and hence the list of installed
+ids) are added only for a caller whose token checks out. See
+``app._help_corpus``; the check is the same ``request_token_ok`` every gated
+route uses, it just answers with a smaller 200 instead of a 401.
+
 A fresh install stays one-command usable: with nothing configured the broker
 MINTS its own token into a sidecar (``webterm_token.json``) beside the state
 store and prints a ready-to-open ``?token=`` URL.

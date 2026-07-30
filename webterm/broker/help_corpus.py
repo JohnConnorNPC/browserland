@@ -589,6 +589,14 @@ def build_full_corpus() -> dict:
 # mods_dir. The index captured each mod's help text at install/scan time from
 # the very bytes being served, so there is exactly ONE read and no second
 # traversal that could disagree with it.
+#
+# What comes out of here is NOT public (#173). ``GET /help-corpus.json`` stays
+# publicly reachable, but it serves the unmerged base to a caller with no token
+# and only the merged corpus to one holding it — otherwise the ids of installed
+# mods that ship help, their help text and their manifest's label/icon would be
+# enumerable by anyone who can reach the port. Keeping the merge OFF the base
+# object is what makes that possible: the caller (app._swap_mods_index) keeps
+# both, so never mutate ``corpus`` in place here.
 # --------------------------------------------------------------------------- #
 
 # Installed sections sort after the wiki (orders are small) AND after the
@@ -693,7 +701,9 @@ def merge_installed_sections(corpus: dict, index: dict) -> dict:
 
     Returns a NEW corpus dict with a new section list; ``corpus`` is never
     mutated, because the base is the import-time ``HELP_CORPUS`` reused by every
-    swap. When nothing is merged the base is returned unchanged.
+    swap AND served verbatim to every unauthenticated caller (#173) — mutating
+    it would leak the installed sections into the public response. When nothing
+    is merged the base is returned unchanged.
 
     NEVER RAISES — which is why this exists instead of a call into
     ``build_mod_sections`` (that one raises BuildError on a duplicate slug, and
