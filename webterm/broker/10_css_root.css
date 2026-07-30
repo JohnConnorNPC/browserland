@@ -282,14 +282,22 @@
             font-weight: bold;
             gap: 6px;
             flex-shrink: 0;
-            /* #176: the drag is a captured-pointer gesture. Without this a UA
-               may claim a pen (or touch) drag that starts here as a pan/zoom
-               and pointercancel the gesture out from under it. The bar is not
-               a scroll or zoom surface -- the desktop shell does not pan -- so
-               there is nothing to give up. It does NOT enable touch dragging:
-               the gesture still starts on a mousedown (74_js_drag_resize.js). */
-            touch-action: none;
         }
+        /* #176: a FLOATING window's title-bar drag is a captured-pointer
+           gesture. Without this a UA may claim a pen (or touch) drag that
+           starts here as a pan/zoom and pointercancel the gesture out from
+           under it, and a floating window sits on the desktop, which does not
+           pan -- so there is nothing to give up. It does NOT enable touch
+           dragging: the gesture still starts on a mousedown
+           (74_js_drag_resize.js).
+           Deliberately NOT applied to tiled windows. They are reparented into
+           .strip-col columns inside #strip, which IS a horizontal scroll
+           container (overflow-x: auto, and the engine drives strip.scrollLeft),
+           so this would cost a touch pan of the workspace there. And it would
+           buy nothing: wireDrag hands a tiled window to startTiledDrag before
+           it ever reaches captureGesturePointer, so a tiled title-bar drag
+           takes no capture to protect. */
+        .term-window:not(.tiled) .title-bar { touch-action: none; }
         .term-window .ti-id-badge { opacity: 0.7; }
         .term-window .title-text {
             flex: 1;

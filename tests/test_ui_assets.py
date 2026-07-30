@@ -328,10 +328,18 @@ def test_gesture_handles_declare_touch_action_none():
     # #176: the gestures are captured-pointer gestures, so a UA that claims a
     # pen (or touch) drag starting on a handle as a pan/zoom would
     # pointercancel it out from under us. Neither handle is a scroll surface.
-    bar = INDEX_HTML.split(".term-window .title-bar {")[1].split("}")[0]
-    assert "touch-action: none;" in bar
+    assert ".term-window:not(.tiled) .title-bar { touch-action: none; }" in INDEX_HTML
     rh = INDEX_HTML.split(".term-window .rh {")[1][:200]
     assert "touch-action: none" in rh
+    # NOT on a tiled title bar. Tiled windows live in .strip-col columns inside
+    # #strip, a real overflow-x:auto scroll container, so the rule would kill a
+    # touch pan of the workspace -- and buys nothing there, because wireDrag
+    # hands a tiled window to startTiledDrag before any capture is taken.
+    bar = INDEX_HTML.split(".term-window .title-bar {")[1].split("}")[0]
+    assert "touch-action" not in bar
+    src = _drag_resize_src()
+    tiled_handoff = src.index("startTiledDrag(win, e)")
+    assert tiled_handoff < src.index("captureGesturePointer(livePointerDown()")
 
 
 def test_index_html_never_puts_token_in_url():
