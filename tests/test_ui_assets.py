@@ -231,7 +231,7 @@ def test_window_gestures_take_pointer_capture():
     src = _drag_resize_src()
     assert "el.setPointerCapture(pd.id)" in src
     assert "if (!el.hasPointerCapture(pd.id)) return null;" in src
-    assert src.count("captureGesturePointer(takePointerDown(), e.target, handle)") == 2
+    assert src.count("captureGesturePointer(livePointerDown(), e.target, handle)") == 2
     # Tracking is pointer events in the document CAPTURE phase, filtered to the
     # captured pointer so a second pointer cannot corrupt the gesture.
     for name in ("pointermove", "pointerup", "pointercancel", "lostpointercapture"):
@@ -267,6 +267,13 @@ def test_window_gestures_still_start_on_mousedown():
     assert src.count("addEventListener('pointerdown'") == 1
     assert "e.pointerType === 'mouse' || e.pointerType === 'pen'" in src
     assert "e.isPrimary" in src
+    # The record is cleared by pointerup/pointercancel and by NOTHING else. A
+    # per-read reset would contradict that: pointerdown/pointerup fire only on
+    # the 0<->1 buttons transition, so with a second button already held a left
+    # mousedown gets neither -- consuming the id on the first gesture would
+    # leave the next one with no capture at all, silently back on the bug.
+    assert "function livePointerDown() { return _lastPointerDown; }" in src
+    assert src.count("() => { _lastPointerDown = null; }") == 2
 
 
 def test_drag_pointer_events_none_stays_an_elementfrompoint_concern():

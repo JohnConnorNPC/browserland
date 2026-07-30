@@ -61,12 +61,18 @@
         // its own and must reuse the live record (see bindGestureTracking).
         document.addEventListener('pointerup', () => { _lastPointerDown = null; }, true);
         document.addEventListener('pointercancel', () => { _lastPointerDown = null; }, true);
-        function takePointerDown() {
-            const rec = _lastPointerDown;
-            _lastPointerDown = null;
-            return rec;
-        }
-        // Capture `pd` (from takePointerDown) for a gesture whose mousedown
+        // READ-ONLY on purpose -- consuming the record here would contradict the
+        // invariant above and silently reinstate the bug: hold the middle button,
+        // press left on a title bar (record consumed), release left (buttons
+        // 3->2, so no pointerup and no reset), then press left on a resize grip
+        // (buttons 2->3, so no pointerdown either) and the gesture would find no
+        // id and fall back to the bare document pair. A stale id cannot get
+        // through instead: the record only outlives its press if the UA loses the
+        // pointerup entirely, and setPointerCapture on a pointer that is no
+        // longer active fails, which captureGesturePointer already treats as "no
+        // capture".
+        function livePointerDown() { return _lastPointerDown; }
+        // Capture `pd` (from livePointerDown) for a gesture whose mousedown
         // targeted `target` inside `handle`. Returns {id, el} or null; null
         // means "no capture" and the caller tracks with the legacy mouse pair,
         // i.e. exactly the pre-#176 behaviour (synthetic MouseEvents with no
@@ -219,7 +225,7 @@
                 };
                 // Pointer capture keeps this gesture alive over an iframe /
                 // canvas / anything else that eats events (#176).
-                const cap = captureGesturePointer(takePointerDown(), e.target, handle);
+                const cap = captureGesturePointer(livePointerDown(), e.target, handle);
                 // elementFromPoint ONLY: swap/tab mode probes for the window
                 // UNDER the cursor, so the dragged window must not hit-test.
                 // This is NOT what keeps the gesture alive over event-eating
@@ -498,7 +504,7 @@
                 // resize path needed this fix most: it has no pointer-events
                 // neutralisation of any kind, so before capture it stalled the
                 // moment the cursor crossed the window's OWN embedded content.
-                const cap = captureGesturePointer(takePointerDown(), e.target, handle);
+                const cap = captureGesturePointer(livePointerDown(), e.target, handle);
                 let lastX = startX, lastY = startY;
                 let ended = false;
                 let unbind = null;
