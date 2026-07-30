@@ -313,8 +313,14 @@ passwords live per-browser in localStorage. Requirements:
   (preferred: unlocks secure-context features like clipboard image paste)
   or all-plain-http (see SETUP.md → Multiple machines over Tailscale).
 
-A single broker's status chip is always shown in the taskbar — even
-healthy and local, so the per-broker hide toggle is always reachable.
+A single broker's status chip is shown in the taskbar by default, even
+healthy and local. Since the per-broker actions moved onto the (+)
+menu's rows it is a pure indicator, so the browser-global
+`hostStatusChip` setting can switch it to `attention` (drawn only while
+some broker is auth-needed / down / lease — a broker the user HID does
+not count) or `never`; hiding is a `hide-broker-chip` body class, never
+an inline display, so the node stays put as the ws-pager's anchor and
+eats no taskbar gap slot.
 Four states: green ok / red down / amber password-needed / blue lease;
 an ok/down chip toggles that host's window visibility, while auth and
 lease chips are click-to-log-in / take-over. With two or more brokers

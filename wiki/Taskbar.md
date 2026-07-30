@@ -9,7 +9,7 @@ From left to right, the taskbar contains:
 | Launch button (**+**) | By default, left-click launches a terminal on your default host — the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]) — and right-click opens the full profile / app menu — a Control Panel toggle can swap the two |
 | Window buttons | One per open window (sticky notes only when opted in — see below) — click to focus, right-click for per-window actions |
 | Pager dots | One dot per workspace — click to switch. From the Workspaces mod, enabled by default (see [[Workspaces]]) |
-| Host status | One status chip for a single broker; with several, one aggregate badge that opens the broker menu (see [[Hosts-and-Multi-Browser]]) |
+| Host status | One status chip for a single broker; with several, one aggregate badge that opens the broker menu. A Control Panel option decides whether it shows always, only when a broker needs attention, or never (see [[Hosts-and-Multi-Browser]]) |
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
@@ -81,3 +81,17 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 The pager dots on the right of the taskbar (left of the host chips) are one-click workspace switchers, and their right-click menus rename or remove workspaces and toggle names vs. numbers. They come from the **Workspaces** mod (enabled by default), so the dots are absent if you turn it off. They are covered in full under [[Workspaces]].
 
 To keep workspaces but reclaim the space the dots take, turn on **Hide the workspace pager from the taskbar** under Control Panel → Mods → Workspaces. Only the pager goes — the chip badges and dimming, the shortcuts, and **Send to workspace** all stay, and the workspace menu (right-click an empty part of the taskbar or the desktop) still switches, adds, renames, and removes workspaces.
+
+## Broker status chip
+
+The host-status area shows a chip for your broker (or one aggregate badge once you have several). By default it is always there, but it is only an indicator — every broker also has a live row in the start (+) menu carrying the same actions — so **Control Panel → Broker status chip** lets you turn it down:
+
+| Show | Effect |
+|---|---|
+| Always | The default, and the same as before this option existed |
+| Only when a broker needs attention | The chip appears only while a broker is unreachable, wants a password, or is held by another browser — and disappears again once nothing is wrong |
+| Never | The chip is never drawn |
+
+A broker **you hid yourself** never counts as needing attention, so parking one you don't want right now keeps the chip quiet in attention mode. Nothing becomes unreachable when the chip is gone: right-click the **+** button and every broker is listed with its state and its log-in / take-over / un-hide action, and the same hide toggle is a checkbox on each host's row under Control Panel → Hosts. Attention mode is also deliberately slow to fire — a broker has to miss two polls (about four seconds) before it counts as down, so a single dropped poll never makes the chip flicker into view.
+
+The setting follows the browser you are sitting at rather than any one host, and is shared with other browsers viewing the same broker. See [[Hosts-and-Multi-Browser]] for what each chip state means.

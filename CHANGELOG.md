@@ -85,7 +85,33 @@ story behind anything named below.
   removed whole; under *whole list* that means the list goes with them, and the
   confirmation says so before you agree.
 
+- **The taskbar's broker status chip can be turned down or off** (#178).
+  **Control Panel → Broker status chip** takes **Always** (the default, and
+  unchanged from before), **Only when a broker needs attention** — drawn only
+  while some broker is unreachable, wants a password, or is held by another
+  browser, and gone again once nothing is wrong — or **Never**. The chip used to
+  render unconditionally because it was the only home for the per-broker hide
+  toggle; #149 gave every broker a live row in the start (+) menu carrying that
+  toggle plus log-in and take-over, and a **hidden** checkbox under
+  Control Panel → Hosts, so the chip is now a pure indicator and nothing becomes
+  unreachable without it. Attention mode inherits the existing two-failure
+  debounce, so a single dropped poll never flickers the chip into view, and a
+  broker you hid yourself never triggers it. The setting follows your browser
+  rather than a host tab, and syncs to other browsers viewing the same broker.
+
 ### Fixed
+
+- **Brokers you hid on purpose no longer count as needing attention** (#178).
+  The aggregate badge computed both its `K need attention` count and its colour
+  over every host with no regard for whether you had hidden it, so hiding an
+  offline broker — the documented way to park one — left the badge reading
+  `3 brokers · 1 needs attention` in red for good. Hidden is a chosen state, not
+  a fault: it is excluded from the count and from the colour, and an all-hidden
+  badge now drops its state colour entirely instead of claiming to be healthy.
+  The badge stops *claiming* a fault but never stops *reporting* one — its hover
+  list and the (+) menu rows still show every broker's real state, marked
+  `— hidden`. The same fix stops a freshly added broker counting as down for one
+  tick before its first poll has even been attempted.
 
 - **A window drag or resize no longer stalls over embedded content** (#176).
   Both gestures tracked on bare `document` mousemove/mouseup, so anything that

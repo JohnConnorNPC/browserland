@@ -165,6 +165,45 @@ def test_host_status_aggregate_wired_into_page():
     assert "if (!it.keepOpen) hideCtxMenu();" in s77
 
 
+def test_host_status_chip_visibility_wired_into_page():
+    # #178: the broker-status chip gains a three-mode Control Panel option
+    # (always / attention / never), and hidden brokers stop counting as needing
+    # attention. No JS test runner exists (pytest only), so lock the served-page
+    # symbols: the shared predicate and the visibility seam (75), the select
+    # (40), the self-healed default (55), and the CSS hook (10).
+    for sentinel in (
+        "function hostNeedsAttention",          # predicate (75)
+        "function applyHostStatusVisibility",   # visibility seam (75)
+        'id="set-host-status-chip"',            # the 3-state select (40)
+        "s.hostStatusChip = 'always'",          # self-heal default (55)
+        "body.hide-broker-chip #host-status",   # CSS hook (10)
+    ):
+        assert sentinel in INDEX_HTML, f"missing #178 sentinel: {sentinel!r}"
+    s75 = (BROKER_DIR / "75_js_taskbar_hosts.js").read_text(encoding="utf-8")
+    body = s75.split("function hostNeedsAttention", 1)[1].split("}\n", 1)[0]
+    # The predicate must read hostMenuState, NOT hostChipState: pollStateFor
+    # seeds polling:false, which hostChipState reads as 'down' before a poll has
+    # been TRIED, so a freshly-added host would flash the chip on for one tick.
+    assert "hostMenuState(" in body
+    assert "hostChipState(" not in body
+    # A parked broker is not a fault — that is the whole of fix (2).
+    assert "if (host.hidden) return false;" in body
+    # The badge's count and color derive from the predicate / the live hosts,
+    # never from the raw `states` array (which is per-host tooltip detail and
+    # still lists hidden brokers).
+    agg = s75.split("function renderAggregateChip", 1)[1].split(
+        "function renderHostStatus", 1)[0]
+    assert "hosts.filter(hostNeedsAttention).length" in agg
+    assert "const live = hosts.filter(h => !h.hidden);" in agg
+    assert "states.filter(" not in agg
+    # Ordering is load-bearing: renderHostStatus's hottest call site is
+    # unguarded, so the newest call goes LAST — a throw in it can at worst lose
+    # a visibility update, never the rest of the tick.
+    tail = s75.split("function renderHostStatus", 1)[1]
+    assert tail.index("repaintLaunchMenu();") < tail.index(
+        "applyHostStatusVisibility(hosts);")
+
+
 def test_agent_and_cwd_frames_handled_in_browser():
     # #156: protocol.py advertises `agent` and `cwd` as broker->browser pushes,
     # but the ws.onmessage if-chain in 73_js_window_runtime used to drop both —
