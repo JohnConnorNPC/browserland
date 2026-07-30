@@ -14,17 +14,6 @@ story behind anything named below.
 
 ## [Unreleased]
 
-### Security
-
-- `GET /help-corpus.json` now answers with two different bodies off the one
-  URL: without a token, the wiki + shipped-mod corpus (byte-identical to what
-  the route returned before runtime mod install); with a valid token, that plus
-  every installed mod's help section. The route stays public because the login
-  page renders its own Help window, so this is a smaller `200` rather than a
-  `401`. `Cache-Control: no-store` + `Vary: Authorization` stop a compliant
-  cache from handing one audience the other's body. Closes the unauthenticated
-  enumeration through this route noted under 0.8.0 below (#163).
-
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the
@@ -88,8 +77,8 @@ changes — see [`docs/UPGRADING.md`](docs/UPGRADING.md) for the record of those
 ### Security
 
 Neither of these is an advisory. The first is an information-disclosure
-finding, already fixed on the mainline; the second is a design property you have
-to understand before you install a mod.
+finding, introduced and fixed within this release; the second is a design
+property you have to understand before you install a mod.
 
 - **`GET /help-corpus.json` became an enumeration surface for installed mods.**
   The route is deliberately public (the login page renders its own Help window),
@@ -98,7 +87,17 @@ to understand before you install a mod.
   their help text, and their manifest's label and icon readable by anyone who
   can reach the port. What leaks is that help material and the mod ids around
   it: no token, and no file the mod did not already publish as documentation.
-  Gated in [Unreleased](#unreleased).
+  **Fixed before release.** The route now answers with two bodies off the one
+  URL — without a token, the wiki + shipped-mod corpus, byte-identical to what
+  it served before runtime mod install; with a valid token, that plus every
+  installed mod's help section. It stays public rather than becoming a `401`
+  because the login page renders its own Help window, and `Cache-Control:
+  no-store` + `Vary: Authorization` keep a compliant cache from handing one
+  audience the other's body. The `/mods/<id>/<gen>/<file>` asset route stays
+  public by design, and since `<gen>` is a content hash of the package rather
+  than a secret, anyone holding a distributed package's bytes can still confirm
+  that specific mod is installed — a confirmation oracle over a candidate set
+  the caller already has, not enumeration.
 - **Installing a mod is the decision to run it; disabling it is not
   containment.** An installed package's scripts are fetched and executed on
   every page load whatever its enabled state, and its stylesheets are live
