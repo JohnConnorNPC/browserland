@@ -21,10 +21,36 @@ story behind anything named below.
   swallows events — an `<iframe>`, whose events belong to its own document, or
   a canvas that stops propagation — starved the listeners: the window stuck at
   the last position `document` saw, the release never arrived, and the gesture
-  stayed live afterwards (a later buttonless mouse move kept resizing it). The
-  gestures now take pointer capture, so the browser routes the whole gesture to
-  them whatever is underneath, and `pointercancel` / a lost capture / a window
-  blur all end them cleanly.
+  stayed live afterwards (a later buttonless mouse move kept resizing it).
+  Two things fix it, and both are needed. The gesture raises a transparent
+  full-viewport shield, so nothing underneath is hit-tested at all; and it takes
+  pointer capture, which gives clean routing within the page plus a
+  `pointercancel` / lost-capture / blur lifecycle that ends the gesture cleanly.
+  Capture alone was not enough: a **cross-site** iframe runs in a separate
+  browser process and is hit-tested before the capture is consulted, so the page
+  saw none of the gesture even while it held the capture — measured at 0 of 16
+  moves in Chrome 150. A move that arrives with no mouse button down now also
+  ends the gesture, so a release the browser never delivered can no longer
+  strand it.
+  Not covered: a gesture that starts on a **tiled** window's title bar (the
+  tiling strip runs its own drag engine and takes neither), and any content the
+  browser paints in its *top layer* — a native `<dialog>` or popover — which
+  sits above the shield. Nothing in the app uses either today.
+
+- **Double-click stopped working page-wide for 700 ms after any window drag or
+  resize** (#176). The guard that suppresses the stray click a finished gesture
+  leaves behind was installed on `window` with no target check, so for 700 ms
+  after moving essentially any window, every double-click died: opening a file
+  or entering a directory in a file-manager or file-picker pane, renaming a
+  scratchpad tab, and renaming another window by its title — the very thing the
+  guard existed to protect. It is now scoped to the title bar the gesture
+  started from, and the resize path, which never needed it, no longer arms it.
+
+- **Touch could no longer pan the tiling workspace from a tiled window's title
+  bar** (#176). `touch-action: none` was applied to every title bar, including
+  tiled ones, which live inside the horizontally scrolling strip. Floating
+  windows keep it (their drag is a captured-pointer gesture that a pan claim
+  would cancel); tiled ones no longer do.
 
 ## [0.8.0] - 2026-07-30
 
