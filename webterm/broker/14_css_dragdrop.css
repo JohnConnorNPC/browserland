@@ -12,8 +12,10 @@
            native <dialog>/popover over an embedded frame would still starve the
            gesture. Nothing in-tree uses either (there is no showModal anywhere);
            a mod that does would need to know. Also relies on html/body carrying
-           no transform/filter/contain, or the fixed containing block stops being
-           the viewport — 10_css_root.css keeps both clean, and the tiling layer
+           nothing that makes itself a containing block for fixed descendants
+           (transform, filter, backdrop-filter, perspective, contain, a
+           will-change naming one of them...), or `inset: 0` stops meaning the
+           viewport — 10_css_root.css keeps both clean, and the tiling layer
            already forbids transforms for its own reasons.
            Fully transparent; `cursor` is set inline from the handle it was
            raised for, so a resize keeps its edge cursor. The swap/tab probe

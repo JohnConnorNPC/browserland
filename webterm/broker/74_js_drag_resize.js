@@ -144,10 +144,11 @@
         //     ancestor (body) instead of the title bar, and double-click to
         //     rename would stop working. Under a capture that cannot happen --
         //     the compat events are retargeted to the capture element;
-        //   * refcounted, because two gestures CAN be live at once: a gesture
-        //     that lost its release is only swept when its OWN handle is
-        //     pressed again, so another can start underneath it, and the first
-        //     to end must not strip the other's shield;
+        //   * refcounted, because two gestures can still overlap and the first
+        //     to end must not strip the other's shield. NOT from an ordinary
+        //     second press -- the shield stops that reaching a handle at all --
+        //     but from a synthetic mousedown, or a gesture started
+        //     programmatically while one is live;
         //   * re-attached on `isConnected`, not on the refcount, so anything
         //     that rips the node out from under us (a mod, a devtools poke)
         //     self-heals on the next gesture instead of never showing again;
@@ -258,15 +259,35 @@
             document.addEventListener('pointerup', pUp, true);
             document.addEventListener('pointercancel', pCancel, true);
             document.addEventListener('lostpointercapture', pCancel, true);
-            // ALSO end on a plain mouseup. pointerdown/pointerup fire only on
-            // the 0<->1 buttons transition, so when a second button is held
-            // (chording) the release of THIS button produces a mouseup and no
-            // pointerup -- without this the gesture would run on until the last
-            // button came up, where today it ends on the first. Capture
-            // retargets the compatibility mouse events too, so this listener is
-            // not starved by whatever the pointer is over. onUp is idempotent,
-            // so the normal pointerup-then-mouseup order costs nothing.
-            document.addEventListener('mouseup', onUp, true);
+            // ALSO end on a plain mouseup of the PRIMARY button.
+            // pointerdown/pointerup fire only on the 0<->1 buttons transition,
+            // so when a second button is held (chording) the release of the one
+            // that started this gesture produces a mouseup and no pointerup --
+            // without this the gesture would run on until the last button came
+            // up, where today it ends on the first. Capture retargets the
+            // compatibility mouse events too, so this listener is not starved by
+            // whatever the pointer is over. onUp is idempotent, so the normal
+            // pointerup-then-mouseup order costs nothing.
+            //
+            // ev.button === 0 because this listener is deliberately the one that
+            // DOES see everything: a right-click landing mid-drag releases too,
+            // and that release is not this gesture's. onDown already refuses to
+            // let a right mousedown kill a live drag; this is the same rule for
+            // the way out.
+            const mUp = (ev) => { if (ev.button === 0) onUp(ev); };
+            document.addEventListener('mouseup', mUp, true);
+            // Last-resort recovery. Every listener above is filtered to OUR
+            // pointer, and with the shield up a fresh press cannot reach a
+            // handle, so wireDrag / wireResize's `if (endGesture) endGesture()`
+            // sweep is unreachable while a gesture is live. If a release is lost
+            // on a stream whose events we filter out, a pointerdown from some
+            // OTHER pointer is the only thing left that can free the page --
+            // so it ends this gesture rather than being ignored. Chording does
+            // not trip it (a second button on the same pointer produces no
+            // pointerdown at all), and neither does this gesture's own press:
+            // that pointerdown was dispatched before we got here.
+            const pDown = (ev) => { onCancel(ev); };
+            document.addEventListener('pointerdown', pDown, true);
             return () => {
                 // Listeners go FIRST: releasePointerCapture fires
                 // lostpointercapture, which must not re-enter onCancel.
@@ -274,7 +295,8 @@
                 document.removeEventListener('pointerup', pUp, true);
                 document.removeEventListener('pointercancel', pCancel, true);
                 document.removeEventListener('lostpointercapture', pCancel, true);
-                document.removeEventListener('mouseup', onUp, true);
+                document.removeEventListener('mouseup', mUp, true);
+                document.removeEventListener('pointerdown', pDown, true);
                 lowerShield();
                 // pointerup / pointercancel release implicitly; this is for
                 // every OTHER exit (Escape, blur, the window being disposed

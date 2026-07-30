@@ -243,9 +243,13 @@ def test_window_gestures_take_pointer_capture():
     # mouseup does, for both gestures.
     assert src.count("bindGestureTracking(cap, handle, onMove, onUp, onAbort)") == 2
     # A chorded release produces a mouseup and no pointerup (pointerdown/up fire
-    # only on the 0<->1 buttons transition), so mouseup still ends the gesture.
-    assert "document.addEventListener('mouseup', onUp, true);" in src
-    assert "document.removeEventListener('mouseup', onUp, true);" in src
+    # only on the 0<->1 buttons transition), so mouseup still ends the gesture --
+    # but only the PRIMARY button's. This listener is deliberately the one that
+    # sees everything, so without the filter a right-click landing mid-drag would
+    # end it on the way out, which onDown already refuses to do on the way in.
+    assert "const mUp = (ev) => { if (ev.button === 0) onUp(ev); };" in src
+    assert "document.addEventListener('mouseup', mUp, true);" in src
+    assert "document.removeEventListener('mouseup', mUp, true);" in src
     # Capture is released on every exit that is not an implicit release.
     assert "cap.el.releasePointerCapture(cap.id);" in src
 
@@ -261,10 +265,14 @@ def test_window_gestures_still_start_on_mousedown():
     src = _drag_resize_src()
     assert src.count("handle.addEventListener('mousedown', onDown);") == 2
     assert "handle.addEventListener('pointerdown'" not in src
-    # The only pointerdown listener is the passive id sniffer, and it records
-    # mouse/pen only: a touch's compatibility mousedown arrives after the touch
-    # has ENDED, so its id would be dead by the time we tried to capture it.
-    assert src.count("addEventListener('pointerdown'") == 1
+    # Two pointerdown listeners, and NEITHER starts a gesture: the passive id
+    # sniffer, which records mouse/pen only (a touch's compatibility mousedown
+    # arrives after the touch has ENDED, so its id would be dead by the time we
+    # tried to capture it), and the live gesture's last-resort recovery, which
+    # only ends one.
+    assert src.count("document.addEventListener('pointerdown'") == 2
+    assert "const pDown = (ev) => { onCancel(ev); };" in src
+    assert "document.removeEventListener('pointerdown', pDown, true);" in src
     assert "e.pointerType === 'mouse' || e.pointerType === 'pen'" in src
     assert "e.isPrimary" in src
     # The record is cleared by pointerup/pointercancel and by NOTHING else. A
