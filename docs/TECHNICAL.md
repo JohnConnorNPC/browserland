@@ -448,7 +448,7 @@ effective mode to permit them.
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
 **`GET /mcp/info`** →
-`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.1.0+ba4b62e"}`.
+`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e"}`.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22).
@@ -471,7 +471,7 @@ dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repa
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
-  "version":"0.1.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
+  "version":"0.8.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
   "pyte":true}]
 ```
 
