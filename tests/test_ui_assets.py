@@ -2168,7 +2168,9 @@ def test_editor_symbols_removed_from_core_fragments():
     # from core 54, its launcher from core 76, and the AGENTS.md hooks
     # (openAgentDocsWindow + openAgentsMdEditor) from core 73. The editor kind +
     # builder + launcher live in mods/editor/; as of #120 the two AGENTS.md hooks
-    # were split further into their own mods/agent-docs/ mod (requires the editor).
+    # were split further into their own mods/agent-docs/ mod (requires the
+    # editor), which #177 then retired to mods-deprecated/ — so they are gone
+    # from core AND from the served page now.
     # The CodeMirror fragment (69) + editor fragment (70) are DELETED;
     # openAppWindow (the dispatcher) moved into core 54.
     assert not (BROKER_DIR / "69_js_codemirror.js").exists()
@@ -2188,18 +2190,18 @@ def test_editor_symbols_removed_from_core_fragments():
     s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
     assert "function openAppWindow" in s54
     # And the moved builder/hooks are present + reachable in the served page as
-    # hoisted functions, so core (and the editor's legacy-upgrade branch) reach
-    # them mods-off. The builder/loader/launcher ship in mods/editor/; the two
-    # AGENTS.md openers ship in mods/agent-docs/ (#120) — both are concatenated
-    # into the one shared <script>, so every symbol stays reachable.
+    # hoisted functions, so core reaches them mods-off. The builder/loader/
+    # launcher ship in mods/editor/, concatenated into the one shared <script>.
     for sym in ("function openNoteOrEditorWindow", "function loadCodeMirror",
-                "function openAgentDocsWindow", "function openAgentsMdEditor",
                 "function launchTextEditor"):
         assert sym in INDEX_HTML, f"{sym!r} must stay reachable in the served page"
     # #120: the two AGENTS.md openers moved OUT of mods/editor/ and INTO
-    # mods/agent-docs/ — assert they live in the agent-docs mod, not editor.js.
+    # mods/agent-docs/ — which #177 then retired to mods-deprecated/. They live
+    # in the retired copy, not in editor.js, and reach the served page from
+    # NEITHER (see test_agent_docs_mod_retired_to_deprecated_tree).
     editor_src = (BROKER_DIR / "mods" / "editor" / "editor.js").read_text(encoding="utf-8")
-    agent_src = (BROKER_DIR / "mods" / "agent-docs" / "agent-docs.js").read_text(encoding="utf-8")
+    agent_src = (BROKER_DIR / "mods-deprecated" / "agent-docs"
+                 / "agent-docs.js").read_text(encoding="utf-8")
     for sym in ("function openAgentDocsWindow", "function openAgentsMdEditor"):
         assert sym in agent_src, f"{sym!r} must live in the agent-docs mod (#120)"
         assert sym not in editor_src, f"{sym!r} must be gone from editor.js (#120)"
@@ -2250,54 +2252,106 @@ def test_editor_mod_packaged_and_manifest_agrees():
     assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'sticky'")
 
 
-def test_agent_docs_mod_packaged_and_requires_editor():
-    # #120: the Agent-docs feature (the tabbed AGENTS.md/CLAUDE.md editor opened
-    # from the terminal 📋 button) is split into its own mod that REQUIRES the
-    # editor mod. It reuses the editor's text-editor window kind (NO new appKind,
-    # NO duplicate registerWindowKind, so webterm:appwindows:v1 stays byte-
-    # identical) and inserts its 📋 title-bar button via the #116 per-terminal-
-    # window seam (ctx.windows.onTerminalCreate) — core keeps zero Agent-docs knowledge.
+def test_agent_docs_mod_retired_to_deprecated_tree():
+    # #177: the Agent-docs mod (#120 — the tabbed AGENTS.md/CLAUDE.md editor
+    # opened from each terminal's 📋 button) is RETIRED. Its 📋 opened whatever
+    # the session's INFERRED cwd happened to be, so a wrong inference silently
+    # opened — and, on save, wrote to — a different project's AGENTS.md. The
+    # inference is core's (psutil over the process tree), not this mod's, so the
+    # mod is retired recoverably rather than deleted: it moves verbatim into
+    # mods-deprecated/, which nothing loads.
+    #
+    # This test is the anti-rot guard the retirement is worth only if it exists:
+    # the retired copy must stay COMPLETE (so the README's copy-back steps work
+    # on a clean checkout) and must stay UNSHIPPED.
     import json
-    mod_dir = BROKER_DIR / "mods" / "agent-docs"
+    mod_dir = BROKER_DIR / "mods-deprecated" / "agent-docs"
     js = mod_dir / "agent-docs.js"
     manifest = mod_dir / "mod.json"
     help_md = mod_dir / "help.md"
-    assert js.is_file() and manifest.is_file() and help_md.is_file()
+    assert js.is_file() and manifest.is_file() and help_md.is_file(), \
+        "the retired agent-docs copy must stay whole — it is the re-enable path"
     meta = json.loads(manifest.read_text(encoding="utf-8"))
     assert meta["id"] == "agent-docs"
     assert meta["ctxVersion"] == 1
     assert meta["entry"] == "agent-docs.js"
     assert meta["help"]["slug"] == "agent-docs"
-    # Declared in _MODS, AFTER the editor it depends on (the #121 static ordering
-    # guard also enforces this in test_requires_declared_before_dependency_...).
-    assert "mods/agent-docs/agent-docs.js" in ui._MODS
-    assert ui._MODS.index("mods/editor/editor.js") \
-        < ui._MODS.index("mods/agent-docs/agent-docs.js")
     src = js.read_text(encoding="utf-8")
     assert "registerMod(" in src
     assert "id: 'agent-docs'" in src
-    assert "ctxVersion: 1" in src
-    # The hard dependency on the editor mod (the #121 requires primitive).
+    # The hard dependency on the editor mod (#121) — copying it back re-adds a
+    # mod that MUST be listed after mods/editor/editor.js in _MODS.
     assert "requires: ['editor']" in src
-    # Rides the per-terminal-window seam and adds/tears-down its button there; NO
-    # window kind of its own (it reuses the editor's text-editor kind).
-    assert "ctx.windows.onTerminalCreate(" in src
-    assert "registerWindowKind(" not in src, \
-        "agent-docs must reuse the editor's text-editor kind, not register its own"
-    assert "info.addTitleBarItem(" in src
-    assert "info.onDispose(" in src
-    # The 📋 button opens the editor keyed by the terminal WINDOW id (win.id) —
-    # how openAgentsMdEditor keys sessions/windows — not the session wire id.
-    assert "openAgentsMdEditor(win.id)" in src
-    assert "btn-agentsmd" in src
-    # Both moved openers live here now (and NOT in editor.js — see
-    # test_editor_symbols_removed_from_core_fragments).
     assert "function openAgentDocsWindow" in src
     assert "function openAgentsMdEditor" in src
-    # Ships in the served page, AFTER the editor mod, BEFORE the sticky mod.
-    assert "id: 'agent-docs'" in INDEX_HTML
-    assert INDEX_HTML.index("id: 'editor'") < INDEX_HTML.index("id: 'agent-docs'")
-    assert INDEX_HTML.index("id: 'agent-docs'") < INDEX_HTML.index("id: 'sticky'")
+    # The parent README is the mechanism, not a courtesy: it is the only place
+    # the copy-back steps (and why `mods_dir` is NOT one of them) are written.
+    readme = (BROKER_DIR / "mods-deprecated" / "README.md")
+    assert readme.is_file()
+    readme_txt = readme.read_text(encoding="utf-8")
+    assert "agent-docs" in readme_txt and "_MODS" in readme_txt
+
+    # UNSHIPPED. _MODS is the allowlist that ships a mod, so its absence there is
+    # the retirement; the served page must carry no trace of the mod.
+    assert not any("agent-docs" in rel for rel in ui._MODS)
+    assert not (BROKER_DIR / "mods" / "agent-docs").exists(), \
+        "the retired mod must not also sit in mods/ (the _MODS drift guard " \
+        "rglobs mods/**/*.js and would fail too)"
+    for sym in ("id: 'agent-docs'", "function openAgentDocsWindow",
+                "function openAgentsMdEditor", "btn-agentsmd"):
+        assert sym not in INDEX_HTML, f"{sym!r} must be gone from the served page (#177)"
+    assert "agent-docs" not in {m["id"] for m in ui.mod_catalog()}
+
+    # ...and the editor's legacy-record upgrade branch, which called the retired
+    # opener as a hoisted free identifier, is GUARDED. `typeof` is the only test
+    # that is safe on an undeclared identifier — a bare call would ReferenceError
+    # for any stored record with `agentsMdCwd` and no `docs`.
+    editor_src = (BROKER_DIR / "mods" / "editor"
+                  / "editor.js").read_text(encoding="utf-8")
+    assert "typeof openAgentDocsWindow === 'function'" in editor_src
+    assert "openAgentDocsWindow(" in editor_src   # the guarded call still there
+    # The tabbed docs/Sections machinery STAYS in editor.js on purpose, so an
+    # already-stored Agent-docs window still restores and works. Only the two
+    # entry points (and the 📋 button) went away.
+    assert "appData.docs" in editor_src
+    assert "kind: 'sections'" in editor_src
+
+
+def test_retired_agent_docs_would_still_load_if_copied_back():
+    # The README promises the retired copy re-enables on a clean checkout, and a
+    # manifest-shape assertion cannot back that: a retired mod rots by having the
+    # HOST rename something out from under it, not by editing itself. So hold the
+    # two contracts a copy-back actually depends on.
+    #
+    # (1) Rule 1 of the portable-mod lint, which every SHIPPED mod passes and
+    # _shipped_mod_scripts() no longer scans for this one: nothing may RUN at
+    # top level but registerMod(...). Spliced back into the inline bundle,
+    # top-level code would run at parse time.
+    src_path = BROKER_DIR / "mods-deprecated" / "agent-docs" / "agent-docs.js"
+    bad = [s for s in _js_top_level_statements(src_path.read_text(encoding="utf-8"))
+           if s != "registerMod" and not _JS_DECL.match(s)]
+    assert not bad, f"retired agent-docs runs code at top level: {bad[:4]}"
+
+    # (2) Every core/editor name it calls as a hoisted FREE IDENTIFIER still
+    # exists in the served page. This is the real rot: rename or drop any of
+    # these and the retired copy is broken long before anyone tries to copy it
+    # back, with nothing to say so. `editorFile` in particular is the editor
+    # mod's ctx.file choke point and lost its only external caller in #177 --
+    # exactly the kind of now-unused seam a later cleanup deletes.
+    src = src_path.read_text(encoding="utf-8")
+    for name in ("editorFile", "openAppWindow", "showNotice", "hostById",
+                 "localHost", "joinNative", "revealAndFocusWindow",
+                 "findKeyInLayout", "visibleColIndex", "placeWindowTiled",
+                 "tabWindowIntoTile", "registerMod"):
+        assert name + "(" in src, \
+            f"{name!r} is no longer called by the retired mod — drop it here"
+        assert "function " + name in INDEX_HTML, (
+            f"the retired agent-docs mod calls {name}() as a free identifier, "
+            "but the served page no longer declares it. Either restore the name "
+            "or update mods-deprecated/agent-docs/ (and its README note).")
+    # ...and the shared maps it reads, which are core `const`s, not functions.
+    for name in ("sessions", "windows"):
+        assert "const " + name in INDEX_HTML
 
 
 def test_scratchpad_mod_packaged_and_manifest_agrees():
@@ -4780,7 +4834,7 @@ _EXPECTED_TIERS = {
     "task-manager": ["session", "window"],
     "file-manager": ["file", "window"],
     "editor": ["file", "window"],
-    "agent-docs": ["file", "window"],  # #120 AGENTS.md/CLAUDE.md openers do host /file/* I/O + open a window
+    # (#177 retired agent-docs -- ["file", "window"] -- to mods-deprecated/.)
     "sticky": ["settings", "window"],  # #141 stickyTaskbar toggle (ctx.settings.boolean) + the sticky-note window kind
     "aistatus": ["taskbar", "settings", "window"],  # #112 chip + synced settings + window kind
     "git": ["session", "window"],  # #116 per-terminal git widget via ctx.session.git + ctx.windows
@@ -6022,7 +6076,10 @@ def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
     # its own <script src> it would run after /info, against a desktop that is
     # already up. Same bytes, different world.
     #
-    # All 20 shipped mods pass. This is a forward guard, not a known-gap list.
+    # Every shipped mod script passes. This is a forward guard, not a known-gap
+    # list. (#177's retired agent-docs is held to the same rule by
+    # test_retired_agent_docs_would_still_load_if_copied_back, which this no
+    # longer reaches — _shipped_mod_scripts() scans mods/, not mods-deprecated/.)
     offenders = {}
     for path in _shipped_mod_scripts():
         bad = [s for s in _js_top_level_statements(path.read_text(encoding="utf-8"))
@@ -6049,10 +6106,12 @@ def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
 #: to break any of these couplings is a separate decision.
 _MOD_CROSS_FRAGMENT_CALL_INS = {
     ("applyPattern", "pattern", "mod:theme/theme.js"),
-    ("editorFile", "editor", "mod:agent-docs/agent-docs.js"),
     ("findHelpWindow", "help", "core:86_js_mod_loader.js"),
     ("loadCodeMirror", "editor", "mod:scratchpad/scratchpad.js"),
-    ("openAgentDocsWindow", "agent-docs", "mod:editor/editor.js"),
+    # (#177 retired agent-docs, which took two edges with it: `editorFile`
+    # (editor) reached in from mods/agent-docs/, and `openAgentDocsWindow`
+    # (agent-docs) reached in from mods/editor/. The editor's call site survives
+    # as a `typeof` guard, which owns no shipped name, so it is not an edge.)
     ("openNoteOrEditorWindow", "editor", "core:54_js_app_windows_store.js"),
     ("openNoteOrEditorWindow", "editor", "mod:sticky/sticky.js"),
     ("refreshHelpCorpus", "help", "core:86_js_mod_loader.js"),

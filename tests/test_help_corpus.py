@@ -398,15 +398,18 @@ def test_full_corpus_includes_mod_sections():
     slugs = [s["slug"] for s in full["sections"]]
     assert len(slugs) == len(set(slugs)), "no duplicate slug across wiki + mods"
     assert "taskbar" in slugs                    # a surviving wiki section
-    for mod_slug in ("sticky", "editor", "agent-docs", "file-manager",
+    for mod_slug in ("sticky", "editor", "file-manager",
                      "task-manager", "clock", "help", "aistatus", "git",
                      "clipboard", "scratchpad", "recorder", "host-registry",
                      "mousemode", "mod-sync"):
         assert mod_slug in slugs
+    # #177 retired agent-docs to mods-deprecated/, which build_mod_sections does
+    # not scan — so its Help section goes with it.
+    assert "agent-docs" not in slugs
     # every mod section is tagged and sorts AFTER every wiki section.
     mod_orders = [s["order"] for s in full["sections"] if "mod" in s]
     wiki_orders = [s["order"] for s in full["sections"] if "mod" not in s]
-    assert len(mod_orders) == 15   # +git (#116) +clipboard (#106) +agent-docs (#120) +scratchpad (#124) +recorder (#140) +host-registry (#65) +mousemode (#155) +mod-sync (#158)
+    assert len(mod_orders) == 14   # +git (#116) +clipboard (#106) +scratchpad (#124) +recorder (#140) +host-registry (#65) +mousemode (#155) +mod-sync (#158) -agent-docs (#177)
     assert min(mod_orders) > max(wiki_orders)
 
 

@@ -24,7 +24,9 @@ You can also open a terminal with the **New terminal** shortcut (`Ctrl+Alt+Enter
 
 A terminal runs a real shell on its broker host. The shell keeps running even when no browser is attached, so you can close the window, come back later, and the screen heals from a snapshot.
 
-Each terminal title bar carries a per-window **robot button** that sets that window's MCP (AI agent) access — off, read, or read-write. The robot icon briefly flashes when an agent reads the screen or types into the terminal. See [[MCP-and-AI-Agents]] for the full picture. The title bar also carries a **📋 Agent docs button** that opens an editor for that host's `AGENTS.md` / `CLAUDE.md` files (provided by the default-on Agent-docs mod; requires the Text editor mod; toggleable under Control Panel → Mods).
+Each terminal title bar carries a per-window **robot button** that sets that window's MCP (AI agent) access — off, read, or read-write. The robot icon briefly flashes when an agent reads the screen or types into the terminal. See [[MCP-and-AI-Agents]] for the full picture.
+
+The title bar used to carry a **📋 Agent docs button** that opened that folder's `AGENTS.md` / `CLAUDE.md`. It has been **retired**: the button guessed which folder you meant from the terminal's detected working directory, and when that guess was wrong it opened — and, once you saved, wrote to — a different project's `AGENTS.md`, with no way to tell from the window that it had. `AGENTS.md` and `CLAUDE.md` are ordinary files; open them with the **Text editor** (Open) or the **File manager** as you would any other. Agent-docs windows you already had open still restore and still save.
 
 A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left-click on the **+** button launches on your **default host** — the local broker unless changed in Control Panel → Hosts. To start one on a specific host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts and setting the default.
 

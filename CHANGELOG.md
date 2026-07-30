@@ -99,6 +99,33 @@ story behind anything named below.
   broker you hid yourself never triggers it. The setting follows your browser
   rather than a host tab, and syncs to other browsers viewing the same broker.
 
+### Removed
+
+- **The Agent-docs mod is retired** (#177). Each terminal title bar carried a
+  📋 button that opened that folder's `AGENTS.md` and `CLAUDE.md`. It had no way
+  to know which folder you meant: it used the terminal's *detected* working
+  directory, which is inferred by walking the OS process tree rather than
+  reported by the shell, so it can lag a `cd`, prefer a lingering agent's
+  directory over the shell's, fall back to a known-wrong parent for an
+  unrecognised tool, or go stale entirely when the process is unreadable. When
+  the guess was wrong the button opened a *different project's* `AGENTS.md`,
+  silently, with the same window it shows when it is right — and because that
+  window saves, a wrong guess did not just show the wrong file, it wrote to it.
+  Nothing else is lost: `AGENTS.md` and `CLAUDE.md` are ordinary files that the
+  text editor and file manager still open. Agent-docs windows you already have
+  keep working — they restore, tab, and save exactly as before; only the ability
+  to open a *new* one from a terminal is gone. A desktop that is already open
+  keeps its 📋 buttons until the page is reloaded, as every mod change does.
+  The same inferred directory still
+  feeds the git-status widget, the file manager's start folder and the task
+  manager, where being wrong is cosmetic or obvious rather than destructive.
+  The mod is not deleted. It moves verbatim to a new
+  `webterm/broker/mods-deprecated/` tree whose README says what would have to
+  change before it is worth bringing back — the working directory being
+  *reported* (shell integration / OSC 7) instead of inferred — and how to copy
+  it back. That tree is the reusable mechanism for future retirements; it is
+  repo-only and deliberately not shipped in the wheel.
+
 ### Fixed
 
 - **Brokers you hid on purpose no longer count as needing attention** (#178).

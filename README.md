@@ -219,7 +219,6 @@ browser that loads its page. The desktop ships with nineteen:
 | `file-manager` | dual-pane file manager | on |
 | `task-manager` | live per-host process list | on |
 | `scratchpad` | server-backed notes, synced across browsers with revision history | on |
-| `agent-docs` | AGENTS.md / CLAUDE.md one-click openers on terminal title bars | on |
 | `recorder` | terminal session recorder + fixed-size player (speed, continuous rewind, timestamped notes) | on |
 | `host-registry` | optional shared broker list — publish/pull your host list across browsers | on |
 | `mousemode` | title-bar chip while a full-screen app owns the mouse | on |

@@ -667,19 +667,25 @@ So the contract, if you want source that moves in both directions unchanged:
 
 Rules 1, 2 and 4 are enforced by the portable-mod lint in
 `tests/test_ui_assets.py`, and every shipped mod passes them. Rule 3's known
-in-tree exceptions are pinned there too, as an exact set of nine edges:
+in-tree exceptions are pinned there too, as an exact set of seven edges:
 
 | top-level name (owner) | reached from |
 |---|---|
 | `openNoteOrEditorWindow` (`editor`) | core `54_js_app_windows_store.js`, `sticky` |
 | `loadCodeMirror` (`editor`) | `scratchpad` |
-| `editorFile` (`editor`) | `agent-docs` |
 | `applyPattern` (`pattern`) | `theme` |
-| `openAgentDocsWindow` (`agent-docs`) | `editor` |
 | `findHelpWindow`, `refreshHelpCorpus` (`help`) | core `86_js_mod_loader.js` |
 | `toggleHelpWindow` (`help`) | core `78_js_keybindings.js` |
 
-So `editor`, `help`, `pattern` and `agent-docs` cannot be republished as
+The set is a drift guard **both ways** — a stale edge fails as loudly as a new
+one — so decoupling a mod forces it to shrink. It did: #177 retired `agent-docs`
+(see `webterm/broker/mods-deprecated/README.md`), which took two edges with it,
+`editorFile` (`editor`) ← `agent-docs` and `openAgentDocsWindow` (`agent-docs`)
+← `editor`. The surviving call site in `editor.js` is a
+`typeof openAgentDocsWindow === 'function'` guard, which owns no shipped name
+and so is not an edge.
+
+So `editor`, `help` and `pattern` cannot be republished as
 installable packages unchanged. **Rule 5 is not enforced** — check it yourself.
 The lint is a floor, not a proof: it reads source text, so it cannot see a
 call hidden inside `registerMod`'s own argument.
