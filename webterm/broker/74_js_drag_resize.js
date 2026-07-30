@@ -7,14 +7,199 @@
             getPref(win.id).geom = Object.assign({}, win.geom);
             savePrefs();
         }
+
+        // ---- pointer capture for the window gestures (#176) ----------------
+        // Both gestures used to track on bare `document` mousemove/mouseup.
+        // Content that swallows events starves those listeners: an <iframe>'s
+        // events belong to ITS document and never reach ours at all, and a
+        // canvas/plugin surface can stopPropagation on the way up. The gesture
+        // then stalls at the last position `document` saw and the mouseup that
+        // would end it may never arrive.
+        //
+        // setPointerCapture fixes that at the source: while a pointer is
+        // captured the browser retargets EVERY subsequent event for that
+        // pointer to the capture element, so our listeners see the whole
+        // gesture no matter what is underneath the cursor.
+        //
+        // Why the gestures still START on `mousedown`. The drag handle is the
+        // entire .title-bar, and the way a title-bar child opts out of dragging
+        // the window is to call stopPropagation in its OWN mousedown handler --
+        // a contract core (min / close / colour / MCP) and every mod with a
+        // title-bar control depends on, in-tree and out (see the mousemode
+        // chip: "wireDrag treats anything that does not stopPropagation as 'the
+        // bar itself'"). `pointerdown` fires BEFORE mousedown and is a separate
+        // dispatch, so starting the gesture there would ignore all of those
+        // guards -- press-and-hold on the close button would snap the window to
+        // the grid. So mousedown stays the permission gate and the pointer id
+        // is sniffed from the pointerdown that immediately precedes it.
+        //
+        // TOUCH is deliberately not recorded: a touch pointer's compatibility
+        // mousedown (when a UA synthesises one at all) arrives only after the
+        // touch has already ENDED, so its id would be dead by the time we tried
+        // to capture it -- and a touch cannot start either gesture today for
+        // exactly that reason. Recording only mouse/pen keeps touch on its
+        // current (no-op) path instead of half-supporting it. Supporting touch
+        // properly needs a pointer-era opt-out contract for title-bar children
+        // (no mousedown ever arrives during a touch gesture, so the existing
+        // one cannot be honoured) -- a deliberate follow-up, not a side effect
+        // of this fix. `touch-action: none` IS set on both handles anyway (see
+        // 10_css_root.css / 12_css_help.css): pen is a captured pointer here,
+        // and without it the UA may claim a pen drag as a pan/zoom and
+        // pointercancel it out from under the gesture.
+        let _lastPointerDown = null;
+        document.addEventListener('pointerdown', (e) => {
+            // Primary mouse/pen only (above); overwritten by every press.
+            _lastPointerDown = (e.isPrimary
+                && (e.pointerType === 'mouse' || e.pointerType === 'pen'))
+                ? { id: e.pointerId } : null;
+        }, true);
+        // Bound staleness: the record is cleared the moment the press it
+        // describes is over, so a mousedown can only ever find the id of a
+        // pointer that is still down. It is NOT cleared per-mousedown, because
+        // pointerdown/pointerup fire only on the 0<->1 buttons transition: with
+        // a second button already held, a left mousedown gets no pointerdown of
+        // its own and must reuse the live record (see bindGestureTracking).
+        document.addEventListener('pointerup', () => { _lastPointerDown = null; }, true);
+        document.addEventListener('pointercancel', () => { _lastPointerDown = null; }, true);
+        function takePointerDown() {
+            const rec = _lastPointerDown;
+            _lastPointerDown = null;
+            return rec;
+        }
+        // Capture `pd` (from takePointerDown) for a gesture whose mousedown
+        // targeted `target` inside `handle`. Returns {id, el} or null; null
+        // means "no capture" and the caller tracks with the legacy mouse pair,
+        // i.e. exactly the pre-#176 behaviour (synthetic MouseEvents with no
+        // pointer stream behind them, an already-released pointer, a UA that
+        // refuses the capture).
+        //
+        // It captures the ORIGINAL target rather than the handle on purpose:
+        // capture retargets the compatibility mouse events too, so capturing
+        // the .title-bar for a press that landed on .title-text would move that
+        // press's click/dblclick onto the bar and break the app-window
+        // double-click rename (editor.js).
+        function captureGesturePointer(pd, target, handle) {
+            if (!pd) return null;
+            let el = (target instanceof Element) ? target : null;
+            if (!el || !el.isConnected || !handle.contains(el)) el = handle;
+            if (!el.setPointerCapture || !el.hasPointerCapture) return null;
+            try {
+                el.setPointerCapture(pd.id);
+            } catch (_) { return null; }
+            // setPointerCapture can also fail WITHOUT throwing (a pointer that
+            // is no longer active); only hasPointerCapture proves it took, and
+            // a false positive here would silently reinstate the bug.
+            if (!el.hasPointerCapture(pd.id)) return null;
+            return { id: pd.id, el: el };
+        }
+        // Bind one gesture's tracking listeners; returns the unbind.
+        //
+        // With a capture held we track POINTER events, in the CAPTURE phase on
+        // document so nothing in between can stop them, filtered to the
+        // captured pointer id -- a second pointer (multi-touch, a second
+        // device) is ignored instead of corrupting the gesture. `onCancel` runs
+        // for pointercancel (a system/touch interruption, which never sends a
+        // pointerup) and for an unexpected lostpointercapture, both of which
+        // must end the gesture the same way a lost mouseup does.
+        //
+        // Without a capture we bind the legacy document mousemove/mouseup pair
+        // in the bubble phase -- unchanged, deliberately, so the fallback path
+        // behaves exactly as it did before #176.
+        function bindGestureTracking(cap, onMove, onUp, onCancel) {
+            if (!cap) {
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                return () => {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                };
+            }
+            const mine = (fn) => (ev) => { if (ev.pointerId === cap.id) fn(ev); };
+            const pMove = mine(onMove);
+            const pUp = mine(onUp);
+            const pCancel = mine(onCancel);
+            document.addEventListener('pointermove', pMove, true);
+            document.addEventListener('pointerup', pUp, true);
+            document.addEventListener('pointercancel', pCancel, true);
+            document.addEventListener('lostpointercapture', pCancel, true);
+            // ALSO end on a plain mouseup. pointerdown/pointerup fire only on
+            // the 0<->1 buttons transition, so when a second button is held
+            // (chording) the release of THIS button produces a mouseup and no
+            // pointerup -- without this the gesture would run on until the last
+            // button came up, where today it ends on the first. Capture
+            // retargets the compatibility mouse events too, so this listener is
+            // not starved by whatever the pointer is over. onUp is idempotent,
+            // so the normal pointerup-then-mouseup order costs nothing.
+            document.addEventListener('mouseup', onUp, true);
+            return () => {
+                // Listeners go FIRST: releasePointerCapture fires
+                // lostpointercapture, which must not re-enter onCancel.
+                document.removeEventListener('pointermove', pMove, true);
+                document.removeEventListener('pointerup', pUp, true);
+                document.removeEventListener('pointercancel', pCancel, true);
+                document.removeEventListener('lostpointercapture', pCancel, true);
+                document.removeEventListener('mouseup', onUp, true);
+                // pointerup / pointercancel release implicitly; this is for
+                // every OTHER exit (Escape, blur, the window being disposed
+                // mid-gesture), which must not leave the pointer captured.
+                try {
+                    if (cap.el.hasPointerCapture(cap.id)) {
+                        cap.el.releasePointerCapture(cap.id);
+                    }
+                } catch (_) {}
+            };
+        }
+        // A captured pointerup retargets the compatibility click to the capture
+        // element, so a gesture RELEASED somewhere else still lands a click on
+        // the element it started from, where uncaptured it would have gone to
+        // the common ancestor instead. Swallow that one, at the very top of the
+        // propagation path so nothing downstream sees it.
+        //
+        // dblclick needs a LONGER guard than the click that follows the
+        // release: swallowing a click does not un-count it for the UA, so the
+        // next plain click on the same element -- a drag, then a click on the
+        // title -- would pair with it into a dblclick and open the rename
+        // editor. Hold the dblclick guard for one double-click interval.
+        //
+        // Only ever called for a gesture that actually MOVED, and only for
+        // TRUSTED events, so a press that stayed put keeps its click/dblclick
+        // (double-click-to-rename still works) and a programmatic .click() from
+        // some handler in the same task is left alone.
+        const DBLCLICK_GUARD_MS = 700;
+        function swallowClickAfterGesture() {
+            const eat = (ev) => {
+                if (!ev.isTrusted) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                ev.stopImmediatePropagation();
+            };
+            window.addEventListener('click', eat, true);
+            window.addEventListener('dblclick', eat, true);
+            setTimeout(() => window.removeEventListener('click', eat, true), 0);
+            setTimeout(() => window.removeEventListener('dblclick', eat, true),
+                       DBLCLICK_GUARD_MS);
+        }
+
         function wireDrag(win, handle) {
+            // Set while a gesture is live so window teardown can end it. A
+            // capture element removed from the DOM does NOT reliably fire
+            // lostpointercapture (the spec defers it to the next pointer
+            // event), so disposal must not be left to that.
+            let endGesture = null;
             const onDown = (e) => {
+                // Ahead of the stale-gesture sweep below on purpose: a
+                // right-click lands a mousedown too, and it must not kill the
+                // drag it lands in the middle of.
                 if (e.button !== 0) return;
                 // Tiled windows: title-bar drag reorders / consumes / detaches
                 // via the strip engine (overlays during drag, one mutation on
                 // drop). The floating absolute-move below would be a no-op on a
                 // static box, so hand off and return.
                 if (win.tiled) { startTiledDrag(win, e); return; }
+                // A gesture still live on this handle can only be one that lost
+                // its release (the fallback path over event-eating content).
+                // Abandon it rather than run two gestures on one window.
+                if (endGesture) endGesture();
                 // Interactive children (tb-btn, incl. the color button)
                 // stopPropagation in their own mousedown handlers; title-text has
                 // pointer-events:none. So we only get here for the bar itself,
@@ -32,8 +217,16 @@
                     width: win.dom.offsetWidth,
                     height: win.dom.offsetHeight,
                 };
-                // Take dragged window out of elementFromPoint hit-testing so
-                // we can find the window underneath the cursor for swap mode.
+                // Pointer capture keeps this gesture alive over an iframe /
+                // canvas / anything else that eats events (#176).
+                const cap = captureGesturePointer(takePointerDown(), e.target, handle);
+                // elementFromPoint ONLY: swap/tab mode probes for the window
+                // UNDER the cursor, so the dragged window must not hit-test.
+                // This is NOT what keeps the gesture alive over event-eating
+                // content -- `cap` above is. Reading it as drag safety is how
+                // the resize path, which never had this line, kept stalling
+                // over embedded content until #176. Do not delete it as
+                // redundant, and do not rely on it for anything else.
                 const prevPointerEvents = win.dom.style.pointerEvents;
                 win.dom.style.pointerEvents = 'none';
                 let swapCandidate = null;
@@ -58,6 +251,11 @@
                 // whole gesture even if a settings edit / remote prefetch lands
                 // mid-drag); 0 disables the snap dwell.
                 const holdMs = snapHoldMsFor(win);
+                // `ended` makes every exit path idempotent: pointerup and the
+                // implicit lostpointercapture that follows it, a blur racing a
+                // pointercancel, disposal racing either.
+                let ended = false;
+                let unbind = null;
                 const clearHold = () => {
                     if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; }
                 };
@@ -85,13 +283,17 @@
                     if (holdMs <= 0) return;      // 0 = snap dwell disabled
                     holdTimer = setTimeout(enterSnap, holdMs);
                 };
+                // Drops every listener this gesture owns (tracking, keys, blur)
+                // and releases the capture. Idempotent.
                 const teardown = () => {
+                    if (ended) return;
+                    ended = true;
+                    endGesture = null;
                     clearHold();
-                    document.removeEventListener('mousemove', onMove);
-                    document.removeEventListener('mouseup', onUp);
+                    if (unbind) unbind();
                     document.removeEventListener('keydown', onKey, true);
                     document.removeEventListener('keyup', onKeyUp, true);
-                    window.removeEventListener('blur', onBlur);
+                    window.removeEventListener('blur', onAbort);
                     win.dom.classList.remove('swap-source');
                     if (snapMode) {
                         document.body.classList.remove('tiled-dragging');
@@ -100,6 +302,17 @@
                         hideSnapCancel();
                     }
                     snapMode = false;
+                };
+                // True when the pointer ended far enough from where it started
+                // that the release should not also read as a click (see
+                // swallowClickAfterGesture). Measured from the RELEASE event,
+                // whose coordinates can be newer than the last move we saw. A
+                // drag that returns to where it began keeps its click, which is
+                // what would have happened without a capture anyway.
+                const dragged = (ev) => {
+                    const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : lastX;
+                    const y = (ev && typeof ev.clientY === 'number') ? ev.clientY : lastY;
+                    return Math.hypot(x - startX, y - startY) > DRAG_THRESHOLD;
                 };
                 const onMove = (ev) => {
                     if (win.disposed) { setCandidate(null); teardown(); return; }
@@ -147,8 +360,11 @@
                     }
                 };
                 const onUp = (ev) => {
+                    if (ended) return;
                     const wasSnap = snapMode;
+                    const wasDrag = dragged(ev);
                     teardown();
+                    if (cap && wasDrag) swallowClickAfterGesture();
                     if (win.disposed) { setCandidate(null); return; }
                     win.dom.style.pointerEvents = prevPointerEvents;
                     if (wasSnap) {
@@ -168,7 +384,7 @@
                     const finalCandidate = swapCandidate;
                     setCandidate(null);
                     // Revalidate target — it may have been closed/minimized
-                    // between the last mousemove and mouseup.
+                    // between the last move and the release.
                     const candValid = finalCandidate
                         && !finalCandidate.disposed
                         && !finalCandidate.minimized
@@ -210,13 +426,18 @@
                 // while parked (then released without moving) would leave modHeld
                 // stuck true and suppress the dwell forever.
                 const onKeyUp = (ev) => { modHeld = !!(ev.shiftKey || ev.altKey); };
-                // A lost mouseup (window blur / alt-tab) must not leave the drag
-                // half-alive (listeners live, pointer-events:none, stale swap UI).
-                // Always tear down + restore pointer-events. In snap mode this is
-                // a cancel back to the pre-drag box (undo the gesture); pre-snap it
-                // drops the window where it currently sits, mirroring the missing
-                // no-modifier mouseup so the existing floating-drag isn't regressed.
-                const onBlur = () => {
+                // Every abnormal end of the gesture: a lost mouseup (window blur
+                // / alt-tab), a pointercancel (the system took the pointer over
+                // — a touch or pen interruption never sends pointerup), or an
+                // unexpected lostpointercapture. None of them may leave the drag
+                // half-alive (listeners live, pointer-events:none, stale swap
+                // UI). Always tear down + restore pointer-events. In snap mode
+                // this is a cancel back to the pre-drag box (undo the gesture);
+                // pre-snap it drops the window where it currently sits,
+                // mirroring the missing no-modifier release so the existing
+                // floating-drag isn't regressed.
+                const onAbort = () => {
+                    if (ended) return;
                     const wasSnap = snapMode;
                     teardown();
                     if (win.disposed) { setCandidate(null); return; }
@@ -231,22 +452,38 @@
                         persistWinGeom(win);
                     }
                 };
-                document.addEventListener('mousemove', onMove);
-                document.addEventListener('mouseup', onUp);
+                unbind = bindGestureTracking(cap, onMove, onUp, onAbort);
                 document.addEventListener('keydown', onKey, true);
                 document.addEventListener('keyup', onKeyUp, true);
-                window.addEventListener('blur', onBlur);
+                window.addEventListener('blur', onAbort);
+                // Window teardown (or a stale gesture displaced by a new press):
+                // drop the gesture without committing geom, but DO put
+                // pointer-events back -- win.cleanups also runs on the
+                // active-view rebuild, and a live window left non-interactive
+                // would be unclickable.
+                endGesture = () => {
+                    teardown();
+                    setCandidate(null);
+                    win.dom.style.pointerEvents = prevPointerEvents;
+                };
                 armDwell();   // start the dwell clock at grab
             };
             handle.addEventListener('mousedown', onDown);
-            win.cleanups.push(() => handle.removeEventListener('mousedown', onDown));
+            win.cleanups.push(() => {
+                handle.removeEventListener('mousedown', onDown);
+                if (endGesture) endGesture();
+            });
         }
 
         function wireResize(win, handle, dir) {
+            let endGesture = null;
             const onDown = (e) => {
                 if (e.button !== 0) return;
                 if (win.tiled) return;       // flex-sized; handles are hidden
                 if (isSizeLocked()) return;
+                // See wireDrag: only a gesture that lost its release can still
+                // be live here, and two of them must not share one window.
+                if (endGesture) endGesture();
                 e.preventDefault();
                 e.stopPropagation();
                 bringToFront(win.id);
@@ -257,7 +494,37 @@
                 const startH = win.dom.offsetHeight;
                 const desktop = document.getElementById('desktop');
                 const dRect = desktop.getBoundingClientRect();
+                // Same pointer capture as the drag (#176) — and the reason the
+                // resize path needed this fix most: it has no pointer-events
+                // neutralisation of any kind, so before capture it stalled the
+                // moment the cursor crossed the window's OWN embedded content.
+                const cap = captureGesturePointer(takePointerDown(), e.target, handle);
+                let lastX = startX, lastY = startY;
+                let ended = false;
+                let unbind = null;
+                // Single exit for the whole gesture: drops the tracking
+                // listeners, releases the capture, and commits the box unless
+                // the window went away under us (nothing worth persisting, and
+                // no session left to resize). Idempotent.
+                const finish = (commit) => {
+                    if (ended) return;
+                    ended = true;
+                    endGesture = null;
+                    if (unbind) unbind();
+                    window.removeEventListener('blur', onAbort);
+                    if (!commit || win.disposed) return;
+                    win.geom = {
+                        left: win.dom.offsetLeft,
+                        top: win.dom.offsetTop,
+                        width: win.dom.offsetWidth,
+                        height: win.dom.offsetHeight,
+                    };
+                    persistWinGeom(win);
+                    sendResize(win, true);
+                };
                 const onMove = (ev) => {
+                    if (win.disposed) { finish(false); return; }
+                    lastX = ev.clientX; lastY = ev.clientY;
                     let nl = startLeft, nt = startTop, nw = startW, nh = startH;
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
@@ -283,22 +550,28 @@
                     win.dom.style.height = nh + 'px';
                     scheduleResize(win);
                 };
-                const onUp = () => {
-                    document.removeEventListener('mousemove', onMove);
-                    document.removeEventListener('mouseup', onUp);
-                    win.geom = {
-                        left: win.dom.offsetLeft,
-                        top: win.dom.offsetTop,
-                        width: win.dom.offsetWidth,
-                        height: win.dom.offsetHeight,
-                    };
-                    persistWinGeom(win);
-                    sendResize(win, true);
+                const onUp = (ev) => {
+                    if (ended) return;
+                    const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : lastX;
+                    const y = (ev && typeof ev.clientY === 'number') ? ev.clientY : lastY;
+                    const wasDrag = Math.hypot(x - startX, y - startY) > DRAG_THRESHOLD;
+                    finish(true);
+                    if (cap && wasDrag) swallowClickAfterGesture();
                 };
-                document.addEventListener('mousemove', onMove);
-                document.addEventListener('mouseup', onUp);
+                // pointercancel / an unexpected lostpointercapture / window blur
+                // (alt-tab with the button still down). Before #176 a blur mid-
+                // resize left both document listeners bound forever, so a later
+                // BUTTONLESS mousemove kept resizing the window. Commit the box
+                // where it got to — same choice the drag's abort path makes.
+                const onAbort = () => { finish(true); };
+                unbind = bindGestureTracking(cap, onMove, onUp, onAbort);
+                window.addEventListener('blur', onAbort);
+                endGesture = () => finish(false);
             };
             handle.addEventListener('mousedown', onDown);
-            win.cleanups.push(() => handle.removeEventListener('mousedown', onDown));
+            win.cleanups.push(() => {
+                handle.removeEventListener('mousedown', onDown);
+                if (endGesture) endGesture();
+            });
         }
 

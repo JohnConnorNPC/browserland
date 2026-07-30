@@ -6,7 +6,9 @@
            windows), never Help-specific. (Filename kept as-is so ui._ORDERED and
            the byte-identity guards don't shift.) */
         /* edge / corner resize handles */
-        .term-window .rh { position: absolute; z-index: 5; }
+        /* touch-action: same reason as .title-bar (#176) — the resize is a
+           captured-pointer gesture and these grips are not scroll surfaces. */
+        .term-window .rh { position: absolute; z-index: 5; touch-action: none; }
         .term-window .rh-n  { top: 0; left: var(--corner-size); right: var(--corner-size); height: var(--handle-thick); cursor: ns-resize; }
         .term-window .rh-s  { bottom: 0; left: var(--corner-size); right: var(--corner-size); height: var(--handle-thick); cursor: ns-resize; }
         .term-window .rh-w  { top: var(--corner-size); bottom: var(--corner-size); left: 0; width: var(--handle-thick); cursor: ew-resize; }
