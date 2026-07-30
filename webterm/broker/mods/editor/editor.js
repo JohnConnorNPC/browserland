@@ -13,9 +13,14 @@
         // always shared), the CodeMirror 6 lazy loader (mods/editor/codemirror.js),
         // and the (+) launcher launchTextEditor. (#120: the AGENTS.md hooks
         // openAgentDocsWindow + openAgentsMdEditor were since split out into the
-        // agent-docs mod (mods/agent-docs/), which requires this mod and still
-        // drives the shared docs/Sections/template machinery below as hoisted
-        // free identifiers.) All are
+        // agent-docs mod, which required this mod and drove the shared docs/
+        // Sections/template machinery below as hoisted free identifiers. #177
+        // RETIRED that mod to webterm/broker/mods-deprecated/agent-docs/ -- its
+        // 📋 button opened whichever folder the session's INFERRED cwd named, so
+        // a wrong inference wrote to another project's AGENTS.md. The machinery
+        // it drove STAYS here: an already-stored Agent-docs window (`docs` in its
+        // record) still restores, still tabs, still saves. Only the two entry
+        // points went away, so no NEW one can be opened from a terminal.) All are
         // top-level `function` declarations, so they HOIST across the one
         // concatenated <script> and stay reachable from core regardless of
         // mods_enabled -- the same posture the help/sticky mods use.
@@ -82,12 +87,28 @@
             // Legacy single-doc AGENTS.md record (agentsMdCwd, no docs): a build
             // before the tabbed agent-docs window. Upgrade it on reopen by reading
             // AGENTS.md + CLAUDE.md fresh, preserving the stored geom/color/tiling.
-            // openAgentDocsWindow (now in the agent-docs mod, mods/agent-docs/, but
-            // a hoisted free identifier reachable here regardless of that mod's
-            // enabled state — #120) re-enters openAppWindow with a `docs` array, so
-            // this branch never recurses. Async — the window appears a moment later.
+            // openAgentDocsWindow (the agent-docs mod, a hoisted free identifier
+            // reachable here regardless of that mod's ENABLED state — #120)
+            // re-enters openAppWindow with a `docs` array, so this branch never
+            // recurses. Async — the window appears a moment later.
+            //
+            // #177 retired agent-docs to mods-deprecated/, so the opener is no
+            // longer SHIPPED — a different thing from disabled, and a bare call
+            // would now be a ReferenceError. `typeof` is the only test that is
+            // safe on an undeclared identifier. With it absent the record falls
+            // through and the builder below rebuilds it as exactly the pre-#120
+            // single-doc AGENTS.md editor it was serialized from: the record's
+            // own cached `content` and `filePath`, and `win.agentsMdCwd` still
+            // carried over (the `!docs` arm of the win object below), so the
+            // AGENTS save hook — ensureClaudeMd + the template checklist, both
+            // keyed off `!!win.agentsMdCwd` — is intact. It re-reads nothing, so
+            // it cannot write to a folder the record did not already name. Copy
+            // the mod back and the tabbed upgrade returns with no other edit.
+            // Records that DO carry `docs` never reach here; the tabbed machinery
+            // stays in this file, so those windows restore unchanged.
             if (appData.appKind === 'text-editor' && appData.agentsMdCwd
-                && !appData.docs) {
+                && !appData.docs
+                && typeof openAgentDocsWindow === 'function') {
                 openAgentDocsWindow({
                     id, cwd: String(appData.agentsMdCwd),
                     fileHostId: appData.fileHostId || 'local',

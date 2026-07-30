@@ -192,7 +192,9 @@ _MODS = [
     "mods/file-manager/file-manager.js",  # S11 (#84) dual-pane file-manager window kind via ctx.registerWindowKind + ctx.file
     "mods/editor/codemirror.js",  # S10 (#83) CodeMirror 6 lazy loader (was 69), helpers only
     "mods/editor/editor.js",   # S10 (#83) text-editor window kind via ctx.registerWindowKind + ctx.file
-    "mods/agent-docs/agent-docs.js",  # #120 Agent-docs 📋 button + AGENTS.md/CLAUDE.md openers via ctx.windows.onTerminalCreate; requires:['editor'] (MUST load after editor.js); reuses the text-editor kind
+    # (#177 retired mods/agent-docs/ -- the 📋 AGENTS.md/CLAUDE.md openers -- into
+    # mods-deprecated/agent-docs/. Dropping the line here is what un-ships it;
+    # see webterm/broker/mods-deprecated/README.md to copy it back.)
     "mods/sticky/sticky.js",   # S8 (#81) sticky-note window kind via ctx.registerWindowKind
     "mods/aistatus/aistatus.js",  # #112 AI-provider status chip + window; ships default-off, polls /status/fetch; ships aistatus.css
     "mods/git/git.js",         # S14 (#116) per-terminal git status widget via ctx.windows.onTerminalCreate + ctx.session.git; default-off; ships git.css

@@ -2417,7 +2417,7 @@
                     return { id: m.id, tiers: (m.tiers || []).slice(),
                              defaultEnabled: (m.defaultEnabled !== false),
                              // #121: declared deps, so the Playwright acceptance can
-                             // assert a dependent (e.g. #120 agent-docs) requires: [...].
+                             // assert a dependent (e.g. #124 scratchpad) requires: [...].
                              requires: (m.requires || []).slice() };
                 });
             },

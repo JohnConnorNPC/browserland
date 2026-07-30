@@ -154,10 +154,13 @@
 
             // #120: the per-terminal 📋 "Agent docs" button (opens this folder's
             // AGENTS.md/CLAUDE.md editor) used to be built here; it moved to the
-            // default-on agent-docs mod (mods/agent-docs/), which subscribes to
-            // ctx.windows.onTerminalCreate and inserts it into this title bar
-            // (before the min button, its original slot) — the same seam as the
-            // git widget below.
+            // agent-docs mod, which subscribed to ctx.windows.onTerminalCreate
+            // and inserted it into this title bar (before the min button, its
+            // original slot) — the same seam as the git widget below. #177 then
+            // RETIRED that mod (webterm/broker/mods-deprecated/agent-docs/): the
+            // folder it opened came from the session's INFERRED cwd, so a wrong
+            // inference wrote to another project's AGENTS.md. No button is built
+            // here or anywhere; the seam below is unchanged.
 
             // #116: the per-terminal git status button + branch label used to be
             // built here; they moved to the default-off git mod (mods/git/), which

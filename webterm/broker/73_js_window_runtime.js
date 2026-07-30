@@ -196,8 +196,8 @@
                     // NO re-render, deliberately — unlike the `title` branch
                     // just below, which must repaint the title bar it owns.
                     // Every consumer reads sessions at use time:
-                    // needsConptyPasteWrap (67) on each paste, the AGENTS.md
-                    // button (mods/agent-docs) on click, the task-manager mod on
+                    // needsConptyPasteWrap (67) on each paste, the file
+                    // manager's start dir (68) on open, the task-manager mod on
                     // its own timer. Landing the value in the map IS the fix.
                     const key = String(win.id);
                     const sess = liveSess();
