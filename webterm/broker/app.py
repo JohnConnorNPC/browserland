@@ -2306,6 +2306,26 @@ async def _mod_asset(request: Request, modId: str, gen: str, name: str):
     ever exposes installed help text is ``/help-corpus.json``, and since #173
     that surface withholds the installed sections from a caller with no token.
 
+    ``<gen>`` is NOT a second secret, and #173's id-withholding should not be
+    read as if it were. ``modinstall.compute_gen`` is a plain content hash --
+    sha256 over the canonical manifest plus the sorted (name, sha256) pairs, no
+    salt, no broker id, no install timestamp -- so anyone holding the exact bytes
+    of a distributed package recomputes the same gen this broker stored, and a
+    200 here rather than a 404 then CONFIRMS that package is installed. That is a
+    confirmation oracle over a candidate set the caller already holds, not
+    enumeration: a mod whose bytes were never published stays unguessable in both
+    segments, and what leaks about a public one is a single bit about code this
+    route hands out in full anyway. So #173 is partial by construction -- it
+    stops the corpus LISTING installed ids, it cannot hide a publicly
+    distributed mod from someone who thinks to ask for it by name.
+
+    Salting the gen would close that, and is deliberately not done: a
+    generation's directory name must content-address its own bytes (the scanner
+    refuses one that does not), which is what makes reinstalling identical bytes
+    a no-op, keeps two brokers' URLs for one package agreeing, and makes
+    ``immutable`` below honest. That is a lot of load-bearing structure to trade
+    for one bit.
+
     Served from the in-memory allowlist dict, exactly like ``_vendor_asset``: a
     client-supplied segment can only ever hit a known key, so traversal is
     unrepresentable rather than defended against, blocking IO stays off the
@@ -2361,6 +2381,14 @@ async def _help_corpus(request: Request):
     # route stays open for the .js/.css, and reaching one of those takes the id
     # AND the generation AND the file name -- the id being exactly what this
     # route used to hand over for free.
+    #
+    # "Takes the id and the generation" is a bar, not a second secret, and the
+    # scope of what #173 buys depends on the difference. gen is a plain content
+    # hash of the package (modinstall.compute_gen), so a caller holding a
+    # PUBLICLY DISTRIBUTED mod's bytes recomputes it and can confirm that mod is
+    # installed here. What this route stopped handing over is ENUMERATION -- the
+    # list of installed ids, and every help text with it -- not every last bit
+    # about a specific mod someone already suspects. See _mod_asset.
     #
     # Exactly ONE notion of "authenticated" in this process: the same
     # auth.request_token_ok(ctx.auth_token) every gated route runs through

@@ -774,6 +774,57 @@ def test_asset_route_serves_installed_bytes_immutably(tmp_path, monkeypatch):
         assert hidden.status == 404, name
 
 
+def test_the_asset_route_confirms_a_known_package_without_a_token(tmp_path,
+                                                                  monkeypatch):
+    # The LIMIT of what #173 bought, pinned so nobody reads the id-withholding
+    # as though <gen> were a second secret. compute_gen is a plain content hash
+    # -- no salt, no broker id, no install timestamp -- so a caller holding the
+    # exact bytes of a distributed package recomputes the gen this broker stored
+    # and can ask for the file with no token at all. A 200 rather than a 404 is
+    # then a CONFIRMATION ORACLE: "this specific package is installed here".
+    #
+    # Deliberate, and the narrow shape matters: it works only over a candidate
+    # set the caller already holds. A mod whose bytes were never published stays
+    # unguessable in BOTH segments, and what leaks about a public one is one bit
+    # about source this route serves in full anyway (#163). Salting the gen would
+    # close it and would also break the scanner's requirement that a generation's
+    # directory name content-address its own bytes -- see _mod_asset. If gen ever
+    # stops being derivable from the package alone, this test is where that
+    # decision gets made explicitly rather than by accident.
+    app = make_app(tmp_path, monkeypatch)
+    man = manifest("x-zqmarker", scripts=["x-zqmarker.js"])
+    fls = {"x-zqmarker.js": "registerMod({ id: 'x-zqmarker' });\n"}
+    _, ins = authed(app).post("/mods/install", json={"manifest": man,
+                                                     "files": fls})
+    assert ins.status == 200
+
+    # The attacker's whole input is the package bytes: no token, no /info, no
+    # corpus -- just validate + hash, exactly as the installer did.
+    canonical, records = modinstall.validate_package(man, fls)
+    guessed = modinstall.compute_gen(canonical, records)
+    assert guessed == ins.json["gen"], "gen is derived from the package alone"
+
+    _, hit = app.test_client.get(f"/mods/x-zqmarker/{guessed}/x-zqmarker.js")
+    assert hit.status == 200                         # installed -> served
+    assert hit.body == fls["x-zqmarker.js"].encode("utf-8")
+
+    # ...and the same probe for a package that is NOT installed is a 404, which
+    # is what makes the 200 above informative.
+    man2 = manifest("x-absent", scripts=["x-absent.js"])
+    fls2 = {"x-absent.js": "registerMod({ id: 'x-absent' });\n"}
+    c2, r2 = modinstall.validate_package(man2, fls2)
+    g2 = modinstall.compute_gen(c2, r2)
+    _, miss = app.test_client.get(f"/mods/x-absent/{g2}/x-absent.js")
+    assert miss.status == 404
+
+    # What #173 does still buy, and the reason it is worth having anyway: the
+    # corpus never NAMES an installed mod, so the oracle has to be aimed. A
+    # caller who cannot guess the package learns nothing.
+    _, public = app.test_client.get("/help-corpus.json")
+    assert "x-zqmarker" not in json.dumps(public.json)
+    assert public.json == app.ctx.help_corpus_base
+
+
 def test_asset_route_404s_an_unknown_id_gen_or_name(tmp_path, monkeypatch):
     gen = plant(tmp_path / "mods", manifest(), files())
     app = make_app(tmp_path, monkeypatch)

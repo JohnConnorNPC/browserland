@@ -155,7 +155,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | Surface | Rule |
 |---|---|
 | `GET /`, `GET /help-corpus.json` | **unauthenticated.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. The corpus is public but **auth-sensitive** (#173): with no token it is the wiki + shipped-mod corpus alone, exactly what it was before #163; the sections contributed by **installed** mods — their help text, their manifest label/icon, and hence the list of installed ids — are merged in only for a caller holding the token. Same `request_token_ok` as every gated route, answering with a smaller `200` instead of a `401`, plus `Cache-Control: no-store` and `Vary: Authorization` so no cache can hand one audience the other's body. |
-| `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source and styles are publicly readable**, exactly as `GET /` already carries every shipped mod's source — but *reaching* one takes the id **and** the generation **and** the file name, and #173 stopped the help corpus from handing out that first ingredient. `help.md` is not servable here at all. |
+| `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source and styles are publicly readable**, exactly as `GET /` already carries every shipped mod's source — but *reaching* one takes the id **and** the generation **and** the file name, and #173 stopped the help corpus from handing out that first ingredient. Neither ingredient is a *broker* secret, though: `<gen>` is a content hash of the package, so someone holding a **publicly distributed** mod's bytes recomputes it and can confirm that mod is installed here (`200` vs `404`). #173 stops the corpus **enumerating** installed ids; it cannot hide a mod you already know to ask for by name. `help.md` is not servable here at all. |
 | `OPTIONS` preflights | unauthenticated by design (they carry no credentials). Explicit routes, because route resolution happens before request middleware. |
 | `WS /browserland` (producers) | token required, loopback included. Was the one gate the token never covered — and WebSockets are not CORS-gated, so any website could dial `ws://127.0.0.1:4445/browserland`, re-register a live `window_id` (kicking the real agent off with 1012) and inject fabricated terminal output. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
 | `POST /launch` | token required — never an open RCE on any bind. |
@@ -764,6 +764,21 @@ therefore readable by anyone who knows the id, the generation and the file name
 (`content_type` returns `None` for it); its only surface is
 `/help-corpus.json`, which since #173 withholds the installed sections — and so
 the installed ids — from a caller with no token.
+
+**`<gen>` is not a second secret.** `compute_gen` is sha256 over the canonical
+manifest plus the sorted `(name, sha256)` pairs — no salt, no broker id, no
+install timestamp — so anyone holding the exact bytes of a distributed package
+recomputes the gen this broker stored, and a `200` here rather than a `404`
+confirms it is installed. That is a **confirmation oracle over a candidate set
+the caller already has**, not enumeration: a mod whose bytes were never
+published stays unguessable in both segments, and what leaks about a public one
+is one bit about code this route serves in full anyway. #173 is therefore
+partial *by construction* — it stops the corpus **listing** installed ids, it
+cannot hide a publicly distributed mod from someone who asks for it by name.
+Salting the gen would close it and is deliberately not done: a generation's
+directory name must content-address its own bytes (the scanner refuses one that
+does not), which is what makes reinstalling identical bytes a no-op, keeps two
+brokers' URLs for one package agreeing, and makes `immutable` honest.
 
 **Store `mods_dir`** — runtime-installed mods live in a directory beside the
 `/state` store (default `<state dir>/webterm_mods`; override with config

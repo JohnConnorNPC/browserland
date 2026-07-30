@@ -754,6 +754,14 @@ shipped-mod corpus alone, so installed ids, help text and manifest label/icon
 are not enumerable. Treat that as *not published*, not as *secret storage*: it
 is one token away, and a mod's help is written to be read.
 
+**The generation is not a second secret.** `<gen>` is a content hash of the
+package, so anyone holding the exact bytes of a *publicly distributed* mod
+recomputes it and can ask this broker for the file: a `200` rather than a `404`
+confirms that mod is installed. So #173 removed **enumeration** — the list of
+installed ids, and the help text with it — not every last bit about a mod
+someone already knows to ask for. A mod whose bytes were never published stays
+unguessable in both segments.
+
 ### 10.5 The install API
 
 ```jsonc
