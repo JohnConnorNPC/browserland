@@ -155,7 +155,7 @@ every boot that it changes on restart and `--print-token` cannot recover it.
 | Surface | Rule |
 |---|---|
 | `GET /`, `GET /help-corpus.json` | **unauthenticated.** The token is typed *into* that page and auth is query/header-only with no cookies, so gating the document deadlocks the bootstrap — every reload, bookmark and new tab would 401 forever. Neither carries host- or session-derived data. Headless, `GET /` is `200 {"ui": false}`, so health probes keep working. The corpus is public but **auth-sensitive** (#173): with no token it is the wiki + shipped-mod corpus alone, exactly what it was before #163; the sections contributed by **installed** mods — their help text, their manifest label/icon, and hence the list of installed ids — are merged in only for a caller holding the token. Same `request_token_ok` as every gated route, answering with a smaller `200` instead of a `401`, plus `Cache-Control: no-store` and `Vary: Authorization` so no cache can hand one audience the other's body. |
-| `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source and styles are publicly readable**, exactly as `GET /` already carries every shipped mod's source — but *reaching* one takes the id **and** the generation **and** the file name, and #173 stopped the help corpus from handing out that first ingredient. |
+| `GET /vendor/*`, `GET /mods/<id>/<gen>/<name>` (#163) | **unauthenticated, and forced rather than chosen**: the browser needs the vendored xterm to render the *login* page, before any token exists, and a `<script src>` cannot carry an `Authorization` header (`?token=` is structurally banned by #144). Both serve from an in-memory allowlist dict, so a client-supplied name can never reach the filesystem. Consequence: an **installed mod's source and styles are publicly readable**, exactly as `GET /` already carries every shipped mod's source — but *reaching* one takes the id **and** the generation **and** the file name, and #173 stopped the help corpus from handing out that first ingredient. `help.md` is not servable here at all. |
 | `OPTIONS` preflights | unauthenticated by design (they carry no credentials). Explicit routes, because route resolution happens before request middleware. |
 | `WS /browserland` (producers) | token required, loopback included. Was the one gate the token never covered — and WebSockets are not CORS-gated, so any website could dial `ws://127.0.0.1:4445/browserland`, re-register a live `window_id` (kicking the real agent off with 1012) and inject fabricated terminal output. Refusal is a post-upgrade WS close **4401** (an HTTP reject would surface as an opaque 1006). |
 | `POST /launch` | token required — never an open RCE on any bind. |
@@ -758,10 +758,12 @@ from an in-memory allowlist dict keyed `"<id>/<gen>/<name>"` — a client-suppli
 segment can only ever hit a known key, so traversal is unrepresentable rather
 than defended against, and no blocking IO reaches the event loop. Only
 `.js`/`.css` are servable. `Cache-Control: public, max-age=31536000, immutable`
-is honest because `<gen>` is a content hash. **Installed source, styles and
-help are therefore readable by anyone who knows the id, the generation and the
-file name — do not put a secret in a mod.** Knowing those is the hard part, and
-`/help-corpus.json` no longer gives away the ids (#173).
+is honest because `<gen>` is a content hash. **Installed source and styles are
+therefore readable by anyone who knows the id, the generation and the file name
+— do not put a secret in a mod.** `help.md` is not servable here at all
+(`content_type` returns `None` for it); its only surface is
+`/help-corpus.json`, which since #173 withholds the installed sections — and so
+the installed ids — from a caller with no token.
 
 **Store `mods_dir`** — runtime-installed mods live in a directory beside the
 `/state` store (default `<state dir>/webterm_mods`; override with config

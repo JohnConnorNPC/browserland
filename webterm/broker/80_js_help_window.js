@@ -53,19 +53,28 @@
                                           { timeoutMs: 8000 })
                 .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
                 .then(data => {
-                    const entries = flattenHelpCorpus(data);
-                    // Superseded by a login while we were out: hand this answer
-                    // to whoever asked, but do not let it become the memo — the
-                    // request that replaced it is the one carrying the token.
-                    if (gen !== helpCorpusGen) return entries;
+                    // Superseded by a login while we were out. This answer
+                    // predates the token, so it must neither become the memo
+                    // nor be handed back as if it were current — a caller that
+                    // renders what fetchHelpCorpus() RESOLVES to (the help mod
+                    // re-reads the globals instead, but a mod need not) would
+                    // paint the pre-login corpus. Chain onto the current
+                    // generation instead: that is the memo if the replacement
+                    // already landed, the replacement's promise if it is still
+                    // out, and otherwise a fresh request. Bounded by the number
+                    // of logins, so it cannot spin.
+                    if (gen !== helpCorpusGen) return fetchHelpCorpus();
                     helpCorpusData = data;
-                    helpCorpusEntries = entries;
-                    return entries;
+                    helpCorpusEntries = flattenHelpCorpus(data);
+                    return helpCorpusEntries;
                 })
                 .catch(() => {
-                    // Same guard: a stale failure must not null a NEWER
-                    // in-flight promise out from under its callers.
-                    if (gen === helpCorpusGen) helpCorpusPromise = null;
+                    // Same guard, both ways: a stale failure must not null a
+                    // NEWER in-flight promise out from under its callers, and
+                    // it must not be reported to its own caller as "the corpus
+                    // is empty" when a current-generation answer is available.
+                    if (gen !== helpCorpusGen) return fetchHelpCorpus();
+                    helpCorpusPromise = null;   // cleared, so a later open retries
                     return [];
                 });
             return helpCorpusPromise;
@@ -78,6 +87,10 @@
         // pins and #163 closed for the packages themselves. Retire the memo when
         // the LOCAL broker authenticates and let the next open re-ask. Only the
         // local one: the corpus is fetched from localHost() and nowhere else.
+        // Nulling helpCorpusPromise as it bumps the generation is also what
+        // keeps the "chain onto the current generation" branches above from
+        // ever awaiting themselves: a superseded fetch can only ever find null
+        // or a DIFFERENT promise there.
         function notifyHelpHostAuth(hostId) {
             let lh = null;
             try { lh = localHost(); } catch (_) {}

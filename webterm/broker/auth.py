@@ -15,8 +15,8 @@ re-register a live window and inject fabricated terminal output.
 Only ``GET /`` and ``GET /help-corpus.json`` stay public, plus the OPTIONS
 preflights (which carry no credentials by design). The token is typed *into*
 that page and auth is query/header-only with no cookies, so gating the document
-itself would 401 every reload, bookmark and new tab forever. Neither response
-carries host- or session-derived data.
+itself would 401 every reload, bookmark and new tab forever. Neither of those
+public responses carries host-, session- or install-derived data.
 
 ``/help-corpus.json`` is public but AUTH-SENSITIVE (#173): without a token it
 serves the wiki + shipped-mod corpus alone — the same bytes it served before

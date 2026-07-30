@@ -1591,13 +1591,23 @@ def test_the_help_corpus_memo_is_dropped_on_a_first_login():
     for cleared in ("helpCorpusData = null", "helpCorpusEntries = null",
                     "helpCorpusPromise = null"):
         assert cleared in hook, cleared
-    # A fetch already in flight when the memo is dropped must not write its
-    # pre-token answer back into it, so the memo is generation-stamped.
+    # A fetch already in flight when the memo is dropped must neither write its
+    # pre-token answer back into it NOR resolve its own caller with it (the help
+    # mod re-reads the globals, but a mod calling this hoisted function need
+    # not). Generation-stamped, and a superseded settle chains onto the current
+    # generation instead of returning what it has.
     assert "helpCorpusGen++" in hook
     fetch = _frag_fn(src, "function fetchHelpCorpus(")
     assert "const gen = helpCorpusGen;" in fetch
-    assert "if (gen !== helpCorpusGen) return entries;" in fetch
-    assert "if (gen === helpCorpusGen) helpCorpusPromise = null;" in fetch
+    assert fetch.count("if (gen !== helpCorpusGen) return fetchHelpCorpus();") \
+        == 2, "both the success and the failure path must chain"
+    # ...and the chain cannot await itself, because the notify nulls the promise
+    # in the same step it bumps the generation.
+    assert hook.index("helpCorpusGen++") < hook.index("helpCorpusPromise = null")
+    # The token is committed to the host BEFORE the notify, or the re-ask this
+    # exists to trigger would go out unauthenticated and change nothing.
+    assert auth.index("host.token = candidate") < auth.index(
+        "notifyHelpHostAuth(host.id)")
     # An already-open Help window refreshes rather than waiting to be reopened:
     # 63's _onHostAuth loop runs AFTER the notify above, so the re-fetch there
     # sees a cleared memo.

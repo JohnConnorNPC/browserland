@@ -733,7 +733,7 @@ Related loader behaviour worth knowing:
   way `?token=` is, because replaceState-ing it away would mean a reload
   silently re-enabling the mod you are there to remove.
 
-### 10.4 Every file an installed mod ships is public
+### 10.4 An installed mod's code and styles are public
 
 `GET /mods/<modId>/<gen>/<name>` is **public**, like `GET /` and `/vendor/*`,
 and that is forced rather than chosen: a `<script src>` cannot carry an
@@ -743,14 +743,16 @@ workaround would need `blob:` in `script-src`. The posture is the existing one �
 
 So **an installed mod's source and its stylesheets are readable without a
 token** — by anyone who knows the id *and* the generation *and* the file name.
-**Do not put a secret in a mod** — not in its code, not in its stylesheet, not
-in its help page.
+**Do not put a secret in a mod** — not in its code and not in its stylesheet.
 
-What is *not* public is the list. `/help-corpus.json` is public for the same
-bootstrap reason `GET /` is (the Help window has to render on the login page),
-but since #173 it serves the installed mods' help sections **only to a caller
-holding the token**. Without one it is the wiki + shipped-mod corpus alone, so
-installed ids, help text and manifest label/icon are not enumerable.
+`help.md` is a different matter: only `.js`/`.css` are servable, so this route
+cannot hand it out at all. Its only surface is `/help-corpus.json`, which is
+public for the same bootstrap reason `GET /` is (the Help window has to render
+on the login page) — but since #173 it serves the installed mods' help sections
+**only to a caller holding the token**. Without one it is the wiki +
+shipped-mod corpus alone, so installed ids, help text and manifest label/icon
+are not enumerable. Treat that as *not published*, not as *secret storage*: it
+is one token away, and a mod's help is written to be read.
 
 ### 10.5 The install API
 

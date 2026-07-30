@@ -277,6 +277,16 @@ def test_the_public_pair_answers_without_a_token(tmp_path):
     assert "<title>Browserland</title>" in page.body.decode("utf-8")
     _, corpus = app.test_client.get("/help-corpus.json")
     assert corpus.status == 200
+    # ...but "answers" is not "answers with everything" (#173): the sections
+    # runtime-INSTALLED mods contribute are withheld from a tokenless caller.
+    # Installed ids live in the reserved "x-" namespace, so their absence here
+    # is the whole disclosure surface. (This app installs none; the merge is
+    # exercised in tests/test_mod_install.py -- what this pins is that the
+    # PUBLIC branch is the one the public-pair carve-out actually covers.)
+    assert not [s for s in corpus.json["sections"]
+                if s["slug"].startswith("x-")]
+    assert corpus.json == app.ctx.help_corpus_base
+    assert corpus.headers.get("Cache-Control") == "no-store"
     # Vendored xterm (#143): same reasoning -- the page cannot render its own
     # login overlay without it, and no token exists yet at that point.
     _, js = app.test_client.get("/vendor/xterm.js")

@@ -2254,8 +2254,9 @@ def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
 
     BOTH corpora stay live, and that is now load-bearing rather than incidental:
     ``base`` is what an unauthenticated ``GET /help-corpus.json`` is served and
-    the merged one what an authenticated one gets (#173), so the merge must keep
-    returning a new object and leaving the base alone.
+    the merged one what an authenticated one gets (#173). So the merge must go
+    on leaving the base untouched -- a new dict whenever it adds anything, the
+    base object itself when it adds nothing, and never a mutation of either.
 
     SHIPPED FIRST, and that is load-bearing, not cosmetic. ``modPolicyImplied``
     (81_js_control_panel.js) and #158's ``planFor`` both walk the catalog
@@ -2287,9 +2288,10 @@ async def _mod_asset(request: Request, modId: str, gen: str, name: str):
     carries every shipped mod's source. So installed mod source and its
     stylesheets are PUBLICLY READABLE. Do not put a secret in a mod.
 
-    Its help text is not enumerable, though: ``/help-corpus.json`` serves the
-    installed sections only to a caller holding the token (#173), so reaching a
-    file here still takes the id AND the generation AND the file name.
+    Its help.md is NOT among them, and not by omission: ``content_type`` returns
+    None for it, so this route cannot serve it at all. The only surface that
+    ever exposes installed help text is ``/help-corpus.json``, and since #173
+    that surface withholds the installed sections from a caller with no token.
 
     Served from the in-memory allowlist dict, exactly like ``_vendor_asset``: a
     client-supplied segment can only ever hit a known key, so traversal is
@@ -2339,32 +2341,37 @@ async def _help_corpus(request: Request):
     #
     # #163 shipped the merged corpus to everyone, which made the ids of
     # installed mods that ship help -- plus their help text and their manifest's
-    # label and icon -- ENUMERABLE with no token. The underlying BYTES stay
-    # public on purpose (a <script src> cannot carry an Authorization header, so
-    # /mods/<id>/<gen>/<name> is forced open), but that route needs the id AND
-    # the generation AND the file name; this one handed over the list. Discovery
-    # is the part that is withheld here, not the content.
+    # label and icon -- ENUMERABLE with no token. This is the only surface that
+    # ever exposes installed help text at all: modinstall.content_type returns
+    # None for help.md, so /mods/<id>/<gen>/<name> (public, forced, because a
+    # <script src> cannot carry an Authorization header) cannot serve it. That
+    # route stays open for the .js/.css, and reaching one of those takes the id
+    # AND the generation AND the file name -- the id being exactly what this
+    # route used to hand over for free.
     #
     # Exactly ONE notion of "authenticated" in this process: the same
     # auth.request_token_ok(ctx.auth_token) every gated route runs through
-    # _gated_auth_error. This is not a gate, though -- a missing/wrong token is
-    # a smaller 200, never a 401 -- so it calls the predicate directly rather
-    # than the 401-and-log helper (and, being module level, it could not reach
-    # that create_app-local closure anyway).
+    # _gated_auth_error, credential precedence (?token= / ?auth= over the
+    # Authorization header) included. This is not a gate, though -- a
+    # missing/wrong token is a smaller 200, never a 401 -- so it calls the
+    # predicate directly rather than the 401-and-log helper (and, being module
+    # level, it could not reach that create_app-local closure anyway).
     #
-    # One URL, two bodies, so it must never be cached and never be reused across
-    # the two audiences. Sanic sets no validators or freshness of its own here,
-    # and the CORS response middleware adds none, so these two headers are the
-    # whole cache story for this route:
-    #   no-store  -- no shared proxy (tailscale serve, a corporate MITM) and no
-    #                browser disk cache may keep either body around to hand to
-    #                the other audience. It costs nothing: with no ETag and no
-    #                Last-Modified there was no validator to revalidate with, so
-    #                this response was already effectively uncacheable, and the
-    #                frontend memoizes the corpus per page load anyway.
-    #   Vary      -- correctness for anything that stores despite no-store. The
-    #                ?token=/?auth= forms of the credential are already part of
-    #                the cache key (they are in the URL); Authorization is not.
+    # One URL, two bodies, so no cache may reuse one audience's body for the
+    # other. Sanic sets no validators or freshness of its own here and the CORS
+    # response middleware adds none, so these two headers are the whole cache
+    # story for this route:
+    #   no-store  -- a conforming cache, shared (tailscale serve, a corporate
+    #                MITM) or private, stores neither body. It is not free: the
+    #                public corpus is ~200 KB and a browser can no longer reuse
+    #                it across reloads. That is a small price here -- there were
+    #                no validators and no freshness before either, so little was
+    #                being reused in practice, and the frontend memoizes the
+    #                corpus for the page's lifetime regardless.
+    #   Vary      -- for a cache that stores anyway, and for correctness of the
+    #                variant key. The ?token=/?auth= forms of the credential are
+    #                already part of that key (they are in the URL); the
+    #                Authorization header is not.
     corpus = (request.app.ctx.help_corpus
               if auth.request_token_ok(request, request.app.ctx.auth_token)
               else request.app.ctx.help_corpus_base)

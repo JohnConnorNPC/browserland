@@ -1721,12 +1721,15 @@ def test_the_served_corpus_withholds_installed_help_without_a_token(tmp_path,
     # into) but it now serves TWO bodies: no token -> the wiki + shipped-mod
     # corpus alone; token -> that plus the installed sections.
     #
-    # What the public body must not carry is DISCOVERY. The installed BYTES stay
-    # reachable on purpose -- /mods/<id>/<gen>/<name> is forced public because a
-    # <script src> cannot carry an Authorization header -- but that route needs
-    # the id AND the generation AND the file name, whereas a merged corpus is a
-    # directly enumerable list of every installed id.
+    # What the public body must not carry is DISCOVERY. The installed .js/.css
+    # stay reachable on purpose -- /mods/<id>/<gen>/<name> is forced public
+    # because a <script src> cannot carry an Authorization header -- but that
+    # route needs the id AND the generation AND the file name (and cannot serve
+    # help.md at all), whereas a merged corpus is a directly enumerable list of
+    # every installed id.
     app = make_app(tmp_path, monkeypatch)
+    _, before = app.test_client.get("/help-corpus.json")
+    assert before.status == 200
     body = payload()
     body["manifest"]["help"] = {"label": "Notes", "icon": "N"}
     body["files"]["help.md"] = "# Notes\n\n## Secretish\n\nplain as day\n"
@@ -1746,8 +1749,11 @@ def test_the_served_corpus_withholds_installed_help_without_a_token(tmp_path,
     assert [s for s in sections if s["slug"] == "taskbar"], \
         "the wiki sections must still be public"
     # ...and it is the pre-#163 response EXACTLY, not merely a filtered one:
-    # the very object the wiki parse produced, byte for byte.
+    # the same object the wiki parse produced, and -- asserted on the RAW BYTES,
+    # because that is the actual claim -- the same response as before the
+    # install happened at all.
     assert public.json == app.ctx.help_corpus_base
+    assert public.body == before.body
 
     # The same URL, with the token, is the merged corpus.
     _, privileged = authed(app).get("/help-corpus.json")
@@ -1756,11 +1762,52 @@ def test_the_served_corpus_withholds_installed_help_without_a_token(tmp_path,
     assert sec and sec[0]["label"] == "Notes" and sec[0]["icon"] == "N"
     assert "plain as day" in json.dumps(sec[0])
 
-    # A WRONG token is not a 401 here, it is the public body -- the whole point
-    # of leaving the route public is that it never refuses the login page.
-    _, wrong = app.test_client.get(
-        "/help-corpus.json", headers={"Authorization": "Bearer nope"})
-    assert wrong.status == 200 and wrong.json == app.ctx.help_corpus_base
+    # Every way of presenting the credential, and every way of getting it
+    # wrong, resolves EXACTLY as it does on a gated route -- auth.provided_token
+    # is the one implementation, precedence included. The only difference is the
+    # answer: a smaller 200 instead of a 401.
+    for label, kwargs in (
+            ("query token", {"params": {"token": TEST_TOKEN}}),
+            ("query auth", {"params": {"auth": TEST_TOKEN}}),
+            # An EMPTY query arg is falsy in provided_token, so it does not
+            # shadow the header -- it falls through to it.
+            ("empty query, good header",
+             {"params": {"token": ""},
+              "headers": {"Authorization": "Bearer " + TEST_TOKEN}})):
+        _, ok = app.test_client.get("/help-corpus.json", **kwargs)
+        assert ok.status == 200, label
+        assert ok.json == app.ctx.help_corpus, label
+    for label, kwargs in (
+            # A WRONG token is not a 401, it is the public body -- the whole
+            # point of leaving the route public is that it never refuses the
+            # login page.
+            ("wrong header", {"headers": {"Authorization": "Bearer nope"}}),
+            ("wrong query", {"params": {"token": "nope"}}),
+            # ...and a NON-EMPTY query form wins over the header, exactly as
+            # provided_token says, so a good header cannot rescue a bad query.
+            ("bad query beats good header",
+             {"params": {"token": "nope"},
+              "headers": {"Authorization": "Bearer " + TEST_TOKEN}})):
+        _, r = app.test_client.get("/help-corpus.json", **kwargs)
+        assert r.status == 200, label
+        assert r.body == before.body, label
+
+
+def test_help_installed_before_the_broker_started_is_withheld_too(tmp_path,
+                                                                  monkeypatch):
+    # The other way installed help reaches the corpus: not POST /mods/install
+    # but the create_app scan of a store that was already on disk. Same swap,
+    # so the same split -- pinned separately because a restart is the normal
+    # state of a broker with mods, and the install path is the exception.
+    plant(tmp_path / "mods", manifest(),
+          {"x-notes.js": "//\n", "help.md": "# Notes\n\nplanted words\n"})
+    app = make_app(tmp_path, monkeypatch)
+    assert "x-notes" in _help_slugs(app)             # it really did get scanned
+    _, public = app.test_client.get("/help-corpus.json")
+    assert public.status == 200
+    assert "x-notes" not in json.dumps(public.json)
+    assert "planted words" not in json.dumps(public.json)
+    assert public.json == app.ctx.help_corpus_base
 
 
 def test_the_served_corpus_is_never_cached_across_the_two_audiences(tmp_path,
@@ -1776,11 +1823,18 @@ def test_the_served_corpus_is_never_cached_across_the_two_audiences(tmp_path,
                           ("authed", authed(app).get("/help-corpus.json"))):
         assert r.status == 200, label
         assert r.headers.get("Cache-Control") == "no-store", label
-        assert r.headers.get("Vary") == "Authorization", label
-        # Nothing a heuristic cache could key freshness or a revalidation off.
+        # A SET, not the literal header: Vary is a comma-separated,
+        # case-insensitive field list, and a later Accept-Encoding or Origin
+        # joining it would be perfectly correct.
+        vary = {v.strip().lower()
+                for v in (r.headers.get("Vary") or "").split(",")}
+        assert "authorization" in vary, label
+        # No validator, and this is a property not an accident: ONE URL with two
+        # bodies must not hand out a token a conditional request could later
+        # trade for a 304. If a future ETag/Last-Modified is ever added here it
+        # has to be per-audience, and this is where that gets noticed.
         assert r.headers.get("ETag") is None, label
         assert r.headers.get("Last-Modified") is None, label
-        assert r.headers.get("Expires") is None, label
     # And the two bodies really are different, or the assertions above would be
     # guarding a distinction that no longer exists.
     assert _public_help_slugs(app) != _help_slugs(app)

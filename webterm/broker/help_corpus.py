@@ -590,13 +590,15 @@ def build_full_corpus() -> dict:
 # the very bytes being served, so there is exactly ONE read and no second
 # traversal that could disagree with it.
 #
-# What comes out of here is NOT public (#173). ``GET /help-corpus.json`` stays
-# publicly reachable, but it serves the unmerged base to a caller with no token
-# and only the merged corpus to one holding it — otherwise the ids of installed
-# mods that ship help, their help text and their manifest's label/icon would be
-# enumerable by anyone who can reach the port. Keeping the merge OFF the base
-# object is what makes that possible: the caller (app._swap_mods_index) keeps
-# both, so never mutate ``corpus`` in place here.
+# What comes out of here MUST NOT BE SERVED UNAUTHENTICATED (#173).
+# ``GET /help-corpus.json`` stays publicly REACHABLE, but it hands a caller with
+# no token the unmerged base and only a caller holding one the merged corpus —
+# otherwise the ids of installed mods that ship help, their help text and their
+# manifest's label/icon are enumerable by anyone who can reach the port, and
+# this is the only surface that exposes installed help at all (the asset route
+# cannot serve help.md). Keeping the merge OFF the base object is what makes
+# that possible: the caller (app._swap_mods_index) keeps both, so never mutate
+# ``corpus`` in place here.
 # --------------------------------------------------------------------------- #
 
 # Installed sections sort after the wiki (orders are small) AND after the
