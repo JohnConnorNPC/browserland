@@ -16,6 +16,40 @@ story behind anything named below.
 
 ### Added
 
+- **Pull can read the broker list from any broker you have configured** (#174).
+  Publish has been multi-broker since #65; Pull could only read the broker whose
+  page was open, which made recovering a list published to broker B mean loading
+  B's page first — circular when B was the very host missing from the list. With
+  more than one broker configured, **Pull…** now asks which brokers' lists to
+  read: this one is ticked by default, each other one is listed with what it
+  holds ("3 hosts", "passwords encrypted") or why it can't be read ("refused our
+  password", "could not be reached", "nothing published there"), and unreadable
+  ones are shown but not selectable. With only one broker configured the picker
+  is skipped entirely, so nothing changes for that case. Opening it forces no
+  password prompt, and a broker with no saved password is not contacted at all.
+  Reading several brokers merges them into one set of rows, de-duped by address
+  with the first source winning and every row saying which broker it came from
+  and which ones disagreed. Two *different* addresses claiming to be the same
+  broker are kept as two flagged rows rather than silently merged — broker ids
+  in a registry are unverified, so treating one as an identity would let a list
+  swallow another's entry by claiming it.
+  Reading someone else's list is a new direction of trust, so three things are
+  never taken from a remote one: **passwords** (unless you tick *Accept
+  passwords from other brokers*, and you still tick each host by hand),
+  **loopback addresses** (they name the publisher's machine, and importing one
+  here would point a host at *your* broker carrying somebody else's password),
+  and **hidden**, which takes a host out of the list you can see while this
+  browser keeps talking to it.
+  Two related fixes fell out of it. An entry's `id` is no longer a match
+  candidate: it belongs to the browser that published the list, and since your
+  own ids appear in every list you publish, a copy somebody else controlled
+  could name one and repoint the host it belonged to. And an apply no longer
+  writes an imported `broker_id` into your prefs — it clears it, so the identity
+  is re-learned from the new address's own `/info`.
+  A list carrying a *different password* for a host you otherwise already have
+  now classifies as **differs** instead of "already have". It was greyed out
+  before, so a rotated password could never be pulled back at all.
+
 - **The Broker registry can encrypt what it publishes, in the browser** (#175).
   The registry was stored as plain JSON on the broker (`webterm_modstore.json`
   plus a revision ring), so **Include passwords** meant writing every broker

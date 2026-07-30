@@ -18,17 +18,27 @@ Publishing needs this browser to be the **active** browser for the target broker
 
 ## Pull
 
-Click **Pull…** to import hosts that were published to this broker. Each entry is classified against what you already have:
+Click **Pull…** to import hosts that were published to a broker. If you have more than one broker configured, it first asks **which brokers' lists to read** — this one is ticked by default, and every other one is checked and listed with what it holds ("3 hosts", "passwords encrypted") or why it can't be read ("refused our password — set it on the Browser tab", "could not be reached", "nothing published there"). Brokers that can't be read are shown but can't be picked. There's a **Every broker that can be read** tick if you want the lot.
+
+This is what makes the registry recoverable: a list published to a broker you can reach is readable from here even if this broker's own registry is empty — including, in particular, when the host missing from your list *is* the broker holding it.
+
+Reading several brokers merges their lists into one set of rows. Where two brokers list the same address, the first one in the order shown wins, and the row says which brokers it came from and which ones disagreed. Where two *different* addresses claim to be the same broker, both rows survive and both are flagged — at most one of them is telling the truth, and that's a decision for you, not a tie for the mod to break quietly.
+
+Each entry is classified against what you already have:
 
 - **new** — a broker you don't have yet (checked by default).
-- **differs** — a broker you already have, but with a different label, URL, or color (unchecked by default: your local copy wins unless you tick it). If the URL differs, applying it replaces your local URL **and clears that host's saved password**, so you may need to re-enter it — a saved password is never carried over to a different address.
+- **differs** — a broker you already have, but with a different label, URL, or color (unchecked by default: your local copy wins unless you tick it). If the URL differs, applying it replaces your local URL **and clears that host's saved password**, so you may need to re-enter it — a saved password is never carried over to a different address. A list that carries a *different password* for a host you otherwise already have is also a **differs**, so a rotated password can be pulled back.
 - **already have** — identical to what you have (greyed out, nothing to do).
 
-Matching is by the broker's verified identity first, then its address, so pulling an updated list **updates** the hosts you already have instead of duplicating them. The registry's own copy of a broker never replaces your **this broker** entry, and your default-host choice is left untouched.
+Matching is by the broker's **verified** identity first, then its address, so pulling an updated list **updates** the hosts you already have instead of duplicating them. The registry's own copy of a broker never replaces your **this broker** entry, and your default-host choice is left untouched. Nothing is matched by the id a list carries — that belongs to the browser that published it, and treating it as an identity would let whoever wrote the list choose which of your hosts an entry lands on.
 
 ## Passwords
 
 Passwords (broker tokens) are **not** published unless you tick **Include passwords**, which is off by default and shows a warning. Publishing a token is a real risk: anyone who can read that broker's registry can then log into every broker whose token you included — a lateral-movement path between your machines. Only include passwords when the broker holding the registry is as trusted as the brokers whose tokens it will carry.
+
+The same risk runs in the other direction when you read *another* broker's list, so passwords in it are ignored unless you tick **Accept passwords from other brokers** in the source picker. That's the permission; you still tick each host by hand afterwards, and each row says which broker its password came from.
+
+Two other things are never taken from another broker's list. A **loopback** address (`localhost`, `127.x`) means the machine that published it, so importing it here would point a host at *your* broker carrying somebody else's password — those rows are dropped and counted. And a **hidden** host arrives visible, because hidden takes a host out of the list you can see while this browser carries on talking to it.
 
 ## Encryption
 

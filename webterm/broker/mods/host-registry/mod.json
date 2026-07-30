@@ -1,9 +1,9 @@
 {
   "id": "host-registry",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "ctxVersion": 1,
   "title": "Broker registry",
-  "description": "Optionally share this browser's multi-host broker list through the broker (via ctx.serverStore), so you can recover it in another browser or after clearing local data. The host list stays browser-local and the source of truth; the broker only stores a copy and never proxies — every browser still connects directly to each broker. Publish the current list, pull a saved one (per-entry, with a diff so local overrides are never clobbered), and optionally include passwords (off by default). The published value can be encrypted in the browser first (WebCrypto: PBKDF2-SHA-256 → AES-GCM), either passwords-only or the whole list, so the broker stores only ciphertext at rest — it is not protection from the broker itself, which serves the code that encrypts. Passwords can be removed from the registry and its history with Forget passwords, which uses the broker's purgeRevisions flag and needs no passphrase.",
+  "description": "Optionally share this browser's multi-host broker list through the broker (via ctx.serverStore), so you can recover it in another browser or after clearing local data. The host list stays browser-local and the source of truth; the broker only stores a copy and never proxies — every browser still connects directly to each broker. Publish the current list, pull a saved one from ANY configured broker (per-entry, with a diff so local overrides are never clobbered; several sources merge with the source shown per row), and optionally include passwords (off by default, in both directions). The published value can be encrypted in the browser first (WebCrypto: PBKDF2-SHA-256 → AES-GCM), either passwords-only or the whole list, so the broker stores only ciphertext at rest — it is not protection from the broker itself, which serves the code that encrypts. Passwords can be removed from the registry and its history with Forget passwords, which uses the broker's purgeRevisions flag and needs no passphrase.",
   "entry": "host-registry.js",
   "styles": ["host-registry.css"],
   "author": "JohnConnorNPC",

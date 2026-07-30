@@ -65,11 +65,34 @@
                 }
                 // A loopback origin can't be reached by another machine, so the
                 // publisher's own broker is skipped when its address is loopback.
+                // #174 gave it a second job — dropping the loopback rows of a
+                // REMOTE registry, where they name the publisher's machine and
+                // would otherwise import as a host pointing at MY local broker,
+                // carrying somebody else's password. So the spellings matter:
+                // a trailing-dot FQDN, 0.0.0.0, and the IPv4-mapped IPv6 forms
+                // all reach loopback and all used to slip through. This is a
+                // "means nothing from here" filter, not a security boundary — a
+                // remote registry can still name any reachable origin, which is
+                // inherent to importing somebody's host list at all.
                 function isLoopbackOrigin(origin) {
                     try {
-                        const h = new URL(origin).hostname;
-                        return h === 'localhost' || h === '127.0.0.1'
-                            || h === '::1' || h === '[::1]' || /^127\./.test(h);
+                        let h = new URL(origin).hostname.toLowerCase();
+                        if (h.length > 1 && h.charAt(h.length - 1) === '.') {
+                            h = h.slice(0, -1);          // "localhost." resolves
+                        }
+                        if (h.charAt(0) === '[' && h.charAt(h.length - 1) === ']') {
+                            h = h.slice(1, -1);          // URL keeps IPv6 brackets
+                        }
+                        // An IPv4-mapped address is normalized by URL() to the
+                        // HEX form (::ffff:127.0.0.1 -> ::ffff:7f00:1), so match
+                        // that; the dotted spelling is kept too for an engine
+                        // that leaves it alone.
+                        return h === 'localhost' || h === '::1' || h === '0.0.0.0'
+                            || h === '::' || h === '::ffff:0:0'
+                            || /^127\./.test(h)
+                            || /^::ffff:7f[0-9a-f]{2}:/.test(h)
+                            || /^::ffff:127\./.test(h)
+                            || h === '::ffff:0.0.0.0';
                     } catch (_) { return false; }
                 }
                 function localOrigin() { return window.location.origin; }
@@ -473,10 +496,20 @@
                     });
                 }
                 // Find the LOCAL remote host an incoming entry refers to, or null.
-                // Order: broker_id (the authoritative identity, verified locally via
-                // /info) -> normalized url -> id. The local 'this broker' host is
-                // never a match target (we never import over ourselves); an incoming
-                // id of 'local' is reserved and ignored for id-matching.
+                // Order: broker_id (the authoritative identity, verified locally
+                // via /info) -> normalized url. The local 'this broker' host is
+                // never a match target (we never import over ourselves).
+                //
+                // #174 removed a third fallback, matching the incoming `id`
+                // against a local host id. It contradicted the rule two functions
+                // down — a publisher's id is THEIR browser-local namespace, which
+                // is why applyRows mints a fresh one — and it was reachable from a
+                // registry somebody else wrote: publish once and your host ids are
+                // in that broker's store, so a hostile copy could name one and
+                // repoint the host it belongs to. url and broker_id cover the real
+                // cases. The cost is narrow: a broker that moved address AND whose
+                // broker_id this browser never learned now imports as a second
+                // entry instead of updating in place.
                 function matchLocal(e) {
                     const hosts = getHosts();
                     if (e.brokerId) {
@@ -489,11 +522,6 @@
                         if (h.id !== 'local'
                                 && normalizeHostUrl(h.url) === e.url) return h;
                     }
-                    if (e.id && e.id !== 'local') {
-                        for (const h of hosts) {
-                            if (h.id !== 'local' && h.id === e.id) return h;
-                        }
-                    }
                     return null;
                 }
                 // A matched host "differs" on any user-visible field EXCEPT the
@@ -505,41 +533,234 @@
                         || (local.color || '') !== e.color
                         || (!!local.hidden) !== (!!e.hidden);
                 }
-                // Classify every incoming entry vs the live local hosts. Drops this
-                // broker (by origin OR broker_id) and de-dupes incoming by url.
-                // Takes the host ARRAY, not the stored value: which array that is
-                // — a decrypted one, a plaintext projection, or a plain v1 list —
-                // is decided once, in the caller (unlockForPull / publicHostsOf).
-                function classify(hosts) {
+                // …but an incoming PASSWORD that is not the one we hold IS a real
+                // difference, and it used to be invisible: an otherwise identical
+                // host classified as 'identical', whose checkbox is disabled, so a
+                // rotated password could never be pulled back at all. #174 makes
+                // that its own row kind, because recovering a password from
+                // another broker's registry is half the point of reading one.
+                // Still unchecked by default, like every other 'differs'.
+                function tokenDiffers(local, e) {
+                    return !!e.token && e.token !== (local.token || '');
+                }
+                // ---- merge N sources (#174) ---------------------------------
+                // sources: [{name, local, hosts}] in a FIXED order (this broker
+                // first, then the host list's own order), so a multi-source read
+                // is deterministic. Returns {items, dropped} where an item is
+                //   {entry, src, srcLocal, also:[name], diverged, conflict,
+                //    pwRefused}
+                // and `src` is the provenance. It is stamped from the SOURCE LIST
+                // onto a wrapper, never read off the value and never written onto
+                // the entry: a row that lies about where it came from is exactly
+                // the wrong thing to show, and any field on the entry is a field
+                // whoever wrote that registry controls.
+                //
+                // De-dupe is by normalized URL and by URL ONLY. Two entries at one
+                // address are one host — that is what a single-source classify has
+                // always assumed. broker_id is NOT a merge key: it is unverified
+                // input, so keying on it would let one source's record swallow
+                // another's by claiming its identity, and a chain of records could
+                // collapse two genuinely different brokers into one. Where two
+                // ADDRESSES claim one broker_id, both rows survive and both are
+                // flagged as a conflict — that is an identity disagreement to show
+                // the user, not a duplicate to silently resolve.
+                function mergeSources(sources, opts) {
+                    opts = opts || {};
+                    const byUrl = new Map();
+                    const byBroker = new Map();
+                    const items = [];
+                    let droppedLoopback = 0;
+                    for (const s of (Array.isArray(sources) ? sources : [])) {
+                        const hosts = Array.isArray(s && s.hosts) ? s.hosts : [];
+                        for (const raw of hosts) {
+                            if (items.length >= REG_MAX_HOSTS) break;
+                            const e = normEntry(raw);
+                            if (!e) continue;
+                            let pwRefused = false;
+                            if (!s.local) {
+                                // A loopback row names the PUBLISHER's machine.
+                                if (isLoopbackOrigin(e.url)) {
+                                    droppedLoopback += 1;
+                                    continue;
+                                }
+                                // Never import an invisible host from somebody
+                                // else's list: `hidden` takes it out of the host
+                                // UI while the poll loop keeps talking to it.
+                                e.hidden = false;
+                                if (e.token && !opts.acceptRemoteTokens) {
+                                    e.token = '';       // hasToken stays, so the
+                                    pwRefused = true;   // row can say it was there
+                                }
+                            }
+                            const prev = byUrl.get(e.url);
+                            if (prev) {
+                                if (prev.also.indexOf(s.name) === -1) {
+                                    prev.also.push(s.name);
+                                }
+                                if (entryDiffers(prev.entry, e)) {
+                                    prev.diverged = true;
+                                }
+                                continue;
+                            }
+                            const item = { entry: e, src: s.name,
+                                           srcLocal: !!s.local, also: [],
+                                           diverged: false, conflict: '',
+                                           pwRefused: pwRefused };
+                            byUrl.set(e.url, item);
+                            if (e.brokerId) {
+                                const other = byBroker.get(e.brokerId);
+                                if (!other) {
+                                    byBroker.set(e.brokerId, item);
+                                } else if (other.entry.url !== e.url) {
+                                    other.conflict = e.url;
+                                    item.conflict = other.entry.url;
+                                }
+                            }
+                            items.push(item);
+                        }
+                    }
+                    return { items: items, droppedLoopback: droppedLoopback };
+                }
+                // Do two registry entries for the SAME url disagree about anything
+                // a user would notice? Drives the "sources disagree" flag, so the
+                // losing source is never silently discarded.
+                function entryDiffers(a, b) {
+                    return a.label !== b.label || a.url !== b.url
+                        || a.color !== b.color || (!!a.hidden) !== (!!b.hidden)
+                        || a.brokerId !== b.brokerId
+                        || (a.token || '') !== (b.token || '')
+                        || (!!a.hasToken) !== (!!b.hasToken);
+                }
+                // Classify every merged item vs the live local hosts, dropping
+                // this broker (by origin OR broker_id). Takes mergeSources' items,
+                // not a raw host array: the merge is what decides which array a
+                // source contributes — a decrypted one, a plaintext projection, or
+                // a plain v1 list — and it is the only place provenance exists.
+                function classify(items) {
                     const myOrigin = localOrigin();
                     const myBrokerId = cleanStr(localHost().brokerId, 128);
-                    const raw = Array.isArray(hosts) ? hosts : [];
-                    const seenUrl = new Set();
                     const rows = [];
-                    for (const r of raw) {
-                        if (rows.length >= REG_MAX_HOSTS) break;
-                        const e = normEntry(r);
+                    for (const it of (Array.isArray(items) ? items : [])) {
+                        const e = it && it.entry;
                         if (!e) continue;
                         if (e.url === myOrigin) continue;               // us (url)
                         if (myBrokerId && e.brokerId === myBrokerId) continue; // us (id)
-                        if (seenUrl.has(e.url)) continue;               // dupe url
-                        seenUrl.add(e.url);
                         const local = matchLocal(e);
+                        let row;
                         if (!local) {
-                            rows.push({ kind: 'new', entry: e, local: null,
-                                        checked: true });
-                        } else if (!hostDiffers(local, e)) {
-                            rows.push({ kind: 'identical', entry: e, local: local,
-                                        checked: false });
+                            row = { kind: 'new', entry: e, local: null,
+                                    checked: true };
+                        } else if (hostDiffers(local, e)) {
+                            row = { kind: 'differs', entry: e, local: local,
+                                    checked: false,
+                                    urlChanged:
+                                        normalizeHostUrl(local.url) !== e.url };
+                        } else if (tokenDiffers(local, e)) {
+                            row = { kind: 'differs', entry: e, local: local,
+                                    checked: false, urlChanged: false,
+                                    tokenOnly: true };
                         } else {
-                            rows.push({ kind: 'differs', entry: e, local: local,
-                                        checked: false,
-                                        urlChanged:
-                                            normalizeHostUrl(local.url) !== e.url });
+                            row = { kind: 'identical', entry: e, local: local,
+                                    checked: false };
                         }
+                        row.src = it.src;
+                        row.srcLocal = it.srcLocal;
+                        row.also = it.also;
+                        row.diverged = it.diverged;
+                        row.conflict = it.conflict;
+                        row.pwRefused = it.pwRefused;
+                        rows.push(row);
                     }
                     return rows;
                 }
+                // The single-source shorthand: merge one local source, classify.
+                function classifyLocal(hosts) {
+                    return classify(mergeSources(
+                        [{ name: 'this broker', local: true, hosts: hosts }]).items);
+                }
+                // ---- pull sources (#174) ------------------------------------
+                // Pull used to read only the broker whose page is open, which
+                // made recovering a list published to broker B circular when B
+                // was the very host missing from the list. It now reads any
+                // configured broker, over the routing publish has always had
+                // (ctx.serverStore.get({host})).
+                //
+                // Reading somebody else's broker means every failure has to be
+                // distinguishable. The old code treated any non-200 as "no
+                // registry yet" — right for the local broker, wrong for a remote
+                // one, where a 401 means "it refused our password", not "empty".
+                // Pure so it can be tested against the whole table.
+                function sourceTransportState(got) {
+                    const st = (got && typeof got.status === 'number')
+                        ? got.status : -1;
+                    const err = (got && typeof got.error === 'string')
+                        ? got.error : '';
+                    if (st === 0 || st === -1) {
+                        if (err === 'no_host') {
+                            return { state: 'no_host',
+                                     why: 'no longer in your host list' };
+                        }
+                        if (err === 'timeout') {
+                            return { state: 'unreachable',
+                                     why: 'did not answer in time' };
+                        }
+                        return { state: 'unreachable',
+                                 why: 'could not be reached' };
+                    }
+                    if (st === 401 || st === 403) {
+                        return { state: 'unauthorized',
+                                 why: 'refused our password — set it on the '
+                                    + 'Browser tab' };
+                    }
+                    if (st === 404) {
+                        return { state: 'unsupported',
+                                 why: 'older build: it has no registry to read' };
+                    }
+                    if (st < 200 || st > 299) {
+                        return { state: 'error', why: 'answered HTTP ' + st };
+                    }
+                    return { state: 'ok', why: '' };
+                }
+                // …and what a 2xx actually carries. 'locked' is only reported once
+                // the envelope has passed structural validation — an envelope we
+                // cannot parse is unreadable, and sending someone to a passphrase
+                // prompt that cannot succeed is worse than saying so.
+                function sourceContentState(value) {
+                    const scope = encScope(value);
+                    if (scope) {
+                        const bad = (scope === 'unknown')
+                            ? 'unknown scope' : encProblem(value.enc);
+                        if (bad) {
+                            return { state: 'unreadable', count: 0,
+                                     why: 'its encrypted block is unreadable ('
+                                        + bad + ')' };
+                        }
+                        const n = publicHostsOf(value).length;
+                        return { state: 'locked', count: n,
+                                 why: scope === 'all'
+                                    ? 'encrypted — needs a passphrase'
+                                    : n + ' host' + (n === 1 ? '' : 's')
+                                      + ', passwords encrypted' };
+                    }
+                    const n = publicHostsOf(value).length;
+                    if (!n) {
+                        return { state: 'empty', count: 0,
+                                 why: 'nothing published there' };
+                    }
+                    return { state: 'ok', count: n,
+                             why: n + ' host' + (n === 1 ? '' : 's') };
+                }
+                function sourceState(got) {
+                    const t = sourceTransportState(got);
+                    if (t.state !== 'ok') return { state: t.state, why: t.why,
+                                                   count: 0 };
+                    return sourceContentState(got && got.value);
+                }
+                // Only these two have anything to read.
+                function sourceUsable(state) {
+                    return state === 'ok' || state === 'locked';
+                }
+
                 // Tamper evidence for a 'tokens' registry: the plaintext side is
                 // a PROJECTION of what we sealed, and one buildValue writes both,
                 // so they cannot drift on their own. A mismatch means somebody
@@ -622,7 +843,14 @@
                                 // warning says so before you tick it.
                                 local.url = row.entry.url;
                                 local.token = row.entry.token || '';
-                                local.brokerId = row.entry.brokerId || '';
+                                // #174: CLEAR the identity rather than adopt the
+                                // incoming one. Importing it wrote an unverified
+                                // broker_id into prefs — contradicting the rule
+                                // three lines up, and letting whoever wrote that
+                                // registry choose what this host claims to be.
+                                // refreshHostIdentities() re-learns it from the
+                                // new address's own /info.
+                                local.brokerId = '';
                             } else if (row.entry.token
                                     && row.entry.token !== local.token) {
                                 // Same origin: a fresh token for the SAME broker is
@@ -903,10 +1131,16 @@
                     if (o.mode === 'unlock' && !o.whole) {
                         buttons.push({ label: 'Without passwords', value: 'skip' });
                     }
-                    buttons.push({ label: 'Cancel', value: false });
+                    // #174: with several sources selected, backing out has to skip
+                    // THIS source rather than read as "give up on the pull" — and
+                    // it must not quietly import the readable half instead, which
+                    // is what the separate "Without passwords" button is for.
+                    buttons.push({ label: o.source ? 'Skip this broker' : 'Cancel',
+                                   value: false });
+                    const who = o.source ? ('“' + o.source + '”') : 'This broker';
                     const pending = openDialog({
                         title: o.mode === 'set' ? 'Registry passphrase'
-                            : 'Unlock the registry',
+                            : (o.source ? ('Unlock ' + who) : 'Unlock the registry'),
                         body: function (c) {
                             const msg = document.createElement('div');
                             msg.className = 'app-dialog-msg';
@@ -918,10 +1152,10 @@
                                   + 'Anyone who can read the broker\'s files can '
                                   + 'guess at it offline, so make it long.'
                                 : (o.whole
-                                    ? 'This broker\'s registry is encrypted. '
+                                    ? who + '’s registry is encrypted. '
                                       + 'Enter the passphrase it was published '
                                       + 'with.'
-                                    : 'This registry\'s passwords are encrypted. '
+                                    : who + '’s passwords are encrypted. '
                                       + 'Enter the passphrase to import them, or '
                                       + 'import the list without passwords.');
                             c.appendChild(msg);
@@ -989,17 +1223,22 @@
                         return p;
                     }
                 }
-                // Resolve a stored value to the host array to classify, asking for
-                // a passphrase only when there is an envelope.
-                //   -> {hosts, unlocked} | null (abort)
+                // Resolve ONE source's stored value to the host array to classify,
+                // asking for a passphrase only when there is an envelope.
+                //   -> {hosts, unlocked} | null (the user backed out of THIS
+                //      source; with several selected that skips it, not the pull)
                 // NOTHING local is touched here: a wrong passphrase costs a retry,
-                // never a clobbered host list.
-                async function unlockForPull(value) {
+                // never a clobbered host list. #175's invariant holds per source —
+                // the array returned is either the decrypted one, used alone, or
+                // the plaintext projection, chosen explicitly. The two are never
+                // spliced together.
+                async function unlockForPull(value, srcName) {
                     const scope = encScope(value);
                     if (!scope) {
                         return { hosts: publicHostsOf(value), unlocked: false };
                     }
                     const whole = (scope !== 'tokens');
+                    const who = srcName ? ('“' + srcName + '”') : 'this broker';
                     const fallback = function () {
                         return whole ? null
                             : { hosts: publicHostsOf(value), unlocked: false };
@@ -1007,44 +1246,50 @@
                     const problem = (scope === 'unknown')
                         ? 'unknown scope' : encProblem(value.enc);
                     if (problem) {
-                        showNotice('This broker\'s registry carries an encrypted '
-                            + 'block this browser can\'t read (' + problem + ').'
+                        showNotice('The registry on ' + who + ' carries an '
+                            + 'encrypted block this browser can\'t read ('
+                            + problem + ').'
                             + (whole ? '' : ' Importing without passwords.'),
                             { sticky: true, type: whole ? 'error' : undefined });
                         return fallback();
                     }
                     if (!encAvailable()) {
                         showNotice((whole
-                            ? 'This broker\'s registry is encrypted and this page '
-                              + 'can\'t decrypt it: '
-                            : 'This registry\'s passwords are encrypted and this '
+                            ? 'The registry on ' + who + ' is encrypted and this '
+                              + 'page can\'t decrypt it: '
+                            : 'The passwords on ' + who + ' are encrypted and this '
                               + 'page can\'t decrypt them, so they are skipped: ')
                             + encWhyUnavailable(),
                             { sticky: true, type: whole ? 'error' : undefined });
                         return fallback();
                     }
                     let err = '';
+                    // The session passphrase is TRIED, once, and never cleared by
+                    // this source's failure (#174): with several sources selected,
+                    // one tampered or differently-keyed registry would otherwise
+                    // evict the passphrase that unlocks all the others. It is only
+                    // PROMOTED to the session passphrase if none is held yet, so a
+                    // second source's passphrase can never quietly become the one
+                    // the next Publish encrypts with.
+                    let held = _encPass;
                     for (;;) {
-                        let pass = _encPass;
+                        let pass = held;
+                        held = null;                 // try the held one once only
                         if (!pass) {
                             const r = await openPassphraseDialog({ mode: 'unlock',
-                                whole: whole, error: err });
-                            if (!r) return null;                    // cancelled
+                                whole: whole, error: err, source: srcName });
+                            if (!r) return null;             // skip this source
                             if (r.skip) {
                                 return { hosts: publicHostsOf(value),
                                          unlocked: false };
                             }
                             pass = r.pass;
                         }
-                        showNotice('Unlocking the registry…');
+                        showNotice('Unlocking ' + who + '…');
                         let payload = null;
                         try {
                             payload = await encOpen(value.enc, pass);
                         } catch (e) {
-                            // Held passphrase was the wrong one -> drop it, or the
-                            // next action would silently reuse it.
-                            _encPass = null;
-                            refreshPane();
                             if (e && e.encError === 'passphrase') {
                                 // A wrong key and a modified blob are the SAME GCM
                                 // failure; claiming "wrong passphrase" alone would
@@ -1053,15 +1298,14 @@
                                     + 'was modified after it was published.';
                                 continue;
                             }
-                            showNotice('Could not read the encrypted registry ('
-                                + ((e && e.message) || 'unreadable') + ').',
-                                { sticky: true, type: 'error' });
+                            showNotice('Could not read the encrypted registry on '
+                                + who + ' (' + ((e && e.message) || 'unreadable')
+                                + ').', { sticky: true, type: 'error' });
                             return fallback();
                         }
-                        _encPass = pass;
-                        refreshPane();
+                        if (!_encPass) { _encPass = pass; refreshPane(); }
                         if (!whole && !encPublicMatches(value, payload.hosts)) {
-                            showNotice('This registry\'s readable host list does '
+                            showNotice('The readable host list on ' + who + ' does '
                                 + 'not match its encrypted contents — someone '
                                 + 'edited the stored copy. Using the encrypted '
                                 + '(authenticated) list.',
@@ -1069,6 +1313,154 @@
                         }
                         return { hosts: payload.hosts, unlocked: true };
                     }
+                }
+
+                // ---- pull sources: probe + pick (#174) -----------------------
+                // Every configured broker, in a FIXED order — this broker first,
+                // then the host list's own order — so a multi-source read is
+                // deterministic.
+                function pullSourceHosts() {
+                    const out = [localHost()];
+                    for (const h of getHosts()) {
+                        if (h && h.id !== 'local') out.push(h);
+                    }
+                    return out;
+                }
+                function srcLabel(h) {
+                    if (!h || h.id === 'local') return 'this broker';
+                    return cleanStr(h.label, LABEL_MAX) || h.url || h.id;
+                }
+                // hostFetch already deadlines the CONNECT, but fetch() resolves on
+                // headers: a broker that answers 200 and then dribbles (or never
+                // finishes) its body would hang the read forever, and with it the
+                // source dialog. So each probe carries its own end-to-end deadline
+                // covering the body, and one bad source can never hold up the rest.
+                const PROBE_MS = 8000;
+                function withDeadline(p, ms, onTimeout) {
+                    return new Promise(function (resolve) {
+                        let done = false;
+                        const t = setTimeout(function () {
+                            if (!done) { done = true; resolve(onTimeout); }
+                        }, ms);
+                        p.then(function (v) {
+                            if (!done) { done = true; clearTimeout(t); resolve(v); }
+                        }, function () {
+                            if (!done) {
+                                done = true; clearTimeout(t);
+                                resolve({ status: 0, error: 'failed' });
+                            }
+                        });
+                    });
+                }
+                async function probeSource(host) {
+                    const local = (host.id === 'local');
+                    const rec = { hostId: host.id, name: srcLabel(host),
+                                  local: local, value: null };
+                    // A host with no saved password can only 401. Don't make the
+                    // request: it tells that broker we tried and learns nothing we
+                    // don't already know from our own host list.
+                    if (!local && !(host.token)) {
+                        return Object.assign(rec, { state: 'no_password', count: 0,
+                            why: 'no password saved — set it on the Browser tab' });
+                    }
+                    const got = await withDeadline(
+                        ctx.serverStore.get({ host: host.id }), PROBE_MS,
+                        { status: 0, error: 'timeout' });
+                    rec.value = got && got.value;
+                    return Object.assign(rec, sourceState(got));
+                }
+                // The source picker. Returns {sources:[rec], acceptRemoteTokens}
+                // or null. Skipped entirely when nothing but this broker is
+                // configured, so the single-broker case is exactly as it was.
+                async function pickSources() {
+                    const hosts = pullSourceHosts();
+                    if (hosts.length < 2) {
+                        const only = await probeSource(hosts[0]);
+                        return { sources: [only], acceptRemoteTokens: false,
+                                 skipped: [], single: true };
+                    }
+                    showNotice('Checking ' + hosts.length + ' brokers…');
+                    // Isolated per source: probeSource never rejects, so one bad
+                    // broker cannot take the whole dialog down with it.
+                    const recs = await Promise.all(hosts.map(probeSource));
+                    const refs = [];
+                    let allBox = null, pwBox = null;
+                    const anyRemoteUsable = recs.some(
+                        r => !r.local && sourceUsable(r.state));
+                    const res = await openDialog({
+                        title: 'Pull broker list',
+                        body: function (c) {
+                            const intro = document.createElement('div');
+                            intro.className = 'app-dialog-msg';
+                            intro.textContent = 'Which brokers\' lists to read. '
+                                + 'Each one stores its own; reading more than one '
+                                + 'merges them, and where two lists hold the same '
+                                + 'address the first broker in this order wins.';
+                            c.appendChild(intro);
+                            const list = document.createElement('div');
+                            list.className = 'hostreg-list';
+                            for (const rec of recs) {
+                                const usable = sourceUsable(rec.state);
+                                const r = mkRowCheck('', usable && rec.local);
+                                r.row.classList.add('hostreg-src');
+                                if (!usable) {
+                                    r.cb.disabled = true;
+                                    r.row.classList.add('hostreg-identical');
+                                }
+                                const tag = document.createElement('span');
+                                tag.className = 'hostreg-tag';
+                                tag.textContent = rec.state;
+                                r.span.textContent = rec.name;
+                                r.row.insertBefore(tag, r.span);
+                                if (rec.why) {
+                                    const w = document.createElement('span');
+                                    w.className = usable
+                                        ? 'hostreg-tag' : 'hostreg-locked';
+                                    w.textContent = ' — ' + rec.why;
+                                    r.span.appendChild(w);
+                                }
+                                list.appendChild(r.row);
+                                refs.push({ rec: rec, cb: r.cb, usable: usable });
+                            }
+                            c.appendChild(list);
+                            const ar = mkRowCheck('Every broker that can be read',
+                                false);
+                            allBox = ar.cb;
+                            allBox.addEventListener('change', function () {
+                                for (const ref of refs) {
+                                    if (ref.usable) ref.cb.checked = allBox.checked;
+                                }
+                            });
+                            c.appendChild(ar.row);
+                            if (anyRemoteUsable) {
+                                const pr = mkRowCheck(
+                                    'Accept passwords from other brokers', false);
+                                pr.row.classList.add('hostreg-danger');
+                                pwBox = pr.cb;
+                                c.appendChild(pr.row);
+                                const ph = document.createElement('div');
+                                ph.className = 'set-hint hostreg-warn';
+                                ph.textContent = 'Off by default. A password in '
+                                    + 'another broker\'s list was put there by '
+                                    + 'whoever wrote it, and taking it means this '
+                                    + 'browser will send it to the address that '
+                                    + 'list names — the same lateral-movement risk '
+                                    + 'as publishing one, in the other direction. '
+                                    + 'You still tick each host by hand afterwards.';
+                                c.appendChild(ph);
+                            }
+                        },
+                        buttons: [
+                            { label: 'Read', value: 'read', primary: true },
+                            { label: 'Cancel', value: false },
+                        ],
+                    });
+                    if (!res || res.value !== 'read') return null;
+                    const chosen = refs.filter(r => r.usable && r.cb.checked)
+                        .map(r => r.rec);
+                    return { sources: chosen,
+                             acceptRemoteTokens: !!(pwBox && pwBox.checked),
+                             skipped: [], single: false };
                 }
                 async function openPublishDialog() {
                     const hosts = getHosts();
@@ -1150,21 +1542,50 @@
                         !!(allBox && allBox.checked));
                 }
                 async function openPullDialog() {
-                    let got = null;
-                    try { got = await ctx.serverStore.get(); } catch (_) {}
-                    // A non-200 GET means "no registry yet", not an error (an older
-                    // broker still exposes ctx.serverStore); only a transport
-                    // failure (status 0) is worth flagging.
-                    if (got && got.status === 0) {
-                        showNotice('Could not read the registry on this broker.',
-                            { sticky: true, type: 'error' });
+                    const picked = await pickSources();
+                    if (!picked) return;                     // cancelled the picker
+                    if (!picked.sources.length) {
+                        showNotice('No broker selected to read.');
                         return;
                     }
-                    const opened = await unlockForPull(got && got.value);
-                    if (!opened) return;
-                    const rows = classify(opened.hosts);
+                    // Single-source (nothing but this broker configured) keeps the
+                    // old reporting exactly: a transport failure is flagged, and
+                    // anything else is "no registry yet".
+                    if (picked.single) {
+                        const only = picked.sources[0];
+                        if (only.state === 'unreachable'
+                                || only.state === 'no_host') {
+                            showNotice('Could not read the registry on this broker.',
+                                { sticky: true, type: 'error' });
+                            return;
+                        }
+                    }
+                    // Unlock each selected source in turn. A source that will not
+                    // open is ONE SKIPPED SOURCE, not a dead dialog.
+                    const feeds = [];
+                    const skipped = [];
+                    for (const rec of picked.sources) {
+                        const opened = await unlockForPull(rec.value,
+                            picked.single ? '' : rec.name);
+                        if (!opened) { skipped.push(rec.name); continue; }
+                        feeds.push({ name: rec.name, local: rec.local,
+                                     hosts: opened.hosts });
+                    }
+                    if (!feeds.length) {
+                        showNotice(skipped.length
+                            ? 'Nothing read — every selected broker was skipped.'
+                            : 'No hosts to import.');
+                        return;
+                    }
+                    const merged = mergeSources(feeds,
+                        { acceptRemoteTokens: picked.acceptRemoteTokens });
+                    const rows = classify(merged.items);
+                    const multi = feeds.length > 1
+                        || feeds.some(f => !f.local);
                     if (!rows.length) {
-                        showNotice('No hosts to import from this broker\'s registry.');
+                        showNotice('No hosts to import from '
+                            + (multi ? 'the selected brokers.'
+                                     : 'this broker\'s registry.'));
                         return;
                     }
                     const refs = [];
@@ -1173,11 +1594,32 @@
                         body: function (c) {
                             const intro = document.createElement('div');
                             intro.className = 'app-dialog-msg';
-                            intro.textContent = 'Import hosts published to this '
-                                + 'broker. New hosts are checked; hosts you already '
+                            intro.textContent = 'Import hosts published to '
+                                + (multi
+                                    ? ('these brokers: '
+                                       + feeds.map(f => f.name).join(', ') + '.')
+                                    : 'this broker.')
+                                + ' New hosts are checked; hosts you already '
                                 + 'have that differ are unchecked (your local copy '
                                 + 'wins unless you tick them).';
                             c.appendChild(intro);
+                            const notes = [];
+                            if (skipped.length) {
+                                notes.push('Skipped: ' + skipped.join(', ') + '.');
+                            }
+                            if (merged.droppedLoopback) {
+                                notes.push(merged.droppedLoopback + ' loopback '
+                                    + 'address' + (merged.droppedLoopback === 1
+                                        ? ' was' : 'es were')
+                                    + ' dropped — they only mean something on the '
+                                    + 'machine that published them.');
+                            }
+                            if (notes.length) {
+                                const n = document.createElement('div');
+                                n.className = 'set-hint';
+                                n.textContent = notes.join(' ');
+                                c.appendChild(n);
+                            }
                             const list = document.createElement('div');
                             list.className = 'hostreg-list';
                             for (const row of rows) {
@@ -1196,14 +1638,32 @@
                                 if (row.entry.token) {
                                     const pw = document.createElement('span');
                                     pw.className = 'hostreg-haspw';
-                                    pw.textContent = ' (has password)';
+                                    pw.textContent = row.srcLocal
+                                        ? ' (has password)'
+                                        : ' (password from ' + row.src + ')';
                                     r.span.appendChild(pw);
                                 } else if (row.entry.hasToken) {
-                                    // Encrypted, and we didn't unlock it.
+                                    // Either still in its envelope, or a remote
+                                    // password we were told not to accept.
                                     const pw = document.createElement('span');
                                     pw.className = 'hostreg-locked';
-                                    pw.textContent = ' (password locked)';
+                                    pw.textContent = row.pwRefused
+                                        ? ' (password not accepted)'
+                                        : ' (password locked)';
                                     r.span.appendChild(pw);
+                                }
+                                // #174: where this row came from. Shown whenever
+                                // ANY selected source was remote, not only when
+                                // several were — "which machine told me this" is
+                                // the thing a user needs to weigh a row.
+                                if (multi) {
+                                    const s = document.createElement('span');
+                                    s.className = 'hostreg-tag';
+                                    s.textContent = ' from ' + row.src
+                                        + ((row.also && row.also.length)
+                                            ? (', also in ' + row.also.join(', '))
+                                            : '');
+                                    r.span.appendChild(s);
                                 }
                                 if (row.kind === 'differs' && row.urlChanged) {
                                     const w = document.createElement('div');
@@ -1215,6 +1675,31 @@
                                             ? ' The registry\'s password for it is '
                                               + 'still locked, so it can\'t be '
                                               + 'imported in its place.' : '');
+                                    r.row.appendChild(w);
+                                }
+                                if (row.tokenOnly) {
+                                    const w = document.createElement('div');
+                                    w.className = 'set-hint hostreg-warn';
+                                    w.textContent = 'Same host, different password '
+                                        + '— applying replaces the one you have '
+                                        + 'saved for it.';
+                                    r.row.appendChild(w);
+                                }
+                                if (row.diverged) {
+                                    const w = document.createElement('div');
+                                    w.className = 'set-hint hostreg-warn';
+                                    w.textContent = 'The brokers that list this '
+                                        + 'address don\'t agree about it — '
+                                        + row.src + '\'s copy is the one shown.';
+                                    r.row.appendChild(w);
+                                }
+                                if (row.conflict) {
+                                    const w = document.createElement('div');
+                                    w.className = 'set-hint hostreg-warn';
+                                    w.textContent = 'Identity conflict — this '
+                                        + 'address and ' + row.conflict + ' both '
+                                        + 'claim to be the same broker. At most '
+                                        + 'one of them is.';
                                     r.row.appendChild(w);
                                 }
                                 list.appendChild(r.row);
@@ -1409,6 +1894,12 @@
                 // It NEVER asks for a passphrase: this runs with no user
                 // interaction at all, and a page-load password prompt is exactly
                 // the habit an attacker wants people to have.
+                //
+                // #174 deliberately left it LOCAL-ONLY while Pull went
+                // multi-broker. Fanning it out would spend one request per
+                // configured broker on every single page load, and give every one
+                // of them a per-load failure to report, to buy a nudge toward an
+                // action that now reaches all of them anyway.
                 (async function () {
                     let got = null;
                     try { got = await ctx.serverStore.get(); } catch (_) {}
@@ -1432,7 +1923,7 @@
                     }
                     if (value.v !== 1 || !Array.isArray(value.hosts)) return;
                     ctx.storage.set(NOTIFIED_KEY, nonce);   // record at show time
-                    const newCount = classify(publicHostsOf(value))
+                    const newCount = classifyLocal(publicHostsOf(value))
                         .filter(r => r.kind === 'new').length;
                     if (!newCount) return;
                     showNotice('This broker has a shared host list with ' + newCount

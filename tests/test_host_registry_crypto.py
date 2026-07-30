@@ -254,7 +254,7 @@ CASES.enc_plan = async () => {
 CASES.v1_back_compat = async () => {
     const plain = sample(true);
     LOCAL_HOSTS = [{ id: 'local', brokerId: 'BROKER-ME', url: '' }];
-    const rows = classify(publicHostsOf(plain));
+    const rows = classifyLocal(publicHostsOf(plain));
     return {
         scope: encScope(plain),
         scopeOfEmpty: [encScope(null), encScope({}), encScope({ enc: 'x' }),
@@ -274,7 +274,7 @@ CASES.public_side_token_is_dropped = async () => {
     // attacker edits the plaintext half of the stored value
     sealed.hosts[2].token = 'ATTACKER-CHOSEN-TOKEN';
     LOCAL_HOSTS = [{ id: 'local', brokerId: 'BROKER-ME', url: '' }];
-    const rows = classify(publicHostsOf(sealed));
+    const rows = classifyLocal(publicHostsOf(sealed));
     return {
         pub: publicHostsOf(sealed).map(h => ('token' in h)),
         rowTokens: rows.map(r => r.entry.token),

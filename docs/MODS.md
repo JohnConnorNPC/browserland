@@ -353,12 +353,19 @@ bumping it.
   quota) and `get` returns `null`.
 - **`ctx.serverStore`** — a durable per-mod key/value store on the broker
   (`/mod-store/<modId>`), scoped to this mod's id so one mod can neither read
-  nor write another's. `get(opts)` → `{rev, value, revisions:[{rev,ts}]}`;
-  `set(value, baseRev, opts)` → `{status, ok, rev, …}` (a `409` carries the live
-  value inlined so you can rebase in one round trip); `getRevision(n, opts)` →
-  one past revision's full value. Writes ride the `/state` single-active-client
-  lease: a non-active browser reads fine but its `set()` resolves
-  `409 {error:'not_active'}`. `opts.host` routes to another broker by host id.
+  nor write another's. Every call resolves to the parsed body plus the HTTP
+  `status`, and never rejects: `get(opts)` → `{status, rev, value,
+  revisions:[{rev,ts}]}`; `set(value, baseRev, opts)` → `{status, ok, rev, …}`
+  (a `409` carries the live value inlined so you can rebase in one round trip);
+  `getRevision(n, opts)` → `{status, ok, rev, value}`. Writes ride the `/state`
+  single-active-client lease: a non-active browser reads fine but its `set()`
+  resolves `409 {error:'not_active'}`. `opts.host` routes to another broker by
+  host id, and an unknown id **fails closed** — `{status:0, error:'no_host'}`
+  with no request made. Reading another broker is why `status` matters: a `401`
+  ("it refused our password") and a `200` with `value:null` ("nothing published
+  there") are the same empty body and only the status tells them apart. The
+  status is applied *after* the body, so a response body carrying its own
+  `status` cannot overwrite the transport's.
 
 ### Host I/O
 

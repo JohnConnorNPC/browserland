@@ -57,6 +57,10 @@
             color: var(--fg-dim);
             font-size: 11px;
         }
+        /* #174: a row in the pull SOURCE picker. Wider gap than a host row —
+           each carries a state tag plus a reason, and they wrap. */
+        .hostreg-src { align-items: baseline; }
+        .hostreg-src .hostreg-tag { text-transform: none; letter-spacing: 0; }
         /* The encryption state line (Control Panel pane + publish dialog). It
            is repainted in place by refreshPane, so it needs room for the
            longest wording without the row jumping. */

@@ -2358,6 +2358,61 @@ def test_host_registry_mod_packaged_and_manifest_agrees():
     # All untrusted text is textContent, never innerHTML (labels/urls/tokens).
     assert ".innerHTML" not in src
     _assert_host_registry_encryption(src)
+    _assert_host_registry_pull_sources(src)
+
+
+def _assert_host_registry_pull_sources(src):
+    # #174: Pull reads ANY configured broker, not just the one whose page is
+    # open. The BEHAVIOUR is tested by executing the shipped code
+    # (tests/test_host_registry_sources.py); these are the structural facts and
+    # the negatives that a round-trip test cannot see.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    # It rides the routing publish has always had. No new endpoint, and no
+    # second transport.
+    assert "ctx.serverStore.get({ host: host.id })" in code
+    assert "function probeSource(" in code
+    # Reading somebody else's broker means the failures must be
+    # distinguishable: the old "any non-200 means no registry yet" is right for
+    # the local broker only.
+    assert "function sourceTransportState(" in code
+    assert "refused our password" in src
+    # A source with no saved password is NOT probed: it could only 401, and the
+    # request would tell that broker we tried for nothing.
+    assert "if (!local && !(host.token))" in code
+    # fetch() resolves on HEADERS, so hostFetch's deadline does not cover a
+    # body that never finishes arriving. Each probe carries its own.
+    assert "function withDeadline(" in code
+    assert "PROBE_MS" in code
+    # No forced auth prompt, ever — reading N brokers must not pop N prompts.
+    assert "promptFileHostAuth" not in code
+    assert "promptHostAuth" not in code
+    # Provenance is stamped from the SOURCE LIST onto a wrapper, never read off
+    # the value: a row that lies about which machine told us is exactly the
+    # wrong thing to show. classify() takes mergeSources' items, so there is no
+    # path that reaches a row without going through the merge.
+    assert "function mergeSources(" in code
+    assert "function classify(items)" in code
+    assert "row.src = it.src;" in code
+    assert "classify(merged.items)" in code
+    assert "classify(mergeSources(" in code          # the single-source shorthand
+    # broker_id is NOT a merge key (it is unverified input, so keying on it
+    # would let one record swallow another's identity) — a second address
+    # claiming one identity is a CONFLICT that keeps both rows.
+    assert "byBroker" in code and "item.conflict" in code
+    # …and it is no longer written into prefs on an apply, nor is the incoming
+    # `id` a match candidate at all.
+    assert "local.brokerId = '';" in code
+    assert "h.id === e.id" not in code
+    # A remote list may not hand us a loopback host, an invisible host, or a
+    # password we did not ask for.
+    assert "droppedLoopback" in code
+    assert "e.hidden = false;" in code
+    assert "acceptRemoteTokens" in code
+    # The load-time discovery notice stays LOCAL-only and still never prompts.
+    notice = src[src.index("// ---- one-time discovery notice"):]
+    assert "serverStore.get()" in notice
+    assert "{ host:" not in notice
 
 
 def _assert_host_registry_encryption(src):
@@ -3460,10 +3515,22 @@ def test_server_store_capability_present():
     for sym in ("function _modStoreApi", "function _modStoreHost",
                 "'/mod-store/'", "clientId: CLIENT_ID"):
         assert sym in loader, f"missing ctx.serverStore transport symbol: {sym!r}"
+    # #174: EVERY method resolves the parsed body plus the HTTP `status` through
+    # one helper. get() used to drop the status, which made "it refused our
+    # password" (401) and "nothing published there" (200, value null) the same
+    # empty body — unanswerable once a mod can read ANOTHER broker's store.
+    assert "function _withStatus" in loader
+    assert loader.count("_withStatus(r)") == 4      # the helper + its 3 callers
+    # The status is applied AFTER the body, never before: a response body
+    # carrying its own `status` must not overwrite the transport's, and a
+    # cross-broker read makes that body untrusted input.
+    assert "Object.assign({}, j, { status: r.status })" in loader
+    assert "Object.assign({ status: r.status }, r.json)" not in loader
     # ctxVersion is unchanged — ctx.serverStore is additive.
     assert "ctxVersion: 1" in loader
     # And it all reaches the served page.
-    for sym in ("function _modStoreApi", "serverStore: {", "'/mod-store/'"):
+    for sym in ("function _modStoreApi", "function _withStatus",
+                "serverStore: {", "'/mod-store/'"):
         assert sym in INDEX_HTML, \
             f"ctx.serverStore missing from served page: {sym!r}"
 

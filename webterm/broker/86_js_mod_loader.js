@@ -414,13 +414,21 @@
                 // local-only contract, so an omitted opts behaves exactly as v1).
                 serverStore: {
                     // Current value + revision METADATA (rev + ts, NO bodies — the
-                    // ring can be large). -> {rev, value, revisions:[{rev,ts}]}
-                    // (rev 0 / value null when the mod has never written). Ungated
-                    // by the lease, so a non-active / reactivating browser always
-                    // reads.
+                    // ring can be large). -> {status, rev, value,
+                    // revisions:[{rev,ts}]} (rev 0 / value null when the mod has
+                    // never written). Ungated by the lease, so a non-active /
+                    // reactivating browser always reads.
+                    //
+                    // #174: `status` is the HTTP status, the same field set()
+                    // has always carried, because a mod reading ANOTHER broker's
+                    // store has to tell "it refused our password" (401) from "no
+                    // registry there yet" (200, value null) from "unreachable"
+                    // (0) — and the body alone cannot say. It is applied LAST so
+                    // a `status` in the body can never overwrite the transport's
+                    // (a remote broker's response body is untrusted input).
                     get: function (opts) {
                         return _modStoreApi('GET', modId, undefined, '', opts)
-                            .then(r => r.json);
+                            .then(r => _withStatus(r));
                     },
                     // Optimistic write: PUT {baseRev, value, clientId}. clientId is
                     // the core lease id (CLIENT_ID), so the ACTIVE browser's write
@@ -438,16 +446,16 @@
                             body.purgeRevisions = true;
                         }
                         return _modStoreApi('PUT', modId, body, '', opts)
-                            .then(r => Object.assign({ status: r.status }, r.json));
+                            .then(r => _withStatus(r));
                     },
-                    // Fetch ONE past (or current) revision's FULL value. -> {ok,
-                    // rev, value} or {ok:false, error:'no_such_rev'} (404 — it
+                    // Fetch ONE past (or current) revision's FULL value. -> {status,
+                    // ok, rev, value} or {ok:false, error:'no_such_rev'} (404 — it
                     // scrolled off the ring) / 'bad_rev'. Drives History preview +
                     // restore.
                     getRevision: function (n, opts) {
                         return _modStoreApi('GET', modId, undefined,
                             '?rev=' + encodeURIComponent(n), opts)
-                            .then(r => r.json);
+                            .then(r => _withStatus(r));
                     },
                 },
                 // #85 (S12): host session RPC — ONE reviewed wrapper over the
@@ -1651,6 +1659,17 @@
         // pre-built querystring ('?rev=3'); `body` omitted -> a bodyless GET;
         // opts.host picks the target broker (omitted -> local, so #124 callers
         // are unchanged).
+        // One shape for every /mod-store answer: the parsed body plus the HTTP
+        // `status`. The status is written LAST, not first — a body carrying its
+        // own `status` (a hostile or simply odd broker; the store can be read
+        // across brokers since #174) must not be able to overwrite the transport
+        // status a caller is about to branch on. A non-object body degrades to
+        // just the status rather than throwing.
+        function _withStatus(r) {
+            const j = (r && r.json && typeof r.json === 'object'
+                       && !Array.isArray(r.json)) ? r.json : {};
+            return Object.assign({}, j, { status: r.status });
+        }
         function _modStoreApi(method, modId, body, query, opts) {
             const host = _modStoreHost(opts && opts.host);
             if (!host) {
