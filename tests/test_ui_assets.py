@@ -241,7 +241,7 @@ def test_window_gestures_take_pointer_capture():
     # pointercancel (a touch/pen interruption sends no pointerup) and an
     # unexpected lostpointercapture end the gesture on the SAME path a lost
     # mouseup does, for both gestures.
-    assert src.count("bindGestureTracking(cap, onMove, onUp, onAbort)") == 2
+    assert src.count("bindGestureTracking(cap, handle, onMove, onUp, onAbort)") == 2
     # A chorded release produces a mouseup and no pointerup (pointerdown/up fire
     # only on the 0<->1 buttons transition), so mouseup still ends the gesture.
     assert "document.addEventListener('mouseup', onUp, true);" in src
@@ -284,9 +284,71 @@ def test_drag_pointer_events_none_stays_an_elementfrompoint_concern():
     # stalling. Keep the line AND keep the warning attached to it.
     src = _drag_resize_src()
     assert src.count("win.dom.style.pointerEvents = 'none';") == 1
-    preamble = src.split("win.dom.style.pointerEvents = 'none';")[0][-900:]
+    preamble = src.split("win.dom.style.pointerEvents = 'none';")[0][-1400:]
     assert "elementFromPoint ONLY" in preamble
     assert "NOT what keeps the gesture alive" in preamble
+    # ...and the warning must name what DOES keep it alive. Pointing at the
+    # capture was wrong for the case the issue is about: a cross-site iframe is
+    # hit-tested in another process before the capture is consulted.
+    assert "content -- the shield is." in preamble
+
+
+def test_gestures_raise_a_shield_that_every_exit_path_lowers():
+    # #176 measured: over a genuine out-of-process iframe the capturing element
+    # reported hasPointerCapture() true and our document still got 0 of 16
+    # pointermoves, no pointerup and no pointercancel. Capture is a routing rule
+    # inside ONE renderer, so the gesture also covers the viewport with a
+    # transparent shield -- with it on top nothing underneath is hit-tested.
+    src = _drag_resize_src()
+    assert "_shieldEl.id = 'gesture-shield';" in src
+    # Raised inside bindGestureTracking and lowered by the unbind it returns, so
+    # it rides the SAME teardown that already covers pointerup, a plain mouseup,
+    # pointercancel, a lost capture, blur and window disposal.
+    assert "const lowerShield = raiseGestureShield(handle);" in src
+    bind = src.split("function bindGestureTracking(")[1].split("\n        }")[0]
+    assert bind.count("return () => {") == 2         # captured + fallback unbind
+    # ONLY under a capture. Without one the teardown has nothing but a mouseup
+    # that may never come, and a stuck shield makes the whole page unclickable;
+    # worse, the compat mouseup would land on the SHIELD, so the click the UA
+    # synthesises from a stationary press would go to the common ancestor
+    # instead of the title bar and dblclick-to-rename would stop working.
+    assert bind.count("lowerShield();") == 1
+    fallback = bind.split("const lowerShield")[0]
+    assert "raiseGestureShield" not in fallback
+    # Backstop for a release nobody delivered: no button is down during a move
+    # that belongs to a live gesture.
+    assert "if (ev.buttons === 0) { onCancel(ev); return; }" in src
+    # Refcounted: a gesture that lost its release is only swept when its own
+    # handle is pressed again, so a second gesture can start under it and the
+    # first to end must not strip the other's shield. Re-attach is keyed on
+    # isConnected, not the refcount, so a node ripped out from under us
+    # self-heals on the next gesture instead of never coming back.
+    assert "_shieldRefs = Math.max(0, _shieldRefs - 1);" in src
+    assert "if (!_shieldEl.isConnected) document.body.appendChild(_shieldEl);" in src
+    # Above every other layer (the highest shipped is #auth-overlay at 250000).
+    shield = INDEX_HTML.split("#gesture-shield {")[1].split("}")[0]
+    assert "position: fixed;" in shield
+    assert "inset: 0;" in shield
+    assert int(shield.split("z-index:")[1].split(";")[0]) > 250000
+
+
+def test_swap_probe_reads_through_the_shield():
+    # With a shield on top, a plain elementFromPoint answers "the shield" for
+    # every position, which would break swap (Shift) and tab (Alt) mode. Read
+    # past it with elementsFromPoint -- READ-ONLY, where toggling the shield's
+    # pointer-events off around the probe would write style twice per move and,
+    # if anything in between threw, leave the shield inert.
+    src = _drag_resize_src()
+    assert "const hit = hitTestUnderShield(ev.clientX, ev.clientY);" in src
+    probe = src.split("function hitTestUnderShield(")[1].split("\n        }")[0]
+    assert "document.elementsFromPoint(x, y)" in probe
+    assert "if (stack[i] !== _shieldEl) return stack[i];" in probe
+    # The pointer-events toggle survives ONLY as the no-elementsFromPoint
+    # fallback, and it restores in a finally.
+    assert "if (document.elementsFromPoint) {" in probe
+    assert "finally { _shieldEl.style.pointerEvents = prev; }" in probe
+    # No bare elementFromPoint call is left on the gesture path.
+    assert src.count("document.elementFromPoint(") == 2   # both inside the probe
 
 
 def test_post_gesture_click_guard_is_scoped_to_the_capture_element():
@@ -297,10 +359,14 @@ def test_post_gesture_click_guard_is_scoped_to_the_capture_element():
     # browse pane's navigate/open rows, scratchpad tab renames, and the
     # app-window rename on a DIFFERENT window (the thing it was written for).
     src = _drag_resize_src()
-    assert "if (!ev.isTrusted || ev.target !== el) return;" in src
-    assert "function swallowClickAfterGesture(el)" in src
-    # The drag passes its own capture element...
-    assert src.count("swallowClickAfterGesture(cap.el)") == 1
+    assert "if (!ev.isTrusted || !root.contains(ev.target)) return;" in src
+    assert "function swallowClickAfterGesture(root)" in src
+    # The drag passes its own handle -- its title bar. Not the whole page, and
+    # not just the capture element: swallowing a click does not un-count it, so
+    # the pair that reaches dblclick can be (retargeted click on the id badge,
+    # then a click on the title text) and the dblclick lands on their common
+    # ancestor. Everything that pairing can reach is inside the handle.
+    assert src.count("swallowClickAfterGesture(handle)") == 1
     # ...and the resize does not guard at all: its capture element IS the
     # original mousedown target, a .rh grip with no click/dblclick handler, so
     # the retargeted click dies there and a guard would be pure collateral.

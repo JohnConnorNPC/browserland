@@ -290,13 +290,16 @@
            pan -- so there is nothing to give up. It does NOT enable touch
            dragging: the gesture still starts on a mousedown
            (74_js_drag_resize.js).
-           Deliberately NOT applied to tiled windows. They are reparented into
-           .strip-col columns inside #strip, which IS a horizontal scroll
-           container (overflow-x: auto, and the engine drives strip.scrollLeft),
-           so this would cost a touch pan of the workspace there. And it would
-           buy nothing: wireDrag hands a tiled window to startTiledDrag before
-           it ever reaches captureGesturePointer, so a tiled title-bar drag
-           takes no capture to protect. */
+           Deliberately NOT applied to tiled windows, where the trade goes the
+           other way. They are reparented into .strip-col columns inside #strip,
+           which IS a horizontal scroll container (overflow-x: auto, and the
+           engine drives strip.scrollLeft), so the rule costs a touch pan of the
+           workspace; and there is no capture there to protect, because wireDrag
+           hands a tiled window to startTiledDrag before it ever reaches
+           captureGesturePointer. What it would still buy is stopping a UA from
+           claiming a PEN drag on a tiled bar as a pan — accepted, since panning
+           the strip is the common gesture and pen-dragging a tiled window is
+           not, and that is the status quo either way. */
         .term-window:not(.tiled) .title-bar { touch-action: none; }
         .term-window .ti-id-badge { opacity: 0.7; }
         .term-window .title-text {

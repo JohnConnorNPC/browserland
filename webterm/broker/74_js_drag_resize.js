@@ -8,7 +8,7 @@
             savePrefs();
         }
 
-        // ---- pointer capture for the window gestures (#176) ----------------
+        // ---- keeping the window gestures alive over embedded content (#176) -
         // Both gestures used to track on bare `document` mousemove/mouseup.
         // Content that swallows events starves those listeners: an <iframe>'s
         // events belong to ITS document and never reach ours at all, and a
@@ -16,10 +16,19 @@
         // then stalls at the last position `document` saw and the mouseup that
         // would end it may never arrive.
         //
-        // setPointerCapture fixes that at the source: while a pointer is
-        // captured the browser retargets EVERY subsequent event for that
-        // pointer to the capture element, so our listeners see the whole
-        // gesture no matter what is underneath the cursor.
+        // TWO mechanisms carry the gesture, and they are not alternatives --
+        // each covers a half the other cannot (see raiseGestureShield below for
+        // the measurement that settles it):
+        //
+        //   * a full-viewport SHIELD, which stops anything underneath from
+        //     being hit-tested in the first place. This is what survives a
+        //     cross-site iframe, where the pointer is routed into another
+        //     RENDERER PROCESS before our capture is ever consulted;
+        //   * setPointerCapture, which retargets every subsequent event for
+        //     that pointer to the capture element. In-process that is clean
+        //     routing for free, and it is what gives the gesture a
+        //     pointerup / pointercancel / lostpointercapture lifecycle to hang
+        //     its teardown off instead of a mouseup that may never come.
         //
         // Why the gestures still START on `mousedown`. The drag handle is the
         // entire .title-bar, and the way a title-bar child opts out of dragging
@@ -98,6 +107,110 @@
             if (!el.hasPointerCapture(pd.id)) return null;
             return { id: pd.id, el: el };
         }
+        // ---- the gesture shield --------------------------------------------
+        // Why pointer capture is not enough, measured rather than reasoned
+        // (Chrome 150, headless, over CDP): with a genuine CROSS-SITE iframe
+        // under the cursor -- parent on 127.0.0.1, frame on localhost, so a real
+        // out-of-process iframe and not merely a cross-ORIGIN one -- a resize
+        // whose grip reported `hasPointerCapture() === true` throughout received
+        // 0 of 16 pointermoves. No pointerup, no mouseup, no pointercancel: the
+        // child document counted every one of them, and the gesture both stalled
+        // and outlived the button (the lostpointercapture that eventually ends
+        // it is deferred to the next pointer event WE see, so a stray buttonless
+        // move can get in first and keep resizing). Dragging a window across
+        // another window's cross-site iframe froze after 7 of 16 moves the same
+        // way. A same-site iframe (in-process, still cross-origin) delivered all
+        // 16 plus the release -- which is the whole story: capture is a routing
+        // rule inside ONE renderer, and a cross-process frame is hit-tested by
+        // the compositor before that rule is reached.
+        //
+        // So every gesture also raises a transparent full-viewport shield. With
+        // it on top nothing underneath is hit-tested at all -- no iframe of
+        // either flavour, no canvas, no plugin surface -- and every event of the
+        // gesture lands on an element in OUR document. That, not the capture, is
+        // what makes the issue's cases work; the capture stays for the lifecycle
+        // and the in-process routing.
+        //
+        // A shield that outlived its gesture would leave the whole page
+        // unclickable, which is far worse than the bug it fixes, so the
+        // lifecycle is deliberately conservative:
+        //
+        //   * only raised for a gesture that HOLDS A CAPTURE, so the teardown
+        //     has the pointerup / pointercancel / lostpointercapture triple
+        //     behind it and not just a mouseup that may never come. It is also
+        //     what keeps the no-capture fallback honest: with a shield up the
+        //     compat mouseup would target the SHIELD, so the click the UA
+        //     synthesises from a stationary press would go to the common
+        //     ancestor (body) instead of the title bar, and double-click to
+        //     rename would stop working. Under a capture that cannot happen --
+        //     the compat events are retargeted to the capture element;
+        //   * refcounted, because two gestures CAN be live at once: a gesture
+        //     that lost its release is only swept when its OWN handle is
+        //     pressed again, so another can start underneath it, and the first
+        //     to end must not strip the other's shield;
+        //   * re-attached on `isConnected`, not on the refcount, so anything
+        //     that rips the node out from under us (a mod, a devtools poke)
+        //     self-heals on the next gesture instead of never showing again;
+        //   * and bindGestureTracking's buttons-are-up sweep is the backstop
+        //     for a release we never saw at all.
+        let _shieldEl = null;
+        let _shieldRefs = 0;
+        function raiseGestureShield(handle) {
+            if (!_shieldEl) {
+                _shieldEl = document.createElement('div');
+                _shieldEl.id = 'gesture-shield';
+            }
+            // Carry the handle's cursor across. The shield is what the pointer
+            // is over for the whole gesture, so without this a resize would
+            // drop its edge cursor for the default arrow the moment it started.
+            // First raise only: with two gestures live the visible one owns the
+            // shield, and a second must not repaint its cursor.
+            if (!_shieldRefs) {
+                let cur = '';
+                try { cur = getComputedStyle(handle).cursor; } catch (_) {}
+                _shieldEl.style.cursor = cur || 'default';
+            }
+            if (!_shieldEl.isConnected) document.body.appendChild(_shieldEl);
+            _shieldRefs++;
+            let lowered = false;
+            return () => {
+                if (lowered) return;      // idempotent, like every teardown here
+                lowered = true;
+                _shieldRefs = Math.max(0, _shieldRefs - 1);
+                if (!_shieldRefs && _shieldEl.parentNode) {
+                    _shieldEl.parentNode.removeChild(_shieldEl);
+                }
+            };
+        }
+        // Hit-test the page as if the shield were not there. The drag's
+        // swap/tab mode probes for the window UNDER the cursor, and with a
+        // shield on top a plain elementFromPoint would answer "the shield",
+        // every time, for every position.
+        //
+        // elementsFromPoint + skip, rather than switching the shield's
+        // pointer-events off around the probe: this is READ-ONLY. The toggle
+        // would write style twice per move of a modifier drag, and if anything
+        // between the two writes threw it would leave the shield inert -- which
+        // is silently the exact failure the shield exists to prevent. Hit-testing
+        // by geometry was the third option and would mean re-deriving a z-order
+        // the DOM already knows (windows, tiers, pinned notes, mods). The toggle
+        // survives only as the fallback for a UA without elementsFromPoint.
+        function hitTestUnderShield(x, y) {
+            if (!_shieldEl || !_shieldEl.parentNode) {
+                return document.elementFromPoint(x, y);
+            }
+            if (document.elementsFromPoint) {
+                const stack = document.elementsFromPoint(x, y);
+                for (let i = 0; i < stack.length; i++) {
+                    if (stack[i] !== _shieldEl) return stack[i];
+                }
+                return null;
+            }
+            const prev = _shieldEl.style.pointerEvents;
+            _shieldEl.style.pointerEvents = 'none';
+            try { return document.elementFromPoint(x, y); }
+            finally { _shieldEl.style.pointerEvents = prev; }
+        }
         // Bind one gesture's tracking listeners; returns the unbind.
         //
         // With a capture held we track POINTER events, in the CAPTURE phase on
@@ -109,9 +222,17 @@
         // must end the gesture the same way a lost mouseup does.
         //
         // Without a capture we bind the legacy document mousemove/mouseup pair
-        // in the bubble phase -- unchanged, deliberately, so the fallback path
-        // behaves exactly as it did before #176.
-        function bindGestureTracking(cap, onMove, onUp, onCancel) {
+        // in the bubble phase, and raise NO shield -- unchanged, deliberately,
+        // so the fallback behaves exactly as it did before #176 (see
+        // raiseGestureShield for why a shield without a capture behind it is a
+        // bad trade).
+        //
+        // The shield is raised HERE, so that the unbind this returns is what
+        // lowers it: the drag's teardown and the resize's finish both call it,
+        // and between them they cover pointerup, a plain mouseup, pointercancel,
+        // a lost capture, window blur, window disposal, a stale gesture
+        // displaced by a new press, and (in snap mode only) Escape.
+        function bindGestureTracking(cap, handle, onMove, onUp, onCancel) {
             if (!cap) {
                 document.addEventListener('mousemove', onMove);
                 document.addEventListener('mouseup', onUp);
@@ -120,8 +241,17 @@
                     document.removeEventListener('mouseup', onUp);
                 };
             }
+            const lowerShield = raiseGestureShield(handle);
             const mine = (fn) => (ev) => { if (ev.pointerId === cap.id) fn(ev); };
-            const pMove = mine(onMove);
+            // Backstop for a release nobody delivered. No button is down during
+            // a move that belongs to a live gesture, so a move that reports
+            // buttons === 0 means the up was lost -- end on the cancel path
+            // rather than run on (which, with a shield up, would leave the page
+            // unclickable until something else tore the gesture down).
+            const pMove = mine((ev) => {
+                if (ev.buttons === 0) { onCancel(ev); return; }
+                onMove(ev);
+            });
             const pUp = mine(onUp);
             const pCancel = mine(onCancel);
             document.addEventListener('pointermove', pMove, true);
@@ -145,6 +275,7 @@
                 document.removeEventListener('pointercancel', pCancel, true);
                 document.removeEventListener('lostpointercapture', pCancel, true);
                 document.removeEventListener('mouseup', onUp, true);
+                lowerShield();
                 // pointerup / pointercancel release implicitly; this is for
                 // every OTHER exit (Escape, blur, the window being disposed
                 // mid-gesture), which must not leave the pointer captured.
@@ -172,19 +303,25 @@
         // (double-click-to-rename still works) and a programmatic .click() from
         // some handler in the same task is left alone.
         //
-        // SCOPED to `el`, the gesture's own capture element, and only to events
-        // whose target IS it. The retargeted compat click is dispatched AT the
-        // capture element, so that is the whole population this guard exists
-        // for; a target check costs nothing and an unscoped guard is a page-wide
-        // outage. Unscoped, for 700ms after any drag every trusted double-click
-        // in the page died -- a browse-pane row (70_js_browse_pane.js), a
-        // scratchpad tab, and the app-window rename on some OTHER window, which
-        // is the very thing the guard was written to protect.
+        // SCOPED to `root`, the gesture's own handle -- its title bar, and only
+        // events inside it. Unscoped, for 700ms after any drag every trusted
+        // double-click in the page died: a browse-pane row
+        // (70_js_browse_pane.js), a scratchpad tab, and the app-window rename on
+        // some OTHER window, which is the very thing the guard was written to
+        // protect.
+        //
+        // The handle rather than the capture element itself, even though the
+        // retargeted click is dispatched AT the capture element: swallowing a
+        // click does not un-count it, so the pair that reaches dblclick can be
+        // (retargeted click on the ID badge, then a click on the title text)
+        // and the dblclick then lands on their common ancestor. Everything that
+        // pairing can reach is inside the handle, and nothing outside this one
+        // window's title bar has any business being suppressed.
         const DBLCLICK_GUARD_MS = 700;
-        function swallowClickAfterGesture(el) {
-            if (!el) return;
+        function swallowClickAfterGesture(root) {
+            if (!root) return;
             const eat = (ev) => {
-                if (!ev.isTrusted || ev.target !== el) return;
+                if (!ev.isTrusted || !root.contains(ev.target)) return;
                 ev.preventDefault();
                 ev.stopPropagation();
                 ev.stopImmediatePropagation();
@@ -233,16 +370,22 @@
                     width: win.dom.offsetWidth,
                     height: win.dom.offsetHeight,
                 };
-                // Pointer capture keeps this gesture alive over an iframe /
-                // canvas / anything else that eats events (#176).
+                // Capture for lifecycle + in-process routing; the shield that
+                // bindGestureTracking raises below is what actually survives
+                // event-eating content, cross-process included (#176).
                 const cap = captureGesturePointer(livePointerDown(), e.target, handle);
                 // elementFromPoint ONLY: swap/tab mode probes for the window
                 // UNDER the cursor, so the dragged window must not hit-test.
                 // This is NOT what keeps the gesture alive over event-eating
-                // content -- `cap` above is. Reading it as drag safety is how
-                // the resize path, which never had this line, kept stalling
-                // over embedded content until #176. Do not delete it as
-                // redundant, and do not rely on it for anything else.
+                // content -- the shield is. It only ever looked like drag
+                // safety: neutralising the dragged window's own subtree happens
+                // to hide the iframe INSIDE it, which is why dragging an
+                // embedding window worked while resizing it did not, and
+                // reading that as safety is how the resize path (which never
+                // had this line) kept stalling. Do not delete it as redundant
+                // -- hitTestUnderShield still needs the dragged window
+                // transparent to find what is beneath it -- and do not rely on
+                // it for anything else.
                 const prevPointerEvents = win.dom.style.pointerEvents;
                 win.dom.style.pointerEvents = 'none';
                 let swapCandidate = null;
@@ -353,10 +496,12 @@
                     win.dom.classList.toggle('swap-source', !!ev.shiftKey);
                     // Shift = swap, Alt (without Shift) = tab; both hit-test the
                     // window under the cursor (the dragged node has
-                    // pointer-events:none so it's transparent to the probe).
+                    // pointer-events:none so it's transparent to the probe, and
+                    // hitTestUnderShield sees past the gesture shield, which is
+                    // over everything for the duration -- #176).
                     if (ev.shiftKey || ev.altKey) {
                         clearHold();   // modifier drags own the gesture; no dwell
-                        const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+                        const hit = hitTestUnderShield(ev.clientX, ev.clientY);
                         const dom = hit && hit.closest && hit.closest('.term-window');
                         let cand = null;
                         if (dom) {
@@ -380,7 +525,7 @@
                     const wasSnap = snapMode;
                     const wasDrag = dragged(ev);
                     teardown();
-                    if (cap && wasDrag) swallowClickAfterGesture(cap.el);
+                    if (cap && wasDrag) swallowClickAfterGesture(handle);
                     if (win.disposed) { setCandidate(null); return; }
                     win.dom.style.pointerEvents = prevPointerEvents;
                     if (wasSnap) {
@@ -468,7 +613,7 @@
                         persistWinGeom(win);
                     }
                 };
-                unbind = bindGestureTracking(cap, onMove, onUp, onAbort);
+                unbind = bindGestureTracking(cap, handle, onMove, onUp, onAbort);
                 document.addEventListener('keydown', onKey, true);
                 document.addEventListener('keyup', onKeyUp, true);
                 window.addEventListener('blur', onAbort);
@@ -510,10 +655,11 @@
                 const startH = win.dom.offsetHeight;
                 const desktop = document.getElementById('desktop');
                 const dRect = desktop.getBoundingClientRect();
-                // Same pointer capture as the drag (#176) — and the reason the
+                // Same capture + shield as the drag (#176) — and the reason the
                 // resize path needed this fix most: it has no pointer-events
-                // neutralisation of any kind, so before capture it stalled the
-                // moment the cursor crossed the window's OWN embedded content.
+                // neutralisation of any kind, so it stalled the moment the
+                // cursor crossed the window's OWN embedded content, which the
+                // drag's neutralisation was accidentally hiding.
                 const cap = captureGesturePointer(livePointerDown(), e.target, handle);
                 let ended = false;
                 let unbind = null;
@@ -566,10 +712,12 @@
                 };
                 // No swallowClickAfterGesture here, unlike the drag. This
                 // gesture's capture element IS the original mousedown target --
-                // the .rh grip, which carries no click or dblclick handler of
-                // its own and is not a rename affordance -- so the retargeted
-                // compat click lands on it and dies there. Guarding it would
-                // only cost collateral.
+                // the .rh grip -- so the retargeted compat click lands on a
+                // grip, and the retargeting has moved it no closer to anything
+                // that reacts: nothing on the grip, the window, the desktop or
+                // the document listens for click or dblclick, and a grip is not
+                // a rename affordance. There is nothing to guard, and the guard
+                // was pure collateral here.
                 const onUp = () => { finish(true); };
                 // pointercancel / an unexpected lostpointercapture / window blur
                 // (alt-tab with the button still down). Before #176 a blur mid-
@@ -577,7 +725,7 @@
                 // BUTTONLESS mousemove kept resizing the window. Commit the box
                 // where it got to — same choice the drag's abort path makes.
                 const onAbort = () => { finish(true); };
-                unbind = bindGestureTracking(cap, onMove, onUp, onAbort);
+                unbind = bindGestureTracking(cap, handle, onMove, onUp, onAbort);
                 window.addEventListener('blur', onAbort);
                 endGesture = () => finish(false);
             };

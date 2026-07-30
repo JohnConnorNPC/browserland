@@ -1,6 +1,33 @@
         /* ---- P4 drag-and-drop overlays (viewport-fixed, pointer-events
            none so they never intercept the drag) ----------------------- */
+        /* #176: the one overlay here that DOES intercept, on purpose. Raised
+           for the duration of a floating window's drag/resize and removed on
+           every exit path (74_js_drag_resize.js). Pointer capture alone does
+           not survive a cross-site iframe — that frame is another renderer
+           process and the compositor routes the pointer into it before our
+           capture is consulted, so our document sees nothing of the gesture —
+           and with this on top nothing underneath is hit-tested at all.
+           Above every layer this page paints — the highest shipped is
+           #auth-overlay at 250000 — but NOT above the browser top layer, so a
+           native <dialog>/popover over an embedded frame would still starve the
+           gesture. Nothing in-tree uses either (there is no showModal anywhere);
+           a mod that does would need to know. Also relies on html/body carrying
+           no transform/filter/contain, or the fixed containing block stops being
+           the viewport — 10_css_root.css keeps both clean, and the tiling layer
+           already forbids transforms for its own reasons.
+           Fully transparent; `cursor` is set inline from the handle it was
+           raised for, so a resize keeps its edge cursor. The swap/tab probe
+           reads past it with elementsFromPoint, NOT by turning this off. */
+        #gesture-shield {
+            position: fixed;
+            inset: 0;
+            z-index: 2000000;
+            background: transparent;
+            touch-action: none;
+        }
         body.tiled-dragging { cursor: grabbing; }
+        /* Snap mode owns the cursor; beat the inline one the shield carries. */
+        body.tiled-dragging #gesture-shield { cursor: grabbing !important; }
         body.tiled-dragging .term-window.tiled.drag-source { opacity: 0.45; }
         /* #38: a tiled drag held still long enough to pop OUT to a float — a
            distinct "release to float" affordance layered over .drag-source. */
