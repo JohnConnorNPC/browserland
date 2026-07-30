@@ -285,6 +285,9 @@
             renderModSettingsToggles(t.isLocal);   // #71/#78: reflect mod toggles (clock, help, …)
             setStartLabelEl.value = (ls.startLabel === '+' ? '' : ls.startLabel);
             setSwapLaunchEl.checked = !!ls.swapLaunchButtons;   // #114 (browser-global)
+            // #178: normalizeSettings guarantees one of the three modes, so the
+            // select always has a matching option to land on.
+            setHostStatusChipEl.value = ls.hostStatusChip;
             // Default start path is PER-HOST (#17): read the target host's own
             // settings (local = live getSettings(); remote = its cached blob),
             // resolving any legacy per-OS map against THAT host's OS.
@@ -1520,6 +1523,15 @@
             getSettings().swapLaunchButtons = setSwapLaunchEl.checked;
             savePrefs();
             applyStartButton();
+        });
+        // #178: the broker-status chip's visibility mode. Write LIVE local
+        // getSettings() like the two above, persist, then converge through
+        // applyDisplaySettings — the same door a peer browser's /state adopt
+        // uses, so both routes end at exactly one applyHostStatusVisibility.
+        setHostStatusChipEl.addEventListener('change', () => {
+            getSettings().hostStatusChip = setHostStatusChipEl.value;
+            savePrefs();
+            applyDisplaySettings();
         });
         // Issue #10/#17: the default start path is PER-HOST. Write the target
         // host's settings blob then t.save() (savePrefs for local; the host

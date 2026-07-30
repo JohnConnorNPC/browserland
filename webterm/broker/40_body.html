@@ -84,6 +84,24 @@
                     <label class="set-check"><input type="checkbox" id="set-swap-launch" />
                         Left-click opens the profile menu (right-click quick-launches)</label>
                 </div>
+                <!-- #178: the taskbar's broker-status chip is a pure indicator
+                     since #149 moved the per-broker actions onto the start (+)
+                     menu's rows, so it can be turned down or off. -->
+                <div class="set-section set-browser-global">
+                    <div class="set-title">Broker status chip</div>
+                    <div class="set-row"><label>show</label>
+                        <select id="set-host-status-chip">
+                            <option value="always">Always</option>
+                            <option value="attention">Only when a broker needs attention</option>
+                            <option value="never">Never</option>
+                        </select></div>
+                    <div class="set-hint">&#8220;Needs attention&#8221; = a broker
+                        is unreachable, wants a password, or is held by another
+                        browser. A broker you hid yourself does not count.
+                        Whichever you pick, every broker keeps a live row in the
+                        start (+) menu, so log in, take over and un-hide stay
+                        reachable.</div>
+                </div>
                 <!-- Default start path is PER-HOST (#17): editing it on a remote
                      host's tab persists to THAT host (no .set-browser-global). -->
                 <div class="set-section">

@@ -287,6 +287,14 @@
             updateStripScrollbar();
             // #88: terminal × terminate affordance may have toggled the same way.
             applyTerminalCloseAffordance();
+            // #178: the broker-status chip's visibility mode may have changed
+            // the same way. This is the single door boot, a /state adopt, a
+            // view rebuild and the Control Panel handler all come through.
+            // Deliberately the LIGHT helper and not renderHostStatus(), which
+            // rebuilds chip DOM and repaints an open (+) menu — a peer browser
+            // changing an unrelated setting must not repaint a menu the user
+            // is looking at.
+            applyHostStatusVisibility();
         }
 
         function hexToRgb(c) {

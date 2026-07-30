@@ -18,6 +18,13 @@
         // duplicate-free permutation of the four keys no matter how mangled the
         // input (hand-edited blob, stale /state, unknown key).
         const LABEL_ORDER_KEYS = ['id', 'host', 'title', 'pid'];
+        // #178: when the taskbar's broker-status chip is drawn. 'always' is
+        // today byte-for-byte; 'attention' shows it only while some broker is
+        // unreachable / wants a password / is held by another browser (see
+        // hostNeedsAttention in 75); 'never' hides it outright. Explicit
+        // vocabulary, so an unknown / legacy / hand-edited value heals to
+        // 'always' and the chip can never be lost to a typo.
+        const HOST_STATUS_CHIP_MODES = ['always', 'attention', 'never'];
         function normalizeLabelOrder(arr) {
             const seen = new Set(), out = [];
             for (const k of (Array.isArray(arr) ? arr : [])) {
@@ -148,6 +155,15 @@
             // #114: swap the START (+) button's left/right-click behaviour.
             // false = today's mapping (left = quick-launch, right = menu).
             if (typeof s.swapLaunchButtons !== 'boolean') s.swapLaunchButtons = false;
+            // #178: the taskbar broker-status chip's visibility mode. Like
+            // swapLaunchButtons above it is browser-global in the sense that it
+            // governs THE BROWSER's chrome rather than a host tab — it still
+            // SYNCS through /state like restoreOnRefresh, so every browser
+            // viewing this broker converges on it. Self-heals to 'always'
+            // (today's behaviour) from anything not in the vocabulary.
+            if (HOST_STATUS_CHIP_MODES.indexOf(s.hostStatusChip) === -1) {
+                s.hostStatusChip = 'always';
+            }
             // Issue #10: single default start path for new terminals (collapses
             // the per-OS pair from #2). Browser-local (like startLabel) and
             // belongs to THIS broker's host; resolveStartPath only sends it to a

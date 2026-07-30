@@ -41,6 +41,7 @@
         // mod mounts it into #set-mods via ctx.settings.boolean).
         const setStartLabelEl = document.getElementById('set-start-label');
         const setSwapLaunchEl = document.getElementById('set-swap-launch');   // #114
+        const setHostStatusChipEl = document.getElementById('set-host-status-chip');   // #178
         const setStartPathEl = document.getElementById('set-start-path');
         // MCP access section (per-broker; NOT part of the synced /state blob —
         // fetched/saved via /mcp/config on the settings-target host, mirroring

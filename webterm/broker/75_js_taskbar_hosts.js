@@ -325,6 +325,27 @@
             const s = hostMenuState(pollStateFor(host.id));
             return s === 'auth' || s === 'down' || s === 'lease';
         }
+        // #178: the chip's three-mode visibility. A BODY CLASS, never
+        // el.style.display: any inline display on #host-status would beat
+        // `#host-status:empty { display:none }` in 10, and an empty-but-shown
+        // node still eats a #taskbar `gap: 6px` slot — the trap the workspaces
+        // mod documents for its pager. The node itself must never be removed
+        // either: workspaces.js anchors #ws-pager with
+        // taskbar.insertBefore(pager, hostStatus) and silently relocates the
+        // pager past #btn-fullscreen if that anchor is gone.
+        //
+        // The test is written so anything OTHER than the two hiding modes
+        // shows the chip: getSettings() self-heals hostStatusChip on every
+        // read, but failing open to today's behaviour is the right direction
+        // for a control whose failure mode would otherwise be a silently
+        // missing indicator.
+        function applyHostStatusVisibility(hosts) {
+            const mode = getSettings().hostStatusChip;
+            const list = hosts || allHosts();
+            const show = mode !== 'never'
+                && (mode !== 'attention' || list.some(hostNeedsAttention));
+            document.body.classList.toggle('hide-broker-chip', !show);
+        }
         // Short state phrase, shared by the aggregate badge's tooltip and the
         // (+) menu's broker rows — one string source, so the two surfaces can
         // never describe the same state differently. '' for ok; callers
@@ -532,6 +553,13 @@
             // no-change tick is a no-op there, so this never eats a click or
             // a hover.
             repaintLaunchMenu();
+            // #178: LAST on purpose. renderHostStatus's hottest call site (the
+            // ~2s tick inside refreshTaskbarInner) is unguarded, so a throw
+            // here aborts the rest of that tick — profile warm, auto-open,
+            // auto-reattach, the /state pull. Last position means the newest
+            // code in this function can at worst lose a visibility update,
+            // never the tick. Reuses the hosts array already read above.
+            applyHostStatusVisibility(hosts);
         }
 
         // ---- auto-reattach eligibility ------------------------------------

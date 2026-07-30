@@ -111,13 +111,20 @@
             min-width: 0;
             overflow: hidden;
         }
-        /* Host status. ONE broker: renderHostStatus() draws its chip, always
-           (even a single healthy local), so the per-broker hide toggle is
-           always reachable. TWO OR MORE (#149): one aggregate badge — the
-           worst state colors it, and the per-host detail (with the chip's old
-           per-host actions) lives on the start (+) menu's broker rows, which
-           the badge opens. The :empty rule below mainly matters before the
-           first render — something always renders once anything has. */
+        /* Host status. ONE broker: renderHostStatus() draws its chip. TWO OR
+           MORE (#149): one aggregate badge — the worst state colors it, and
+           the per-host detail (with the chip's old per-host actions) lives on
+           the start (+) menu's broker rows, which the badge opens. The :empty
+           rule below mainly matters before the first render — something always
+           renders once anything has.
+           #178: the chip is no longer unconditional. It used to be, so that
+           the per-broker hide toggle stayed reachable; since #149 gave every
+           broker a live (+) menu row carrying that toggle (plus log-in and
+           take-over) and Control Panel → Hosts gained a hidden checkbox, the
+           chip is a pure indicator and Control Panel → Broker status chip can
+           switch it to attention-only or off. Hiding is a body class, never an
+           inline display on #host-status — that would beat the :empty rule,
+           and an empty-but-shown node still eats a #taskbar gap slot. */
         #host-status {
             display: flex;
             gap: 4px;
@@ -125,6 +132,9 @@
             flex-shrink: 0;
         }
         #host-status:empty { display: none; }
+        /* #178: (0,1,1,1) beats both #host-status and #host-status:empty, so
+           the two hiding rules can never fight. */
+        body.hide-broker-chip #host-status { display: none; }
         .host-chip {
             font-family: monospace;
             font-size: 11px;
