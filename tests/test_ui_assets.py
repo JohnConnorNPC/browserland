@@ -217,6 +217,96 @@ def test_ws_switcher_preview_honors_live_filter():
     assert "!renderCols.length && !floatN" in preview
 
 
+def _drag_resize_src():
+    return (BROKER_DIR / "74_js_drag_resize.js").read_text(encoding="utf-8")
+
+
+def test_window_gestures_take_pointer_capture():
+    # #176: both gestures tracked on bare document mousemove/mouseup, so
+    # content that swallows events (an iframe, whose events belong to ITS
+    # document; a canvas that stopPropagation's) starved the listeners and the
+    # gesture stalled mid-move with its mouseup never arriving. UI JS never runs
+    # in CI, so pin the wiring by source: the capture is taken, it is only
+    # BELIEVED when the UA confirms it, and both gestures ask for it.
+    src = _drag_resize_src()
+    assert "el.setPointerCapture(pd.id)" in src
+    assert "if (!el.hasPointerCapture(pd.id)) return null;" in src
+    assert src.count("captureGesturePointer(takePointerDown(), e.target, handle)") == 2
+    # Tracking is pointer events in the document CAPTURE phase, filtered to the
+    # captured pointer so a second pointer cannot corrupt the gesture.
+    for name in ("pointermove", "pointerup", "pointercancel", "lostpointercapture"):
+        assert f"document.addEventListener('{name}', p" in src
+        assert f"document.removeEventListener('{name}', p" in src
+    assert "if (ev.pointerId === cap.id)" in src
+    # pointercancel (a touch/pen interruption sends no pointerup) and an
+    # unexpected lostpointercapture end the gesture on the SAME path a lost
+    # mouseup does, for both gestures.
+    assert src.count("bindGestureTracking(cap, onMove, onUp, onAbort)") == 2
+    # A chorded release produces a mouseup and no pointerup (pointerdown/up fire
+    # only on the 0<->1 buttons transition), so mouseup still ends the gesture.
+    assert "document.addEventListener('mouseup', onUp, true);" in src
+    assert "document.removeEventListener('mouseup', onUp, true);" in src
+    # Capture is released on every exit that is not an implicit release.
+    assert "cap.el.releasePointerCapture(cap.id);" in src
+
+
+def test_window_gestures_still_start_on_mousedown():
+    # #176: the pointer id is sniffed from the pointerdown that precedes the
+    # press, but the gesture START stays a mousedown -- a title-bar child's only
+    # way to opt out of dragging the window is stopPropagation on its OWN
+    # mousedown (core min/close/colour/MCP + every mod with a title-bar
+    # control). pointerdown fires first and is a separate dispatch, so starting
+    # there would ignore all of them and let press-and-hold on the close button
+    # snap the window to the grid.
+    src = _drag_resize_src()
+    assert src.count("handle.addEventListener('mousedown', onDown);") == 2
+    assert "handle.addEventListener('pointerdown'" not in src
+    # The only pointerdown listener is the passive id sniffer, and it records
+    # mouse/pen only: a touch's compatibility mousedown arrives after the touch
+    # has ENDED, so its id would be dead by the time we tried to capture it.
+    assert src.count("addEventListener('pointerdown'") == 1
+    assert "e.pointerType === 'mouse' || e.pointerType === 'pen'" in src
+    assert "e.isPrimary" in src
+
+
+def test_drag_pointer_events_none_stays_an_elementfrompoint_concern():
+    # #176 asks for this by name: the dragged window's pointer-events:none is
+    # there so elementFromPoint can find the window UNDERNEATH for swap/tab
+    # mode. It is NOT what keeps the gesture alive over event-eating content --
+    # reading it that way is how the resize path, which never had it, kept
+    # stalling. Keep the line AND keep the warning attached to it.
+    src = _drag_resize_src()
+    assert src.count("win.dom.style.pointerEvents = 'none';") == 1
+    preamble = src.split("win.dom.style.pointerEvents = 'none';")[0][-900:]
+    assert "elementFromPoint ONLY" in preamble
+    assert "NOT what keeps the gesture alive" in preamble
+
+
+def test_gesture_cleanup_covers_blur_cancel_and_disposal():
+    # Before #176 the resize path's ONLY listener remover was its mouseup: a
+    # blur (alt-tab with the button down) left document mousemove/mouseup bound
+    # forever, so a later BUTTONLESS mousemove kept resizing the window. Both
+    # gestures now share the abort path and both end on window teardown.
+    src = _drag_resize_src()
+    assert src.count("window.addEventListener('blur', onAbort);") == 2
+    assert src.count("window.removeEventListener('blur', onAbort);") == 2
+    # 2 win.cleanups hooks + the stale-gesture sweep at the top of each onDown.
+    assert src.count("if (endGesture) endGesture();") == 4
+    # A window disposed mid-resize has no geometry worth persisting and no
+    # session left to resize.
+    assert "if (!commit || win.disposed) return;" in src
+
+
+def test_gesture_handles_declare_touch_action_none():
+    # #176: the gestures are captured-pointer gestures, so a UA that claims a
+    # pen (or touch) drag starting on a handle as a pan/zoom would
+    # pointercancel it out from under us. Neither handle is a scroll surface.
+    bar = INDEX_HTML.split(".term-window .title-bar {")[1].split("}")[0]
+    assert "touch-action: none;" in bar
+    rh = INDEX_HTML.split(".term-window .rh {")[1][:200]
+    assert "touch-action: none" in rh
+
+
 def test_index_html_never_puts_token_in_url():
     # Security invariant carried over from the monolith: the page must not push
     # the auth token into the address bar.

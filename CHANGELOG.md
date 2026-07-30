@@ -14,6 +14,18 @@ story behind anything named below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A window drag or resize no longer stalls over embedded content** (#176).
+  Both gestures tracked on bare `document` mousemove/mouseup, so anything that
+  swallows events — an `<iframe>`, whose events belong to its own document, or
+  a canvas that stops propagation — starved the listeners: the window stuck at
+  the last position `document` saw, the release never arrived, and the gesture
+  stayed live afterwards (a later buttonless mouse move kept resizing it). The
+  gestures now take pointer capture, so the browser routes the whole gesture to
+  them whatever is underneath, and `pointercancel` / a lost capture / a window
+  blur all end them cleanly.
+
 ## [0.8.0] - 2026-07-30
 
 The version number catches up with what has actually shipped: `0.1.0` was the
