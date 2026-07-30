@@ -171,10 +171,20 @@
         // TRUSTED events, so a press that stayed put keeps its click/dblclick
         // (double-click-to-rename still works) and a programmatic .click() from
         // some handler in the same task is left alone.
+        //
+        // SCOPED to `el`, the gesture's own capture element, and only to events
+        // whose target IS it. The retargeted compat click is dispatched AT the
+        // capture element, so that is the whole population this guard exists
+        // for; a target check costs nothing and an unscoped guard is a page-wide
+        // outage. Unscoped, for 700ms after any drag every trusted double-click
+        // in the page died -- a browse-pane row (70_js_browse_pane.js), a
+        // scratchpad tab, and the app-window rename on some OTHER window, which
+        // is the very thing the guard was written to protect.
         const DBLCLICK_GUARD_MS = 700;
-        function swallowClickAfterGesture() {
+        function swallowClickAfterGesture(el) {
+            if (!el) return;
             const eat = (ev) => {
-                if (!ev.isTrusted) return;
+                if (!ev.isTrusted || ev.target !== el) return;
                 ev.preventDefault();
                 ev.stopPropagation();
                 ev.stopImmediatePropagation();
@@ -370,7 +380,7 @@
                     const wasSnap = snapMode;
                     const wasDrag = dragged(ev);
                     teardown();
-                    if (cap && wasDrag) swallowClickAfterGesture();
+                    if (cap && wasDrag) swallowClickAfterGesture(cap.el);
                     if (win.disposed) { setCandidate(null); return; }
                     win.dom.style.pointerEvents = prevPointerEvents;
                     if (wasSnap) {
@@ -505,7 +515,6 @@
                 // neutralisation of any kind, so before capture it stalled the
                 // moment the cursor crossed the window's OWN embedded content.
                 const cap = captureGesturePointer(livePointerDown(), e.target, handle);
-                let lastX = startX, lastY = startY;
                 let ended = false;
                 let unbind = null;
                 // Single exit for the whole gesture: drops the tracking
@@ -530,7 +539,6 @@
                 };
                 const onMove = (ev) => {
                     if (win.disposed) { finish(false); return; }
-                    lastX = ev.clientX; lastY = ev.clientY;
                     let nl = startLeft, nt = startTop, nw = startW, nh = startH;
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
@@ -556,14 +564,13 @@
                     win.dom.style.height = nh + 'px';
                     scheduleResize(win);
                 };
-                const onUp = (ev) => {
-                    if (ended) return;
-                    const x = (ev && typeof ev.clientX === 'number') ? ev.clientX : lastX;
-                    const y = (ev && typeof ev.clientY === 'number') ? ev.clientY : lastY;
-                    const wasDrag = Math.hypot(x - startX, y - startY) > DRAG_THRESHOLD;
-                    finish(true);
-                    if (cap && wasDrag) swallowClickAfterGesture();
-                };
+                // No swallowClickAfterGesture here, unlike the drag. This
+                // gesture's capture element IS the original mousedown target --
+                // the .rh grip, which carries no click or dblclick handler of
+                // its own and is not a rename affordance -- so the retargeted
+                // compat click lands on it and dies there. Guarding it would
+                // only cost collateral.
+                const onUp = () => { finish(true); };
                 // pointercancel / an unexpected lostpointercapture / window blur
                 // (alt-tab with the button still down). Before #176 a blur mid-
                 // resize left both document listeners bound forever, so a later

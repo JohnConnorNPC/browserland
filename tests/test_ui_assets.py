@@ -289,6 +289,26 @@ def test_drag_pointer_events_none_stays_an_elementfrompoint_concern():
     assert "NOT what keeps the gesture alive" in preamble
 
 
+def test_post_gesture_click_guard_is_scoped_to_the_capture_element():
+    # The guard exists for ONE event: the compat click a captured pointerup
+    # retargets onto the gesture's capture element. Unscoped it was a page-wide
+    # outage -- `eat` sat on window in the capture phase and killed every trusted
+    # click for a tick and every trusted DBLCLICK for 700ms, taking out the
+    # browse pane's navigate/open rows, scratchpad tab renames, and the
+    # app-window rename on a DIFFERENT window (the thing it was written for).
+    src = _drag_resize_src()
+    assert "if (!ev.isTrusted || ev.target !== el) return;" in src
+    assert "function swallowClickAfterGesture(el)" in src
+    # The drag passes its own capture element...
+    assert src.count("swallowClickAfterGesture(cap.el)") == 1
+    # ...and the resize does not guard at all: its capture element IS the
+    # original mousedown target, a .rh grip with no click/dblclick handler, so
+    # the retargeted click dies there and a guard would be pure collateral.
+    assert src.count("swallowClickAfterGesture(") == 2   # the definition + 1 call
+    resize = src.split("function wireResize(")[1]
+    assert "swallowClickAfterGesture" not in resize.split("const onUp")[1]
+
+
 def test_gesture_cleanup_covers_blur_cancel_and_disposal():
     # Before #176 the resize path's ONLY listener remover was its mouseup: a
     # blur (alt-tab with the button down) left document mousemove/mouseup bound
