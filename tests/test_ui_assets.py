@@ -1575,6 +1575,39 @@ def test_help_corpus_pipeline_kept_in_core():
     assert "function buildHelpEntries" in INDEX_HTML
 
 
+def test_the_help_corpus_memo_is_dropped_on_a_first_login():
+    # #173: /help-corpus.json serves the INSTALLED mods' help sections only to a
+    # caller holding the token. A browser that arrives with no stored token and
+    # opens Help before answering the login overlay therefore memoizes a corpus
+    # with those sections missing -- and entering the token heals in place, it
+    # does NOT reload, so without this they stay missing for the whole session.
+    # Same shape as the mod-policy re-ask (test_mod_policy_applies_after_a_first
+    # _login): the login success path notifies, the hook is HOME-broker-only.
+    auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    assert "notifyHelpHostAuth(host.id)" in auth
+    src = (BROKER_DIR / "80_js_help_window.js").read_text(encoding="utf-8")
+    hook = _frag_fn(src, "function notifyHelpHostAuth(")
+    assert "hostId !== lh.id" in hook          # the local broker only
+    for cleared in ("helpCorpusData = null", "helpCorpusEntries = null",
+                    "helpCorpusPromise = null"):
+        assert cleared in hook, cleared
+    # A fetch already in flight when the memo is dropped must not write its
+    # pre-token answer back into it, so the memo is generation-stamped.
+    assert "helpCorpusGen++" in hook
+    fetch = _frag_fn(src, "function fetchHelpCorpus(")
+    assert "const gen = helpCorpusGen;" in fetch
+    assert "if (gen !== helpCorpusGen) return entries;" in fetch
+    assert "if (gen === helpCorpusGen) helpCorpusPromise = null;" in fetch
+    # An already-open Help window refreshes rather than waiting to be reopened:
+    # 63's _onHostAuth loop runs AFTER the notify above, so the re-fetch there
+    # sees a cleared memo.
+    help_mod = (BROKER_DIR / "mods" / "help"
+                / "help.js").read_text(encoding="utf-8")
+    assert "win._onHostAuth = (hid) => {" in help_mod
+    assert auth.index("notifyHelpHostAuth(host.id)") < auth.index(
+        "win._onHostAuth(host.id)")
+
+
 def test_help_mod_packaged_and_manifest_agrees():
     import json
     mod_dir = BROKER_DIR / "mods" / "help"

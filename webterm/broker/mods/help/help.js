@@ -480,6 +480,21 @@
             try { fetchHelpCorpus().then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchProfiles(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchMcpConfig(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
+            // #173: a corpus fetched before the login overlay was answered has
+            // no installed-mod sections (that half needs the token). Core's
+            // notifyHelpHostAuth drops the memo on login and runs BEFORE this
+            // hook, so re-asking here gets the merged corpus rather than the
+            // one already cached. Everything else in the window is per-page
+            // state, so there is nothing else to redo.
+            win._onHostAuth = (hid) => {
+                let lh = null;
+                try { lh = localHost(); } catch (_) {}
+                if (!lh || hid !== lh.id) return;   // only the corpus's host
+                try {
+                    fetchHelpCorpus().then(() => refreshHelpCorpus(win))
+                        .catch(() => {});
+                } catch (_) {}
+            };
 
             finishWindowPlacement(win);
             setTimeout(() => { try { win._help.searchEl.focus(); } catch (_) {} }, 0);

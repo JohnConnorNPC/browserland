@@ -776,6 +776,11 @@
             // reconcile. A no-op for a normal (already-authenticated) load and
             // for every remote host — see notifyModsHostAuth in 86.
             try { notifyModsHostAuth(host.id); } catch (_) {}
+            // #173: the boot's Help corpus, if one was fetched, came back
+            // WITHOUT the installed mods' sections — that half needs the token.
+            // Retire the memo so the next Help open re-asks; the open-window
+            // loop below refreshes any Help window that is already up.
+            try { notifyHelpHostAuth(host.id); } catch (_) {}
             // App windows (text editor / file manager) carry hostId 'app', so
             // the terminal-healing loop below never reaches them. Notify any
             // file tool bound to the host that just authenticated so it can
