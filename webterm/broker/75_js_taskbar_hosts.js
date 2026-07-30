@@ -303,6 +303,28 @@
             if (s === 'down' && !st.consecFailures) return 'pending';
             return s;
         }
+        // #178: the ONE definition of "this broker wants you". Read by the
+        // aggregate badge's count/color AND (via applyHostStatusVisibility) by
+        // the taskbar chip's `attention` visibility mode, so the two surfaces
+        // can never disagree about what a fault is.
+        //
+        // `hidden` is a CHOSEN state, not a fault: hiding an offline broker is
+        // the documented way to park one, and the count used to keep reporting
+        // it as '1 needs attention' in red forever. Its real state still rides
+        // the badge tooltip and its (+) menu row, both of which append
+        // '— hidden'.
+        //
+        // hostMenuState, NOT hostChipState: pollStateFor() seeds polling:false,
+        // which hostChipState reads as 'down' before a poll has been TRIED, so
+        // a freshly-added host would count as a fault (and pop the chip) for
+        // one tick. Free property worth keeping: a previously-healthy broker
+        // needs consecFailures >= STALE_AFTER_FAILURES to reach 'down', so this
+        // is inherently debounced ~4s — one dropped poll never cries wolf.
+        function hostNeedsAttention(host) {
+            if (host.hidden) return false;
+            const s = hostMenuState(pollStateFor(host.id));
+            return s === 'auth' || s === 'down' || s === 'lease';
+        }
         // Short state phrase, shared by the aggregate badge's tooltip and the
         // (+) menu's broker rows — one string source, so the two surfaces can
         // never describe the same state differently. '' for ok; callers
@@ -435,13 +457,28 @@
         // attention'). Per-host detail rides the tooltip/aria-label; the
         // click opens the start (+) menu, where each broker has a live row
         // carrying the chip's old per-host actions.
+        // #178: the count and the color are derived from hostNeedsAttention and
+        // the LIVE (non-hidden) hosts, not from the raw `states` array, so a
+        // broker you hid on purpose no longer colors the badge red or shows up
+        // in 'K need attention'. The tooltip / aria-label below deliberately
+        // still list EVERY host with its state and '— hidden': the badge stops
+        // CLAIMING a fault, it never stops REPORTING one.
         function renderAggregateChip(el, hosts, states) {
             const chip = document.createElement('span');
-            const bad = states.filter(s =>
-                s === 'auth' || s === 'down' || s === 'lease').length;
+            const live = hosts.filter(h => !h.hidden);
+            const liveStates = live.map(h => hostMenuState(pollStateFor(h.id)));
+            const bad = hosts.filter(hostNeedsAttention).length;
+            // bad and worst provably agree: hostNeedsAttention(h) is exactly
+            // "h is live and its liveState is one of these three", so bad > 0
+            // iff worst lands on a fault. Every host hidden -> '' (no state
+            // class at all): the neutral base chip, because painting it .ok
+            // green would be a claim about brokers the user cannot see.
+            // hosts is never empty here — getHosts() always unshifts the local
+            // broker, and 1 host takes the single-chip path.
             const worst = ['auth', 'down', 'lease'].find(
-                s => states.indexOf(s) !== -1)
-                || (states.indexOf('pending') !== -1 ? 'pending' : 'ok');
+                s => liveStates.indexOf(s) !== -1)
+                || (liveStates.indexOf('pending') !== -1
+                    ? 'pending' : (live.length ? 'ok' : ''));
             let text = hosts.length + ' brokers';
             if (bad) {
                 text += ' · ' + bad
@@ -449,8 +486,10 @@
             } else if (worst === 'pending') {
                 text += ' · checking…';
             }
-            chip.className = 'host-chip agg ' + worst
-                + (hosts.every(h => h.hidden) ? ' off' : '');
+            // Filtered join, not concatenation: an all-hidden badge has no
+            // state class, and a bare '+ worst' would leave a double space.
+            chip.className = ['host-chip', 'agg', worst,
+                live.length ? '' : 'off'].filter(Boolean).join(' ');
             chip.textContent = text;
             const lines = hosts.map((h, i) =>
                 h.label + ' — ' + (hostStateSuffix(states[i]) || 'ok')
