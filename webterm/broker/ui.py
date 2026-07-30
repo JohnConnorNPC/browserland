@@ -8,14 +8,20 @@ it into purpose-scoped fragments so the JS/CSS can be edited without scrolling a
 14k-line script, *without* adding a build toolchain and *without* changing what
 the broker serves.
 
-The served page stays BYTE-IDENTICAL to the old monolith: each fragment is a
-contiguous slice that already ends in its own ``\\n``, and they are joined with
-the empty string (a ``"\\n".join`` would inject a double newline at every seam).
-``read_text`` uses universal-newline translation, so the result is LF-normalized
-regardless of CRLF-on-disk -- exactly as the single ``index.html`` read did. The
-served bytes are pinned by ``tests/test_ui_assets.py`` (sha-style sentinels) and
-``test_broker_e2e.py``. Edits to a fragment need a broker restart to be picked
-up -- same as the inline string / monolith did.
+The served page is the fragment join, modulo ONE substitution: each fragment is
+a contiguous slice that already ends in its own ``\\n``, and they are joined with
+the empty string (a ``"\\n".join`` would inject a double newline at every seam);
+then the single build-stamp ``<meta>`` in ``00_head.html`` (which carries the
+``__WEBTERM_BUILD__`` placeholder on disk) becomes the same element carrying the
+running build id -- see ``_BUILD_PLACEHOLDER``. That substitution is the only way
+the served bytes differ from what is on disk, and
+``tests/test_ui_assets.py::test_assembled_equals_segment_join`` states it in
+exactly that form. ``read_text`` uses universal-newline translation, so the
+result is LF-normalized regardless of CRLF-on-disk -- exactly as the single
+``index.html`` read did. The served bytes are pinned by
+``tests/test_ui_assets.py`` (sha-style sentinels) and ``test_broker_e2e.py``.
+Edits to a fragment need a broker restart to be picked up -- same as the inline
+string / monolith did.
 
 ``_ORDERED`` is an explicit list (not glob+sort) so assembly order is
 deterministic and a stray file (editor ``.bak``, ``Zone.Identifier``, etc.) can
@@ -43,7 +49,10 @@ import hashlib
 import json
 import logging
 import re
+from html import escape as _attr_escape
 from pathlib import Path, PurePosixPath
+
+from .. import build_version
 
 _DIR = Path(__file__).resolve().parent
 _LOG = logging.getLogger(__name__)
@@ -51,6 +60,38 @@ _LOG = logging.getLogger(__name__)
 # Every fragment (core, mod .js, and now mod .css) rides the same line cap as the
 # #68/#71 split guard, so no mod can smuggle a giant script/stylesheet back in.
 _MAX_LINES = 2500
+
+# #22: the build stamp. ``00_head.html`` carries _BUILD_META with the
+# placeholder as its content, exactly once, and assembly swaps that whole
+# element for the same element carrying webterm.build_version(). Why it exists:
+# a broker serves the page it assembled at IMPORT, so a `git pull` changes
+# nothing until the process restarts, and until now nothing in the served bytes
+# said which code was actually running.
+#   curl -s <host>/ | grep webterm-build     # vs git rev-parse --short HEAD
+# build_version() is cached per process, so the stamp names the RUNNING PROCESS
+# rather than the checkout on disk -- which is precisely the question -- and is
+# never recomputed per request (assembly happens once). Be honest about the
+# limit, though: it reports the revision HEAD pointed at when this process first
+# asked, so it cannot see uncommitted edits, and a pull that lands mid-run
+# between two imports is not something any single stamp can describe.
+#
+# The substitution targets the exact ELEMENT, not the bare token: a stray
+# `__WEBTERM_BUILD__` in a mod comment or a sticky note then stays literal
+# instead of being silently stamped. A missing element is a no-op here (the
+# synthetic fragment trees in tests have no head) -- that the real page carries
+# exactly one is a test assertion rather than an import-time raise, matching how
+# the rest of this module keeps assembly failures out of the boot path.
+#
+# It lives in a <meta>, NOT in the page's one inline script element, because the
+# CSP sha256 in app.py is computed over that element's exact bytes: a per-commit
+# string inside it would change the CSP hash on every commit for no reason.
+# test_ui_assets.py pins that the hash is stamp-independent. Script that wants
+# the value reads the tag:
+#     document.querySelector('meta[name="webterm-build"]').content
+# The head comment next to the tag stays short on purpose -- it ships to every
+# client, and every extra mention of the name is another line the grep returns.
+_BUILD_PLACEHOLDER = "__WEBTERM_BUILD__"
+_BUILD_META = '<meta name="webterm-build" content="{}">'
 
 # Page order, top to bottom. The numeric filename prefixes mirror this order so
 # the directory reads top-to-bottom too, but THIS list is authoritative.
@@ -353,26 +394,49 @@ def mod_catalog(mods=_MODS, base: Path = _DIR):
     return out
 
 
-def assemble(ordered=_ORDERED, mods=_MODS, base: Path = _DIR) -> str:
-    """Five-segment empty-string join: core fragments up to the head-css splice
-    point, the mod stylesheets, the rest of core up to the mod-js splice point,
-    the mod scripts, then the boot fragment + tail. Every piece already ends in
-    its own newline, so the empty join preserves byte layout (a ``"\\n".join``
-    would inject a double newline at every seam). With no mod declaring a
-    ``styles`` file the css segment is empty and the result is byte-identical to
-    the #71 three-segment join."""
+def stamp_build(page: str, version: str = None) -> str:
+    """Substitute the build stamp into an assembled page (#22).
+
+    Separate from the join so the invariant stays sayable in one line: the
+    served page is the fragment join with the ONE placeholder-carrying
+    ``_BUILD_META`` element replaced by the same element carrying the running
+    build id, and nothing else. ``version`` is an injection point for tests (two
+    different stamps must produce the same CSP hash); production passes nothing
+    and gets ``build_version()``, which is computed ONCE per process and cached
+    -- assembly calls it a single time at import, never per request.
+
+    HTML-escaped even though ``git rev-parse --short HEAD`` yields hex: this
+    lands in a quoted attribute, and a value that could close the attribute must
+    not be able to reach it."""
+    stamp = build_version() if version is None else str(version)
+    return page.replace(_BUILD_META.format(_BUILD_PLACEHOLDER),
+                        _BUILD_META.format(_attr_escape(stamp, quote=True)))
+
+
+def assemble(ordered=_ORDERED, mods=_MODS, base: Path = _DIR,
+             version: str = None) -> str:
+    """Five-segment empty-string join, then the build stamp: core fragments up
+    to the head-css splice point, the mod stylesheets, the rest of core up to
+    the mod-js splice point, the mod scripts, then the boot fragment + tail.
+    Every piece already ends in its own newline, so the empty join preserves
+    byte layout (a ``"\\n".join`` would inject a double newline at every seam).
+    With no mod declaring a ``styles`` file the css segment is empty and the
+    result is the #71 three-segment join. ``stamp_build`` then swaps the one
+    ``__WEBTERM_BUILD__`` token in the head for the running build id -- the only
+    difference between the served page and the bytes on disk."""
     css_cut = ordered.index(_MOD_CSS_AFTER) + 1   # splice css AFTER this fragment
     js_cut = ordered.index(_MOD_SPLICE_BEFORE)     # splice js BEFORE the boot frag
 
     def _join(names):
         return "".join(_read(_name, base) for _name in names)
 
-    return (
+    return stamp_build(
         _join(ordered[:css_cut])
         + _join(_mod_css(mods, base))
         + _join(ordered[css_cut:js_cut])
         + _join(mods)
-        + _join(ordered[js_cut:])
+        + _join(ordered[js_cut:]),
+        version,
     )
 
 

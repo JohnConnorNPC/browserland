@@ -429,6 +429,12 @@ recover. Most recently: **a token is now required on every connection,
 including loopback (#142)**, which strands terminals launched by a previously
 tokenless broker.
 
+What changed in a release, and roughly what came before it, is in
+**[`CHANGELOG.md`](CHANGELOG.md)** — the most recent cycle itemized, earlier
+history summarized, and the security posture statements worth reading before you
+install a mod. Breaking changes stay in `docs/UPGRADING.md`; the changelog links
+to it rather than duplicating it.
+
 Adding or editing launch profiles (WSL / zsh / PowerShell / Git-Bash) is covered
 in **[`docs/PROFILES.md`](docs/PROFILES.md)** — the recipe catalog, the three
 profile fields, the `webterm_profiles.json` sidecar-vs-`broker_config` rule, and

@@ -738,29 +738,120 @@ def test_ordered_list_matches_disk_exactly():
     assert not extra, f"fragment-typed files on disk not in _ORDERED: {sorted(extra)}"
 
 
-def test_assembled_equals_segment_join():
-    # #71 splices the mod scripts (ui._MODS) into the one <script> BETWEEN the
-    # loader and the boot fragment; #77 additionally splices each mod's manifest
-    # .css into the head <style> zone, AFTER ui._MOD_CSS_AFTER and before
-    # 40_body.html's </style>. So the served page is a 5-segment join, not a flat
-    # join of _ORDERED. Rebuild it the same way ui.assemble does (mod-css comes
-    # from the same best-effort ui._mod_css) and assert byte-equality with what
-    # gets served. With no in-repo mod declaring `styles`, the css segment is
-    # empty and this reduces to the #71 three-segment join.
+def _segment_join():
+    """The served page as it exists ON DISK -- the five-segment fragment join,
+    build stamp NOT yet substituted. #71 splices the mod scripts (ui._MODS) into
+    the one <script> BETWEEN the loader and the boot fragment; #77 additionally
+    splices each mod's manifest .css into the head <style> zone, AFTER
+    ui._MOD_CSS_AFTER and before 40_body.html's </style>. So it is a 5-segment
+    join, not a flat join of _ORDERED. Built the same way ui.assemble does
+    (mod-css comes from the same best-effort ui._mod_css)."""
     css_cut = ui._ORDERED.index(ui._MOD_CSS_AFTER) + 1
     js_cut = ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
 
     def _j(names):
         return "".join((BROKER_DIR / n).read_text(encoding="utf-8") for n in names)
 
-    rebuilt = (
+    return (
         _j(ui._ORDERED[:css_cut])
         + _j(ui._mod_css(ui._MODS, BROKER_DIR))
         + _j(ui._ORDERED[css_cut:js_cut])
         + _j(ui._MODS)
         + _j(ui._ORDERED[js_cut:])
     )
-    assert rebuilt == INDEX_HTML
+
+
+def test_assembled_equals_segment_join():
+    # THE assembly invariant, in its post-#22 form: the served page is the
+    # fragment join with the ONE build-stamp <meta> element rewritten, and
+    # nothing else. Byte-identity with the raw join no longer holds (it cannot
+    # -- the stamp is per-commit), so it is stated modulo exactly one
+    # substitution: a named element, present once on disk, whose content becomes
+    # webterm.build_version(). Everything the old assertion caught -- a dropped
+    # fragment, a reordered splice, a stray edit in assemble() -- still fails
+    # here; what it no longer forbids is that single named swap. Note it is the
+    # ELEMENT that is swapped, not the bare token, so a `__WEBTERM_BUILD__`
+    # appearing anywhere else must survive into the page verbatim.
+    import webterm
+
+    rebuilt = _segment_join()
+    assert rebuilt.count(ui._BUILD_PLACEHOLDER) == 1, (
+        "the build placeholder must appear exactly once on disk (in "
+        "00_head.html), inside the stamp <meta>")
+    assert rebuilt.replace(
+        ui._BUILD_META.format(ui._BUILD_PLACEHOLDER),
+        ui._BUILD_META.format(webterm.build_version())) == INDEX_HTML
+
+
+def test_build_stamp_is_a_meta_tag_in_the_head():
+    """#22: the served page names the build the broker PROCESS is running, so
+    `curl -s <host>/ | grep webterm-build` vs `git rev-parse --short HEAD` says
+    whether a deploy has actually restarted onto the pulled code.
+
+    Pinned: the exact served line (that is the greppable contract), that the
+    value is webterm.build_version(), and that there is exactly ONE such element
+    -- counted as elements, not as substrings, so a future reader in JS
+    (`document.querySelector('meta[name="webterm-build"]')`) is not a
+    regression."""
+    import webterm
+
+    line = f'<meta name="webterm-build" content="{webterm.build_version()}">'
+    assert line in INDEX_HTML
+    assert INDEX_HTML.count('<meta name="webterm-build"') == 1
+    # The comment beside the tag must not repeat the name: the head fragment is
+    # what the documented one-line grep reads, and every extra mention there is
+    # another line of noise in its output.
+    head = (BROKER_DIR / "00_head.html").read_text(encoding="utf-8")
+    assert head.count("webterm-build") == 1
+    # In <head>, and no placeholder survived into the served bytes.
+    assert INDEX_HTML.index("webterm-build") < INDEX_HTML.index("</head>")
+    assert ui._BUILD_PLACEHOLDER not in INDEX_HTML
+
+
+def test_build_stamp_does_not_change_the_csp_hash():
+    """The stamp must NOT be inside the inline script.
+
+    ``script-src`` authorizes that element by sha256 of its exact bytes, so a
+    per-commit string in there would mint a new CSP hash on every commit --
+    churn in app.py's policy for a value the head already carries. Assemble the
+    real page twice with two different stamps: same hash, both times."""
+    a = ui.assemble(version="0.0.0+aaaaaaa")
+    b = ui.assemble(version="9.9.9+bbbbbbb")
+    assert a != b, "the stamp must actually reach the page"
+    assert ui.inline_script_hash(a) == ui.inline_script_hash(b) == \
+        ui.inline_script_hash(INDEX_HTML)
+    # ...and say it directly: the hashed bytes contain neither stamp.
+    block = re.findall(r"<script>(.*?)</script>", INDEX_HTML, re.S)[0]
+    assert "webterm-build" not in block and ui._BUILD_PLACEHOLDER not in block
+
+
+def test_csp_hash_covers_the_script_that_starts_at_the_real_open_tag():
+    """The failure the extraction regex can hide, now that the head has grown a
+    comment: ``inline_script_hash`` anchors on the FIRST literal ``<script>``,
+    which today is the real opening tag in 40_body.html (the vendor tags all
+    carry ``src=``, and the ~15 other literal occurrences are in JS comments
+    AFTER it). Write that token into any head fragment and the regex would
+    start there and hash the wrong bytes -- a policy the browser rejects, i.e. a
+    blank page, with the stamp-independence test above still passing.
+
+    So pin the anchor rather than trusting it: the hashed block must begin with
+    exactly what follows the opening tag inside 40_body.html."""
+    body = (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    assert body.count("<script>") == 1, "40_body.html opens the one inline script"
+    after_open = body.split("<script>", 1)[1]
+    block = re.findall(r"<script>(.*?)</script>", INDEX_HTML, re.S)[0]
+    assert block.startswith(after_open), (
+        "the CSP hash is being computed from a <script> token that is not the "
+        "real opening tag -- something before it in the page now contains the "
+        "literal token")
+
+
+def test_build_stamp_is_escaped_into_the_attribute():
+    # The value is a hex short hash in practice, but it lands in a quoted
+    # attribute -- a value that could close the attribute must not be able to.
+    page = ui.assemble(version='x" onload="alert(1)')
+    assert 'onload="alert(1)"' not in page
+    assert "&quot; onload=&quot;alert(1)" in page
 
 
 def test_mod_css_declared_matches_disk():

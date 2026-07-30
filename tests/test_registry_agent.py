@@ -150,9 +150,9 @@ def test_hello_version_field_seeds_summary():
         ws = FeedWS()
         entry = await reg.register(ws, {
             "type": "hello", "window_id": 7, "pid": 1, "title": "t",
-            "cols": 80, "rows": 24, "version": "0.1.0+abc"})
-        assert entry.version == "0.1.0+abc"
-        assert entry.summary()["version"] == "0.1.0+abc"
+            "cols": 80, "rows": 24, "version": "0.8.0+abc"})
+        assert entry.version == "0.8.0+abc"
+        assert entry.summary()["version"] == "0.8.0+abc"
         entry2 = await reg.register(ws, {
             "type": "hello", "window_id": 8, "pid": 1, "title": "t",
             "cols": 80, "rows": 24})

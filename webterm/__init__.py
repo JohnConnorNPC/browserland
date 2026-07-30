@@ -1,6 +1,6 @@
 """webterm: headless PTY agents + broker speaking Browserland's web-terminal producer protocol."""
 
-__version__ = "0.1.0"
+__version__ = "0.8.0"
 
 _BUILD_VERSION = None
 
@@ -11,10 +11,14 @@ def build_version() -> str:
     detectable (issue #22). Falls back to the bare package version when git is
     unavailable (e.g. a pip install). Computed from the package's OWN directory
     (never the process cwd), and only when that directory's parent is itself a
-    git repo root — so a wheel installed *inside* an unrelated repo never reports
-    that enclosing repo's commit. Cached per process; never raises.
+    git repo root — so a wheel installed into a site-packages *inside* an
+    unrelated repo never reports that enclosing repo's commit. The guard is a
+    SIBLING ``.git``, so the one layout it cannot tell apart from a checkout is
+    ``pip install --target`` straight into a repo root (the package then sits
+    next to that repo's ``.git``); don't do that. Cached per process; never
+    raises.
 
-    Example: ``"0.1.0+ba4b62e"`` from a checkout, or ``"0.1.0"`` without git.
+    Example: ``"0.8.0+ba4b62e"`` from a checkout, or ``"0.8.0"`` without git.
     Uses ``rev-parse --short HEAD`` (stable across clones/tags) and does NOT
     encode a dirty-tree marker — two different dirty trees share a hash, so it
     would be a misleading equality signal. NOTE: when git is absent on BOTH the

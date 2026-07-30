@@ -103,6 +103,49 @@ client-supplied command/cwd/env. Responses: `200` registered, `202` spawned
 but no hello within 10 s, `400` unknown profile, `401`/`403` auth, `429`
 too many pending, `500` agent exited early.
 
+### Which build is running (#22)
+
+There is one build id in this project: `webterm.build_version()` — the package
+version from `webterm/__init__.py` (the **single source**; `pyproject.toml`
+declares `dynamic = ["version"]` and reads that attribute) plus the git short
+hash when running from a checkout, e.g. `0.8.0+ba4b62e`. It is derived from the
+package's own directory (never the process cwd, so a wheel installed inside an
+unrelated repo cannot report that repo's commit), cached per process, and never
+raises.
+
+It rides the agent hello, `GET /info` and `GET /mcp/info` — and it is baked into
+the served desktop page:
+
+```html
+<meta name="webterm-build" content="0.8.0+ba4b62e">
+```
+
+A broker serves the page it assembled at **import**, so a `git pull` changes
+nothing until the process is restarted. That is the gap this closes:
+
+```
+curl -s http://host:4445/ | grep webterm-build
+git -C /path/to/checkout rev-parse --short HEAD
+```
+
+The stamp's `+hash` matches → the running process is the pulled code; it does
+not → a restart is still pending. The stamp describes the **running process**,
+not the checkout on disk, exactly because `build_version()` is cached at import
+and never recomputed per request.
+
+Read it for what it is: the revision `HEAD` pointed at when that process first
+asked. It cannot see uncommitted edits (there is no dirty marker — two different
+dirty trees would share a hash, which is a worse signal than none), and if a
+pull lands *while* a broker is running, modules imported before and after it
+come from different revisions and no single stamp can say so. A caching reverse
+proxy in front of `GET /` will also happily serve you an old stamp.
+
+It is a `<meta>` in the head and deliberately **not** a value inside the page's
+one inline script: `script-src` authorizes that script by `sha256` of its exact
+bytes (see [Auth model](#auth-model)), so a per-commit string in there would
+change the CSP hash on every commit. Script that wants the value reads the tag —
+`document.querySelector('meta[name="webterm-build"]').content`.
+
 ### Auth model
 
 **A token is required on every surface, on every interface, always** (#142) —
@@ -448,7 +491,7 @@ effective mode to permit them.
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
 **`GET /mcp/info`** →
-`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.1.0+ba4b62e"}`.
+`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e"}`.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22).
@@ -471,7 +514,7 @@ dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repa
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
-  "version":"0.1.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
+  "version":"0.8.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
   "pyte":true}]
 ```
 

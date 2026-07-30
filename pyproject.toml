@@ -4,7 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "webterm"
-version = "0.1.0"
+# The version lives in ONE place: webterm/__init__.py's __version__ -- the same
+# string build_version() prefixes onto every build id it reports. A static
+# `version =` here too would be a second source with nothing keeping the pair in
+# sync, and the first thing to rot after a bump. setuptools reads the attr
+# STATICALLY (ast, no import), which works because __version__ is a plain string
+# literal -- tests/test_packaging.py pins both halves of that.
+dynamic = ["version"]
 description = "Self-contained web terminal: headless PTY agents + WebSocket broker (Browserland's web-terminal producer protocol)"
 requires-python = ">=3.9"
 dependencies = [
@@ -27,6 +33,9 @@ dev = ["pytest>=7", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 browserland-mcp = "webterm.mcptool.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "webterm.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["webterm*"]
