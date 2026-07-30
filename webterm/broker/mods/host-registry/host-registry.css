@@ -51,6 +51,16 @@
             color: var(--warn);
             font-size: 11px;
         }
+        /* #175: a password that is IN the registry but still inside its
+           envelope — dimmed, not warned, because nothing was imported. */
+        .hostreg-locked {
+            color: var(--fg-dim);
+            font-size: 11px;
+        }
+        /* The encryption state line (Control Panel pane + publish dialog). It
+           is repainted in place by refreshPane, so it needs room for the
+           longest wording without the row jumping. */
+        .hostreg-status { width: 100%; flex-basis: 100%; }
         /* The include-passwords opt-in + its warning. */
         .hostreg-danger { color: #e07b3a; }
         .hostreg-warn {

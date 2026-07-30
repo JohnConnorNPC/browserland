@@ -2357,6 +2357,76 @@ def test_host_registry_mod_packaged_and_manifest_agrees():
     assert "purgeRevisions: true" in src
     # All untrusted text is textContent, never innerHTML (labels/urls/tokens).
     assert ".innerHTML" not in src
+    _assert_host_registry_encryption(src)
+
+
+def _assert_host_registry_encryption(src):
+    # #175: client-side encryption of the published value. The BEHAVIOUR is
+    # tested by executing the shipped code in node
+    # (tests/test_host_registry_crypto.py); these are the structural facts that
+    # file cannot see, plus the negatives -- a thing being ABSENT is exactly
+    # what a round-trip test can't prove.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    # The node harness slices between these two markers and needs the range to
+    # stay declaration-only. If either disappears those tests stop running.
+    assert "// ---- pure model + crypto ---" in src
+    assert "// ---- dialogs ---" in src
+    assert src.index("// ---- pure model + crypto ---") \
+        < src.index("// ---- dialogs ---")
+    # WebCrypto only -- no vendored/hand-rolled cipher, no third-party import.
+    assert "window.crypto.subtle" in code
+    assert "'PBKDF2'" in code and "'SHA-256'" in code
+    assert "AES-GCM" in code
+    # …and gated on the secure context, like the clipboard APIs (#153), because
+    # the broker terminates no TLS: on http://<lan-ip>:4445 crypto.subtle is
+    # simply undefined.
+    assert "window.isSecureContext" in code
+    # The mode is a SYNCED setting with all three options ALWAYS registered.
+    # Dropping the unusable ones would make an intent this page can't act on
+    # read as 'off', and encPlan could no longer tell "the user said publish in
+    # the clear" from "this page can't encrypt" -- which is the difference
+    # between an intended plaintext publish and a silent downgrade.
+    assert "ctx.settings.select('hostRegEncrypt'" in src
+    assert "def: 'tokens'" in src
+    for mode in ("'off'", "'tokens'", "'all'"):
+        assert f"value: {mode}" in src
+    # Fail closed: encPlan is the ONE place that decides, and `blocked` is a
+    # real outcome rather than a fallback to publishing in the clear.
+    assert "function encPlan(" in src
+    assert "blocked: true" in src
+    assert "if (plan.blocked)" in src
+    # The passphrase is never persisted: no ctx.storage / localStorage write of
+    # it, and no "remember me" anywhere.
+    # The ONE thing it stores is the discovery-notice nonce: written by the
+    # notice's two branches, and by a successful publish so the browser that
+    # published is never nudged about its own list.
+    assert code.count("ctx.storage.set(NOTIFIED_KEY") == 3
+    assert code.count("ctx.storage.set(") == 3
+    for forbidden in ("localStorage", "sessionStorage", "set(_encPass",
+                      ", _encPass)", "JSON.stringify(_encPass"):
+        assert forbidden not in code, \
+            f"the passphrase must never be persisted: {forbidden!r}"
+    assert "ctx.onUnload(function () { _encPass = null; });" in src
+    # A real password field, not openDialog's `fields` (those are type=text).
+    assert "i.type = 'password';" in code
+    # The encrypted publish clears the revision ring: without it the plaintext
+    # value this write replaces stays in the history of the store we just
+    # stopped trusting, and "the broker only stores ciphertext" is false.
+    assert "publishTo(hid, out, !!plan.seal)" in code
+    assert "purgeRevisions: true } : { host: hid }" in code
+    # The load-time discovery notice must never prompt: it runs with no user
+    # interaction, and a page-load password prompt is a habit worth not
+    # teaching. The whole-list branch reports and stops.
+    notice = src[src.index("// ---- one-time discovery notice"):]
+    for forbidden in ("openPassphraseDialog", "encOpen(", "requirePassphrase"):
+        assert forbidden not in notice, \
+            f"the discovery notice must not unlock anything: {forbidden!r}"
+    # Nothing displayed is sourced from the stored value: `encNote` is written
+    # for whoever opens the JSON by hand and is never read back (a
+    # writer-controlled human string is a phishing surface).
+    assert "encNote: ENC_NOTE" in code
+    assert "value.encNote" not in code and ".encNote)" not in code
     # Ships in the served page, AFTER the recorder mod (the last mod before it).
     assert "id: 'host-registry'" in INDEX_HTML
     assert INDEX_HTML.index("id: 'recorder'") \

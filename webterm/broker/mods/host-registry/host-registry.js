@@ -19,6 +19,12 @@
         //              republishes without tokens + purgeRevisions, clearing the
         //              server history — it does NOT revoke a token already pulled;
         //              rotate the broker token for real revocation)
+        //   encrypt   - #175. The value the broker stores can be encrypted IN THIS
+        //              BROWSER first (WebCrypto, passphrase-derived), so the
+        //              modstore JSON on disk holds ciphertext. Three modes, and
+        //              the default ('passwords only') is a no-op until a publish
+        //              actually carries a password. See the encryption block below
+        //              for the threat model — it is NOT protection from the broker.
         //
         // This is the first consumer of ctx.registerSettingsPane (a rich per-row
         // host list needs more than a boolean/select), mounted into the Browser
@@ -28,7 +34,7 @@
         // textContent — labels/urls/tokens are untrusted and never innerHTML'd.
         registerMod({
             id: 'host-registry',
-            version: '1.0.0',
+            version: '1.1.0',
             ctxVersion: 1,
             tiers: ['storage', 'settings'],
             init: function (ctx) {
@@ -36,6 +42,13 @@
                 // loader that predates ctx.serverStore (#124).
                 if (!ctx.serverStore) return;
 
+                // ---- pure model + crypto ------------------------------------
+                // Everything from here down to "---- dialogs ----" is
+                // declarations only — nothing runs at load, nothing touches the
+                // DOM. tests/test_host_registry_crypto.py slices exactly that
+                // range and executes it in node against a stub browser, so the
+                // encryption tests run the code that SHIPS rather than a copy of
+                // it. Keep this range side-effect free.
                 const REG_MAX_HOSTS = 64;      // cap registry entries (both ways)
                 const LABEL_MAX = 120;
                 const TOKEN_MAX = 4096;
@@ -71,12 +84,247 @@
                     return (typeof v === 'string' && strictHex(v)) ? strictHex(v) : '';
                 }
 
+                // ---- encryption (#175) --------------------------------------
+                // Encrypt the published value in the browser, so the broker only
+                // ever stores ciphertext — the modstore JSON next to the state
+                // file, its backups, and the 50-deep revision ring.
+                //
+                // THREAT MODEL, stated as plainly here as in help.md. This
+                // protects the registry AT REST and from anyone who can READ the
+                // store: that file, a backup or snapshot of it, the revision
+                // ring, another user or admin of that machine, a second browser
+                // that holds the broker token but not the passphrase. It does
+                // NOT protect against a COMPROMISED OR HOSTILE BROKER, because
+                // that broker serves the very JS doing the encrypting and could
+                // ship a build that pockets the passphrase. Anyone reaching for
+                // this to defend against the broker itself is holding it wrong.
+                //
+                // Against a WRITER (someone who can PUT the registry without
+                // knowing the passphrase) it buys forgery resistance, and that
+                // shaped the format: the ciphertext carries WHOLE host records —
+                // id, url and token together — and an unlocked pull uses the
+                // DECRYPTED array and nothing else. Merging an encrypted token
+                // onto a plaintext url beside it (by index, or by id) would let a
+                // writer repoint a live credential at a host of their choosing
+                // while the tag still verified. What it cannot buy: a writer can
+                // still delete the value, replay an older one, or replace it with
+                // a plaintext registry of their own — encryption is not
+                // availability and not freshness. The pull diff (every incoming
+                // entry classified, and ticked by hand) stays the real control.
+                const ENC_ALG = 'AES-GCM';
+                const ENC_KDF = 'PBKDF2-SHA-256';
+                const ENC_ITER = 600000;        // what we WRITE
+                const ENC_ITER_MIN = 100000;    // …and the band we agree to READ.
+                const ENC_ITER_MAX = 1000000;   // A stored registry is untrusted
+                                                // input: an unbounded iteration
+                                                // count is a CPU bill anyone who
+                                                // can write the store could hand
+                                                // this browser, and it is charged
+                                                // BEFORE the tag is checked.
+                const ENC_SALT_BYTES = 16;
+                const ENC_IV_BYTES = 12;
+                const ENC_TAG_BITS = 128;
+                const ENC_B64_MAX = 2000000;    // per encoded field
+                const ENC_PASS_MIN = 8;
+                // Written on every encrypted publish and NEVER read back or
+                // shown: a breadcrumb for whoever opens webterm_modstore.json by
+                // hand. Every string this mod displays is built locally — a
+                // human-readable field a writer controls is a phishing surface.
+                const ENC_NOTE = 'encrypted by browserland host-registry: '
+                    + 'AES-GCM + PBKDF2-SHA-256, decrypted in the browser';
+
+                // crypto.subtle is SECURE-CONTEXT ONLY, and the broker terminates
+                // no TLS — so http://<lan-ip>:4445, which is how most of these
+                // run, has window.isSecureContext false and crypto.subtle
+                // undefined. Same gate shape as canReadClipboard
+                // (63_js_clipboard_auth.js). Read through window.* so the whole
+                // gate is one stubbable surface.
+                function encAvailable() {
+                    return !!(window.isSecureContext && window.crypto
+                        && window.crypto.subtle && window.crypto.getRandomValues);
+                }
+                function encWhyUnavailable() {
+                    return 'this page is not a secure context ('
+                        + localOrigin() + '), and crypto.subtle needs https:// '
+                        + 'or localhost.';
+                }
+
+                // Strict base64. atob() tolerates a wrong-length tail and some
+                // stray characters; we would rather call a malformed envelope
+                // malformed than hand crypto.subtle something surprising.
+                // -> Uint8Array, or null (never a throw) on anything unexpected.
+                const ENC_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+                function encB64Bytes(s) {
+                    if (typeof s !== 'string' || !s || s.length > ENC_B64_MAX
+                            || s.length % 4 !== 0 || !ENC_B64_RE.test(s)) {
+                        return null;
+                    }
+                    let bin;
+                    try { bin = atob(s); } catch (_) { return null; }
+                    const out = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+                    return out;
+                }
+                function encBytesB64(bytes) {
+                    let s = '';
+                    const CHUNK = 0x8000;   // apply() has an argument-count limit
+                    for (let i = 0; i < bytes.length; i += CHUNK) {
+                        s += String.fromCharCode.apply(null,
+                            bytes.subarray(i, i + CHUNK));
+                    }
+                    return btoa(s);
+                }
+
+                // Failure kinds, because they mean different things to the user:
+                //   'envelope'   - malformed / unsupported. NOT a passphrase
+                //                  problem, so never re-prompt on it.
+                //   'passphrase' - AES-GCM authentication failed. A wrong key and
+                //                  a modified ciphertext / iv / header are the
+                //                  SAME failure and cannot be told apart, so the
+                //                  message has to name both.
+                //   'payload'    - decrypted, but not the shape we write.
+                function encErr(kind, reason) {
+                    const e = new Error(reason || kind);
+                    e.encError = kind;
+                    return e;
+                }
+
+                // Additional authenticated data: the envelope HEADER. Not secret
+                // — bound. Without it a writer could edit `iter` (bill this
+                // browser for a slow derive) or `scope` (change how a reader
+                // treats the value) and still hand back a blob that
+                // authenticates. Rebuilt from the DECLARED values on read, so any
+                // edit to them fails the tag check.
+                function encAad(iter, scope) {
+                    return new TextEncoder().encode('browserland/host-registry/1|'
+                        + ENC_ALG + '|' + ENC_KDF + '|' + iter + '|' + scope);
+                }
+                async function encDerive(pass, salt, iter) {
+                    const base = await window.crypto.subtle.importKey('raw',
+                        new TextEncoder().encode(pass), { name: 'PBKDF2' },
+                        false, ['deriveKey']);
+                    // Non-extractable: the page never gets the raw key back.
+                    return await window.crypto.subtle.deriveKey(
+                        { name: 'PBKDF2', salt: salt, iterations: iter,
+                          hash: 'SHA-256' },
+                        base, { name: ENC_ALG, length: 256 }, false,
+                        ['encrypt', 'decrypt']);
+                }
+                // Seal a plain object. A FRESH salt AND iv every time — the key
+                // is re-derived per publish rather than cached, so an iv can
+                // never be reused under one key.
+                async function encSeal(payload, pass, scope) {
+                    const salt = window.crypto.getRandomValues(
+                        new Uint8Array(ENC_SALT_BYTES));
+                    const iv = window.crypto.getRandomValues(
+                        new Uint8Array(ENC_IV_BYTES));
+                    const key = await encDerive(pass, salt, ENC_ITER);
+                    const ct = await window.crypto.subtle.encrypt(
+                        { name: ENC_ALG, iv: iv, tagLength: ENC_TAG_BITS,
+                          additionalData: encAad(ENC_ITER, scope) },
+                        key, new TextEncoder().encode(JSON.stringify(payload)));
+                    return { alg: ENC_ALG, kdf: ENC_KDF, iter: ENC_ITER,
+                             scope: scope, salt: encBytesB64(salt),
+                             iv: encBytesB64(iv),
+                             ct: encBytesB64(new Uint8Array(ct)) };
+                }
+                // Structural validation, run BEFORE a passphrase is asked for, so
+                // an unreadable envelope is reported as unreadable and the user
+                // is never sent round a retype loop that cannot succeed. Returns
+                // null when usable, else a short reason.
+                function encProblem(e) {
+                    if (!e || typeof e !== 'object' || Array.isArray(e)) {
+                        return 'not an envelope';
+                    }
+                    if (e.alg !== ENC_ALG) return 'unsupported cipher';
+                    if (e.kdf !== ENC_KDF) return 'unsupported key derivation';
+                    if (typeof e.iter !== 'number' || !isFinite(e.iter)
+                            || Math.floor(e.iter) !== e.iter
+                            || e.iter < ENC_ITER_MIN || e.iter > ENC_ITER_MAX) {
+                        return 'unsupported iteration count';
+                    }
+                    if (e.scope !== 'tokens' && e.scope !== 'all') {
+                        return 'unknown scope';
+                    }
+                    const salt = encB64Bytes(e.salt);
+                    const iv = encB64Bytes(e.iv);
+                    const ct = encB64Bytes(e.ct);
+                    if (!salt || salt.length !== ENC_SALT_BYTES) return 'bad salt';
+                    if (!iv || iv.length !== ENC_IV_BYTES) return 'bad iv';
+                    // At or below the tag length there is no ciphertext at all.
+                    if (!ct || ct.length <= ENC_TAG_BITS / 8) {
+                        return 'bad ciphertext';
+                    }
+                    return null;
+                }
+                async function encOpen(e, pass) {
+                    const bad = encProblem(e);
+                    if (bad) throw encErr('envelope', bad);
+                    const key = await encDerive(pass, encB64Bytes(e.salt), e.iter);
+                    let pt;
+                    try {
+                        pt = await window.crypto.subtle.decrypt(
+                            { name: ENC_ALG, iv: encB64Bytes(e.iv),
+                              tagLength: ENC_TAG_BITS,
+                              additionalData: encAad(e.iter, e.scope) },
+                            key, encB64Bytes(e.ct));
+                    } catch (_) { throw encErr('passphrase'); }
+                    let obj = null;
+                    try { obj = JSON.parse(new TextDecoder().decode(pt)); }
+                    catch (_) {}
+                    if (!obj || typeof obj !== 'object' || Array.isArray(obj)
+                            || !Array.isArray(obj.hosts)) {
+                        throw encErr('payload', 'unexpected payload');
+                    }
+                    return obj;
+                }
+
+                // The passphrase lives in memory for this page's life and is
+                // NEVER persisted — there is deliberately no "remember on this
+                // browser", because a key sitting in localStorage is worth
+                // exactly as much as the passphrase to anything that can read
+                // localStorage. It is held so publish-to-all and back-to-back
+                // pulls don't re-prompt, and dropped by Forget passphrase or the
+                // mod's teardown. "Dropped" means the reference is released — a
+                // JS string cannot be wiped.
+                let _encPass = null;
+                // Single-flight over every registry action. openDialog is a
+                // SINGLETON that cancels whatever dialog is live, so a pull that
+                // is mid-derive must not be able to have its retry dialog shot
+                // down by a publish started in the meantime (or by a second click
+                // on itself) — the button guard only covers "a dialog is open
+                // right now", which an await between dialogs is not.
+                let _encBusy = false;
+                // Assigned once the Control Panel control exists (below). A `let`
+                // seeded null, not a const declared later, because the pane's
+                // reflect() runs during registerSettingsPane and would otherwise
+                // read it in its temporal dead zone — which throws, and a throw in
+                // init disables the whole mod.
+                let _encSetting = null;
+                function encMode() {
+                    return _encSetting ? _encSetting.get() : 'off';
+                }
+                function encModeLabel(mode) {
+                    return mode === 'all' ? 'Whole list'
+                        : mode === 'tokens' ? 'Passwords only' : 'Off';
+                }
+                // 'tokens' | 'all' | 'unknown' (an envelope we can't read) | ''.
+                function encScope(value) {
+                    const e = (value && typeof value === 'object')
+                        ? value.enc : null;
+                    if (!e || typeof e !== 'object' || Array.isArray(e)) return '';
+                    return (e.scope === 'tokens' || e.scope === 'all')
+                        ? e.scope : 'unknown';
+                }
+
                 // ---- publish: build the stored value ------------------------
                 // selected: [{host, checked}]; localUrl: the editable "this broker"
                 // address. Emits {v,updated,nonce,origin,hosts:[...]}. The local
                 // host is published with an ABSOLUTE url (so other machines can
                 // reach it) and its id is the broker_id (never the reserved
                 // 'local', which is browser-local and would collide on pull).
+                // This is always the PLAINTEXT value; sealing (if any) happens
+                // after, in sealTokens/sealAll.
                 function buildValue(selected, includeTokens, localUrl) {
                     const hosts = [];
                     for (const sel of selected) {
@@ -113,6 +361,66 @@
                              origin: cleanStr(localHost().brokerId, 128),
                              hosts: hosts };
                 }
+                function valueHasPlainTokens(value) {
+                    const raw = (value && Array.isArray(value.hosts))
+                        ? value.hosts : [];
+                    return raw.some(h => h && typeof h.token === 'string' && h.token);
+                }
+
+                // ---- publish: seal ------------------------------------------
+                // 'tokens' KEEPS the v1 shape and its plaintext host list, minus
+                // every token, and seals the WHOLE records (tokens included).
+                // Staying at v1 is deliberate: an older build reads the plaintext
+                // side and imports labels/urls exactly as if the list had been
+                // published without Include passwords — strictly better than the
+                // "no hosts to import" a v2 would leave it with — and it cannot
+                // be talked into adopting a token, because there is no token on
+                // that side to adopt. An unlocked pull in THIS build ignores the
+                // plaintext side entirely (see unlockForPull). `hasToken` marks
+                // the entries whose password is in the envelope, so the pull diff
+                // can say "locked" without the passphrase.
+                async function sealTokens(value, pass) {
+                    const enc = await encSeal({ hosts: value.hosts }, pass,
+                        'tokens');
+                    const pub = value.hosts.map(function (h) {
+                        const c = Object.assign({}, h);
+                        if (typeof c.token === 'string' && c.token) {
+                            c.hasToken = true;
+                        }
+                        delete c.token;
+                        return c;
+                    });
+                    return { v: 1, updated: value.updated, nonce: value.nonce,
+                             origin: value.origin, hosts: pub,
+                             enc: enc, encNote: ENC_NOTE };
+                }
+                // 'all' is v2: nothing about the list survives outside the
+                // envelope — not the labels, not the addresses, not even which
+                // broker published it. `nonce` and `updated` stay outside because
+                // the one-time discovery notice keys off the nonce and must work
+                // without the passphrase.
+                async function sealAll(value, pass) {
+                    const enc = await encSeal(
+                        { origin: value.origin, hosts: value.hosts }, pass, 'all');
+                    return { v: 2, updated: value.updated, nonce: value.nonce,
+                             origin: '', enc: enc, encNote: ENC_NOTE };
+                }
+                // What a publish has to do, as ONE decision: seal ('tokens' /
+                // 'all' / '' = publish in the clear), or refuse outright. FAIL
+                // CLOSED — "the setting says encrypt but this page can't" must
+                // never quietly degrade to publishing the tokens in the clear,
+                // which would undo the point of gating the option on the secure
+                // context in the first place. mode 'tokens' with nothing to
+                // encrypt is a genuine no-op: there is no secret in the value, so
+                // it goes out as today's plain v1 with no prompt.
+                function encPlan(mode, value, available) {
+                    const wants = (mode === 'all') ? 'all'
+                        : (mode === 'tokens' && valueHasPlainTokens(value))
+                            ? 'tokens' : '';
+                    if (!wants) return { seal: '', blocked: false };
+                    if (!available) return { seal: '', blocked: true };
+                    return { seal: wants, blocked: false };
+                }
 
                 // ---- pull: normalize + classify -----------------------------
                 // One untrusted registry entry -> a clean shape, or null (dropped).
@@ -132,8 +440,37 @@
                                 hidden: (raw.hidden === true),
                                 brokerId: cleanStr(raw.brokerId, 128),
                                 token: cleanStr(raw.token, TOKEN_MAX) };
+                    // #175: a password we know about but may not hold — either
+                    // it is right here, or the plaintext side of a 'tokens'
+                    // registry says the envelope has one. Display only.
+                    e.hasToken = !!e.token || (raw.hasToken === true);
                     if (!e.label) e.label = url;
                     return e;
+                }
+                // The hosts a registry value exposes WITHOUT the passphrase.
+                // NEVER used once a payload has been decrypted — the decrypted
+                // array is the authenticated one and is used alone. Any `token`
+                // found here is DROPPED: the plaintext side of a 'tokens'
+                // registry is written token-free, so a token in it is somebody
+                // else's addition, and adopting an attacker-chosen token is how
+                // you get talked into authenticating to their broker. A plain v1
+                // registry (no envelope) is unchanged — its tokens are trusted
+                // exactly as much as the broker storing them, which is the
+                // pre-existing bargain Include passwords already spells out.
+                function publicHostsOf(value) {
+                    if (!value || typeof value !== 'object') return [];
+                    const scope = encScope(value);
+                    if (scope === 'all' || scope === 'unknown') return [];
+                    if (value.v !== 1 || !Array.isArray(value.hosts)) return [];
+                    if (!scope) return value.hosts;
+                    return value.hosts.map(function (h) {
+                        if (!h || typeof h !== 'object' || Array.isArray(h)) {
+                            return h;
+                        }
+                        const c = Object.assign({}, h);
+                        delete c.token;
+                        return c;
+                    });
                 }
                 // Find the LOCAL remote host an incoming entry refers to, or null.
                 // Order: broker_id (the authoritative identity, verified locally via
@@ -170,11 +507,13 @@
                 }
                 // Classify every incoming entry vs the live local hosts. Drops this
                 // broker (by origin OR broker_id) and de-dupes incoming by url.
-                function classify(value) {
+                // Takes the host ARRAY, not the stored value: which array that is
+                // — a decrypted one, a plaintext projection, or a plain v1 list —
+                // is decided once, in the caller (unlockForPull / publicHostsOf).
+                function classify(hosts) {
                     const myOrigin = localOrigin();
                     const myBrokerId = cleanStr(localHost().brokerId, 128);
-                    const raw = (value && value.v === 1 && Array.isArray(value.hosts))
-                        ? value.hosts : [];
+                    const raw = Array.isArray(hosts) ? hosts : [];
                     const seenUrl = new Set();
                     const rows = [];
                     for (const r of raw) {
@@ -200,6 +539,26 @@
                         }
                     }
                     return rows;
+                }
+                // Tamper evidence for a 'tokens' registry: the plaintext side is
+                // a PROJECTION of what we sealed, and one buildValue writes both,
+                // so they cannot drift on their own. A mismatch means somebody
+                // edited the readable half. The decrypted half is used either way
+                // (it is the authenticated one) — this only refuses to do it
+                // silently.
+                function encPublicMatches(value, hosts) {
+                    const pub = publicHostsOf(value);
+                    if (!Array.isArray(hosts) || pub.length !== hosts.length) {
+                        return false;
+                    }
+                    for (let i = 0; i < pub.length; i++) {
+                        const a = pub[i] || {}, b = hosts[i] || {};
+                        if (cleanStr(a.url, URL_MAX) !== cleanStr(b.url, URL_MAX)
+                                || cleanStr(a.id, 64) !== cleanStr(b.id, 64)
+                                || cleanStr(a.label, LABEL_MAX)
+                                    !== cleanStr(b.label, LABEL_MAX)) return false;
+                    }
+                    return true;
                 }
 
                 // ---- per-host cache invalidation ----------------------------
@@ -256,6 +615,11 @@
                                 // change, NEVER keep the existing local token (it
                                 // would be sent to the new origin). Adopt the
                                 // imported token, or clear it so the user re-auths.
+                                // #175: that holds for a LOCKED token too — if the
+                                // registry's password is still in its envelope, the
+                                // entry carries none, so the local one is cleared
+                                // rather than pointed at a new address. The row's
+                                // warning says so before you tick it.
                                 local.url = row.entry.url;
                                 local.token = row.entry.token || '';
                                 local.brokerId = row.entry.brokerId || '';
@@ -290,19 +654,31 @@
                 // Write `value` to ONE broker: read its rev, then set() with a
                 // one-shot conflict rebase (adopt the live rev, retry once). The
                 // nonce makes every publish a real (non-deduped) write.
-                async function publishTo(hid, value) {
+                //
+                // `purge` rides every ENCRYPTED publish. The modstore keeps a
+                // 50-deep revision ring, so the value this write replaces — the
+                // plaintext one, tokens and all — would otherwise sit in the
+                // history of the very store we just stopped trusting, and "the
+                // broker only stores ciphertext" would be false the moment anyone
+                // migrated. get() returns rev + timestamps only, never past
+                // bodies, so this browser cannot tell whether the ring holds a
+                // token; clearing it is the only honest answer. Nothing in this
+                // mod reads the ring.
+                async function publishTo(hid, value, purge) {
                     const host = (hid === 'local') ? localHost() : hostById(hid);
                     const name = (host && host.id === 'local')
                         ? 'this broker' : (host ? host.label : hid);
                     let got = null;
                     try { got = await ctx.serverStore.get({ host: hid }); } catch (_) {}
                     const rev = (got && typeof got.rev === 'number') ? got.rev : 0;
-                    let res = await ctx.serverStore.set(value, rev, { host: hid });
+                    const opts = purge
+                        ? { host: hid, purgeRevisions: true } : { host: hid };
+                    let res = await ctx.serverStore.set(value, rev, opts);
                     if (res && res.status === 409 && res.error === 'conflict'
                             && typeof res.rev === 'number') {
-                        res = await ctx.serverStore.set(value, res.rev, { host: hid });
+                        res = await ctx.serverStore.set(value, res.rev, opts);
                     }
-                    return { name: name, ok: !!(res && res.ok),
+                    return { hid: hid, name: name, ok: !!(res && res.ok),
                              error: res && res.error };
                 }
                 async function doPublish(selected, includeTokens, localUrl, toAll) {
@@ -312,26 +688,68 @@
                             + 'selected (a loopback-only local address is skipped).');
                         return;
                     }
+                    const mode = encMode();
+                    const plan = encPlan(mode, value, encAvailable());
+                    if (plan.blocked) {
+                        showNotice('Publish cancelled. Broker registry encryption '
+                            + 'is set to "' + encModeLabel(mode) + '", but '
+                            + encWhyUnavailable() + ' Reach this broker over '
+                            + 'https (or on localhost), or set encryption to Off '
+                            + '— which publishes in the clear.',
+                            { sticky: true, type: 'error' });
+                        return;
+                    }
+                    let out = value;
+                    if (plan.seal) {
+                        const pass = await requirePassphrase();
+                        if (!pass) return;          // cancelled -> publish NOTHING
+                        showNotice('Encrypting the registry…');
+                        try {
+                            out = (plan.seal === 'all')
+                                ? await sealAll(value, pass)
+                                : await sealTokens(value, pass);
+                        } catch (e) {
+                            showNotice('Could not encrypt the registry ('
+                                + ((e && e.message) || 'failed')
+                                + '). Nothing was published.',
+                                { sticky: true, type: 'error' });
+                            return;
+                        }
+                    }
                     // Targets: the local broker always; every configured broker if
                     // "publish to all" was ticked. Each broker is an INDEPENDENT
                     // store, so results are reported per broker (never a blanket
-                    // success when some failed).
+                    // success when some failed). The value — ciphertext included —
+                    // is built ONCE, so every broker gets the same bytes under one
+                    // passphrase rather than a per-broker re-derive.
                     const targets = toAll ? getHosts().map(h => h.id) : ['local'];
                     const results = [];
                     for (const hid of targets) {
-                        results.push(await publishTo(hid, value));
+                        results.push(await publishTo(hid, out, !!plan.seal));
+                    }
+                    // Don't nudge yourself: the one-time discovery notice keys off
+                    // the stored nonce, and the browser that just published one
+                    // has nothing to be told about. Recorded only when the LOCAL
+                    // write (the store that notice reads) actually landed.
+                    if (results.some(r => r.hid === 'local' && r.ok)) {
+                        try { ctx.storage.set(NOTIFIED_KEY, out.nonce); } catch (_) {}
                     }
                     const oks = results.filter(r => r.ok);
                     const fails = results.filter(r => !r.ok);
+                    const how = plan.seal === 'all' ? ', encrypted (whole list)'
+                        : plan.seal === 'tokens' ? ', passwords encrypted'
+                        : (includeTokens ? ', including passwords' : '');
                     if (!fails.length) {
                         showNotice('Published to ' + oks.length + ' broker'
-                            + (oks.length === 1 ? '' : 's')
-                            + (includeTokens ? ', including passwords' : '') + '.',
-                            includeTokens ? { sticky: true } : undefined);
+                            + (oks.length === 1 ? '' : 's') + how + '.',
+                            (includeTokens && !plan.seal)
+                                ? { sticky: true } : undefined);
                     } else {
                         const why = (f) => f.error === 'not_active'
                             ? 'another browser is active there'
                             : f.error === 'no_host' ? 'host not found'
+                            : f.error === 'too_large'
+                                ? 'the registry is too large for that broker'
                             : (f.error || 'failed');
                         showNotice('Published to ' + oks.length + ' of '
                             + results.length + ' brokers. Failed: '
@@ -341,33 +759,44 @@
                 }
 
                 // ---- forget passwords ---------------------------------------
+                // The emergency path, and it must work with NO passphrase — so it
+                // never decrypts anything. An envelope is opaque: this browser
+                // cannot tell whether a password is inside one, so it assumes so.
+                // A fresh object is built rather than the stored one edited, which
+                // is what drops `enc`/`encNote` — the ciphertext goes with the
+                // passwords it was hiding.
                 function stripTokens(value) {
-                    const raw = (value && value.v === 1 && Array.isArray(value.hosts))
-                        ? value.hosts : [];
+                    const scope = encScope(value);
+                    let raw = [];
+                    if (scope === 'tokens' || !scope) {
+                        // 'tokens' keeps its readable list (publicHostsOf strips
+                        // any token somebody added to it); a plain v1 keeps its
+                        // own hosts, minus the tokens deleted below.
+                        raw = publicHostsOf(value);
+                    }
+                    // scope 'all' / 'unknown' -> []. The whole list is inside the
+                    // envelope, so passwords cannot be separated from it without
+                    // the passphrase; the honest emergency answer is to drop both,
+                    // and doForget says exactly that before you agree to it.
                     return { v: 1, updated: Math.floor(Date.now() / 1000),
                              nonce: makeNonce(),
                              origin: (value && cleanStr(value.origin, 128)) || '',
                              hosts: raw.map(function (h) {
                                  const c = Object.assign({}, h);
                                  delete c.token;
+                                 delete c.hasToken;
                                  return c;
                              }) };
                 }
                 function valueHasTokens(value) {
+                    if (encScope(value)) return true;   // opaque -> assume it does
                     const raw = (value && value.v === 1 && Array.isArray(value.hosts))
                         ? value.hosts : [];
                     return raw.some(h => h && typeof h.token === 'string' && h.token);
                 }
                 async function doForget() {
-                    const ok = await openConfirmDialog({
-                        title: 'Forget passwords',
-                        message: 'Remove every password from this broker\'s '
-                            + 'registry AND its saved history. This does not revoke '
-                            + 'access: a browser that already pulled a password '
-                            + 'keeps it, and a broker\'s token stays valid until you '
-                            + 'rotate it. Continue?',
-                        okLabel: 'Forget passwords', danger: true });
-                    if (!ok) return;
+                    // Read BEFORE confirming, so the confirmation describes what
+                    // will actually happen to THIS registry.
                     let got = null;
                     try { got = await ctx.serverStore.get(); } catch (_) {}
                     if (!got || got.status === 0) {
@@ -375,21 +804,43 @@
                             { sticky: true, type: 'error' });
                         return;
                     }
+                    const scope = encScope(got.value);
+                    const whole = (scope === 'all' || scope === 'unknown');
+                    const tail = 'This does not revoke access: a browser that '
+                        + 'already pulled a password keeps it, and a broker\'s '
+                        + 'token stays valid until you rotate it. Continue?';
+                    const ok = await openConfirmDialog({
+                        title: 'Forget passwords',
+                        message: whole
+                            ? 'This registry is encrypted as a WHOLE LIST, so '
+                              + 'this browser cannot see which part of it is a '
+                              + 'password without the passphrase. Continuing '
+                              + 'removes the ENTIRE published list and its saved '
+                              + 'history from this broker — not just the '
+                              + 'passwords. ' + tail
+                            : 'Remove every password from this broker\'s '
+                              + 'registry AND its saved history. ' + tail,
+                        okLabel: whole ? 'Remove the whole list'
+                            : 'Forget passwords', danger: true });
+                    if (!ok) return;
                     const rev = (typeof got.rev === 'number') ? got.rev : 0;
                     const stripped = stripTokens(got.value);
                     // purgeRevisions clears the ring so a token that scrolled into
                     // history is gone too. A fresh nonce makes the write non-deduped.
-                    let res = await ctx.serverStore.set(stripped, rev,
+                    // NO conflict rebase here, unlike publish: the confirmation the
+                    // user gave was about the value that was read above, and a
+                    // registry that changed under them may have changed CLASS
+                    // (a 'tokens' envelope replaced by a whole-list one), turning
+                    // "remove the passwords" into "remove everything". Re-run it.
+                    const res = await ctx.serverStore.set(stripped, rev,
                         { purgeRevisions: true });
-                    if (res && res.status === 409 && res.error === 'conflict'
-                            && typeof res.rev === 'number') {
-                        res = await ctx.serverStore.set(stripped, res.rev,
-                            { purgeRevisions: true });
-                    }
                     if (!res || !res.ok) {
                         showNotice('Could not forget passwords: '
                             + (res && res.error === 'not_active'
                                ? 'another browser is active'
+                               : res && res.error === 'conflict'
+                               ? 'the registry changed while you were confirming '
+                                 + '— try again'
                                : (res && res.error) || 'failed'),
                             { sticky: true, type: 'error' });
                         return;
@@ -422,6 +873,202 @@
                     row.appendChild(cb);
                     row.appendChild(span);
                     return { row: row, cb: cb, span: span };
+                }
+                // A real type=password field, NOT one of openDialog's `fields`:
+                // those are type=text (69_js_dialog.js), which would show the
+                // passphrase and offer it to form autofill. Built in body() with
+                // the inputs kept in a closure — the same shape the publish dialog
+                // already uses for its url input.
+                //   o = {mode:'set'|'unlock', whole:Boolean, error:String}
+                //   -> null (cancel) | {skip:true} | {pass, confirm}
+                async function openPassphraseDialog(o) {
+                    let inp = null, inp2 = null;
+                    const mkPass = function (labelText, auto) {
+                        const row = document.createElement('div');
+                        row.className = 'set-row';
+                        const lab = document.createElement('label');
+                        lab.textContent = labelText;
+                        const i = document.createElement('input');
+                        i.type = 'password';
+                        i.autocomplete = auto;
+                        i.spellcheck = false;
+                        row.appendChild(lab);
+                        row.appendChild(i);
+                        return { row: row, input: i };
+                    };
+                    const buttons = [{ label: o.mode === 'set' ? 'Encrypt'
+                        : 'Unlock', value: 'ok', primary: true }];
+                    // Only a 'tokens' registry has anything readable to fall back
+                    // to, so only it offers the skip.
+                    if (o.mode === 'unlock' && !o.whole) {
+                        buttons.push({ label: 'Without passwords', value: 'skip' });
+                    }
+                    buttons.push({ label: 'Cancel', value: false });
+                    const pending = openDialog({
+                        title: o.mode === 'set' ? 'Registry passphrase'
+                            : 'Unlock the registry',
+                        body: function (c) {
+                            const msg = document.createElement('div');
+                            msg.className = 'app-dialog-msg';
+                            msg.textContent = o.mode === 'set'
+                                ? 'This passphrase encrypts the registry in this '
+                                  + 'browser before it is published. It is never '
+                                  + 'sent anywhere and never stored — lose it and '
+                                  + 'you republish the list under a new one. '
+                                  + 'Anyone who can read the broker\'s files can '
+                                  + 'guess at it offline, so make it long.'
+                                : (o.whole
+                                    ? 'This broker\'s registry is encrypted. '
+                                      + 'Enter the passphrase it was published '
+                                      + 'with.'
+                                    : 'This registry\'s passwords are encrypted. '
+                                      + 'Enter the passphrase to import them, or '
+                                      + 'import the list without passwords.');
+                            c.appendChild(msg);
+                            const a = mkPass('Passphrase', o.mode === 'set'
+                                ? 'new-password' : 'current-password');
+                            inp = a.input;
+                            c.appendChild(a.row);
+                            if (o.mode === 'set') {
+                                const b = mkPass('Confirm', 'new-password');
+                                inp2 = b.input;
+                                c.appendChild(b.row);
+                            }
+                            const show = mkRowCheck(' Show the passphrase', false);
+                            show.cb.addEventListener('change', function () {
+                                const t = show.cb.checked ? 'text' : 'password';
+                                if (inp) inp.type = t;
+                                if (inp2) inp2.type = t;
+                            });
+                            c.appendChild(show.row);
+                            if (o.error) {
+                                const err = document.createElement('div');
+                                err.className = 'set-hint hostreg-warn';
+                                err.textContent = o.error;
+                                c.appendChild(err);
+                            }
+                        },
+                        buttons: buttons,
+                    });
+                    // openDialog mounts and focuses SYNCHRONOUSLY before it hands
+                    // the promise back (the executor runs during construction), so
+                    // this lands on the field rather than the primary button.
+                    try { if (inp) inp.focus(); } catch (_) {}
+                    const res = await pending;
+                    const out = (!res || !res.value) ? null
+                        : (res.value === 'skip') ? { skip: true }
+                        : { pass: inp ? inp.value : '',
+                            confirm: inp2 ? inp2.value : '' };
+                    // Drop the DOM's copy; the overlay is already detached.
+                    if (inp) inp.value = '';
+                    if (inp2) inp2.value = '';
+                    inp = inp2 = null;
+                    return out;
+                }
+                // The session passphrase, prompting (with a confirm field) only
+                // when none is held. Returns null if the user backs out, and the
+                // caller MUST treat that as "publish nothing".
+                async function requirePassphrase() {
+                    if (_encPass) return _encPass;
+                    let err = '';
+                    for (;;) {
+                        const r = await openPassphraseDialog({ mode: 'set',
+                            error: err });
+                        if (!r) return null;
+                        const p = r.pass || '';
+                        if (p.length < ENC_PASS_MIN) {
+                            err = 'Use at least ' + ENC_PASS_MIN + ' characters.';
+                            continue;
+                        }
+                        if (p !== r.confirm) {
+                            err = 'The two passphrases don\'t match.';
+                            continue;
+                        }
+                        _encPass = p;
+                        refreshPane();
+                        return p;
+                    }
+                }
+                // Resolve a stored value to the host array to classify, asking for
+                // a passphrase only when there is an envelope.
+                //   -> {hosts, unlocked} | null (abort)
+                // NOTHING local is touched here: a wrong passphrase costs a retry,
+                // never a clobbered host list.
+                async function unlockForPull(value) {
+                    const scope = encScope(value);
+                    if (!scope) {
+                        return { hosts: publicHostsOf(value), unlocked: false };
+                    }
+                    const whole = (scope !== 'tokens');
+                    const fallback = function () {
+                        return whole ? null
+                            : { hosts: publicHostsOf(value), unlocked: false };
+                    };
+                    const problem = (scope === 'unknown')
+                        ? 'unknown scope' : encProblem(value.enc);
+                    if (problem) {
+                        showNotice('This broker\'s registry carries an encrypted '
+                            + 'block this browser can\'t read (' + problem + ').'
+                            + (whole ? '' : ' Importing without passwords.'),
+                            { sticky: true, type: whole ? 'error' : undefined });
+                        return fallback();
+                    }
+                    if (!encAvailable()) {
+                        showNotice((whole
+                            ? 'This broker\'s registry is encrypted and this page '
+                              + 'can\'t decrypt it: '
+                            : 'This registry\'s passwords are encrypted and this '
+                              + 'page can\'t decrypt them, so they are skipped: ')
+                            + encWhyUnavailable(),
+                            { sticky: true, type: whole ? 'error' : undefined });
+                        return fallback();
+                    }
+                    let err = '';
+                    for (;;) {
+                        let pass = _encPass;
+                        if (!pass) {
+                            const r = await openPassphraseDialog({ mode: 'unlock',
+                                whole: whole, error: err });
+                            if (!r) return null;                    // cancelled
+                            if (r.skip) {
+                                return { hosts: publicHostsOf(value),
+                                         unlocked: false };
+                            }
+                            pass = r.pass;
+                        }
+                        showNotice('Unlocking the registry…');
+                        let payload = null;
+                        try {
+                            payload = await encOpen(value.enc, pass);
+                        } catch (e) {
+                            // Held passphrase was the wrong one -> drop it, or the
+                            // next action would silently reuse it.
+                            _encPass = null;
+                            refreshPane();
+                            if (e && e.encError === 'passphrase') {
+                                // A wrong key and a modified blob are the SAME GCM
+                                // failure; claiming "wrong passphrase" alone would
+                                // send someone round a loop they cannot win.
+                                err = 'Wrong passphrase — or the stored registry '
+                                    + 'was modified after it was published.';
+                                continue;
+                            }
+                            showNotice('Could not read the encrypted registry ('
+                                + ((e && e.message) || 'unreadable') + ').',
+                                { sticky: true, type: 'error' });
+                            return fallback();
+                        }
+                        _encPass = pass;
+                        refreshPane();
+                        if (!whole && !encPublicMatches(value, payload.hosts)) {
+                            showNotice('This registry\'s readable host list does '
+                                + 'not match its encrypted contents — someone '
+                                + 'edited the stored copy. Using the encrypted '
+                                + '(authenticated) list.',
+                                { sticky: true, type: 'error' });
+                        }
+                        return { hosts: payload.hosts, unlocked: true };
+                    }
                 }
                 async function openPublishDialog() {
                     const hosts = getHosts();
@@ -477,6 +1124,13 @@
                                 + 'risk. You can remove them later with Forget '
                                 + 'passwords; rotate a token if it was exposed.';
                             c.appendChild(th);
+                            // #175: what encryption is about to do, stated here so
+                            // a passphrase request, or a refusal, is never a
+                            // surprise arriving after the Publish click.
+                            const eh = document.createElement('div');
+                            eh.className = 'set-hint hostreg-status';
+                            eh.textContent = encPublishHint();
+                            c.appendChild(eh);
                             // Publish-to-all opt-in.
                             const ar = mkRowCheck(
                                 'Also publish to every configured broker', false);
@@ -506,7 +1160,9 @@
                             { sticky: true, type: 'error' });
                         return;
                     }
-                    const rows = classify(got && got.value);
+                    const opened = await unlockForPull(got && got.value);
+                    if (!opened) return;
+                    const rows = classify(opened.hosts);
                     if (!rows.length) {
                         showNotice('No hosts to import from this broker\'s registry.');
                         return;
@@ -542,13 +1198,23 @@
                                     pw.className = 'hostreg-haspw';
                                     pw.textContent = ' (has password)';
                                     r.span.appendChild(pw);
+                                } else if (row.entry.hasToken) {
+                                    // Encrypted, and we didn't unlock it.
+                                    const pw = document.createElement('span');
+                                    pw.className = 'hostreg-locked';
+                                    pw.textContent = ' (password locked)';
+                                    r.span.appendChild(pw);
                                 }
                                 if (row.kind === 'differs' && row.urlChanged) {
                                     const w = document.createElement('div');
                                     w.className = 'set-hint hostreg-warn';
                                     w.textContent = 'URL differs — applying replaces '
                                         + 'your local one and clears its saved '
-                                        + 'password (you may need to re-enter it).';
+                                        + 'password (you may need to re-enter it).'
+                                        + ((!row.entry.token && row.entry.hasToken)
+                                            ? ' The registry\'s password for it is '
+                                              + 'still locked, so it can\'t be '
+                                              + 'imported in its place.' : '');
                                     r.row.appendChild(w);
                                 }
                                 list.appendChild(r.row);
@@ -578,12 +1244,84 @@
                     if (title) b.title = title;
                     b.addEventListener('click', function (e) {
                         e.preventDefault();
-                        // Guard against a double-open while a dialog is already up.
+                        // Guard against a double-open while a dialog is already up,
+                        // AND against starting a second registry action while one
+                        // is between dialogs (mid-derive, mid-publish) — openDialog
+                        // is a singleton and would cancel the first one's prompt.
                         if (typeof isAppDialogOpen === 'function'
                                 && isAppDialogOpen()) return;
-                        onClick();
+                        if (_encBusy) return;
+                        _encBusy = true;
+                        Promise.resolve()
+                            .then(onClick)
+                            .catch(function (err) {
+                                console.error('[host-registry]', err);
+                            })
+                            .then(function () { _encBusy = false; });
                     });
                     return b;
+                }
+                let _paneStatus = null, _paneForget = null;
+                // One line describing what encryption will do on the NEXT publish.
+                // Built locally from the setting and this page's capability —
+                // never from anything the stored registry says.
+                function encStatusText() {
+                    const mode = encMode();
+                    let s;
+                    if (!encAvailable()) {
+                        s = 'Encryption: unavailable here — ' + encWhyUnavailable()
+                            + (mode === 'off' ? ''
+                                : ' Publishing is blocked while the mode is "'
+                                  + encModeLabel(mode) + '"; set it to Off to '
+                                  + 'publish in the clear.');
+                    } else if (mode === 'all') {
+                        s = 'Encryption: whole list. Publishing asks for a '
+                            + 'passphrase and the broker stores only ciphertext — '
+                            + 'not even the labels.';
+                    } else if (mode === 'tokens') {
+                        s = 'Encryption: passwords only. A passphrase is asked for '
+                            + 'when a publish actually carries passwords; labels '
+                            + 'and addresses stay readable.';
+                    } else {
+                        s = 'Encryption: off — the list is published in the clear.';
+                    }
+                    if (_encPass) s += ' A passphrase is held for this session.';
+                    return s;
+                }
+                function encPublishHint() {
+                    const mode = encMode();
+                    if (!encAvailable()) {
+                        return mode === 'off'
+                            ? 'Encryption is off — this list is published in the '
+                              + 'clear.'
+                            : 'Encryption is set to "' + encModeLabel(mode)
+                              + '" but ' + encWhyUnavailable()
+                              + ' Publishing will be refused.';
+                    }
+                    if (mode === 'all') {
+                        return 'Encryption: whole list. '
+                            + (_encPass ? 'The passphrase held for this session is '
+                                + 'used — Forget passphrase (below the buttons) to '
+                                + 'switch.' : 'You will be asked for a passphrase.');
+                    }
+                    if (mode === 'tokens') {
+                        return 'Encryption: passwords only — engaged only if you '
+                            + 'tick Include passwords. '
+                            + (_encPass ? 'The passphrase held for this session is '
+                                + 'used — Forget passphrase (below the buttons) to '
+                                + 'switch.' : 'You will be asked for a passphrase.');
+                    }
+                    return 'Encryption is off — this list, and any password in it, '
+                        + 'is published in the clear.';
+                }
+                function refreshPane() {
+                    if (_paneStatus) _paneStatus.textContent = encStatusText();
+                    if (_paneForget) _paneForget.disabled = !_encPass;
+                }
+                function forgetPassphrase() {
+                    _encPass = null;
+                    refreshPane();
+                    showNotice('Passphrase dropped from this browser\'s memory.');
                 }
                 function renderPane() {
                     const wrap = document.createElement('div');
@@ -603,7 +1341,16 @@
                         'import a saved host list from the broker', openPullDialog));
                     row.appendChild(mkBtn('Forget passwords',
                         'remove tokens from the registry and its history', doForget));
+                    _paneForget = mkBtn('Forget passphrase',
+                        'drop the encryption passphrase held for this session',
+                        forgetPassphrase);
+                    row.appendChild(_paneForget);
                     wrap.appendChild(row);
+                    const status = document.createElement('div');
+                    status.className = 'set-hint hostreg-status';
+                    _paneStatus = status;
+                    wrap.appendChild(status);
+                    refreshPane();
                     return wrap;
                 }
                 ctx.registerSettingsPane({
@@ -611,9 +1358,47 @@
                     mount: 'browser',
                     title: 'Broker registry',
                     render: renderPane,
-                    // No reflect: the pane is action buttons only, and the dialogs
-                    // read live getHosts()/the registry each time they open.
+                    // The buttons themselves need no reflect — the dialogs read
+                    // live getHosts()/the registry each time they open. The
+                    // encryption status line does: the mode is a SYNCED setting,
+                    // so another browser can change it under this one.
+                    reflect: refreshPane,
                 });
+
+                // #175: the mode. A synced setting, so every browser you own
+                // publishes the same way. Availability is deliberately NOT folded
+                // into it: all three options are always registered, so a page that
+                // cannot encrypt still READS (and never clobbers) an intent it
+                // can't act on — which is what lets encPlan refuse instead of
+                // silently downgrading to a plaintext publish. Registered AFTER
+                // the pane so the actions sit above the setting that qualifies
+                // them; _encSetting is a pre-seeded `let` so the pane's
+                // registration-time reflect() can't read it in its dead zone.
+                const encOptions = encAvailable() ? [
+                    { value: 'tokens', label: 'Passwords only (recommended)' },
+                    { value: 'all', label: 'Whole list' },
+                    { value: 'off', label: 'Off — publish in the clear' },
+                ] : [
+                    { value: 'tokens',
+                      label: 'Passwords only — UNAVAILABLE on this page' },
+                    { value: 'all', label: 'Whole list — UNAVAILABLE on this page' },
+                    { value: 'off', label: 'Off — publish in the clear' },
+                ];
+                _encSetting = ctx.settings.select('hostRegEncrypt', encOptions, {
+                    mount: 'browser',
+                    title: 'Broker registry encryption',
+                    label: 'Encrypt before publishing',
+                    // Default 'passwords only'. It costs an existing user nothing
+                    // — with Include passwords off (its own default) there is no
+                    // secret in the value, so the publish is byte-identical to
+                    // today's and no passphrase is asked for. It engages exactly
+                    // when a publish would otherwise write a token to disk in the
+                    // clear.
+                    def: 'tokens',
+                });
+                _encSetting.onChange(function () { refreshPane(); });
+                refreshPane();                  // now that the mode is readable
+                ctx.onUnload(function () { _encPass = null; });
 
                 // ---- one-time discovery notice ------------------------------
                 // On init, one GET of the LOCAL registry: if it holds hosts this
@@ -621,15 +1406,33 @@
                 // Keyed by the registry NONCE (changes every publish, survives a
                 // broker restart / rev reset), recorded at SHOW time (showNotice
                 // has no dismiss callback), so it fires once per distinct publish.
+                // It NEVER asks for a passphrase: this runs with no user
+                // interaction at all, and a page-load password prompt is exactly
+                // the habit an attacker wants people to have.
                 (async function () {
                     let got = null;
                     try { got = await ctx.serverStore.get(); } catch (_) {}
                     const value = got && got.value;
-                    if (!value || value.v !== 1 || !Array.isArray(value.hosts)) return;
+                    if (!value || typeof value !== 'object') return;
                     const nonce = (typeof value.nonce === 'string') ? value.nonce : '';
                     if (!nonce || ctx.storage.get(NOTIFIED_KEY) === nonce) return;
+                    const scope = encScope(value);
+                    if (scope === 'all' || scope === 'unknown') {
+                        // Opaque without the passphrase — say what it is and stop.
+                        ctx.storage.set(NOTIFIED_KEY, nonce);
+                        showNotice(encAvailable()
+                            ? 'This broker has an ENCRYPTED shared host list — '
+                              + 'Control Panel → Browser → Broker registry → Pull '
+                              + 'to unlock it.'
+                            : 'This broker has an ENCRYPTED shared host list, and '
+                              + 'this page can\'t decrypt it: '
+                              + encWhyUnavailable(),
+                            { sticky: true });
+                        return;
+                    }
+                    if (value.v !== 1 || !Array.isArray(value.hosts)) return;
                     ctx.storage.set(NOTIFIED_KEY, nonce);   // record at show time
-                    const newCount = classify(value)
+                    const newCount = classify(publicHostsOf(value))
                         .filter(r => r.kind === 'new').length;
                     if (!newCount) return;
                     showNotice('This broker has a shared host list with ' + newCount

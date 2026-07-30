@@ -14,6 +14,43 @@ story behind anything named below.
 
 ## [Unreleased]
 
+### Added
+
+- **The Broker registry can encrypt what it publishes, in the browser** (#175).
+  The registry was stored as plain JSON on the broker (`webterm_modstore.json`
+  plus a revision ring), so **Include passwords** meant writing every broker
+  token you published to that machine's disk in the clear. **Control Panel →
+  Browser → Broker registry encryption** now offers three modes: *passwords
+  only* (the default), *whole list*, and *off* (the old behaviour). WebCrypto
+  only — PBKDF2-SHA-256 at 600 000 iterations with a fresh random salt per
+  publish, then AES-GCM-256 with a fresh IV and the envelope header bound as
+  additional authenticated data. The passphrase is held in memory for the page's
+  life so publish-to-all and back-to-back pulls ask once, and is never persisted;
+  there is no "remember on this browser", and **Forget passphrase** drops it.
+  Each password is sealed *together with* the address it belongs to, and an
+  unlocked pull uses the decrypted list alone — so nobody who can write the
+  registry can edit the readable half to point one of your saved passwords at a
+  machine of theirs. If the two halves disagree you are told.
+  The default costs an existing user nothing: with **Include passwords** off,
+  *passwords only* has no secret to encrypt, so the published value is
+  byte-identical to before and no passphrase is asked for.
+  Two behaviour changes worth knowing. `crypto.subtle` is secure-context only
+  and the broker terminates no TLS, so on `http://<lan-ip>:4445` encryption is
+  unavailable — and publishing is **refused** rather than quietly falling back
+  to the clear, so publishing passwords from such a page now needs the mode set
+  to *off* first. And an encrypted publish clears the broker's revision ring,
+  because the plaintext value it replaces would otherwise stay readable in the
+  history of the store you had just stopped trusting.
+  **This is not protection from the broker itself** — that broker serves the
+  code that does the encrypting. It protects the registry at rest, and from
+  anyone who can read the store: the file, its backups, the revision ring,
+  another admin of the machine, or a browser holding the broker token but not
+  the passphrase. `host-registry/help.md` says so in as many words.
+  **Forget passwords** still works with no passphrase — that is the emergency
+  path. An encrypted block is opaque, so it is assumed to hold passwords and
+  removed whole; under *whole list* that means the list goes with them, and the
+  confirmation says so before you agree.
+
 ### Fixed
 
 - **A window drag or resize no longer stalls over embedded content** (#176).
