@@ -103,6 +103,49 @@ client-supplied command/cwd/env. Responses: `200` registered, `202` spawned
 but no hello within 10 s, `400` unknown profile, `401`/`403` auth, `429`
 too many pending, `500` agent exited early.
 
+### Which build is running (#22)
+
+There is one build id in this project: `webterm.build_version()` — the package
+version from `webterm/__init__.py` (the **single source**; `pyproject.toml`
+declares `dynamic = ["version"]` and reads that attribute) plus the git short
+hash when running from a checkout, e.g. `0.8.0+ba4b62e`. It is derived from the
+package's own directory (never the process cwd, so a wheel installed inside an
+unrelated repo cannot report that repo's commit), cached per process, and never
+raises.
+
+It rides the agent hello, `GET /info` and `GET /mcp/info` — and it is baked into
+the served desktop page:
+
+```html
+<meta name="webterm-build" content="0.8.0+ba4b62e">
+```
+
+A broker serves the page it assembled at **import**, so a `git pull` changes
+nothing until the process is restarted. That is the gap this closes:
+
+```
+curl -s http://host:4445/ | grep webterm-build
+git -C /path/to/checkout rev-parse --short HEAD
+```
+
+The stamp's `+hash` matches → the running process is the pulled code; it does
+not → a restart is still pending. The stamp describes the **running process**,
+not the checkout on disk, exactly because `build_version()` is cached at import
+and never recomputed per request.
+
+Read it for what it is: the revision `HEAD` pointed at when that process first
+asked. It cannot see uncommitted edits (there is no dirty marker — two different
+dirty trees would share a hash, which is a worse signal than none), and if a
+pull lands *while* a broker is running, modules imported before and after it
+come from different revisions and no single stamp can say so. A caching reverse
+proxy in front of `GET /` will also happily serve you an old stamp.
+
+It is a `<meta>` in the head and deliberately **not** a value inside the page's
+one inline script: `script-src` authorizes that script by `sha256` of its exact
+bytes (see [Auth model](#auth-model)), so a per-commit string in there would
+change the CSP hash on every commit. Script that wants the value reads the tag —
+`document.querySelector('meta[name="webterm-build"]').content`.
+
 ### Auth model
 
 **A token is required on every surface, on every interface, always** (#142) —
