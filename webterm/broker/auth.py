@@ -12,11 +12,30 @@ request arrives *from* loopback; and a plain web page can dial
 ``ws://127.0.0.1:<port>/browserland`` (WebSockets are not CORS-gated) to
 re-register a live window and inject fabricated terminal output.
 
-Only ``GET /`` and ``GET /help-corpus.json`` stay public, plus the OPTIONS
-preflights (which carry no credentials by design). The token is typed *into*
-that page and auth is query/header-only with no cookies, so gating the document
-itself would 401 every reload, bookmark and new tab forever. Neither of those
-public responses carries host-, session- or install-derived data.
+FIVE routes stay public, plus the OPTIONS preflights (which carry no credentials
+by design). ``PUBLIC_PATHS`` in ``tests/test_auth_mandatory.py`` is the pinned
+list -- every other route is enumerated off the live router there and asserted
+to 401 -- and it is that test, not this paragraph, which fails when the set
+changes:
+
+* ``GET /`` -- the token is typed *into* that page and auth is query/header-only
+  with no cookies, so gating the document itself would 401 every reload,
+  bookmark and new tab forever.
+* ``GET /help-corpus.json`` -- so the Help window of that same login page
+  renders before a token exists. Public but AUTH-SENSITIVE; see below.
+* ``GET /vendor/<name>`` and ``GET /vendor/codemirror/<name>`` (#143, #146) --
+  the browser needs the vendored xterm to draw the login page at all, and a
+  ``<script src>`` cannot carry an Authorization header. Static bytes from the
+  wheel.
+* ``GET /mods/<modId>/<gen>/<name>`` (#163) -- one file of one generation of a
+  runtime-INSTALLED mod, public for that same forced reason.
+
+``GET /``, ``/vendor/*`` and the tokenless ``/help-corpus.json`` body carry
+nothing host-, session- or install-derived. The mod-asset route DOES serve
+install-derived bytes: an installed mod's ``.js`` and ``.css`` are publicly
+readable, deliberately and documented as such (do not put a secret in a mod).
+What it withholds is only reachability -- a caller must already name the id, the
+generation and the file; see ``app._mod_asset`` for the limits of that.
 
 ``/help-corpus.json`` is public but AUTH-SENSITIVE (#173): without a token it
 serves the wiki + shipped-mod corpus alone — the same bytes it served before

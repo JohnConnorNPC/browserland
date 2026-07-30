@@ -5,9 +5,10 @@ Two halves:
 * **Token bootstrap** — ``auth.resolve_or_mint_token`` precedence, the O_EXCL
   mint, sidecar reuse across a restart, and concurrent-mint convergence.
 * **Route policy** (added with the gate collapse) — every route outside the
-  deliberately-public ``{"/", "/help-corpus.json"}`` refuses an unauthenticated
-  request, enumerated off the live router so a route added later cannot quietly
-  ship unauthenticated.
+  deliberately-public ``PUBLIC_PATHS`` below refuses an unauthenticated request,
+  enumerated off the live router so a route added later cannot quietly ship
+  unauthenticated. That set is five routes, not the two it started as: #143 put
+  ``/vendor/*`` in the clear and #163 added ``/mods/<id>/<gen>/<name>``.
 
 Every app factory here passes an EXPLICIT ``auth_token`` and every temp sidecar
 lives under ``tmp_path``: a test that minted into the repo root would drop a
@@ -310,6 +311,40 @@ def test_the_public_pair_answers_without_a_token(tmp_path):
                   "..%5capp.py", "nope.mjs"):
         _, bad = app.test_client.get(f"/vendor/codemirror/{probe}")
         assert bad.status in (400, 404), f"{probe} -> {bad.status}"
+
+
+def test_the_docstrings_enumerate_every_public_route():
+    """``auth.py`` is the canonical prose statement of the auth posture and
+    ``app.py``'s header is the one a reader of the broker meets first. Both used
+    to say only ``GET /`` and ``GET /help-corpus.json`` were public -- false
+    since #143 put ``/vendor/*`` in the clear and #163 added the mod-asset route,
+    and actively misleading next to the (correct) claim that no public response
+    carries install-derived data, because ``_mod_asset`` serves an installed
+    mod's .js and .css to anyone.
+
+    PUBLIC_PATHS above is the machine-checked list; this keeps the prose from
+    drifting away from it again. Route parameters are normalised to ``<>`` so a
+    docstring may name them whatever reads best."""
+    import inspect
+
+    from webterm.broker import app as app_mod
+
+    def norm(text):
+        return re.sub(r"<[^<>]*>", "<>", text)
+
+    for mod in (auth, app_mod):
+        doc = norm(inspect.getdoc(mod) or "")
+        where = mod.__name__
+        for path in sorted(PUBLIC_PATHS):
+            if path == "/":
+                continue            # too short to substring-match usefully
+            assert norm(path) in doc, \
+                f"{where}'s module docstring never mentions public {path}"
+        # The specific false claim, in both of its historical spellings.
+        low = doc.lower()
+        for wrong in ("only ``get /`` and ``get /help-corpus.json`` stay public",
+                      "the only\nunauthenticated responses are ``get /``"):
+            assert wrong not in low, f"{where}: stale public-route claim"
 
 
 def test_headless_root_still_answers_for_health_probes(tmp_path):

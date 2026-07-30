@@ -10,13 +10,26 @@ network failure (a lesson carried over from an earlier broker).
 
 Auth (#142): a token is REQUIRED on every route and every interface, always.
 There is no loopback exemption and no opt-out; with nothing configured the
-broker mints one into ``webterm_token.json`` beside the state store. The ONLY
-unauthenticated responses are ``GET /`` (the token is typed into that page, and
-auth is query/header-only with no cookies, so gating the document would 401
-every reload, bookmark and new tab forever), ``GET /help-corpus.json`` (which
-answers without a token but serves LESS: the wiki + shipped-mod corpus only,
-never the installed mods' help or their ids — see ``_help_corpus``), and the
-OPTIONS preflights. ``/mcp/*`` is a separate realm with its own token.
+broker mints one into ``webterm_token.json`` beside the state store. FIVE routes
+answer unauthenticated, plus the OPTIONS preflights; ``PUBLIC_PATHS`` in
+tests/test_auth_mandatory.py is the pinned list, and it is that test, not this
+docstring, which fails when the set changes:
+
+* ``GET /`` — the token is typed into that page, and auth is query/header-only
+  with no cookies, so gating the document would 401 every reload, bookmark and
+  new tab forever.
+* ``GET /help-corpus.json`` — answers without a token but serves LESS: the wiki
+  + shipped-mod corpus only, never the installed mods' help or their ids. See
+  ``_help_corpus``.
+* ``GET /vendor/<name>`` and ``GET /vendor/codemirror/<name>`` (#143, #146) — a
+  ``<script src>`` cannot carry an Authorization header and the login page needs
+  the vendored xterm to draw at all. Static bytes from the wheel.
+* ``GET /mods/<modId>/<gen>/<name>`` (#163) — one file of one generation of a
+  runtime-INSTALLED mod, public for that same forced reason. This one DOES serve
+  install-derived bytes, deliberately; see ``_mod_asset``. The other four carry
+  nothing host-, session- or install-derived.
+
+``/mcp/*`` is a separate realm with its own token.
 
 CORS posture: the UI's multi-host mode has the BROWSER fetch /sessions and
 dial /ws directly on every configured broker, so the JSON API needs CORS.
