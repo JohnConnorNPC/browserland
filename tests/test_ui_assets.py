@@ -1588,15 +1588,13 @@ def test_the_help_corpus_memo_is_dropped_on_a_first_login():
     src = (BROKER_DIR / "80_js_help_window.js").read_text(encoding="utf-8")
     hook = _frag_fn(src, "function notifyHelpHostAuth(")
     assert "hostId !== lh.id" in hook          # the local broker only
-    for cleared in ("helpCorpusData = null", "helpCorpusEntries = null",
-                    "helpCorpusPromise = null"):
-        assert cleared in hook, cleared
-    # A fetch already in flight when the memo is dropped must neither write its
+    assert "helpCorpusGen++" in hook
+    assert "helpCorpusPromise = null" in hook
+    # A fetch already in flight when the memo is retired must neither write its
     # pre-token answer back into it NOR resolve its own caller with it (the help
     # mod re-reads the globals, but a mod calling this hoisted function need
     # not). Generation-stamped, and a superseded settle chains onto the current
     # generation instead of returning what it has.
-    assert "helpCorpusGen++" in hook
     fetch = _frag_fn(src, "function fetchHelpCorpus(")
     assert "const gen = helpCorpusGen;" in fetch
     assert fetch.count("if (gen !== helpCorpusGen) return fetchHelpCorpus();") \
@@ -1610,12 +1608,56 @@ def test_the_help_corpus_memo_is_dropped_on_a_first_login():
         "notifyHelpHostAuth(host.id)")
     # An already-open Help window refreshes rather than waiting to be reopened:
     # 63's _onHostAuth loop runs AFTER the notify above, so the re-fetch there
-    # sees a cleared memo.
+    # sees a retired memo.
     help_mod = (BROKER_DIR / "mods" / "help"
                 / "help.js").read_text(encoding="utf-8")
     assert "win._onHostAuth = (hid) => {" in help_mod
     assert auth.index("notifyHelpHostAuth(host.id)") < auth.index(
         "win._onHostAuth(host.id)")
+
+
+def test_the_retired_help_corpus_is_invalidated_not_blanked():
+    # The memo is retired by BUMPING THE GENERATION, never by nulling the
+    # entries. buildHelpEntries reads `(helpCorpusEntries || [])` directly, and
+    # this same login synchronously drives re-renders that go through it: 63
+    # fires the async notifyModsHostAuth one line BEFORE notifyHelpHostAuth, and
+    # its continuation (a /info + package round trip far cheaper than the ~300 KB
+    # corpus) reaches _applyPolicyLive, so an installed mod whose init calls
+    # ctx.registerHelpCards lands in _refreshHelpIfOpen -> refreshHelpCorpus ->
+    # buildHelpEntries. With the entries nulled, that render snapshots an EMPTY
+    # wiki corpus into the open Help window -- every wiki and shipped-mod section
+    # gone until the refetch lands. Keep the stale corpus (it is exactly what the
+    # window was already showing) and swap it whole on arrival.
+    src = (BROKER_DIR / "80_js_help_window.js").read_text(encoding="utf-8")
+    hook = _frag_fn(src, "function notifyHelpHostAuth(")
+    for kept in ("helpCorpusEntries = null", "helpCorpusData = null"):
+        assert kept not in hook, \
+            f"{kept!r} blanks an open Help window mid-login; bump the gen instead"
+    # What makes the bump sufficient: the early-return memo hit is
+    # generation-scoped, so a login still forces exactly one refetch.
+    fetch = _frag_fn(src, "function fetchHelpCorpus(")
+    assert "helpCorpusEntries && helpCorpusEntriesGen === helpCorpusGen" in fetch
+    assert "helpCorpusEntriesGen = gen;" in fetch
+    # ...stamped in the same settle that installs the entries, or the next call
+    # would either refetch forever or hand back a corpus from the wrong audience.
+    body = fetch[fetch.index("helpCorpusEntries = flattenHelpCorpus(data);"):]
+    assert body.index("helpCorpusEntriesGen = gen;") < body.index("return ")
+    # A FAILED post-login refetch is the same story: return the stale corpus, not
+    # [] -- the caller that renders the resolution must not blank the wiki either.
+    assert "return helpCorpusEntries || [];" in fetch
+    # And the renderer keeps tolerating a never-fetched memo (the first open,
+    # before any corpus has landed at all).
+    build = _frag_fn(src, "function buildHelpEntries(")
+    assert "(helpCorpusEntries || [])" in build
+    # The ordering that makes this reachable at all: 63 fires the async mods
+    # re-ask BEFORE the (synchronous) help notify, so the mod-load continuation
+    # is already racing the corpus refetch by the time the memo is retired.
+    auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    assert auth.index("notifyModsHostAuth(host.id)") < auth.index(
+        "notifyHelpHostAuth(host.id)")
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "_refreshHelpIfOpen();" in _frag_fn(
+        loader, "function _modRegisterHelpCards(")
 
 
 def test_help_mod_packaged_and_manifest_agrees():

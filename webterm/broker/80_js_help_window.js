@@ -14,9 +14,15 @@
         let helpCorpusEntries = null;    // flattened wiki cards -> help entries
         let helpCorpusPromise = null;    // in-flight fetch (dedupes fast re-opens)
         // Bumped by notifyHelpHostAuth to retire everything above. A fetch that
-        // was already in flight when the memo was dropped must NOT write itself
+        // was already in flight when the memo was retired must NOT write itself
         // back into it — its answer predates the token.
         let helpCorpusGen = 0;
+        // The generation helpCorpusEntries was fetched at. Retiring the memo
+        // makes it STALE, never ABSENT: it is still the best corpus we have and
+        // buildHelpEntries must keep rendering it, but fetchHelpCorpus may no
+        // longer hand it back, so a login forces exactly one refetch. Nulling
+        // helpCorpusEntries instead would be a hole — see notifyHelpHostAuth.
+        let helpCorpusEntriesGen = -1;
         // Flatten the wiki corpus into the flat per-card entry shape the renderer
         // groups by slug: {slug, section(label), title, bodyFrags, search}.
         function flattenHelpCorpus(data) {
@@ -43,7 +49,10 @@
         // never goes blank). A single shared promise dedupes concurrent opens; a
         // failure clears it so a later open retries.
         function fetchHelpCorpus() {
-            if (helpCorpusEntries) return Promise.resolve(helpCorpusEntries);
+            // Current-generation memo only: after a login the memo is still
+            // renderable but no longer answers for the token we now hold.
+            if (helpCorpusEntries && helpCorpusEntriesGen === helpCorpusGen)
+                return Promise.resolve(helpCorpusEntries);
             if (helpCorpusPromise) return helpCorpusPromise;
             const gen = helpCorpusGen;
             // ~200 KB of wiki text, and over a tailnet that is a transfer, not a
@@ -64,8 +73,11 @@
                     // out, and otherwise a fresh request. Bounded by the number
                     // of logins, so it cannot spin.
                     if (gen !== helpCorpusGen) return fetchHelpCorpus();
+                    // Swapped in whole, never cleared-then-filled: no render can
+                    // observe a half-replaced corpus.
                     helpCorpusData = data;
                     helpCorpusEntries = flattenHelpCorpus(data);
+                    helpCorpusEntriesGen = gen;
                     return helpCorpusEntries;
                 })
                 .catch(() => {
@@ -75,7 +87,10 @@
                     // is empty" when a current-generation answer is available.
                     if (gen !== helpCorpusGen) return fetchHelpCorpus();
                     helpCorpusPromise = null;   // cleared, so a later open retries
-                    return [];
+                    // A stale memo still beats nothing: a failed post-login
+                    // refetch leaves the pre-login corpus on screen (minus the
+                    // installed sections) rather than blanking the wiki.
+                    return helpCorpusEntries || [];
                 });
             return helpCorpusPromise;
         }
@@ -87,6 +102,21 @@
         // pins and #163 closed for the packages themselves. Retire the memo when
         // the LOCAL broker authenticates and let the next open re-ask. Only the
         // local one: the corpus is fetched from localHost() and nowhere else.
+        //
+        // INVALIDATE, DO NOT CLEAR. Bumping the generation alone retires the
+        // memo for fetchHelpCorpus while leaving it renderable, and that
+        // distinction is load-bearing rather than tidy. The refetch is ~300 KB
+        // and this same login synchronously drives re-renders that read the memo
+        // directly: 63 fires the async notifyModsHostAuth one line BEFORE this,
+        // and its continuation (localHost /info + the installed packages, a far
+        // cheaper round trip) reaches _applyPolicyLive, so any installed mod
+        // whose init calls ctx.registerHelpCards lands in _refreshHelpIfOpen ->
+        // refreshHelpCorpus -> buildHelpEntries. Nulling helpCorpusEntries here
+        // let that snapshot an EMPTY wiki corpus into an open Help window --
+        // every wiki and shipped-mod section gone until the fetch landed. The
+        // stale corpus is exactly what that window was already showing, so
+        // keeping it is invisible; the fetch swaps it whole on arrival.
+        //
         // Nulling helpCorpusPromise as it bumps the generation is also what
         // keeps the "chain onto the current generation" branches above from
         // ever awaiting themselves: a superseded fetch can only ever find null
@@ -96,8 +126,6 @@
             try { lh = localHost(); } catch (_) {}
             if (!lh || hostId !== lh.id) return;
             helpCorpusGen++;
-            helpCorpusData = null;
-            helpCorpusEntries = null;
             helpCorpusPromise = null;
         }
         // A single-paragraph typed body block for the generated (non-wiki) entries.
