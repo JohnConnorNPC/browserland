@@ -428,7 +428,7 @@ def test_help_corpus_endpoint(broker_proc):
     assert set(card) >= {"title", "body", "search"}
     # Body is typed plain data (blocks of typed spans), never an HTML string.
     for block in card["body"]:
-        assert block["t"] in {"p", "bullet", "sub"}
+        assert block["t"] in {"p", "bullet", "sub", "pre"}
         for span in block["spans"]:
             assert span["t"] in {"text", "strong", "code", "kbd"}
             assert isinstance(span["v"], str)

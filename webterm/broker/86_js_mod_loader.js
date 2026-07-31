@@ -712,7 +712,7 @@
                 // block/span schema (NEVER raw HTML) — same typed shape as the
                 // wiki corpus:
                 //   { slug, section, title, body:[block], keys?, search? }
-                //   block = { t:'p'|'bullet'|'sub', spans:[span] }
+                //   block = { t:'p'|'bullet'|'sub'|'pre', spans:[span] }
                 //   span  = { t:'text'|'strong'|'code'|'kbd', v:String }
                 // Cards are sanitized here (unknown block/span types degrade to
                 // text; values are coerced to String) and merged into the Help
