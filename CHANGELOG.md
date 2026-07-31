@@ -180,7 +180,7 @@ story behind anything named below.
 
 The version number catches up with what has actually shipped: `0.1.0` was the
 number the project was born with and had stopped describing it. No breaking
-changes — see [`docs/UPGRADING.md`](docs/UPGRADING.md) for the record of those.
+changes — see [`wiki/Upgrading.md`](wiki/Upgrading.md) for the record of those.
 
 ### Added
 
@@ -195,7 +195,7 @@ changes — see [`docs/UPGRADING.md`](docs/UPGRADING.md) for the record of those
 - **The `x-` mod-id namespace is reserved for installed mods** (#172). One mod id
   keys five namespaces (pins, per-browser overrides, stored data, assets, help),
   so an unprefixed third-party id could inherit a first-party mod's state.
-- **[`docs/MODS.md`](docs/MODS.md), the mod-authoring guide** (#171) — the `ctx`
+- **[`wiki/Writing-a-Mod.md`](wiki/Writing-a-Mod.md), the mod-authoring guide** (#171) — the `ctx`
   contract used to live only in `86_js_mod_loader.js` comments. The portable-mod
   rules it states are now linted over `mods/**/*.js` by the test suite.
 - **`ctx.theme`** (#169): read the live theme and subscribe to changes, derived
@@ -266,7 +266,7 @@ property you have to understand before you install a mod.
   either way — `off` only means the mod's `init()` is not called. Installed mods
   are always reported `default_enabled: false`, which is an install/enable
   split, not a sandbox. Mods run same-origin with the broker's full authority;
-  see [`docs/MODS.md`](docs/MODS.md) (#163, #171).
+  see [`wiki/Writing-a-Mod.md`](wiki/Writing-a-Mod.md) (#163, #171).
 
 ### Earlier history (summary)
 

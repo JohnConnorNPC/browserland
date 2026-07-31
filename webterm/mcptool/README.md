@@ -9,7 +9,7 @@ window must be in `read`/`readwrite` mode to be visible or typed into, and
 launching requires the broker's `allow_launch` flag. See the root
 [`README.md`](../../README.md) → **MCP & AI agent access** for how to enable MCP,
 access modes, and minting the token, and
-[`docs/TECHNICAL.md`](../../docs/TECHNICAL.md) → **MCP HTTP interface** for the
+[`wiki/Technical-Reference.md`](../../wiki/Technical-Reference.md) → **MCP HTTP interface** for the
 broker endpoint contract and error reference.
 
 ## Install

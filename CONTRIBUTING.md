@@ -17,7 +17,7 @@
    command, and what you saw vs. expected. A broker or agent log snippet helps.
  - **Feature requests** — describe the real-world use case, not just the API.
    Concrete scenarios get prioritized.
- - **Setup questions** — read **[docs/SETUP.md](docs/SETUP.md)** first; it covers
+ - **Setup questions** — read **[wiki/Setup-and-Onboarding.md](wiki/Setup-and-Onboarding.md)** first; it covers
    the broker / agent / browser model and multi-machine setup.
 
  Search existing issues before opening a new one.

@@ -639,7 +639,7 @@
             // The ONE place a token still rides a URL, and it is unavoidable:
             // the browser WebSocket API cannot set request headers on the
             // handshake. /ws, /control and /browserland therefore keep
-            // ?token=. Documented in docs/TECHNICAL.md rather than papered
+            // ?token=. Documented in wiki/Technical-Reference.md rather than papered
             // over — closing it needs a connect-ticket scheme, not a refactor.
             if (!host || !host.token) return base + path;
             return base + path + (path.indexOf('?') === -1 ? '?' : '&')

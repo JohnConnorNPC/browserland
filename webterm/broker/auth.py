@@ -139,7 +139,7 @@ def resolve_or_mint_token(config: Optional[dict], path) -> Tuple[str, str]:
 
     Mode 0o600 is honoured on POSIX (umask can only clear bits further). Windows
     has no POSIX mode: the file inherits the directory's ACL, so the state dir
-    must itself be private — see docs/SETUP.md."""
+    must itself be private — see wiki/Setup-and-Onboarding.md."""
     env_tok = os.environ.get(TOKEN_ENV)
     if env_tok:
         return env_tok, "env"
@@ -221,6 +221,6 @@ def request_token_ok(request, expected: Optional[str]) -> bool:
 # is_loopback_request() lived here until #142. It is gone rather than merely
 # unused: as an auth input it was a loaded gun. It answered "did this connection
 # arrive on a loopback listener", which is NOT "is this the same machine" — a
-# request proxied by `tailscale serve` (the topology docs/SETUP.md recommends)
+# request proxied by `tailscale serve` (the topology wiki/Setup-and-Onboarding.md recommends)
 # arrives from loopback no matter which machine sent it, and any web page the
 # user opens can reach loopback as well. Every gate now takes the token.

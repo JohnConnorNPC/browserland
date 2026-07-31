@@ -55,7 +55,7 @@ terminals directly — including full-screen TUIs.
 > different minted value per machine.
 >
 > Full details, a does-this-affect-me table, and recovery steps:
-> **[`docs/UPGRADING.md`](docs/UPGRADING.md)**.
+> **[`wiki/Upgrading.md`](wiki/Upgrading.md)**.
 
 ## What is this?
 
@@ -122,7 +122,7 @@ works great). One browser tab then fronts the whole fleet:
   an AI harness enumerate and drive terminals across **all** brokers through
   a single tool surface.
 
-**[`docs/SETUP.md`](docs/SETUP.md)** walks through joining machines step by
+**[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)** walks through joining machines step by
 step.
 
 ## Screenshots 
@@ -179,7 +179,7 @@ The desktop with tiled and floating terminals
 - **Launch profiles you can edit in the UI**: add WSL/zsh/PowerShell shells from
   **Control Panel → Launch profiles** (one-click WSL-distro / shell **Detect…**),
   applied live with no restart — still profiles-only. See
-  **[docs/PROFILES.md](docs/PROFILES.md)** for recipes and the security model.
+  **[wiki/Launch-Profiles.md](wiki/Launch-Profiles.md)** for recipes and the security model.
 
 ## Mods
 
@@ -200,7 +200,7 @@ in-desktop copy/paste observer, and help cards.
 A mod is **not sandboxed** — it is same-origin code with the page's full
 authority, and `ctx` is a set of reviewed choke points rather than a boundary.
 Writing one (and the trust model behind installing one) is covered in
-**[docs/MODS.md](docs/MODS.md)**.
+**[wiki/Writing-a-Mod.md](wiki/Writing-a-Mod.md)**.
 
 A mod's *settings* sync across your browsers via the broker's shared state;
 its *enable/disable* toggle is deliberately per-browser — flip it in
@@ -337,7 +337,7 @@ BROWSERLAND_MCP_TOKEN=… browserland-mcp --broker-url http://127.0.0.1:4445
 ```
 
 For the full HTTP contract, error table, and config sidecar, see
-**[`docs/TECHNICAL.md`](docs/TECHNICAL.md)** and
+**[`wiki/Technical-Reference.md`](wiki/Technical-Reference.md)** and
 **[`webterm/mcptool/README.md`](webterm/mcptool/README.md)**.
 
 ## Quick start
@@ -407,7 +407,7 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 |---|---|
 | `webterm/agent/` | Headless producer: PTY backends, output ring buffer, OSC-title sniffer, reconnecting WebSocket client |
 | `webterm/broker/` | Web server: desktop UI (`ui.py` assembles the served page from ordered `*.html`/`*.css`/`*.js` fragments), `/ws` relay, producer WS, session list, profiles-only launch |
-| `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, script(s), optional CSS + in-app help page (authoring guide: [docs/MODS.md](docs/MODS.md)) |
+| `webterm/broker/mods/` | The bundled desktop mods — one folder per mod: `mod.json` manifest, script(s), optional CSS + in-app help page (authoring guide: [wiki/Writing-a-Mod.md](wiki/Writing-a-Mod.md)) |
 | `webterm/mcptool/` | The shipped stdio MCP server wrapping the broker's `/mcp/*` API |
 | `webterm/protocol.py` | The single source of truth for the JSON frame shapes |
 | `launchers/` | venv-bootstrapping run scripts (and systemd units) for both OSes |
@@ -415,14 +415,27 @@ See **[MCP & AI agent access](#mcp--ai-agent-access)** for running the server.
 
 ## Documentation
 
+**Everything lives in [`wiki/`](wiki/)** — one tree, and the same source the
+in-app Help window reads. Open Help with the **?** chip in the taskbar to search
+it without leaving the desktop; the developer and operator pages are in there
+too, behind **Include developer docs**.
+
+| | Page |
+|---|---|
+| **Start here** | [Home](wiki/Home.md) · [Getting Started](wiki/Getting-Started.md) · [Keyboard Shortcuts](wiki/Keyboard-Shortcuts.md) |
+| **Building layouts** | [Window Modes](wiki/Window-Modes.md) · [Arranging Windows](wiki/Arranging-Windows.md) · [Columns & Widths](wiki/Columns-and-Widths.md) · [Snapping & Pop-out](wiki/Snapping-and-Pop-out.md) · [Floating Window Controls](wiki/Floating-Window-Controls.md) |
+| **The desktop** | [Workspaces](wiki/Workspaces.md) · [Taskbar](wiki/Taskbar.md) · [Context Menus](wiki/Context-Menus.md) · [Window Types](wiki/Window-Types.md) |
+| **Multi-host & AI** | [Hosts & Multi-Browser](wiki/Hosts-and-Multi-Browser.md) · [MCP & AI Agents](wiki/MCP-and-AI-Agents.md) |
+| **For developers** | [Setup & Onboarding](wiki/Setup-and-Onboarding.md) · [Launch Profiles](wiki/Launch-Profiles.md) · [Writing a Mod](wiki/Writing-a-Mod.md) · [Technical Reference](wiki/Technical-Reference.md) · [Upgrading](wiki/Upgrading.md) |
+
 New here, or setting up more than one machine? Start with
-**[`docs/SETUP.md`](docs/SETUP.md)** — the onboarding guide: the broker / agent /
+**[`wiki/Setup-and-Onboarding.md`](wiki/Setup-and-Onboarding.md)** — the onboarding guide: the broker / agent /
 browser mental model, joining machines over Tailscale via Control Panel → Hosts,
 what *not* to hand-edit, and running the broker unattended in the background
 (Windows Task Scheduler / Linux systemd). It's written to be followed by a human
 or a coding agent.
 
-Upgrading an existing install? **[`docs/UPGRADING.md`](docs/UPGRADING.md)** is
+Upgrading an existing install? **[`wiki/Upgrading.md`](wiki/Upgrading.md)** is
 the breaking-change record — what changed, whether it affects you, and how to
 recover. Most recently: **a token is now required on every connection,
 including loopback (#142)**, which strands terminals launched by a previously
@@ -431,21 +444,21 @@ tokenless broker.
 What changed in a release, and roughly what came before it, is in
 **[`CHANGELOG.md`](CHANGELOG.md)** — the most recent cycle itemized, earlier
 history summarized, and the security posture statements worth reading before you
-install a mod. Breaking changes stay in `docs/UPGRADING.md`; the changelog links
+install a mod. Breaking changes stay in `wiki/Upgrading.md`; the changelog links
 to it rather than duplicating it.
 
 Adding or editing launch profiles (WSL / zsh / PowerShell / Git-Bash) is covered
-in **[`docs/PROFILES.md`](docs/PROFILES.md)** — the recipe catalog, the three
+in **[`wiki/Launch-Profiles.md`](wiki/Launch-Profiles.md)** — the recipe catalog, the three
 profile fields, the `webterm_profiles.json` sidecar-vs-`broker_config` rule, and
 the browser-realm-only editing model.
 
 Writing a mod — or installing somebody else's — is
-**[`docs/MODS.md`](docs/MODS.md)**: the trust posture (a mod is *not*
+**[`wiki/Writing-a-Mod.md`](wiki/Writing-a-Mod.md)**: the trust posture (a mod is *not*
 sandboxed), every `mod.json` field, the whole `ctx` surface, CSS ownership, the
 `help.md` + corpus-regeneration rule, and the `x-` namespace and portable-mod
 contract an installable mod has to meet.
 
-The full engineering reference lives in **[`docs/TECHNICAL.md`](docs/TECHNICAL.md)**:
+The full engineering reference lives in **[`wiki/Technical-Reference.md`](wiki/Technical-Reference.md)**:
 
 - the complete wire protocol and frame semantics,
 - the full auth model (every surface, token precedence, CORS),

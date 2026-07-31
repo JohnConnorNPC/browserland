@@ -7,7 +7,7 @@
 #
 # Defaults: broker ws://127.0.0.1:4445/browserland, command bash -l.
 # The token is REQUIRED (#142) - unset, it is read from the repo-root
-# webterm_token.json the broker mints. See docs/UPGRADING.md.
+# webterm_token.json the broker mints. See wiki/Upgrading.md.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
