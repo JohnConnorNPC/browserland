@@ -84,7 +84,7 @@ The default is only a *starting* color: recoloring an individual window with its
 
 ## Default color per profile
 
-A launch **profile** can also carry its own optional **default terminal color**, set in **Control Panel → (a host tab) → Launch profiles** with the color dot on that profile's row. When set, every **new** terminal launched from that profile starts in that color — useful when the meaningful distinction is the profile rather than the host (say `prod-ssh` always red, `scratch` always green), regardless of which host runs it.
+A launch **profile** can also carry its own optional **default terminal color**, set in **Control Panel → (a host tab) → Terminals → Launch profiles** with the color dot on that profile's row. When set, every **new** terminal launched from that profile starts in that color — useful when the meaningful distinction is the profile rather than the host (say `prod-ssh` always red, `scratch` always green), regardless of which host runs it.
 
 The profile color sits between the per-window and per-host colors in the order of precedence: a window you have recolored by hand keeps its own color; otherwise the launch profile's color wins; failing that the host's default color; and finally the automatic palette pick. Clearing it (the **✕** next to the dot) drops back to the host/auto colors. Unlike the per-host default (stored in your browser only), the profile color lives in the broker's profile definition, so it is shared with every browser and viewer of that broker.
 
@@ -113,7 +113,7 @@ There, each broker has a **live status row** above its profiles: a state-colored
 
 So the status surfaces stay interactive, not just indicators — and every recovery path that used to live on a chip (re-opening a cancelled login, taking back a lease, spotting a down broker) is one badge click away when several brokers are attached.
 
-Because those recovery paths now live on the (+) menu rows rather than on the chip, the chip itself is optional. **Control Panel → Broker status chip** offers **Always** (the default), **Only when a broker needs attention** — it appears when a broker goes unreachable, wants a password, or is taken over by another browser, and vanishes again once nothing is wrong — and **Never**. A broker you hid yourself never triggers it. Whichever you pick, the (+) menu rows and the **hidden** checkboxes under Control Panel → Hosts are unchanged, so logging in, taking over and un-hiding stay reachable with no chip at all. See [[Taskbar]].
+Because those recovery paths now live on the (+) menu rows rather than on the chip, the chip itself is optional. **Control Panel → Desktop → Broker status chip** offers **Always** (the default), **Only when a broker needs attention** — it appears when a broker goes unreachable, wants a password, or is taken over by another browser, and vanishes again once nothing is wrong — and **Never**. A broker you hid yourself never triggers it. Whichever you pick, the (+) menu rows and the **hidden** checkboxes under Control Panel → Hosts are unchanged, so logging in, taking over and un-hiding stay reachable with no chip at all. See [[Taskbar]].
 
 ## Single active browser (the lease)
 

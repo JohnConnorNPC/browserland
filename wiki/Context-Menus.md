@@ -85,7 +85,7 @@ Right-click a workspace dot at the bottom of the taskbar:
 - **Show names** / **Show numbers** — choose whether the dots display workspace names or numbers.
 - **New workspace** — append a fresh, empty workspace.
 
-Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click. Hiding the pager (Control Panel → Mods → Workspaces) removes the dots too, but rename and remove are on the empty desktop / taskbar menu below as well, so they survive that. Disabling the mod takes both menus away together.
+Workspaces and the pager are covered on [[Workspaces]]. This whole menu comes from the Workspaces mod — with it disabled there are no pager dots to right-click. Hiding the pager (Control Panel → Windows → Workspaces) removes the dots too, but rename and remove are on the empty desktop / taskbar menu below as well, so they survive that. Disabling the mod takes both menus away together.
 
 ## Empty desktop / strip
 

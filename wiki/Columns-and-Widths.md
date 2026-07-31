@@ -21,7 +21,7 @@ For a width between the presets, drag a column's **side gutter** — the seam be
 
 ## Move & focus columns
 
-You can shuffle columns and jump focus between them without touching the mouse. These are the defaults — all keys are rebindable in [[Control Panel → Keyboard shortcuts|Keyboard-Shortcuts]].
+You can shuffle columns and jump focus between them without touching the mouse. These are the defaults — all keys are rebindable in [[Control Panel → Input → Keybindings|Keyboard-Shortcuts]].
 
 | Action | Default binding |
 |---|---|

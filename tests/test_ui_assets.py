@@ -5271,8 +5271,11 @@ def test_mod_policy_section_is_per_host_and_painted_on_tab_switch():
     # remote tab -- the tabs it exists for.
     body = (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
     # The ELEMENT, not the comment above it (which explains why it is not global).
-    section = body[body.index('<div class="set-section" id="set-mod-policy">'):
+    # Sliced from the opening tag's id (#181 added a data-applet to it), so the
+    # assertion below is about the class list rather than the attribute order.
+    section = body[body.rindex("<div", 0, body.index('id="set-mod-policy"')):
                    body.index('id="set-mod-policy-hint"')]
+    assert 'class="set-section"' in section
     assert "set-browser-global" not in section
     assert 'id="set-mod-policy"' in body and 'id="set-mod-policy-list"' in body
     assert body.index('id="set-mod-policy"') > body.index('id="set-pane-host"')
@@ -5392,6 +5395,207 @@ def test_control_panel_has_no_native_password_inputs():
     pw_ids = re.findall(r'type="password"\s+id="([^"]+)"', INDEX_HTML)
     assert pw_ids == ["auth-token"], \
         f"unexpected native password input(s) survive: {pw_ids}"
+
+
+# --------------------------------------------------------------------------- #
+# the Control Panel is an applet grid (#181)
+# --------------------------------------------------------------------------- #
+
+_APPLET_FRAGMENT = "81a_js_control_panel_applets.js"
+
+
+def _applet_ids():
+    """The applet ids declared in the CP_APPLETS table, in table order."""
+    src = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    table = src[src.index("const CP_APPLETS = ["):src.index("const CP_APPLET_INDEX")]
+    return re.findall(r"\{ id: '([a-z-]+)'", table)
+
+
+def test_applet_grid_table_reaches_the_served_page():
+    # The table is the whole navigation: an applet that never reaches the page is
+    # a topic nobody can open. Assert the ids, their captions, their status-line
+    # blurbs AND their icons all ride the assembled HTML.
+    ids = _applet_ids()
+    assert len(ids) == len(set(ids)), f"duplicate applet id in CP_APPLETS: {ids}"
+    assert set(ids) == {"desktop", "windows", "input", "terminals", "startup",
+                        "access", "mods", "advanced"}
+    src = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    icons = src[src.index("const CP_APPLET_ICON_SVG = {"):
+                src.index("function cpAppletIconSvg")]
+    for aid in ids:
+        assert f"'{aid}'" in icons, f"applet {aid!r} has no icon table entry"
+        assert f"id: '{aid}'" in INDEX_HTML, f"applet {aid!r} missing from the page"
+    # The status line is what makes an icon grid navigable rather than a guessing
+    # game, so every applet declares one. It is the piece most likely to be
+    # dropped as "polish"; it is not.
+    blurbs = re.findall(r"blurb: '[^']", src)
+    assert len(blurbs) == len(ids), \
+        f"{len(ids)} applets but {len(blurbs)} status-line blurbs"
+    # Core applets need their OWN icons: APP_ICON_SVG (65) is keyed by app KIND
+    # and deliberately closed, and "Windows"/"Input"/"Startup" are not app kinds.
+    theming = (BROKER_DIR / "65_js_display_theming.js").read_text(encoding="utf-8")
+    closed = theming[theming.index("const APP_ICON_SVG = {"):
+                     theming.index("function appIconSvg")]
+    for aid in ids:
+        assert f"'{aid}':" not in closed, \
+            f"applet {aid!r} leaked into the closed app-kind icon table"
+
+
+def test_every_control_panel_section_belongs_to_exactly_one_applet():
+    # The failure mode this guards is a setting that becomes UNREACHABLE: behind
+    # eight icons, a section with no applet is drawn by no tile. Every .set-section
+    # in #set-pane-host must carry a data-applet naming a known applet -- except
+    # #set-mods, which is scaffolding (mods append their own sections INTO it) and
+    # is toggled by the router as a container, not as a member.
+    body = (BROKER_DIR / "40_body.html").read_text(encoding="utf-8")
+    pane = body[body.index('id="set-pane-host"'):body.index('id="set-pane-browser"')]
+    ids = set(_applet_ids())
+    sections = re.findall(r'<div class="set-section[^"]*"([^>]*)>', pane)
+    assert len(sections) >= 17, \
+        f"expected the full host pane, found {len(sections)} sections"
+    orphans, unknown = [], []
+    for attrs in sections:
+        if 'id="set-mods"' in attrs:
+            assert "data-applet" not in attrs, \
+                "#set-mods is a container, not an applet member"
+            continue
+        m = re.search(r'data-applet="([^"]+)"', attrs)
+        if not m:
+            orphans.append(attrs.strip())
+        elif m.group(1) not in ids:
+            unknown.append(m.group(1))
+    assert not orphans, f"section(s) with no applet (unreachable): {orphans}"
+    assert not unknown, f"section(s) naming an unknown applet: {unknown}"
+    # Exactly one applet each: a second data-applet on one tag would make the
+    # membership depend on which one the parser kept.
+    assert pane.count("data-applet=") == len(sections) - 1
+
+
+def test_applet_router_never_writes_inline_display():
+    # #17/#178, restated: `.set-browser-global` already has TWO writers of inline
+    # style.display (applyBrowserGlobalVisibility, and _controlSection at create
+    # time), inline beats every selector, and last-writer-wins there puts controls
+    # bound to the live LOCAL settings on a remote broker's tab. So the applet
+    # router and the filter hide through CLASSES and nothing else.
+    src = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("//"))
+    assert not re.search(r"style\.display\s*=[^=]", code), \
+        "the applet router became a third inline-display writer"
+    for cls in ("cp-applet-off", "cp-filter-off"):
+        assert f"classList.toggle('{cls}'" in src, f"{cls} is not class-driven"
+        assert f"#set-pane-host .{cls}" in INDEX_HTML \
+            or f".{cls}," in INDEX_HTML, f"{cls} has no CSS rule on the page"
+    # Availability is read off the INLINE property, never getComputedStyle --
+    # which our own hiding classes would pollute into a circular answer.
+    assert "getComputedStyle" not in code
+    assert "el.style.display !== 'none'" in code
+
+
+def test_flat_view_is_the_same_sections_not_a_second_renderer():
+    # "Show everything" falls back to the flat scroll by dropping the applet
+    # class, NOT by rendering a parallel list -- otherwise every future section
+    # has to be added in two places and the two drift.
+    src = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("//"))
+    # The only mention of the class is the query that FINDS the existing nodes.
+    assert code.count("set-section") == 1 \
+        and "querySelectorAll('.set-section')" in code, \
+        "the applet fragment builds .set-section nodes of its own"
+    # Rendering stays EAGER: opening an applet triggers no render (the #153/#157
+    # lesson -- a slow or failed remote /state must never leave the previous
+    # broker's rows under this host's name).
+    for renderer in ("renderSettings(", "renderModPolicy(", "renderKeybindings(",
+                     "renderProfilesEditor(", "renderMcpConfig("):
+        assert renderer not in code, \
+            f"{renderer} is called from the applet router -- render must stay eager"
+
+
+def test_applet_view_state_is_browser_local_and_survives_reset_local_view():
+    # The "Show everything" toggle is a VIEW preference: two people viewing one
+    # broker must not fight over it, so it must not ride the synced blob.
+    src = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    assert "const CP_PREFS_KEY = '_controlPanel'" in src
+    # (a) outside prefs._settings / prefs._layout, the only two things _stateBlob
+    #     serializes, so savePrefs can never push it;
+    sync = (BROKER_DIR / "52_js_state_sync.js").read_text(encoding="utf-8")
+    blob = sync[sync.index("function _stateBlob()"):sync.index("_stateSerialize")]
+    assert "_controlPanel" not in blob
+    # (b) UNDERSCORE-prefixed, because "Reset local view" deletes every
+    #     non-underscore top-level pref as per-session window geometry;
+    ident = (BROKER_DIR / "83_js_broker_identity.js").read_text(encoding="utf-8")
+    reset = ident[ident.index("function resetLocalView()"):]
+    assert "k.charAt(0) === '_'" in reset[:400], \
+        "resetLocalView no longer spares underscore keys -- recheck CP_PREFS_KEY"
+    # (c) persisted with savePrefsLocal, so toggling a view preference does not
+    #     schedule a broker PUT of unrelated settings/layout.
+    setter = src[src.index("function cpSetFlatMode"):src.index("function cpFilterQuery")]
+    assert "savePrefsLocal()" in setter and "savePrefs()" not in setter
+    # Strict === true: a corrupted stored "false" must not enable flat mode.
+    assert "p.flat === true" in src
+    # The filter box holds no state worth persisting and resets per open.
+    assert "filt.value = ''" in src
+
+
+def test_mod_sections_take_a_closed_applet_id_from_their_existing_mount():
+    # #181 rides _controlSection's EXISTING opts.mount seam: already a per-call
+    # placement hint resolved to a DOM host, already falling back to the shared
+    # bucket on an unknown value, already funnelled through by every
+    # ctx.settings.* primitive AND registerSettingsPane.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    sect = loader[loader.index("function _controlSection"):
+                  loader.index("function _modTrack")]
+    assert "cpAppletFor(opts.mount)" in sect
+    # A 'browser' mount is resolved FIRST and gets no applet (different pane).
+    assert sect.index("browserMount") < sect.index("cpAppletFor")
+    assert "if (!browserMount) section.dataset.applet" in sect
+    # The DOM host stays #set-mods whatever the applet is, so the silent-drop
+    # branch (`if (host) host.appendChild`) stays unreachable: an applet id must
+    # never resolve to a null host.
+    assert "'set-browser-mods' : 'set-mods'" in sect
+    # Closed set, owned by core: an unknown id degrades, it never MINTS an applet
+    # (a typo would otherwise mint a one-item applet titled by the typo).
+    applets = (BROKER_DIR / _APPLET_FRAGMENT).read_text(encoding="utf-8")
+    resolver = applets[applets.index("function cpAppletFor"):
+                       applets.index("const CP_MOD_BADGE_GLYPH")]
+    assert "CP_APPLET_INDEX[hint]" in resolver and "CP_DEFAULT_APPLET" in resolver
+    # registerSettingsPane forwards the hint verbatim instead of flattening it.
+    pane = loader[loader.index("function _modRegisterPane"):
+                  loader.index("_HELP_BLOCK_TYPES")]
+    assert "mount: browserMount ? 'browser' : spec.mount" in pane
+    # A mod placed inside a CORE applet stays attributable (#163: an installed
+    # mod is not first-party code). The badge is the SAME {svg}|{text} trust
+    # split #170 drew -- trusted table or our own glyph, never a mod's string.
+    badge = applets[applets.index("function cpModBadge"):
+                    applets.index("let cpOpenApplet")]
+    assert "appIconSvg(modId)" in badge and "CP_MOD_BADGE_GLYPH" in badge
+    assert badge.count("innerHTML") == 1, \
+        "cpModBadge grew a second innerHTML sink"
+
+
+def test_bevel_vars_have_a_static_value_outside_the_color_mix_gate():
+    # #173's finding, at the custom-property layer: a custom property accepts an
+    # ARBITRARY token stream, so `--x: <static>; --x: color-mix(...)` does NOT
+    # fall back on an engine without color-mix -- the second declaration still
+    # wins and the CONSUMING property becomes invalid at computed-value time,
+    # i.e. `unset`. Chiselled edges would then be absent, not "slightly wrong".
+    # The static pair must therefore live in :root and the derived pair behind an
+    # @supports gate.
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    at = css.index("@supports (color: color-mix(")
+    root, gate = css[css.index(":root {"):at], css[at:]
+    for var in ("--bevel-light", "--bevel-dark", "--bevel-face"):
+        assert re.search(rf"{var}:\s*#[0-9a-f]{{6}};", root), \
+            f"{var} has no static value in :root"
+        assert "color-mix" not in root.split(var + ":")[-1].split(";")[0], \
+            f"{var}'s :root value must be static, not a color-mix"
+        assert f"{var}: color-mix(" in gate, \
+            f"{var}'s derived value is not inside the @supports gate"
+    assert "@supports (color: color-mix(" in css
+    # And nothing hardcodes grey for the dress: the bevels are derived from the
+    # theme's own --bg-2 so the panel is coherent under every scheme.
+    assert "var(--bg-2)" in gate
+
+
 # --------------------------------------------------------------------------- #
 # floating windows honour the active workspace (#152)
 # --------------------------------------------------------------------------- #

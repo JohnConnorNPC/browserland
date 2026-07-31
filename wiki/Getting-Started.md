@@ -30,22 +30,33 @@ The **Control Panel** is where you configure the desktop. Open it any of these w
 - **Right-click the empty desktop or the taskbar** and choose **🎛 Control panel**.
 - Press the **Open control panel** shortcut, `Ctrl+Alt+p`.
 
-It opens as a moveable floating window — drag its title bar, resize it, or minimize it like any other window — with a tab per connected broker. Among the settings it covers (not an exhaustive list):
+It opens as a moveable floating window — drag its title bar, resize it, or minimize it like any other window — with a tab per connected broker.
 
-| Setting | What it controls |
+### Applets
+
+Inside a broker's tab the settings are grouped into **applets**: the panel opens on a grid of captioned icons, and you pick a topic first. Clicking one (or pressing Enter on a focused icon) swaps the grid for that applet's settings plus a **Back** button. It is one level deep — there is no nesting. The line under the grid describes whichever icon you are hovering or have tabbed to.
+
+| Applet | What lives there |
 |---|---|
-| Appearance | Theme, background pattern, and — via an opt-in mod (off by default; enable it under **Control Panel → Mods**) — terminal font |
-| Window mode | Floating vs. tiling (see [[Window-Modes]]) |
-| Drag hold delay | The hold time for the snap and pop-out gestures (see [[Snapping-and-Pop-out]]) |
-| Hosts | Remote brokers you connect to (see [[Hosts-and-Multi-Browser]]) |
-| Mods on this broker | Which mods that broker pins on or off for every browser that loads its page — including a remote broker's, from its own tab (see [[Hosts-and-Multi-Browser]]) |
-| Sync mods | Copy this broker's mod setup to the other brokers you have configured, instead of repeating it on each machine (see [[Hosts-and-Multi-Browser]]) |
-| MCP | AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
-| Keyboard shortcuts | Rebind any action (see [[Keyboard-Shortcuts]]) |
-| Clipboard (OSC 52) | Whether programs on that host may set your clipboard — off by default (see [[Keyboard-Shortcuts]]) |
-| Start button / taskbar | The + button's label, whether left/right-click gestures are swapped, restore-on-refresh |
-| Broker status chip | Whether the taskbar's broker-status chip shows always, only when a broker needs attention, or never (see [[Hosts-and-Multi-Browser]]) |
-| Workspaces | Whether the pager dots show names or numbers, whether the taskbar hides (rather than dims) windows on other workspaces, and whether the pager shows at all. Under **Mods**, since workspaces are one (see [[Workspaces]]) |
+| **Desktop** | Theme, background pattern, the clock chip's time zone, the start button's label and gestures, the broker status chip — and the terminal font, via an opt-in mod (off by default; enable it under **Control Panel → Mods**) |
+| **Windows** | Window size, window mode (floating vs. tiling — see [[Window-Modes]]), taskbar / title labels, drag hold delay (see [[Snapping-and-Pop-out]]), window slide speed, the workspace scrollbar, the terminal close button, and the Workspaces settings (see [[Workspaces]]) |
+| **Input** | Keybindings (see [[Keyboard-Shortcuts]]) and Clipboard (OSC 52) — whether programs on that host may set your clipboard, off by default |
+| **Terminals** | The default start path, the default terminal profile, and the launch profiles themselves |
+| **Startup** | Restore-on-refresh |
+| **Access** | MCP — AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
+| **Mods** | Which mods this browser runs, plus the settings each enabled mod contributes. A mod may also place its control in one of the applets above — the Color scheme radio sits in **Desktop**, for instance — and a mod-owned setting carries a small badge naming its mod wherever it lands |
+| **Advanced** | **Mods on this broker**: which mods that broker pins on or off for every browser that loads its page — including a remote broker's, from its own tab (see [[Hosts-and-Multi-Browser]]) |
+
+An applet only appears when it has something to show on the tab you are on. A remote broker's tab has no **Desktop** or **Startup** icon, for example, because everything in them belongs to the browser you are sitting at rather than to that broker (see *Per-browser vs. per-host settings* below).
+
+The **Browser** tab is not an applet grid — it is short already, and holds the Hosts list, **Broker registry**, **Sync mods** (copy this broker's mod setup to the other brokers you have configured, instead of repeating it on each machine — see [[Hosts-and-Multi-Browser]]), and Troubleshooting.
+
+### Finding a setting
+
+Two ways in, and you do not have to guess which applet something is under:
+
+- **The box above the grid** filters as you type. It matches section headings, control labels, hints and the values you have entered, and icons with no match drop out of the grid. When what you typed narrows to a single applet, press **Enter** to open it with the matching setting scrolled into view; **Esc** clears the box.
+- **Show everything** turns the applets off and gives you the whole flat list in one scroll — the browse path, the `Ctrl+F` path, and the escape hatch for when the grouping puts something where you did not look. Filtering while it is on filters that flat list instead of the grid. The toggle is remembered in the browser you set it from and is never shared with anyone else viewing the same broker.
 
 ### Per-browser vs. per-host settings
 

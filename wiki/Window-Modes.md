@@ -13,7 +13,7 @@ The window mode is a per-host setting (one tab per broker), so each host can be 
 
 You can flip between floating and tiling two ways:
 
-- **Control Panel → Window mode.** Open the [[Control Panel|Getting-Started]] (right-click the + button or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), then pick the window mode.
+- **Control Panel → Windows → Window mode.** Open the [[Control Panel|Getting-Started]] (right-click the + button or the desktop → **🎛 Control panel**, or press `Ctrl+Alt+p`), then pick the window mode.
 - **The "Toggle tiling mode" shortcut** — default `Ctrl+Alt+t`.
 
 The shortcut is rebindable like every other keyboard action. See [[Keyboard-Shortcuts]] to change it.

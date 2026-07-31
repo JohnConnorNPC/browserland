@@ -35,7 +35,7 @@ To detach a window directly without the hold, **right-click the title bar** and 
 
 ## Hold delay (configurable)
 
-The hold time for **both** gestures is set per host in **Control Panel → Drag hold delay**, measured in milliseconds.
+The hold time for **both** gestures is set per host in **Control Panel → Windows → Drag hold delay**, measured in milliseconds.
 
 | Setting | Behavior |
 |---|---|

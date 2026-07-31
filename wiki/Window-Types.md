@@ -36,7 +36,7 @@ A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left
 
 Every terminal title bar carries a **⏺ record button**: click to record that session, click again to stop and save it to the broker. The **Session recorder** window from the **+** menu lists saved recordings and plays them back in a window fixed at the original recorded size, with pause, speed, continuous reverse, and timestamped notes.
 
-**Control Panel → Session recorder → auto-record every session** (off by default) records every terminal as it opens, so nothing is missed for want of pressing ⏺ first. Switching it off again stops the recordings it started; a recording you began by hand keeps running. A long recording rolls over into numbered parts at the 50 MB size cap rather than stopping, and with auto-record on a page reload no longer warns before discarding the segment in progress. Recordings are never swept, so leaving it on grows the broker's `webterm_recordings/` directory until you delete from the library. See the **Session recorder** section of the in-app help for details.
+**Control Panel → Mods → Session recorder → auto-record every session** (off by default) records every terminal as it opens, so nothing is missed for want of pressing ⏺ first. Switching it off again stops the recordings it started; a recording you began by hand keeps running. A long recording rolls over into numbered parts at the 50 MB size cap rather than stopping, and with auto-record on a page reload no longer warns before discarding the segment in progress. Recordings are never swept, so leaving it on grows the broker's `webterm_recordings/` directory until you delete from the library. See the **Session recorder** section of the in-app help for details.
 
 ## Scratchpad
 
@@ -45,6 +45,8 @@ The Scratchpad is a single-instance window of tabbed notes stored on the broker,
 ## Control Panel
 
 The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **🎛 Control panel** item, the desktop / taskbar right-click menu, or the **Open control panel** shortcut (`Ctrl+Alt+p`).
+
+Inside a broker's tab the settings are grouped into **applets** — Desktop, Windows, Input, Terminals, Startup, Access, Mods, Advanced — so the panel opens on a grid of captioned icons rather than one long scroll, and you pick a topic first. A filter box above the grid finds a setting by name, and a **Show everything** toggle drops back to the flat list. See [[Getting-Started]] for what each applet holds.
 
 Like the file manager and the task manager, the Control Panel is **ephemeral**: it edits settings that persist on their own (per-browser, or per-host via the broker), so the window itself has nothing to save — closing it just dismisses it, and it has no *Delete*. See [[Getting-Started]] for what the settings cover.
 

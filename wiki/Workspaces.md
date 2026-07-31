@@ -76,7 +76,7 @@ Right-click a **pager dot** for that workspace's options:
 | `Show numbers` | Show workspace numbers on the dots instead. |
 | `New workspace` | Append a fresh empty workspace. |
 
-`Show names` / `Show numbers` is a single toggle for how *all* dots are labeled; the active choice is marked with a `✓`. It is also **Workspace labels** under **Control Panel → Mods → Workspaces**.
+`Show names` / `Show numbers` is a single toggle for how *all* dots are labeled; the active choice is marked with a `✓`. It is also **Workspace labels** under **Control Panel → Windows → Workspaces**.
 
 The workspace menu — right-click the empty desktop, the empty tiling strip, or an empty part of the taskbar — renames and removes too, naming its target so there is no doubt which workspace it acts on:
 
@@ -93,7 +93,7 @@ Hovering a pager dot pops up a small schematic of that workspace: its columns an
 
 ## Taskbar behaviour
 
-Chips for windows on other workspaces are dimmed and carry a small badge naming their workspace, so the bar always indicates where you are. The mod's three settings all live together under **Control Panel → Mods → Workspaces**:
+Chips for windows on other workspaces are dimmed and carry a small badge naming their workspace, so the bar always indicates where you are. The mod's three settings all live together under **Control Panel → Windows → Workspaces** — the mod places them beside the other window settings rather than in the shared **Mods** applet, each carrying its mod badge:
 
 | Setting | What it does |
 |---|---|
@@ -125,7 +125,7 @@ Nothing is destroyed and nothing is hidden either way. Every tiled column lives 
 - the pager disappears;
 - the seven workspace shortcuts leave the Keyboard shortcuts list (your bindings are remembered, not deleted);
 - **Send to workspace** and **On all workspaces** leave the title-bar menus, and the whole workspace block leaves the empty-desktop / taskbar menu;
-- the mod's three settings leave **Control Panel → Mods**;
+- the mod's three settings leave **Control Panel → Windows**;
 - any floating window that was masked to another workspace becomes visible.
 
 Re-enable it and your workspaces come back exactly as they were. A column created while the mod was off joins whichever workspace is active when you turn it back on.

@@ -45,11 +45,11 @@ Each window button — and the matching window title bar — shows a label built
 
 By default the label reads **`#id host: title [pid]`** with the pid hidden — for example `#42 myhost: claude`.
 
-To change it, open **Control Panel → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and a ticked component that has no value for a given window (for example the host on an app window that has none) is simply left out — if that would leave the label empty, the title is shown instead, so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
+To change it, open **Control Panel → Windows → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and a ticked component that has no value for a given window (for example the host on an app window that has none) is simply left out — if that would leave the label empty, the title is shown instead, so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
 
 ### Items for other workspaces
 
-By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Mods → Workspaces. This setting governs your browser.
+By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Windows → Workspaces. This setting governs your browser.
 
 ## The launch button (+)
 
@@ -62,7 +62,7 @@ By default:
 
 ### Swapping the click gestures
 
-If you open the picker more often than you use the one-click default, turn on **Control Panel → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches your default host's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
+If you open the picker more often than you use the one-click default, turn on **Control Panel → Desktop → Start button → "Left-click opens the profile menu (right-click quick-launches)"**. With it enabled the two gestures swap: **left-click** opens the launch menu and **right-click** quick-launches your default host's default profile. The native browser context menu never appears either way. The toggle is off by default and, like the button label, applies to the browser you set it from.
 
 ### Open in folder…
 
@@ -70,7 +70,7 @@ The right-click menu also includes an **Open in folder…** item under each host
 
 ### Renaming the button
 
-The button shows `+` by default. To change its label, set Control Panel → Start button. Leave it blank to fall back to `+`. Only the visible label changes — the click gestures follow whichever mapping you have set (see [Swapping the click gestures](#swapping-the-click-gestures) above).
+The button shows `+` by default. To change its label, set Control Panel → Desktop → Start button. Leave it blank to fall back to `+`. Only the visible label changes — the click gestures follow whichever mapping you have set (see [Swapping the click gestures](#swapping-the-click-gestures) above).
 
 ## Fullscreen
 
@@ -80,11 +80,11 @@ The fullscreen button (`⛶`) toggles the browser into fullscreen and back. You 
 
 The pager dots on the right of the taskbar (left of the host chips) are one-click workspace switchers, and their right-click menus rename or remove workspaces and toggle names vs. numbers. They come from the **Workspaces** mod (enabled by default), so the dots are absent if you turn it off. They are covered in full under [[Workspaces]].
 
-To keep workspaces but reclaim the space the dots take, turn on **Hide the workspace pager from the taskbar** under Control Panel → Mods → Workspaces. Only the pager goes — the chip badges and dimming, the shortcuts, and **Send to workspace** all stay, and the workspace menu (right-click an empty part of the taskbar or the desktop) still switches, adds, renames, and removes workspaces.
+To keep workspaces but reclaim the space the dots take, turn on **Hide the workspace pager from the taskbar** under Control Panel → Windows → Workspaces. Only the pager goes — the chip badges and dimming, the shortcuts, and **Send to workspace** all stay, and the workspace menu (right-click an empty part of the taskbar or the desktop) still switches, adds, renames, and removes workspaces.
 
 ## Broker status chip
 
-The host-status area shows a chip for your broker (or one aggregate badge once you have several). By default it is always there, but it is only an indicator — every broker also has a live row in the start (+) menu carrying the same actions — so **Control Panel → Broker status chip** lets you turn it down:
+The host-status area shows a chip for your broker (or one aggregate badge once you have several). By default it is always there, but it is only an indicator — every broker also has a live row in the start (+) menu carrying the same actions — so **Control Panel → Desktop → Broker status chip** lets you turn it down:
 
 | Show | Effect |
 |---|---|

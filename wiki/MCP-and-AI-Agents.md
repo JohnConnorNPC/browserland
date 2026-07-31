@@ -8,7 +8,7 @@ An MCP client (such as an AI coding agent) connects to your broker and can attac
 
 The agent can only see and touch the terminals you allow. There are three layers of control, all opt-in:
 
-1. **Master enable** for the host (Control Panel → MCP).
+1. **Master enable** for the host (Control Panel → Access → MCP access).
 2. **Per-window access** — `off`, `read`, or `readwrite` — set on each terminal.
 3. A separate gate for whether the agent may **launch new terminals**.
 
@@ -30,7 +30,7 @@ The robot button is specific to **terminals**. For the full list of window types
 
 ## Enable MCP for a host
 
-MCP is configured per host in **Control Panel → MCP**:
+MCP is configured per host in **Control Panel → Access → MCP access**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
 - **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with.
