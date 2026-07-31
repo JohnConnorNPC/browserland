@@ -84,7 +84,7 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import auth, modinstall, relay
+from . import auth, modinstall, relay, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
@@ -406,8 +406,13 @@ def _load_mod_policy(path: Path) -> Dict[str, bool]:
 RPC_TIMEOUT = 10.0
 
 # ---- AI-provider status proxy (#112) ---------------------------------------
-# The broker makes NO other outbound HTTP request; GET /status/fetch is its ONLY
-# egress. The aistatus mod (which ships DISABLED — no request until the operator
+# The broker makes exactly TWO outbound HTTP requests, and they are the only
+# egress in the process: GET /status/fetch (here, #112) and GET /update/check
+# (the version check, #182 -- see _update_check and broker/update.py). Both are
+# operator-gated and off until opted in; keep this comment true if a third is
+# ever added, because this is where the egress surface is meant to be auditable.
+#
+# The aistatus mod (which ships DISABLED — no request until the operator
 # opts in) needs a server-side, ALLOWLISTED, cached proxy so browser JS can read
 # cross-origin Atlassian Statuspage summaries (the status hosts don't send
 # permissive CORS, so the browser can't fetch them directly).
@@ -432,6 +437,19 @@ STATUS_ALLOWLIST = {
 STATUS_FETCH_TIMEOUT = 4.0          # seconds per upstream request
 STATUS_MAX_BYTES = 512 * 1024       # reject an oversized status payload
 STATUS_CACHE_TTL = 60               # seconds a normalized result is cache-served
+
+# ---- update check (#182) ----------------------------------------------------
+# The broker's SECOND (and last) egress. Gated TWICE: by the browser token like
+# every other route, and by an operator switch in broker config. The switch is
+# the one that matters here -- the update mod shipping default-OFF does not stop
+# anything from calling this route, so without a server-side gate "no outbound
+# request until you opt in" would be a claim the code does not keep.
+#
+# How long a FAILED check is cached. Successes use update.next_ttl() (daily +
+# jitter); a transient failure must not pin an "unknown" for a whole day, but it
+# must not retry-storm either. A rate-limited result ignores both and waits for
+# the reset the response itself named.
+UPDATE_RETRY_TTL = 15 * 60
 # Statuspage summary.json overall indicators, worst last. Anything else (or a
 # fetch/parse failure) normalizes to "unknown" so the UI greys the row.
 _STATUS_INDICATORS = ("none", "minor", "major", "critical")
@@ -2522,6 +2540,30 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # after STATUS_CACHE_TTL. Single-process => this one dict is the source of
     # truth; a minor concurrent-miss stampede is acceptable for v1.
     app.ctx.status_cache = {}
+    # ---- update check (#182) ---------------------------------------------
+    # The operator switch. Default FALSE, and deliberately independent of
+    # mods_enabled and of the update mod's own default-off: the mod being
+    # disabled governs what the BROWSER draws, not whether this process is
+    # willing to talk to github.com. Without this, "zero outbound requests
+    # until you opt in" is not something the broker actually enforces.
+    app.ctx.update_check_enabled = bool(
+        config.get("update_check_enabled", False))
+    # Upstream override for someone genuinely tracking their own fork. Still a
+    # CONSTANT from the client's point of view -- it is never read off a
+    # request, only out of the broker's own config.
+    app.ctx.update_repo = str(
+        config.get("update_repo") or update_check.UPSTREAM_REPO)
+    app.ctx.update_branch = str(
+        config.get("update_branch") or update_check.UPSTREAM_BRANCH)
+    # {"data": <last result>, "until": <wall-clock seconds>}. Wall clock, not
+    # loop.time(), because a rate-limit reset arrives as an absolute unix
+    # timestamp and mixing the two clocks is how you get a cache that expires
+    # in 1970 or never.
+    app.ctx.update_cache = {"data": None, "until": 0.0}
+    # Single-flight. Ten tabs opening at once on a cold cache must produce ONE
+    # upstream request, not ten -- the unauthenticated budget is 60/hour for
+    # the whole source IP, shared with CI and everything else on it.
+    app.ctx.update_lock = asyncio.Lock()
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -5538,6 +5580,65 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True, "fetchedAt": int(time.time()),
                            "providers": list(results)})
 
+    # ---- update check (/update/check, #182) -------------------------------
+    # The broker's second and last egress. Same token gate as /info, PLUS the
+    # operator switch: a broker that was never opted in answers 503 and makes
+    # no outbound request at all.
+    #
+    # The client supplies NOTHING. There is no ?repo=, no ?url=, no ?ref= --
+    # the upstream comes from broker config or the module constant, so this
+    # route cannot be pointed at an internal address the way a URL parameter
+    # would let it be. Same structural posture as /status/fetch's allowlist.
+    async def _update_check_cached() -> Dict[str, Any]:
+        ctx = app.ctx
+        now = time.time()
+        ent = ctx.update_cache
+        if ent.get("data") is not None and now < ent.get("until", 0.0):
+            return ent["data"]
+        async with ctx.update_lock:
+            # Re-read INSIDE the lock: while we waited, the request that held
+            # it may have filled the cache. Without this the lock serializes
+            # the stampede instead of collapsing it -- ten requests would each
+            # take their turn making the very call the first one just made.
+            ent = ctx.update_cache
+            now = time.time()
+            if ent.get("data") is not None and now < ent.get("until", 0.0):
+                return ent["data"]
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(
+                None, functools.partial(
+                    update_check.run_check,
+                    repo=ctx.update_repo, branch=ctx.update_branch,
+                    local_version=ctx.version))
+            if data.get("state") == update_check.STATE_UNKNOWN:
+                reset_at = data.get("resetAt")
+                if (data.get("reason") == update_check.REASON_RATE_LIMITED
+                        and isinstance(reset_at, (int, float))
+                        and reset_at > now):
+                    # Wait exactly as long as GitHub said, and not on a timer
+                    # of our own invention.
+                    until = float(reset_at)
+                else:
+                    until = now + UPDATE_RETRY_TTL
+            else:
+                until = now + update_check.next_ttl()
+            ctx.update_cache = {"data": data, "until": until}
+            return data
+
+    async def _update_check(request: Request):
+        err = _gated_auth_error(request, "/update/check")
+        if err is not None:
+            return err
+        if not app.ctx.update_check_enabled:
+            # 503, not 403: the capability is absent on this broker, which is a
+            # different thing from the caller being unauthorized. The client
+            # renders it as "unknown -- checking is disabled here", never as
+            # "up to date".
+            return sanic_json({"ok": False, "error": "update_check_disabled"},
+                              status=503)
+        data = await _update_check_cached()
+        return sanic_json({"ok": True, "check": data})
+
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
     # concurrency on an integer rev: GET returns {rev, settings, layout}; PUT
@@ -6403,6 +6504,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_info, "/info", methods=["GET"])
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
+    app.add_route(_update_check, "/update/check", methods=["GET"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
     app.add_route(_modstore_get, "/mod-store/<modId>", methods=["GET"])
@@ -6466,6 +6568,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/info", "preflight_info"),
                              ("/mods/policy", "preflight_mods_policy"),
                              ("/status/fetch", "preflight_status_fetch"),
+                             ("/update/check", "preflight_update_check"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),
                              ("/recording/begin", "preflight_rec_begin"),

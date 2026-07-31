@@ -20,14 +20,17 @@ fetch-path tests monkeypatch the module-level `_OPENER`.
 
 from __future__ import annotations
 
-import io
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
+from .auth_helpers import TEST_TOKEN, authed
+from webterm.broker import app as broker_app
 from webterm.broker import update
+from webterm.broker.app import create_app
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -443,3 +446,156 @@ def test_run_check_always_returns_a_renderable_shape():
     for key in ("state", "reason", "mode", "local", "repo", "checkedAt",
                 "upstream", "treeVerified"):
         assert key in out
+
+
+# ---- E5 / E20: the route, its two gates, and its cache ---------------------
+
+_app_seq = 0
+
+
+def _make_app(tmp_path, monkeypatch, token=None, enabled=True):
+    """A broker app with state_path in tmp_path and a UNIQUE Sanic name (mirrors
+    test_status_fetch)."""
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "auth_token": token or TEST_TOKEN,
+           "update_check_enabled": enabled}
+    return create_app(cfg, name=f"webterm-update-test-{_app_seq}")
+
+
+def _patch_run_check(monkeypatch, result=None, explode=False):
+    """Replace the whole check with a no-network fake that counts calls.
+    The route resolves it through the module object, so patching the attribute
+    is what the route actually invokes."""
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        if explode:
+            raise AssertionError(
+                "the route made an upstream call it was not permitted to make")
+        return result or {"state": update.STATE_CURRENT, "reason": None,
+                          "mode": "commit", "local": {"version": "0.8.0",
+                                                      "sha": SHA},
+                          "repo": update.UPSTREAM_REPO, "checkedAt": 1,
+                          "upstream": {"sha": SHA}, "treeVerified": False}
+
+    monkeypatch.setattr(broker_app.update_check, "run_check", fake)
+    return calls
+
+
+def test_the_route_requires_a_token(tmp_path, monkeypatch):
+    _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    # RAW client on purpose: authed() would append the token this test needs
+    # to be missing.
+    _, r = app.test_client.get("/update/check")
+    assert r.status == 401
+    _, r = app.test_client.get("/update/check?token=nope")
+    assert r.status == 401
+
+
+def test_a_broker_that_never_opted_in_makes_no_request(tmp_path, monkeypatch):
+    """E20, and the one that makes G2 true. The mod shipping default-off does
+    NOT gate this route -- without the server-side switch, 'no outbound request
+    until you opt in' would be a claim the code does not keep. The fake raises
+    if called, so a regression fails loudly rather than silently egressing."""
+    _patch_run_check(monkeypatch, explode=True)
+    app = _make_app(tmp_path, monkeypatch, enabled=False)
+    _, r = authed(app).get("/update/check")
+    assert r.status == 503
+    assert r.json["ok"] is False
+    assert r.json["error"] == "update_check_disabled"
+
+
+def test_the_gate_defaults_to_off(tmp_path, monkeypatch):
+    """Absent config must mean disabled, not enabled."""
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    app = create_app({"state_path": str(tmp_path / "s.json"),
+                      "auth_token": TEST_TOKEN},
+                     name=f"webterm-update-default-{_app_seq}")
+    assert app.ctx.update_check_enabled is False
+
+
+def test_an_enabled_broker_returns_the_check(tmp_path, monkeypatch):
+    _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/update/check")
+    assert r.status == 200
+    assert r.json["ok"] is True
+    assert r.json["check"]["state"] == update.STATE_CURRENT
+
+
+def test_a_second_call_inside_the_ttl_does_not_refetch(tmp_path, monkeypatch):
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    client.get("/update/check")
+    client.get("/update/check")
+    client.get("/update/check")
+    assert len(calls) == 1, "the daily TTL must serve the cached result"
+
+
+def test_the_client_cannot_supply_a_repo_or_url(tmp_path, monkeypatch):
+    """Structural, not filtered: there is no parameter to smuggle a URL
+    through, so an attacker-supplied host cannot become the fetch target."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    authed(app).get("/update/check?repo=evil/repo"
+                    "&url=http://169.254.169.254/latest/meta-data/")
+    assert len(calls) == 1
+    assert calls[0]["repo"] == update.UPSTREAM_REPO
+    for value in calls[0].values():
+        assert "169.254" not in str(value)
+        assert "evil" not in str(value)
+
+
+def test_a_rate_limited_result_waits_for_the_reset(tmp_path, monkeypatch):
+    """Not our own retry timer: wait exactly as long as GitHub said."""
+    import time as _time
+    reset_at = _time.time() + 3600
+    _patch_run_check(monkeypatch, result={
+        "state": update.STATE_UNKNOWN,
+        "reason": update.REASON_RATE_LIMITED, "resetAt": reset_at,
+        "mode": "commit", "local": {}, "repo": update.UPSTREAM_REPO,
+        "checkedAt": 1, "upstream": None, "treeVerified": False})
+    app = _make_app(tmp_path, monkeypatch)
+    authed(app).get("/update/check")
+    assert app.ctx.update_cache["until"] == pytest.approx(reset_at, abs=2)
+
+
+def test_a_transient_failure_is_cached_briefly_not_for_a_day(tmp_path,
+                                                             monkeypatch):
+    """An offline blip must not pin `unknown` until tomorrow."""
+    import time as _time
+    _patch_run_check(monkeypatch, result={
+        "state": update.STATE_UNKNOWN, "reason": update.REASON_OFFLINE,
+        "mode": "commit", "local": {}, "repo": update.UPSTREAM_REPO,
+        "checkedAt": 1, "upstream": None, "treeVerified": False})
+    app = _make_app(tmp_path, monkeypatch)
+    authed(app).get("/update/check")
+    ahead = app.ctx.update_cache["until"] - _time.time()
+    assert 0 < ahead <= broker_app.UPDATE_RETRY_TTL + 2
+    assert ahead < update.CHECK_TTL
+
+
+def test_a_success_is_cached_for_a_day(tmp_path, monkeypatch):
+    import time as _time
+    _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    authed(app).get("/update/check")
+    ahead = app.ctx.update_cache["until"] - _time.time()
+    assert ahead >= update.CHECK_TTL - 2
+
+
+def test_the_egress_comment_names_both_routes():
+    """app.py's egress comment is load-bearing for reviewing this codebase's
+    threat model. Adding a second outbound route made the old wording false."""
+    src = Path(broker_app.__file__).read_text(encoding="utf-8")
+    assert "GET /status/fetch is its ONLY" not in src
+    head = src[:src.index("STATUS_ALLOWLIST")]
+    assert "/update/check" in head and "/status/fetch" in head
