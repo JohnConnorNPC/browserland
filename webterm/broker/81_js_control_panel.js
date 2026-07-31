@@ -135,9 +135,7 @@
             // class (it is answering for a tab that is no longer open), so a
             // reopen would otherwise land on the local tab wearing "loading
             // settings…". Clear both here, where we know the tab is local.
-            setHostLoadingEl.style.display = 'none';
-            setHostLoadingEl.textContent = 'loading settings…';
-            setPaneHost.classList.remove('loading');
+            clearHostLoading();
             renderSettingsTabs();
             showSettingsPane('local');
             renderSettings();
@@ -204,6 +202,19 @@
             // we just wrote, so it must run AFTER the loop, never before.
             reconcileControlPanel();
         }
+        // Retire the remote-load placeholder + its pane class. Only the remote
+        // branch of selectSettingsTab ever RAISES them, and only its own success
+        // path lowered them — so leaving a failed remote tab (for local, for
+        // Browser, or by closing the panel) used to strand "could not load this
+        // broker's settings" at the top of a pane it no longer describes. The
+        // text is reset too, because the failure branch overwrites it and the
+        // next load would otherwise open showing the previous failure.
+        function clearHostLoading() {
+            if (!setHostLoadingEl) return;
+            setHostLoadingEl.style.display = 'none';
+            setHostLoadingEl.textContent = 'loading settings…';
+            if (setPaneHost) setPaneHost.classList.remove('loading');
+        }
         // Switch tabs. Browser + local are synchronous; a remote host awaits a
         // fresh /state GET (with a "loading…" placeholder) before its form is
         // populated and editable.
@@ -212,6 +223,12 @@
             _kbRecording = null;
             renderSettingsTabs();
             showSettingsPane(tabId);
+            // Whatever the previous tab left behind is not about THIS tab. The
+            // remote branch below raises it again a few lines later for its own
+            // fetch; every other path wants it gone. #181 made this conspicuous
+            // rather than causing it — in grid mode the pane is otherwise empty,
+            // so a stale failure line sits alone above the applet icons.
+            clearHostLoading();
             // #157: the mod-policy section keys off currentSettingsTab alone (not
             // settingsTarget / this host's /state), so paint it NOW — before any
             // await, on every tab including 'browser'. If the remote /state fetch

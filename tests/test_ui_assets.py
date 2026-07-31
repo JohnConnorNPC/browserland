@@ -5572,6 +5572,38 @@ def test_mod_sections_take_a_closed_applet_id_from_their_existing_mount():
         "cpModBadge grew a second innerHTML sink"
 
 
+def test_remote_load_placeholder_is_cleared_on_every_exit_path():
+    # Only the REMOTE branch of selectSettingsTab raises #set-host-loading, and
+    # only its own success path lowered it -- so leaving a FAILED remote tab
+    # stranded "could not load this broker's settings" at the top of a pane it no
+    # longer describes (for local, for Browser, and across a close/reopen of the
+    # borrowed singleton). #181 did not cause that, but made it conspicuous: in
+    # grid mode the pane is otherwise empty, so the stale line sits alone above
+    # the applet icons.
+    panel = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+    assert "function clearHostLoading()" in panel
+    # Resets the TEXT too -- the failure branch overwrites it, so the next load
+    # would otherwise open showing the previous failure.
+    fn = panel[panel.index("function clearHostLoading()"):
+               panel.index("// Switch tabs.")]
+    assert "style.display = 'none'" in fn
+    assert "loading settings" in fn
+    assert "classList.remove('loading')" in fn
+    # Called unconditionally at the top of every tab switch, BEFORE the remote
+    # branch raises it again for its own fetch...
+    tab = panel[panel.index("async function selectSettingsTab"):
+                panel.index("// Populate the host-form fields")]
+    assert tab.index("clearHostLoading()") < tab.index("if (tabId === 'browser')")
+    assert tab.index("clearHostLoading()") < tab.index("setHostLoadingEl.style.display = ''")
+    # ...and on open, where the tab is known to be local.
+    opener = panel[panel.index("function openControlPanelWindow"):
+                   panel.index("function toggleControlPanelWindow")]
+    assert "clearHostLoading()" in opener
+    # The applet view is reset on open too, and AFTER renderSettings -- which
+    # repaints every section (and reconciles) before we decide what to show.
+    assert opener.index("renderSettings()") < opener.index("cpResetControlPanelView()")
+
+
 def test_bevel_vars_have_a_static_value_outside_the_color_mix_gate():
     # #173's finding, at the custom-property layer: a custom property accepts an
     # ARBITRARY token stream, so `--x: <static>; --x: color-mix(...)` does NOT
