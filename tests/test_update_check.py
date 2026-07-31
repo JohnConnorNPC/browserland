@@ -707,3 +707,58 @@ def test_the_egress_comment_names_both_routes():
     assert "GET /status/fetch is its ONLY" not in src
     head = src[:src.index("STATUS_ALLOWLIST")]
     assert "/update/check" in head and "/status/fetch" in head
+
+
+# ---- A1: the capability signal on GET /info ---------------------------------
+#
+# #157's precedent (documented in _info's own comment): a brand-new route's
+# cross-origin OPTIONS preflight fails hard on an older peer and reads as an
+# opaque network error, indistinguishable from "that machine is asleep". /info
+# is already in the explicit preflight list, so an older broker just answers
+# without the new key -- a difference a client can see and report honestly.
+# That is why the capability rides /info rather than a route of its own, and
+# why its mere PRESENCE (not the mod's enabled state, not serve_ui) is the
+# signal: it must show up on every broker that has this atom, full stop.
+
+def test_info_reports_update_check_disabled_by_default(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch, enabled=False)
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    assert r.json["update"]["check_enabled"] is False
+
+
+def test_info_reports_update_check_enabled_when_configured(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch, enabled=True)
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    assert r.json["update"]["check_enabled"] is True
+
+
+def test_info_reports_apply_enabled_false_though_the_gate_does_not_exist_yet(
+        tmp_path, monkeypatch):
+    """No `update_apply_enabled` config key exists yet -- apply is a LATER
+    checkpoint -- so this must read as an honest, present, off-by-default
+    capability rather than being silently omitted or hardcoded true."""
+    app = _make_app(tmp_path, monkeypatch, enabled=True)
+    assert not hasattr(app.ctx, "update_apply_enabled")
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    assert r.json["update"]["apply_enabled"] is False
+
+
+def test_info_update_key_is_additive_not_conditional(tmp_path, monkeypatch):
+    """Adding `update` must not disturb any existing /info key, and it must be
+    present regardless of mods/serve_ui -- headless included."""
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "auth_token": TEST_TOKEN, "serve_ui": False, "mods_enabled": False}
+    app = create_app(cfg, name=f"webterm-update-info-headless-{_app_seq}")
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    body = r.json
+    for key in ("ok", "broker_id", "version", "mods_enabled", "serve_ui",
+                "mods", "mod_policy", "update"):
+        assert key in body
+    assert "check_enabled" in body["update"] and "apply_enabled" in body["update"]

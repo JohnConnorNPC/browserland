@@ -5163,12 +5163,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # installed_at, what was skipped) lives on the token-gated
         # GET /mods/installed, so /info -- which every peer fetches -- stays
         # small. An installed row's `default_enabled` is ALWAYS false.
+        #
+        # #182: `update` follows the SAME rationale as `mods`/`mod_policy`
+        # above -- it rides the existing /info route rather than a route of
+        # its own so that a broker predating the update feature still answers
+        # normally (it just lacks the key), instead of an older peer's
+        # cross-origin OPTIONS preflight 404ing on a brand-new path and the
+        # browser surfacing that as an opaque network error indistinguishable
+        # from "that machine is asleep". `apply_enabled` is read defensively
+        # (the apply half does not exist yet -- a later checkpoint) so this
+        # key is honest about a capability that is not implemented rather than
+        # silently omitted or hardcoded true.
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
                            "version": app.ctx.version,
                            "mods_enabled": app.ctx.mods_enabled,
                            "serve_ui": app.ctx.serve_ui,
                            "mods": app.ctx.mod_catalog,
-                           "mod_policy": dict(app.ctx.mod_policy)})
+                           "mod_policy": dict(app.ctx.mod_policy),
+                           "update": {
+                               "check_enabled": app.ctx.update_check_enabled,
+                               "apply_enabled": bool(getattr(
+                                   app.ctx, "update_apply_enabled", False)),
+                           }})
 
     # ---- mod policy write (/mods/policy, #157) ----------------------------
     # The ONLY writer of the pins GET /info reports. Token-gated like every
