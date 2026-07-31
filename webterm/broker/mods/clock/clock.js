@@ -128,6 +128,7 @@
                 // like pattern owns `pattern`). def '' -> browser-local fallback.
                 const setting = ctx.settings.text('clockTz', {
                     title: 'Time zone',
+                    mount: 'desktop',   // #181: the chip is desktop chrome
                     label: 'time zone',
                     def: '',
                     isBrowserGlobal: true,

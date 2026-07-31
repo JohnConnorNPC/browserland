@@ -55,9 +55,15 @@
                 const labelMode = ctx.settings.select('wsLabelMode', [
                     { value: 'number', label: 'Numbers' },
                     { value: 'name', label: 'Names' },
-                ], { title: 'Workspaces', label: 'Workspace labels', def: 'number' });
+                ], { title: 'Workspaces', label: 'Workspace labels', def: 'number',
+                     mount: 'windows' });
+                // #181: EVERY call site takes the same mount, not just the titled
+                // one. The contiguity these three rely on is DOM order inside one
+                // applet -- placing only the titled section would strand the two
+                // untitled ones in the Mods bucket under no heading at all.
                 const hideOther = ctx.settings.boolean('hideTaskbarOtherWs', false, {
                     label: 'Hide taskbar items from other workspaces',
+                    mount: 'windows',
                 });
                 // #162: hide JUST the pager, for people who drive workspaces
                 // from the keyboard and want the taskbar space back.
@@ -77,6 +83,7 @@
                 // absent key means today's behaviour.
                 const hidePager = ctx.settings.boolean('hideWsPager', false, {
                     label: 'Hide the workspace pager from the taskbar',
+                    mount: 'windows',
                 });
                 function wsLabelMode() { return labelMode.get(); }
                 function setWsLabelModeValue(v) { labelMode.set(v); }

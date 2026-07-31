@@ -295,6 +295,134 @@
         .set-pane { display: none; flex-direction: column; gap: 12px; }
         .set-pane.active { display: flex; }
         .set-loading { color: var(--fg-dim); font-style: italic; font-size: 12px; }
+        /* ---- #181: the Control Panel applet grid ------------------------------
+           An early-90s desktop control panel: a grid of captioned applet icons
+           over a status well, chiselled 3D edges, square corners, no rounding,
+           no shadows, no transitions, no animation. The dress is DERIVED from
+           --bevel-light / --bevel-dark / --bevel-face (10_css_root.css, gated
+           behind an @supports for the color-mix half) rather than a hardcoded
+           grey, so it stays coherent under night/day/midnight/sunday and the
+           `redmond` scheme produces the full period look for free.
+
+           No animation is a correctness choice as well as a period one: anything
+           gated on prefers-reduced-motion is simply instant for a viewer who has
+           it set, so it looks broken-or-fine depending on who is testing.
+
+           SPECIFICITY NOTE, load-bearing throughout this block: the shared
+           `#settings-modal button` / `input[type=text]` rules above are id-scoped
+           (1,0,1), so a bare `.cp-tile` (0,1,0) would lose to them and the whole
+           dress would silently revert to the rounded default chrome. Every rule
+           here that overrides one of those is written id-scoped too. */
+        .cp-nav { display: flex; flex-direction: column; gap: 8px; }
+        .cp-nav-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .cp-crumb {
+            flex: 0 0 auto; font-weight: bold; font-size: 13px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            max-width: 45%;
+        }
+        #settings-modal input[type=text].cp-filter {
+            flex: 1 1 110px; min-width: 80px;
+            font-family: Arial, sans-serif; font-size: 12px;
+            border-radius: 0;
+            border-width: 2px; border-style: solid;
+            border-color: var(--bevel-dark) var(--bevel-light)
+                          var(--bevel-light) var(--bevel-dark);
+        }
+        .cp-flat {
+            flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+            font-size: 12px; cursor: pointer; user-select: none;
+            color: var(--fg-dim);
+        }
+        /* Raised chisel: the shared face for every clickable surface in the grid.
+           Pressing swaps the light and dark edges — that swap IS the depth cue,
+           and it is instant because there is no transition to gate. */
+        #settings-modal button.cp-back, #settings-modal button.cp-tile {
+            background: var(--bevel-face);
+            color: var(--fg);
+            border-radius: 0;
+            border-width: 2px; border-style: solid;
+            border-color: var(--bevel-light) var(--bevel-dark)
+                          var(--bevel-dark) var(--bevel-light);
+        }
+        #settings-modal button.cp-back:hover,
+        #settings-modal button.cp-tile:hover {
+            background: var(--bevel-face);
+            border-color: var(--bevel-light) var(--bevel-dark)
+                          var(--bevel-dark) var(--bevel-light);
+        }
+        #settings-modal button.cp-back:active,
+        #settings-modal button.cp-tile:active {
+            border-color: var(--bevel-dark) var(--bevel-light)
+                          var(--bevel-light) var(--bevel-dark);
+        }
+        #settings-modal button.cp-back {
+            flex: 0 0 auto; font-size: 12px; padding: 3px 10px;
+        }
+        /* Reflows on the CONTAINER'S OWN width, which is what matters here: the
+           panel can be tiled into a narrow column. auto-fill (not auto-fit) keeps
+           the cells a constant size and left-aligned as tiles drop out under a
+           filter, which is the period look; auto-fit would stretch two survivors
+           across the whole panel. */
+        .cp-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+            gap: 8px;
+            align-content: start;
+        }
+        #settings-modal button.cp-tile {
+            display: flex; flex-direction: column; align-items: center; gap: 5px;
+            padding: 8px 4px 6px;
+            font-family: Arial, sans-serif; font-size: 11px; text-align: center;
+            cursor: pointer;
+        }
+        #settings-modal button.cp-tile:focus-visible {
+            outline: 1px dotted var(--fg); outline-offset: -4px;
+        }
+        .cp-tile-icon {
+            width: 32px; height: 32px; flex: 0 0 auto;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; line-height: 1;
+            overflow: hidden;
+            unicode-bidi: isolate;
+        }
+        .cp-tile-icon svg { width: 32px; height: 32px; display: block; }
+        .cp-tile-cap {
+            width: 100%; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* Inset chisel: the status well. Keeps its height with no text (the
+           nbsp) so the grid does not jump as the pointer crosses it. */
+        .cp-status {
+            min-height: 1.4em;
+            padding: 4px 7px;
+            font-size: 12px; color: var(--fg);
+            background: var(--bg);
+            border-width: 2px; border-style: solid;
+            border-color: var(--bevel-dark) var(--bevel-light)
+                          var(--bevel-light) var(--bevel-dark);
+        }
+        .cp-status:empty::before { content: " a0"; }
+        /* Mode. The grid + status well show only while browsing topics; Back
+           only inside an applet; the crumb always. "Show everything" is the same
+           sections with the applet class off, so it needs no chrome of its own
+           beyond hiding the grid. */
+        .cp-nav .cp-back, .cp-nav .cp-grid, .cp-nav .cp-status { display: none; }
+        .cp-nav.cp-mode-grid .cp-grid { display: grid; }
+        .cp-nav.cp-mode-grid .cp-status { display: block; }
+        #settings-modal .cp-nav.cp-mode-applet .cp-back { display: flex; }
+        /* #181: a mod-owned section keeps its attribution when a mod's `mount`
+           hint places it inside a CORE applet — with runtime installs (#163) an
+           installed mod is not first-party code, so its control must not read as
+           one of ours just because it was placed next to one. */
+        .set-mod-badge {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 14px; height: 14px; vertical-align: -2px;
+            margin-right: 5px;
+            font-size: 11px; line-height: 1;
+            overflow: hidden; unicode-bidi: isolate;
+        }
+        .set-mod-badge svg { width: 14px; height: 14px; display: block; }
+        #set-pane-host .cp-applet-off, #set-pane-host .cp-filter-off { display: none; }
         /* Keybindings rows: label | combo | Set | Clear. */
         .kb-row { display: flex; align-items: center; gap: 6px; }
         .kb-row .kb-label { flex: 1 1 auto; min-width: 0;

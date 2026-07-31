@@ -154,6 +154,14 @@ _ORDERED = [
     "79_js_settings_modal.js",
     "80_js_help_window.js",
     "81_js_control_panel.js",
+    # #181: the Control Panel's applet grid -- the applet table + icons, the one
+    # visibility arbiter (reconcileControlPanel), the filter and the "show
+    # everything" toggle. Split out rather than grown into 81 so neither file
+    # approaches _MAX_LINES. Must load BEFORE 86 (the mod loader's
+    # _controlSection calls cpAppletFor / cpModBadge) and before 90's loadMods,
+    # which is when the first mod section mounts; its own top-level consts are
+    # initialized here at eval, well before either runs.
+    "81a_js_control_panel_applets.js",
     "82_js_settings_keys_hosts.js",
     "83_js_broker_identity.js",
     "84_js_active_view_lifecycle.js",

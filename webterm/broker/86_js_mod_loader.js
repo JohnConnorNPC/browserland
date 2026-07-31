@@ -1107,12 +1107,31 @@
             // pane, beside the Hosts list) instead of the per-host #set-mods, so a
             // browser-local mod can sit with the config it manages. Unknown / omit
             // -> the historical #set-mods, so every existing control is unchanged.
-            const mountId = opts.mount === 'browser'
-                ? 'set-browser-mods' : 'set-mods';
+            const browserMount = (opts.mount === 'browser');
+            const mountId = browserMount ? 'set-browser-mods' : 'set-mods';
             const host = document.getElementById(mountId);
             const section = document.createElement('div');
             section.className = 'set-section set-mod-setting';
             section.dataset.modId = rec.id;
+            // #181: opts.mount ALSO names a Control Panel applet, so a mod can
+            // say which topic its control belongs to instead of everything
+            // mod-owned landing in one bucket. Deliberately this existing seam
+            // rather than a new one: it is already a per-CALL-SITE placement
+            // hint resolved to a DOM host (one mod may want two placements — a
+            // color-scheme radio belongs in Desktop, a recording pane with the
+            // terminals), every ctx.settings.* primitive and registerSettingsPane
+            // already funnel through here, and its documented contract for an
+            // unknown/omitted value is already "the historical shared bucket".
+            //
+            // The applet id space is CLOSED and core-owned (cpAppletFor, 81a):
+            // an unrecognised string degrades to the Mods applet, it never mints
+            // an applet. That is also what keeps `if (host)` below unreachable —
+            // the DOM host stays #set-mods whatever the applet is, so an applet
+            // id can never resolve to null and drop a mod's control silently.
+            //
+            // A 'browser' mount is resolved FIRST and gets no applet: it lands
+            // in #set-pane-browser, a different pane with no grid.
+            if (!browserMount) section.dataset.applet = cpAppletFor(opts.mount);
             if (opts.isBrowserGlobal !== false) {
                 section.classList.add('set-browser-global');
                 try {
@@ -1122,12 +1141,27 @@
             if (opts.title) {
                 const t = document.createElement('div');
                 t.className = 'set-title';
-                t.textContent = opts.title;
+                // #181: placed inside a CORE applet, the section sits among core
+                // controls, so it carries its mod's badge — placement is a hint,
+                // not a claim, and an installed mod (#163) must not read as ours
+                // by virtue of where it asked to sit. In the Mods applet
+                // everything is mod-owned, so the badge would be noise.
+                if (!browserMount && section.dataset.applet !== 'mods') {
+                    t.appendChild(cpModBadge(rec.id));
+                }
+                t.appendChild(document.createTextNode(opts.title));
                 section.appendChild(t);
             }
             if (host) host.appendChild(section);
+            // The grid is built from what is actually MOUNTED, and mods mount and
+            // leave LIVE (a toggle in the Mods pane, an initMod rollback), so
+            // both edges have to tell it. Without the teardown call an applet
+            // whose only section belonged to a just-disabled mod would keep an
+            // icon that opens onto nothing.
+            reconcileControlPanel();
             rec.unloads.push(function () {
                 if (section.parentNode) section.parentNode.removeChild(section);
+                reconcileControlPanel();
             });
             return section;
         }
@@ -1414,7 +1448,14 @@
             const browserMount = spec.mount === 'browser';
             const section = _controlSection(rec, {
                 title: spec.title,
-                mount: browserMount ? 'browser' : 'mods',
+                // #181: forward the hint VERBATIM for a non-browser mount rather
+                // than flattening it to 'mods' — that flattening predates applet
+                // ids and would silently drop a pane's applet placement, which is
+                // exactly the case #181 wants (a pane-registering mod is the kind
+                // that most deserves to sit with the topic it administers).
+                // _controlSection closes the id space, so an unknown value still
+                // lands in the Mods applet.
+                mount: browserMount ? 'browser' : spec.mount,
                 isBrowserGlobal: browserMount ? false : spec.isBrowserGlobal,
             });
             if (spec.id) section.dataset.paneId = spec.id;

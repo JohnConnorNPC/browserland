@@ -18,10 +18,16 @@
             const ex = findControlPanelWindow();
             if (ex) closeWindow(ex.id);   // teardown returns #settings-modal to the overlay
         }
+        // #181: wider and shorter than the old 340-560 x 360-620. The panel used
+        // to be one tall scroll, so height was the scarce dimension; it is now an
+        // applet grid, and a grid wants width — at 340px the tiles fall into a
+        // three-column stack before anything has been filtered. The clamps stay
+        // clamps: a small desktop still gets a panel that fits inside it, and the
+        // grid reflows on its own container width either way.
         function controlPanelDefaultGeom() {
             const d = document.getElementById('desktop').getBoundingClientRect();
-            const width = Math.min(560, Math.max(340, Math.round(d.width - 48)));
-            const height = Math.min(620, Math.max(360, Math.round(d.height - 64)));
+            const width = Math.min(640, Math.max(340, Math.round(d.width - 48)));
+            const height = Math.min(540, Math.max(340, Math.round(d.height - 64)));
             const left = Math.max(12, Math.round((d.width - width) / 2));
             const top = Math.max(12, Math.round((d.height - height) / 2 - 20));
             return { left, top, width, height };
@@ -122,9 +128,24 @@
             currentSettingsTab = 'local';
             settingsOpenHostId = null;
             settingsTarget = makeLocalTarget();
+            // The panel BORROWS a singleton that is never destroyed, so nothing
+            // about a reopen is fresh — including a remote tab's loading state
+            // left mid-flight by the previous close. That fetch's tab guard
+            // returns without clearing either the placeholder or the .loading
+            // class (it is answering for a tab that is no longer open), so a
+            // reopen would otherwise land on the local tab wearing "loading
+            // settings…". Clear both here, where we know the tab is local.
+            setHostLoadingEl.style.display = 'none';
+            setHostLoadingEl.textContent = 'loading settings…';
+            setPaneHost.classList.remove('loading');
             renderSettingsTabs();
             showSettingsPane('local');
             renderSettings();
+            // #181: land on the applet grid, with no filter and no applet held
+            // over from the last time this node was open. AFTER renderSettings,
+            // which repaints every section (and reconciles through
+            // applyBrowserGlobalVisibility) before we decide what to show.
+            cpResetControlPanelView();
 
             finishWindowPlacement(win);
             return win;
@@ -175,6 +196,13 @@
             for (const el of document.querySelectorAll('.set-browser-global')) {
                 el.style.display = show ? '' : 'none';
             }
+            // #181: this is the ONE function that knows browser-global
+            // visibility just moved, and the applet grid is built from what is
+            // actually available on the open tab — an applet whose whole
+            // membership is browser-global must not be drawn on a remote tab
+            // only to open onto blank space. Reconcile reads the inline display
+            // we just wrote, so it must run AFTER the loop, never before.
+            reconcileControlPanel();
         }
         // Switch tabs. Browser + local are synchronous; a remote host awaits a
         // fresh /state GET (with a "loading…" placeholder) before its form is

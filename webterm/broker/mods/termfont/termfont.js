@@ -127,6 +127,7 @@
                     label: 'font',
                     def: '',
                     isBrowserGlobal: true,
+                    mount: 'desktop',   // #181: with the rest of the appearance
                 });
                 // onChange fires on a local pick AND on a cross-browser /state
                 // convergence (notifyModSettings, change-detected) — restyle every

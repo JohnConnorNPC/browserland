@@ -44,7 +44,7 @@
                         '--bg': '#e8e8e8', '--bg-2': '#d6d6d6', '--bg-3': '#b8b8b8',
                         '--fg': '#1a1a1a', '--fg-dim': '#5a5a5a', '--accent-default': '#1d6fd0',
                     },
-                    redmond: { // Win95 teal/silver
+                    redmond: { // early-90s desktop: teal ground, silver chrome
                         '--bg': '#008080', '--bg-2': '#c0c0c0', '--bg-3': '#808080',
                         '--fg': '#000000', '--fg-dim': '#404040', '--accent-default': '#000080',
                     },
@@ -99,6 +99,11 @@
                     title: 'Color scheme',
                     def: 'night',
                     isBrowserGlobal: true,
+                    // #181: sits with the rest of the desktop's appearance in the
+                    // Control Panel's Desktop applet rather than in the shared
+                    // Mods bucket. A HINT against a core-owned closed set -- an
+                    // unknown id degrades to Mods, it never mints an applet.
+                    mount: 'desktop',
                 });
                 // onChange fires on a local pick AND on a cross-browser /state
                 // convergence (notifyModSettings, change-detected); apply once now

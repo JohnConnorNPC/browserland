@@ -57,10 +57,48 @@
             --ok:     color-mix(in srgb, #2eb35a 72%, var(--fg));
             --warn:   color-mix(in srgb, #e19500 72%, var(--fg));
             --danger: color-mix(in srgb, #ee4141 72%, var(--fg));
+            /* Chiselled bevel edges (#181). The Control Panel's applet grid wears
+               an early-90s desktop dress — raised edges on buttons and applet
+               icons, inset edges on the status well and the filter box — and
+               those edges must recolor with the theme rather than being a
+               hardcoded grey that only reads under one palette. Derived from
+               --bg-2 (the surface the panel actually sits on) so every scheme
+               gets a coherent light/dark pair for free, and `redmond` produces
+               the full period look with no special case.
+
+               These are the STATIC values, and they are overridden by the
+               derived color-mix pair in the @supports block below. Do NOT
+               collapse that into the two-declarations-in-a-row fallback used for
+               `background` elsewhere in this file: a custom property accepts an
+               ARBITRARY token stream, so an engine with no color-mix() still
+               accepts `--bevel-light: color-mix(…)` and it wins — the failure
+               then lands at the CONSUMING declaration, which becomes invalid at
+               computed-value time and falls back to `unset`, NOT to the earlier
+               declaration. That is #173's finding restated at the var layer: no
+               fallback means transparent, not "slightly wrong". @supports gates
+               the whole override instead, so an engine without color-mix simply
+               never sees it and keeps these. */
+            --bevel-light: #4a4a4a;
+            --bevel-dark: #101010;
+            /* The raised surface itself, nudged toward the light edge so a face
+               reads as standing off the panel even before its edges are drawn. */
+            --bevel-face: #303030;
             --taskbar-h: 40px;
             --title-h: 26px;
             --handle-thick: 6px;
             --corner-size: 12px;
+        }
+        /* #181: the themed half of the bevel pair — see the note in :root for why
+           this is an @supports gate and not a second declaration. The test in
+           tests/test_ui_assets.py pins that shape, so collapsing it fails a test
+           rather than silently making every chiselled edge transparent on an
+           engine that lacks color-mix(). */
+        @supports (color: color-mix(in srgb, black 50%, white)) {
+            :root {
+                --bevel-light: color-mix(in srgb, var(--bg-2) 62%, #ffffff);
+                --bevel-dark: color-mix(in srgb, var(--bg-2) 62%, #000000);
+                --bevel-face: color-mix(in srgb, var(--bg-2) 92%, #ffffff);
+            }
         }
         html, body {
             margin: 0;

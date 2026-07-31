@@ -51,6 +51,43 @@
             <div class="set-pane" id="set-pane-host">
                 <div class="set-loading" id="set-host-loading"
                      style="display:none">loading settings&hellip;</div>
+                <!-- #181: the applet grid — the Control Panel's navigation. An
+                     early-90s desktop idiom (a grid of captioned applet icons
+                     over a status well) in place of one 17-section scroll.
+
+                     It lives INSIDE #settings-modal because the Control Panel
+                     window BORROWS that singleton node out of #settings-overlay
+                     and hands it back on close (81_js_control_panel.js): a
+                     wrapper mounted anywhere else would be stranded by the first
+                     close. It sits inside #set-pane-host specifically, so the
+                     Browser tab — already its own short pane — is untouched and
+                     the whole block is hidden with the pane on that tab.
+
+                     .cp-windowed display:none's .set-head / .set-foot, so the
+                     crumb and the status line below are their OWN nodes rather
+                     than a reuse of those.
+
+                     Two discoverability affordances ship WITH the grid, not
+                     after it: the filter box (targeted lookup) and the
+                     "Show everything" toggle (today's flat scroll, the Ctrl+F
+                     path, and the escape hatch when the grouping puts something
+                     where you didn't look). Both are view state only — the
+                     toggle lives on prefs directly (browser-local, never the
+                     synced blob), the filter resets per open. -->
+                <div class="cp-nav" id="cp-nav">
+                    <div class="cp-nav-bar">
+                        <button type="button" class="cp-back" id="cp-back"
+                                title="back to the applet grid">&#9664; Back</button>
+                        <div class="cp-crumb" id="cp-crumb"></div>
+                        <input type="text" class="cp-filter" id="cp-filter"
+                               placeholder="find a setting&hellip;"
+                               autocomplete="off" spellcheck="false" />
+                        <label class="cp-flat"><input type="checkbox"
+                               id="cp-flat-toggle" /> Show everything</label>
+                    </div>
+                    <div class="cp-grid" id="cp-grid"></div>
+                    <div class="cp-status" id="cp-status"></div>
+                </div>
                 <!-- Appearance + browser chrome (theme/pattern/clock/start-button/
                      restore/taskbar-filter) are BROWSER-GLOBAL: one browser renders
                      one theme regardless of which host's windows it shows. They bind
@@ -74,7 +111,7 @@
                      mods/help/help.js (ctx.settings.boolean -> #set-mods above),
                      like the clock's checkbox. -->
                 <div class="set-section" id="set-mods"></div>
-                <div class="set-section set-browser-global">
+                <div class="set-section set-browser-global" data-applet="desktop">
                     <div class="set-title">Start button</div>
                     <div class="set-row"><label>label</label>
                         <input type="text" id="set-start-label" maxlength="24"
@@ -87,7 +124,7 @@
                 <!-- #178: the taskbar's broker-status chip is a pure indicator
                      since #149 moved the per-broker actions onto the start (+)
                      menu's rows, so it can be turned down or off. -->
-                <div class="set-section set-browser-global">
+                <div class="set-section set-browser-global" data-applet="desktop">
                     <div class="set-title">Broker status chip</div>
                     <div class="set-row"><label>show</label>
                         <select id="set-host-status-chip">
@@ -104,7 +141,7 @@
                 </div>
                 <!-- Default start path is PER-HOST (#17): editing it on a remote
                      host's tab persists to THAT host (no .set-browser-global). -->
-                <div class="set-section">
+                <div class="set-section" data-applet="terminals">
                     <div class="set-title">Default start path</div>
                     <div class="set-row">
                         <input type="text" id="set-start-path"
@@ -113,7 +150,7 @@
                         Must be an existing folder. Blank = the agent's
                         default.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Window size (cols &#215; rows)</div>
                     <div class="set-row">
                         <input type="number" id="set-cols" min="35" max="500"
@@ -127,20 +164,20 @@
                     <div class="set-hint">empty = legacy 720&#215;480 px. Drives new
                         windows, Lock Size, and tile actions.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Taskbar / title labels</div>
                     <div id="set-label-order" class="set-label-order"></div>
                     <div class="set-hint">Tick to show each component; drag or use
                         &#8593;/&#8595; to reorder.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Window mode</div>
                     <label class="set-check"><input type="checkbox" id="set-tiling" />
                         Tiling mode</label>
                     <div class="set-hint">tiling arranges windows in a niri-style
                         scrolling strip; unchecked = free-floating windows.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Drag hold delay</div>
                     <div class="set-row">
                         <input type="number" id="set-snap-hold" min="0" max="20000"
@@ -152,7 +189,7 @@
                         out to a float. <b>0</b> disables both; otherwise
                         250&#8211;20000ms (default 3000).</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Window slide speed</div>
                     <div class="set-row">
                         <input type="number" id="set-slide-ms" min="0" max="2000"
@@ -166,14 +203,14 @@
                         120&#8211;2000ms per screen (default 350). Overrides OS
                         reduced-motion.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Workspace scrollbar</div>
                     <label class="set-check"><input type="checkbox" id="set-strip-scrollbar" />
                         Show workspace scrollbar</label>
                     <div class="set-hint">a slim draggable bar at the bottom of the
                         tiling workspace, shown whenever the strip can scroll right.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="windows">
                     <div class="set-title">Terminal close button</div>
                     <label class="set-check"><input type="checkbox" id="set-close-terminates" />
                         Close (&#215;) terminates terminal sessions</label>
@@ -185,7 +222,7 @@
                     <div class="set-hint">ask before the &#215; button kills a session. Only applies
                         when the option above is on.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="input">
                     <div class="set-title">Clipboard (OSC 52)</div>
                     <label class="set-check"><input type="checkbox" id="set-osc52" />
                         Let programs on this host set my clipboard</label>
@@ -203,7 +240,7 @@
                         in the front terminal. Neovim&#8217;s <code>"+y</code>
                         works; <code>"*y</code> is ignored.</div>
                 </div>
-                <div class="set-section set-browser-global">
+                <div class="set-section set-browser-global" data-applet="startup">
                     <div class="set-title">Restore on refresh</div>
                     <label class="set-check"><input type="checkbox" id="set-restore-refresh" />
                         Restore open terminals on refresh</label>
@@ -211,7 +248,7 @@
                         terminals you had open and reattach to their running
                         agents. Governs this browser's startup.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="terminals">
                     <div class="set-title">Default terminal profile</div>
                     <div class="set-row"><label>profile</label>
                         <select id="set-default-profile">
@@ -221,7 +258,7 @@
                         host launch with; "(broker default)" uses the broker's own
                         configured default.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="terminals">
                     <div class="set-title">Launch profiles</div>
                     <div id="set-profiles-list" class="set-profiles"></div>
                     <div class="set-row">
@@ -234,7 +271,7 @@
                         webterm_profiles.json; changes apply immediately (no
                         restart). See docs/PROFILES.md for copyable recipes.</div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="access">
                     <div class="set-title">MCP access</div>
                     <label class="set-check"><input type="checkbox" id="set-mcp-enabled" />
                         Enable MCP access</label>
@@ -267,12 +304,12 @@
                      dead remote can never leave the PREVIOUS host's rows on screen
                      under its name -- the #153 lesson. NOT .set-browser-global: it
                      is per-host, so it shows on remote tabs too. -->
-                <div class="set-section" id="set-mod-policy">
+                <div class="set-section" id="set-mod-policy" data-applet="advanced">
                     <div class="set-title">Mods on this broker</div>
                     <div id="set-mod-policy-list" class="set-mod-policy"></div>
                     <div class="set-hint" id="set-mod-policy-hint"></div>
                 </div>
-                <div class="set-section">
+                <div class="set-section" data-applet="input">
                     <div class="set-title">Keybindings</div>
                     <div id="set-keybindings"></div>
                     <div class="set-hint">Ctrl/Alt/Meta combos only (so plain
