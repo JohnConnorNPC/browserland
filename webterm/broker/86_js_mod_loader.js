@@ -1486,7 +1486,7 @@
         // type; every value is coerced to String. The sanitized entries live on
         // window.__mods.helpCards (the Help mod merges them with the core
         // corpus) and are removed on the contributing mod's teardown.
-        const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1 };
+        const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1, pre: 1 };
         const _HELP_SPAN_TYPES = { text: 1, strong: 1, code: 1, kbd: 1 };
         function _sanitizeHelpSpan(sp) {
             if (!sp || typeof sp !== 'object') return null;

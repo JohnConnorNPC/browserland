@@ -469,6 +469,66 @@ def test_ignore_marker_inside_a_fence_is_literal_code(tmp_path):
                                         "<!-- help:ignore-end -->")
 
 
+@pytest.mark.parametrize("marker", ["<!-- help:ignore-start -->",
+                                    "<!-- help:ignore-end -->"])
+def test_a_lone_ignore_marker_inside_a_fence_is_not_unbalanced(tmp_path, marker):
+    # The natural way to document this system is ONE marker per code sample, not
+    # a matched pair. Only markers outside every fence are directives, so a lone
+    # one inside a fence is literal text — not an unbalanced region. (It used to
+    # raise, naming a region the page does not contain: the pairing walked
+    # in-fence markers onto the same stack as real ones.)
+    page = ("intro\n"
+            "\n"
+            "## Markers\n"
+            "\n"
+            "```\n"
+            f"{marker}\n"
+            "sample\n"
+            "```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    pres = [b for b in cards[1]["body"] if b["t"] == "pre"]
+    assert pres[0]["spans"][0]["v"] == f"{marker}\nsample"
+
+
+def test_a_fence_indented_under_a_list_item_is_dedented_to_its_delimiter(tmp_path):
+    # CommonMark: the opening fence's own indentation is layout, not content.
+    # A fence nested under a bullet would otherwise render shifted right inside
+    # an already-narrow Help card, and copy out with the leading spaces.
+    page = ("## Steps\n"
+            "\n"
+            "1. Run it:\n"
+            "\n"
+            "       ```bash\n"
+            "       tailscale serve --bg 4445\n"
+            "         nested deeper\n"
+            "       ```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    pre = [b for b in cards[0]["body"] if b["t"] == "pre"][0]
+    # The delimiter's 7 columns are gone; the extra 2 columns of the second
+    # line — relative indentation INSIDE the block — survive.
+    assert pre["spans"][0]["v"] == ("tailscale serve --bg 4445\n"
+                                    "  nested deeper")
+
+
+def test_a_column_zero_fence_keeps_every_space_it_had(tmp_path):
+    # The mirror of the test above, and the reason the dedent is capped at the
+    # delimiter's own indent rather than being a blanket lstrip: an ASCII
+    # diagram in an unindented fence is content, all of it.
+    page = ("## Topology\n"
+            "\n"
+            "```\n"
+            "  Machine A          Machine B\n"
+            "      |                  |\n"
+            "```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    pre = [b for b in cards[0]["body"] if b["t"] == "pre"][0]
+    assert pre["spans"][0]["v"] == ("  Machine A          Machine B\n"
+                                    "      |                  |")
+
+
 def _pre_a2_page_chunks(text):
     """The page splitter EXACTLY as it read before the fence-aware scanner.
 

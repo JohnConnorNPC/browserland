@@ -290,35 +290,47 @@ def _ignore_pairs(lines: list[str], ids: list[int],
     Returns the ``(start, end)`` line-index pairs that are REAL directives —
     both markers outside any fence. Two other outcomes:
 
-    * both markers inside the SAME fence -> the region is literal code (a
-      marker in a fenced block is documentation ABOUT the marker, not a
-      directive), so it is dropped from the result and stripped by nobody;
-    * the markers land in different fence contexts -> ``BuildError``. Stripping
-      such a region would delete one half of a fence and rewrite the page's
-      fence topology before the splitter or the block parser ever sees it.
+    Only a marker OUTSIDE every fence is a directive. A marker inside a fenced
+    block is documentation ABOUT the marker — which is exactly how the
+    mod-authoring page documents this system, one marker per code sample — so it
+    is literal text and is never paired, never stripped, and never unbalanced.
+
+    That rule also makes a fence-crossing region unrepresentable rather than
+    merely rejected: both markers of a real region are outside fences, so every
+    fence between them is necessarily complete and stripping can never rewrite
+    the page's fence topology. A start whose only candidate end is buried in a
+    fence is reported as the missing end that it is, with the buried line named.
     """
     pfx = _source_prefix(source)
     stack: list[int] = []
     real: list[tuple[int, int]] = []
+
+    def _buried(marker: str) -> str:
+        at = [j + 1 for j, l in enumerate(lines)
+              if ids[j] != 0 and l.strip() == marker]
+        if not at:
+            return ""
+        return ("; a %s at line %s is inside a code fence, where it is literal "
+                "text rather than a directive"
+                % (marker, ", ".join(str(a) for a in at)))
+
     for i, line in enumerate(lines):
+        if ids[i] != 0:
+            continue                      # inside a fence: literal code
         stripped = line.strip()
         if stripped == _IGNORE_START:
             stack.append(i)
         elif stripped == _IGNORE_END:
             if not stack:
                 raise BuildError("%sunbalanced help:ignore (end before start) "
-                                 "at line %d" % (pfx, i + 1))
-            start = stack.pop()
-            if ids[start] != ids[i]:
-                raise BuildError(
-                    "%shelp:ignore region opened at line %d closes at line %d, "
-                    "crossing a code-fence boundary" % (pfx, start + 1, i + 1))
-            if ids[i] == 0:
-                real.append((start, i))
+                                 "at line %d%s"
+                                 % (pfx, i + 1, _buried(_IGNORE_START)))
+            real.append((stack.pop(), i))
     if stack:
         raise BuildError("%sunbalanced help:ignore (missing %d end marker(s); "
-                         "last start at line %d)"
-                         % (pfx, len(stack), stack[-1] + 1))
+                         "last start at line %d)%s"
+                         % (pfx, len(stack), stack[-1] + 1,
+                            _buried(_IGNORE_END)))
     return real
 
 
@@ -365,6 +377,23 @@ def _row_spans(cells: list[str], sep: str, search_extra: list[str]) -> list[dict
     return _coalesce(spans)
 
 
+def _dedent_fence_line(line: str, indent: int) -> str:
+    """Drop a CRLF artifact and up to ``indent`` leading spaces from one line.
+
+    ``indent`` is the opening fence delimiter's own indentation. Removing it is
+    what CommonMark specifies for a fence nested inside a list item; removing
+    only up to it is what keeps relative indentation inside the block intact.
+    Tabs are never consumed — a tab's width is not knowable here, and guessing
+    would corrupt exactly the Makefile / YAML content this must preserve.
+    """
+    if line.endswith("\r"):
+        line = line[:-1]
+    cut = 0
+    while cut < indent and cut < len(line) and line[cut] == " ":
+        cut += 1
+    return line[cut:]
+
+
 def parse_blocks(text: str, search_extra: list[str]) -> list[dict]:
     """Parse the markdown body of one card into typed blocks."""
     lines = text.split("\n")
@@ -393,6 +422,12 @@ def parse_blocks(text: str, search_extra: list[str]) -> list[dict]:
         if _is_fence(line):
             flush_para()
             code_lines = []
+            # CommonMark: the opening fence's own indentation is layout (the
+            # fence sits inside a list item), not content. Strip up to that many
+            # leading spaces from each line so a fence nested under a bullet is
+            # not rendered shifted right — while a column-0 fence holding an
+            # indented ASCII diagram keeps every space it had.
+            indent = len(line) - len(line.lstrip())
             i += 1
             while i < n and not _is_fence(lines[i]):
                 code_lines.append(lines[i])
@@ -403,10 +438,10 @@ def parse_blocks(text: str, search_extra: list[str]) -> list[dict]:
             # everything that lands in a fence (systemd units, YAML, JSON, shell
             # continuations), so `" ".join(l.strip() ...)` — and equally
             # `"\n".join(l.strip() ...)` — would destroy the block. The only
-            # normalization is the newline convention: a trailing "\r" left by
-            # CRLF input is line-ending machinery, not content.
-            code = "\n".join(l[:-1] if l.endswith("\r") else l
-                             for l in code_lines)
+            # normalizations are the newline convention (a trailing "\r" left by
+            # CRLF input is line-ending machinery) and the opening fence's own
+            # indentation, removed above.
+            code = "\n".join(_dedent_fence_line(l, indent) for l in code_lines)
             # Emptiness is decided from the STRIPPED text (a fence holding only
             # blank lines is still not a block) while the UNSTRIPPED text is what
             # gets stored.

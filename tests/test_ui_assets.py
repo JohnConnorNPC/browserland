@@ -3469,6 +3469,18 @@ def test_help_pre_block_renders_as_real_pre():
     assert ".app-help .help-b-pre" in INDEX_HTML
 
 
+def test_mod_contributed_help_blocks_admit_pre():
+    # The loader sanitizes a mod's help cards against a block-type whitelist and
+    # coerces anything unknown to 'p'. That whitelist and the schema comment
+    # documenting it must agree: publishing 'pre' in the contract while the
+    # sanitizer rewrites it to 'p' would hand mods a block type that silently
+    # renders as a nowrap <code> run-on line -- the exact regression the wiki
+    # corpus side was restructured to avoid.
+    src = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1, pre: 1 };" in src
+    assert "block = { t:'p'|'bullet'|'sub'|'pre', spans:[span] }" in src
+
+
 def test_chip_icons_use_registry():
     # #119 follow-up: the aistatus + clipboard taskbar chips and git's title-bar
     # button render the SAME registry SVGs (via appIconSvg) instead of an emoji /
