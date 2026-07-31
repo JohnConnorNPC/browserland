@@ -89,6 +89,26 @@
         .app-help .help-clear:hover {
             background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg);
         }
+        /* "Include developer docs": its own line under the search box rather
+           than beside it, so the ~150px label never squeezes the query field on
+           a narrow Help window (helpDefaultGeom floors the width at 440px). */
+        .app-help .help-dev-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 8px;
+            color: var(--fg-dim);
+            font-size: 11px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .app-help .help-dev-toggle:hover { color: var(--fg); }
+        .app-help .help-dev-check {
+            width: 13px; height: 13px;
+            margin: 0;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
         .app-help .help-main {
             flex: 1 1 auto; min-height: 0;
             display: grid;

@@ -1950,8 +1950,8 @@ def test_the_retired_help_corpus_is_invalidated_not_blanked():
     # entries. buildHelpEntries reads `(helpCorpusEntries || [])` directly, and
     # this same login synchronously drives re-renders that go through it: 63
     # fires the async notifyModsHostAuth one line BEFORE notifyHelpHostAuth, and
-    # its continuation (a /info + package round trip far cheaper than the ~300 KB
-    # corpus) reaches _applyPolicyLive, so an installed mod whose init calls
+    # its continuation (a /info + package round trip far cheaper than the
+    # ~650 KB corpus) reaches _applyPolicyLive, so an installed mod whose init calls
     # ctx.registerHelpCards lands in _refreshHelpIfOpen -> refreshHelpCorpus ->
     # buildHelpEntries. With the entries nulled, that render snapshots an EMPTY
     # wiki corpus into the open Help window -- every wiki and shipped-mod section
@@ -2026,6 +2026,151 @@ def test_help_mod_packaged_and_manifest_agrees():
     assert "function openHelpWindow" in INDEX_HTML
     assert "id: 'help'" in INDEX_HTML
     assert INDEX_HTML.index("id: 'clock'") < INDEX_HTML.index("id: 'help'")
+
+
+def test_help_dev_docs_toggle_is_browser_local_and_survives_reset_local_view():
+    # The Help window defaults to the END-USER guide; "Include developer docs"
+    # is the opt-in that widens it. That is a per-BROWSER VIEW preference: two
+    # people reading one broker must not flip each other's view, so it must
+    # never ride the synced /state blob.
+    src = (BROKER_DIR / "mods" / "help" / "help.js").read_text(encoding="utf-8")
+
+    # (0) The control exists: a real checkbox with a visible label, built into
+    #     the same .help-top row as the heading + search wrapper, and it ships
+    #     in the served page.
+    assert "devBox.type = 'checkbox'" in src
+    assert "devLabel.textContent = 'Include developer docs';" in src
+    assert "top.appendChild(devWrap);" in src
+    for served in ("Include developer docs", "help-dev-toggle",
+                   ".app-help .help-dev-toggle"):
+        assert served in INDEX_HTML, f"missing from the served page: {served!r}"
+    css = (BROKER_DIR / "mods" / "help" / "help.css").read_text(encoding="utf-8")
+    assert ".app-help .help-dev-check" in css
+
+    # (a) The pref key is UNDERSCORE-prefixed, which is load-bearing: "Reset
+    #     local view" deletes every top-level pref whose key does NOT start with
+    #     '_' (it reads them as per-session window geometry), so a bare 'help'
+    #     key would be wiped by an unrelated recovery action.
+    m = re.search(r"const HELP_PREFS_KEY = '([^']+)'", src)
+    assert m, "help.js no longer declares HELP_PREFS_KEY"
+    key = m.group(1)
+    assert key.startswith("_"), \
+        f"HELP_PREFS_KEY {key!r} would be wiped by resetLocalView"
+    ident = (BROKER_DIR / "83_js_broker_identity.js").read_text(encoding="utf-8")
+    reset = ident[ident.index("function resetLocalView()"):]
+    assert "k.charAt(0) === '_'" in reset[:400], \
+        "resetLocalView no longer spares underscore keys -- recheck HELP_PREFS_KEY"
+
+    # (b) It also sits outside prefs._settings / prefs._layout, the only two
+    #     things _stateBlob serializes, so the sync path cannot reach it.
+    sync = (BROKER_DIR / "52_js_state_sync.js").read_text(encoding="utf-8")
+    blob = sync[sync.index("function _stateBlob()"):sync.index("_stateSerialize")]
+    assert key not in blob
+
+    # (c) Persisted with savePrefsLocal(), never savePrefs() -- the latter would
+    #     schedule a broker PUT of unrelated settings/layout on every tick. (The
+    #     mod's savePrefs() calls elsewhere are for helpHintSeen, a deliberately
+    #     SYNCED setting; the assertion is scoped to this path on purpose.)
+    setter = src[src.index("function helpSetShowDevDocs"):]
+    setter = setter[:setter.index("\n        function ")]
+    assert "savePrefsLocal();" in setter and "savePrefs()" not in setter
+    handler = src[src.index("const onDevToggle"):]
+    handler = handler[:handler.index("devBox.addEventListener")]
+    assert "savePrefs()" not in handler
+    assert "helpSetShowDevDocs(devBox.checked);" in handler
+    # Toggling repaints the OPEN window from the in-memory corpus (no refetch).
+    assert "refreshHelpCorpus(win)" in handler
+
+    # (d) Default UNTICKED, strictly: an absent OR corrupted stored value reads
+    #     as false, so the end-user guide stays the default view.
+    getter = src[src.index("function helpShowDevDocs"):]
+    getter = getter[:getter.index("\n        function ")]
+    assert "p.dev === true" in getter
+    assert "devBox.checked = helpShowDevDocs();" in src
+
+    # (e) The listener is torn down with the window, like every other one here.
+    assert "devBox.removeEventListener('change', onDevToggle);" in src
+
+
+def test_help_section_tier_reaches_the_client_and_gates_the_render():
+    # #182: a wiki page declaring `<!-- help:tier dev -->` makes help_corpus.py
+    # emit "tier": "dev" on its SECTION (a user-tier section carries no key at
+    # all, which keeps the shipped sections byte-identical). Two halves have to
+    # hold for the "Include developer docs" checkbox to mean anything: the tier
+    # has to survive flattening into the flat per-card entries the renderer
+    # groups, and the render path has to gate on it.
+    core = (BROKER_DIR / "80_js_help_window.js").read_text(encoding="utf-8")
+    src = (BROKER_DIR / "mods" / "help" / "help.js").read_text(encoding="utf-8")
+
+    # (a) Carried across the flattening, alongside owner/secIcon -- and present
+    #     in the served page, since the mod reads what core produced.
+    flat = _frag_fn(core, "function flattenHelpCorpus(")
+    assert re.search(r"\btier: sec\.tier\b", flat), \
+        "flattenHelpCorpus drops sec.tier; the client can never see the tier"
+    assert "tier: sec.tier" in INDEX_HTML
+
+    # (b) The gate is an ALLOWLIST, and that is the non-negotiable shape.
+    #     merge_installed_sections injects INSTALLED mods' help sections at
+    #     serve time, bypassing the strict BuildError path that makes an unknown
+    #     tier impossible for a shipped wiki page. A denylist ("hide only
+    #     'dev'") would therefore DISPLAY anything malformed, misspelled or
+    #     future-valued; the allowlist hides it. Hidden-by-default is the right
+    #     failure direction for a control whose job is keeping content out of
+    #     the default view.
+    render = _frag_fn(src, "function renderHelpInto(")
+    assert "const showDev = helpShowDevDocs();" in render
+    assert "const tier = e.tier || 'user';" in render, \
+        "an entry with no tier key must default to the user tier"
+    assert "return tier === 'user' || (showDev && tier === 'dev');" in render, \
+        "the tier gate must be an allowlist of exactly {user, dev}"
+    # ...which is what makes an unknown tier hidden: the predicate accepts two
+    # literals and nothing else, so there is no third value it can let through.
+    assert set(re.findall(r"tier === '([a-z-]+)'", render)) == {"user", "dev"}
+    # And no denylist crept back in beside it.
+    for denylist in ("tier !== 'dev'", "!showDev &&", "e.tier === 'dev'"):
+        assert denylist not in render, \
+            "%r is a denylist; an unknown tier would be shown" % denylist
+
+    # (c) It runs BEFORE the query filter. Gating afterwards would still keep
+    #     developer cards off the rail at rest, but a query matching only
+    #     developer prose would hand them straight back -- a filter that leaks
+    #     on search is not a filter.
+    assert "(e._hay || '').indexOf(q)" in render, "the query filter moved"
+    assert render.index("tier === 'user'") < render.index("(e._hay || '')"), \
+        "the tier gate must precede the query filter, not follow it"
+
+    # (d) The rail counts, the section counts and the "N results" count all
+    #     derive from the gated list, so a section whose cards are all hidden
+    #     cannot survive as an empty category in the rail.
+    assert "const n = entries.length;" in render
+    assert "for (const e of entries) {" in render      # the group-by-slug pass
+    assert "bySlug.get(slug).length" in render
+
+    # (e) Toggling costs NO network request: refreshHelpCorpus (what the
+    #     checkbox handler calls) re-snapshots from state already in memory and
+    #     re-renders; neither it nor the render path fetches anything.
+    refresh = _frag_fn(src, "function refreshHelpCorpus(")
+    for net in ("hostFetch", "fetchHelpCorpus", "fetch("):
+        assert net not in refresh, "toggling dev docs must not refetch (%s)" % net
+        assert net not in render, "the render path must not fetch (%s)" % net
+
+    # (f) The gate lives inside the XSS-boundary slice (helpAppendHighlighted ->
+    #     findHelpWindow, guarded by test_help_render_path_has_no_innerhtml), so
+    #     restate it locally: nothing added here may parse markup.
+    for forbidden in ("innerHTML", "insertAdjacentHTML", "outerHTML",
+                      "DOMParser", "document.write"):
+        assert forbidden not in render
+
+    # (g) The transfer-size comments were written for a ~200-300 KB corpus. The
+    #     developer/operator wiki roughly doubles it, so both figures were
+    #     simply false; a stale number in a comment about a network deadline is
+    #     the kind that gets believed.
+    for stale in ("~200 KB", "~300 KB"):
+        assert stale not in core, "stale corpus size %r in 80_js_help_window.js" % stale
+    assert core.count("650 KB") >= 2
+
+    # (h) And the whole gate ships in the served page.
+    assert "return tier === 'user' || (showDev && tier === 'dev');" in INDEX_HTML
 
 
 def test_register_help_cards_capability_present():

@@ -49,6 +49,40 @@
             return Object.prototype.hasOwnProperty.call(HELP_SECTION_ICONS, slug)
                 ? HELP_SECTION_ICONS[slug] : '•';
         }
+        // ---- "Include developer docs" (a per-BROWSER view preference) --------
+        // The Help window defaults to the END-USER guide; the developer/operator
+        // sections are opt-in per browser. This is a VIEW preference, not a
+        // setting: two people reading the same broker's Help must not flip each
+        // other's view, and one person's laptop must not un-tick their desktop.
+        // So it is persisted with savePrefsLocal() (localStorage only) and NEVER
+        // savePrefs(), which would schedule a broker /state PUT of unrelated
+        // settings/layout every time somebody ticked a box.
+        //
+        // The key is UNDERSCORE-prefixed on purpose, and that is load-bearing
+        // twice over: resetLocalView() ("Reset local view", 83_js_broker_identity)
+        // deletes every top-level pref whose key does NOT start with '_' — it
+        // treats them as per-session window geometry — so a bare 'help' key would
+        // be silently wiped; and _stateBlob() (52_js_state_sync) serializes only
+        // prefs._settings + prefs._layout, so an own top-level key is unreachable
+        // by the sync path even if a future caller reached for savePrefs().
+        //
+        // Declared/read as a top-level hoisted function so the rest of the page
+        // can ask (the mod script is one concatenated <script>, and loadMods gates
+        // init() but never parsing — so this answers even with the mod disabled).
+        const HELP_PREFS_KEY = '_help';
+        function helpShowDevDocs() {
+            const p = prefs[HELP_PREFS_KEY];
+            // === true, not truthy: corrupted storage must not opt somebody in.
+            return !!(p && typeof p === 'object' && p.dev === true);
+        }
+        function helpSetShowDevDocs(on) {
+            let p = prefs[HELP_PREFS_KEY];
+            if (!p || typeof p !== 'object' || Array.isArray(p)) {
+                p = {}; prefs[HELP_PREFS_KEY] = p;
+            }
+            p.dev = (on === true);
+            savePrefsLocal();   // browser-local only — never a /state PUT
+        }
         // #119: paint a section glyph into the rail button / header box. The icon
         // is a TAGGED value: { svg } is a trusted APP_ICON_SVG string (injected as
         // markup) and { text } is an emoji / '•' fallback (kept as textContent).
@@ -181,7 +215,40 @@
             const h = win._help; if (!h) return;
             const raw = query || '';
             const q = raw.trim().toLowerCase();
-            const entries = (win._helpCorpus || []).filter(
+            // #182: the TIER gate, and it runs BEFORE the query filter on
+            // purpose. Everything downstream — the rail buttons and their
+            // counts, the section headers, the "N results" / "N topics" count,
+            // the "No matches" empty state — is derived from `entries`, so a
+            // section whose cards are all gated out never appears at all, as an
+            // empty category or otherwise. Filtering here rather than while the
+            // entries are BUILT also costs no refetch on a toggle:
+            // refreshHelpCorpus re-snapshots from memory and re-renders.
+            //
+            // Ordering is the load-bearing half. Gating after the query would
+            // still keep developer cards off the rail at rest but would hand
+            // them straight back to anyone who typed a word that only appears
+            // in developer prose — a filter that leaks on search is not a
+            // filter.
+            //
+            // ALLOWLIST, deliberately, not a denylist. An entry is shown only
+            // if its tier is 'user' (the default: no tier key at all, which is
+            // every generated entry, every mod-contributed card, and every
+            // user-tier wiki section) or — when opted in — exactly 'dev'.
+            // Anything else is HIDDEN. help_corpus.py's merge_installed_sections
+            // injects INSTALLED mods' help at serve time without the strict
+            // BuildError path that makes an unknown tier impossible for a
+            // shipped wiki page. A denylist — hide the one known developer
+            // value, show the rest — would therefore display anything
+            // misspelled, malformed or future-valued by default, which is
+            // exactly backwards. Hidden-by-default is the right failure mode
+            // for a control whose whole job is keeping content OUT of the
+            // default view.
+            const showDev = helpShowDevDocs();
+            const shown = (win._helpCorpus || []).filter(e => {
+                const tier = e.tier || 'user';
+                return tier === 'user' || (showDev && tier === 'dev');
+            });
+            const entries = shown.filter(
                 e => !q || (e._hay || '').indexOf(q) !== -1);
             h.clearBtn.classList.toggle('show', !!raw.length);
             // Group by section SLUG (stable id), remembering each slug's display
@@ -329,7 +396,24 @@
             clear.title = 'Clear search'; clear.textContent = '×';
             searchWrap.appendChild(search); searchWrap.appendChild(clear);
 
+            // "Include developer docs": the opt-in that widens the default
+            // end-user guide to the developer/operator sections. A wrapping
+            // <label> is the whole hit target, so no id/for pair is needed.
+            // Ticked state comes from the browser-local pref (default OFF).
+            const devWrap = document.createElement('label');
+            devWrap.className = 'help-dev-toggle';
+            devWrap.title = 'Also show the developer and operator documentation';
+            const devBox = document.createElement('input');
+            devBox.type = 'checkbox';
+            devBox.className = 'help-dev-check';
+            devBox.checked = helpShowDevDocs();
+            const devLabel = document.createElement('span');
+            devLabel.className = 'help-dev-label';
+            devLabel.textContent = 'Include developer docs';
+            devWrap.appendChild(devBox); devWrap.appendChild(devLabel);
+
             top.appendChild(heading); top.appendChild(searchWrap);
+            top.appendChild(devWrap);
 
             const main = document.createElement('div');
             main.className = 'help-main';
@@ -342,10 +426,23 @@
             body.appendChild(top); body.appendChild(main);
 
             win._help = { searchEl: search, clearBtn: clear, countEl: count,
-                          railEl: rail, scrollEl: scroll, sectionEls: [] };
+                          railEl: rail, scrollEl: scroll, sectionEls: [],
+                          devEl: devBox };
 
             const onInput = () => renderHelpInto(win, search.value);
             search.addEventListener('input', onInput);
+            // Persist first, then repaint the OPEN window with the CURRENT query
+            // (exactly what the search handler above does) — never a refetch:
+            // refreshHelpCorpus re-snapshots win._helpCorpus from helpEntriesAll(),
+            // which reads state ALREADY in memory, and then renders with
+            // searchEl.value. Going through it rather than calling renderHelpInto
+            // directly means the tier filter takes effect on the tick whether it
+            // is applied while entries are built or while they are rendered.
+            const onDevToggle = () => {
+                helpSetShowDevDocs(devBox.checked);
+                refreshHelpCorpus(win);
+            };
+            devBox.addEventListener('change', onDevToggle);
             const onClear = () => { search.value = ''; renderHelpInto(win, ''); search.focus(); };
             clear.addEventListener('click', onClear);
             const onScroll = () => updateHelpActiveSection(win);
@@ -362,6 +459,7 @@
             body.addEventListener('keydown', onKey);
             win.cleanups.push(() => {
                 search.removeEventListener('input', onInput);
+                devBox.removeEventListener('change', onDevToggle);
                 clear.removeEventListener('click', onClear);
                 scroll.removeEventListener('scroll', onScroll);
                 body.removeEventListener('keydown', onKey);
