@@ -28,7 +28,11 @@ the critical section rather than at some sleep-guessed moment.
 """
 
 import asyncio
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -59,6 +63,37 @@ def _no_supervisor(monkeypatch):
     for name in (supervise.ENV_RUN_DIR, supervise.ENV_SUPERVISOR_NONCE,
                  supervise.ENV_SUPERVISOR_PID):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_capability(monkeypatch):
+    """Pin the PROCESS capability memo to "nothing supervises us", for every
+    test in this file.
+
+    The memo is per process by design — it describes this interpreter, and
+    ``worker_capability`` can block for 5 s on ``systemctl show``, so probing it
+    per app (let alone per request) is not on the table. That design has one
+    cost in a test suite: the answer would otherwise depend on the developer's
+    shell (a broker-launched terminal inherits the three variables) and on which
+    test happened to create the first app. Pinning it here makes every test
+    below start from the same known-unsupported state; the ones that need
+    another mechanism say so explicitly with ``_capability``."""
+    monkeypatch.setattr(app_mod, "_RESTART_CAPABILITY",
+                        {"supported": False,
+                         "mechanism": supervise.MECHANISM_NONE,
+                         "reason_code": supervise.REASON_NO_SUPERVISOR})
+
+
+def _capability(app, mechanism, reason_code=None):
+    """Pin ONE app's view of the process capability.
+
+    ``app.ctx.restart_capability`` is the documented override seam: it exists so
+    the systemd branch — which cannot be reached on a Windows box or on a CI
+    runner without systemd — is testable at all."""
+    app.ctx.restart_capability = {
+        "supported": mechanism != supervise.MECHANISM_NONE,
+        "mechanism": mechanism, "reason_code": reason_code}
+    return app
 
 
 # ---- E14: the operator gate -------------------------------------------------
@@ -523,6 +558,11 @@ def test_a_successful_drain_arms_the_real_sentinel_and_stops(tmp_path,
     monkeypatch.setenv(supervise.ENV_RUN_DIR, str(run_dir))
     monkeypatch.setenv(supervise.ENV_SUPERVISOR_NONCE, "nonce-for-the-test")
     app = _make_app(tmp_path, monkeypatch)
+    # Arming is now per-MECHANISM: only the "supervisor" mechanism has a
+    # sentinel to write. The env above is what arm_restart actually reads; this
+    # is what says the sentinel is the right thing to write (the real capability
+    # probe would report ppid-mismatch here, since our parent is pytest).
+    _capability(app, supervise.MECHANISM_SUPERVISOR)
     stops = []
 
     async def _drive():
@@ -547,3 +587,547 @@ def test_a_successful_drain_arms_the_real_sentinel_and_stops(tmp_path,
     assert app.ctx.exit_code == supervise.EXIT_RESTART
     assert stops == [True], "the deferred stop never fired"
     assert app.ctx.lifecycle == app_mod.LIFECYCLE_RESTART_READY
+
+
+# ---- the mechanism decides whether there is anything to arm -----------------
+
+def test_systemd_does_not_arm_and_does_not_need_to(tmp_path, monkeypatch):
+    """The seam this checkpoint closes.
+
+    Under a unit with Restart=always/on-failure there is no supervisor, no nonce
+    and no run dir, so ``arm_restart`` CANNOT succeed — while systemd respawns
+    any non-zero exit, so exiting 75 is the whole mechanism. Arming
+    unconditionally (as this did) refused a genuine systemd install the one
+    restart it could actually perform."""
+    _no_supervisor(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _capability(app, supervise.MECHANISM_SYSTEMD)
+    armed = []
+    stops = []
+
+    async def _drive():
+        result = await app_mod.request_restart(
+            app, delay=0.01, arm=lambda: armed.append(True) or True,
+            stop=lambda: stops.append(True))
+        for _ in range(200):
+            if stops:
+                break
+            await asyncio.sleep(0.01)
+        return result
+
+    result = asyncio.run(_drive())
+
+    assert armed == [], \
+        "systemd was handed a sentinel it will never read (and cannot write)"
+    assert result["ok"] is True, result
+    assert result["armed"] is True, "a systemd restart was refused"
+    assert result["mechanism"] == supervise.MECHANISM_SYSTEMD
+    assert app.ctx.exit_code == supervise.EXIT_RESTART, \
+        "exit 75 is the ONLY thing that restarts us under systemd"
+    assert stops == [True]
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RESTART_READY
+
+
+def test_mechanism_none_never_even_tries_to_arm(tmp_path, monkeypatch):
+    """"Refuse outright", not "try and see".
+
+    A sentinel written by an unsupervised broker sits on disk authorizing the
+    NEXT accidental exit 75 — and the mechanism is already known, so trying is
+    pure downside."""
+    _no_supervisor(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _capability(app, supervise.MECHANISM_NONE, supervise.REASON_PPID_MISMATCH)
+    armed = []
+    stops = []
+
+    result = asyncio.run(app_mod.request_restart(
+        app, arm=lambda: armed.append(True) or True,
+        stop=lambda: stops.append(True)))
+
+    assert armed == [], "an unsupervised broker armed a sentinel anyway"
+    assert result["ok"] is False
+    assert result["reason"] == "not_supervised"
+    assert stops == []
+    assert getattr(app.ctx, "exit_code", None) is None
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+# ---- E15: honest capability reporting on /info ------------------------------
+
+def test_info_carries_the_restart_object(tmp_path, monkeypatch):
+    """Every field a client needs to render the control AND explain it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    block = r.json["restart"]
+    assert set(block) == {"configured", "available", "mechanism", "reason_code",
+                          "continuity", "lifecycle", "bootId"}
+    assert block["configured"] is False
+    assert block["available"] is False
+    assert block["mechanism"] == supervise.MECHANISM_NONE
+    assert block["reason_code"] == app_mod.REASON_RESTART_DISABLED
+    assert block["lifecycle"] == app_mod.LIFECYCLE_RUNNING
+    assert set(block["continuity"]) == {"guaranteed", "at_risk", "unknown"}
+    assert block["bootId"] == app_mod.BOOT_ID
+    # Additive: the keys other clients already read must be untouched.
+    for key in ("ok", "broker_id", "version", "mods", "mod_policy", "update"):
+        assert key in r.json
+
+
+@pytest.mark.parametrize("enabled,mechanism,reason,stage,expected", [
+    # The operator gate wins: it is the one an operator can actually change.
+    (False, supervise.MECHANISM_SUPERVISOR, None, app_mod.LIFECYCLE_RUNNING,
+     app_mod.REASON_RESTART_DISABLED),
+    (True, supervise.MECHANISM_NONE, supervise.REASON_NO_SUPERVISOR,
+     app_mod.LIFECYCLE_RUNNING, supervise.REASON_NO_SUPERVISOR),
+    # Inherited variables, not ours — a DIFFERENT fix from "no supervisor".
+    (True, supervise.MECHANISM_NONE, supervise.REASON_PPID_MISMATCH,
+     app_mod.LIFECYCLE_RUNNING, supervise.REASON_PPID_MISMATCH),
+    # systemd started us but will not bring us back.
+    (True, supervise.MECHANISM_NONE, supervise.REASON_SYSTEMD_NO_RESTART,
+     app_mod.LIFECYCLE_RUNNING, supervise.REASON_SYSTEMD_NO_RESTART),
+    # ...and "we could not read the policy" is not the same as "it says no".
+    (True, supervise.MECHANISM_NONE, supervise.REASON_SYSTEMD_POLICY_UNKNOWN,
+     app_mod.LIFECYCLE_RUNNING, supervise.REASON_SYSTEMD_POLICY_UNKNOWN),
+    (True, supervise.MECHANISM_SUPERVISOR, None, app_mod.LIFECYCLE_QUIESCING,
+     app_mod.REASON_RESTART_IN_PROGRESS),
+    (True, supervise.MECHANISM_SUPERVISOR, None, app_mod.LIFECYCLE_RESTART_READY,
+     app_mod.REASON_RESTART_IN_PROGRESS),
+    (True, supervise.MECHANISM_SUPERVISOR, None, app_mod.LIFECYCLE_RUNNING, None),
+    (True, supervise.MECHANISM_SYSTEMD, None, app_mod.LIFECYCLE_RUNNING, None),
+])
+def test_every_unavailable_cause_has_its_own_reason_code(
+        tmp_path, monkeypatch, enabled, mechanism, reason, stage, expected):
+    """A bare supported/none collapses states an operator needs told apart —
+    policy off, no supervisor, inherited variables, a unit that will not respawn
+    us, and one already running all read as "greyed out, no idea why"."""
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=enabled)
+    _capability(app, mechanism, reason)
+    app.ctx.lifecycle = stage
+    _, r = authed(app).get("/info")
+    block = r.json["restart"]
+    assert block["reason_code"] == expected, block
+    assert block["available"] is (expected is None), block
+    assert block["configured"] is enabled
+
+
+def test_the_reason_codes_are_all_distinct():
+    """They are API — the UI renders them — so a collision would silently show
+    one cause's text for another's problem."""
+    codes = [app_mod.REASON_RESTART_DISABLED,
+             app_mod.REASON_RESTART_IN_PROGRESS,
+             app_mod.REASON_ORIGIN_FORBIDDEN,
+             app_mod.REASON_RESTART_ERROR,
+             supervise.REASON_NO_SUPERVISOR,
+             supervise.REASON_PPID_MISMATCH,
+             supervise.REASON_SYSTEMD_NO_RESTART,
+             supervise.REASON_SYSTEMD_POLICY_UNKNOWN,
+             supervise.REASON_PROBE_FAILED]
+    assert len(set(codes)) == len(codes), codes
+
+
+def test_the_capability_is_probed_once_per_process_not_per_request(
+        tmp_path, monkeypatch):
+    """The hard requirement: ``worker_capability`` can shell out to ``systemctl
+    show`` with a 5 s timeout, synchronously, and /info is POLLED."""
+    calls = []
+
+    def counting_probe(**kwargs):
+        calls.append(True)
+        return {"supported": True, "mechanism": supervise.MECHANISM_SUPERVISOR,
+                "reason_code": None}
+
+    monkeypatch.setattr(app_mod, "_RESTART_CAPABILITY", None)
+    monkeypatch.setattr(supervise, "worker_capability", counting_probe)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    for _ in range(3):
+        _, r = authed(app).get("/info")
+        assert r.json["restart"]["mechanism"] == supervise.MECHANISM_SUPERVISOR
+    assert calls == [True], f"{len(calls)} probes for one app and 3 requests"
+    # And per PROCESS, not per app: it describes this interpreter, so a second
+    # app must not pay for a second systemctl call either.
+    other = _make_app(tmp_path, monkeypatch)
+    _, r = authed(other).get("/info")
+    assert calls == [True], "a second app re-probed the process capability"
+
+
+def test_a_probe_that_raises_degrades_to_unsupported(tmp_path, monkeypatch):
+    """A capability probe that throws is strictly worse than one that says no:
+    /info is how the whole desktop boots, and it must not 500 because a
+    subprocess call went wrong."""
+    def exploding_probe(**kwargs):
+        raise RuntimeError("boom from the capability probe")
+
+    monkeypatch.setattr(app_mod, "_RESTART_CAPABILITY", None)
+    monkeypatch.setattr(supervise, "worker_capability", exploding_probe)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    _, r = authed(app).get("/info")
+    assert r.status == 200, "a failed probe took /info down"
+    block = r.json["restart"]
+    assert block["available"] is False
+    assert block["mechanism"] == supervise.MECHANISM_NONE
+    assert block["reason_code"] == supervise.REASON_PROBE_FAILED
+
+
+def test_a_probe_that_answers_nonsense_degrades_to_unsupported(
+        tmp_path, monkeypatch):
+    """Same rule for a probe that returns something unusable rather than
+    raising — "we could not tell" must never render as "yes"."""
+    monkeypatch.setattr(app_mod, "_RESTART_CAPABILITY", None)
+    monkeypatch.setattr(supervise, "worker_capability", lambda **k: None)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    assert r.json["restart"]["mechanism"] == supervise.MECHANISM_NONE
+    assert r.json["restart"]["reason_code"] == supervise.REASON_PROBE_FAILED
+
+
+def test_an_unreadable_launcher_still_reports_a_continuity_summary(
+        tmp_path, monkeypatch):
+    """Bookkeeping must never be the reason the capability cannot be reported.
+    Zeros, and the restart is still describable."""
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    app.ctx.launcher = None                   # no launcher at all
+    _, r = authed(app).get("/info")
+    assert r.status == 200
+    assert r.json["restart"]["continuity"] == {"guaranteed": 0, "at_risk": 0,
+                                               "unknown": 0}
+
+
+def test_info_is_never_served_from_a_cache(tmp_path, monkeypatch):
+    """A restart capability read out of a shared cache (tailscale serve, a
+    corporate MITM) could show a quiescing broker as available — or a stale
+    bootId as proof of a restart nobody performed."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/info")
+    assert r.headers.get("Cache-Control") == "no-store"
+
+
+def test_the_boot_id_is_stable_within_the_process(tmp_path, monkeypatch):
+    """Stable, or every poll would look like a restart."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, first = authed(app).get("/info")
+    _, second = authed(app).get("/info")
+    assert first.json["restart"]["bootId"] == second.json["restart"]["bootId"]
+    # Two apps ARE one process: a per-app id would report a restart that never
+    # happened the moment anything created a second app.
+    other = _make_app(tmp_path, monkeypatch)
+    _, third = authed(other).get("/info")
+    assert third.json["restart"]["bootId"] == first.json["restart"]["bootId"]
+    # And it is NOT broker_id, which is durable across restarts by design (#64)
+    # — watching that one could never confirm anything.
+    assert first.json["restart"]["bootId"] != first.json["broker_id"]
+
+
+def test_the_boot_id_changes_when_the_process_changes():
+    """The whole point of it. The HTTP response to POST /restart cannot prove a
+    restart happened (the process answering is the one being replaced), so the
+    client confirms by polling /info until this value differs — which only works
+    if a NEW process really does mint a new one."""
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(root)] + [p for p in sys.path if p])
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import webterm.broker.app as a; print(a.BOOT_ID)"],
+        cwd=str(root), env=env, capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr
+    other = out.stdout.strip()
+    assert other, out.stderr
+    assert other != app_mod.BOOT_ID, \
+        "a fresh interpreter reported the same bootId: a client could never " \
+        "tell a restart from a broker that never went away"
+
+
+# ---- E17: POST /restart -----------------------------------------------------
+
+#: What a successful ``request_restart`` hands back, minus the part that stops
+#: the server. Route tests inject this: the route's job is the status codes and
+#: the body, and the machinery underneath has its own tests above.
+_OK_RESULT = {"ok": True, "lifecycle": app_mod.LIFECYCLE_RESTART_READY,
+              "reason": None, "waited_for": 0, "finished": 0, "timed_out": 0,
+              "aborted_uploads": [], "aborted_recordings": [], "elapsed": 0.01,
+              "armed": True, "stopping": True,
+              "mechanism": supervise.MECHANISM_SUPERVISOR}
+
+
+def _spy_drain(monkeypatch):
+    """Record every drain — and make sure a refusal that reaches one cannot
+    quietly succeed instead of failing the test."""
+    calls = []
+
+    async def _drain(app, timeout=None):
+        calls.append(timeout)
+        return dict(_OK_RESULT)
+
+    monkeypatch.setattr(app_mod, "drain_for_restart", _drain)
+    return calls
+
+
+def _spy_restart(monkeypatch, result=None, hold=None):
+    """Replace the machinery with a recorder.
+
+    The route calls ``request_restart(app)`` with no injectable seams of its
+    own — by design, the seams live one layer down — so this is where a route
+    test stops short of actually stopping the server."""
+    calls = []
+    payload = dict(_OK_RESULT if result is None else result)
+
+    async def _restart(app, **kwargs):
+        calls.append(kwargs)
+        if hold is not None:
+            await hold["event"].wait()
+        if payload.get("ok"):
+            app.ctx.lifecycle = app_mod.LIFECYCLE_RESTART_READY
+        else:
+            app_mod.resume_from_quiesce(app)   # what the real one does
+        return dict(payload)
+
+    monkeypatch.setattr(app_mod, "request_restart", _restart)
+    return calls
+
+
+def _restartable(tmp_path, monkeypatch, **cfg):
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True, **cfg)
+    return _capability(app, supervise.MECHANISM_SUPERVISOR)
+
+
+def test_restart_401s_unauthenticated(tmp_path, monkeypatch):
+    """The shared gate, first and always — and the live-router walk in
+    test_auth_mandatory asserts exactly this for every non-public route."""
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    # RAW client on purpose: no token.
+    _, r = app.test_client.post("/restart", json={})
+    assert r.status == 401
+    assert r.json["error"] == "auth_required"
+    assert drains == [] and restarts == [], \
+        "an unauthenticated request reached the drain"
+
+
+def test_restart_is_post_only(tmp_path, monkeypatch):
+    """A GET that bounces the process would be followed by every prefetcher and
+    link scanner on the network."""
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).get("/restart")
+    assert r.status == 405, r.status
+
+
+def test_restart_answers_its_preflight(tmp_path, monkeypatch):
+    """A JSON POST is never a simple request, so a cross-origin caller sends
+    OPTIONS first; route resolution precedes middleware, so an unrouted OPTIONS
+    405s and the browser reports an opaque network error."""
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = app.test_client.options("/restart")
+    assert r.status == 204
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    assert r.headers.get("Access-Control-Allow-Methods") == \
+        "GET, POST, PUT, OPTIONS"
+
+
+def test_restart_503s_when_the_gate_is_off_and_never_drains(tmp_path,
+                                                            monkeypatch):
+    """503, mirroring /update/check's disabled shape: an ABSENT capability is
+    not the caller being unauthorized."""
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)       # gate off (the default)
+    _capability(app, supervise.MECHANISM_SUPERVISOR)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 503, r.json
+    assert r.json["error"] == "restart_disabled"
+    assert r.json["reason_code"] == app_mod.REASON_RESTART_DISABLED
+    assert drains == [] and restarts == [], "a refused restart drained anyway"
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+@pytest.mark.parametrize("reason", [supervise.REASON_NO_SUPERVISOR,
+                                    supervise.REASON_PPID_MISMATCH,
+                                    supervise.REASON_SYSTEMD_NO_RESTART])
+def test_restart_409s_when_nothing_would_relaunch_us(tmp_path, monkeypatch,
+                                                     reason):
+    """Refusing to try is a correct outcome; trying and dying is not. The body
+    carries the reason_code so the UI can say WHICH."""
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    _capability(app, supervise.MECHANISM_NONE, reason)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 409, r.json
+    assert r.json["error"] == "restart_unsupported"
+    assert r.json["reason_code"] == reason
+    assert drains == [] and restarts == []
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+def test_restart_409s_when_one_is_already_in_progress(tmp_path, monkeypatch):
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    app.ctx.lifecycle = app_mod.LIFECYCLE_DRAINING
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 409, r.json
+    assert r.json["error"] == "restart_in_progress"
+    assert r.json["reason_code"] == app_mod.REASON_RESTART_IN_PROGRESS
+    assert drains == [] and restarts == [], \
+        "a second restart drained a broker that was already draining"
+
+
+def test_a_cross_origin_post_is_refused_before_anything_happens(tmp_path,
+                                                                monkeypatch):
+    """_cors_headers answers ACAO:* unconditionally, so the BROWSER will not
+    stop a page on any origin from POSTing here. For a route that bounces the
+    machine, the token cannot be the only gate."""
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    for origin in ("http://evil.example", "https://evil.example:8443", "null"):
+        _, r = authed(app).post("/restart", json={},
+                                headers={"Origin": origin})
+        assert r.status == 403, f"{origin} answered {r.status}"
+        assert r.json["error"] == "forbidden_origin"
+        assert r.json["reason_code"] == app_mod.REASON_ORIGIN_FORBIDDEN
+    assert drains == [] and restarts == [], \
+        "a cross-origin request reached the drain"
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+def test_the_broker_s_own_page_is_not_cross_origin(tmp_path, monkeypatch):
+    """...and the check must not refuse the UI it exists to serve. Hosts, not
+    full origins: this broker terminates no TLS, so its view of the scheme and
+    port is the proxy's, not the browser's."""
+    restarts = _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={},
+                            headers={"Origin": "https://127.0.0.1:8445"})
+    assert r.status == 202, r.json
+    assert len(restarts) == 1
+
+
+def test_a_successful_restart_answers_202_with_a_boot_id(tmp_path, monkeypatch):
+    """202, never 200: "restarted" is not a claim this response can make. The
+    client confirms by watching bootId change."""
+    restarts = _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 202, r.json
+    assert r.json["ok"] is True
+    assert r.json["bootId"] == app_mod.BOOT_ID
+    assert r.json["mechanism"] == supervise.MECHANISM_SUPERVISOR
+    # The drain report: what it waited for and what it cost.
+    assert r.json["drain"]["armed"] is True
+    assert r.json["drain"]["stopping"] is True
+    assert r.json["drain"]["aborted_uploads"] == []
+    assert set(r.json["continuity"]) == {"guaranteed", "at_risk", "unknown"}
+    # And the capability is honest about itself immediately afterwards.
+    assert r.json["restart"]["available"] is False
+    assert r.json["restart"]["reason_code"] == \
+        app_mod.REASON_RESTART_IN_PROGRESS
+    assert restarts == [{}], "the route did not drive request_restart exactly once"
+
+
+def test_a_restart_that_cannot_be_armed_is_not_a_202(tmp_path, monkeypatch):
+    """The mechanism said supervisor, the arming said otherwise (a run dir that
+    could not be written). Same class of fact as the 409 above — and NOT a
+    success, because nothing will bring this process back."""
+    _spy_restart(monkeypatch, result=dict(_OK_RESULT, ok=False,
+                                          reason="not_supervised",
+                                          armed=False, stopping=False))
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 409, r.json
+    assert r.json["ok"] is False
+    assert r.json["reason_code"] == "not_supervised"
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING, \
+        "a refused restart left the broker refusing new work"
+
+
+def test_a_drain_that_times_out_is_a_503_not_a_202(tmp_path, monkeypatch):
+    """"Come back shortly" — the broker is still up, still serving, and the
+    in-flight write it could not wait for is still running."""
+    _spy_restart(monkeypatch,
+                 result=dict(_OK_RESULT, ok=False, armed=False, stopping=False,
+                             reason="critical_sections_timed_out",
+                             timed_out=1))
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 503, r.json
+    assert r.json["reason_code"] == "critical_sections_timed_out"
+    assert r.json["drain"]["timed_out"] == 1
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+def test_a_restart_that_blows_up_does_not_strand_the_broker(tmp_path,
+                                                            monkeypatch):
+    """Should be unreachable — request_restart swallows the drain's own errors.
+    What matters is that a bug there cannot leave the broker QUIESCING, refusing
+    every upload, recording and launch for the rest of its life while looking
+    perfectly healthy."""
+    async def _boom(app, **kwargs):
+        raise RuntimeError("boom from the restart machinery")
+
+    monkeypatch.setattr(app_mod, "request_restart", _boom)
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 503, r.json
+    assert r.json["reason_code"] == app_mod.REASON_RESTART_ERROR
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
+
+
+def test_two_simultaneous_requests_produce_one_restart(tmp_path, monkeypatch):
+    """Two operators clicking at once, or one double-submit, must not schedule
+    two drains and two shutdowns.
+
+    Both requests are genuinely in flight: the first is held inside the
+    machinery until the second has been answered, so the loser is refused by the
+    compare-and-swap rather than by having arrived after everything was over.
+    """
+    hold = {}
+    restarts = _spy_restart(monkeypatch, hold=hold)
+    app = _restartable(tmp_path, monkeypatch)
+
+    with authed_reusable(app) as client:
+        url = with_token(f"http://{client.host}:{client.port}/restart",
+                         app.ctx.auth_token)
+
+        async def _drive():
+            hold["event"] = asyncio.Event()
+            first = asyncio.ensure_future(client._session.post(url, json={}))
+            second = asyncio.ensure_future(client._session.post(url, json={}))
+            for _ in range(500):        # until one of them holds the claim
+                if restarts:
+                    break
+                await asyncio.sleep(0.01)
+            assert restarts, "neither request reached the machinery"
+            # Give the loser time to be refused while the winner is still held.
+            for _ in range(200):
+                if second.done() or first.done():
+                    break
+                await asyncio.sleep(0.01)
+            hold["event"].set()
+            return await asyncio.gather(first, second)
+
+        responses = client._loop.run_until_complete(_drive())
+
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses == [202, 409], statuses
+    assert len(restarts) == 1, \
+        f"{len(restarts)} restarts were started for two simultaneous requests"
+    loser = [r for r in responses if r.status_code == 409][0]
+    assert loser.json()["error"] == "restart_in_progress"
+    assert loser.json()["reason_code"] == app_mod.REASON_RESTART_IN_PROGRESS
+
+
+def test_the_claim_is_a_compare_and_swap(tmp_path, monkeypatch):
+    """The primitive underneath, on its own: exactly one caller wins, and the
+    claim is what makes the broker refuse new work from that instant rather than
+    an await later."""
+    app = _make_app(tmp_path, monkeypatch)
+    assert app_mod._claim_restart(app) is True
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_QUIESCING
+    assert app_mod._claim_restart(app) is False, "two callers claimed one restart"
+    app_mod.resume_from_quiesce(app)
+    assert app_mod._claim_restart(app) is True, \
+        "an abandoned restart left the claim held forever"

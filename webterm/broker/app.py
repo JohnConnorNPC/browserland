@@ -1208,6 +1208,242 @@ RESTART_DRAIN_TIMEOUT = 20.0
 #: enough that the window in which a quiesced broker refuses work stays small.
 RESTART_STOP_DELAY = 0.25
 
+#: THIS PROCESS's identity, minted once at import (#183). ``broker_id`` cannot do
+#: this job: it is durable across restarts BY DESIGN (#64, it is how a browser
+#: recognises the same machine), so a client watching it can never tell "the
+#: broker came back" from "it never went away". And an HTTP response cannot
+#: truthfully claim a restart happened — the process answering is the one being
+#: replaced, and it answers BEFORE it stops. So the client's only honest
+#: confirmation is to poll /info until this value changes.
+#:
+#: At import, not per app: two apps in one interpreter are one PROCESS, and a
+#: per-app id would report a restart that never happened.
+BOOT_ID = secrets.token_hex(8)
+
+#: ``restart.reason_code`` on /info, on top of ``supervise``'s vocabulary —
+#: which names only the MECHANISM's reasons (no supervisor, ppid mismatch, a
+#: systemd unit that will not respawn us). These two are BROKER-policy reasons
+#: and are a different fact from "there is nothing to relaunch us": an operator
+#: told "no-supervisor" would go looking for a launcher problem that does not
+#: exist. The UI renders these strings, so they are API — add, never repurpose.
+REASON_RESTART_DISABLED = "restart-disabled"          # the operator gate is off
+REASON_RESTART_IN_PROGRESS = "restart-in-progress"    # one is already under way
+#: POST /restart only: the caller is a page on some other origin.
+REASON_ORIGIN_FORBIDDEN = "cross-origin-forbidden"
+#: POST /restart only, and it should be unreachable: the machinery itself blew
+#: up. Distinct from every reason above so a client renders "something went
+#: wrong here" rather than a confident explanation that is not the truth.
+REASON_RESTART_ERROR = "restart-error"
+
+#: Zeros, not None: a confirmation dialog has to render SOMETHING, and "0 at
+#: risk" from an unreadable registry is the same shape as "0 at risk" from an
+#: idle broker — which is why the summary is only ever read alongside the
+#: lifecycle and never on its own.
+_NO_CONTINUITY = {"guaranteed": 0, "at_risk": 0, "unknown": 0}
+
+#: One probe per PROCESS. See :func:`_probe_restart_capability`.
+_RESTART_CAPABILITY: Optional[Dict[str, Any]] = None
+
+
+def _probe_restart_capability() -> Dict[str, Any]:
+    """``supervise.worker_capability()``, run at most ONCE per process.
+
+    Never per request, and that is a hard requirement rather than an
+    optimisation: the probe can shell out to ``systemctl show`` with a 5 s
+    timeout, synchronously, and /info is POLLED — every second of that would be
+    a second the whole event loop serves nobody.
+
+    Caching is not a staleness risk here, because the answer cannot change
+    without the process changing: it is derived from our own ppid, the three
+    variables our supervisor exported at spawn, and the unit that started us.
+    A restart replaces the process, and the new one probes again.
+
+    Memoized on the MODULE, not on the app: it describes this interpreter, and
+    a test suite that builds thirty apps must not pay thirty systemctl calls.
+    Degrades to "unsupported" on any exception — worker_capability already
+    swallows its own, so this only covers a bug in it or an injected probe, and
+    a capability that says "no" is strictly better than a route that 500s."""
+    global _RESTART_CAPABILITY
+    if _RESTART_CAPABILITY is None:
+        try:
+            cap = supervise.worker_capability()
+        except Exception:  # noqa: BLE001 -- see the docstring
+            LOGGER.exception("the restart capability probe raised; reporting "
+                             "restart as unsupported")
+            cap = None
+        if not isinstance(cap, dict) or not cap.get("mechanism"):
+            cap = {"supported": False,
+                   "mechanism": supervise.MECHANISM_NONE,
+                   "reason_code": supervise.REASON_PROBE_FAILED}
+        _RESTART_CAPABILITY = cap
+    return _RESTART_CAPABILITY
+
+
+def _restart_capability(app) -> Dict[str, Any]:
+    """This app's copy of the process capability, falling back to the memo.
+
+    ``app.ctx`` carries it (create_app seeds it) so one app's answer can be
+    overridden — a test driving the systemd branch on a Windows box, for
+    instance — without reaching into another app's. ``getattr`` for the same
+    reason :func:`_lifecycle` uses one: an app object built before this existed
+    must read as "unsupported", never AttributeError."""
+    cap = getattr(app.ctx, "restart_capability", None)
+    if not isinstance(cap, dict) or not cap.get("mechanism"):
+        cap = _probe_restart_capability()
+    return cap
+
+
+def _continuity_summary(app) -> Dict[str, int]:
+    """How many live agents survive a restart, defensively (#183).
+
+    ``Launcher.continuity_summary`` already promises never to raise; this covers
+    the app that has no launcher at all. Bookkeeping must never be the reason a
+    restart capability cannot be reported."""
+    try:
+        summary = app.ctx.launcher.continuity_summary()
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("continuity summary unavailable", exc_info=True)
+        return dict(_NO_CONTINUITY)
+    if not isinstance(summary, dict):
+        return dict(_NO_CONTINUITY)
+    out = dict(_NO_CONTINUITY)
+    for key in out:
+        try:
+            out[key] = int(summary.get(key, 0))
+        except (TypeError, ValueError):
+            out[key] = 0
+    return out
+
+
+def restart_status(app) -> Dict[str, Any]:
+    """What GET /info reports under ``restart``, and what POST /restart refuses
+    with (#183).
+
+    ``{"configured": bool, "available": bool, "mechanism": str,
+       "reason_code": str|None, "continuity": {...}, "lifecycle": str,
+       "bootId": str}``
+
+    ``configured`` and ``available`` are deliberately two fields, not one. A
+    bare supported/unsupported collapses four states an operator needs told
+    apart — policy off, nothing to relaunch us, a restart already running, and
+    live sessions at risk — into one greyed-out button with nothing to say. So
+    ``configured`` is the operator gate alone, ``available`` is the gate AND the
+    mechanism AND the lifecycle together (can a restart be performed right
+    NOW), and ``reason_code`` names which of them said no.
+
+    Reason precedence: the gate first (it is the one an operator can change,
+    and it is a broker-wide fact rather than a moment), then the mechanism, then
+    "already in progress". The last two cannot both be true — a restart cannot
+    be under way on a broker that has nothing to relaunch it.
+
+    Never raises: every input is read through a defensive helper. An /info that
+    500s because a capability probe hiccupped is worse than one that says
+    "restart unavailable"."""
+    cap = _restart_capability(app)
+    mechanism = str(cap.get("mechanism") or supervise.MECHANISM_NONE)
+    configured = bool(getattr(app.ctx, "restart_enabled", False))
+    stage = _lifecycle(app)
+    reason: Optional[str] = None
+    if not configured:
+        reason = REASON_RESTART_DISABLED
+    elif mechanism == supervise.MECHANISM_NONE or not cap.get("supported"):
+        # worker_capability collapses EVERY unsupported case to mechanism
+        # "none" and puts the distinction in reason_code, which is exactly what
+        # a client needs to render ("started without the launcher shim" vs
+        # "this unit's Restart= will not bring us back").
+        reason = str(cap.get("reason_code") or supervise.REASON_NO_SUPERVISOR)
+    elif stage != LIFECYCLE_RUNNING:
+        reason = REASON_RESTART_IN_PROGRESS
+    return {"configured": configured,
+            "available": reason is None,
+            "mechanism": mechanism,
+            "reason_code": reason,
+            "continuity": _continuity_summary(app),
+            "lifecycle": stage,
+            "bootId": BOOT_ID}
+
+
+def _claim_restart(app) -> bool:
+    """Compare-and-swap RUNNING -> QUIESCING. True for the ONE caller that won.
+
+    No await between the read and the write, and the loop is single-threaded,
+    so this is atomic without a lock — and it has to be atomic somewhere: two
+    operators clicking Restart at once (or one double-submit, or a client that
+    retries a request it thought had timed out) would otherwise both drain,
+    both arm, and both schedule a stop. The loser is told a restart is already
+    under way, which is the truth.
+
+    Claiming BEFORE the drain rather than relying on drain_for_restart's own
+    quiesce is the whole point: the drain's first statement is an await away,
+    and a second request that arrives in that gap would find the broker still
+    RUNNING. :func:`resume_from_quiesce` is what releases the claim when the
+    restart turns out to be impossible."""
+    if _lifecycle(app) != LIFECYCLE_RUNNING:
+        return False
+    app.ctx.lifecycle = LIFECYCLE_QUIESCING
+    return True
+
+
+def _log_orphaned_restart(task) -> None:
+    """Log a shielded restart whose request went away, for
+    :func:`_log_orphaned_section`'s reason: ``shield`` marks the inner
+    exception retrieved, and the client is gone, so a failure here would
+    otherwise be invisible — on the one operation that decides whether this
+    process comes back."""
+    if task.cancelled():
+        LOGGER.error("the restart task was cancelled outright; the broker may "
+                     "be left quiesced and will not restart")
+        return
+    exc = task.exception()
+    if exc is not None:
+        LOGGER.error("the restart failed after its request had gone: %r", exc)
+
+
+def _origin_permitted(request) -> bool:
+    """May a page on THIS request's Origin ask for something destructive?
+
+    ``_cors_headers`` answers every response — including 401s — with
+    ``Access-Control-Allow-Origin: *``, deliberately and unconditionally: a
+    tokenless network-reachable broker still has to answer the UI's cross-origin
+    probe. The consequence is that the BROWSER will not stop a page on any
+    origin from POSTing here; for every other route the token in the URL is the
+    whole gate, and that is accepted because those routes are recoverable. A
+    process bounce is not, so this route adds the check the CORS policy cannot.
+
+    Permitted:
+
+      * no ``Origin`` header at all — curl, the MCP, a launcher script, an
+        operator's own tooling. Browsers send Origin on EVERY POST (same-origin
+        included, per Fetch), so absence is not a browser request slipping
+        through; it is a non-browser caller, which is the same caller that could
+        just run ``systemctl restart``.
+      * an Origin whose HOST is the host this request was addressed to.
+
+    Everything else is refused, ``null`` (a sandboxed iframe, a file:// page)
+    included.
+
+    HOSTS, not full origins, and that is measured rather than lazy: this broker
+    terminates no TLS — ``tailscale serve`` fronts it — so ``request.scheme``
+    and the port it sees are the PROXY's, not the browser's. A scheme- and
+    port-exact comparison would refuse our own UI on every https deployment we
+    ship, i.e. it would break the feature everywhere it matters while looking
+    stricter."""
+    try:
+        origin = (request.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        host = (urllib.parse.urlsplit(origin).hostname or "").lower()
+        if not host:
+            return False                      # "null", or not an origin at all
+        # server_name is the Host header's hostname WITHOUT the port, which also
+        # keeps a bracketed IPv6 literal in one piece.
+        mine = (request.server_name or "").lower()
+        return bool(mine) and host == mine
+    except Exception:  # noqa: BLE001 -- an unparseable anything refuses, never
+        # 500s. The safe direction for a destructive route is "no".
+        LOGGER.debug("origin check failed; refusing", exc_info=True)
+        return False
+
 
 def _lifecycle(app) -> str:
     """``app.ctx.lifecycle``, read defensively. ``getattr`` because a bare
@@ -1378,16 +1614,26 @@ async def request_restart(app, *, timeout: float = RESTART_DRAIN_TIMEOUT,
     broker, it ENDS it. Nothing is set, nothing is stopped, the quiesce is
     undone and the caller gets ``reason="not_supervised"``.
 
+    ARMING IS PER-MECHANISM, and this used to be wrong. The sentinel authorizes
+    OUR supervisor and nothing else; under systemd there is no supervisor, no
+    nonce and no run dir, so ``arm_restart`` cannot succeed — while the unit's
+    ``Restart=always``/``on-failure`` respawns ANY non-zero exit, which makes
+    exiting 75 sufficient on its own. Arming unconditionally therefore refused a
+    genuine systemd install the one restart it could actually perform. So:
+    ``supervisor`` arms, ``systemd`` skips arming, ``none`` refuses outright.
+
     ``arm``/``stop`` are injectable so a test can drive this without a
     supervisor and without stopping its own event loop."""
     arm = arm or supervise.arm_restart
     stopper = stop or (lambda: app.stop(terminate=False))
 
-    # No capability pre-check before the drain, deliberately: worker_capability()
-    # can shell out to `systemctl show` (up to 5 s, BLOCKING the loop), and
-    # arm_restart() is the only authority that matters anyway. The cost of
-    # finding out late is a drain on a broker that then stays up — reported, and
-    # recoverable, which a wedged event loop is not.
+    # Read from the CACHED capability (_restart_capability), never a fresh
+    # worker_capability(): that call can shell out to `systemctl show` for up to
+    # 5 s, synchronously, and this runs on the event loop. Read here rather than
+    # after the drain only because it is now free — the refusal still happens
+    # below, after the drain, so the ordering rule above is untouched.
+    mechanism = str(_restart_capability(app).get("mechanism")
+                    or supervise.MECHANISM_NONE)
     try:
         report = await drain_for_restart(app, timeout=timeout)
     except BaseException:
@@ -1400,6 +1646,7 @@ async def request_restart(app, *, timeout: float = RESTART_DRAIN_TIMEOUT,
     result: Dict[str, Any] = dict(report)
     result["armed"] = False
     result["stopping"] = False
+    result["mechanism"] = mechanism
     if not result.get("ok"):
         result["reason"] = result.get("reason") or "drain_failed"
         resume_from_quiesce(app)
@@ -1410,19 +1657,37 @@ async def request_restart(app, *, timeout: float = RESTART_DRAIN_TIMEOUT,
     # is a few bytes to a local run dir, and we have just proven the shared
     # executor may be exactly where things get stuck. A fast failure beats a
     # hop that can queue behind a wedged worker at the last possible moment.
-    try:
-        armed = bool(arm())
-    except Exception:  # noqa: BLE001 -- arm_restart already swallows its own
-        # OSErrors; this covers an injected arm and any future signature change.
-        LOGGER.exception("arming the restart intent raised")
+    if mechanism == supervise.MECHANISM_SYSTEMD:
+        # NOTHING TO ARM, and nothing to arm it with. The sentinel is a message
+        # to OUR supervisor; systemd never reads it, has given us no nonce and
+        # no run dir, and respawns any non-zero exit under Restart=always /
+        # on-failure — which worker_capability has already verified by reading
+        # the unit's actual policy rather than trusting $INVOCATION_ID. Exiting
+        # 75 is therefore the whole mechanism here.
+        armed = True
+        LOGGER.info("restart under systemd: exiting %d is sufficient, no "
+                    "intent sentinel to arm", supervise.EXIT_RESTART)
+    elif mechanism == supervise.MECHANISM_SUPERVISOR:
+        try:
+            armed = bool(arm())
+        except Exception:  # noqa: BLE001 -- arm_restart already swallows its
+            # own OSErrors; this covers an injected arm and any future signature
+            # change.
+            LOGGER.exception("arming the restart intent raised")
+            armed = False
+    else:
+        # mechanism "none": there is nothing that will bring this process back,
+        # so exiting 75 would END the broker. Refused without even trying to
+        # arm — a sentinel written here would sit on disk authorizing the next
+        # accidental exit 75 of a broker that nobody is supervising.
         armed = False
     if not armed:
         result["ok"] = False
         result["reason"] = "not_supervised"
         LOGGER.error("restart requested but no supervisor will honour it "
-                     "(no intent sentinel could be armed). Staying up: exiting "
-                     "%d here would stop the broker, not restart it.",
-                     supervise.EXIT_RESTART)
+                     "(mechanism=%s; no intent sentinel could be armed). "
+                     "Staying up: exiting %d here would stop the broker, not "
+                     "restart it.", mechanism, supervise.EXIT_RESTART)
         resume_from_quiesce(app)
         result["lifecycle"] = _lifecycle(app)
         return result
@@ -2880,6 +3145,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.lifecycle = LIFECYCLE_RUNNING
     # Strong ref to the deferred stop task, once a restart is under way.
     app.ctx.restart_stop_task = None
+    app.ctx.restart_task = None
+    # CAN this process be restarted by exiting — probed ONCE, here, and never
+    # again (see _probe_restart_capability: it can block for 5 s on `systemctl
+    # show`, and /info is polled). Seeded onto ctx so a test can override ONE
+    # app's answer; the value itself is memoized per process, so N apps in one
+    # interpreter still cost one probe.
+    app.ctx.restart_capability = _probe_restart_capability()
+    # This PROCESS's id, so a client can tell a restart actually happened (see
+    # BOOT_ID). Deliberately NOT broker_id, which survives restarts by design.
+    app.ctx.boot_id = BOOT_ID
+    LOGGER.info("restart: gate=%s mechanism=%s%s boot=%s",
+                "on" if app.ctx.restart_enabled else "off",
+                app.ctx.restart_capability.get("mechanism"),
+                (" (%s)" % app.ctx.restart_capability.get("reason_code")
+                 if app.ctx.restart_capability.get("reason_code") else ""),
+                BOOT_ID)
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -5503,6 +5784,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # (the apply half does not exist yet -- a later checkpoint) so this
         # key is honest about a capability that is not implemented rather than
         # silently omitted or hardcoded true.
+        #
+        # #183: `restart` rides here for the SAME compatibility reason, and its
+        # shape is a deliberate refusal to collapse states. A bare
+        # supported/none would tell an operator nothing about WHICH of "the gate
+        # is off", "nothing will relaunch us", "these variables were inherited,
+        # not ours", "this unit's Restart= will not bring us back" and "one is
+        # already running" they are looking at — and the UI has to say which,
+        # because every one of them has a different fix. `continuity` is here so
+        # a confirmation dialog can say how many live sessions are at risk
+        # BEFORE anything happens; `bootId` is how a client confirms the restart
+        # actually occurred, since the response to POST /restart cannot.
+        #
+        # no-store, and not merely for tidiness: this body now carries a
+        # capability whose whole job is to be current. A restart capability read
+        # out of a shared cache (tailscale serve, a corporate MITM) could show a
+        # restart-in-progress broker as available, or a stale bootId as proof
+        # that a restart nobody performed did happen.
         return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
                            "version": app.ctx.version,
                            "mods_enabled": app.ctx.mods_enabled,
@@ -5513,7 +5811,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                "check_enabled": app.ctx.update_check_enabled,
                                "apply_enabled": bool(getattr(
                                    app.ctx, "update_apply_enabled", False)),
-                           }})
+                           },
+                           "restart": restart_status(app)},
+                          headers={"Cache-Control": "no-store"})
 
     # ---- mod policy write (/mods/policy, #157) ----------------------------
     # The ONLY writer of the pins GET /info reports. Token-gated like every
@@ -5990,6 +6290,113 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                               status=503)
         data = await _update_check_cached()
         return sanic_json({"ok": True, "check": data})
+
+    # ---- self-restart (POST /restart, #183) -------------------------------
+    # POST only, and never 200. "Restarted" is not a claim an HTTP response can
+    # make about its own process: the thing answering is the thing being
+    # replaced, and it answers BEFORE it stops. 202 Accepted plus a bootId the
+    # client watches for a change is the honest version of that exchange.
+    #
+    # The refusals are graded on purpose, because they mean different things to
+    # whoever clicked:
+    #   401  no token                     -- the shared gate, first, always.
+    #   403  a page on another origin     -- see _origin_permitted.
+    #   503  the operator gate is off     -- an ABSENT capability, exactly like
+    #        /update/check's disabled shape; not "you are not allowed".
+    #   409  nothing will relaunch us, or one is already under way -- a state
+    #        conflict, and the body names WHICH via reason_code.
+    async def _restart_post(request: Request):
+        err = _gated_auth_error(request, "/restart")
+        if err is not None:
+            return err
+        # Origin BEFORE the gate and the capability: a refused caller learns
+        # nothing about this broker's deployment policy, and nothing below runs.
+        if not _origin_permitted(request):
+            LOGGER.warning("refused a cross-origin restart from origin %r (%s)",
+                           request.headers.get("Origin"), request.ip)
+            return sanic_json({"ok": False, "error": "forbidden_origin",
+                               "reason_code": REASON_ORIGIN_FORBIDDEN},
+                              status=403)
+        status = restart_status(app)
+        if not status["configured"]:
+            return sanic_json({"ok": False, "error": "restart_disabled",
+                               "reason_code": REASON_RESTART_DISABLED,
+                               "restart": status}, status=503)
+        if status["mechanism"] == supervise.MECHANISM_NONE:
+            # worker_capability collapses every unsupported case to mechanism
+            # "none", so this one comparison covers them all; reason_code is
+            # what tells them apart ("no-supervisor" vs "ppid-mismatch" vs
+            # "systemd-restart-disabled"). 409 rather than 501: this is about
+            # the state this process happens to be running in, and it changes
+            # the moment somebody starts it under the launcher.
+            LOGGER.warning("restart refused: %s (%s)", status["mechanism"],
+                           status["reason_code"])
+            return sanic_json({"ok": False, "error": "restart_unsupported",
+                               "reason_code": status["reason_code"],
+                               "restart": status}, status=409)
+        # THE CLAIM. Two clicks, a double-submit, or a client retrying a request
+        # it thought had timed out must produce ONE restart; the loser is told
+        # so rather than starting a second drain and a second stop.
+        if not _claim_restart(app):
+            return sanic_json({"ok": False, "error": "restart_in_progress",
+                               "reason_code": REASON_RESTART_IN_PROGRESS,
+                               "restart": restart_status(app)}, status=409)
+        # AUDIT. This bounces a machine, so it is a warning and it is written
+        # BEFORE anything happens — a restart that wedges half way must still
+        # leave a record of who asked. We know the caller's address and that
+        # they held the browser token; there is no per-user identity to log.
+        cont = status["continuity"]
+        LOGGER.warning("RESTART requested by %s (origin %s, mechanism %s, "
+                       "boot %s): %d agent(s) survive, %d at risk, %d unknown; "
+                       "draining now", request.ip,
+                       request.headers.get("Origin") or "-",
+                       status["mechanism"], BOOT_ID, cont["guaranteed"],
+                       cont["at_risk"], cont["unknown"])
+        # SHIELDED, and with a strong reference held: the client that asked can
+        # disconnect mid-drain (Sanic cancels the handler on connection_lost),
+        # and abandoning a drain half way through is how in-flight writes get
+        # abandoned with the operator told "restarting". The task carries on;
+        # request_restart's own cancellation path is what un-quiesces the broker
+        # if the drain itself is cancelled outright.
+        task = asyncio.ensure_future(request_restart(app))
+        app.ctx.restart_task = task
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Nobody will observe the outcome now; make a failure loud.
+            task.add_done_callback(_log_orphaned_restart)
+            raise
+        except Exception:  # noqa: BLE001 -- request_restart swallows the drain's
+            # own errors, so only a bug reaches here. The broker must not be
+            # left quiesced by one.
+            LOGGER.exception("the restart request failed")
+            resume_from_quiesce(app)
+            return sanic_json({"ok": False, "error": "restart_failed",
+                               "reason_code": REASON_RESTART_ERROR,
+                               "restart": restart_status(app)}, status=503)
+        body = {"ok": bool(result.get("ok")),
+                # The whole drain report: what was waited for, what timed out,
+                # and which upload/recording sessions the restart cost. An
+                # operator gets told what it destroyed, not just that it worked.
+                "drain": result,
+                "continuity": cont,
+                "mechanism": result.get("mechanism", status["mechanism"]),
+                # THE confirmation handle. The response cannot prove a restart;
+                # a client polls /info until restart.bootId differs from this.
+                "bootId": BOOT_ID,
+                "restart": restart_status(app)}
+        if not result.get("ok"):
+            reason = str(result.get("reason") or "restart_failed")
+            body["error"] = "restart_failed"
+            body["reason_code"] = reason
+            # not_supervised is the same class of fact as the 409 above (there
+            # is nothing to relaunch us — we only found out at arming time);
+            # everything else here is a drain that did not complete, which is a
+            # "try again shortly".
+            return sanic_json(
+                body, status=409 if reason == "not_supervised" else 503)
+        # 202, never 200: accepted, drained, armed, and stopping in a moment.
+        return sanic_json(body, status=202)
 
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
@@ -6864,6 +7271,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])
+    # POST only (#183): a GET that bounces the process would be followed by
+    # every prefetcher, link scanner and browser history restore on the network.
+    app.add_route(_restart_post, "/restart", methods=["POST"])
     app.add_route(_state_get, "/state", methods=["GET"])
     app.add_route(_state_put, "/state", methods=["PUT"])
     app.add_route(_modstore_get, "/mod-store/<modId>", methods=["GET"])
@@ -6928,6 +7338,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mods/policy", "preflight_mods_policy"),
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/update/check", "preflight_update_check"),
+                             ("/restart", "preflight_restart"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),
                              ("/recording/begin", "preflight_rec_begin"),
