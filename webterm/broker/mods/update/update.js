@@ -57,14 +57,52 @@
                     'disabled': 'update checking is switched off on this '
                         + 'broker. An operator enables it with '
                         + '"update_check_enabled" in the broker config',
+                    'no-such-host': 'the host this answer belonged to is no '
+                        + 'longer configured, so there was nobody left to ask',
                 };
 
                 // ---- live state (NOT persisted — it is a live check) ----
-                let last = null;        // the broker's check payload
-                let lastError = null;   // string when the request itself failed
-                let checkedAt = 0;      // epoch ms of the last completed poll
+                // One record PER HOST, keyed by host id, following the core's
+                // pollStateFor() precedent. A single set of module scalars
+                // could only ever describe one broker, and "this one is
+                // current, that one is 3 behind" is the normal case for anyone
+                // running more than one — not an edge case. So the answer is
+                // stored beside the id it came from, and two hosts can hold
+                // different states at the same time.
+                //
+                // Record fields:
+                //   hostId     the id it was fetched FOR, so a record can never
+                //              be read out from under the host it describes
+                //   check      the broker's check payload (null = nothing good)
+                //   error      string reason when the request itself failed
+                //   checkedAt  epoch ms of the last COMPLETED poll (0 = never
+                //              answered, which renders as "checking…", not as
+                //              a stale timestamp)
+                //   inFlight   this host's own mutex. Deliberately per host:
+                //              one global one would let a single black-holed
+                //              broker sit on the 20s timeout and suppress
+                //              every other host's poll for the whole window.
+                const hostChecks = new Map();   // hostId -> check state record
+                function checkStateFor(hostId) {
+                    let st = hostChecks.get(hostId);
+                    if (!st) {
+                        st = { hostId: hostId, check: null, error: null,
+                               checkedAt: 0, inFlight: false };
+                        hostChecks.set(hostId, st);
+                    }
+                    return st;
+                }
+                // The host the chip and the window currently describe. Resolved
+                // from its ID at every use rather than captured once: a host
+                // object grabbed at init time goes stale the moment its url or
+                // token is edited in Settings, and a stale object aims the
+                // check at the old address.
+                function localHostId() {
+                    const h = hostById('local') || localHost();
+                    return (h && h.id) || 'local';
+                }
+                function viewRecord() { return checkStateFor(localHostId()); }
                 let timer = null;
-                let inFlight = false;
                 const openWins = new Set();
 
                 // The issue's own objection to a permanent taskbar chip: this
@@ -101,22 +139,28 @@
                 chip.addEventListener('click', openOrFocusWindow);
                 ctx.taskbar.addStatusItem(chip);   // auto-removed on unload
 
-                function state() {
-                    if (lastError) return 'unknown';
-                    return (last && last.state) || 'unknown';
+                // The readers all take the RECORD they are describing. Passing
+                // it in (instead of reaching for whatever the module last saw)
+                // is what stops a second host's answer being rendered under the
+                // first host's name once the poll fans out.
+                function state(st) {
+                    if (!st) return 'unknown';        // never established
+                    if (st.error) return 'unknown';
+                    return (st.check && st.check.state) || 'unknown';
                 }
-                function reasonCode() {
-                    if (lastError) return lastError;
-                    return (last && last.reason) || null;
+                function reasonCode(st) {
+                    if (!st) return null;
+                    if (st.error) return st.error;
+                    return (st.check && st.check.reason) || null;
                 }
                 function bandFor(s) {
                     if (s === 'current') return 'green';
                     if (s === 'behind') return 'amber';
                     return 'grey';   // ahead-or-diverged and unknown both
                 }
-                function chipLabel(s) {
+                function chipLabel(st, s) {
                     if (s === 'behind') {
-                        const n = last && last.behindBy;
+                        const n = st && st.check && st.check.behindBy;
                         return (typeof n === 'number' && n > 0)
                             ? (n + ' behind') : 'update';
                     }
@@ -126,7 +170,8 @@
                 }
 
                 function renderChip() {
-                    const s = state();
+                    const st = viewRecord();
+                    const s = state(st);
                     // "Quiet when current" hides only the CURRENT state, never
                     // unknown: an unknown that hid itself would be
                     // indistinguishable from a green one, which is exactly the
@@ -136,56 +181,84 @@
                     const band = BANDS[bandFor(s)];
                     chip.style.borderColor = band.border;
                     chip.style.color = band.fg;
-                    chipText.textContent = chipLabel(s);
-                    chip.title = chipTitle();
+                    chipText.textContent = chipLabel(st, s);
+                    chip.title = chipTitle(st);
                 }
 
-                function chipTitle() {
-                    const s = state();
+                function chipTitle(st) {
+                    const s = state(st);
                     if (s === 'current') return 'this build is current with upstream';
                     if (s === 'behind') return 'a newer build is available';
                     if (s === 'ahead-or-diverged') {
                         return 'this checkout has commits upstream has not seen';
                     }
-                    const r = REASONS[reasonCode()];
+                    const r = REASONS[reasonCode(st)];
                     return 'could not check: ' + (r || 'reason unavailable');
                 }
 
                 // ---- the poll ----
-                async function poll() {
-                    if (inFlight) return;
-                    inFlight = true;
+                // Takes a host ID, never a host object: the object is resolved
+                // here, at call time, so an edited url/token is picked up on the
+                // next poll instead of the check being aimed at a dead address.
+                // Everything it learns lands in THAT host's record and nowhere
+                // else.
+                async function poll(hostId) {
+                    const hid = hostId || localHostId();
+                    const st = checkStateFor(hid);
+                    const host = hostById(hid);
+                    if (!host) {
+                        // The host was removed between scheduling and firing.
+                        // hostFetch(null, …) silently hits the SERVING origin,
+                        // which would report this broker's version under some
+                        // other host's name — so this degrades to unknown
+                        // rather than asking anyone.
+                        st.check = null;
+                        st.error = 'no-such-host';
+                        st.checkedAt = Date.now();
+                        renderAll();
+                        return;
+                    }
+                    // Per host, not global: a broker that is hanging on its own
+                    // 20s timeout only ever blocks itself.
+                    if (st.inFlight) return;
+                    st.inFlight = true;
                     try {
-                        const r = await hostFetch(localHost(), '/update/check',
+                        const r = await hostFetch(host, '/update/check',
                                                   { timeoutMs: 20000 });
                         if (r.status === 503) {
                             // The broker's own gate. A capability that is absent
                             // here, NOT an error and NOT "up to date".
-                            last = null;
-                            lastError = 'disabled';
+                            st.check = null;
+                            st.error = 'disabled';
                         } else if (!r.ok) {
                             throw new Error('HTTP ' + r.status);
                         } else {
                             const j = await r.json();
                             if (!j || !j.ok || !j.check) throw new Error('bad-response');
-                            last = j.check;
-                            lastError = null;
+                            st.check = j.check;
+                            st.error = null;
                         }
-                        checkedAt = Date.now();
+                        st.checkedAt = Date.now();
                     } catch (e) {
                         // Degrade to unknown — never to "current".
-                        last = null;
-                        lastError = 'offline';
-                        checkedAt = Date.now();
+                        st.check = null;
+                        st.error = 'offline';
+                        st.checkedAt = Date.now();
                     } finally {
-                        inFlight = false;
+                        st.inFlight = false;
                     }
                     renderAll();
                 }
 
+                // The driver. Still LOCAL-ONLY: the state below it is per host,
+                // but who gets polled is deliberately unchanged here, so this
+                // change cannot alter what the current single-broker chip says.
+                // Fanning out is a loop over the host list, not a rewrite.
+                function pollTick() { poll(localHostId()); }
+
                 function start() {
                     stop();
-                    timer = setInterval(poll, POLL_MS);
+                    timer = setInterval(pollTick, POLL_MS);
                 }
                 function stop() {
                     if (timer) { clearInterval(timer); timer = null; }
@@ -257,7 +330,7 @@
                             btn.removeEventListener('click', onClick);
                         });
                     };
-                    wireBtn(refreshBtn, function () { poll(); });
+                    wireBtn(refreshBtn, function () { pollTick(); });
 
                     wireAppChrome(win, chrome);
 
@@ -305,22 +378,31 @@
                     return el;
                 }
 
-                // Idempotent: rebuild from `last` every call.
+                // Idempotent: rebuild from the record every call. The window
+                // still shows the LOCAL broker's record — one host per window
+                // is the shape it has today, and picking a host is a later
+                // change; what matters here is that it reads a record it names,
+                // not whatever the module last happened to see.
                 function renderWindow(win) {
                     if (!win || win.disposed) return;
+                    const st = viewRecord();
+                    const chk = st.check;
                     if (win.checkedEl) {
                         let t = '';
-                        if (checkedAt) {
+                        if (st.checkedAt) {
                             try {
-                                t = new Date(checkedAt).toLocaleTimeString();
+                                t = new Date(st.checkedAt).toLocaleTimeString();
                             } catch (_) {}
                         }
-                        win.checkedEl.textContent = checkedAt
+                        // checkedAt 0 = no poll has COMPLETED for this host yet,
+                        // so it says "checking…" rather than dating an answer
+                        // that was never established.
+                        win.checkedEl.textContent = st.checkedAt
                             ? ('checked ' + t) : 'checking…';
                     }
                     const body = win.body;
                     body.innerHTML = '';
-                    const s = state();
+                    const s = state(st);
 
                     const headline = addRow(body, 'Status', ({
                         'current': 'up to date',
@@ -330,27 +412,27 @@
                     })[s] || 'could not be established', 'app-upd-' + bandFor(s));
                     headline.classList.add('app-upd-headline');
 
-                    const local = (last && last.local) || {};
+                    const local = (chk && chk.local) || {};
                     addRow(body, 'This build', local.version
                         ? (local.version + (local.sha
                             ? ('  (' + String(local.sha).slice(0, 10) + ')') : ''))
                         : 'unknown');
 
-                    const up = last && last.upstream;
+                    const up = chk && chk.upstream;
                     if (up) {
                         addRow(body, 'Upstream', up.tag
                             || (up.sha ? String(up.sha).slice(0, 10) : '—')
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
-                    if (last && last.repo) addRow(body, 'Tracking', last.repo);
+                    if (chk && chk.repo) addRow(body, 'Tracking', chk.repo);
 
-                    if (s === 'behind' && typeof last.behindBy === 'number') {
-                        addRow(body, 'Behind by', last.behindBy + ' commit'
-                            + (last.behindBy === 1 ? '' : 's'));
+                    if (s === 'behind' && typeof chk.behindBy === 'number') {
+                        addRow(body, 'Behind by', chk.behindBy + ' commit'
+                            + (chk.behindBy === 1 ? '' : 's'));
                     }
                     if (s === 'ahead-or-diverged') {
-                        const a = last && last.aheadBy;
-                        const b = last && last.behindBy;
+                        const a = chk && chk.aheadBy;
+                        const b = chk && chk.behindBy;
                         addRow(body, 'Ahead by', (a || 0) + ' commit'
                             + (a === 1 ? '' : 's')
                             + (b ? (', behind by ' + b) : ''));
@@ -360,7 +442,7 @@
                     }
 
                     if (s === 'unknown') {
-                        const code = reasonCode();
+                        const code = reasonCode(st);
                         addNote(body, 'Why: ' + (REASONS[code]
                             || 'the reason was not reported') + '.',
                             'app-upd-why');
@@ -436,6 +518,6 @@
 
                 renderChip();
                 start();
-                poll();
+                pollTick();
             },
         });
