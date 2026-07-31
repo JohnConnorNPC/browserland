@@ -28,6 +28,24 @@ from typing import Dict, List, Optional
 _HKLM_ENV = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 _HKCU_ENV = r"Environment"
 
+# The supervisor (GH#183, ``python -m webterm.broker``) tells its worker
+# broker it is supervised — and authorizes that worker to restart itself —
+# by setting these three variables on the worker's process. spawn_env()
+# builds the environment for every agent the broker spawns, and agents in
+# turn spawn a shell the user types into; without scrubbing, these would
+# leak all the way down to that shell. From there a *second*, hand-started
+# broker would inherit them, believe it is supervised (its own ppid check
+# would fail, but this is defense in depth, not the only check) and report
+# restart-supported when it is not — and worse, the nonce is an
+# authorization token for a restart, so it must never sit in an ordinary
+# user shell's environment. Compare: the broker-restart CLAUDE_CODE_* leak
+# this repo hit before.
+_SUPERVISOR_ENV_VARS = frozenset({
+    "BROWSERLAND_SUPERVISOR_PID",
+    "BROWSERLAND_SUPERVISOR_NONCE",
+    "BROWSERLAND_RUN_DIR",
+})
+
 
 def _expand(value: str) -> str:
     """Expand %VAR% references in a REG_EXPAND_SZ value against the current
@@ -113,6 +131,12 @@ def spawn_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     from the registry (Windows) or an unchanged copy of ``base``/os.environ
     (elsewhere). Never raises: any failure yields the base environment."""
     env = dict(base if base is not None else os.environ)
+    # Never let the supervisor-authorization variables reach a spawned agent
+    # (and therefore its shell) — see _SUPERVISOR_ENV_VARS above. Windows env
+    # names are case-insensitive but a dict is not, so match by upper-case
+    # the same way the PATH dedup below does.
+    for k in [k for k in list(env) if k.upper() in _SUPERVISOR_ENV_VARS]:
+        del env[k]
     try:
         fresh = registry_path(env.get("PATH"))
     except Exception:

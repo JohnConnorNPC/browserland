@@ -35,6 +35,53 @@ def test_spawn_env_accepts_base():
     assert env["FOO"] == "bar"
 
 
+def test_spawn_env_strips_supervisor_vars():
+    """GH#183: the supervisor authorizes worker restarts via these three
+    vars; a spawned agent (and its shell) must never see them."""
+    base = {
+        "BROWSERLAND_SUPERVISOR_PID": "1234",
+        "BROWSERLAND_SUPERVISOR_NONCE": "secret-nonce",
+        "BROWSERLAND_RUN_DIR": "/run/dir",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    env = env_util.spawn_env(base)
+    for name in env_util._SUPERVISOR_ENV_VARS:
+        assert name not in env
+
+
+def test_spawn_env_strips_supervisor_vars_any_case():
+    """Windows env names are case-insensitive; a mixed/lower spelling must
+    be scrubbed just as reliably as the canonical upper-case one."""
+    base = {
+        "Browserland_Supervisor_Pid": "1234",
+        "browserland_supervisor_nonce": "secret-nonce",
+        "BROWSERLAND_RUN_dir": "/run/dir",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    env = env_util.spawn_env(base)
+    assert not any(k.upper() in env_util._SUPERVISOR_ENV_VARS for k in env)
+
+
+def test_spawn_env_preserves_unrelated_vars():
+    base = {
+        "FOO": "bar",
+        "BROWSERLAND_SUPERVISOR_PID": "1234",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    env = env_util.spawn_env(base)
+    assert env["FOO"] == "bar"
+    assert "BROWSERLAND_SUPERVISOR_PID" not in env
+
+
+def test_spawn_env_odd_environment_does_not_raise():
+    # Empty base, and a base with only a supervisor var and no PATH at all —
+    # spawn_env() must never raise regardless of platform.
+    env_empty = env_util.spawn_env({})
+    assert isinstance(env_empty, dict)
+    env = env_util.spawn_env({"BROWSERLAND_SUPERVISOR_NONCE": "x"})
+    assert "BROWSERLAND_SUPERVISOR_NONCE" not in env
+
+
 if os.name == "nt":
 
     def test_registry_path_is_superset_of_inherited():
