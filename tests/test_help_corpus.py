@@ -789,8 +789,18 @@ def test_duplicate_slug_raises(tmp_path):
 
 def test_real_wiki_builds():
     corpus = hc.build_corpus(hc.WIKI_DIR)
-    # All 13 pages survive #113 (only mod-OWNED sections were migrated out).
-    assert len(corpus["sections"]) == 13
+    # 13 end-user pages survive #113 (only mod-OWNED sections were migrated out),
+    # plus the 5 developer/operator pages that replaced docs/.
+    assert len(corpus["sections"]) == 18
+    # The developer pages are the ONLY tiered ones, and every end-user page must
+    # stay untagged -- an untagged section defaults to the user tier, so a stray
+    # marker on an end-user page would hide it from the default Help view, and a
+    # MISSING marker on a developer page publishes operator prose into it.
+    dev = {s["slug"] for s in corpus["sections"] if s.get("tier") == "dev"}
+    assert dev == {"setup-and-onboarding", "launch-profiles", "writing-a-mod",
+                   "technical-reference", "upgrading"}
+    assert all("tier" not in s for s in corpus["sections"]
+               if s["slug"] not in dev)
     total = sum(len(s["cards"]) for s in corpus["sections"])
     # #113 moved the mod-owned cards (sticky/editor/file-manager/task-manager
     # from Window-Types, the Taskbar clock/help chips, the Getting-Started in-app

@@ -24,7 +24,14 @@
 - [[Hosts & Multi-Browser|Hosts-and-Multi-Browser]]
 - [[MCP & AI Agents|MCP-and-AI-Agents]]
 
+**For developers**
+- [[Setup & Onboarding|Setup-and-Onboarding]]
+- [[Launch Profiles|Launch-Profiles]]
+- [[Writing a Mod|Writing-a-Mod]]
+- [[Technical Reference|Technical-Reference]]
+- [[Upgrading]]
+
 ---
 [Repo](https://github.com/JohnConnorNPC/browserland) ·
 [README](https://github.com/JohnConnorNPC/browserland/blob/main/README.md) ·
-[Technical reference](https://github.com/JohnConnorNPC/browserland/blob/main/docs/TECHNICAL.md)
+[[Technical Reference|Technical-Reference]]

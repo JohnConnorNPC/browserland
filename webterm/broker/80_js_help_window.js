@@ -39,7 +39,7 @@
                         // and an optional per-section icon. Core wiki sections have
                         // neither, so these stay '' and change nothing.
                         owner: sec.mod || '', secIcon: sec.icon || '',
-                        // #182: the section's AUDIENCE, from a wiki page's
+                        // The section's AUDIENCE, from a wiki page's
                         // `<!-- help:tier dev -->` front matter. help_corpus.py
                         // emits the key ONLY for a developer/operator page, so a
                         // user-tier section arrives without it and lands here as
@@ -63,14 +63,16 @@
                 return Promise.resolve(helpCorpusEntries);
             if (helpCorpusPromise) return helpCorpusPromise;
             const gen = helpCorpusGen;
-            // ~321 KB of wiki text today, heading for roughly 650 KB once the
-            // developer/operator sections land in wiki/ — over a tailnet that
-            // is a transfer, not a round trip. The default deadline would abort
-            // a corpus that was mid-flight and drop Help back to its live-only
-            // entries. NOTE: the 8 s below was chosen against the smaller
-            // payload; revisit it when the corpus actually doubles.
+            // ~695 KB of wiki text — the developer/operator pages roughly
+            // doubled it — and over a tailnet that is a transfer, not a round
+            // trip. The default deadline would abort a corpus that was
+            // mid-flight and drop Help back to its live-only entries. The
+            // deadline grew with the payload: only the slowest link ever
+            // notices it, and that link is the whole reason it exists.
+            // (test_ui_assets checks the figure above against the real
+            // help_corpus.json, so it cannot quietly go stale again.)
             helpCorpusPromise = hostFetch(localHost(), '/help-corpus.json',
-                                          { timeoutMs: 8000 })
+                                          { timeoutMs: 15000 })
                 .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
                 .then(data => {
                     // Superseded by a login while we were out. This answer
@@ -116,9 +118,8 @@
         //
         // INVALIDATE, DO NOT CLEAR. Bumping the generation alone retires the
         // memo for fetchHelpCorpus while leaving it renderable, and that
-        // distinction is load-bearing rather than tidy. The refetch is ~321 KB
-        // now and roughly 650 KB once the developer sections land, and this
-        // same login
+        // distinction is load-bearing rather than tidy. The refetch is ~695 KB
+        // and this same login
         // synchronously drives re-renders that read the memo
         // directly: 63 fires the async notifyModsHostAuth one line BEFORE this,
         // and its continuation (localHost /info + the installed packages, a far

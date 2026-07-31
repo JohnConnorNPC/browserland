@@ -1349,7 +1349,7 @@ def _log_auth_banner(app: Sanic, port: int, config: Optional[Dict[str, Any]],
                 "calling /sessions, /launch or /file/* over loopback now get "
                 "401. A token has been minted into %s - recover it any time "
                 "with 'python -m webterm.broker --print-token'. See "
-                "docs/UPGRADING.md. ===", path)
+                "wiki/Upgrading.md. ===", path)
         else:
             LOGGER.info("token auth enabled (minted a new token into %s)", path)
         if interactive:
@@ -2422,7 +2422,9 @@ async def _help_corpus(request: Request):
     # story for this route:
     #   no-store  -- a conforming cache, shared (tailscale serve, a corporate
     #                MITM) or private, stores neither body. It is not free: the
-    #                public corpus is ~200 KB and a browser can no longer reuse
+    #                public corpus is ~695 KB (it roughly doubled when the
+    #                developer/operator pages moved into wiki/) and a browser
+    #                can no longer reuse
     #                it across reloads. That is a small price here -- there were
     #                no validators and no freshness before either, so little was
     #                being reused in practice, and the frontend memoizes the
@@ -2883,7 +2885,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 LOGGER.warning(
                     "%d producer connections rejected for a missing token - "
                     "terminals launched by a previous tokenless broker cannot "
-                    "reconnect and must be relaunched (see docs/UPGRADING.md). "
+                    "reconnect and must be relaunched (see wiki/Upgrading.md). "
                     "Further rejections are logged at DEBUG.",
                     rejects)
             elif rejects < _PRODUCER_REJECT_HINT_AT:

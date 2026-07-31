@@ -638,7 +638,7 @@ def test_websocket_is_the_only_remaining_token_in_url():
 
     The browser WebSocket API cannot set request headers on the handshake, so
     /ws, /control and /browserland keep `?token=`. Closing that needs a
-    connect-ticket scheme, not a refactor -- see docs/TECHNICAL.md. This test
+    connect-ticket scheme, not a refactor -- see wiki/Technical-Reference.md. This test
     exists so the exception can't quietly grow to cover HTTP again.
     """
     auth_src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(
@@ -2161,13 +2161,21 @@ def test_help_section_tier_reaches_the_client_and_gates_the_render():
                       "DOMParser", "document.write"):
         assert forbidden not in render
 
-    # (g) The transfer-size comments were written for a ~200-300 KB corpus. The
-    #     developer/operator wiki roughly doubles it, so both figures were
-    #     simply false; a stale number in a comment about a network deadline is
-    #     the kind that gets believed.
-    for stale in ("~200 KB", "~300 KB"):
-        assert stale not in core, "stale corpus size %r in 80_js_help_window.js" % stale
-    assert core.count("650 KB") >= 2
+    # (g) The transfer-size comments justify a network deadline, so a stale
+    #     number there is the kind that gets believed. Rather than pin a
+    #     literal that goes stale on the next wiki edit, MEASURE the corpus and
+    #     require every "N KB" figure in the fragment to be within 15% of it.
+    #     The figures were written for a ~200-300 KB corpus and the
+    #     developer/operator pages roughly doubled it; this keeps them honest
+    #     from here on without anyone having to remember.
+    actual_kb = (BROKER_DIR / "help_corpus.json").stat().st_size / 1024
+    quoted = [int(k) for k in re.findall(r"~(\d{3,4}) KB", core)]
+    assert len(quoted) >= 2, "the corpus-size comments went missing from 80_js_help_window.js"
+    for kb in quoted:
+        assert abs(kb - actual_kb) / actual_kb < 0.15, (
+            "80_js_help_window.js claims ~%d KB but the corpus is %.0f KB -- "
+            "the comment justifies fetchHelpCorpus's deadline, so it has to be true"
+            % (kb, actual_kb))
 
     # (h) And the whole gate ships in the served page.
     assert "return tier === 'user' || (showDev && tier === 'dev');" in INDEX_HTML

@@ -1789,7 +1789,13 @@ def test_the_served_corpus_withholds_installed_help_without_a_token(tmp_path,
     _, public = app.test_client.get("/help-corpus.json")
     assert public.status == 200                      # still public, just less
     blob = json.dumps(public.json)
-    assert "x-notes" not in blob                     # no id, anywhere
+    # The id is checked STRUCTURALLY, for the same reason the label below is:
+    # wiki/Writing-a-Mod.md documents the "x-" installed-namespace convention
+    # and uses "x-notes" as its worked example, so the string legitimately
+    # appears in the public corpus as prose. What must not appear is a SECTION
+    # keyed by it.
+    assert not [s for s in public.json["sections"]
+                if s.get("mod") == "x-notes" or s["slug"] == "x-notes"]
     assert "plain as day" not in blob                # no help text
     # No label and no icon either. Checked structurally, not by substring:
     # "Notes" is an ordinary word the wiki itself uses.
@@ -1856,7 +1862,10 @@ def test_help_installed_before_the_broker_started_is_withheld_too(tmp_path,
     assert "x-notes" in _help_slugs(app)             # it really did get scanned
     _, public = app.test_client.get("/help-corpus.json")
     assert public.status == 200
-    assert "x-notes" not in json.dumps(public.json)
+    # Structural, not substring: "x-notes" is the worked example in
+    # wiki/Writing-a-Mod.md's section on the installed-id namespace.
+    assert not [s for s in public.json["sections"]
+                if s.get("mod") == "x-notes" or s["slug"] == "x-notes"]
     assert "planted words" not in json.dumps(public.json)
     assert public.json == app.ctx.help_corpus_base
 

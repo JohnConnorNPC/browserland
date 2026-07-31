@@ -1,4 +1,4 @@
-# Writing a mod
+<!-- help:tier dev -->
 
 A **mod** is a folder of JavaScript (plus optional CSS and an in-app help page)
 that extends the Browserland desktop: taskbar chips, app-window kinds, Control

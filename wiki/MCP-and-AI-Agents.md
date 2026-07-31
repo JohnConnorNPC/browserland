@@ -81,6 +81,6 @@ Window ids are namespaced as `"<host>:<int>"` — for example `"default:12345"`.
 This page is the user-facing summary; it does not duplicate the full HTTP contract, error table, or config sidecar. For those, see:
 
 - README → **MCP & AI agent access**: <https://github.com/JohnConnorNPC/browserland/blob/main/README.md#mcp--ai-agent-access>
-- Technical reference: <https://github.com/JohnConnorNPC/browserland/blob/main/docs/TECHNICAL.md>
+- Technical reference: [[Technical Reference|Technical-Reference]]
 - The shipped stdio MCP server (`webterm.mcptool`): <https://github.com/JohnConnorNPC/browserland/blob/main/webterm/mcptool/README.md>
 <!-- help:ignore-end -->

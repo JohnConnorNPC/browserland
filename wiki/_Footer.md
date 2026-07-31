@@ -1,1 +1,1 @@
-**Browserland** — a web-based terminal desktop. This wiki is the end-user guide; for the wire protocol, auth model, and HTTP/MCP contract see [docs/TECHNICAL.md](https://github.com/JohnConnorNPC/browserland/blob/main/docs/TECHNICAL.md). Released under the MIT License.
+**Browserland** — a web-based terminal desktop. This wiki is the end-user guide; for the wire protocol, auth model, and HTTP/MCP contract see [[Technical Reference|Technical-Reference]]. Released under the MIT License.

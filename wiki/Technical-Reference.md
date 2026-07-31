@@ -1,6 +1,7 @@
-# Browserland (codename `webterm`)
+<!-- help:tier dev -->
 
-**Browserland** is a self-contained web terminal system: **headless PTY agents** + a
+**Browserland** (codename `webterm`, still the name of the Python package and its
+directories) is a self-contained web terminal system: **headless PTY agents** + a
 **WebSocket broker**, speaking Browserland's own web-terminal producer protocol. The
 name evokes a place — a little world inside your browser where a whole fleet of
 terminals and AI coding agents live, are launched, and are driven from a single
@@ -156,10 +157,10 @@ with `hmac.compare_digest`. `python -m webterm.broker --print-token` reports it
 without minting or starting a server.
 
 Loopback was never a sound exemption: `tailscale serve` in front of a
-`127.0.0.1` bind (the topology [SETUP.md](SETUP.md) recommends) makes every
+`127.0.0.1` bind (the topology [[Setup-and-Onboarding]] recommends) makes every
 tailnet request arrive *from* loopback, and any page in the user's browser
 reaches loopback too. Upgrading a tokenless install is a **breaking change** —
-see [UPGRADING.md](UPGRADING.md).
+see [[Upgrading]].
 
 **How the token travels (#144).** HTTP sends it as `Authorization: Bearer`, never in the
 query string. A URL credential leaks where a header does not: any script on the page can
@@ -740,12 +741,12 @@ override with config `profiles_state_path`). Schema:
 Seeded from `broker_config.json`'s `agent.profiles`; **once written it owns the
 set** (`agent.profiles` becomes seed-only). Self-heals — a missing/corrupt/empty
 sidecar falls back to the seed, never bricking startup or `/launch`. Full recipe
-catalog + the security rationale: **[PROFILES.md](PROFILES.md)**.
+catalog + the security rationale: **[[Launch-Profiles]]**.
 
 ### Mods (browser `auth_token`-gated) — #157 / #163 / #172
 
 The desktop's mod system. Authoring contract, the `ctx` API and the trust model:
-**[MODS.md](MODS.md)**. All of these are **`serve_ui`-gated** — a headless
+**[[Writing-a-Mod]]**. All of these are **`serve_ui`-gated** — a headless
 broker registers none of them and reports `mods: []` — and, like
 `/mcp/config`, they take the **browser** token, never the MCP one. They are
 deliberately **not** lease-gated: this is broker configuration, and the point is

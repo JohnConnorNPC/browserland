@@ -1,4 +1,4 @@
-# Setup & onboarding
+<!-- help:tier dev -->
 
 A practical guide to standing Browserland up — single machine first, then
 multiple machines over [Tailscale](https://tailscale.com/) — written so a
@@ -48,7 +48,7 @@ So the canonical two-machine setup is:
 
 ## Single machine
 
-Follow the **[Quick start](../README.md#quick-start)** in the README: install,
+Follow the **[Quick start](https://github.com/JohnConnorNPC/browserland/blob/main/README.md#quick-start)** in the README: install,
 run the broker, open `http://127.0.0.1:4445/`, click **new terminal**. On a
 single loopback machine you need no config file — the defaults work.
 
@@ -62,7 +62,7 @@ python -m webterm.broker --print-token
 ```
 
 > **Upgrading an existing tokenless install?** Read
-> **[UPGRADING.md](UPGRADING.md)** first — terminals launched by the old broker
+> **[[Upgrading]]** first — terminals launched by the old broker
 > cannot reconnect and must be relaunched once.
 
 You only need the rest of this page once a second machine, a network bind, or an
@@ -140,7 +140,7 @@ Requirements worth knowing:
   localhost page. All-plain-http over a trusted tailnet still works; you just
   forfeit those.
 
-Full auth/CORS details: **[TECHNICAL.md → Multiple hosts](TECHNICAL.md#multiple-hosts)**.
+Full auth/CORS details: **[[Technical Reference → Multiple hosts|Technical-Reference]]**.
 
 ## Don't hand-edit this
 
@@ -158,7 +158,7 @@ editing the wrong thing. Rules of thumb:
   here are the **seed**; the easiest way to add a WSL/zsh/PowerShell profile is
   **Control Panel → Launch profiles** (add/edit/detect, applied live with no
   restart), which persists to a `webterm_profiles.json` sidecar that then owns
-  the set. See **[PROFILES.md](PROFILES.md)** for copyable recipes and the
+  the set. See **[[Launch-Profiles]]** for copyable recipes and the
   sidecar-vs-`broker_config` rule.
 - **Tokens/passwords for *remote* hosts live in the browser** (localStorage),
   set through the add-host form — not in any file on disk.
@@ -219,14 +219,13 @@ get there.
 
 ### Linux (systemd)
 
-Installable units ship in `launchers/systemd/`. See **[TECHNICAL.md → Linux
-deployment](TECHNICAL.md#linux-deployment)** for the full walkthrough
+Installable units ship in `launchers/systemd/`. See **[[Technical Reference → Linux deployment|Technical-Reference]]** for the full walkthrough
 (`webterm-broker.service` / `webterm-agent.service`, `User=`, paths, token).
 
 ## See also
 
-- **[README → Quick start](../README.md#quick-start)** — install and first run.
-- **[TECHNICAL.md](TECHNICAL.md)** — wire protocol, full auth/CORS model, every
+- **[README → Quick start](https://github.com/JohnConnorNPC/browserland/blob/main/README.md#quick-start)** — install and first run.
+- **[[Technical-Reference]]** — wire protocol, full auth/CORS model, every
   HTTP endpoint, multi-host internals, deployment.
-- **[MCP & AI agent access](../README.md#mcp--ai-agent-access)** — letting an MCP
+- **[MCP & AI agent access](https://github.com/JohnConnorNPC/browserland/blob/main/README.md#mcp--ai-agent-access)** — letting an MCP
   client or harness drive the terminals.

@@ -49,7 +49,7 @@ New here? Read [[Getting-Started]] first. Once you are in the desktop, click the
 
 | Page | What it covers |
 |---|---|
-| [[Window-Types]] | Terminal, sticky note, text editor, file manager, task manager, Control Panel |
+| [[Window-Types]] | Terminal, sticky note, text editor, file manager, task manager, Control Panel, scratchpad, session recorder |
 
 ### Multi-host & AI
 
@@ -60,4 +60,13 @@ New here? Read [[Getting-Started]] first. Once you are in the desktop, click the
 
 ## For developers
 
-Building or running Browserland yourself? See the repo [README](https://github.com/JohnConnorNPC/browserland) and the [docs/TECHNICAL.md](https://github.com/JohnConnorNPC/browserland/blob/main/docs/TECHNICAL.md) reference.
+Building or running Browserland yourself? These pages live in the same wiki, and
+in the in-app Help behind **Include developer docs**.
+
+| Page | What it covers |
+|---|---|
+| [[Setup & Onboarding|Setup-and-Onboarding]] | Standing a broker up, one machine then several over Tailscale |
+| [[Launch Profiles|Launch-Profiles]] | Named shell recipes the broker is allowed to spawn |
+| [[Writing a Mod|Writing-a-Mod]] | The mod folder layout and the `ctx` surface |
+| [[Technical Reference|Technical-Reference]] | Wire protocol, auth model, HTTP and MCP contract |
+| [[Upgrading]] | Breaking changes and how to recover from them |

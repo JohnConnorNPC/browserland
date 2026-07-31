@@ -1,4 +1,4 @@
-# Launch profiles
+<!-- help:tier dev -->
 
 A **profile** is a named shell recipe the broker is allowed to spawn. The
 browser (and any MCP client) launches a terminal by sending a profile **name** —
@@ -173,5 +173,5 @@ in ways worth knowing before you wonder what broke:
 
 ---
 
-See also: **[SETUP.md](SETUP.md)** (config basics) and
-**[TECHNICAL.md](TECHNICAL.md)** (endpoint reference, auth model).
+See also: **[[Setup-and-Onboarding]]** (config basics) and
+**[[Technical-Reference]]** (endpoint reference, auth model).

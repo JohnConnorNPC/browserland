@@ -1,4 +1,4 @@
-# Upgrading
+<!-- help:tier dev -->
 
 Breaking changes, what they cost you, and how to recover. Newest first.
 
