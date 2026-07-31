@@ -16,6 +16,52 @@ story behind anything named below.
 
 ### Added
 
+- **`wiki/` is now the single source for every piece of prose in the project.**
+  `docs/` — 2,528 lines of developer and operator reference — never rendered in
+  the app, was never searchable, and drifted on its own. It has been merged into
+  `wiki/`, which was already the single source for the in-app Help window, and
+  deleted. Every reference in the repo points at the new paths.
+- **Developer pages are reachable from inside the desktop**, behind an
+  **Include developer docs** checkbox in the Help window, so the default view
+  stays the end-user guide. A page declares its audience with
+  `<!-- help:tier dev -->` front matter; the parser is strict about it, because a
+  typo that silently published internals into the end-user guide is the failure
+  that matters. The choice is per browser and survives *Reset local view*.
+- **Fenced code renders as real code.** The corpus parser folded a fenced block
+  into one space-joined line, which no multi-line `curl`, systemd unit or JSON
+  sample survives. Blocks now keep their lines and their indentation, and the
+  Help window renders them in a scrollable `<pre>`.
+- **New pages** for two features that were documented in neither surface:
+  **Installing Mods** (install/uninstall, the shipped-vs-installed badge, the
+  install preview, that installs apply on the *next page load*, and the
+  `?nomods=1` rescue hatch) and **Themes & Appearance** (the five colour schemes,
+  the background patterns, the opt-in terminal font). The `theme`, `pattern` and
+  `termfont` mods ship a `help.md` for the first time.
+- **Drift guards** (`tests/test_wiki_drift.py`): the default-keybinding table is
+  checked against the real defaults, no file may reference the retired `docs/`
+  tree, and every shipped mod must carry a `help.md` — so a new feature arrives
+  with documentation instead of a year later.
+- **A workflow publishes `wiki/` to the GitHub Wiki** on push to `main`, gated on
+  the packaged corpus being current.
+
+### Fixed
+
+- **The wiki now describes what ships.** An accuracy pass corrected roughly
+  twenty claims, among them: the (+) menu's order (it is window-kind
+  registration order) and its labels (SVG icons, not emoji); `Undo` being the
+  last item of the desktop menu rather than an arrangement action; Pull merging
+  every configured broker with a "sources disagree" flag; the Mods pane having
+  gained install/uninstall; the mouse-mode chip shipping **on**, not off;
+  rebinding using explicit Set/Clear buttons; OSC 52's rate limit; and
+  `read_screen`'s wait/scrollback/attrs options.
+- **A `##` heading inside a fenced code block no longer splits a page in two.**
+  No page had one, but 2,528 lines of developer prose is exactly where the first
+  would appear. An unclosed fence is now a build error rather than silent
+  mangling.
+- **Emphasis containing inline code renders as emphasis.** `**a `b` c**` put its
+  `**` markers on screen as literal punctuation, because the parser split on code
+  spans before it looked for emphasis.
+
 - **Pull can read the broker list from any broker you have configured** (#174).
   Publish has been multi-broker since #65; Pull could only read the broker whose
   page was open, which made recovering a list published to broker B mean loading

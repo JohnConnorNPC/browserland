@@ -1,0 +1,85 @@
+# Publish wiki/ to the GitHub Wiki.
+#
+# wiki/ is the single source for BOTH the published Wiki and the in-app Help
+# window (webterm/broker/help_corpus.py parses it into help_corpus.json, served
+# at /help-corpus.json). This workflow keeps the published Wiki a true mirror of
+# the tree in the repo, and refuses to publish a tree whose corpus is stale.
+name: Publish wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wiki/**'
+      - '.github/workflows/publish-wiki.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # A second push while the first is mid-clone would race on the wiki remote.
+  group: publish-wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      # The wiki is now the source of everything, so a stale corpus must never
+      # reach the published pages. help_corpus.py imports only the stdlib, so
+      # there is deliberately no install step to keep in sync.
+      - name: Gate — the packaged corpus must match wiki/
+        run: |
+          python -m webterm.broker.help_corpus
+          if ! git diff --exit-code -- webterm/broker/help_corpus.json; then
+            echo "::error::help_corpus.json is stale. Run 'python -m webterm.broker.help_corpus' and commit the result."
+            exit 1
+          fi
+
+      - name: Clone the wiki repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" \
+            wiki-remote
+
+      # Guards before anything destructive. The publish REPLACES the wiki's
+      # markdown, so a page present only on the wiki is deleted -- that is the
+      # intent (the repo is authoritative), which is exactly why an empty or
+      # wrong checkout must not be allowed to reach the delete step.
+      - name: Guard — refuse to publish an empty or unexpected tree
+        run: |
+          count=$(find wiki -maxdepth 1 -name '*.md' | wc -l)
+          echo "wiki/*.md count: ${count}"
+          if [ "${count}" -lt 5 ]; then
+            echo "::error::only ${count} markdown files in wiki/ -- refusing to mirror a tree this small."
+            exit 1
+          fi
+          branch=$(git -C wiki-remote rev-parse --abbrev-ref HEAD)
+          echo "wiki branch: ${branch}"
+          # GitHub wikis are created on 'master', not 'main'. Pushing the wrong
+          # ref silently publishes nothing, so assert it rather than assume it.
+          if [ "${branch}" != "master" ]; then
+            echo "::error::expected the wiki branch to be 'master', got '${branch}'."
+            exit 1
+          fi
+
+      - name: Mirror wiki/ into the wiki repo
+        run: |
+          find wiki-remote -maxdepth 1 -name '*.md' -delete
+          cp wiki/*.md wiki-remote/
+          git -C wiki-remote add -A
+          if git -C wiki-remote diff --cached --quiet; then
+            echo "wiki already up to date; nothing to publish."
+            exit 0
+          fi
+          git -C wiki-remote \
+            -c user.name='JohnConnorNPC' \
+            -c user.email='128232619+JohnConnorNPC@users.noreply.github.com' \
+            commit -m "docs: sync wiki from ${GITHUB_SHA}"
+          git -C wiki-remote push origin master
