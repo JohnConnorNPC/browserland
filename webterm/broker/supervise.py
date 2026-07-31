@@ -1,0 +1,891 @@
+"""GH#183 -- the broker supervises itself.
+
+``python -m webterm.broker`` is no longer the server. It is a small, stable
+*supervisor* that spawns ``python -m webterm.broker --worker`` as a direct
+child and relaunches it when the worker asks. The server lives in the child;
+the supervisor imports nothing that can crash it and does no I/O beyond one
+sentinel file.
+
+Why here, and not in the launcher scripts. The obvious design -- wrap
+``launchers/run-broker.sh`` / ``run-broker.ps1`` in a relaunch loop -- was
+rejected in review, for reasons that are worth keeping written down:
+
+* under systemd a *waiting shell parent* becomes ``$MAINPID``. That silently
+  retargets ``KillMode``, ``ExecReload`` and watchdog attribution at the shell
+  instead of at the broker: the unit contract changes without the unit file
+  changing.
+* the same fragile loop would have to exist twice, in bash and in PowerShell,
+  and stay in agreement.
+* and it still would not cover the fourth start path -- somebody simply typing
+  ``python -m webterm.broker``.
+
+Putting the loop in Python fixes all three: the launchers keep their ``exec``
+(so the supervisor IS the main PID and the unit contract is unchanged), there
+is one implementation, and every start path -- systemd, Windows scheduled task,
+shell, bare python -- gets restart support for free.
+
+Load-bearing decisions:
+
+* **Exit 75 is an authorization request, not a fact.** Any crash that happens
+  to exit 75 would otherwise be honoured as a deliberate restart. So the worker
+  must ALSO write an intent sentinel containing this supervisor boot's nonce
+  into ``$BROWSERLAND_RUN_DIR``; the supervisor relaunches only when that file
+  is present AND matches, and deletes it after reading. An unarmed 75 is a
+  crash and is reported as one. The nonce is per-supervisor-boot, so a sentinel
+  left behind by an earlier broker cannot authorize anything.
+
+* **The failure budget resets on "a worker came up", never on "a worker was
+  spawned".** Resetting per spawn lets a crash-loop refill its own budget
+  forever, which is exactly the failure mode a budget exists to stop.
+
+* **Capability is reported by the WORKER, with a PPID check.** The three
+  environment variables are inherited by every agent and every shell those
+  agents spawn, so a broker a user starts by hand from inside one of those
+  shells would inherit them and claim it is supervised -- and then die on the
+  first restart. ``os.getppid() == $BROWSERLAND_SUPERVISOR_PID`` is what makes
+  the claim unspoofable, because only a real child of this supervisor has it.
+
+* **``$INVOCATION_ID`` alone does not mean systemd will restart us.** A unit
+  with ``Restart=no`` sets it too, and would claim support and then stay dead.
+  The unit's real policy is read with ``systemctl show``, and only ``always``
+  and ``on-failure`` count (75 is non-zero, so on-failure does respawn).
+
+* **Nothing here ever raises.** A capability probe that throws is strictly
+  worse than one that says "no".
+
+Two limits, stated plainly so nobody has to rediscover them:
+
+* the sentinel guards against ACCIDENT, not against a hostile local process.
+  Anything running as the broker's own user can read the worker's environment
+  and write the file. That is the same trust boundary the broker already has
+  (it launches shells as that user), and the threat the sentinel actually
+  removes is the realistic one: a crash, a library, or a wrapper that happens
+  to exit 75 being mistaken for a deliberate restart.
+
+* **a restart replaces the worker's code, never the supervisor's.** After an
+  update on disk, the new worker runs under the OLD supervisor, for as long as
+  that supervisor lives. So the contract between them -- the exit codes, the
+  three variable names, the sentinel format -- has to stay backward-compatible,
+  and picking up a change to THIS file means restarting the service itself
+  (``systemctl restart``, the scheduled task, the shell). That is the price of
+  a parent stable enough to be trusted to restart things, and it is why this
+  module stays small and dependency-free.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from collections import deque
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+# ---- exit-code vocabulary ---------------------------------------------------
+#
+# Deliberately outside the codes this repo already uses (0 ok, 1 error, 2 audit
+# incomplete, 130 Ctrl-C), so none of them can be mistaken for one of these.
+
+#: The worker is asking to be relaunched. Honoured ONLY with a matching intent
+#: sentinel -- see ``arm_restart`` / ``consume_restart_intent``.
+EXIT_RESTART = 75
+
+#: The worker could not bind its port -- it is held by somebody else, or the OS
+#: refused the address outright. The supervisor must NOT relaunch on this one:
+#: retrying a bind that already failed for a structural reason is an infinite
+#: loop that never becomes a working broker.
+EXIT_ADDR_IN_USE = 78
+
+#: The supervisor gave up: the restart budget is exhausted, or the worker could
+#: not be spawned at all. Non-zero on purpose -- under ``Restart=always``
+#: systemd then applies its OWN start-limit logic on top of ours.
+EXIT_SUPERVISOR_FAILED = 70
+
+# ---- the supervisor -> worker environment -----------------------------------
+#
+# These exact names are also scrubbed from agent/terminal environments: a shell
+# the broker launches must not inherit them (see the PPID note in the module
+# docstring for why inheriting them is not a security hole, only a lie).
+
+ENV_SUPERVISOR_PID = "BROWSERLAND_SUPERVISOR_PID"
+ENV_SUPERVISOR_NONCE = "BROWSERLAND_SUPERVISOR_NONCE"
+ENV_RUN_DIR = "BROWSERLAND_RUN_DIR"
+
+#: systemd sets this for every service it starts. Presence proves systemd
+#: started us; it proves NOTHING about whether systemd will restart us.
+ENV_INVOCATION_ID = "INVOCATION_ID"
+
+# ---- budget + backoff -------------------------------------------------------
+
+#: At most this many relaunches inside ``RESTART_WINDOW`` seconds.
+MAX_RESTARTS = 5
+RESTART_WINDOW = 60.0
+
+#: A worker that stayed alive this long is treated as "came up", which is what
+#: clears the budget. This is a PROXY for a real readiness handshake, and it is
+#: adequate because the ways a broker fails to come up are all fast and fatal:
+#: an import error, a bad config, or a port it cannot bind kill it in well under
+#: a second. The failures it cannot see -- a broker that binds and then wedges
+#: -- would not be caught by a startup handshake either; they need a liveness
+#: probe, which is a different feature.
+READY_SECONDS = 10.0
+
+#: Backoff between relaunches, doubling per CONSECUTIVE fast death. A restart
+#: from a healthy broker waits not at all (the operator is watching).
+BACKOFF_BASE = 0.5
+BACKOFF_MAX = 30.0
+#: Doubling stops here; BACKOFF_MAX has long since won, and an unclamped
+#: exponent is an OverflowError waiting for a long-running crash loop.
+_BACKOFF_MAX_SHIFT = 20
+
+#: How long the child gets after a forwarded SIGTERM/SIGINT before it is killed.
+#: systemd's TimeoutStopSec is 90s by default; ours is shorter because the only
+#: thing between the signal and exit is a drain.
+STOP_GRACE = 10.0
+
+#: The child is waited on in short slices rather than one blocking wait, because
+#: on Windows a blocking WaitForSingleObject is NOT interrupted by a Python
+#: signal handler -- Ctrl-C would sit unhandled until the child happened to
+#: exit. Polling costs nothing measurable and makes both platforms behave alike.
+POLL_INTERVAL = 0.25
+
+INTENT_FILENAME = "restart.intent"
+
+# ---- capability vocabulary --------------------------------------------------
+#
+# The UI renders these strings, so they are API: rename one and a client shows a
+# blank reason. Add new ones rather than repurposing old ones.
+
+MECHANISM_SUPERVISOR = "supervisor"
+MECHANISM_SYSTEMD = "systemd"
+MECHANISM_NONE = "none"
+
+#: No supervisor variables at all -- a bare ``--worker`` run, or an old broker.
+REASON_NO_SUPERVISOR = "no-supervisor"
+#: The variables are set but our parent is not the supervisor they name: we
+#: INHERITED them (an agent shell, a terminal opened from the desktop). Distinct
+#: from no-supervisor because it is the case that would otherwise lie.
+REASON_PPID_MISMATCH = "supervisor-ppid-mismatch"
+#: systemd started us, but the unit will not restart us (Restart=no, on-abort,
+#: on-abnormal, on-watchdog, on-success -- none of which respawn on a plain
+#: non-zero exit).
+REASON_SYSTEMD_NO_RESTART = "systemd-restart-disabled"
+#: systemd started us and we could not find out what its restart policy is --
+#: no unit name in the cgroup, no systemctl, or systemctl failed. Unsupported,
+#: because "we could not check" must never render as "yes".
+REASON_SYSTEMD_POLICY_UNKNOWN = "systemd-policy-unreadable"
+#: The probe itself blew up. Should be unreachable; it exists so that a bug in
+#: this module degrades to "restart unsupported" instead of taking down the
+#: route that calls it.
+REASON_PROBE_FAILED = "probe-failed"
+
+#: The only two policies under which a non-zero exit brings the unit back.
+SYSTEMD_RESTART_OK = frozenset({"always", "on-failure"})
+
+# ---- address-in-use detection (A19) -----------------------------------------
+
+#: errno values, never message text: the string is localized, differs per
+#: platform, and changes between Python versions.
+#:
+#: ``errno.EADDRINUSE`` is whatever this build calls it (98 Linux, 48 BSD/macOS,
+#: 100 on Windows); the literals cover the case where the error travelled from
+#: another platform's convention -- notably Winsock's 10048, which is what a
+#: Windows socket error actually carries.
+ADDR_IN_USE_ERRNOS = frozenset({errno.EADDRINUSE, 48, 98, 10048})
+
+#: The OTHER way a bind permanently fails, and on Windows the LIKELIER one.
+#: Measured, not assumed: a second bind to a taken port only reports 10048 when
+#: the binding socket has no SO_REUSEADDR. Sanic's ``bind_socket`` always sets
+#: it, so an occupied port shows up as WSAEACCES 10013 instead. On POSIX the
+#: same errno is what binding a privileged port as a normal user gives. Both are
+#: structural: the next attempt fails identically, so neither may be retried.
+BIND_DENIED_ERRNOS = frozenset({errno.EACCES, 13, 10013})
+
+#: Reasons ``bind_failure_reason`` can return.
+BIND_IN_USE = "in-use"
+BIND_DENIED = "denied"
+
+_WSAEADDRINUSE = 10048
+_WSAEACCES = 10013
+
+
+def bind_failure_reason(exc: BaseException) -> Optional[str]:
+    """``"in-use"``, ``"denied"``, or None -- classify a startup exception.
+
+    The chain walk is the point. Sanic does not let the ``OSError`` from
+    ``bind()`` out: ``configure_socket`` catches it and raises its own
+    ``ServerError`` with advice about ``__main__`` guards. Because that raise
+    happens inside the ``except`` block, Python attaches the original as
+    ``__context__``, so the errno is still reachable -- just not on the
+    exception the caller sees. Checking only the top exception would classify
+    every port clash as a generic crash, and a generic crash is exactly the
+    thing that must not be retried forever.
+
+    errno, never message text: the string is localized, differs per platform,
+    and changes between Python versions.
+    """
+    seen = set()
+    # BOTH links, not `__cause__ or __context__`: an explicit `raise X from Y`
+    # sets __cause__ while __context__ still points at whatever was being
+    # handled, and the errno can be down either branch.
+    pending = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            code = getattr(current, "errno", None)
+            # Windows sockets can carry the Winsock code in .winerror with a
+            # translated (or absent) .errno.
+            win = getattr(current, "winerror", None)
+            if code in ADDR_IN_USE_ERRNOS or win == _WSAEADDRINUSE:
+                return BIND_IN_USE
+            if code in BIND_DENIED_ERRNOS or win == _WSAEACCES:
+                return BIND_DENIED
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+    return None
+
+
+def is_addr_in_use(exc: BaseException) -> bool:
+    """True only for a genuine address-already-in-use error. ``denied`` is a
+    different fact and gets a different message, even though both stop the
+    supervisor with the same exit code."""
+    return bind_failure_reason(exc) == BIND_IN_USE
+
+
+# ---- the intent sentinel ----------------------------------------------------
+
+def arm_restart(run_dir: Optional[str] = None,
+                nonce: Optional[str] = None) -> bool:
+    """Authorize ONE relaunch. Called in the worker, just before it stops.
+
+    Returns True when the sentinel is on disk, False when this worker is not
+    supervised or the write failed -- and a False return is a caller's cue that
+    exiting 75 will simply stop the broker, so it should not.
+
+    Both arguments default to the environment the supervisor set, so the caller
+    in ``app.py`` is a bare ``arm_restart()``.
+
+    Written to a temp name and renamed, so the supervisor can never read a
+    half-written nonce. (A partial read would be refused anyway -- the compare
+    is exact -- but "refused" and "restart silently didn't happen" are the same
+    observable, and that is a bad thing to leave to timing.)
+    """
+    run_dir = run_dir or os.environ.get(ENV_RUN_DIR)
+    nonce = nonce or os.environ.get(ENV_SUPERVISOR_NONCE)
+    if not run_dir or not nonce:
+        return False
+    try:
+        directory = Path(run_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / (INTENT_FILENAME + ".tmp")
+        # 0600: the sentinel is an authorization token for "restart the
+        # broker". (A no-op on Windows, where the run dir's inherited ACL is
+        # what protects it -- see default_run_dir.)
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(nonce)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp), str(directory / INTENT_FILENAME))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def restart_armed(run_dir: Optional[str] = None,
+                  nonce: Optional[str] = None) -> bool:
+    """Would the supervisor accept a restart right now? Read-only -- it does
+    not consume.
+
+    Checks the CONTENT, not merely that a file exists: a stale or corrupt
+    sentinel that the supervisor will reject must not convince the worker that
+    exiting 75 is safe. Answering "yes" on a file the supervisor is about to
+    refuse turns sentinel debris into a broker that shuts down and stays
+    down."""
+    run_dir = run_dir or os.environ.get(ENV_RUN_DIR)
+    nonce = nonce or os.environ.get(ENV_SUPERVISOR_NONCE)
+    if not run_dir or not nonce:
+        return False
+    try:
+        raw = (Path(run_dir) / INTENT_FILENAME).read_text(
+            encoding="ascii", errors="replace").strip()
+    except (OSError, ValueError):
+        return False
+    return bool(raw) and secrets.compare_digest(raw, str(nonce))
+
+
+def consume_restart_intent(run_dir: str, nonce: str) -> bool:
+    """Read, DESTROY, and validate the sentinel. True only if it matched AND
+    the file is now gone.
+
+    Destroying unconditionally is deliberate: one sentinel authorizes exactly
+    one relaunch, and a mismatched file must not sit there waiting for the boot
+    whose nonce it happens to equal.
+
+    The "and the file is now gone" half matters just as much. If the unlink
+    fails -- on Windows another process can hold the file open without delete
+    sharing -- a surviving sentinel would authorize the NEXT exit 75 as well,
+    and a worker that crashes 75 twice would be relaunched on the strength of
+    an intent it expressed once. So a sentinel that cannot be removed is
+    blanked instead, and if even that fails the restart is refused."""
+    try:
+        path = Path(run_dir) / INTENT_FILENAME
+    except (TypeError, ValueError):
+        return False
+    raw = None
+    try:
+        raw = path.read_text(encoding="ascii", errors="replace").strip()
+    except (OSError, ValueError):
+        raw = None
+    destroyed = True
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        try:
+            with open(str(path), "w", encoding="ascii"):
+                pass          # an empty sentinel matches no nonce
+        except OSError:
+            destroyed = False
+    if not raw or not nonce or not destroyed:
+        return False
+    return secrets.compare_digest(raw, str(nonce))
+
+
+def default_run_dir() -> str:
+    """A private directory this supervisor owns, removed when it exits.
+
+    ``mkdtemp`` rather than a fixed path under the state dir: two brokers on one
+    box (dev on 4445, deploy on 8445) must not share a sentinel, and 0700 comes
+    for free on POSIX. On Windows the per-user TEMP directory's ACL is the
+    equivalent protection."""
+    return tempfile.mkdtemp(prefix="browserland-supervisor-")
+
+
+def worker_env(base: Optional[Dict[str, str]], pid: int, nonce: str,
+               run_dir: str) -> Dict[str, str]:
+    """The child's environment: ours, plus the three supervisor variables.
+
+    NOT ``agent/env_util.py::spawn_env``. That function is written for agent
+    shells -- it strips inherited tool variables that would confuse a nested
+    CLI -- and the broker legitimately needs some of what it removes. Copying
+    the broker's own environment verbatim is the only behaviour that keeps a
+    supervised broker identical to an unsupervised one."""
+    env = dict(os.environ if base is None else base)
+    env[ENV_SUPERVISOR_PID] = str(pid)
+    env[ENV_SUPERVISOR_NONCE] = str(nonce)
+    env[ENV_RUN_DIR] = str(run_dir)
+    return env
+
+
+# ---- capability reporting (A13) ---------------------------------------------
+
+_UNIT_RE = re.compile(r"([^/\s]+\.service)")
+
+
+def _read_self_cgroup() -> Optional[str]:
+    try:
+        return Path("/proc/self/cgroup").read_text(
+            encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _run_systemctl(argv: Sequence[str]) -> Optional[str]:
+    """Stripped stdout, or None on any failure at all. Never raises."""
+    try:
+        out = subprocess.run(list(argv), capture_output=True, text=True,
+                             timeout=5)
+    except Exception:  # noqa: BLE001 -- missing binary, timeout, permissions
+        return None
+    if out.returncode != 0:
+        return None
+    return (out.stdout or "").strip()
+
+
+def systemd_unit(cgroup_text: Optional[str]) -> Optional[str]:
+    """Our unit name out of /proc/self/cgroup, or None.
+
+    v2 gives ``0::/system.slice/webterm-broker.service``; v1 gives several
+    lines that all end in the same path; a user unit nests under
+    ``user@1000.service/app.slice/``. Taking the LAST ``*.service`` segment is
+    correct for all three -- the outer ``user@1000.service`` is a slice we are
+    inside, not the unit we are."""
+    if not cgroup_text:
+        return None
+    found = _UNIT_RE.findall(cgroup_text)
+    return found[-1] if found else None
+
+
+def systemd_is_user_unit(cgroup_text: Optional[str]) -> bool:
+    """Does our cgroup path run through a per-user systemd manager?
+
+    ``systemctl show`` without ``--user`` asks the SYSTEM manager, which has
+    never heard of a user unit and answers for a stub with ``Restart=no`` --
+    a false "cannot restart" for anyone running the broker as a user service.
+    The nesting under ``user@<uid>.service`` is what distinguishes the two."""
+    return bool(cgroup_text) and "/user@" in (cgroup_text or "")
+
+
+def _cap(supported: bool, mechanism: str,
+         reason_code: Optional[str]) -> Dict[str, Any]:
+    return {"supported": supported, "mechanism": mechanism,
+            "reason_code": reason_code}
+
+
+def worker_capability(*, env: Optional[Dict[str, str]] = None,
+                      getppid: Optional[Callable[[], int]] = None,
+                      runner: Optional[Callable[[Sequence[str]],
+                                                Optional[str]]] = None,
+                      cgroup_reader: Optional[Callable[[], Optional[str]]]
+                      = None) -> Dict[str, Any]:
+    """Can THIS process be restarted by exiting? Called in the worker.
+
+    ``{"supported": bool, "mechanism": "supervisor"|"systemd"|"none",
+       "reason_code": str|None}``
+
+    Every probe is injectable so the systemd branch is testable on a box with
+    no systemd -- which includes every Windows developer and CI runner we have.
+    """
+    try:
+        env = os.environ if env is None else env
+        getppid = getppid or os.getppid
+        runner = runner or _run_systemctl
+        cgroup_reader = cgroup_reader or _read_self_cgroup
+
+        pid_raw = env.get(ENV_SUPERVISOR_PID)
+        nonce = env.get(ENV_SUPERVISOR_NONCE)
+        # BOTH, or neither: a half-set pair is not a supervisor, it is debris.
+        if pid_raw and nonce:
+            try:
+                claimed = int(str(pid_raw).strip())
+            except (TypeError, ValueError):
+                claimed = None
+            actual = None
+            try:
+                actual = int(getppid())
+            except Exception:  # noqa: BLE001
+                actual = None
+            if claimed is not None and actual is not None and claimed == actual:
+                return _cap(True, MECHANISM_SUPERVISOR, None)
+            # Inherited, not ours. Saying "unsupported" is not enough here: the
+            # operator needs to know the variables are present but stale, or
+            # they will go looking for a supervisor that never existed.
+            return _cap(False, MECHANISM_NONE, REASON_PPID_MISMATCH)
+
+        if env.get(ENV_INVOCATION_ID):
+            cgroup = cgroup_reader()
+            unit = systemd_unit(cgroup)
+            if not unit:
+                return _cap(False, MECHANISM_NONE,
+                            REASON_SYSTEMD_POLICY_UNKNOWN)
+            scope = ["--user"] if systemd_is_user_unit(cgroup) else []
+            policy = runner(["systemctl"] + scope
+                            + ["show", "-p", "Restart", "--value", unit])
+            if policy is None or not policy.strip():
+                return _cap(False, MECHANISM_NONE,
+                            REASON_SYSTEMD_POLICY_UNKNOWN)
+            if policy.strip().lower() in SYSTEMD_RESTART_OK:
+                return _cap(True, MECHANISM_SYSTEMD, None)
+            return _cap(False, MECHANISM_NONE, REASON_SYSTEMD_NO_RESTART)
+
+        return _cap(False, MECHANISM_NONE, REASON_NO_SUPERVISOR)
+    except Exception:  # noqa: BLE001 -- a probe must never take down its caller
+        return _cap(False, MECHANISM_NONE, REASON_PROBE_FAILED)
+
+
+# ---- keeping the worker from outliving the supervisor -----------------------
+#
+# If the supervisor is hard-killed (TerminateProcess on Windows, SIGKILL on
+# POSIX) it cannot forward anything, and the worker would survive holding the
+# port -- a broker nobody can stop and nothing can replace. Before this module
+# existed, killing `python -m webterm.broker` killed the server, and that has to
+# stay true.
+#
+# On Linux the shipped path is systemd, whose default KillMode=control-group
+# already takes the whole cgroup down with the main process, so there is nothing
+# to add. On Windows there is no equivalent, so the child goes into a job object
+# marked kill-on-close: when the supervisor dies by ANY means the handle closes
+# and Windows terminates the job. Agents are unaffected -- launcher.py already
+# spawns them with CREATE_BREAKAWAY_FROM_JOB precisely so they survive a broker
+# restart.
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+#: MANDATORY alongside kill-on-close, and the reason is not obvious: without it
+#: Windows FAILS every CreateProcess that passes CREATE_BREAKAWAY_FROM_JOB with
+#: ERROR_ACCESS_DENIED. ``launcher.py`` passes exactly that flag to keep agents
+#: alive across a broker restart, and it falls back to spawning WITHOUT
+#: breakaway when the call fails -- so omitting this does not break /launch
+#: loudly, it silently puts every agent inside the job and kills them all the
+#: next time the supervisor dies. A quiet reversal of documented behaviour is
+#: worse than a crash.
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+
+_JobObjectExtendedLimitInformation = 9
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong)]
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32)]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+_KERNEL32: Any = None
+
+
+def _kernel32():
+    """One cached kernel32 binding. Loading it per spawn would take a library
+    reference each time and never give one back."""
+    global _KERNEL32
+    if _KERNEL32 is None and os.name == "nt":
+        _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    return _KERNEL32
+
+
+def _create_kill_on_close_job():
+    """A Windows job handle whose closure kills its members, or None.
+
+    None on any failure, and the caller carries on without it: a supervisor
+    that cannot make a job object is still a working supervisor, just one whose
+    worker can be orphaned by a hard kill."""
+    if os.name != "nt":
+        return None
+    try:
+        k32 = _kernel32()
+        # restype MUST be set: the default c_int truncates a 64-bit HANDLE, and
+        # the truncated value then fails every call that uses it.
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | _JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+        ok = k32.SetInformationJobObject(
+            ctypes.c_void_p(job), _JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info))
+        if not ok:
+            k32.CloseHandle(ctypes.c_void_p(job))
+            return None
+        return job
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _assign_to_job(job, proc) -> None:
+    if not job or os.name != "nt":
+        return
+    try:
+        handle = getattr(proc, "_handle", None)
+        if handle is None:
+            return
+        k32 = _kernel32()
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p,
+                                                 ctypes.c_void_p]
+        k32.AssignProcessToJobObject(ctypes.c_void_p(job),
+                                     ctypes.c_void_p(int(handle)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _close_job(job) -> None:
+    if not job or os.name != "nt":
+        return
+    try:
+        _kernel32().CloseHandle(ctypes.c_void_p(job))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---- the loop ---------------------------------------------------------------
+
+def _stderr_log(message: str) -> None:
+    try:
+        sys.stderr.write("[supervisor] %s\n" % message)
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 -- a closed stderr must not be fatal
+        pass
+
+
+def _forward(proc, signum: int) -> None:
+    """Pass a stop signal down to the worker. Never raises -- this runs inside
+    a signal handler, where an exception surfaces somewhere unrelated.
+
+    Windows deliberately forwards NOTHING. The only signal a Python handler
+    actually sees there is a console Ctrl-C, and the OS has already delivered
+    that to the whole process group -- the worker has it and is shutting down
+    gracefully. The only forwarding primitive Windows offers is
+    ``TerminateProcess``, which would abort that shutdown mid-flight and
+    guarantee the ungraceful stop we were trying to avoid. The STOP_GRACE
+    escalation in ``_wait_for`` is the backstop for a worker that ignores it.
+    """
+    if os.name == "nt":
+        return
+    try:
+        proc.send_signal(signum)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _wait_for(proc, state: Dict[str, Any], *, poll: float = POLL_INTERVAL,
+              grace: float = STOP_GRACE,
+              clock: Callable[[], float] = time.monotonic) -> Optional[int]:
+    """Wait in slices so signal handlers actually run (see POLL_INTERVAL), and
+    escalate to a kill if the worker ignores the stop signal."""
+    signalled_at: Optional[float] = None
+    last_kill: Optional[float] = None
+    while True:
+        try:
+            return proc.wait(timeout=poll)
+        except subprocess.TimeoutExpired:
+            if state.get("signum") and signalled_at is None:
+                signalled_at = clock()
+            if signalled_at is None:
+                continue
+            now = clock()
+            # Retried, not fired once: a kill can fail transiently, and a
+            # single ignored failure would leave this polling forever with no
+            # further escalation -- a supervisor that hangs on shutdown.
+            due = (last_kill is None and now - signalled_at > grace) or \
+                  (last_kill is not None and now - last_kill > grace)
+            if due:
+                last_kill = now
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+def _exit_code_for(returncode: Optional[int], signum: int) -> int:
+    """One integer for ``sys.exit``.
+
+    A signal we were told to stop on IS the reason we stopped, so it wins over
+    whatever the child managed to return -- and 128+signum is the shell
+    convention this repo already speaks (130 for Ctrl-C). A negative returncode
+    is POSIX for "killed by signal N" and would otherwise become a nonsense
+    exit status."""
+    if signum:
+        return 128 + int(signum)
+    if returncode is None:
+        return 0
+    if returncode < 0:
+        return 128 + (-returncode)
+    return int(returncode)
+
+
+def supervise(args: Optional[Sequence[str]] = None, *,
+              child_cmd: Optional[Sequence[str]] = None,
+              env: Optional[Dict[str, str]] = None,
+              run_dir: Optional[str] = None,
+              nonce: Optional[str] = None,
+              popen: Optional[Callable[..., Any]] = None,
+              clock: Optional[Callable[[], float]] = None,
+              sleeper: Optional[Callable[[float], None]] = None,
+              log: Optional[Callable[[str], None]] = None,
+              max_restarts: int = MAX_RESTARTS,
+              window: float = RESTART_WINDOW,
+              ready_seconds: float = READY_SECONDS,
+              backoff_base: float = BACKOFF_BASE,
+              backoff_max: float = BACKOFF_MAX,
+              install_signals: bool = True) -> int:
+    """Run the worker, relaunch it when it asks, and return an exit code.
+
+    ``args`` are this process's own CLI arguments; they are replayed to the
+    worker verbatim after ``--worker`` so the child is configured identically.
+    Everything else is injectable so the loop can be driven by a trivial fake
+    child instead of a real broker."""
+    args = list(sys.argv[1:] if args is None else args)
+    popen = popen or subprocess.Popen
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    log = log or _stderr_log
+    nonce = nonce or secrets.token_hex(16)
+
+    owned_dir: Optional[str] = None
+    if run_dir is None:
+        try:
+            run_dir = owned_dir = default_run_dir()
+        except OSError as exc:
+            log("cannot create a run directory (%s); restarts unavailable"
+                % exc)
+            return EXIT_SUPERVISOR_FAILED
+
+    if child_cmd is None:
+        # A fresh interpreter, not an in-process re-exec: Sanic's state is not
+        # reusable after a stop, and a new process is also the only thing that
+        # picks up code changed on disk -- which is the whole point of a
+        # restart after an update.
+        child_cmd = [sys.executable, "-m", "webterm.broker", "--worker"] + args
+    child_cmd = list(child_cmd)
+    child_env = worker_env(env, os.getpid(), nonce, run_dir)
+
+    # Mutable box shared with the signal handler; a handler cannot rebind a
+    # closure local.
+    state: Dict[str, Any] = {"signum": 0, "child": None}
+
+    def _handler(signum, _frame):
+        state["signum"] = signum
+        child = state.get("child")
+        if child is not None:
+            _forward(child, signum)
+
+    installed: List[Any] = []
+    if install_signals:
+        # SIGTERM and SIGINT only. Anything else (SIGHUP, a console close) keeps
+        # its default disposition, which is what the pre-supervisor broker had.
+        for name in ("SIGTERM", "SIGINT"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue                      # not on this platform
+            try:
+                installed.append((sig, signal.signal(sig, _handler)))
+            except (ValueError, OSError, RuntimeError):
+                # ValueError: not the main thread (a test, an embedded run).
+                pass
+
+    job = _create_kill_on_close_job()
+    attempts: "deque" = deque()   # relaunch timestamps inside the window
+    consecutive = 0               # fast deaths since the last worker that came up
+    try:
+        while True:
+            started = clock()
+            try:
+                proc = popen(child_cmd, env=child_env)
+            except OSError as exc:
+                log("could not start the broker worker: %s" % exc)
+                return EXIT_SUPERVISOR_FAILED
+            state["child"] = proc
+            _assign_to_job(job, proc)
+            # A signal that arrived between installing the handler and storing
+            # the child would have found state["child"] empty; deliver it now.
+            if state.get("signum"):
+                _forward(proc, state["signum"])
+            raw = _wait_for(proc, state, clock=clock)
+            state["child"] = None
+            uptime = clock() - started
+
+            if state.get("signum"):
+                log("stopping on signal %d; not relaunching"
+                    % state["signum"])
+                return _exit_code_for(raw, state["signum"])
+
+            if raw == EXIT_ADDR_IN_USE:
+                # The worker has already printed WHICH kind of bind failure it
+                # was (taken vs refused) on the inherited stderr; repeating a
+                # guess here would contradict it.
+                log("the broker could not bind its port (see the message "
+                    "above). Not relaunching: a bind that failed for a "
+                    "structural reason fails identically next time.")
+                return EXIT_ADDR_IN_USE
+
+            if raw != EXIT_RESTART:
+                return _exit_code_for(raw, 0)
+
+            # ---- exit 75: a restart REQUEST, to be authorized ----
+            if not consume_restart_intent(run_dir, nonce):
+                log("worker exited %d without arming a restart (no intent "
+                    "sentinel, or the wrong nonce). Treating it as a crash "
+                    "and stopping -- an unauthorized 75 is not a restart."
+                    % EXIT_RESTART)
+                return EXIT_RESTART
+
+            came_up = uptime >= ready_seconds
+            now = clock()
+            while attempts and now - attempts[0] > window:
+                attempts.popleft()
+            if came_up:
+                # The ONLY thing that clears the budget. Not the spawn: a
+                # crash-loop that reset on spawn would restart forever.
+                attempts.clear()
+                consecutive = 0
+            else:
+                consecutive += 1
+            if len(attempts) >= max_restarts:
+                log("restart budget exhausted: %d relaunches in under %.0fs "
+                    "and no worker stayed up %.0fs. Giving up -- the broker "
+                    "is crash-looping, and restarting it again would only "
+                    "hide that." % (len(attempts), window, ready_seconds))
+                return EXIT_SUPERVISOR_FAILED
+            attempts.append(now)
+
+            delay = 0.0
+            if not came_up:
+                # The exponent is clamped, not just the result. A worker that
+                # dies slowly enough to stay inside the budget (say every 9s,
+                # under READY_SECONDS but too rarely to fill the window) loops
+                # indefinitely by design -- that is what "N per M seconds"
+                # means -- and `consecutive` would climb forever with it, until
+                # `backoff_base * 2 ** consecutive` overflowed and took the
+                # supervisor down with an unrelated traceback.
+                delay = min(backoff_max,
+                            backoff_base * (2 ** min(max(0, consecutive - 1),
+                                                     _BACKOFF_MAX_SHIFT)))
+                log("worker exited after %.1fs (under the %.0fs it takes to "
+                    "count as up); relaunching in %.1fs [%d/%d]"
+                    % (uptime, ready_seconds, delay, len(attempts),
+                       max_restarts))
+            else:
+                log("restarting the broker as requested")
+            # Sliced, and abandoned the moment a stop arrives. A single
+            # sleeper(30) would keep the supervisor alive and unresponsive for
+            # half a minute after a SIGTERM, and then -- worse -- spawn a fresh
+            # worker it immediately has to stop.
+            remaining = delay
+            while remaining > 0 and not state.get("signum"):
+                slice_ = min(POLL_INTERVAL, remaining)
+                sleeper(slice_)
+                remaining -= slice_
+            if state.get("signum"):
+                log("stopping on signal %d; not relaunching"
+                    % state["signum"])
+                return _exit_code_for(0, state["signum"])
+    finally:
+        for sig, previous in installed:
+            try:
+                signal.signal(sig, previous)
+            except (ValueError, OSError, RuntimeError, TypeError):
+                pass
+        _close_job(job)
+        if owned_dir:
+            shutil.rmtree(owned_dir, ignore_errors=True)

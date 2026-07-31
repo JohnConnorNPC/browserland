@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import auth
+from . import auth, supervise
 from .app import DEFAULT_PORT, _open_url, create_app, load_config
 
 
@@ -119,6 +119,65 @@ def _scan_recordings(config: dict, ns) -> int:
     return 1 if result.findings else 0
 
 
+def _run_worker(config: dict, host: str, port: int) -> int:
+    """The server itself -- what ``python -m webterm.broker`` used to be, now
+    reached only via the internal ``--worker`` flag (#183).
+
+    Two things happen here that did not before:
+
+    * the exit code comes from the app. With ``single_process=True``,
+      ``app.stop()`` from a request handler makes ``app.run()`` RETURN, so a
+      route can set ``app.ctx.exit_code`` and have this process exit with it --
+      which is how a restart is requested of the supervisor. Read defensively:
+      this must work before (and after) any route that sets it exists.
+    * a port clash is reported as its OWN exit code rather than as a generic
+      crash, so the supervisor can refuse to relaunch into it.
+    """
+    app = create_app(config, port=port)
+    # Did the server ever come up? This is what keeps the bind classification
+    # honest: EACCES is BOTH "the OS refused this address" and "a file write was
+    # denied", so an errno alone would let a mid-flight permission error at
+    # runtime masquerade as a port clash - stopping the broker for good with a
+    # message about ports. A failure that happens before this listener ever ran
+    # is, by construction, a startup failure.
+    started = {"ok": False}
+
+    async def _mark_started(_app, _loop):
+        started["ok"] = True
+
+    app.register_listener(_mark_started, "after_server_start")
+    try:
+        # single_process avoids Sanic's multi-worker spawn path, which on
+        # Windows re-imports the module and can't find an app built in main();
+        # it also dodges an os.killpg call that doesn't exist on Windows.
+        app.run(host=host, port=port, single_process=True)
+    except Exception as exc:      # noqa: BLE001 -- re-raised unless it's a bind
+        # Not `except OSError`: Sanic wraps the bind failure in its own
+        # ServerError, so the errno lives in the exception's context chain
+        # rather than on the exception itself (bind_failure_reason walks it).
+        reason = (None if started["ok"]
+                  else supervise.bind_failure_reason(exc))
+        if reason == supervise.BIND_IN_USE:
+            print(f"cannot bind {host}:{port} - the address is already in "
+                  f"use. Another broker (or something else) is listening "
+                  f"there; stop it, or start this one on a different --port.",
+                  file=sys.stderr)
+            return supervise.EXIT_ADDR_IN_USE
+        if reason == supervise.BIND_DENIED:
+            print(f"cannot bind {host}:{port} - the OS refused the address. "
+                  f"Usually that means it is already taken (Windows reports an "
+                  f"occupied port this way), or the port is reserved/"
+                  f"privileged for this user. Try a different --port.",
+                  file=sys.stderr)
+            return supervise.EXIT_ADDR_IN_USE
+        raise
+    try:
+        return int(getattr(app.ctx, "exit_code", 0) or 0)
+    except (TypeError, ValueError):
+        # A garbage exit_code must not turn a clean shutdown into a crash.
+        return 0
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("WEBTERM_LOG", "INFO").upper(),
@@ -157,6 +216,12 @@ def main() -> int:
                              "but may still sit in an old recording")
     parser.add_argument("--json", action="store_true",
                         help="machine-readable output for --scan-recordings")
+    # Internal (#183): this process is the SUPERVISOR unless told otherwise.
+    # SUPPRESSed from --help because it is not something a human should pass --
+    # a hand-run `--worker` is a broker that cannot restart itself, which is
+    # exactly the state the supervisor exists to remove.
+    parser.add_argument("--worker", action="store_true",
+                        help=argparse.SUPPRESS)
     ns = parser.parse_args()
 
     config = load_config(ns.config)
@@ -171,17 +236,20 @@ def main() -> int:
     # --print-token can build the ready-to-open URL off the config alone.
     config["host"] = host
 
+    # The one-shot subcommands answer and exit. They deliberately run BEFORE
+    # the supervisor split: asking for a token must not spawn a broker, and
+    # auditing recordings must not sit under a process that would relaunch it.
     if ns.print_token:
         return _print_token(config, port)
     if ns.scan_recordings:
         return _scan_recordings(config, ns)
 
-    app = create_app(config, port=port)
-    # single_process avoids Sanic's multi-worker spawn path, which on
-    # Windows re-imports the module and can't find an app built in main();
-    # it also dodges an os.killpg call that doesn't exist on Windows.
-    app.run(host=host, port=port, single_process=True)
-    return 0
+    if ns.worker:
+        return _run_worker(config, host, port)
+    # No --worker: be the supervisor. sys.argv[1:] (not the parsed namespace)
+    # is replayed to the child, so the worker resolves its own config exactly
+    # as this process just did -- no second, drifting serialization of the CLI.
+    return supervise.supervise(sys.argv[1:])
 
 
 if __name__ == "__main__":
