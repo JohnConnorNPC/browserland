@@ -61,9 +61,9 @@ An MCP client sees these tools, each mapping to a broker endpoint:
 | `mcp_info(host?)` | Reports feature flags (`allow_launch`, `default_mode`) |
 | `list_terminals` | Lists all running sessions across hosts (id, title, cwd, agent, kind, cols/rows, mode) |
 | `list_profiles(host?)` | Lists launchable profile names and the default |
-| `read_screen(id)` | Returns the terminal's current screen as a bounded plain-text grid |
+| `read_screen(id, …)` | Returns the terminal's screen. Far more than a bounded grid: `view="scrollback"` and `lines` widen what is returned, `since` returns only what is new, `attrs` adds styling runs, and it can **wait** rather than poll — `wait_for_change`, `wait_for_text`, `wait_for_regex`, `wait_absent`, `wait_for_idle` |
 | `send_input(id, data)` | Types text into a window (window must be `readwrite`; newlines are sent as Enter) |
-| `send_keys(id, keys)` | Sends control/escape keys, e.g. `["C-c"]`, `["Esc"]`, `["Up","Enter"]` |
+| `send_keys(id, keys, delay_ms?)` | Sends control/escape keys, e.g. `["C-c"]`, `["Esc"]`, `["Up","Enter"]`. Also accepts `S-` (shift) modifiers and a bare `LF` token, and `delay_ms` paces the keystrokes |
 | `set_pace(id, pace_ms)` | Sets a per-terminal default inter-key pacing for `send_keys` (window must be `readwrite`; ephemeral, `0` disables, capped at 1000 ms) |
 | `reset_terminal(id)` | Wipes Browserland's screen buffer for the window so the next `read_screen` starts clean (window must be `readwrite`; does not touch the running app) |
 | `flush_input(id)` | Discards keystrokes queued to the app but not yet consumed (window must be `readwrite`; a no-op on a Windows/ConPTY agent) |

@@ -917,8 +917,9 @@ def test_duplicate_slug_raises(tmp_path):
 def test_real_wiki_builds():
     corpus = hc.build_corpus(hc.WIKI_DIR)
     # 13 end-user pages survive #113 (only mod-OWNED sections were migrated out),
-    # plus the 5 developer/operator pages that replaced docs/.
-    assert len(corpus["sections"]) == 18
+    # plus the 5 developer/operator pages that replaced docs/, plus the 2 that
+    # closed the coverage gaps (Themes & Appearance, Installing Mods).
+    assert len(corpus["sections"]) == 20
     # The developer pages are the ONLY tiered ones, and every end-user page must
     # stay untagged -- an untagged section defaults to the user tier, so a stray
     # marker on an end-user page would hide it from the default Help view, and a
@@ -1035,7 +1036,7 @@ def test_full_corpus_includes_mod_sections():
     # every mod section is tagged and sorts AFTER every wiki section.
     mod_orders = [s["order"] for s in full["sections"] if "mod" in s]
     wiki_orders = [s["order"] for s in full["sections"] if "mod" not in s]
-    assert len(mod_orders) == 15   # +git (#116) +clipboard (#106) +scratchpad (#124) +recorder (#140) +host-registry (#65) +mousemode (#155) +mod-sync (#158) -agent-docs (#177) +update (#182)
+    assert len(mod_orders) == 18   # +git (#116) +clipboard (#106) +scratchpad (#124) +recorder (#140) +host-registry (#65) +mousemode (#155) +mod-sync (#158) -agent-docs (#177) +update (#182) +theme +pattern +termfont
     assert min(mod_orders) > max(wiki_orders)
 
 

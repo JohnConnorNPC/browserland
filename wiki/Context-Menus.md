@@ -99,7 +99,6 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - **Tile H + V**
 - **Lock Size** / **Unlock Size** — snap every floating window to the default size and hide the resize handles, or restore free resizing.
 - **Minimize All Windows**
-- **Undo &lt;action&gt;** — appears after an arrange, to reverse the most recent one (single-level).
 
 **Both modes** then show the workspace block:
 
@@ -108,7 +107,7 @@ Right-click the desktop background (or an empty part of the taskbar). The menu d
 - **Rename &lt;workspace&gt;…** — rename the workspace you are on.
 - **Remove &lt;workspace&gt;** — delete the workspace you are on (disabled when only one remains).
 
-Both modes also offer **🎛 Control panel**. The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
+Both modes then offer **🎛 Control panel** — this menu does still use the emoji. **Undo &lt;action&gt;** comes after it, as the **last** item in the menu, appearing in floating mode once there is an arrange to reverse (single-level). The arrange and lock-size actions are covered on [[Floating-Window-Controls]]; the workspace block on [[Workspaces]] — it comes from the Workspaces mod, so with that disabled the tiling menu is just **Control panel**.
 
 Because this menu also opens from an empty part of the **taskbar**, it is the one workspace surface that is always reachable — no window can cover it — which is what makes hiding the pager safe.
 
@@ -119,7 +118,7 @@ Left-click the `+` to launch the default host's default terminal — the local b
 - **Broker status rows** — one per attached broker: a state dot and label doing what the taskbar chip does (log in, take over the lease, or hide/show that broker's windows — the hide toggle keeps the menu open). See [[Hosts-and-Multi-Browser]].
 - **Terminal profiles** — each launchable profile for the host (the default is marked `(default)`), listed under its broker's status row.
 - **Open in folder…** — a directory picker (per host) that starts the host's default profile rooted at the folder you choose.
-- **App windows** — **📝 Sticky note**, **📄 Text editor**, **🗂 File manager**, **🧰 Task manager**, **🎛 Control panel**, **❓ Help**, **Scratchpad**, and **⏺ Session recorder**. See [[Window-Types]].
+- **App windows** — in registration order: **Control panel**, **Help**, **Task manager**, **File manager**, **Text editor**, **Sticky note**, **Scratchpad**, **Session recorder**. Each carries a small SVG icon, not an emoji. Mods that ship off by default add their own rows once enabled, **Clipboard** and **AI status** among them. See [[Window-Types]].
 - **Closed notes** — at the bottom, any non-empty sticky note you've closed; click one to reopen it.
 
 The launch button and start-button label are covered on [[Taskbar]].

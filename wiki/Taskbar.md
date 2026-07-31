@@ -13,7 +13,7 @@ From left to right, the taskbar contains:
 | Fullscreen button (`⛶`) | Toggles the browser into fullscreen |
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
-| Clipboard chip (**📋**) | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
+| Clipboard chip | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
 | Update chip (**⬆**) | Whether this build is current with upstream — up to date, N behind, ahead, or *version ?* when it could not be established. Click to open the Update check window. Shown while the **Update check** mod is enabled; it ships **off by default**, and the broker needs its own `update_check_enabled` switch before it will reach GitHub at all. By default the chip hides itself while the build is current |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
@@ -59,7 +59,7 @@ The launch button doubles as a Start button.
 By default:
 
 - **Left-click** launches a terminal using your **default host's** default profile. The default host is the local broker unless you pick another under Control Panel → Hosts (see [[Hosts-and-Multi-Browser]]).
-- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types (sticky note, text editor, file manager, task manager, scratchpad, session recorder, control panel, and help — with more entries, such as an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). Every broker leads with a **live status row** (its state, and the old chip's click actions — log in, take over the lease, or hide/show its windows, which keeps the menu open) with its profiles below it, so you can launch on a remote host from here. With several hosts attached, the taskbar's aggregate broker badge opens this same menu (see [[Hosts-and-Multi-Browser]]).
+- **Right-click** opens the full launch menu: the launchable terminal profiles plus the other window types, in registration order — control panel, help, task manager, file manager, text editor, sticky note, scratchpad, session recorder — with more entries, such as clipboard history or an AI-provider status monitor, when the matching mods are enabled; see [[Window-Types]] for the authoritative list). Every broker leads with a **live status row** (its state, and the old chip's click actions — log in, take over the lease, or hide/show its windows, which keeps the menu open) with its profiles below it, so you can launch on a remote host from here. With several hosts attached, the taskbar's aggregate broker badge opens this same menu (see [[Hosts-and-Multi-Browser]]).
 
 ### Swapping the click gestures
 

@@ -26,7 +26,7 @@ From the **+** menu you can also open other window types — a sticky note, a te
 
 The **Control Panel** is where you configure the desktop. Open it any of these ways:
 
-- **Right-click the launch (+) button** and choose **🎛 Control panel**.
+- **Right-click the launch (+) button** and choose **Control panel** (that menu uses SVG icons, not emoji).
 - **Right-click the empty desktop or the taskbar** and choose **🎛 Control panel**.
 - Press the **Open control panel** shortcut, `Ctrl+Alt+p`.
 
@@ -44,7 +44,7 @@ Inside a broker's tab the settings are grouped into **applets**: the panel opens
 | **Terminals** | The default start path, the default terminal profile, and the launch profiles themselves |
 | **Startup** | Restore-on-refresh |
 | **Access** | MCP — AI-agent access to your terminals (see [[MCP-and-AI-Agents]]) |
-| **Mods** | Which mods this browser runs, plus the settings each enabled mod contributes. A mod may also place its control in one of the applets above — the Color scheme radio sits in **Desktop**, for instance — and a mod-owned setting carries a small badge naming its mod wherever it lands |
+| **Mods** | Which mods this browser runs — and, since it is no longer enable/disable only, **Install a mod…** and **Uninstall**, a shipped-vs-installed badge, and an install preview with advisory warnings (see [[Installing-Mods]]). Plus the settings each enabled mod contributes. A mod may also place its control in one of the applets above — the Color scheme radio sits in **Desktop**, for instance — and a mod-owned setting carries a small badge naming its mod wherever it lands |
 | **Advanced** | **Mods on this broker**: which mods that broker pins on or off for every browser that loads its page — including a remote broker's, from its own tab (see [[Hosts-and-Multi-Browser]]) |
 
 An applet only appears when it has something to show on the tab you are on. A remote broker's tab has no **Desktop** or **Startup** icon, for example, because everything in them belongs to the browser you are sitting at rather than to that broker (see *Per-browser vs. per-host settings* below).

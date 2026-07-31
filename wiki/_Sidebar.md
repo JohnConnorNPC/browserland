@@ -16,6 +16,8 @@
 - [[Workspaces]]
 - [[Taskbar]]
 - [[Context Menus|Context-Menus]]
+- [[Themes & Appearance|Themes-and-Appearance]]
+- [[Installing Mods|Installing-Mods]]
 
 **Windows & content**
 - [[Window Types|Window-Types]]

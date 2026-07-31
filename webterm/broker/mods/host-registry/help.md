@@ -42,13 +42,13 @@ Two other things are never taken from another broker's list. A **loopback** addr
 
 ## Encryption
 
-The broker stores the registry as plain JSON in a file next to its state file, plus a short revision history. **Broker registry encryption** encrypts that value *in this browser* before it is published, so the broker only ever receives ciphertext. It is set in **Control Panel → Browser → Broker registry encryption**, and it has three modes:
+The broker stores the registry as plain JSON in a file next to its state file, plus a short revision history. **Broker registry encryption** encrypts that value *in this browser* before it is published, so the broker only ever receives ciphertext. It is set in **Control Panel → Browser → Broker registry encryption**, under the **Encrypt before publishing** setting, which offers three modes:
 
-- **Passwords only** (the default) — the labels and addresses stay readable; only the passwords are encrypted. Nothing changes until a publish actually carries a password, so with **Include passwords** off this mode does nothing at all and never asks for a passphrase.
+- **Passwords only (recommended)** (the default) — the labels and addresses stay readable; only the passwords are encrypted. Nothing changes until a publish actually carries a password, so with **Include passwords** off this mode does nothing at all and never asks for a passphrase.
 - **Whole list** — the entire list is encrypted. The broker cannot see which machines you have, and the list is unreadable until you unlock it.
-- **Off** — the old behaviour: everything is published in the clear.
+- **Off — publish in the clear** — the old behaviour: everything is published as before.
 
-Publishing asks for a passphrase, and pulling asks for it again to unlock. The passphrase is held in memory for as long as the page is open — so publishing to every broker, or pulling twice in a row, only asks once — and it is **never stored anywhere**. There is no "remember on this browser": a key kept in local storage is worth exactly as much as the passphrase to anything that can read local storage. **Forget passphrase** drops it. If you lose it, publish the list again with a new one.
+Publishing that needs a passphrase opens a prompt with an **Encrypt** button, and pulling an encrypted registry opens the matching unlock prompt. The passphrase is held in memory for as long as the page is open — so publishing to every broker, or pulling twice in a row, only asks once — and it is **never stored anywhere**. There is no "remember on this browser": a key kept in local storage is worth exactly as much as the passphrase to anything that can read local storage. **Forget passphrase** drops it. If you lose it, publish the list again with a new one.
 
 ### What this protects you from — and what it does not
 

@@ -43,6 +43,8 @@ New here? Read [[Getting-Started]] first. Once you are in the desktop, click the
 |---|---|
 | [[Workspaces]] | Virtual desktops and the pager |
 | [[Taskbar]] | Taskbar items, the launch (+) menu, fullscreen, and clock |
+| [[Themes-and-Appearance]] | Colour schemes, background patterns, the terminal font |
+| [[Installing-Mods]] | Installing and uninstalling mods, and the ?nomods=1 rescue hatch |
 | [[Context-Menus]] | A right-click reference across every surface |
 
 ### Content & windows

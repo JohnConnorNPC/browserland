@@ -7,16 +7,23 @@ The **+** button at the left of the taskbar is how you create windows:
 - **Left-click +** to launch a terminal on your **default host** — the local broker unless you pick another in Control Panel → Hosts.
 - **Right-click +** for the full profile / app menu. Alongside the terminal profiles (grouped per broker when you have more than one host), it lists the app windows:
 
+The items appear in this order, which is the order the window kinds register in — not
+alphabetical:
+
 | Menu item | Opens |
 |---|---|
-| `📝 Sticky note` | A sticky note |
-| `📄 Text editor` | A CodeMirror text editor |
-| `🗂 File manager` | A file manager |
-| `🧰 Task manager` | A task manager |
-| `🎛 Control panel` | The Control Panel (settings) |
-| `❓ Help` | The in-app help guide |
-| `⏺ Session recorder` | The session-recording library (play back recorded terminals) |
-| `🗒 Scratchpad` | Broker-stored shared notes (from the Scratchpad mod) |
+| `Control panel` | The Control Panel (settings) |
+| `Help` | The in-app help guide |
+| `Task manager` | A task manager |
+| `File manager` | A file manager |
+| `Text editor` | A CodeMirror text editor |
+| `Sticky note` | A sticky note |
+| `Scratchpad` | Broker-stored shared notes (from the Scratchpad mod) |
+| `Session recorder` | The session-recording library (play back recorded terminals) |
+
+Each row carries a small SVG icon rather than an emoji. Mods that ship **off** by default add
+their own rows once enabled — **Clipboard** (clipboard history) and **AI status** among them — and
+a **Closed notes** entry appears when there are sticky notes to restore.
 
 You can also open a terminal with the **New terminal** shortcut (`Ctrl+Alt+Enter` — see [[Keyboard-Shortcuts]]). See [[Taskbar]] for the rest of the + menu, including "Open in folder…" and the configurable Start button label.
 
@@ -25,6 +32,14 @@ You can also open a terminal with the **New terminal** shortcut (`Ctrl+Alt+Enter
 A terminal runs a real shell on its broker host. The shell keeps running even when no browser is attached, so you can close the window, come back later, and the screen heals from a snapshot.
 
 Each terminal title bar carries a per-window **robot button** that sets that window's MCP (AI agent) access — off, read, or read-write. The robot icon briefly flashes when an agent reads the screen or types into the terminal. See [[MCP-and-AI-Agents]] for the full picture.
+
+Two more chips can appear in a terminal's title bar, both ambient — neither is a button:
+
+- a **git branch badge** showing the branch that terminal's working directory is on, with a
+  marker when the tree is dirty (from the Git mod);
+- a **🖱 mouse-mode chip**, shown for exactly as long as a full-screen program owns the mouse
+  (`lazygit`, `btop`, `mc`). Its tooltip carries the escape gesture. It comes from the Mouse mode
+  chip mod, which ships **enabled** — see [[Keyboard-Shortcuts]].
 
 The title bar used to carry a **📋 Agent docs button** that opened that folder's `AGENTS.md` / `CLAUDE.md`. It has been **retired**: the button guessed which folder you meant from the terminal's detected working directory, and when that guess was wrong it opened — and, once you saved, wrote to — a different project's `AGENTS.md`, with no way to tell from the window that it had. `AGENTS.md` and `CLAUDE.md` are ordinary files; open them with the **Text editor** (Open) or the **File manager** as you would any other. Agent-docs windows you already had open still restore and still save.
 
@@ -40,11 +55,11 @@ Every terminal title bar carries a **⏺ record button**: click to record that s
 
 ## Scratchpad
 
-The Scratchpad is a single-instance window of tabbed notes stored on the broker, so it is shared across every browser connected to that host. Notes autosave as you type, and each tab keeps a browsable revision history. It comes from the default-on Scratchpad mod and requires the Text editor mod — disable either under Control Panel → Mods and the `🗒 Scratchpad` item disappears from the **+** menu.
+The Scratchpad is a single-instance window of tabbed notes stored on the broker, so it is shared across every browser connected to that host. Notes autosave as you type, and each tab keeps a browsable revision history. It comes from the default-on Scratchpad mod and requires the Text editor mod — disable either under Control Panel → Mods and the `Scratchpad` item disappears from the **+** menu.
 
 ## Control Panel
 
-The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **🎛 Control panel** item, the desktop / taskbar right-click menu, or the **Open control panel** shortcut (`Ctrl+Alt+p`).
+The Control Panel is where you configure the desktop — appearance, window mode, drag-hold delay, hosts, MCP access, keyboard shortcuts, and more, with a tab per connected broker. It opens as a **moveable floating window**: drag its title bar to move it, drag its edges to resize, minimize it to the taskbar, or tile it like any other window. Open it from the **+** menu's **Control panel** item, the desktop / taskbar right-click menu (which does label it **🎛 Control panel**), or the **Open control panel** shortcut (`Ctrl+Alt+p`).
 
 Inside a broker's tab the settings are grouped into **applets** — Desktop, Windows, Input, Terminals, Startup, Access, Mods, Advanced — so the panel opens on a grid of captioned icons rather than one long scroll, and you pick a topic first. A filter box above the grid finds a setting by name, and a **Show everything** toggle drops back to the flat list. See [[Getting-Started]] for what each applet holds.
 

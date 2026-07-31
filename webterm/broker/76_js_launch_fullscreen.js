@@ -290,9 +290,11 @@
         }
         // The "client apps" block of the (+) launch menu, now driven by the window-
         // kind registry (#80/S7): a leading separator, one launcher per registered
-        // kind that carries a menu (registration order — so the built-ins reproduce
-        // the old Sticky / Editor / File-mgr / Task-mgr / Control-panel / Help
-        // order, and a mod's kind appends after Help), then each kind's closed-doc
+        // kind that carries a menu, in REGISTRATION order — Control panel, Help,
+        // Task manager, File manager, Text editor, Sticky note, then whatever the
+        // mods register (Scratchpad, Session recorder, and the recording player;
+        // Clipboard and AI status too once those default-off mods are enabled) —
+        // then each kind's closed-doc
         // items (only the sticky note contributes any — its "Closed notes" list).
         function appMenuItems() {
             const kinds = windowKindMenuList();

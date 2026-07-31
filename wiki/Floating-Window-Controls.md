@@ -25,7 +25,9 @@ Most of the remaining controls live on the **title-bar right-click menu** — ri
 
 ## Minimize, close, terminate, and delete
 
-These actions are on **every** window's title-bar right-click menu, so they work the same whether the window is floating or **snapped into the tiling strip** — see [[Snapping-and-Pop-out]].
+The title bar itself carries two buttons — **minimize** and **×** — and × is worth understanding: by default it **soft-closes** (the view detaches, a terminal's shell keeps running). Turn on **Control Panel → Windows → "Close (×) terminates terminal sessions"** and × instead hard-kills the session, optionally behind **"Confirm before terminating"**. The right-click **Close** stays the soft-close path either way.
+
+The rest of these actions are on **every** window's title-bar right-click menu, so they work the same whether the window is floating or **snapped into the tiling strip** — see [[Snapping-and-Pop-out]].
 
 A window's title-bar menu lets you get a window out of the way or close it. It's important to know that **closing is soft** — what actually happens depends on the window type.
 
@@ -35,7 +37,7 @@ A window's title-bar menu lets you get a window out of the way or close it. It's
 | **Restore** | Brings a minimized window back (same menu item, when the window is minimized). |
 | **Close** | Soft close. A **terminal**'s shell keeps running so you can reattach later. A **non-empty sticky note** is retained and reopens from *Closed notes* in the **+** menu (an empty note is discarded). A **text editor**'s content is a file on the host, so closing it (after a save prompt for unsaved changes) leaves your file intact. A **file manager**, the **task manager**, and the Control Panel/help are ephemeral — Close just dismisses them. |
 | **Terminate** | Terminals only. Hard-kills the shell process tree. You're asked to confirm first. |
-| **Delete note** / **Delete file** | App windows other than the task manager, Control Panel, help, and file manager (notes and the text editor). Permanently discards that window and its stored document. You're asked to confirm first. |
+| **Delete note** / **Delete file** | Intended for windows that own a saved document (notes and the text editor). The guard is a denylist of four window kinds, so some ephemeral windows show the item too — tracked as issue #186. Permanently discards that window and its stored document. You're asked to confirm first. |
 
 Because a closed terminal keeps its shell alive, **Terminate** is the only way to actually kill the process tree. For a sticky note or an editor file, **Close** preserves the content (a note in *Closed notes*, a file on disk), while **Delete** is the one path that throws it away.
 
