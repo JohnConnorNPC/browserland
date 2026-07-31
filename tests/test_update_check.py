@@ -21,6 +21,7 @@ fetch-path tests monkeypatch the module-level `_OPENER`.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -613,6 +614,38 @@ def test_a_second_call_inside_the_ttl_does_not_refetch(tmp_path, monkeypatch):
     client.get("/update/check")
     client.get("/update/check")
     assert len(calls) == 1, "the daily TTL must serve the cached result"
+
+
+def test_ten_concurrent_callers_cause_one_upstream_call(tmp_path, monkeypatch):
+    """Single-flight, not merely TTL reuse. Sequential requests would pass on
+    the cache alone; a cold-cache stampede is the case that burns the 60/hour
+    budget, and it is only prevented by re-reading the cache INSIDE the lock.
+    Driven directly rather than over HTTP, because the test client serializes
+    requests and would pass even without the lock."""
+    import asyncio as _asyncio
+
+    calls = []
+
+    def slow(**kwargs):
+        calls.append(kwargs)
+        time.sleep(0.05)          # hold the executor slot so others pile up
+        return {"state": update.STATE_CURRENT, "reason": None, "mode": "commit",
+                "local": {}, "repo": update.UPSTREAM_REPO, "checkedAt": 1,
+                "upstream": None, "treeVerified": False}
+
+    monkeypatch.setattr(broker_app.update_check, "run_check", slow)
+    app = _make_app(tmp_path, monkeypatch)
+
+    async def drive():
+        return await _asyncio.gather(
+            *[app.ctx.update_check_run() for _ in range(10)])
+
+    results = _asyncio.run(drive())
+    assert len(results) == 10
+    assert all(r["state"] == update.STATE_CURRENT for r in results)
+    assert len(calls) == 1, (
+        "ten concurrent callers must collapse to ONE upstream call, got %d"
+        % len(calls))
 
 
 def test_the_client_cannot_supply_a_repo_or_url(tmp_path, monkeypatch):

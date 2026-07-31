@@ -5625,6 +5625,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             ctx.update_cache = {"data": data, "until": until}
             return data
 
+    # Exposed so the single-flight property can be tested under real
+    # concurrency: driving it through the HTTP test client serializes the
+    # requests, which would pass a test that a stampede still fails.
+    app.ctx.update_check_run = _update_check_cached
+
     async def _update_check(request: Request):
         err = _gated_auth_error(request, "/update/check")
         if err is not None:
