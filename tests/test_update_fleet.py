@@ -221,6 +221,11 @@ CASES.peer_state_table = async () => {
         check: { state: 'unknown', reason: 'no-git' } }));
     out.unknownOffline = read(rec({
         check: { state: 'unknown', reason: 'offline' } }));
+    // The fifth peer failure (#185): a headless peer that was asked and did not
+    // answer, where "asleep" and "too old to have the route" are genuinely
+    // indistinguishable from here.
+    out.unreachableOrTooOld = read(rec({
+        error: 'unreachable-or-too-old' }));
     out.brokerError = read(rec({ error: 'broker-error' }));
     out.noSuchHost = read(rec({ error: 'no-such-host' }));
     // Nothing has come back yet.
@@ -238,8 +243,8 @@ CASES.peer_state_table = async () => {
     out.garbage = read(rec({ check: { nope: true } }));
     out.reasons = {};
     for (const k of ['route-absent', 'not-opted-in', 'unauthorized',
-                     'unreachable', 'broker-error', 'no-such-host',
-                     'offline', 'rate-limited']) {
+                     'unreachable', 'unreachable-or-too-old', 'broker-error',
+                     'no-such-host', 'offline', 'rate-limited']) {
         out.reasons[k] = REASONS[k] || null;
     }
     return out;
@@ -256,6 +261,10 @@ CASES.capability_table = async () => {
     out.headless = capabilityFrom(INFO_HEADLESS);
     out.headlessKeyOff = capabilityFrom(Object.assign({}, INFO_HEADLESS,
         { update: { check_enabled: false } }));
+    // A headless peer that DOES publish the capability is not ambiguous at all:
+    // the key only exists on a build that registers the route.
+    out.headlessKeyOn = capabilityFrom(Object.assign({}, INFO_HEADLESS,
+        { update: { check_enabled: true } }));
     out.unauthorized = capabilityFrom(INFO_401);
     out.unreachable = capabilityFrom(INFO_DOWN);
     out.noRecord = capabilityFrom(undefined);
@@ -343,6 +352,107 @@ CASES.route_absent_never_asked = async () => {
     return { first, second, third };
 };
 
+// --- a headless peer that does not answer (#185) -------------------------
+// The record shapes here are the ones fetchModCatalog really caches, and the
+// request really fails the way a dead preflight arrives (hostFetch REJECTS,
+// not a status). Reading capabilityFrom's return value in isolation cannot see
+// this: 'unproven' is an internal tag that never reaches a record, so the only
+// thing worth grading is the state that lands on the SCREEN.
+CASES.headless_ambiguity = async () => {
+    fleet(['local', 'headless', 'ghosted', 'down', 'old']);
+    INFO = {
+        local: INFO_MODERN(true),
+        headless: INFO_HEADLESS,      // answered /info, serves no page, no key
+        ghosted: INFO_MODERN(true),   // answered /info, then went away
+        down: INFO_DOWN,              // never answered /info at all
+        old: INFO_OLD,                // serves a UI, predates the route
+    };
+    // Only 'local' answers; every other CHECK entry is absent, so the stub
+    // rejects exactly as a black-holed broker or a dead preflight does.
+    CHECK = { local: OK200({ state: 'current' }) };
+    await pollTick();
+    const read = (id) => {
+        const st = checkStateFor(id);
+        const ps = peerState(st);
+        return { ps: ps, error: st.error, check: st.check,
+                 reason: reasonCode(st), words: stateWords(ps, st),
+                 coarse: state(st), band: bandFor(ps), answered: answered(ps),
+                 title: chipTitle(st) };
+    };
+    const out = { snap: snapshot(), checkCalls: checkCalls.slice() };
+    for (const id of ['local', 'headless', 'ghosted', 'down', 'old']) {
+        out[id] = read(id);
+    }
+    out.reasons = {
+        ambiguous: REASONS['unreachable-or-too-old'],
+        unreachable: REASONS['unreachable'],
+        routeAbsent: REASONS['route-absent'],
+    };
+    return out;
+};
+
+// --- …and one that DOES answer is not left ambiguous ---------------------
+// 'unproven' must ask like 'ready' asks. If it ever refused instead, every
+// headless broker in the fleet would report a failure it never had.
+CASES.headless_answers = async () => {
+    fleet(['local', 'hcur', 'hbehind', 'hgate', 'hnopw']);
+    INFO = { local: INFO_MODERN(true), hcur: INFO_HEADLESS,
+             hbehind: INFO_HEADLESS, hgate: INFO_HEADLESS,
+             hnopw: INFO_HEADLESS };
+    CHECK = {
+        local: OK200({ state: 'current' }),
+        hcur: OK200({ state: 'current', local: { version: '1.0.0' } }),
+        hbehind: OK200({ state: 'behind', behindBy: 2 }),
+        // The pre-loaded ambiguity must never survive a real answer.
+        hgate: R503,
+        hnopw: { status: 401, ok: false, body: { ok: false } },
+    };
+    await pollTick();
+    const snap = snapshot();
+    snap.checkCalls = checkCalls.slice();
+    return snap;
+};
+
+// --- a 401 on the WIRE is a refused password, not an unreadable answer ---
+// Reachable in practice because modCatalogCache has no TTL: a token that goes
+// stale after page load leaves a cached 'ok' record, so the probe says 'ready'
+// and every later check 401s.
+CASES.wire_unauthorized = async () => {
+    fleet(['local', 'stale401', 'forbidden403', 'broken500']);
+    INFO = { local: INFO_MODERN(true), stale401: INFO_MODERN(true),
+             forbidden403: INFO_MODERN(true), broken500: INFO_MODERN(true) };
+    CHECK = {
+        local: OK200({ state: 'current' }),
+        stale401: { status: 401, ok: false,
+                    body: { ok: false, error: 'unauthorized' } },
+        forbidden403: { status: 403, ok: false, body: { ok: false } },
+        // The mapping must stay NARROW: any other unreadable answer is still
+        // the broker's answer being unusable.
+        broken500: { status: 500, ok: false, body: { ok: false } },
+    };
+    await pollTick();
+    const read = (id) => {
+        const st = checkStateFor(id);
+        const ps = peerState(st);
+        return { ps: ps, error: st.error, check: st.check,
+                 reason: reasonCode(st), words: stateWords(ps, st),
+                 coarse: state(st), band: bandFor(ps), answered: answered(ps),
+                 title: chipTitle(st) };
+    };
+    const out = { snap: snapshot(), checkCalls: checkCalls.slice(),
+                  infoCalls: infoCalls.slice() };
+    for (const id of ['local', 'stale401', 'forbidden403', 'broken500']) {
+        out[id] = read(id);
+    }
+    out.reasons = { unauthorized: REASONS['unauthorized'],
+                    brokerError: REASONS['broker-error'] };
+    // What the probe alone made of these hosts: 'ready' every time, which is
+    // why the 401 could only ever be caught on the wire path.
+    out.cachedCapability = ['stale401', 'forbidden403', 'broken500'].map(
+        (id) => capabilityFrom(modCatalogCache.get(id)));
+    return out;
+};
+
 // --- an answer never survives the failure that follows it ----------------
 CASES.no_current_without_an_answer = async () => {
     fleet(['local']);
@@ -396,6 +506,11 @@ CASES.aggregate_rules = async () => {
         { local: CUR, b: CUR, c: FAIL('unauthorized') });
     run('one_unreachable', ['local', 'b', 'c'],
         { local: CUR, b: CUR, c: FAIL('unreachable') });
+    run('one_unreachable_or_too_old', ['local', 'b', 'c'],
+        { local: CUR, b: CUR, c: FAIL('unreachable-or-too-old') });
+    // …and it does not outrank the one state with something to DO about it.
+    run('ambiguous_vs_behind', ['local', 'b', 'c'],
+        { local: CUR, b: BEHIND(1), c: FAIL('unreachable-or-too-old') });
     run('one_unknown', ['local', 'b', 'c'],
         { local: CUR, b: CUR,
           c: { check: { state: 'unknown', reason: 'rate-limited' },
@@ -499,6 +614,9 @@ def test_each_peer_failure_is_its_own_state(harness):
     assert r["notOptedIn"]["ps"] == "not-opted-in"
     assert r["unauthorized"]["ps"] == "unauthorized"
     assert r["unreachable"]["ps"] == "unreachable"
+    # …and the fifth (#185), which asks a sixth thing: find out whether that
+    # headless broker is running at all, and update it if it is.
+    assert r["unreachableOrTooOld"]["ps"] == "unreachable-or-too-old"
     # The fifth: the check RAN, and failed carrying its reason code.
     assert r["unknownRateLimited"]["ps"] == "unknown"
     assert r["unknownRateLimited"]["reason"] == "rate-limited"
@@ -520,7 +638,8 @@ def test_every_state_reads_differently_and_has_words(harness):
     r = run(harness, "peer_state_table")
     words = {k: r[k]["words"] for k in
              ("routeAbsent", "notOptedIn", "unauthorized", "unreachable",
-              "unknownRateLimited", "pending", "current", "behind3", "ahead")}
+              "unreachableOrTooOld", "unknownRateLimited", "pending",
+              "current", "behind3", "ahead")}
     assert len(set(words.values())) == len(words), (
         f"two states read the same: {words}")
     assert words["current"] == "up to date"
@@ -538,9 +657,9 @@ def test_no_unanswered_state_is_ever_current(harness):
     # The single rule the mod exists to keep.
     r = run(harness, "peer_state_table")
     for key in ("routeAbsent", "notOptedIn", "unauthorized", "unreachable",
-                "unknownRateLimited", "unknownOffline", "brokerError",
-                "noSuchHost", "pending", "pendingBeatsPayload", "missing",
-                "garbage"):
+                "unreachableOrTooOld", "unknownRateLimited", "unknownOffline",
+                "brokerError", "noSuchHost", "pending", "pendingBeatsPayload",
+                "missing", "garbage"):
         row = r[key]
         assert row["ps"] != "current", f"{key} derived 'current'"
         assert row["words"] != "up to date", f"{key} said 'up to date'"
@@ -588,8 +707,15 @@ def test_the_probe_has_an_outcome_for_every_peer(harness):
     assert r["catalogOnly"] == "ready"        # the mod ships with the route
     assert r["old"] == "route-absent"
     assert r["pre157"] == "route-absent"      # older than #157 ⇒ older than #182
-    assert r["headless"] == "ready"           # empty mods proves nothing there
+    # A headless peer with no capability key is the one genuinely ambiguous
+    # case, and the probe says so rather than picking a side: 'unproven' asks
+    # like 'ready' does, but tagged so poll() can report the ambiguity if the
+    # request dies. It must NOT be 'ready' (which would report "did not answer"
+    # for a broker whose real problem is that it is too old) and must NOT be a
+    # refusal (which would never ask a broker that may well be there).
+    assert r["headless"] == "unproven"
     assert r["headlessKeyOff"] == "not-opted-in"
+    assert r["headlessKeyOn"] == "ready"      # a published key ends the doubt
     assert r["unauthorized"] == "unauthorized"
     assert r["unreachable"] == "unreachable"
     assert r["noRecord"] == "unreachable"
@@ -668,6 +794,129 @@ def test_an_answer_does_not_outlive_the_broker_that_gave_it(harness):
     assert "ghost" not in r["checkCalls"]
 
 
+# ---- a headless peer's ambiguity is reported, not resolved by a guess ------
+
+AMBIGUOUS_WORDS = "no answer — asleep, or too old to check"
+
+
+def test_a_silent_headless_peer_is_not_reported_as_merely_unreachable(harness):
+    # THE #185 regression, graded where it matters: on the state that reaches
+    # the screen. A headless broker publishes an empty `mods` list whatever
+    # routes it has, so one that also publishes no `update` key is either too
+    # old to have /update/check or new enough to have it and asleep — and a
+    # missing route dies in the preflight looking EXACTLY like a dead machine.
+    # Calling that 'unreachable' ("did not answer") sends its operator hunting a
+    # network fault when the fix is "update that broker".
+    r = run(harness, "headless_ambiguity")
+    h = r["headless"]
+    assert h["ps"] == "unreachable-or-too-old"
+    assert h["error"] == "unreachable-or-too-old"
+    assert h["reason"] == "unreachable-or-too-old"
+    assert h["check"] is None
+    assert h["words"] == AMBIGUOUS_WORDS
+    # The words it must NOT wear, and the state it must not collapse into.
+    assert h["words"] != "did not answer"
+    assert h["ps"] != "unreachable"
+    assert h["ps"] != "route-absent"
+    assert h["ps"] != "unknown", "the new state must be pulled up out of unknown"
+    # It is still emphatically a non-answer.
+    assert h["answered"] is False
+    assert h["band"] != "green"
+    assert h["coarse"] == "unknown"      # the single-broker vocabulary is intact
+    # …and it is DISTINCT from the two neighbouring failures in the same fleet:
+    # a broker that answered /info and then went quiet really is unreachable,
+    # and one that serves a UI without the route really is too old.
+    assert r["ghosted"]["ps"] == "unreachable"
+    assert r["ghosted"]["words"] == "did not answer"
+    assert r["down"]["ps"] == "unreachable"
+    assert r["old"]["ps"] == "route-absent"
+    assert r["old"]["words"] == "too old to check"
+    assert len({h["words"], r["ghosted"]["words"], r["old"]["words"]}) == 3
+    # The long-form sentence names BOTH possibilities rather than picking one,
+    # and tells the reader what to do about either.
+    reason = r["reasons"]["ambiguous"]
+    assert reason and reason != r["reasons"]["unreachable"]
+    assert reason != r["reasons"]["routeAbsent"]
+    assert "asleep" in reason
+    assert "before update checking existed" in reason
+    assert "update it" in reason
+    # The tooltip carries it — never the generic fallback.
+    assert h["title"] == "could not check: " + reason
+    assert h["title"] != "could not check: reason unavailable"
+    # The ambiguity is only claimed for a peer that was actually ASKED: 'down'
+    # was never asked (its /info failed) and 'old' was never asked (the route is
+    # known absent), so neither may wear these words.
+    assert sorted(r["checkCalls"]) == ["ghosted", "headless", "local"]
+    assert r["down"]["words"] != AMBIGUOUS_WORDS
+    assert r["old"]["words"] != AMBIGUOUS_WORDS
+
+
+def test_a_headless_peer_that_answers_is_never_left_ambiguous(harness):
+    # 'unproven' is ready-that-asks. If it ever refused to ask, every headless
+    # broker in the fleet would report a failure it never had — so the pre-set
+    # reason must be overwritten by whatever actually comes back, in every
+    # direction a broker can answer.
+    r = run(harness, "headless_answers")
+    assert r["rows"] == [
+        "local|current|up to date|-",
+        "hcur|current|up to date|-",
+        "hbehind|behind|2 commits behind|-",
+        "hgate|not-opted-in|checking not enabled there|not-opted-in",
+        "hnopw|unauthorized|password refused|unauthorized",
+    ]
+    # Every headless peer was asked; none was written off unasked.
+    assert sorted(r["checkCalls"]) == ["hbehind", "hcur", "hgate", "hnopw",
+                                       "local"]
+    assert AMBIGUOUS_WORDS not in r["rows"][1]
+    assert "unreachable-or-too-old" not in r["states"]
+    assert r["worst"] == "behind"        # WORST_FIRST leads with the actionable
+    assert r["text"] == "5 brokers · 1 behind, 2 unchecked"
+    assert r["allCurrent"] is False
+
+
+# ---- a 401 on the wire is a refused password ------------------------------
+
+def test_a_401_from_the_check_is_a_refused_password_not_an_unreadable_answer(
+        harness):
+    # THE #185 regression on the other side. `unauthorized` is a named peer
+    # state with words already written, and before the fix nothing on the wire
+    # path could reach it: poll() set 'broker-error' the moment hostFetch
+    # resolved and special-cased only 503, so a 401 fell through to
+    # `throw new Error('HTTP ' + r.status)` and rendered as "this broker
+    # answered, but not with a version check that could be read" — a lock on a
+    # door, described as a garbled reply.
+    r = run(harness, "wire_unauthorized")
+    for key in ("stale401", "forbidden403"):
+        row = r[key]
+        assert row["ps"] == "unauthorized", key
+        assert row["error"] == "unauthorized", key
+        assert row["reason"] == "unauthorized", key
+        assert row["check"] is None, key
+        assert row["words"] == "password refused", key
+        # The two wrong answers it used to give.
+        assert row["ps"] != "unknown", key
+        assert row["reason"] != "broker-error", key
+        assert row["words"] != "could not be checked", key
+        assert row["answered"] is False and row["band"] != "green", key
+        assert row["title"] == "could not check: " + r["reasons"][
+            "unauthorized"], key
+        assert "password" in r["reasons"]["unauthorized"]
+    # …and the mapping stays NARROW. Any other unreadable answer is still the
+    # broker's answer being unusable, not a locked door.
+    assert r["broken500"]["ps"] == "unknown"
+    assert r["broken500"]["reason"] == "broker-error"
+    assert r["broken500"]["words"] == "could not be checked"
+    # This is only reachable on the wire because the /info cache has no TTL: the
+    # probe still says 'ready' for all three, so nothing but poll() can catch it.
+    assert r["cachedCapability"] == ["ready", "ready", "ready"]
+    assert sorted(r["checkCalls"]) == ["broken500", "forbidden403", "local",
+                                       "stale401"]
+    # One refused broker cannot be rounded up to a clean fleet.
+    assert r["snap"]["allCurrent"] is False
+    assert r["snap"]["worst"] == "unauthorized"
+    assert r["snap"]["text"] == "4 brokers · 3 unchecked"
+
+
 # ---- the aggregate ---------------------------------------------------------
 
 def test_up_to_date_needs_every_host_to_have_answered_current(harness):
@@ -696,6 +945,29 @@ def test_up_to_date_needs_every_host_to_have_answered_current(harness):
     assert r["one_ahead"]["allCurrent"] is False
     assert r["one_ahead"]["text"] == "3 brokers · 1 ahead"
     assert r["one_ahead"]["worst"] == "ahead-or-diverged"
+
+
+def test_an_ambiguous_headless_peer_counts_as_unchecked(harness):
+    # A state added to the model is worth nothing if the aggregate quietly
+    # ignores it: answered() would leave it out of the silent count, and a
+    # WORST_FIRST that never lists it would fall through to 'current' and paint
+    # the whole fleet GREEN while one broker's build is unknown.
+    r = run(harness, "aggregate_rules")
+    case = r["one_unreachable_or_too_old"]
+    assert case["allCurrent"] is False
+    assert "up to date" not in case["text"]
+    assert case["text"] == "3 brokers · 1 unchecked"
+    assert case["worst"] == "unreachable-or-too-old"
+    assert case["worst"] != "current"
+    assert case["states"] == ["current", "current", "unreachable-or-too-old"]
+    assert case["rows"][2] == ("c|unreachable-or-too-old|" + AMBIGUOUS_WORDS
+                               + "|unreachable-or-too-old")
+    assert case["lines"][2] == "c — " + AMBIGUOUS_WORDS
+    # It is ranked, but below the one state with something to DO about it.
+    mixed = r["ambiguous_vs_behind"]
+    assert mixed["worst"] == "behind"
+    assert mixed["text"] == "3 brokers · 1 behind, 1 unchecked"
+    assert mixed["allCurrent"] is False
 
 
 def test_the_worst_state_colours_it_but_the_text_counts_them_all(harness):

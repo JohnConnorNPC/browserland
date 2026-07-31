@@ -235,6 +235,20 @@
             // below is slow or fails, renderSettings never runs, and rows left from
             // the previous tab would show another broker's policy under this host's
             // name — the defect #153 fixed for the OSC 52 box.
+            //
+            // Selecting a tab IS the retry the 'unreachable' copy below promises
+            // ("Select this tab again to retry"). That promise used to be empty:
+            // nothing ever removed an entry from modCatalogCache, so the one
+            // attempt was permanent for the life of the page. It only became
+            // conspicuous with #185 — the update mod probes every configured
+            // host at page load through this same shared cache, so by the time
+            // an operator opens this pane the attempt has usually already
+            // happened, and happened while nobody was looking.
+            //
+            // Only the transport failure is retried. 'headless', 'unsupported'
+            // and 'unauthorized' are facts about that broker, not luck: re-asking
+            // changes nothing and would just spend a request per tab click.
+            dropUnreachableCatalog(tabId);
             renderModPolicy();
             if (tabId === 'browser') {
                 settingsOpenHostId = null;
@@ -711,6 +725,13 @@
         //   unsupported  - answered /info without `mods`: predates this feature
         //   unauthorized - 401/403: no token stored for that host, or a stale one
         //   unreachable  - down, black-holed, or CORS-blocked
+        // Forget a cached "could not reach it" for one host, so the next render
+        // fetches again. Deliberately narrow: only 'unreachable' is a matter of
+        // timing. See the call site in selectSettingsTab for why this exists.
+        function dropUnreachableCatalog(hostId) {
+            const rec = modCatalogCache.get(hostId);
+            if (rec && rec.state === 'unreachable') modCatalogCache.delete(hostId);
+        }
         async function fetchModCatalog(host) {
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
                           policy: {}, update: null };

@@ -115,6 +115,12 @@ So the status surfaces stay interactive, not just indicators — and every recov
 
 Because those recovery paths now live on the (+) menu rows rather than on the chip, the chip itself is optional. **Control Panel → Desktop → Broker status chip** offers **Always** (the default), **Only when a broker needs attention** — it appears when a broker goes unreachable, wants a password, or is taken over by another browser, and vanishes again once nothing is wrong — and **Never**. A broker you hid yourself never triggers it. Whichever you pick, the (+) menu rows and the **hidden** checkboxes under Control Panel → Hosts are unchanged, so logging in, taking over and un-hiding stay reachable with no chip at all. See [[Taskbar]].
 
+## Update check chip
+
+The (off-by-default) **update check** mod is fleet-wide the same way the host badge above is: with more than one broker configured, it collapses into one aggregate chip on the taskbar, colored by the worst state across every configured host, with a tooltip listing each broker's own state. See [[Taskbar]] for where the chip lives and what its states mean.
+
+Its hidden-broker rule is the **opposite** of the host badge's, on purpose. Above, a broker you hide yourself drops out of the host badge entirely — it is not counted and does not color it, because hiding is a choice, not a fault. The update chip does not extend that courtesy: a hidden broker still counts toward its color and its `N behind` / `N ahead` / `N unchecked` counts, and still shows up in its tooltip, suffixed `— hidden`. The reasoning is that hiding a broker only parks it on the desktop — it does not make that broker's build any less stale, so this chip may stop *claiming* a fault for a broker you hid but must never stop *reporting* one.
+
 ## Single active browser (the lease)
 
 A broker allows only **one active browser at a time** to be the WRITER of its layout. That permission is a *lease*: the browser holding it owns the window arrangement for that broker. This prevents two open tabs from overwriting each other's layout.

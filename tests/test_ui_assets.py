@@ -852,6 +852,48 @@ def test_update_check_names_the_broker_it_asks():
     assert "const LOCAL_HOST_ID = 'local';" in INDEX_HTML
 
 
+def test_the_info_capability_is_carried_into_the_cached_catalog_record():
+    """#185: the seam between GET /info and the update mod's capability probe.
+
+    The broker publishes ``update: {check_enabled, apply_enabled}`` on /info and
+    the mod's ``capabilityFrom`` reads ``rec.update`` as its most authoritative
+    layer -- but NEITHER end is what carries the key between them.
+    ``fetchModCatalog`` does, onto the record it caches, and that one line is
+    the whole join. Both ends have tests of their own (the route's payload in
+    the broker suite, the probe's behaviour in test_update_fleet.py), and both
+    keep passing if the copy is dropped: the probe would silently lose layer 1
+    and fall through to layers 2-4, where a headless peer that HAD published
+    check_enabled becomes ambiguous ('unreachable-or-too-old') and a broker that
+    already said "checking is off here" is spent a request to be told so again.
+    A failure that quiet is exactly what a source-slice guard is for.
+
+    Be honest about the limit: this proves the copy is written and guarded, not
+    that a value survives a round trip."""
+    panel = (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+    fetch = _frag_fn(panel, "async function fetchModCatalog(host)")
+    # The initialiser. The field exists on EVERY cached record, the failure
+    # shapes ('unreachable'/'unauthorized') included, so the probe reads a
+    # deliberate null rather than `undefined` off a record nobody filled in.
+    assert "update: null" in fetch, \
+        "every cached catalog record must carry an `update` field"
+    # The copy itself, and it stays GUARDED: `update` is untrusted input from a
+    # peer's /info, and capabilityFrom's layer 1 dereferences it
+    # (`upd.check_enabled === false`) the moment it is truthy.
+    assert re.search(r"rec\.update = \(j\.update && typeof j\.update === "
+                     r"'object'\)\s*\?\s*j\.update\s*:\s*null;", fetch), \
+        "fetchModCatalog must copy a well-shaped j.update onto the record"
+    # ...and the consumer reads that field, off the SHARED cache rather than
+    # fetching /info a second time (two caches that can disagree about one peer
+    # is how one pane says "asleep" while another says "fine").
+    mod = (BROKER_DIR / "mods/update/update.js").read_text(encoding="utf-8")
+    assert "const upd = rec.update;" in mod
+    assert "modCatalogCache.get(host.id)" in mod
+    # Both halves reach the SERVED page, not just the files on disk.
+    assert "rec.update = (j.update && typeof j.update === 'object')" in \
+        INDEX_HTML
+    assert "const upd = rec.update;" in INDEX_HTML
+
+
 def test_recorder_autorecord_setting_is_synced_and_default_off():
     """#151: the auto-record toggle rides the same synced settings primitive as
     the other mod toggles, and ships OFF so the mod stays inert until opted in.

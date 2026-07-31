@@ -77,6 +77,21 @@
                     'unreachable': 'this broker did not answer, so its version '
                         + 'could not be read. That is the connection to the '
                         + 'broker itself, not to GitHub',
+                    // The genuinely ambiguous one, and it is honest about being
+                    // ambiguous. A broker that serves no desktop page reports an
+                    // empty mod list whatever routes it has, so if it also
+                    // publishes no update capability there is no way from here
+                    // to tell "too old to have the check" from "has it, and is
+                    // asleep" — a missing route dies in the cross-origin
+                    // preflight and comes back looking exactly like a machine
+                    // that is down. Naming one of the two would be a guess
+                    // dressed as an answer, so this names both.
+                    'unreachable-or-too-old': 'this headless broker did not '
+                        + 'answer. It is either asleep or running a build from '
+                        + 'before update checking existed — from here those two '
+                        + 'are indistinguishable, because a missing route fails '
+                        + 'in exactly the same way as an unreachable machine. '
+                        + 'Check that it is running; if it is, update it',
                     'broker-error': 'this broker answered, but not with a '
                         + 'version check that could be read',
                     'no-such-host': 'the host this answer belonged to is no '
@@ -230,7 +245,8 @@
                 // thing. They are exactly the capability probe's non-'ready'
                 // outcomes, and every one is a REASONS key, so each has words.
                 const PEER_FAILURES = ['route-absent', 'not-opted-in',
-                                       'unauthorized', 'unreachable'];
+                                       'unauthorized', 'unreachable',
+                                       'unreachable-or-too-old'];
                 // The fine-grained read of a record: what state() returns, plus
                 // 'pending' for a host nothing has come back from yet, plus the
                 // four above pulled up out of 'unknown'. state() is deliberately
@@ -285,6 +301,9 @@
                     if (ps === 'not-opted-in') return 'checking not enabled there';
                     if (ps === 'unauthorized') return 'password refused';
                     if (ps === 'unreachable') return 'did not answer';
+                    if (ps === 'unreachable-or-too-old') {
+                        return 'no answer — asleep, or too old to check';
+                    }
                     return 'could not be checked';
                 }
                 // Worst first (#149's badge rule: a fault is never hidden behind
@@ -294,7 +313,8 @@
                 // honest — green is reachable only when every other entry in
                 // this list is absent from the fleet.
                 const WORST_FIRST = ['behind', 'unauthorized', 'unreachable',
-                                     'route-absent', 'not-opted-in', 'unknown',
+                                     'unreachable-or-too-old', 'route-absent',
+                                     'not-opted-in', 'unknown',
                                      'pending', 'ahead-or-diverged', 'current'];
                 // One snapshot row per CONFIGURED host, in host-list order.
                 // Hosts are resolved HERE, at render time, so a broker added or
@@ -538,7 +558,19 @@
                         // here the empty array is evidence of nothing at all.
                         // Absence of proof is not proof of absence: ask, and let
                         // the answer — or the failure to get one — decide.
-                        if (rec.state === 'headless') return 'ready';
+                        //
+                        // But say WHICH kind of asking this is. A headless peer
+                        // that publishes no `update` key is one of two things we
+                        // genuinely cannot tell apart from here: old enough to
+                        // have no route, or new enough to have one and merely
+                        // asleep. If it answers, the ambiguity is gone. If it
+                        // does not, the failure looks EXACTLY like the opaque
+                        // preflight death of a missing route, and reporting that
+                        // as 'did not answer' would send someone hunting a
+                        // network fault when the fix is "update that broker".
+                        // 'unproven' is ready-that-asks, tagged so poll() can
+                        // report the ambiguity instead of resolving it by guess.
+                        if (rec.state === 'headless') return 'unproven';
                         // (4) It answered, it serves a UI, it published no
                         // capability and it serves no update mod: it predates
                         // #182. Also where 'unsupported' lands — a broker whose
@@ -627,7 +659,13 @@
                         // machine that is asleep.
                         const cap = await capabilityFor(
                             host, !!(opts && opts.refresh));
-                        if (cap !== 'ready') {
+                        // 'unproven' asks like 'ready' does, but a failure to
+                        // get an answer means something different for it — see
+                        // capabilityFrom layer (3). Pre-loading the reason here
+                        // is what keeps that distinction from being lost the
+                        // moment the request dies.
+                        if (cap === 'unproven') failure = 'unreachable-or-too-old';
+                        if (cap !== 'ready' && cap !== 'unproven') {
                             st.check = null;
                             st.error = cap;
                             st.checkedAt = Date.now();
@@ -639,7 +677,26 @@
                             // trip to it, and the two must not be reported as
                             // one.
                             failure = 'broker-error';
-                            if (r.status === 503) {
+                            if (r.status === 401 || r.status === 403) {
+                                // It refused our password. That is one of the
+                                // named peer states with words already written,
+                                // and it is emphatically not "its answer was
+                                // unreadable" — there IS no answer, there is a
+                                // door with a lock on it.
+                                //
+                                // Reachable even though the probe classifies
+                                // 401s of its own: modCatalogCache has no TTL,
+                                // so a token that goes stale AFTER page load
+                                // (broker restart with a fresh auth_token, an
+                                // operator rotating it) leaves a cached 'ok'
+                                // and every later check 401s. Without this the
+                                // taskbar host chip would read "password
+                                // required" while this window said "could not
+                                // be checked" — two surfaces contradicting each
+                                // other about one broker.
+                                st.check = null;
+                                st.error = 'unauthorized';
+                            } else if (r.status === 503) {
                                 // The broker's own gate. A capability that is
                                 // absent here — NOT an error, NOT "up to date",
                                 // and emphatically NOT a transport failure: this
