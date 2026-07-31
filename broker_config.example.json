@@ -4,6 +4,8 @@
     "_auth_token_note": "null means MINT one: the broker generates a token into webterm_token.json beside its state store and prints the URL to open. It never means no auth - a token is required on every connection, loopback included (#142). Set a string here to choose the value yourself (recommended across a fleet, so every host shares one password). Read it back with: python -m webterm.broker --print-token",
     "auth_token": null,
     "serve_ui": true,
+    "_restart_enabled_note": "Off by default. When true, this broker is allowed to restart itself (drain, then exit for its supervisor to relaunch). Deliberately NOT implied by being logged in: the token already grants shell access, but bouncing a broker that is hosting live sessions is deployment policy, so only someone who can edit this file can allow it.",
+    "restart_enabled": false,
     "editor_root": null,
     "mcp_token": null,
     "mcp_enabled": false,

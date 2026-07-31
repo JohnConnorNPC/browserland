@@ -84,7 +84,7 @@ from sanic.exceptions import NotFound
 from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 
 from .. import build_version, protocol
-from . import auth, modinstall, relay, update as update_check
+from . import auth, modinstall, relay, supervise, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
@@ -1160,6 +1160,305 @@ async def _shielded_region(lock: asyncio.Lock, section):
         # loud instead of letting shield silently eat it.
         task.add_done_callback(_log_orphaned_section)
         raise
+
+
+# ---- the restart drain (#183) -----------------------------------------------
+#
+# This is the seam _shielded_region's docstring names ("it does NOT make
+# before_server_stop wait for in-flight work ... _CRITICAL_TASKS is the seam if
+# that is ever addressed"), addressed. A restart is the one shutdown this broker
+# performs DELIBERATELY, so it is the one that can afford to wait for the writes
+# already in flight instead of racing them the way a signal-driven stop does.
+#
+# It deliberately is NOT a ``before_server_stop`` listener, and that is not a
+# style choice. That listener runs after Sanic has begun tearing the loop down,
+# and ``Sanic.stop`` calls ``shutdown_tasks(timeout=0)`` — measured in the spike
+# as "Task was destroyed but it is pending!". A drain scheduled there would be
+# destroyed by the very shutdown it exists to precede. So the drain runs BEFORE
+# anything calls ``app.stop()``, from the request that asked for the restart,
+# and the two existing before_server_stop listeners keep their (now usually
+# empty) unlink sweep as the backstop for every OTHER way this process stops.
+#
+# ``_CRITICAL_TASKS`` is process-global rather than per-app, which is correct
+# here for the same reason ``app.ctx.uploads`` is authoritative: the broker runs
+# ``single_process=True`` with one app (see __main__._run_worker).
+#
+# ``app.ctx.bg_tasks`` is NOT drained. Those are fire-and-forget WS pulses whose
+# whole contract is that nobody waits for them (#33) and that swallow their own
+# errors; waiting on one would couple a restart to a backpressured browser.
+
+#: ``app.ctx.lifecycle``, in the only order it ever moves — except back to
+#: RUNNING, which is what a restart that turns out to be impossible does
+#: (see :func:`resume_from_quiesce`).
+LIFECYCLE_RUNNING = "running"
+LIFECYCLE_QUIESCING = "quiescing"        # refusing new work; old work runs on
+LIFECYCLE_DRAINING = "draining"          # waiting on the critical sections
+LIFECYCLE_RESTART_READY = "restart_ready"
+
+#: Ceiling on the wait for in-flight critical sections. BOUNDED, always: a
+#: shielded section can be parked in a worker thread on a dead UNC share (the
+#: same fact that makes _off_loop refuse a deadline), and "wait forever" would
+#: turn one wedged write into a broker that can neither serve a restart nor
+#: finish one. Comfortably under Sanic's 60 s RESPONSE_TIMEOUT, because the
+#: request that asked for the restart is waiting on this before it is answered.
+RESTART_DRAIN_TIMEOUT = 20.0
+
+#: How long after the 202 the stop actually fires. Long enough for the response
+#: to reach the wire (the spike measured a short deferral as sufficient), short
+#: enough that the window in which a quiesced broker refuses work stays small.
+RESTART_STOP_DELAY = 0.25
+
+
+def _lifecycle(app) -> str:
+    """``app.ctx.lifecycle``, read defensively. ``getattr`` because a bare
+    ``create_app`` from an older test helper — or any app object that predates
+    this state machine — must read as RUNNING rather than AttributeError its way
+    into refusing every upload."""
+    return getattr(app.ctx, "lifecycle", LIFECYCLE_RUNNING)
+
+
+def _refuse_if_quiescing(app, what: str):
+    """A 503 when the broker has stopped accepting new work, else None.
+
+    Only ``/file/upload_begin``, ``/recording/begin`` and ``/launch`` consult
+    this: they are the three entry points that CREATE something the drain would
+    then have to wait for or throw away. The chunk/commit/abort halves stay open
+    on purpose — refusing those would strand exactly the in-flight sessions the
+    drain is trying to let finish.
+
+    503 (not 409/423): "come back shortly", which is the literal truth when the
+    process is about to be relaunched. ``Retry-After`` is deliberately omitted —
+    we do not know how long the new process takes to bind."""
+    stage = _lifecycle(app)
+    if stage == LIFECYCLE_RUNNING:
+        return None
+    LOGGER.info("refusing new %s: broker lifecycle is %s", what, stage)
+    return sanic_json({"ok": False, "error": "restarting", "lifecycle": stage},
+                      status=503)
+
+
+def resume_from_quiesce(app) -> None:
+    """Put a broker that quiesced but is NOT going to restart back to work.
+
+    Reached when the drain times out, the restart cannot be authorized, or the
+    request driving it is cancelled. A broker left in QUIESCING would refuse
+    every new upload, recording and launch for the rest of its life while
+    looking perfectly healthy — a far worse outcome than the restart simply not
+    happening. Synchronous on purpose: it is called from an ``except
+    CancelledError`` path, where an await is a place the cancellation can land
+    again."""
+    if _lifecycle(app) != LIFECYCLE_RUNNING:
+        LOGGER.warning("restart abandoned; resuming normal service from %s",
+                       _lifecycle(app))
+    app.ctx.lifecycle = LIFECYCLE_RUNNING
+
+
+async def drain_for_restart(app, timeout: float = RESTART_DRAIN_TIMEOUT
+                            ) -> Dict[str, Any]:
+    """Quiesce, wait out the in-flight critical sections, and report the truth.
+
+    Returns a structured report — never raises, and is a no-op-shaped success
+    when nothing is in flight::
+
+        {"ok": bool, "lifecycle": str, "reason": str|None,
+         "waited_for": int, "finished": int, "timed_out": int,
+         "aborted_uploads": [id], "aborted_recordings": [id], "elapsed": float}
+
+    THE POLICY ON INCOMPLETE SESSIONS, stated rather than hoped. A chunked
+    upload (#108) or recording save (#140) spans several requests and lives
+    ENTIRELY in memory on ``app.ctx``; the id the client holds means nothing to
+    the next process. So "wait for them to finish" is not on the table — a
+    browser that walked away never sends commit, and the TTL that would reap it
+    is an hour. Every session still open when the writes have quiesced is
+    therefore ABORTED: popped, its ``.part`` temp unlinked, and its id RETURNED
+    so the operator is told what they cost, instead of being unlinked silently
+    by ``before_server_stop`` a moment later.
+
+    The abort happens only after the wait SUCCEEDS. A section that timed out may
+    still have a worker thread inside ``open(tmp, 'ab')`` — a running
+    ``concurrent.futures`` future cannot be cancelled — and unlinking its temp
+    from under it recreates precisely the disk/memory divergence the shield
+    exists to prevent. A drain that times out therefore destroys nothing, fails,
+    and lets the caller abandon the restart.
+
+    CancelledError is deliberately NOT caught: a cancelled drain is not a
+    completed drain, and swallowing it would report a quiesce that never
+    finished as a success."""
+    started = time.monotonic()
+    report: Dict[str, Any] = {
+        "ok": False, "lifecycle": _lifecycle(app), "reason": None,
+        "waited_for": 0, "finished": 0, "timed_out": 0,
+        "aborted_uploads": [], "aborted_recordings": [], "elapsed": 0.0,
+    }
+    try:
+        # 1. QUIESCE. Synchronous and first: the flag is what the three begin
+        #    handlers read, so from the next loop turn on, nothing new can be
+        #    started that this drain would then have to wait for. Doing it after
+        #    sampling _CRITICAL_TASKS would leave a gap in which a fresh section
+        #    starts and is never waited on at all.
+        app.ctx.lifecycle = LIFECYCLE_QUIESCING
+
+        # 2. DRAIN. Snapshot rather than loop-until-empty: the set is the tasks
+        #    that had already acquired their lock when we quiesced, and a
+        #    bounded wait on a fixed set cannot be extended by whatever arrives
+        #    next. asyncio.wait, never wait_for — a timeout must not CANCEL a
+        #    critical section (an outright cancel is the one case _shielded_
+        #    region cannot survive: lock released with the worker still writing).
+        app.ctx.lifecycle = LIFECYCLE_DRAINING
+        pending = {t for t in _CRITICAL_TASKS if not t.done()}
+        report["waited_for"] = len(pending)
+        stuck: set = set()
+        if pending:
+            LOGGER.info("restart drain: waiting up to %.1fs for %d in-flight "
+                        "critical section(s)", timeout, len(pending))
+            done, stuck = await asyncio.wait(pending, timeout=max(0.0, timeout))
+            report["finished"] = len(done)
+            report["timed_out"] = len(stuck)
+        if stuck:
+            # Not restarting. Stopping now would kill the writes we just failed
+            # to wait for, which is the outcome this whole function exists to
+            # avoid — and it would do it with the operator told "restarting".
+            report["reason"] = "critical_sections_timed_out"
+            LOGGER.error("restart drain gave up: %d critical section(s) still "
+                         "in flight after %.1fs. Not restarting — a stop now "
+                         "would abandon a write that is still running.",
+                         len(stuck), timeout)
+            return report
+
+        # 3. INCOMPLETE SESSIONS -> aborted and NAMED (see the docstring). The
+        #    pops are the whole mutation and they happen on the loop with no
+        #    await between them, exactly like /file/upload_abort; only the
+        #    unlinking crosses into a worker, in ONE hop for both families.
+        report["aborted_uploads"] = sorted(app.ctx.uploads)
+        report["aborted_recordings"] = sorted(app.ctx.rec_uploads)
+        temps = [s["tmp"] for s in app.ctx.uploads.values()]
+        temps += [s["tmp"] for s in app.ctx.rec_uploads.values()]
+        app.ctx.uploads.clear()
+        app.ctx.rec_uploads.clear()
+        if temps:
+            LOGGER.warning("restart drain aborted %d incomplete upload "
+                           "session(s) and %d recording save(s)",
+                           len(report["aborted_uploads"]),
+                           len(report["aborted_recordings"]))
+            await _off_loop(_unlink_quiet, temps)
+
+        app.ctx.lifecycle = LIFECYCLE_RESTART_READY
+        report["ok"] = True
+        return report
+    except Exception as exc:  # noqa: BLE001 -- a drain must never take down its
+        # caller: the route still has to answer, and the broker still has to
+        # decide NOT to restart. Reported as a failure, which is what stops the
+        # intent from being armed.
+        LOGGER.exception("restart drain failed")
+        report["reason"] = "drain_error: %s" % exc
+        return report
+    finally:
+        report["elapsed"] = round(time.monotonic() - started, 3)
+        report["lifecycle"] = _lifecycle(app)
+
+
+async def request_restart(app, *, timeout: float = RESTART_DRAIN_TIMEOUT,
+                          delay: float = RESTART_STOP_DELAY,
+                          arm=None, stop=None) -> Dict[str, Any]:
+    """Drain, authorize ONE relaunch, and schedule an orderly stop.
+
+    The worker half of the restart intent: everything up to and including
+    ``app.stop()``. The route that calls it is a separate concern and lives
+    elsewhere; this returns the drain report plus ``armed`` and ``stopping`` so
+    that route can answer **202 Accepted** — never 200, because "restarted" is
+    not a claim an HTTP response can truthfully make about its own process.
+
+    THE ORDER IS THE POINT. Arming before draining would leave a sentinel on
+    disk authorizing a relaunch that a failed drain has just decided against;
+    the next crash-with-75 would then be honoured as a deliberate restart. So:
+    drain, and only a SUCCESSFUL drain reaches ``arm_restart``.
+
+    And a False from ``arm_restart`` is a full stop, not a warning. It means no
+    supervisor will honour exit 75 — under which exiting 75 does not restart the
+    broker, it ENDS it. Nothing is set, nothing is stopped, the quiesce is
+    undone and the caller gets ``reason="not_supervised"``.
+
+    ``arm``/``stop`` are injectable so a test can drive this without a
+    supervisor and without stopping its own event loop."""
+    arm = arm or supervise.arm_restart
+    stopper = stop or (lambda: app.stop(terminate=False))
+
+    # No capability pre-check before the drain, deliberately: worker_capability()
+    # can shell out to `systemctl show` (up to 5 s, BLOCKING the loop), and
+    # arm_restart() is the only authority that matters anyway. The cost of
+    # finding out late is a drain on a broker that then stays up — reported, and
+    # recoverable, which a wedged event loop is not.
+    try:
+        report = await drain_for_restart(app, timeout=timeout)
+    except BaseException:
+        # Only cancellation can get here (drain_for_restart swallows Exception),
+        # and it arrives when the request that asked for the restart went away
+        # mid-drain. Without this the broker would sit in QUIESCING forever,
+        # refusing every upload, recording and launch while looking healthy.
+        resume_from_quiesce(app)
+        raise
+    result: Dict[str, Any] = dict(report)
+    result["armed"] = False
+    result["stopping"] = False
+    if not result.get("ok"):
+        result["reason"] = result.get("reason") or "drain_failed"
+        resume_from_quiesce(app)
+        result["lifecycle"] = _lifecycle(app)
+        return result
+
+    # Armed only now, and on the loop rather than through _off_loop: the write
+    # is a few bytes to a local run dir, and we have just proven the shared
+    # executor may be exactly where things get stuck. A fast failure beats a
+    # hop that can queue behind a wedged worker at the last possible moment.
+    try:
+        armed = bool(arm())
+    except Exception:  # noqa: BLE001 -- arm_restart already swallows its own
+        # OSErrors; this covers an injected arm and any future signature change.
+        LOGGER.exception("arming the restart intent raised")
+        armed = False
+    if not armed:
+        result["ok"] = False
+        result["reason"] = "not_supervised"
+        LOGGER.error("restart requested but no supervisor will honour it "
+                     "(no intent sentinel could be armed). Staying up: exiting "
+                     "%d here would stop the broker, not restart it.",
+                     supervise.EXIT_RESTART)
+        resume_from_quiesce(app)
+        result["lifecycle"] = _lifecycle(app)
+        return result
+    result["armed"] = True
+
+    # Read back by __main__._run_worker after app.run() returns.
+    app.ctx.exit_code = supervise.EXIT_RESTART
+
+    async def _deferred_stop():
+        # The 202 must be on the wire before the loop goes away, or the client
+        # sees a dropped connection and cannot tell "restarting" from "crashed".
+        try:
+            await asyncio.sleep(delay)
+            # terminate=False DELIBERATELY. Sanic's default (terminate=True)
+            # asks the worker multiplexer to force-kill in-flight requests
+            # immediately — the precise opposite of a drain, and pointless here
+            # besides (single_process leaves no `multiplexer` attribute, which
+            # is how stop() decides). What we want is the orderly remainder:
+            # shutdown_tasks, cancel RunServer, stop the loop, so app.run()
+            # returns to __main__ and the process exits with exit_code.
+            stopper()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("the deferred restart stop failed: the broker is "
+                             "drained and armed but still running")
+
+    task = asyncio.ensure_future(_deferred_stop())
+    # A strong reference, for the same reason _CRITICAL_TASKS holds one: the
+    # loop keeps only weak ones, and this task's only other referent would be
+    # the request handler that is about to return.
+    app.ctx.restart_stop_task = task
+    result["stopping"] = True
+    LOGGER.warning("restart armed; stopping in %.2fs (exit %d)",
+                   delay, supervise.EXIT_RESTART)
+    return result
 
 
 def _load_modstore(path: Path) -> Dict[str, Any]:
@@ -2566,6 +2865,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # upstream request, not ten -- the unauthenticated budget is 60/hour for
     # the whole source IP, shared with CI and everything else on it.
     app.ctx.update_lock = asyncio.Lock()
+    # ---- restart (#183) --------------------------------------------------
+    # The operator switch for restarting this process. Default FALSE, and
+    # deliberately independent of AUTHENTICATION: holding the browser token
+    # already means shell-level access to this box, but "can restart the
+    # broker" is deployment policy, not a permission a session earns by logging
+    # in. One deployment here hosts live user sessions and is hands-off by
+    # standing order; it must be impossible to bounce it merely by being
+    # logged in, and only someone who can edit broker_config can change that.
+    app.ctx.restart_enabled = bool(config.get("restart_enabled", False))
+    # The drain state machine's one variable (see drain_for_restart). Every
+    # handler that creates new work reads it through _refuse_if_quiescing, so a
+    # broker on its way out stops accepting what it cannot finish.
+    app.ctx.lifecycle = LIFECYCLE_RUNNING
+    # Strong ref to the deferred stop task, once a restart is under way.
+    app.ctx.restart_stop_task = None
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -3009,6 +3323,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _launch(request: Request):
         err = _gated_auth_error(request, "/launch")
+        if err is not None:
+            return err
+        # AFTER the auth gate, always: an unauthenticated caller learns nothing
+        # about this broker's lifecycle, and test_auth_mandatory's live-router
+        # walk keeps getting its 401. A launch started now would put a fresh
+        # agent behind a broker that is seconds from stopping -- it survives the
+        # restart by design (CREATE_BREAKAWAY_FROM_JOB) but reconnects to a
+        # broker that never knew it existed.
+        err = _refuse_if_quiescing(app, "launch")
         if err is not None:
             return err
         params, err = await _parse_launch_body(request)
@@ -4073,6 +4396,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # atomic same-filesystem swap. follow_leaf=False (like move/delete): commit
         # replaces a symlink/junction leaf as the ENTRY, never through to its target.
         err = _file_auth_error(request)
+        if err is not None:
+            return err
+        # New SESSIONS only (see _refuse_if_quiescing): upload_chunk/commit/abort
+        # stay open so a transfer already in flight can still land or be tidied
+        # up -- refusing those would strand exactly what the drain is waiting on.
+        err = _refuse_if_quiescing(app, "upload session")
         if err is not None:
             return err
         body = _json_object_body(request)
@@ -5918,6 +6247,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _recording_begin(request: Request):
         err = _rec_auth_error(request)
+        if err is not None:
+            return err
+        # Same rule as /file/upload_begin: no NEW save while quiescing, but the
+        # chunk/commit half stays open. The recorder rolls a long session into
+        # segments (#151), so a refusal here costs the segment the browser is
+        # holding -- it retries against the restarted broker.
+        err = _refuse_if_quiescing(app, "recording save")
         if err is not None:
             return err
         body = _json_object_body(request)
