@@ -249,10 +249,439 @@ def test_subheading_becomes_sub_block(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# fenced code blocks -> a verbatim 'pre' block
+# --------------------------------------------------------------------------- #
+
+# Three lines whose LEADING whitespace is content: four spaces, a real tab, and
+# none. A systemd unit / YAML / JSON / shell continuation lives or dies on this.
+FENCE_LINES = ["    indented", "\ttabbed", "plain"]
+FENCE_BODY = ("before the fence\n\n"
+              "```\n" + "\n".join(FENCE_LINES) + "\n```\n\n"
+              "after the fence\n")
+
+
+def test_fenced_block_is_one_verbatim_pre_block():
+    blocks = hc.parse_blocks(FENCE_BODY, [])
+    pres = [b for b in blocks if b["t"] == "pre"]
+    # Exactly ONE block for the whole fence — not one per line.
+    assert len(pres) == 1
+    assert [b["t"] for b in blocks] == ["p", "pre", "p"]
+    spans = pres[0]["spans"]
+    # ONE code span holding the whole block.
+    assert len(spans) == 1
+    assert spans[0]["t"] == "code"
+    # Verbatim: source lines joined by \n, leading whitespace intact.
+    assert spans[0]["v"] == "\n".join(FENCE_LINES)
+    assert spans[0]["v"] == "    indented\n\ttabbed\nplain"
+
+
+def test_fenced_block_survives_crlf_without_carrying_the_cr():
+    # CRLF input normalises to \n only — the \r is line-ending machinery, and a
+    # stray one would show up as a control glyph in the rendered <pre>.
+    blocks = hc.parse_blocks(FENCE_BODY.replace("\n", "\r\n"), [])
+    pre = [b for b in blocks if b["t"] == "pre"][0]
+    assert pre["spans"][0]["v"] == "\n".join(FENCE_LINES)
+    assert "\r" not in pre["spans"][0]["v"]
+
+
+def _legacy_fence_search(title, blocks, extra):
+    """``_card_search`` as it read BEFORE 'pre': each fence line stripped and
+    space-joined into a single ``p``/``code`` block."""
+    legacy = []
+    for b in blocks:
+        if b["t"] == "pre":
+            v = " ".join(l.strip()
+                         for l in b["spans"][0]["v"].split("\n")).strip()
+            legacy.append({"t": "p", "spans": [{"t": "code", "v": v}]})
+        else:
+            legacy.append(b)
+    return hc._card_search(title, legacy, extra)
+
+
+def test_fenced_block_search_string_is_unchanged_and_normalised():
+    extra: list = []
+    blocks = hc.parse_blocks(FENCE_BODY, extra)
+    search = hc._card_search("Fenced", blocks, extra)
+    # Regression: verbatim storage must not change what search sees, because
+    # _card_search collapses every whitespace run to one space.
+    assert search == _legacy_fence_search("Fenced", blocks, extra)
+    assert search == ("fenced before the fence indented tabbed plain "
+                      "after the fence")
+    # Asserted explicitly so a future change to _card_search that drops the
+    # \s+ collapse cannot silently push raw tabs/newlines into the search index.
+    assert "\n" not in search and "\t" not in search and "  " not in search
+
+
+def test_empty_fence_emits_no_block():
+    assert hc.parse_blocks("```\n```\n", []) == []
+    # ...and a fence holding only blank/whitespace lines is still not a block.
+    assert hc.parse_blocks("```\n   \n\n\t\n```\n", []) == []
+
+
+# --------------------------------------------------------------------------- #
+# fence-aware page split: a ## inside a fence is code, not a card boundary
+#
+# parse_page used to re.split the WHOLE page on ^##\s+(.*)$ BEFORE parse_blocks
+# ever saw a fence, so a heading-shaped line inside a fenced block silently cut
+# the page in two. No shipped page trips it — a page of multi-line curl /
+# systemd / JSON examples is where the first one appears.
+# --------------------------------------------------------------------------- #
+
+FENCE_H2_PAGE = ("Intro prose.\n"
+                 "\n"
+                 "## Real heading\n"
+                 "\n"
+                 "before the fence\n"
+                 "\n"
+                 "```\n"
+                 "## Not A Heading\n"
+                 "still code\n"
+                 "```\n"
+                 "\n"
+                 "after the fence\n")
+
+
+def test_h2_inside_a_fence_yields_one_card_not_two(tmp_path):
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n",
+                                  "P.md": FENCE_H2_PAGE})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    assert [c["title"] for c in cards] == ["Overview", "Real heading"]
+    card = cards[1]
+    # The fenced heading survives as LITERAL text inside the one verbatim pre.
+    assert [b["t"] for b in card["body"]] == ["p", "pre", "p"]
+    pres = [b for b in card["body"] if b["t"] == "pre"]
+    assert len(pres) == 1
+    assert pres[0]["spans"][0]["v"] == "## Not A Heading\nstill code"
+    assert "## not a heading" in card["search"]
+
+
+def test_one_fence_recogniser_serves_both_consumers(monkeypatch):
+    # The whole point of the shared _is_fence: teaching the module a new fence
+    # syntax in ONE place has to move the page splitter AND the block parser
+    # together. If either grows its own copy of the rule, this fails — and a
+    # drifted pair is exactly how a page gets cut in half mid-fence.
+    page = "intro\n\n~~~\n## Not A Heading\n~~~\n"
+    # Control: ~~~ is not a fence today, so the splitter DOES cut here.
+    assert len(hc._page_chunks(page)) == 3
+
+    monkeypatch.setattr(hc, "_is_fence",
+                        lambda line: line.strip().startswith(("```", "~~~")))
+    assert len(hc._page_chunks(page)) == 1          # splitter followed
+    blocks = hc.parse_blocks(page, [])
+    assert [b["t"] for b in blocks] == ["p", "pre"]  # block parser followed
+    assert blocks[1]["spans"][0]["v"] == "## Not A Heading"
+
+
+def test_unclosed_fence_raises_naming_the_file_and_the_opening_line(tmp_path):
+    # Silently turning the rest of a developer page into code is worse than
+    # failing the build. The fence opens on line 7 of P.md.
+    page = ("intro\n"          # 1
+            "\n"               # 2
+            "## S\n"           # 3
+            "\n"               # 4
+            "body\n"           # 5
+            "\n"               # 6
+            "```\n"            # 7  <- opens, never closes
+            "code\n")          # 8
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_corpus(wiki)
+    msg = str(excinfo.value)
+    assert "P.md" in msg and "line 7" in msg, msg
+
+
+@pytest.mark.parametrize("page,lines", [
+    # region opens OUTSIDE a fence, closes INSIDE one
+    (("intro\n"                          # 1
+      "\n"                               # 2
+      "<!-- help:ignore-start -->\n"     # 3  outside
+      "```\n"                            # 4
+      "code\n"                           # 5
+      "<!-- help:ignore-end -->\n"       # 6  inside
+      "```\n"                            # 7
+      "\n"
+      "tail\n"), ("line 3", "line 6")),
+    # ...and the mirror image: opens INSIDE, closes OUTSIDE
+    (("intro\n"                          # 1
+      "\n"                               # 2
+      "```\n"                            # 3
+      "code\n"                           # 4
+      "<!-- help:ignore-start -->\n"     # 5  inside
+      "```\n"                            # 6
+      "<!-- help:ignore-end -->\n"       # 7  outside
+      "\n"
+      "tail\n"), ("line 5", "line 7")),
+])
+def test_ignore_region_crossing_a_fence_raises(tmp_path, page, lines):
+    # _strip_ignored runs BEFORE anything else looks at the page, so a region
+    # that swallows one half of a fence rewrites the fence topology in secret.
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_corpus(wiki)
+    msg = str(excinfo.value)
+    assert "fence" in msg and "P.md" in msg, msg
+    for needle in lines:
+        assert needle in msg, msg
+
+
+def test_fence_wholly_inside_an_ignored_region_is_fine(tmp_path):
+    # The region contains a WHOLE fence, so stripping it leaves the rest of the
+    # page's fence topology intact — no error, and nothing leaks.
+    page = ("intro\n"
+            "\n"
+            "<!-- help:ignore-start -->\n"
+            "## Dropped\n"
+            "```\n"
+            "secret code\n"
+            "```\n"
+            "<!-- help:ignore-end -->\n"
+            "\n"
+            "## Kept\n"
+            "\n"
+            "kept body\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    assert [c["title"] for c in cards] == ["Overview", "Kept"]
+    assert "secret code" not in " ".join(c["search"] for c in cards)
+
+
+def test_ignore_marker_inside_a_fence_is_literal_code(tmp_path):
+    # A page DOCUMENTING the ignore markers puts them in a fenced block. Both
+    # markers sit inside the same fence, so they are content, not a directive —
+    # they render verbatim and strip nothing. (Pre-A2 the stripper was fence-
+    # blind and obeyed them, eating the fence's own closing delimiter.)
+    page = ("intro\n"
+            "\n"
+            "## Markers\n"
+            "\n"
+            "```\n"
+            "<!-- help:ignore-start -->\n"
+            "documented, not obeyed\n"
+            "<!-- help:ignore-end -->\n"
+            "```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    assert [c["title"] for c in cards] == ["Overview", "Markers"]
+    pres = [b for b in cards[1]["body"] if b["t"] == "pre"]
+    assert len(pres) == 1
+    assert pres[0]["spans"][0]["v"] == ("<!-- help:ignore-start -->\n"
+                                        "documented, not obeyed\n"
+                                        "<!-- help:ignore-end -->")
+
+
+def _pre_a2_page_chunks(text):
+    """The page splitter EXACTLY as it read before the fence-aware scanner.
+
+    Inlined here rather than left behind in the module: the old rule has to be
+    runnable to prove the new one is equivalent, but dead code in help_corpus.py
+    is how a second, drifting fence rule gets born.
+    """
+    out = []
+    depth = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == hc._IGNORE_START:
+            depth += 1
+            continue
+        if stripped == hc._IGNORE_END:
+            depth -= 1
+            if depth < 0:
+                raise hc.BuildError("unbalanced help:ignore (end before start)")
+            continue
+        if depth == 0:
+            out.append(line)
+    if depth != 0:
+        raise hc.BuildError("unbalanced help:ignore (missing %d end)" % depth)
+    return re.split(r"(?m)^##\s+(.*)$", "\n".join(out))
+
+
+def test_new_scanner_matches_the_old_regex_split_on_every_shipped_page():
+    # The equivalence PROOF behind "A2 is pure hardening": for every page that
+    # ships today, the line-state scanner emits the very same chunk sequence the
+    # regex did. Anything that changes here changed a live page.
+    pages = sorted(hc.WIKI_DIR.glob("*.md"))
+    # Guard against a vacuous loop (16 wiki pages today; more are welcome).
+    assert len(pages) >= 16, "wiki pages not found"
+    pages += sorted(hc.MODS_DIR.glob("*/help.md"))
+    for path in pages:
+        raw = path.read_text(encoding="utf-8")
+        assert hc._page_chunks(raw, path.name) == _pre_a2_page_chunks(raw), \
+            "%s: fence-aware split diverged from the old regex split" % path
+
+
+# --------------------------------------------------------------------------- #
+# <!-- help:tier dev --> front matter (A3)
+#
+# A page declares who it is for so the Help window can default to the end-user
+# guide. It is a magic HTML comment, and a LENIENT parse of one is how internals
+# get silently published into the end-user guide — so every test below is really
+# the same assertion: a marker that is not exactly right is LOUD, never shrugged
+# off, and a page with no marker is byte-for-byte what it is today.
+# --------------------------------------------------------------------------- #
+
+TIER_PAGE = ("<!-- help:tier dev -->\n"
+             "\n"
+             "## Only section\n"
+             "\n"
+             "body text\n")
+
+
+def test_tier_dev_front_matter_tags_the_section(tmp_path):
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": TIER_PAGE})
+    sec = hc.build_corpus(wiki)["sections"][0]
+    assert sec["tier"] == "dev"
+
+
+def test_tier_marker_tolerates_leading_blank_lines(tmp_path):
+    # "First MEANINGFUL line" — blank/whitespace lines above it are fine.
+    page = "\n\n   \n" + TIER_PAGE
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    assert hc.build_corpus(wiki)["sections"][0]["tier"] == "dev"
+
+
+@pytest.mark.parametrize("page", [
+    "intro\n\n## S\n\nbody\n",                          # no marker at all
+    "<!-- help:tier user -->\n\nintro\n\n## S\n\nbody\n",  # explicitly default
+])
+def test_user_tier_emits_no_key_at_all(tmp_path, page):
+    # The whole point of "only when dev": every existing section keeps its exact
+    # bytes, so the unauthenticated /help-corpus.json payload is unchanged for
+    # the default view. An explicit "user" is accepted but still emits nothing.
+    sec = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    sec = hc.build_corpus(sec)["sections"][0]
+    assert "tier" not in sec, sec.get("tier")
+
+
+def test_tier_marker_is_consumed_before_block_parsing(tmp_path):
+    # If the marker survived into parse_blocks it would render as visible text
+    # AND — since it sits above the first heading — conjure an Overview card out
+    # of a page that has no intro.
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": TIER_PAGE})
+    cards = hc.build_corpus(wiki)["sections"][0]["cards"]
+    assert [c["title"] for c in cards] == ["Only section"]
+    blob = " ".join(s["v"] for c in cards for b in c["body"] for s in b["spans"])
+    assert "help:tier" not in blob
+    assert "help:tier" not in " ".join(c["search"] for c in cards)
+
+
+def test_parse_page_consumes_the_marker_even_when_it_discards_the_tier():
+    # parse_page is what the installed-mod merge path calls: it drops the tier,
+    # but the marker must still never reach the reader.
+    cards = hc.parse_page(TIER_PAGE, "P.md")
+    assert [c["title"] for c in cards] == ["Only section"]
+    assert "help:tier" not in " ".join(c["search"] for c in cards)
+
+
+@pytest.mark.parametrize("page,needle", [
+    ("<!-- help:tier internal -->\n\nintro\n", "'internal'"),
+    ("<!-- help:tier DEV -->\n\nintro\n", "'DEV'"),   # values are case-sensitive
+    ("<!-- help:tier -->\n\nintro\n", "''"),          # no value at all
+    ("<!-- help:tier dev user -->\n\nintro\n", "'dev user'"),
+])
+def test_unrecognised_tier_raises_naming_the_file_and_the_value(tmp_path, page,
+                                                                needle):
+    # A typo must not silently publish internals into the end-user guide.
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_corpus(wiki)
+    msg = str(excinfo.value)
+    assert "P.md" in msg and needle in msg, msg
+
+
+@pytest.mark.parametrize("page", [
+    # agreeing duplicates are STILL an error — there is no "last wins" rule
+    "<!-- help:tier dev -->\n<!-- help:tier dev -->\n\nintro\n",
+    # ...and disagreeing ones obviously are
+    "<!-- help:tier dev -->\n\nintro\n\n<!-- help:tier user -->\n",
+])
+def test_duplicate_tier_marker_raises(tmp_path, page):
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_corpus(wiki)
+    assert "P.md" in str(excinfo.value)
+
+
+def test_tier_marker_below_body_content_raises(tmp_path):
+    # NOT silently ignored: a marker the author believed was doing something is
+    # the same hazard as a mistyped one.
+    page = ("intro\n"                      # 1
+            "\n"                           # 2
+            "<!-- help:tier dev -->\n"     # 3  <- too late
+            "\n"                           # 4
+            "## S\n\nbody\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_corpus(wiki)
+    msg = str(excinfo.value)
+    assert "P.md" in msg and "line 3" in msg, msg
+
+
+@pytest.mark.parametrize("page", [
+    "Some prose <!-- help:tier dev --> more prose\n",
+    "<!-- help:tier dev --> and then prose\n",
+])
+def test_inline_tier_marker_raises(tmp_path, page):
+    # Standalone: it is a directive, not inline prose. Both of these are on the
+    # first line, so only the "alone on its line" rule can catch them.
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    with pytest.raises(hc.BuildError):
+        hc.build_corpus(wiki)
+
+
+def test_tier_marker_inside_a_fence_is_literal_code(tmp_path):
+    # A page DOCUMENTING the marker puts it in a fenced block — same convention
+    # help:ignore already has, and the same single fence recogniser decides it.
+    page = ("Intro prose.\n"
+            "\n"
+            "## Declaring a tier\n"
+            "\n"
+            "```\n"
+            "<!-- help:tier dev -->\n"
+            "```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    sec = hc.build_corpus(wiki)["sections"][0]
+    assert "tier" not in sec, "a fenced marker is code, not a directive"
+    pres = [b for c in sec["cards"] for b in c["body"] if b["t"] == "pre"]
+    assert len(pres) == 1
+    assert pres[0]["spans"][0]["v"] == "<!-- help:tier dev -->"
+
+
+def test_a_fenced_marker_is_not_a_duplicate_of_the_real_one(tmp_path):
+    # The page that documents the marker is also the page most likely to declare
+    # one. The fenced copy must neither trip the duplicate rule nor be stripped.
+    page = ("<!-- help:tier dev -->\n"
+            "\n"
+            "## Declaring a tier\n"
+            "\n"
+            "```\n"
+            "<!-- help:tier dev -->\n"
+            "```\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    sec = hc.build_corpus(wiki)["sections"][0]
+    assert sec["tier"] == "dev"
+    pres = [b for c in sec["cards"] for b in c["body"] if b["t"] == "pre"]
+    assert [p["spans"][0]["v"] for p in pres] == ["<!-- help:tier dev -->"]
+
+
+def test_tier_marker_inside_an_ignored_region_has_no_effect(tmp_path):
+    # The region is removed before the tier is read, so there is nothing to obey.
+    page = ("<!-- help:ignore-start -->\n"
+            "<!-- help:tier dev -->\n"
+            "<!-- help:ignore-end -->\n"
+            "intro\n"
+            "\n"
+            "## S\n\nbody\n")
+    wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[P]]\n", "P.md": page})
+    sec = hc.build_corpus(wiki)["sections"][0]
+    assert "tier" not in sec
+    assert "help:tier" not in " ".join(c["search"] for c in sec["cards"])
+
+
+# --------------------------------------------------------------------------- #
 # XSS safety: corpus is typed plain data, never HTML
 # --------------------------------------------------------------------------- #
 
-_ALLOWED_BLOCK = {"p", "bullet", "sub"}
+_ALLOWED_BLOCK = {"p", "bullet", "sub", "pre"}
 _ALLOWED_SPAN = {"text", "strong", "code", "kbd"}
 
 
@@ -441,6 +870,30 @@ def test_mod_help_block_fallbacks(tmp_path):
     assert secs["zzz-mod"]["label"] == "zzz mod"            # humanized id
     assert secs["zzz-mod"]["order"] == hc._MOD_ORDER_BASE + 1  # "10" rejected
     assert "icon" not in secs["zzz-mod"]                    # "" icon dropped
+
+
+def test_mod_help_declares_a_tier_the_same_way_a_wiki_page_does(tmp_path):
+    # A mod's help.md IS a wiki page — same parser, same front-matter rule, same
+    # "only when dev" emission. No special case on either side.
+    root = _write_mods(tmp_path, {
+        "devmod": ({"id": "devmod"},
+                   "<!-- help:tier dev -->\n\n## A\n\nbody\n"),
+        "usermod": ({"id": "usermod"}, "prose\n"),
+    })
+    secs = {s["slug"]: s for s in hc.build_mod_sections(root)}
+    assert secs["devmod"]["tier"] == "dev"
+    # ...and the marker was consumed, so it makes no phantom Overview card.
+    assert [c["title"] for c in secs["devmod"]["cards"]] == ["A"]
+    assert "tier" not in secs["usermod"]
+
+
+def test_mod_help_with_a_bad_tier_raises(tmp_path):
+    root = _write_mods(tmp_path, {
+        "bad": ({"id": "bad"}, "<!-- help:tier nope -->\n\nprose\n"),
+    })
+    with pytest.raises(hc.BuildError) as excinfo:
+        hc.build_mod_sections(root)
+    assert "mods/bad/help.md" in str(excinfo.value)
 
 
 def test_mod_help_empty_page_skipped(tmp_path):

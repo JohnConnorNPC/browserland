@@ -14,11 +14,14 @@ BLOCKS, each block a list of typed inline SPANS::
     section = { "slug": str,            # stable id (lowercased file stem)
                 "label": str,           # human display name (from _Sidebar.md)
                 "order": int,           # sidebar order
+                "tier": "dev",          # OPTIONAL: developer/operator page.
+                                        # ABSENT means the end-user guide, so a
+                                        # user-tier section is byte-unchanged.
                 "cards": [ card, ... ] }
     card    = { "title": str,
                 "body": [ block, ... ],
                 "search": str }         # precomputed lowercased plain text
-    block   = { "t": "p"|"bullet"|"sub", "spans": [ span, ... ] }
+    block   = { "t": "p"|"bullet"|"sub"|"pre", "spans": [ span, ... ] }
     span    = { "t": "text"|"strong"|"code"|"kbd", "v": str }
 
 The frontend renders only this fixed, known set of types; anything the parser
@@ -27,8 +30,9 @@ keeps the long-standing XSS-safety invariant of the Help renderer intact even
 though the content now comes from files.
 
 ``build_corpus`` is strict: it RAISES on structural problems (unbalanced
-``help:ignore`` markers, duplicate slugs) so tests / the regeneration step
-catch them. ``load_corpus`` (used at import) is protective: it parses the live
+``help:ignore`` markers, an unclosed code fence, an ignore region that crosses
+a fence boundary, a malformed ``help:tier`` front-matter marker, duplicate
+slugs) so tests / the regeneration step catch them. ``load_corpus`` (used at import) is protective: it parses the live
 wiki when present, else falls back to the packaged ``help_corpus.json``, else
 an empty corpus — so a missing/broken wiki degrades Help gracefully and never
 breaks broker startup.
@@ -219,32 +223,123 @@ def _coalesce(spans: list[dict]) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Fenced code: ONE recogniser, shared by every consumer.
+#
+# Three things need to know where a fence starts and stops: the page splitter
+# (a ``##`` inside a fence is code, not a card boundary), the block parser (a
+# fence becomes one verbatim ``pre``), and the help:ignore stripper (a region
+# may not rewrite a page's fence topology). Two hand-rolled copies of "does this
+# line open a fence?" WILL drift on indentation / fence length / closing syntax,
+# and the drift shows up as a page silently cut in half. So there is exactly one
+# rule, stated once, here.
+# --------------------------------------------------------------------------- #
+
+_FENCE_MARK = "```"
+
+
+def _is_fence(line: str) -> bool:
+    """True if ``line`` is a code-fence delimiter (opening OR closing).
+
+    THE fence rule for this module. Deliberately the same permissive test the
+    block parser has always used — a stripped line starting with three
+    backticks — so making it shared changes no existing page. Anything stricter
+    (CommonMark's "the closing fence must be at least as long as the opener",
+    ``~~~`` fences) belongs here and nowhere else.
+    """
+    return line.strip().startswith(_FENCE_MARK)
+
+
+def _fence_ids(lines: list[str]) -> tuple[list[int], int | None]:
+    """Map each line to its fence block: 0 = outside, N > 0 = inside the Nth
+    fence (delimiter lines included).
+
+    Returns ``(ids, unclosed)`` where ``unclosed`` is the 0-based index of an
+    opening fence that never closed, else ``None``. The caller decides whether
+    that is fatal, because ``parse_blocks`` has always tolerated it and the page
+    splitter must not.
+    """
+    ids = [0] * len(lines)
+    block = 0
+    opened_at: int | None = None
+    for i, line in enumerate(lines):
+        if _is_fence(line):
+            if opened_at is None:
+                block += 1
+                opened_at = i
+            else:
+                opened_at = None
+            ids[i] = block
+        elif opened_at is not None:
+            ids[i] = block
+    return ids, opened_at
+
+
+def _source_prefix(source: str | None) -> str:
+    """``"Getting-Started.md: "`` when we know the file, else ``""``."""
+    return "%s: " % source if source else ""
+
+
+# --------------------------------------------------------------------------- #
 # Block parsing: the raw lines of one card -> a list of typed blocks.
 # --------------------------------------------------------------------------- #
 
-def _strip_ignored(text: str) -> str:
+def _ignore_pairs(lines: list[str], ids: list[int],
+                  source: str | None = None) -> list[tuple[int, int]]:
+    """Pair every help:ignore marker and classify it against the fence map.
+
+    Returns the ``(start, end)`` line-index pairs that are REAL directives —
+    both markers outside any fence. Two other outcomes:
+
+    * both markers inside the SAME fence -> the region is literal code (a
+      marker in a fenced block is documentation ABOUT the marker, not a
+      directive), so it is dropped from the result and stripped by nobody;
+    * the markers land in different fence contexts -> ``BuildError``. Stripping
+      such a region would delete one half of a fence and rewrite the page's
+      fence topology before the splitter or the block parser ever sees it.
+    """
+    pfx = _source_prefix(source)
+    stack: list[int] = []
+    real: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == _IGNORE_START:
+            stack.append(i)
+        elif stripped == _IGNORE_END:
+            if not stack:
+                raise BuildError("%sunbalanced help:ignore (end before start) "
+                                 "at line %d" % (pfx, i + 1))
+            start = stack.pop()
+            if ids[start] != ids[i]:
+                raise BuildError(
+                    "%shelp:ignore region opened at line %d closes at line %d, "
+                    "crossing a code-fence boundary" % (pfx, start + 1, i + 1))
+            if ids[i] == 0:
+                real.append((start, i))
+    if stack:
+        raise BuildError("%sunbalanced help:ignore (missing %d end marker(s); "
+                         "last start at line %d)"
+                         % (pfx, len(stack), stack[-1] + 1))
+    return real
+
+
+def _strip_ignored(text: str, source: str | None = None) -> str:
     """Remove <!-- help:ignore-start --> .. <!-- help:ignore-end --> regions.
 
     Raises BuildError on unbalanced markers so a typo can't silently erase the
-    rest of a page.
+    rest of a page, on an unclosed code fence, and on a region that crosses a
+    fence boundary (see ``_ignore_pairs``). A fence wholly inside a region is
+    fine — the whole region disappears, fence and all.
     """
-    out: list[str] = []
-    depth = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == _IGNORE_START:
-            depth += 1
-            continue
-        if stripped == _IGNORE_END:
-            depth -= 1
-            if depth < 0:
-                raise BuildError("unbalanced help:ignore (end before start)")
-            continue
-        if depth == 0:
-            out.append(line)
-    if depth != 0:
-        raise BuildError("unbalanced help:ignore (missing %d end marker(s))" % depth)
-    return "\n".join(out)
+    lines = text.splitlines()
+    ids, unclosed = _fence_ids(lines)
+    if unclosed is not None:
+        raise BuildError("%sunclosed code fence opened at line %d"
+                         % (_source_prefix(source), unclosed + 1))
+    drop = [False] * len(lines)
+    for start, end in _ignore_pairs(lines, ids, source):
+        for k in range(start, end + 1):
+            drop[k] = True
+    return "\n".join(line for k, line in enumerate(lines) if not drop[k])
 
 
 def _is_table_sep(line: str) -> bool:
@@ -292,18 +387,31 @@ def parse_blocks(text: str, search_extra: list[str]) -> list[dict]:
             flush_para()
             i += 1
             continue
-        # Fenced code block.
-        if s.startswith("```"):
+        # Fenced code block. Open AND close go through _is_fence — the same
+        # predicate the page splitter and the ignore stripper use — so the three
+        # can never disagree about where a fence begins or ends.
+        if _is_fence(line):
             flush_para()
             code_lines = []
             i += 1
-            while i < n and not lines[i].strip().startswith("```"):
+            while i < n and not _is_fence(lines[i]):
                 code_lines.append(lines[i])
                 i += 1
             i += 1  # skip closing fence
-            code = " ".join(l.strip() for l in code_lines).strip()
-            if code:
-                blocks.append({"t": "p", "spans": [{"t": "code", "v": code}]})
+            # A `pre` block is VERBATIM source: join the raw lines with "\n" and
+            # never strip them individually. Leading whitespace is content for
+            # everything that lands in a fence (systemd units, YAML, JSON, shell
+            # continuations), so `" ".join(l.strip() ...)` — and equally
+            # `"\n".join(l.strip() ...)` — would destroy the block. The only
+            # normalization is the newline convention: a trailing "\r" left by
+            # CRLF input is line-ending machinery, not content.
+            code = "\n".join(l[:-1] if l.endswith("\r") else l
+                             for l in code_lines)
+            # Emptiness is decided from the STRIPPED text (a fence holding only
+            # blank lines is still not a block) while the UNSTRIPPED text is what
+            # gets stored.
+            if code.strip():
+                blocks.append({"t": "pre", "spans": [{"t": "code", "v": code}]})
             continue
         # Subheading (### / ####).
         m = re.match(r"^(#{3,6})\s+(.*)$", s)
@@ -373,15 +481,151 @@ def _card_search(title: str, blocks: list[dict], extra: list[str]) -> str:
     return re.sub(r"\s+", " ", " ".join(parts)).strip().lower()
 
 
-def parse_page(text: str) -> list[dict]:
+_H2 = re.compile(r"##\s+(.*)")
+
+
+def _page_chunks(text: str, source: str | None = None) -> list[str]:
+    """Strip ignore regions, then split the page on level-2 headings.
+
+    Returns the same shape ``re.split(r"(?m)^##\\s+(.*)$", text)`` returns —
+    ``[intro, title, body, title, body, ...]`` — but from a LINE-STATE SCANNER
+    that knows about fences, so a ``## Not A Heading`` inside a fenced block
+    stays code instead of silently cutting the page in two. That regex ran over
+    the whole page before ``parse_blocks`` ever saw a fence; no shipped page
+    tripped it, but a page of curl/systemd/JSON examples is exactly where the
+    first one appears.
+
+    Raises BuildError on an unclosed fence (turning the rest of a developer page
+    into code is worse than failing the build).
+    """
+    text = _strip_ignored(text, source)
+    lines = text.split("\n")
+    ids, unclosed = _fence_ids(lines)
+    if unclosed is not None:
+        # Unreachable via _strip_ignored (it raises first, on the ORIGINAL line
+        # numbers); kept so a direct caller can't get a half-parsed page.
+        raise BuildError("%sunclosed code fence opened at line %d"
+                         % (_source_prefix(source), unclosed + 1))
+    chunks: list[str] = []
+    cut = 0    # start offset of the chunk being accumulated
+    off = 0    # start offset of the current line
+    for i, line in enumerate(lines):
+        m = _H2.fullmatch(line) if ids[i] == 0 else None
+        if m:
+            chunks.append(text[cut:off])
+            chunks.append(m.group(1))
+            cut = off + len(line)
+        off += len(line) + 1   # +1 for the "\n" that split() consumed
+    chunks.append(text[cut:])
+    return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Front matter: <!-- help:tier dev -->
+#
+# A page declares WHO IT IS FOR, so the Help window can show the end-user guide
+# by default and reveal developer/operator pages only behind a checkbox. The
+# default is ``user`` and emits no key at all.
+#
+# A magic HTML comment is only safe if it is parsed as STRICT FRONT MATTER. The
+# failure this must not have is a mistyped or misplaced marker being shrugged
+# off, because that silently publishes internals into the end-user guide. So the
+# marker must stand ALONE on the page's first meaningful line (leading blank
+# lines are fine), appear EXACTLY ONCE, and carry a RECOGNISED value; every
+# other shape raises BuildError naming the file, the line and the value. There
+# is deliberately no "last wins" and no silent ignore.
+#
+# It is consumed BEFORE the page splitter and the block parser see the page: a
+# surviving marker renders as visible text, and on a page that would otherwise
+# have no intro it conjures an Overview card out of nothing.
+# --------------------------------------------------------------------------- #
+
+_TIER_DEFAULT = "user"
+_TIERS = ("user", "dev")
+
+# ONE pattern, used two ways: ``search`` finds an OCCURRENCE anywhere on a line
+# (what makes a duplicate or a misplaced marker loud instead of silent), and
+# ``fullmatch`` against the stripped line is the STANDALONE test. A second
+# pattern for the second job is how the two would come to disagree about what
+# even counts as a marker.
+#
+# It matches the COMMENT form only, so a page may still discuss "help:tier" in
+# prose, and (exactly like help:ignore) may show the literal marker by putting
+# it in a fenced block. group(1) is the raw value — deliberately anything, so an
+# empty or unknown one gets the same "unrecognised value" error rather than
+# being mistaken for "not a marker at all".
+_TIER_MARKER = re.compile(r"<!--\s*help:tier\b(.*?)-->")
+
+
+def _take_tier(text: str, source: str | None = None) -> tuple[str, str]:
+    """Split a page into ``(tier, body)``, consuming the front-matter marker.
+
+    ``text`` must already have had its help:ignore regions stripped — a marker
+    inside an ignored region has no effect, which falls out of it never reaching
+    here. A marker inside a code fence is literal code and neither sets the tier
+    nor is stripped: the fence question is answered by ``_fence_ids``, the same
+    one recogniser the splitter, the block parser and the ignore stripper use.
+    """
+    pfx = _source_prefix(source)
+    lines = text.split("\n")
+    # The unclosed flag is dropped on purpose: _strip_ignored already raised on
+    # it, and it runs ahead of this on every path in.
+    ids, _unclosed = _fence_ids(lines)
+    hits = [i for i, line in enumerate(lines)
+            if ids[i] == 0 and _TIER_MARKER.search(line)]
+    if not hits:
+        return _TIER_DEFAULT, text
+    if len(hits) > 1:
+        raise BuildError("%shelp:tier declared %d times (lines %s); it is front "
+                         "matter — exactly one, on the first line"
+                         % (pfx, len(hits),
+                            ", ".join(str(i + 1) for i in hits)))
+    at = hits[0]
+    first = next((i for i, line in enumerate(lines) if line.strip()), at)
+    if at != first:
+        raise BuildError("%shelp:tier at line %d is below the first content "
+                         "line (line %d); it is front matter and must come "
+                         "before any body content" % (pfx, at + 1, first + 1))
+    m = _TIER_MARKER.fullmatch(lines[at].strip())
+    if m is None:
+        raise BuildError("%shelp:tier at line %d must stand alone on its line "
+                         "(it is a directive, not prose), got %r"
+                         % (pfx, at + 1, lines[at].strip()))
+    value = m.group(1).strip()
+    if value not in _TIERS:
+        raise BuildError("%sunrecognised help:tier %r at line %d (expected one "
+                         "of: %s)" % (pfx, value, at + 1, ", ".join(_TIERS)))
+    return value, "\n".join(lines[:at] + lines[at + 1:])
+
+
+def parse_page(text: str, source: str | None = None) -> list[dict]:
     """Parse one wiki page's markdown into a list of cards.
 
     The intro (text before the first ## heading) becomes an "Overview" card;
     each ## heading becomes a card; a trailing cross-nav card is dropped.
+    ``source`` is the page's name, used only to name the file in BuildError.
+
+    Any ``help:tier`` front matter is consumed (so it never renders) and its
+    value discarded; callers that need it use ``parse_page_with_tier``.
     """
-    text = _strip_ignored(text)
-    # Split on level-2 headings, keeping the heading title with its body.
-    chunks = re.split(r"(?m)^##\s+(.*)$", text)
+    return parse_page_with_tier(text, source)[1]
+
+
+def parse_page_with_tier(text: str, source: str | None = None) \
+        -> tuple[str, list[dict]]:
+    """``(tier, cards)`` for one page — the full ``parse_page`` result.
+
+    Split from ``parse_page`` rather than changing its return type because the
+    tier belongs to the SECTION and most callers only want cards.
+    """
+    page = _strip_ignored(text, source)
+    tier, page = _take_tier(page, source)
+    # _page_chunks strips ignore regions itself; doing it again on already
+    # stripped text is a no-op (whole marker lines are gone, and the only ones
+    # that can remain are fenced, which it leaves alone), and running the
+    # stripper FIRST here is what lets the tier scan see the page the splitter
+    # will actually see.
+    chunks = _page_chunks(page, source)
     cards: list[dict] = []
 
     intro = chunks[0]
@@ -411,7 +655,7 @@ def parse_page(text: str) -> list[dict]:
             "body": c["_blocks"],
             "search": _card_search(c["title"], c["_blocks"], c["_extra"]),
         })
-    return out
+    return tier, out
 
 
 def _humanize(stem: str) -> str:
@@ -472,11 +716,18 @@ def build_corpus(wiki_dir: Path) -> dict:
         else:
             order, label = (1000 + unlisted, _humanize(stem))
             unlisted += 1
-        cards = parse_page(path.read_text(encoding="utf-8"))
+        tier, cards = parse_page_with_tier(path.read_text(encoding="utf-8"),
+                                           path.name)
         if not cards:
             continue
-        sections.append({"slug": slug, "label": label, "order": order,
-                         "cards": cards})
+        section = {"slug": slug, "label": label, "order": order,
+                   "cards": cards}
+        # ONLY a dev page carries the key. A user-tier section keeps the exact
+        # bytes it has today, so the default view — and the unauthenticated
+        # /help-corpus.json payload behind it — is unchanged by this feature.
+        if tier != _TIER_DEFAULT:
+            section["tier"] = tier
+        sections.append(section)
 
     sections.sort(key=lambda s: (s["order"], s["slug"]))
     return {"sections": sections}
@@ -506,8 +757,10 @@ def build_mod_sections(mods_dir: Path = MODS_DIR) -> list[dict]:
     """Parse each mod's optional wiki-format ``help.md`` into a tagged section.
 
     For every subdir of ``mods_dir`` (sorted, for deterministic fallback order)
-    that has BOTH ``mod.json`` and ``help.md``: parse ``help.md`` with the same
-    ``parse_page`` the wiki uses; skip it if that yields no cards. The optional
+    that has BOTH ``mod.json`` and ``help.md``: parse ``help.md`` through the
+    same path the wiki uses — including ``help:tier`` front matter, which a mod
+    declares exactly the way a wiki page does — and skip it if that yields no
+    cards. The optional
     ``help`` block in mod.json supplies ``slug`` / ``label`` / ``order`` / ``icon``
     with fallbacks: slug = mod id, label = mod.json ``title`` (else humanized id),
     order = ``_MOD_ORDER_BASE + index`` (after the wiki), icon omitted. Every
@@ -527,7 +780,9 @@ def build_mod_sections(mods_dir: Path = MODS_DIR) -> list[dict]:
         if not ((mod_dir / "mod.json").is_file()
                 and (mod_dir / "help.md").is_file()):
             continue
-        cards = parse_page((mod_dir / "help.md").read_text(encoding="utf-8"))
+        tier, cards = parse_page_with_tier(
+            (mod_dir / "help.md").read_text(encoding="utf-8"),
+            "mods/%s/help.md" % mod_dir.name)
         if not cards:
             continue
         manifest = _mod_manifest(mod_dir)
@@ -548,6 +803,9 @@ def build_mod_sections(mods_dir: Path = MODS_DIR) -> list[dict]:
             order = _MOD_ORDER_BASE + index
         section = {"slug": slug, "label": label, "order": order,
                    "cards": cards, "mod": mod_id}
+        # Same rule as the wiki (a mod's help.md IS a wiki page): dev-only key.
+        if tier != _TIER_DEFAULT:
+            section["tier"] = tier
         icon = block.get("icon")
         if isinstance(icon, str) and icon:
             section["icon"] = icon
@@ -654,7 +912,12 @@ def _installed_section(mod_id: str, record: dict, offset: int,
     if cards is None:
         cards = _installed_cards.get(help_md)
     if cards is None:
-        cards = parse_page(help_md)
+        # parse_page, not parse_page_with_tier: any help:tier front matter is
+        # still CONSUMED (so it never renders), but an installed mod does not
+        # get to tag its section yet — that is a separate decision from the
+        # shipped wiki/mod tiers, and a malformed marker here is a per-mod skip
+        # by way of the caller's guard, never a raise.
+        cards = parse_page(help_md, "%s/help.md" % mod_id)
     cards_out[help_md] = cards
     if not cards:
         return None
