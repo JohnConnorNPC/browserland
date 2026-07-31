@@ -1,0 +1,63 @@
+        /* ---- mod: update (#182) --------------------------------------------
+           Detail-window rows. The taskbar chip itself is styled inline in
+           update.js (theme-var border/fg, like the core .host-chip), so only
+           the window lives here. Indentation matches the head <style> zone the
+           mod-css splice lands in (ui.py:_mod_css). */
+        #update-chip .update-chip-ic { flex: 0 0 auto; display: inline-flex; }
+        #update-chip .update-chip-ic svg { width: 13px; height: 13px; display: block; }
+        .term-window.app-upd .app-upd-body {
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+            background: var(--bg);
+            color: var(--fg);
+            padding: 8px 10px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .term-window.app-upd .app-upd-checked {
+            margin-left: 8px;
+            color: var(--fg-dim);
+            font-size: 11px;
+        }
+        .app-upd-row {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            padding: 3px 0;
+        }
+        .app-upd-key {
+            flex: 0 0 auto;
+            min-width: 88px;
+            color: var(--fg-dim);
+        }
+        .app-upd-val {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+        .app-upd-headline { font-weight: bold; }
+        .app-upd-green { color: var(--ok); }
+        .app-upd-amber { color: var(--warn); }
+        .app-upd-grey  { color: var(--fg-dim); }
+        .app-upd-note {
+            margin: 8px 0 2px;
+            padding: 6px 8px;
+            border-left: 2px solid var(--bg-3);
+            color: var(--fg-dim);
+            line-height: 1.45;
+        }
+        /* The reason an `unknown` is unknown is the most important line in the
+           window — it is what keeps the mod from being mistaken for a green
+           light. Give it the warning colour rather than the dim one. */
+        .app-upd-why {
+            border-left-color: #a8842c;
+            color: var(--fg);
+        }
+        .app-upd-caveat { font-size: 11px; }
+        .app-upd-howto { border-left-color: var(--ok); color: var(--fg); }
+        .app-upd-link {
+            display: inline-block;
+            margin: 6px 0 2px;
+            color: var(--accent, #6aa9ff);
+        }

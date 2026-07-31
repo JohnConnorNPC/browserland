@@ -116,6 +116,11 @@
                 '<svg viewBox="0 0 24 24" aria-hidden="true">'
                 + '<circle cx="12" cy="12" r="9" fill="#2b2b2b" stroke="#8a1f1f" stroke-width="1.4"/>'
                 + '<circle cx="12" cy="12" r="4.2" fill="#d92b2b"/></svg>',
+            'update':
+                '<svg viewBox="0 0 24 24" aria-hidden="true">'
+                + '<circle cx="12" cy="12" r="9" fill="#eaf2fb" stroke="#2f6cb5" stroke-width="1.2"/>'
+                + '<path d="M12 16.5v-9" fill="none" stroke="#2f6cb5" stroke-width="1.9" stroke-linecap="round"/>'
+                + '<path d="M8.2 11.3L12 7.4l3.8 3.9" fill="none" stroke="#2f6cb5" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
         };
         // Look up an app icon by canonical key (mod id). OWN-property lookup only
         // (never an inherited member like 'constructor'/'toString'), so the return

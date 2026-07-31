@@ -1,0 +1,12 @@
+{
+  "id": "update",
+  "version": "1.0.0",
+  "ctxVersion": 1,
+  "defaultEnabled": false,
+  "title": "Update check",
+  "description": "Taskbar chip + window reporting whether this build is current with upstream, via the broker's GET /update/check. Ships disabled, and the broker needs update_check_enabled before it will reach GitHub at all.",
+  "entry": "update.js",
+  "author": "JohnConnorNPC",
+  "styles": ["update.css"],
+  "help": { "slug": "update", "label": "Update check", "order": 2085, "icon": "⬆" }
+}

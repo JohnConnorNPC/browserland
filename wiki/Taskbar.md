@@ -1,4 +1,4 @@
-The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar unless you opt them in), the workspace pager, host status, a fullscreen button, and clock, AI status, clipboard, and help chips.
+The taskbar runs along the bottom of the Browserland desktop. It holds the launch button, a button for each open window (sticky notes are the exception — they stay off the taskbar unless you opt them in), the workspace pager, host status, a fullscreen button, and clock, AI status, clipboard, update, and help chips.
 
 ## Anatomy
 
@@ -14,6 +14,7 @@ From left to right, the taskbar contains:
 | Clock chip | Date & time readout, shown while the Clock mod is enabled |
 | AI status chip | Worst-case health of the major AI providers — click to open the status window. Shown while the **AI status** mod is enabled; it ships **off by default** because enabling it lets the broker fetch each provider's public status page, which makes the broker's egress IP visible to those hosts. Turn it on from Control Panel → Mods |
 | Clipboard chip (**📋**) | Opens (or focuses) the clipboard-history window. Shown while the **Clipboard** mod is enabled; it ships **off by default** because clipboards carry secrets, so it captures nothing until you opt in. Turn it on from Control Panel → Mods |
+| Update chip (**⬆**) | Whether this build is current with upstream — up to date, N behind, ahead, or *version ?* when it could not be established. Click to open the Update check window. Shown while the **Update check** mod is enabled; it ships **off by default**, and the broker needs its own `update_check_enabled` switch before it will reach GitHub at all. By default the chip hides itself while the build is current |
 | Help chip (**?**) | Opens the in-app interface guide (see [[Getting-Started]]) |
 
 ## Window buttons
