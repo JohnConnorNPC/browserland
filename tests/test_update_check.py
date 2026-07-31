@@ -409,17 +409,92 @@ def test_the_check_uses_releases_latest_not_the_releases_list():
 
 # ---- run_check wiring -------------------------------------------------------
 
-def test_a_cold_commit_mode_check_costs_two_requests_at_most():
+def _commit_mode_fetcher(paths, upstream_sha="b" * 40, compare=None):
+    def fetcher(path, **kw):
+        paths.append(path)
+        if "releases/latest" in path:
+            return _err(status=404, error="http_404")
+        if "/commits/" in path:
+            return _ok({"sha": upstream_sha})
+        return compare if compare is not None else _compare(0, 5)
+    return fetcher
+
+
+def test_a_cold_commit_mode_check_costs_three_requests_at_most():
+    """releases probe, upstream head, and -- only when git could not answer
+    locally -- one compare."""
+    paths = []
+    out = update.run_check(local_version="0.8.0", sha=SHA,
+                           fetcher=_commit_mode_fetcher(paths),
+                           ancestor_fn=lambda s: None)
+    assert out["state"] == update.STATE_BEHIND and out["behindBy"] == 5
+    assert len(paths) == 3
+
+
+def test_when_git_can_answer_locally_no_compare_is_requested():
+    """The interesting case -- a checkout with unpushed commits -- is exactly
+    the one GitHub's compare cannot answer. Asking git instead turns 'could not
+    tell' into a correct answer AND saves a request."""
+    paths = []
+    out = update.run_check(
+        local_version="0.8.0", sha=SHA,
+        fetcher=_commit_mode_fetcher(paths),
+        ancestor_fn=lambda s: {"aheadBy": 3, "behindBy": 0})
+    assert out["state"] == update.STATE_AHEAD
+    assert out["aheadBy"] == 3
+    assert out["ancestrySource"] == "local-git"
+    assert not any("compare" in p for p in paths)
+    assert len(paths) == 2
+
+
+def test_the_local_and_api_paths_agree_about_what_the_numbers_mean():
+    """Both routes go through _from_counts, so 'ahead wins over behind' cannot
+    drift between them."""
+    for ahead, behind, expected in [(0, 0, update.STATE_CURRENT),
+                                    (0, 4, update.STATE_BEHIND),
+                                    (2, 0, update.STATE_AHEAD),
+                                    (2, 4, update.STATE_AHEAD)]:
+        local = update.compute_state(
+            mode="commit", local_version="0.8.0", sha=SHA,
+            ancestry={"aheadBy": ahead, "behindBy": behind},
+            upstream_sha="b" * 40)
+        api = update.compute_state(
+            mode="commit", local_version="0.8.0", sha=SHA,
+            compare_result=_compare(ahead, behind))
+        assert local["state"] == api["state"] == expected
+        assert local["aheadBy"] == api["aheadBy"] == ahead
+        assert local["behindBy"] == api["behindBy"] == behind
+
+
+def test_local_ancestry_refuses_a_sha_it_does_not_have():
+    """Never a guess: an object that is not in the local store returns None so
+    the caller falls back, rather than reporting a measured-looking zero."""
+    assert update.local_ancestry("f" * 40) is None
+    assert update.local_ancestry("not-a-sha") is None
+    assert update.local_ancestry("") is None
+
+
+def test_local_ancestry_measures_this_repo():
+    """Against a commit this checkout definitely has: HEAD itself is zero/zero."""
+    here = update.local_sha()
+    if here is None:
+        pytest.skip("not a git checkout")
+    assert update.local_ancestry(here) == {"aheadBy": 0, "behindBy": 0}
+
+
+def test_a_dead_upstream_head_still_falls_back_to_compare():
     paths = []
 
     def fetcher(path, **kw):
         paths.append(path)
         if "releases/latest" in path:
             return _err(status=404, error="http_404")
-        return _compare(0, 5)
-    out = update.run_check(local_version="0.8.0", sha=SHA, fetcher=fetcher)
-    assert out["state"] == update.STATE_BEHIND and out["behindBy"] == 5
-    assert len(paths) == 2, "one releases probe + one compare, and no more"
+        if "/commits/" in path:
+            return _err(status=None)          # offline for this one call
+        return _compare(0, 2)
+    out = update.run_check(local_version="0.8.0", sha=SHA, fetcher=fetcher,
+                           ancestor_fn=lambda s: None)
+    assert out["state"] == update.STATE_BEHIND
 
 
 def test_release_mode_costs_one_request():

@@ -202,6 +202,57 @@ def local_sha() -> Optional[str]:
     return None
 
 
+def _git(*args: str, timeout: float = 5.0) -> Optional[str]:
+    """Run a read-only git command in the package's repo. None on any failure."""
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent
+        if not (pkg_dir.parent / ".git").exists():
+            return None
+        out = subprocess.run(["git", "-C", str(pkg_dir)] + list(args),
+                             capture_output=True, text=True, timeout=timeout)
+        if out.returncode != 0:
+            return None
+        return out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def local_ancestry(upstream_sha: str) -> Optional[Dict[str, int]]:
+    """``{"aheadBy": n, "behindBy": m}`` computed LOCALLY, or None when this
+    repo does not have the upstream commit on disk.
+
+    This exists because the interesting case -- a development checkout with
+    commits that were never pushed -- is exactly the case GitHub's compare
+    endpoint cannot answer: it 404s on a sha it has never seen. Asking git
+    instead turns "GitHub could not tell us" into a real, correct answer
+    whenever the upstream object is already in the local object store (i.e.
+    anyone who has ever fetched), and costs no request at all.
+
+    It is a strict improvement, never a guess: when the object is absent we
+    return None and the caller falls back to the API, which may in turn fail to
+    ``unknown``. Nothing here invents an ancestry it did not measure."""
+    if not re.fullmatch(r"[0-9a-f]{40}", upstream_sha or ""):
+        return None
+    # Is the commit actually here? Without this, rev-list would fail and be
+    # indistinguishable from "no divergence".
+    if _git("cat-file", "-e", upstream_sha + "^{commit}") is None:
+        return None
+    # left...right: left = reachable from upstream but not HEAD (we are behind
+    # by that many), right = reachable from HEAD but not upstream (ahead).
+    counts = _git("rev-list", "--left-right", "--count",
+                  upstream_sha + "...HEAD")
+    if not counts:
+        return None
+    parts = counts.split()
+    if len(parts) != 2:
+        return None
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    return {"aheadBy": ahead, "behindBy": behind}
+
+
 # ---- semver (A4) ------------------------------------------------------------
 
 _SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
@@ -243,10 +294,28 @@ def _unknown(reason: str, **extra: Any) -> Dict[str, Any]:
     return out
 
 
+def _from_counts(ahead: int, behind: int, upstream: Dict[str, Any],
+                 source: str) -> Dict[str, Any]:
+    """One ahead/behind pair -> one state. Shared by the local-git path and the
+    API compare path so they can never disagree about what the numbers mean."""
+    common = {"reason": None, "aheadBy": ahead, "behindBy": behind,
+              "upstream": upstream, "ancestrySource": source}
+    if ahead > 0:
+        # Local commits upstream has never seen: a development checkout, not a
+        # stale one. Reported whether or not it is ALSO behind -- "diverged" is
+        # the honest word when both are non-zero.
+        return dict(common, state=STATE_AHEAD)
+    if behind > 0:
+        return dict(common, state=STATE_BEHIND)
+    return dict(common, state=STATE_CURRENT)
+
+
 def compute_state(*, mode: str, local_version: Optional[str],
                   sha: Optional[str],
                   release_result: Optional[Dict[str, Any]] = None,
                   compare_result: Optional[Dict[str, Any]] = None,
+                  ancestry: Optional[Dict[str, int]] = None,
+                  upstream_sha: Optional[str] = None,
                   ) -> Dict[str, Any]:
     """Reduce the fetch results to one state. The honesty rules live here:
 
@@ -276,6 +345,16 @@ def compute_state(*, mode: str, local_version: Optional[str],
     # ---- commit mode ----
     if not sha:
         return _unknown(REASON_NO_GIT)
+
+    # Preferred path: git already knows. Costs no request, and answers the one
+    # case the API cannot -- an unpushed local commit.
+    if ancestry is not None:
+        up = {"sha": upstream_sha, "branch": UPSTREAM_BRANCH,
+              "url": (compare_url(UPSTREAM_REPO, UPSTREAM_BRANCH, sha)
+                      if upstream_sha else None)}
+        return _from_counts(ancestry["aheadBy"], ancestry["behindBy"], up,
+                            "local-git")
+
     res = compare_result or {}
     status = res.get("status")
     # Checked BEFORE the status branch: an oversized body arrives with a 200,
@@ -298,20 +377,10 @@ def compute_state(*, mode: str, local_version: Optional[str],
     if not isinstance(ahead, int) or not isinstance(behind, int):
         return _unknown(REASON_BAD_RESPONSE)
     base = data.get("base_commit") or {}
-    upstream = {"sha": base.get("sha"),
+    upstream = {"sha": base.get("sha") or upstream_sha,
                 "url": data.get("html_url"),
                 "branch": UPSTREAM_BRANCH}
-    if ahead > 0:
-        # Local commits upstream has never seen: a dev checkout, not a stale
-        # one. Reported whether or not it is also behind -- "diverged" is the
-        # honest word for both being non-zero.
-        return {"state": STATE_AHEAD, "reason": None, "aheadBy": ahead,
-                "behindBy": behind, "upstream": upstream}
-    if behind > 0:
-        return {"state": STATE_BEHIND, "reason": None, "behindBy": behind,
-                "aheadBy": 0, "upstream": upstream}
-    return {"state": STATE_CURRENT, "reason": None, "aheadBy": 0,
-            "behindBy": 0, "upstream": upstream}
+    return _from_counts(ahead, behind, upstream, "github-compare")
 
 
 # ---- the whole check --------------------------------------------------------
@@ -323,6 +392,8 @@ def run_check(*, repo: str = UPSTREAM_REPO, branch: str = UPSTREAM_BRANCH,
               local_version: Optional[str] = None,
               sha: Any = _UNSET,
               fetcher: Optional[Callable[..., Dict[str, Any]]] = None,
+              ancestor_fn: Optional[Callable[[str], Optional[Dict[str, int]]]]
+              = None,
               ) -> Dict[str, Any]:
     """One complete check. ``fetcher`` is injectable so every path above can be
     tested without a network; production passes None and gets ``fetch_json``.
@@ -331,6 +402,7 @@ def run_check(*, repo: str = UPSTREAM_REPO, branch: str = UPSTREAM_BRANCH,
     is not a 200) one compare. The compare's ``base_commit`` doubles as the
     upstream head, so there is no third request just to name it."""
     get = fetcher or fetch_json
+    ancestor_fn = ancestor_fn or local_ancestry
     # A sentinel, not `is None`: a caller passing sha=None means "this install
     # has no sha", and resolving it from disk anyway would make the no-git path
     # untestable on a machine that IS a checkout.
@@ -341,6 +413,8 @@ def run_check(*, repo: str = UPSTREAM_REPO, branch: str = UPSTREAM_BRANCH,
     mode = select_mode(release_result)
 
     compare_result = None
+    ancestry = None
+    upstream_sha = None
     if mode == "commit":
         if not sha:
             # No sha means no question to ask -- do not spend a request to
@@ -350,13 +424,34 @@ def run_check(*, repo: str = UPSTREAM_REPO, branch: str = UPSTREAM_BRANCH,
                                                 "sha": None},
                         "checkedAt": int(time.time())})
             return out
-        compare_result = get(
-            "/repos/%s/compare/%s...%s" % (repo, branch, sha),
-            max_bytes=COMPARE_MAX_BYTES)
+        # Name upstream's head first. It is a small object, and knowing the sha
+        # is what lets git answer locally -- including for a commit GitHub has
+        # never seen, which is precisely where the compare endpoint gives up.
+        head_result = get("/repos/%s/commits/%s" % (repo, branch),
+                          max_bytes=RELEASE_MAX_BYTES)
+        if head_result.get("status") == 200:
+            upstream_sha = ((head_result.get("data") or {}).get("sha")
+                            if isinstance(head_result.get("data"), dict)
+                            else None)
+        if upstream_sha:
+            ancestry = ancestor_fn(upstream_sha)
+        if ancestry is None:
+            # git could not answer (no local object, or not a checkout) -- ask
+            # GitHub, and accept that it may not be able to either.
+            compare_result = get(
+                "/repos/%s/compare/%s...%s" % (repo, branch, sha),
+                max_bytes=COMPARE_MAX_BYTES)
+            if (compare_result.get("status") not in (200, 403, 429)
+                    and compare_result.get("status") is not None
+                    and head_result.get("status") not in (200, None)):
+                # Neither call worked; report the head failure, which is the
+                # more informative of the two.
+                compare_result = head_result
 
     out = compute_state(mode=mode, local_version=local_version, sha=sha,
                         release_result=release_result,
-                        compare_result=compare_result)
+                        compare_result=compare_result,
+                        ancestry=ancestry, upstream_sha=upstream_sha)
     out.update({
         "mode": mode,
         "local": {"version": local_version, "sha": sha},
