@@ -790,6 +790,68 @@ def test_recorder_reaches_every_broker_not_just_the_local_one():
     assert "hostId: recHostId" not in src
 
 
+def test_update_check_names_the_broker_it_asks():
+    """#182, and the same trap #161 closed for the recorder: a mod that reports
+    a VERSION must never be able to report the wrong broker's version.
+
+    hostFetch(host, path) builds its URL as ``(host && host.url) + path`` and
+    only sends Authorization when host.token is set, so a null host is not an
+    error -- it is a silent, unauthenticated request to the SERVING origin. In a
+    version checker that failure is invisible by construction: the answer looks
+    perfectly well-formed, it is just the local broker's answer wearing a peer's
+    name. So the shape is pinned the same way the recorder's is.
+
+    Source-slice asserts, so be honest about the limit: these prove the wiring
+    is shaped right, NOT that a request lands on the right broker. What they do
+    catch is the regression -- a call reaching hostFetch with anything other
+    than a host resolved from an id at call time."""
+    src = (BROKER_DIR / "mods/update/update.js").read_text(encoding="utf-8")
+    # The exact bug, in its two spellings. localHost() resolves to getHosts()[0]
+    # positionally, which is the local broker only by convention; hostFetch(null
+    # ...) does not even do that much, it just hits whoever served the page.
+    # Both are absent from the source ENTIRELY -- comments included, so the
+    # grep stays a grep and cannot be defeated by a mention.
+    assert "localHost()" not in src, \
+        "the update mod must name its broker, not default to getHosts()[0]"
+    assert "hostFetch(null" not in src, \
+        "a null host is an unauthenticated call to the serving origin"
+    # The positive half: hosts come from ids, at call time.
+    assert "hostById(" in src, "hosts are resolved from an id, never captured"
+    assert "function updHost(hostId)" in src
+    assert "return hostById(hostId || LOCAL_HOST_ID);" in src
+    assert "const LOCAL_HOST_ID = 'local';" in src, \
+        "the local broker is a literal id, not a position in the host list"
+    # EVERY hostFetch call site passes the resolved object, not an id, not null,
+    # and not a captured record from an outer scope. Enumerated rather than
+    # spot-checked so a second call site added later cannot slip past.
+    firsts = re.findall(r"hostFetch\(\s*([^,\s)]+)", src)
+    assert firsts, "the mod must actually call hostFetch"
+    assert set(firsts) == {"host"}, \
+        f"hostFetch call sites must pass the resolved host: {sorted(set(firsts))}"
+    # ...and that object is obtained IMMEDIATELY before the request and fails
+    # closed on a named state when the id no longer resolves. Falling through
+    # to a null host is the one outcome that must be impossible.
+    assert re.search(r"const host = updHost\(hid\);\s*\n\s*if \(!host\) \{", src), \
+        "poll must resolve its host next to the request and refuse a null one"
+    assert "st.error = 'no-such-host';" in src
+    assert "'no-such-host':" in src, "the failure has words, not just a token"
+    # Per-host state, so two brokers can hold different answers at once: one set
+    # of module scalars could only ever describe one of them, and "this one is
+    # current, that one is 3 behind" is the normal case for anyone running more
+    # than one.
+    assert "const hostChecks = new Map();" in src
+    assert "function checkStateFor(hostId)" in src
+    assert "checkStateFor(" in src
+    # A broker we could not reach is NOT "could not reach GitHub". 'offline' is
+    # the broker's own word for its egress failing; pinning it on a peer that is
+    # merely asleep reports an outage that is not happening.
+    assert "st.error = 'offline'" not in src, \
+        "a transport failure to a broker must not be reported as GitHub's"
+    assert "'unreachable':" in src and "'broker-error':" in src
+    # It is the SERVED source that matters, not just the file on disk.
+    assert "const LOCAL_HOST_ID = 'local';" in INDEX_HTML
+
+
 def test_recorder_autorecord_setting_is_synced_and_default_off():
     """#151: the auto-record toggle rides the same synced settings primitive as
     the other mod toggles, and ships OFF so the mod stays inert until opted in.

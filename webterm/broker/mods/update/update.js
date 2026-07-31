@@ -57,6 +57,18 @@
                     'disabled': 'update checking is switched off on this '
                         + 'broker. An operator enables it with '
                         + '"update_check_enabled" in the broker config',
+                    // The three below are raised HERE, in the browser, and
+                    // never by a broker. Keeping them separate from 'offline'
+                    // is the whole point: 'offline' is the BROKER saying IT
+                    // could not reach GitHub. Reusing it for a broker that did
+                    // not answer US would announce a GitHub outage every time a
+                    // peer is asleep or its url is wrong — a failure one hop
+                    // earlier, described as one hop further out.
+                    'unreachable': 'this broker did not answer, so its version '
+                        + 'could not be read. That is the connection to the '
+                        + 'broker itself, not to GitHub',
+                    'broker-error': 'this broker answered, but not with a '
+                        + 'version check that could be read',
                     'no-such-host': 'the host this answer belonged to is no '
                         + 'longer configured, so there was nobody left to ask',
                 };
@@ -92,16 +104,41 @@
                     }
                     return st;
                 }
-                // The host the chip and the window currently describe. Resolved
-                // from its ID at every use rather than captured once: a host
-                // object grabbed at init time goes stale the moment its url or
-                // token is edited in Settings, and a stale object aims the
-                // check at the old address.
-                function localHostId() {
-                    const h = hostById('local') || localHost();
-                    return (h && h.id) || 'local';
+                // ---- broker addressing (#161 doctrine) ----
+                // Callers carry a host ID, never a host OBJECT, and the object
+                // is resolved from that id at the moment of the call. A host
+                // object captured once goes stale: prefs adopting a /state
+                // revision REBUILDS the host array, so a kept reference can
+                // hold a url or token that has since been re-entered in
+                // Settings, or name a broker that has been removed outright.
+                //
+                // An unresolved host is not harmless here, which is why nothing
+                // in this mod may fall through to a null one. Handed a NULL
+                // host, hostFetch builds its URL as '' + path and attaches no
+                // Authorization header, so it quietly issues an
+                // UNAUTHENTICATED request to the SERVING origin: this broker
+                // would answer on a peer's behalf, and this broker's version
+                // would then be rendered under the peer's name. That is exactly
+                // the lie the mod exists to prevent, so an id that no longer
+                // resolves fails closed on 'no-such-host' and never reaches
+                // hostFetch at all.
+                //
+                // The local broker is named by the literal id 'local' rather
+                // than by the core's local-host helper: the core synthesises
+                // getHosts()[0] as the local record with id 'local', so the
+                // literal keeps meaning the same broker even if that list is
+                // reordered, and unlike a getHosts()[0] fallback it is
+                // greppable — a 'local' in a diff is a decision somebody made
+                // on purpose, while a positional fallback is one nobody did.
+                const LOCAL_HOST_ID = 'local';
+                function updHost(hostId) {
+                    return hostById(hostId || LOCAL_HOST_ID);
                 }
-                function viewRecord() { return checkStateFor(localHostId()); }
+                // The host the chip and the window currently describe. Held as
+                // an id, not as a record: the record is looked up on every
+                // render so it can never be read out from under the host it
+                // describes.
+                function viewRecord() { return checkStateFor(LOCAL_HOST_ID); }
                 let timer = null;
                 const openWins = new Set();
 
@@ -203,15 +240,18 @@
                 // Everything it learns lands in THAT host's record and nowhere
                 // else.
                 async function poll(hostId) {
-                    const hid = hostId || localHostId();
+                    const hid = hostId || LOCAL_HOST_ID;
                     const st = checkStateFor(hid);
-                    const host = hostById(hid);
+                    // Resolved HERE, immediately before the request, from the
+                    // id — not carried in from the caller and not captured at
+                    // init.
+                    const host = updHost(hid);
                     if (!host) {
                         // The host was removed between scheduling and firing.
-                        // hostFetch(null, …) silently hits the SERVING origin,
-                        // which would report this broker's version under some
-                        // other host's name — so this degrades to unknown
-                        // rather than asking anyone.
+                        // A hostFetch with a null host silently hits the
+                        // SERVING origin, which would report this broker's
+                        // version under some other host's name — so this
+                        // degrades to unknown rather than asking anyone.
                         st.check = null;
                         st.error = 'no-such-host';
                         st.checkedAt = Date.now();
@@ -222,9 +262,21 @@
                     // 20s timeout only ever blocks itself.
                     if (st.inFlight) return;
                     st.inFlight = true;
+                    // Which failure this is, if the try does not finish.
+                    // Starts at 'unreachable' because until hostFetch RESOLVES
+                    // nothing has come back from this broker at all, and is
+                    // narrowed the moment something does. Deliberately never
+                    // 'offline' — that is the broker's own word for "I could
+                    // not reach GitHub", and pinning it on a peer that is
+                    // merely asleep reports an outage that is not happening.
+                    let failure = 'unreachable';
                     try {
                         const r = await hostFetch(host, '/update/check',
                                                   { timeoutMs: 20000 });
+                        // This broker answered. Anything that goes wrong from
+                        // here on is its ANSWER being unusable, not the trip
+                        // to it, and the two must not be reported as one.
+                        failure = 'broker-error';
                         if (r.status === 503) {
                             // The broker's own gate. A capability that is absent
                             // here, NOT an error and NOT "up to date".
@@ -242,7 +294,7 @@
                     } catch (e) {
                         // Degrade to unknown — never to "current".
                         st.check = null;
-                        st.error = 'offline';
+                        st.error = failure;
                         st.checkedAt = Date.now();
                     } finally {
                         st.inFlight = false;
@@ -254,7 +306,7 @@
                 // but who gets polled is deliberately unchanged here, so this
                 // change cannot alter what the current single-broker chip says.
                 // Fanning out is a loop over the host list, not a rewrite.
-                function pollTick() { poll(localHostId()); }
+                function pollTick() { poll(LOCAL_HOST_ID); }
 
                 function start() {
                     stop();
