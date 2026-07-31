@@ -37,6 +37,27 @@
             overflow-wrap: anywhere;
         }
         .app-upd-headline { font-weight: bold; }
+        /* The divider between the shared facts about the comparison and the
+           per-broker block. Without it a shared "Upstream" line reads as
+           belonging to whichever broker row happens to sit above it. */
+        .app-upd-head {
+            margin: 10px 0 3px;
+            padding-bottom: 2px;
+            border-bottom: 1px solid var(--bg-3);
+            color: var(--fg-dim);
+            font-size: 11px;
+            letter-spacing: 0.04em;
+        }
+        /* A broker row's left column carries a NAME, not a field title, so it
+           gets more room than the 88px the labelled rows use — and full
+           foreground colour, because which broker a line describes is not
+           secondary information here. Long labels still wrap rather than
+           squeezing the state out of view (the value column is min-width:0). */
+        .app-upd-hostrow .app-upd-key {
+            min-width: 120px;
+            color: var(--fg);
+            overflow-wrap: anywhere;
+        }
         .app-upd-green { color: var(--ok); }
         .app-upd-amber { color: var(--warn); }
         .app-upd-grey  { color: var(--fg-dim); }

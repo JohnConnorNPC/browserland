@@ -54,9 +54,19 @@
                     'bad-response': 'GitHub’s answer was not in the '
                         + 'expected form',
                     'too-large': 'the comparison was too large to read',
-                    'disabled': 'update checking is switched off on this '
-                        + 'broker. An operator enables it with '
-                        + '"update_check_enabled" in the broker config',
+                    // NOT a transport failure and NOT an error: a broker in
+                    // this state answered us perfectly, it simply never opted
+                    // in. Named 'not-opted-in' rather than 'disabled' on
+                    // purpose — 'disabled' reads as a fault to go and fix, and
+                    // it is also the word this mod's OWN on/off switch wears,
+                    // so one key meaning either would be a key nobody can read.
+                    // The distinction that matters most is against 'offline'
+                    // and 'unreachable' below: those describe a request that
+                    // did not get through, and this one describes an answer.
+                    'not-opted-in': 'update checking is switched off on this '
+                        + 'broker. That is its operator’s choice, not a fault '
+                        + 'here and not a network problem — an operator enables '
+                        + 'it with "update_check_enabled" in the broker config',
                     // The five below are raised HERE, in the browser, and
                     // never by a broker. Keeping them separate from 'offline'
                     // is the whole point: 'offline' is the BROKER saying IT
@@ -151,11 +161,6 @@
                 function updHost(hostId) {
                     return hostById(hostId || LOCAL_HOST_ID);
                 }
-                // The host the chip and the window currently describe. Held as
-                // an id, not as a record: the record is looked up on every
-                // render so it can never be read out from under the host it
-                // describes.
-                function viewRecord() { return checkStateFor(LOCAL_HOST_ID); }
                 let timer = null;
                 const openWins = new Set();
 
@@ -210,7 +215,151 @@
                 function bandFor(s) {
                     if (s === 'current') return 'green';
                     if (s === 'behind') return 'amber';
-                    return 'grey';   // ahead-or-diverged and unknown both
+                    return 'grey';   // every non-answer, and ahead, land here
+                }
+
+                // ---- one host, one state --------------------------------
+                // The four ways a PEER can leave us without an answer. Each is
+                // its own state rather than one lumped 'unknown', because they
+                // ask four different things of whoever reads them: update that
+                // broker, switch checking on over there, re-enter its password,
+                // or go find out why the machine is not answering. Telling an
+                // operator to chase a network fault when the truth is "that
+                // operator never opted in" is the same class of mistake as
+                // claiming 'current' — a confident sentence about the wrong
+                // thing. They are exactly the capability probe's non-'ready'
+                // outcomes, and every one is a REASONS key, so each has words.
+                const PEER_FAILURES = ['route-absent', 'not-opted-in',
+                                       'unauthorized', 'unreachable'];
+                // The fine-grained read of a record: what state() returns, plus
+                // 'pending' for a host nothing has come back from yet, plus the
+                // four above pulled up out of 'unknown'. state() is deliberately
+                // left alone — the single-broker chip still speaks its coarse
+                // vocabulary, so none of this can change what one broker reads
+                // as. Nothing here can return 'current' for a host that did not
+                // answer: 'current' arrives only on st.check.state, which is
+                // only ever assigned from a parsed 200 body.
+                function peerState(st) {
+                    if (!st) return 'unknown';
+                    // No poll has COMPLETED for this host. Its own state on
+                    // purpose (75's 'pending' precedent): 'unknown' would
+                    // announce a failure that has not happened, and 'current'
+                    // would be the exact lie this mod exists to prevent.
+                    if (!st.checkedAt) return 'pending';
+                    if (st.error) {
+                        return PEER_FAILURES.indexOf(st.error) !== -1
+                            ? st.error : 'unknown';
+                    }
+                    return (st.check && st.check.state) || 'unknown';
+                }
+                // Did this host actually TELL us something? Only these three
+                // come from a version check that ran to completion. Every
+                // aggregate below keys "may I say up to date" on this and on
+                // nothing else, so a state added later is un-answered until
+                // somebody deliberately says otherwise.
+                function answered(ps) {
+                    return ps === 'current' || ps === 'behind'
+                        || ps === 'ahead-or-diverged';
+                }
+                // A host's state in words — short enough for one tooltip line
+                // or one window row, and distinct for every state, so two hosts
+                // in different states can never read the same. The long-form
+                // sentence lives in REASONS and rides the window's why-notes.
+                function stateWords(ps, st) {
+                    const chk = st && st.check;
+                    if (ps === 'current') return 'up to date';
+                    if (ps === 'behind') {
+                        const n = chk && chk.behindBy;
+                        return (typeof n === 'number' && n > 0)
+                            ? (n + ' commit' + (n === 1 ? '' : 's') + ' behind')
+                            : 'behind upstream';
+                    }
+                    if (ps === 'ahead-or-diverged') {
+                        const a = (chk && chk.aheadBy) || 0;
+                        const b = (chk && chk.behindBy) || 0;
+                        return 'ahead by ' + a + ' commit' + (a === 1 ? '' : 's')
+                            + (b ? (', behind by ' + b) : '');
+                    }
+                    if (ps === 'pending') return 'checking…';
+                    if (ps === 'route-absent') return 'too old to check';
+                    if (ps === 'not-opted-in') return 'checking not enabled there';
+                    if (ps === 'unauthorized') return 'password refused';
+                    if (ps === 'unreachable') return 'did not answer';
+                    return 'could not be checked';
+                }
+                // Worst first (#149's badge rule: a fault is never hidden behind
+                // a healthy majority). 'behind' leads because it is the one
+                // state with something to DO about it; the peer failures follow;
+                // 'current' is LAST, which is what makes the chip's colour
+                // honest — green is reachable only when every other entry in
+                // this list is absent from the fleet.
+                const WORST_FIRST = ['behind', 'unauthorized', 'unreachable',
+                                     'route-absent', 'not-opted-in', 'unknown',
+                                     'pending', 'ahead-or-diverged', 'current'];
+                // One snapshot row per CONFIGURED host, in host-list order.
+                // Hosts are resolved HERE, at render time, so a broker added or
+                // removed in Settings is in or out of the very next paint with
+                // no separate invalidation step. The row keeps the id as well as
+                // the label so anything that later acts on a row re-resolves
+                // from the id rather than trusting the label it painted.
+                function hostRows() {
+                    return allHosts().map(function (h) {
+                        const st = checkStateFor(h.id);
+                        const ps = peerState(st);
+                        return { id: h.id, label: h.label, hidden: !!h.hidden,
+                                 st: st, ps: ps, words: stateWords(ps, st) };
+                    });
+                }
+                // The fleet in one line. Mirrors the host aggregate badge in 75
+                // (renderAggregateChip): the WORST state colours it, but the
+                // TEXT counts every abnormal host, so one broker that is behind
+                // cannot mask two that never answered.
+                //
+                // The honesty rule lives in `allCurrent`, and that is why this
+                // returns a flag instead of leaving callers to pattern-match the
+                // text: it is true only when the parts list came out EMPTY —
+                // every configured host answered, and every answer was
+                // 'current'. A host that is pending, ahead, unreachable, too
+                // old, or not opted in each puts a part on that list and thereby
+                // takes the phrase "up to date" off the chip.
+                function aggregate(rows) {
+                    const worst = WORST_FIRST.find(function (s) {
+                        return rows.some(function (r) { return r.ps === s; });
+                    }) || 'unknown';
+                    const count = function (fn) { return rows.filter(fn).length; };
+                    const behind = count(function (r) {
+                        return r.ps === 'behind'; });
+                    const ahead = count(function (r) {
+                        return r.ps === 'ahead-or-diverged'; });
+                    const silent = count(function (r) {
+                        return !answered(r.ps); });
+                    const parts = [];
+                    if (behind) parts.push(behind + ' behind');
+                    if (ahead) parts.push(ahead + ' ahead');
+                    if (silent) parts.push(silent + ' unchecked');
+                    // rows is never empty in practice — getHosts() always
+                    // unshifts the local broker — but an empty list must not
+                    // fall out of the counts below as "everything is current".
+                    // Vacuously true is still the one sentence this mod may
+                    // never print without having checked something.
+                    if (!rows.length) parts.push('none configured');
+                    // Every host on its own line, hidden ones included. #178's
+                    // rule, and it applies doubly to a version: hiding a broker
+                    // parks it on the desktop, it does not make that broker's
+                    // build any less stale, so the badge may stop CLAIMING a
+                    // fault but must never stop REPORTING one.
+                    const lines = rows.map(function (r) {
+                        return r.label + ' — ' + r.words
+                            + (r.hidden ? ' — hidden' : '');
+                    });
+                    return {
+                        worst: worst,
+                        allCurrent: parts.length === 0,
+                        text: rows.length
+                            + (rows.length === 1 ? ' broker · ' : ' brokers · ')
+                            + (parts.length ? parts.join(', ') : 'up to date'),
+                        lines: lines,
+                    };
                 }
                 function chipLabel(st, s) {
                     if (s === 'behind') {
@@ -223,20 +372,49 @@
                     return 'version ?';
                 }
 
+                // ONE chip for the whole fleet. Two brokers cannot have two
+                // chips: the taskbar is not a dashboard, and #149 already
+                // settled that argument for the host chips — N collapse into
+                // one aggregate whose tooltip carries the per-host detail.
                 function renderChip() {
-                    const st = viewRecord();
-                    const s = state(st);
-                    // "Quiet when current" hides only the CURRENT state, never
-                    // unknown: an unknown that hid itself would be
-                    // indistinguishable from a green one, which is exactly the
-                    // confusion this mod exists to prevent.
-                    const quiet = quietSetting.get() && s === 'current';
+                    // Read at paint time: the chip must describe the host list
+                    // as it is NOW, not as it was when the mod loaded.
+                    const rows = hostRows();
+                    // One host takes the presentation this mod shipped with,
+                    // verbatim — same label, same tooltip, same coarse state()
+                    // vocabulary — so fanning out cannot change what a
+                    // single-broker install reads. 75's renderHostStatus
+                    // branches on exactly this count for exactly this reason.
+                    const one = rows.length === 1;
+                    const agg = one ? null : aggregate(rows);
+                    const st = one ? rows[0].st : null;
+                    const s = one ? state(st) : null;
+                    // "Quiet when current" hides only the ALL-current case,
+                    // never an unknown: a chip that hid itself while it could
+                    // not check would be indistinguishable from a green one,
+                    // which is exactly the confusion this mod exists to
+                    // prevent. Across N hosts that means every one of them
+                    // answered and every one is current — a single unreachable
+                    // peer keeps the chip on screen, because the fleet's state
+                    // is then not known to be clean.
+                    const allCurrent = one ? (s === 'current') : agg.allCurrent;
+                    const quiet = quietSetting.get() && allCurrent;
                     chip.style.display = quiet ? 'none' : 'inline-flex';
-                    const band = BANDS[bandFor(s)];
+                    const band = BANDS[bandFor(one ? s : agg.worst)];
                     chip.style.borderColor = band.border;
                     chip.style.color = band.fg;
-                    chipText.textContent = chipLabel(st, s);
-                    chip.title = chipTitle(st);
+                    chipText.textContent = one ? chipLabel(st, s) : agg.text;
+                    chip.title = one ? chipTitle(st)
+                        : (agg.lines.join('\n')
+                            + '\n— click for the full report');
+                    // Keyboard/AT parity is cheap, and a multi-line title does
+                    // not exist on touch at all, so the per-host breakdown rides
+                    // aria-label too (75's aggregate badge again). Assigned on
+                    // BOTH paths so dropping from N hosts back to one cannot
+                    // strand the old fleet text on the element.
+                    chip.setAttribute('aria-label', one
+                        ? (chipText.textContent + ' — ' + chip.title)
+                        : (agg.text + ': ' + agg.lines.join('; ')));
                 }
 
                 function chipTitle(st) {
@@ -289,9 +467,12 @@
                 // is not there. "Check now" is the deliberate retry (recheck()).
                 //
                 // Five outcomes. Four of them are failures with words, and each
-                // one is a REASONS key above so the window can say it:
+                // one is a REASONS key above so the window can say it — and,
+                // being REASONS keys, they are also the peer STATES the chip and
+                // the rows render, which is what keeps them from collapsing into
+                // one indistinguishable grey:
                 //   'ready'         ask it — the route is there
-                //   'disabled'      the route is there and that operator never
+                //   'not-opted-in'  the route is there and that operator never
                 //                   opted in. /info already said so, so the
                 //                   request is skipped rather than spent
                 //                   earning a 503 we can already predict
@@ -299,13 +480,13 @@
                 //   'unauthorized'  it refused our password
                 //   'unreachable'   nothing came back from it at all
                 //
-                // NOTE (seam): layer 1 below reads `rec.update`, the capability
-                // /info now publishes. fetchModCatalog does not yet copy that
-                // key onto the record it caches, so until it does this layer is
-                // inert and the probe falls through to layers 2-4. That is safe
-                // — those layers never ask a peer that lacks the route — it only
-                // costs the shortcut that would let a `check_enabled:false`
-                // broker be answered without a round trip.
+                // Layer 1 below reads `rec.update`, the capability /info
+                // publishes, which fetchModCatalog copies onto the record it
+                // caches (81, `rec.update = ...`). If that copy is ever dropped
+                // the probe still fails safe: it falls through to layers 2-4,
+                // which never ask a peer that lacks the route — the only loss is
+                // the shortcut that answers a `check_enabled:false` broker
+                // without a round trip.
                 function servesUpdateMod(mods) {
                     // A peer's catalog is UNTRUSTED input, so this walks it the
                     // way mod-sync's planFor does: one null or non-object row is
@@ -342,7 +523,7 @@
                         const upd = rec.update;
                         if (upd && typeof upd === 'object') {
                             return upd.check_enabled === false
-                                ? 'disabled' : 'ready';
+                                ? 'not-opted-in' : 'ready';
                         }
                         // (2) No key, but the update MOD is in its served
                         // catalog. The mod and the route ship in the same build,
@@ -460,15 +641,22 @@
                             failure = 'broker-error';
                             if (r.status === 503) {
                                 // The broker's own gate. A capability that is
-                                // absent here, NOT an error and NOT "up to
-                                // date". Still reachable after the probe: an
-                                // older peer can have the route while publishing
-                                // no `update` key on /info, and then the 503 is
-                                // the only authority on the gate. Same wording
+                                // absent here — NOT an error, NOT "up to date",
+                                // and emphatically NOT a transport failure: this
+                                // broker was reached and it answered. Landing a
+                                // 503 on 'offline' or 'unreachable' would report
+                                // a machine that is up and healthy as a network
+                                // problem, and send whoever read it looking for
+                                // a fault that does not exist.
+                                //
+                                // Still reachable after the probe: an older peer
+                                // can have the route while publishing no
+                                // `update` key on /info, and then the 503 is the
+                                // only authority on the gate. Same reason key
                                 // either way, so an operator cannot tell (and
                                 // does not need to) which of the two said it.
                                 st.check = null;
-                                st.error = 'disabled';
+                                st.error = 'not-opted-in';
                             } else if (!r.ok) {
                                 throw new Error('HTTP ' + r.status);
                             } else {
@@ -492,11 +680,55 @@
                     renderAll();
                 }
 
-                // The driver. Still LOCAL-ONLY: the state below it is per host,
-                // but who gets polled is deliberately unchanged here, so this
-                // change cannot alter what the current single-broker chip says.
-                // Fanning out is a loop over the host list, not a rewrite.
-                function pollTick() { poll(LOCAL_HOST_ID); }
+                // The driver. EVERY configured host, not just the local one:
+                // per-host state is worth nothing if only one host is ever
+                // filled in, and "this one is current, that one is three weeks
+                // stale" is the normal case for anybody running more than one
+                // broker — it is the reason to look at all.
+                //
+                // Concurrent, never sequential. Each poll settles into its own
+                // record and repaints as it lands, so a broker sitting on the
+                // full 20 s timeout delays nothing but itself; a serial loop
+                // would make every tick cost the sum of the slowest, which is
+                // precisely the barrier 75's taskbar tick had to remove. Nothing
+                // is awaited across hosts, so there is no shared deadline to
+                // miss. Re-entry is already handled per host by st.inFlight, so
+                // a tick firing while the previous one is still out re-polls
+                // only the hosts that have come back.
+                //
+                // opts is passed straight through, so "Check now" re-probes the
+                // whole fleet on the one code path that polls it.
+                function pollTick(opts) {
+                    const hosts = allHosts();
+                    pruneChecks(hosts);
+                    // .catch because nobody awaits this. poll() swallows its own
+                    // failures, but an unguarded rejection from anywhere else in
+                    // it would surface as an unhandled rejection on the page
+                    // rather than as a state in this mod.
+                    return Promise.all(hosts.map(function (h) {
+                        return poll(h.id, opts);
+                    })).catch(function () {});
+                }
+                // Records for hosts that are no longer configured are DROPPED,
+                // never merged forward — the same GC 75 runs over hostPolls
+                // (~line 691) after each taskbar tick. Nothing renders them
+                // (every reader walks allHosts()), so this is about the map not
+                // growing for the life of a long-lived tab as hosts are added
+                // and removed.
+                //
+                // A record deleted while its own poll is in flight is simply
+                // orphaned: that poll writes into an object nobody holds any
+                // more and its answer is discarded, which is the correct outcome
+                // for a broker that has since been removed. checkStateFor()
+                // would hand a re-added host a fresh record, so the orphan can
+                // never be read back out under the new one's name.
+                function pruneChecks(hosts) {
+                    const ids = new Set(hosts.map(function (h) {
+                        return h.id; }));
+                    for (const id of Array.from(hostChecks.keys())) {
+                        if (!ids.has(id)) hostChecks.delete(id);
+                    }
+                }
                 // The deliberate retry. The capability probe caches its outcome
                 // — including its failures — precisely so a tick can never
                 // re-ask a broker that is asleep or too old, which leaves
@@ -505,7 +737,11 @@
                 // /info as well as re-asking for the version. Without this, a
                 // broker updated while the tab was open would stay 'route-absent'
                 // until the page was reloaded.
-                function recheck() { poll(LOCAL_HOST_ID, { refresh: true }); }
+                //
+                // Fleet-wide, because the window it sits in reports the fleet: a
+                // button that refreshed one row of a list it did not name would
+                // leave the other rows looking equally fresh and quietly stale.
+                function recheck() { return pollTick({ refresh: true }); }
 
                 function start() {
                     stop();
@@ -536,7 +772,8 @@
                     const refreshBtn = document.createElement('button');
                     refreshBtn.type = 'button';
                     refreshBtn.textContent = 'Check now';
-                    refreshBtn.title = 're-ask the broker (it caches for a day)';
+                    refreshBtn.title = 're-ask every configured broker '
+                        + '(each caches its answer for a day)';
                     toolbar.appendChild(refreshBtn);
                     const checkedEl = document.createElement('span');
                     checkedEl.className = 'app-upd-checked';
@@ -605,10 +842,13 @@
                 }
 
                 // One labelled row. Values go through .textContent — everything
-                // here except our own literals came off the network.
-                function addRow(body, label, value, cls) {
+                // here except our own literals came off the network, and a
+                // broker label is user-entered text on top of that. rowCls lets
+                // the per-broker block widen its own label column without
+                // needing a second copy of this function.
+                function addRow(body, label, value, cls, rowCls) {
                     const row = document.createElement('div');
-                    row.className = 'app-upd-row';
+                    row.className = 'app-upd-row' + (rowCls ? ' ' + rowCls : '');
                     const k = document.createElement('span');
                     k.className = 'app-upd-key';
                     k.textContent = label;
@@ -629,78 +869,150 @@
                     return el;
                 }
 
-                // Idempotent: rebuild from the record every call. The window
-                // still shows the LOCAL broker's record — one host per window
-                // is the shape it has today, and picking a host is a later
-                // change; what matters here is that it reads a record it names,
-                // not whatever the module last happened to see.
+                // A section divider. The window now has two kinds of row —
+                // facts about the comparison (shared by every broker, because
+                // the upstream is one constant repository) and facts about one
+                // broker — and a reader who cannot tell them apart would read a
+                // shared "Upstream" line as belonging to the row above it.
+                function addHead(body, text) {
+                    const el = document.createElement('div');
+                    el.className = 'app-upd-head';
+                    el.textContent = text;
+                    body.appendChild(el);
+                    return el;
+                }
+
+                // The toolbar's timestamp. Across several brokers it reports the
+                // OLDEST completed check, never the newest: the newest would
+                // date the freshest row and silently imply the same freshness
+                // for a broker whose answer is an hour older. While ANY host has
+                // no completed poll at all it reads 'checking…', because there
+                // is no honest single time to print with one still outstanding.
+                // With one host that is exactly the behaviour it always had.
+                function renderChecked(win, rows) {
+                    let oldest = 0;
+                    for (const r of rows) {
+                        if (!r.st.checkedAt) { oldest = 0; break; }
+                        oldest = oldest
+                            ? Math.min(oldest, r.st.checkedAt) : r.st.checkedAt;
+                    }
+                    let t = '';
+                    if (oldest) {
+                        try { t = new Date(oldest).toLocaleTimeString(); }
+                        catch (_) {}
+                    }
+                    win.checkedEl.textContent = oldest
+                        ? ('checked ' + t) : 'checking…';
+                    win.checkedEl.title = rows.length > 1
+                        ? 'the oldest of these checks — each broker is asked, '
+                            + 'and answers, separately'
+                        : '';
+                }
+
+                // Idempotent: rebuild from the records every call. ONE ROW PER
+                // CONFIGURED HOST — this window is where the question "which
+                // broker?" is answered in full, so it names every one of them
+                // and gives each its own state in words rather than describing
+                // whichever broker the module last happened to look at.
+                //
+                // Rows come from hostRows(), the same reader the chip uses, so
+                // the chip and the window cannot disagree about a host: there is
+                // one derivation of "what state is this broker in", not two.
                 function renderWindow(win) {
                     if (!win || win.disposed) return;
-                    const st = viewRecord();
-                    const chk = st.check;
-                    if (win.checkedEl) {
-                        let t = '';
-                        if (st.checkedAt) {
-                            try {
-                                t = new Date(st.checkedAt).toLocaleTimeString();
-                            } catch (_) {}
-                        }
-                        // checkedAt 0 = no poll has COMPLETED for this host yet,
-                        // so it says "checking…" rather than dating an answer
-                        // that was never established.
-                        win.checkedEl.textContent = st.checkedAt
-                            ? ('checked ' + t) : 'checking…';
-                    }
+                    const rows = hostRows();
+                    const agg = aggregate(rows);
+                    const one = rows.length === 1;
+                    if (win.checkedEl) renderChecked(win, rows);
                     const body = win.body;
                     body.innerHTML = '';
-                    const s = state(st);
 
-                    const headline = addRow(body, 'Status', ({
-                        'current': 'up to date',
-                        'behind': 'a newer build is available',
-                        'ahead-or-diverged': 'this checkout is ahead of upstream',
-                        'unknown': 'could not be established',
-                    })[s] || 'could not be established', 'app-upd-' + bandFor(s));
+                    // The headline. With one broker it is the sentence this
+                    // window has always opened with; with several it is the
+                    // chip's own aggregate, so the two surfaces say the same
+                    // thing in the same words. Banded from the WORST state
+                    // either way, which for a single host is that host's.
+                    const headline = addRow(body, 'Status', one
+                        ? (({
+                            'current': 'up to date',
+                            'behind': 'a newer build is available',
+                            'ahead-or-diverged':
+                                'this checkout is ahead of upstream',
+                            'unknown': 'could not be established',
+                        })[state(rows[0].st)] || 'could not be established')
+                        : agg.text, 'app-upd-' + bandFor(agg.worst));
                     headline.classList.add('app-upd-headline');
 
-                    const local = (chk && chk.local) || {};
-                    addRow(body, 'This build', local.version
-                        ? (local.version + (local.sha
-                            ? ('  (' + String(local.sha).slice(0, 10) + ')') : ''))
-                        : 'unknown');
-
-                    const up = chk && chk.upstream;
+                    // The shared facts. Read from the LOCAL broker's record on
+                    // purpose: the upstream repository is one constant for every
+                    // broker in the list, and the comparison this browser can
+                    // put a link on is the one the serving broker ran. A peer's
+                    // own upstream row would be the same repository read a few
+                    // hours apart — noise per host, not information.
+                    const localSt = checkStateFor(LOCAL_HOST_ID);
+                    const localChk = localSt.check;
+                    if (localChk && localChk.repo) {
+                        addRow(body, 'Tracking', localChk.repo);
+                    }
+                    const up = localChk && localChk.upstream;
                     if (up) {
                         addRow(body, 'Upstream', up.tag
                             || (up.sha ? String(up.sha).slice(0, 10) : '—')
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
-                    if (chk && chk.repo) addRow(body, 'Tracking', chk.repo);
 
-                    if (s === 'behind' && typeof chk.behindBy === 'number') {
-                        addRow(body, 'Behind by', chk.behindBy + ' commit'
-                            + (chk.behindBy === 1 ? '' : 's'));
+                    // ---- one row per broker ----
+                    addHead(body, one ? 'This broker' : 'Brokers');
+                    for (const r of rows) {
+                        // The state in words first, because it is the answer;
+                        // the build second, because it is the evidence. Both
+                        // through addRow, i.e. through .textContent: the label
+                        // is user-entered and the version and sha came off the
+                        // network.
+                        const detail = [r.words];
+                        const loc = (r.st.check && r.st.check.local) || {};
+                        if (loc.version || loc.sha) {
+                            // The SHORT sha is what makes two builds of the same
+                            // version tellable apart at a glance — a version
+                            // alone cannot do it, which is the same reason
+                            // 'no-git' is an unknown rather than a match.
+                            detail.push(String(loc.version || 'unknown')
+                                + (loc.sha
+                                    ? ('  (' + String(loc.sha).slice(0, 10)
+                                        + ')')
+                                    : ''));
+                        }
+                        addRow(body, r.label + (r.hidden ? '  (hidden)' : ''),
+                               detail.join('  ·  '),
+                               'app-upd-' + bandFor(r.ps), 'app-upd-hostrow');
                     }
-                    if (s === 'ahead-or-diverged') {
-                        const a = chk && chk.aheadBy;
-                        const b = chk && chk.behindBy;
-                        addRow(body, 'Ahead by', (a || 0) + ' commit'
-                            + (a === 1 ? '' : 's')
-                            + (b ? (', behind by ' + b) : ''));
+
+                    // Why each silent broker is silent. The most important text
+                    // in the window: it is what stops a row that is not green
+                    // from being read as "probably fine". Named with the broker
+                    // it belongs to, because among N rows an unattributed reason
+                    // belongs to nobody. 'pending' is skipped — a check still
+                    // running is not a failure and has no reason to give.
+                    for (const r of rows) {
+                        if (answered(r.ps) || r.ps === 'pending') continue;
+                        const code = reasonCode(r.st);
+                        addNote(body, r.label + ' — ' + (REASONS[code]
+                            || 'the reason was not reported') + '.',
+                            'app-upd-why');
+                    }
+
+                    if (rows.some(function (r) {
+                        return r.ps === 'ahead-or-diverged'; })) {
                         addNote(body, 'A checkout with commits upstream has '
                             + 'never seen is a development checkout, not a '
                             + 'stale one.');
                     }
 
-                    if (s === 'unknown') {
-                        const code = reasonCode(st);
-                        addNote(body, 'Why: ' + (REASONS[code]
-                            || 'the reason was not reported') + '.',
-                            'app-upd-why');
-                    }
-
-                    // The link out. Built from our own constants plus the sha —
-                    // href is assigned, never innerHTML'd.
+                    // The link out, and it is the LOCAL broker's comparison:
+                    // the url came from that broker's own check, so labelling it
+                    // with anyone else's range would be a fabricated link. Built
+                    // from that value plus our own literals — href is assigned,
+                    // never innerHTML'd.
                     if (up && (up.url || up.tag)) {
                         const a = document.createElement('a');
                         a.className = 'app-upd-link';
@@ -719,12 +1031,12 @@
                         + 'changes are invisible here and this reflects your '
                         + 'last commit only.', 'app-upd-caveat');
 
-                    if (s === 'behind') {
-                        addNote(body, 'To update: stop the broker, run '
-                            + '"git pull --ff-only" in the checkout, reinstall '
-                            + 'dependencies if pyproject.toml changed, then '
-                            + 'start it again and reload this page.',
-                            'app-upd-howto');
+                    if (rows.some(function (r) { return r.ps === 'behind'; })) {
+                        addNote(body, 'To update a broker that is behind: stop '
+                            + 'it, run "git pull --ff-only" in its checkout, '
+                            + 'reinstall dependencies if pyproject.toml '
+                            + 'changed, then start it again and reload this '
+                            + 'page.', 'app-upd-howto');
                     }
                 }
 
