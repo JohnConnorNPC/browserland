@@ -86,6 +86,24 @@
         function helpRenderFrags(el, blocks, q) {
             if (!Array.isArray(blocks)) return;
             for (const blk of blocks) {
+                if (blk.t === 'pre') {
+                    // Fenced code sample: one 'code' span carrying the WHOLE
+                    // block, real '\n' + original indentation intact (the
+                    // parser no longer folds it to a single space-joined 'p').
+                    // A <pre> (not a <div>) is what lets those newlines survive
+                    // HTML whitespace collapsing; .help-b-pre pairs it with
+                    // `white-space: pre`. Text still goes through
+                    // helpAppendHighlighted (text nodes + <mark> only), so a
+                    // query match highlights inside code exactly like anywhere
+                    // else and the XSS boundary is unchanged.
+                    const pre = document.createElement('pre');
+                    pre.className = 'help-b help-b-pre';
+                    for (const sp of (blk.spans || [])) {
+                        helpAppendHighlighted(pre, sp.v, q);
+                    }
+                    el.appendChild(pre);
+                    continue;
+                }
                 const line = document.createElement('div');
                 line.className = 'help-b help-b-' +
                     (blk.t === 'bullet' ? 'li' : blk.t === 'sub' ? 'sub' : 'p');

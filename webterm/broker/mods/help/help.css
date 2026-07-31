@@ -170,6 +170,18 @@
         .app-help .help-b-li { padding-left: 12px; text-indent: -10px; }
         .app-help .help-b-sub { font-weight: bold; color: var(--fg); margin-top: 8px; }
         .app-help .help-b-dot { color: var(--accent); }
+        /* Fenced code sample: a real <pre>, so a 'pre' block's '\n' characters
+           render as line breaks instead of collapsing under normal HTML
+           whitespace rules. white-space: pre (not pre-wrap) keeps a long curl
+           line on one line and lets overflow-x scroll it inside its own box
+           rather than stretching the Help window. */
+        .app-help .help-b-pre {
+            font-family: monospace; font-size: 11px;
+            white-space: pre; overflow-x: auto;
+            padding: 6px 8px; border-radius: 4px;
+            background: color-mix(in srgb, var(--bg-3) 70%, black);
+            border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+        }
         .app-help .help-code {
             font-family: monospace; font-size: 11px;
             padding: 1px 4px; border-radius: 3px;

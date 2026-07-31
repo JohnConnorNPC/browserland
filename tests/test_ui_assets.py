@@ -3433,6 +3433,42 @@ def test_help_toc_resolves_svg_app_icons():
     assert ".help-section-icon svg" in hcss
 
 
+def test_help_pre_block_renders_as_real_pre():
+    # The corpus parser emits a 'pre' block for fenced code: one 'code' span
+    # carrying the WHOLE block, real '\n' + original indentation intact
+    # (no longer folded to a single space-joined 'p'). helpRenderFrags must
+    # render that as an actual <pre>, not a <div class="help-b-p">
+    # paragraph -- a div would let normal HTML whitespace collapsing eat
+    # every newline (a live regression in the working tree without this
+    # branch).
+    src = (BROKER_DIR / "mods" / "help" / "help.js").read_text(encoding="utf-8")
+    body = _frag_fn(src, "function helpRenderFrags(")
+    assert "blk.t === 'pre'" in body
+    assert "document.createElement('pre')" in body
+    assert "help-b help-b-pre" in body
+    # Text still goes through helpAppendHighlighted (text nodes + <mark>
+    # only, never innerHTML), so search-term highlighting still works
+    # inside a code sample and the XSS boundary guarded by
+    # test_help_corpus.py's test_help_render_path_has_no_innerhtml is
+    # unchanged.
+    assert "helpAppendHighlighted(pre, sp.v, q)" in body
+    assert "blk.t === 'pre'" in INDEX_HTML
+    assert "help-b help-b-pre" in INDEX_HTML
+
+    # And the CSS keeps those newlines visible: monospace + preserved
+    # whitespace + its OWN horizontal scroll (not a window-stretching
+    # overflow) for something like a long curl line. The rule lives beside
+    # the other .help-b-* rules in the Help MOD's css -- 12_css_help.css is
+    # a legacy filename that kept only the shared resize handles when #78
+    # extracted every Help-specific selector out of core.
+    css = (BROKER_DIR / "mods" / "help" / "help.css").read_text(encoding="utf-8")
+    rule = _css_rule(css, ".app-help .help-b-pre")
+    assert "font-family: monospace;" in rule
+    assert "white-space: pre;" in rule
+    assert "overflow-x: auto;" in rule
+    assert ".app-help .help-b-pre" in INDEX_HTML
+
+
 def test_chip_icons_use_registry():
     # #119 follow-up: the aistatus + clipboard taskbar chips and git's title-bar
     # button render the SAME registry SVGs (via appIconSvg) instead of an emoji /
