@@ -57,7 +57,7 @@
                     'disabled': 'update checking is switched off on this '
                         + 'broker. An operator enables it with '
                         + '"update_check_enabled" in the broker config',
-                    // The three below are raised HERE, in the browser, and
+                    // The five below are raised HERE, in the browser, and
                     // never by a broker. Keeping them separate from 'offline'
                     // is the whole point: 'offline' is the BROKER saying IT
                     // could not reach GitHub. Reusing it for a broker that did
@@ -71,6 +71,23 @@
                         + 'version check that could be read',
                     'no-such-host': 'the host this answer belonged to is no '
                         + 'longer configured, so there was nobody left to ask',
+                    // The last two come from the capability probe below, before
+                    // any version check is sent. 'route-absent' is the only
+                    // reason in this whole table that describes a request that
+                    // was never made: the peer is running a build from before
+                    // the check existed, and we know that from its /info rather
+                    // than from watching the request fail.
+                    'route-absent': 'this broker is running a build from before '
+                        + 'update checking existed, so it has no version check '
+                        + 'to ask for. It is deliberately not asked — the '
+                        + 'request would die in that broker’s cross-origin '
+                        + 'preflight and arrive back here as an unexplained '
+                        + 'network error, which reads exactly like a machine '
+                        + 'that is asleep. Update that broker and this answers '
+                        + 'itself',
+                    'unauthorized': 'this broker refused our password, so '
+                        + 'nothing about it could be read — set its password on '
+                        + 'the Browser tab in Settings',
                 };
 
                 // ---- live state (NOT persisted — it is a live check) ----
@@ -233,13 +250,159 @@
                     return 'could not check: ' + (r || 'reason unavailable');
                 }
 
+                // ---- can this broker even be asked? (#182) ----------------
+                // GET /update/check is a NEW route. A peer running a build from
+                // before it existed has no handler for that path and no entry
+                // for it in the explicit OPTIONS preflight list, so a
+                // cross-origin request to it dies in the preflight and comes
+                // back as an opaque TypeError — the very same TypeError a
+                // sleeping machine produces. Asking-and-guessing would therefore
+                // collapse "I could not reach it" and "it is too old to have the
+                // route" into one indistinguishable failure, and the second of
+                // those is not really a failure at all: it is a fixed fact about
+                // that broker which we could have KNOWN before spending a
+                // request on it.
+                //
+                // So nothing is asked until the answer is known to exist. The
+                // probe rides GET /info — a route every broker back to the
+                // beginning answers, and one already in every broker's preflight
+                // list. That is exactly why the capability was published there
+                // (app.py `_info`, `update: {check_enabled, apply_enabled}`)
+                // instead of on a route of its own: an older peer answers /info
+                // normally and simply lacks the key, which is a difference a
+                // client can SEE, rather than one it has to infer from a
+                // network error.
+                //
+                // It does NOT fetch /info itself. fetchModCatalog() in the
+                // control panel already GETs it, already classifies the outcome
+                // into five states, and already caches that outcome — failures
+                // included. A second fetcher here would be a second opinion
+                // about the same peer, and two caches that can disagree about
+                // whether a broker is awake is precisely how one pane ends up
+                // saying "asleep" while another says "fine". This reads the
+                // shared record and derives from it.
+                //
+                // Caching is not re-implemented for the same reason: that shared
+                // record IS the cache. A peer that is asleep is probed once and
+                // answered from memory on every tick afterwards, so a 30-minute
+                // poll can never turn into a retry loop against a machine that
+                // is not there. "Check now" is the deliberate retry (recheck()).
+                //
+                // Five outcomes. Four of them are failures with words, and each
+                // one is a REASONS key above so the window can say it:
+                //   'ready'         ask it — the route is there
+                //   'disabled'      the route is there and that operator never
+                //                   opted in. /info already said so, so the
+                //                   request is skipped rather than spent
+                //                   earning a 503 we can already predict
+                //   'route-absent'  it predates the route. NOT asked.
+                //   'unauthorized'  it refused our password
+                //   'unreachable'   nothing came back from it at all
+                //
+                // NOTE (seam): layer 1 below reads `rec.update`, the capability
+                // /info now publishes. fetchModCatalog does not yet copy that
+                // key onto the record it caches, so until it does this layer is
+                // inert and the probe falls through to layers 2-4. That is safe
+                // — those layers never ask a peer that lacks the route — it only
+                // costs the shortcut that would let a `check_enabled:false`
+                // broker be answered without a round trip.
+                function servesUpdateMod(mods) {
+                    // A peer's catalog is UNTRUSTED input, so this walks it the
+                    // way mod-sync's planFor does: one null or non-object row is
+                    // enough to throw on `m.id` and take the whole probe down
+                    // with it, and a probe that throws is a broker reported as
+                    // unreachable for a shape we could have stepped over.
+                    if (!Array.isArray(mods)) return false;
+                    for (const m of mods) {
+                        if (m && typeof m === 'object' && m.id === 'update') {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                // The layering, most authoritative first. Every branch ends in
+                // an outcome; nothing falls through to "ask it and hope".
+                function capabilityFrom(rec) {
+                    if (!rec) return 'unreachable';
+                    // Did this peer ANSWER /info? On 'unauthorized' and
+                    // 'unreachable' the record is the fetcher's own default
+                    // shape (empty mods, no keys) rather than anything the peer
+                    // said, so reading a capability out of one would be reading
+                    // our own placeholder back as if it were evidence.
+                    const answered = rec.state === 'ok'
+                        || rec.state === 'headless'
+                        || rec.state === 'unsupported';
+                    if (answered) {
+                        // (1) The capability itself. Authoritative: the key only
+                        // exists on a build that also registers the route, so
+                        // its mere presence proves the route is there — and it
+                        // is the ONLY source that knows whether that operator
+                        // opted in, which is why a check_enabled:false broker is
+                        // answered from here instead of over the wire.
+                        const upd = rec.update;
+                        if (upd && typeof upd === 'object') {
+                            return upd.check_enabled === false
+                                ? 'disabled' : 'ready';
+                        }
+                        // (2) No key, but the update MOD is in its served
+                        // catalog. The mod and the route ship in the same build,
+                        // so the row is proof of the route — and it stays proof
+                        // whether or not anybody has the mod switched on, since
+                        // /info reports what a broker SERVES, not what some
+                        // browser runs.
+                        if (servesUpdateMod(rec.mods)) return 'ready';
+                        // (3) Headless. `mods` is empty on a broker that serves
+                        // no page REGARDLESS of what routes it has (the catalog
+                        // is only populated inside app.py's serve_ui block), so
+                        // here the empty array is evidence of nothing at all.
+                        // Absence of proof is not proof of absence: ask, and let
+                        // the answer — or the failure to get one — decide.
+                        if (rec.state === 'headless') return 'ready';
+                        // (4) It answered, it serves a UI, it published no
+                        // capability and it serves no update mod: it predates
+                        // #182. Also where 'unsupported' lands — a broker whose
+                        // /info has no `mods` array at all predates #157, and
+                        // anything older than #157 is necessarily older than
+                        // #182 too. Either way the route is not there, so the
+                        // request that would have failed opaquely is never sent.
+                        return 'route-absent';
+                    }
+                    if (rec.state === 'unauthorized') return 'unauthorized';
+                    return 'unreachable';
+                }
+                // Takes the RESOLVED host, not an id: it is called from inside
+                // poll(), immediately after poll resolved that host, and both
+                // the probe and the check it authorises are deliberately aimed
+                // at that one resolved record. Re-resolving in between would
+                // open the door to probing one broker and asking another.
+                async function capabilityFor(host, refresh) {
+                    // Fetch only when nothing is cached for this host, or when
+                    // an operator explicitly asked for a re-probe. A cached
+                    // FAILURE counts as cached: it is the answer. Re-asking a
+                    // broker that did not answer, every tick, for as long as the
+                    // tab is open, is the loop this exists to avoid.
+                    if (refresh || !modCatalogCache.has(host.id)) {
+                        // Deliberately NOT gated on modCatalogFetching. That set
+                        // marks an in-flight GET but carries no promise to wait
+                        // on, so skipping on it would leave us with no record
+                        // and report a live broker as unreachable. A duplicate
+                        // /info costs one request; a wrong verdict is the bug
+                        // this whole mod is written around.
+                        try { await fetchModCatalog(host); } catch (_) {}
+                    }
+                    return capabilityFrom(modCatalogCache.get(host.id));
+                }
+
                 // ---- the poll ----
                 // Takes a host ID, never a host object: the object is resolved
                 // here, at call time, so an edited url/token is picked up on the
                 // next poll instead of the check being aimed at a dead address.
                 // Everything it learns lands in THAT host's record and nowhere
                 // else.
-                async function poll(hostId) {
+                //
+                // opts.refresh forces the capability probe to re-read /info
+                // instead of trusting what it already knows about this broker.
+                async function poll(hostId, opts) {
                     const hid = hostId || LOCAL_HOST_ID;
                     const st = checkStateFor(hid);
                     // Resolved HERE, immediately before the request, from the
@@ -269,28 +432,55 @@
                     // 'offline' — that is the broker's own word for "I could
                     // not reach GitHub", and pinning it on a peer that is
                     // merely asleep reports an outage that is not happening.
+                    // This covers the CHECK only: the capability probe below
+                    // reports its own outcomes and swallows its own transport
+                    // failure, so it never lands here.
                     let failure = 'unreachable';
                     try {
-                        const r = await hostFetch(host, '/update/check',
-                                                  { timeoutMs: 20000 });
-                        // This broker answered. Anything that goes wrong from
-                        // here on is its ANSWER being unusable, not the trip
-                        // to it, and the two must not be reported as one.
-                        failure = 'broker-error';
-                        if (r.status === 503) {
-                            // The broker's own gate. A capability that is absent
-                            // here, NOT an error and NOT "up to date".
+                        // Ask nothing until it is established that there is
+                        // something there to ask. Every outcome except 'ready'
+                        // IS the answer for this tick — it is recorded as the
+                        // reason and no version check is sent, which for
+                        // 'route-absent' is the entire point: that request would
+                        // have failed its preflight and been reported as a
+                        // machine that is asleep.
+                        const cap = await capabilityFor(
+                            host, !!(opts && opts.refresh));
+                        if (cap !== 'ready') {
                             st.check = null;
-                            st.error = 'disabled';
-                        } else if (!r.ok) {
-                            throw new Error('HTTP ' + r.status);
+                            st.error = cap;
+                            st.checkedAt = Date.now();
                         } else {
-                            const j = await r.json();
-                            if (!j || !j.ok || !j.check) throw new Error('bad-response');
-                            st.check = j.check;
-                            st.error = null;
+                            const r = await hostFetch(host, '/update/check',
+                                                      { timeoutMs: 20000 });
+                            // This broker answered. Anything that goes wrong
+                            // from here on is its ANSWER being unusable, not the
+                            // trip to it, and the two must not be reported as
+                            // one.
+                            failure = 'broker-error';
+                            if (r.status === 503) {
+                                // The broker's own gate. A capability that is
+                                // absent here, NOT an error and NOT "up to
+                                // date". Still reachable after the probe: an
+                                // older peer can have the route while publishing
+                                // no `update` key on /info, and then the 503 is
+                                // the only authority on the gate. Same wording
+                                // either way, so an operator cannot tell (and
+                                // does not need to) which of the two said it.
+                                st.check = null;
+                                st.error = 'disabled';
+                            } else if (!r.ok) {
+                                throw new Error('HTTP ' + r.status);
+                            } else {
+                                const j = await r.json();
+                                if (!j || !j.ok || !j.check) {
+                                    throw new Error('bad-response');
+                                }
+                                st.check = j.check;
+                                st.error = null;
+                            }
+                            st.checkedAt = Date.now();
                         }
-                        st.checkedAt = Date.now();
                     } catch (e) {
                         // Degrade to unknown — never to "current".
                         st.check = null;
@@ -307,6 +497,15 @@
                 // change cannot alter what the current single-broker chip says.
                 // Fanning out is a loop over the host list, not a rewrite.
                 function pollTick() { poll(LOCAL_HOST_ID); }
+                // The deliberate retry. The capability probe caches its outcome
+                // — including its failures — precisely so a tick can never
+                // re-ask a broker that is asleep or too old, which leaves
+                // exactly one way for that verdict to ever change: somebody
+                // asking for it. "Check now" is that somebody, so it re-reads
+                // /info as well as re-asking for the version. Without this, a
+                // broker updated while the tab was open would stay 'route-absent'
+                // until the page was reloaded.
+                function recheck() { poll(LOCAL_HOST_ID, { refresh: true }); }
 
                 function start() {
                     stop();
@@ -382,7 +581,7 @@
                             btn.removeEventListener('click', onClick);
                         });
                     };
-                    wireBtn(refreshBtn, function () { pollTick(); });
+                    wireBtn(refreshBtn, function () { recheck(); });
 
                     wireAppChrome(win, chrome);
 

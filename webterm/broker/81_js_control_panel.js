@@ -701,7 +701,7 @@
         // below: a render must never re-fetch after a failed fetch, or a sleeping
         // broker turns the section into a hot retry loop. Re-selecting the tab is
         // the retry, and it is a deliberate one.
-        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy}
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update}
         const modCatalogFetching = new Set();   // hostIds with an in-flight GET
         // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
         // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
@@ -713,7 +713,7 @@
         //   unreachable  - down, black-holed, or CORS-blocked
         async function fetchModCatalog(host) {
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
-                          policy: {} };
+                          policy: {}, update: null };
             try {
                 const r = await hostFetch(host, '/info', { cache: 'no-store' });
                 if (r.status === 401 || r.status === 403) {
@@ -726,6 +726,13 @@
                         rec.modsEnabled = (j.mods_enabled !== false);
                         rec.policy = sanitizeModPolicy(j.mod_policy);
                         rec.state = (j.serve_ui === false) ? 'headless' : 'ok';
+                        // #185: carried through for the update mod's capability
+                        // probe. Its PRESENCE is the signal that this peer has
+                        // /update/check at all — a headless peer reports an
+                        // empty `mods` whether or not the route exists, so the
+                        // catalog alone cannot answer that question.
+                        rec.update = (j.update && typeof j.update === 'object')
+                            ? j.update : null;
                     } else {
                         // A pre-#157 broker answers /info fine and simply lacks the
                         // keys. This is WHY the catalog rides /info: a brand-new
