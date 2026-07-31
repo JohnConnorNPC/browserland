@@ -10,6 +10,13 @@ detached-spawn helper: DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP
 alone is not enough when the parent sits in a job object that kills its
 members on parent exit; CREATE_BREAKAWAY_FROM_JOB removes the child from
 the job so agents survive a broker restart (their reconnect loop reattaches).
+
+Which of those paths a spawn actually took is RECORDED per agent (#183): a
+self-restart is only tolerable because agents outlive it, so the broker has to
+be able to say how many LIVE sessions would die with it — and on Windows the
+answer differs agent by agent, because the breakaway can be refused for one
+spawn (we silently fall back, and that child then shares the broker's lifetime)
+and granted for the next. See SpawnResult and Launcher.continuity_for.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ import os
 import secrets
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..agent.config import BROKER_URL_ENV
 from ..agent.env_util import spawn_env
@@ -35,6 +42,28 @@ _POLL_INTERVAL = 0.25
 
 # Win32: exclude the child from the parent's job object (see module doc).
 _CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+# Restart continuity of ONE agent, as observed at spawn time. These exact
+# strings are the wire values other broker code reports, so they are constants
+# here rather than literals scattered across call sites.
+CONTINUITY_GUARANTEED = "guaranteed"   # detached from the broker's lifetime
+CONTINUITY_AT_RISK = "at_risk"         # dies with the broker (breakaway refused)
+CONTINUITY_UNKNOWN = "unknown"         # not established — never assume better
+_CONTINUITY_VALUES = (CONTINUITY_GUARANTEED, CONTINUITY_AT_RISK,
+                      CONTINUITY_UNKNOWN)
+
+
+class SpawnResult(NamedTuple):
+    """What ``_spawn_detached`` DID, not what it was asked to do.
+
+    ``continuity`` has to be observed here and carried out, because it cannot be
+    recovered afterwards: on Windows an extra parent in the process tree changes
+    job-object membership, so two agents spawned by the same broker on the same
+    machine can land on different paths. Deriving it later from ``os.name`` or
+    from the install's shape would be a guess dressed as a fact."""
+
+    proc: subprocess.Popen
+    continuity: str
 
 
 def default_profiles() -> Dict[str, Any]:
@@ -82,6 +111,16 @@ class Launcher:
         self._broker_port = broker_port
         self._token = token
         self._pending = 0
+        # #183: observed restart continuity per AGENT, keyed by the window id
+        # this launcher allocated. Per-agent and not per-install on purpose —
+        # "a replacement broker can be launched" and "your sessions survive it"
+        # are different claims, and on Windows the second one can differ between
+        # two agents of the same broker. Only ever written from a spawn that
+        # actually happened (see _note_continuity); an agent that RECONNECTS
+        # after a restart is therefore absent from a fresh broker's map and
+        # reads "unknown", which is exactly right: the new process did not spawn
+        # it and cannot know how it was created.
+        self._continuity: Dict[int, str] = {}
 
     @property
     def profiles(self) -> Dict[str, Any]:
@@ -178,7 +217,7 @@ class Launcher:
         token = self._token
         broker_url = f"ws://127.0.0.1:{self._broker_port}/browserland"
 
-        def _build_env_and_spawn() -> subprocess.Popen:
+        def _build_env_and_spawn() -> SpawnResult:
             env = spawn_env()
             # The agent honors $BROWSERLAND_BROKER_URL above its --broker-url
             # flag; pin it so an inherited value can't redirect our child.
@@ -200,12 +239,18 @@ class Launcher:
                 # No wait_for: a running executor future is not cancellable, so
                 # a deadline here would 504 the request and still leave the
                 # thread wedged mid-CreateProcess.
-                proc = await asyncio.get_running_loop().run_in_executor(
+                spawned = await asyncio.get_running_loop().run_in_executor(
                     None, _build_env_and_spawn)
             except Exception as exc:
                 raise LaunchError(500, f"spawn_failed: {exc}")
-            LOGGER.info("launched profile %r as window %d (agent pid %s)",
-                        name, window_id, proc.pid)
+            proc = spawned.proc
+            # Record what THIS spawn did before anything can go wrong later:
+            # the window may never register, but if it does register it must
+            # already carry the truth about how it was created (#183).
+            self._note_continuity(window_id, spawned.continuity)
+            LOGGER.info("launched profile %r as window %d (agent pid %s, "
+                        "restart continuity %s)",
+                        name, window_id, proc.pid, spawned.continuity)
 
             deadline = asyncio.get_running_loop().time() + REGISTER_TIMEOUT
             while True:
@@ -238,9 +283,97 @@ class Launcher:
                     not self._registry.is_pending(window_id):
                 return window_id
 
+    # -- restart continuity (#183) ------------------------------------------
+
+    def _note_continuity(self, window_id: int, continuity: str) -> None:
+        """Record one spawn's observed continuity, pruning dead entries first.
+
+        A window's DEPARTURE has no hook here — registry.deregister() is called
+        from the producer session, which knows nothing about the launcher — so
+        the map is pruned lazily instead: an entry is dropped the first time we
+        look and find its window neither registered nor still pending. That
+        bounds the map at (live + in-flight) agents rather than one entry per
+        launch for the broker's whole life. Prune BEFORE the insert so the row
+        we are writing can never be the one collected.
+
+        The lazy prune can also drop a record whose agent registers unusually
+        late (a launch that already 202'd): it then reads "unknown". That is the
+        safe direction — under-claiming survival, never over-claiming it."""
+        if continuity not in _CONTINUITY_VALUES:
+            continuity = CONTINUITY_UNKNOWN
+        self._prune_continuity()
+        self._continuity[int(window_id)] = continuity
+
+    def _prune_continuity(self) -> None:
+        # is_pending() covers the gap between the spawn and the agent's hello:
+        # launch() adds the waiter before spawning and drops it in its finally,
+        # so a just-spawned window is never collected out from under itself.
+        #
+        # Pure bookkeeping, so it must never be the reason a launch fails: a
+        # registry that cannot answer just means these rows live one round
+        # longer, which costs a few dict entries and no correctness.
+        try:
+            stale = [wid for wid in self._continuity
+                     if wid not in self._registry
+                     and not self._registry.is_pending(wid)]
+        except Exception:
+            LOGGER.debug("continuity prune skipped", exc_info=True)
+            return
+        for wid in stale:
+            self._continuity.pop(wid, None)
+
+    def continuity_for(self, window_id: int) -> str:
+        """Whether THAT agent survives a broker restart: "guaranteed",
+        "at_risk" or "unknown".
+
+        Read-only, and "unknown" for anything this launcher did not itself
+        spawn — including every agent that reconnected after a restart, because
+        the map lives in the broker process that did the spawning and a fresh
+        broker starts empty. That is by construction, not by accident: there is
+        no path that writes this map from a hello, so a reconnect can never be
+        mistaken for a launch we watched."""
+        try:
+            recorded = self._continuity.get(int(window_id))
+        except (TypeError, ValueError):
+            return CONTINUITY_UNKNOWN
+        if recorded in (CONTINUITY_GUARANTEED, CONTINUITY_AT_RISK):
+            return recorded
+        return CONTINUITY_UNKNOWN
+
+    def continuity_summary(self) -> Dict[str, int]:
+        """Counts over the agents CURRENTLY registered — what a restart
+        confirmation shows an operator ("2 of 5 sessions will not survive").
+
+        Never raises and never over-claims: a registered window with no record
+        counts as unknown, and if the registry cannot even be enumerated we
+        report zeros rather than a reassuring guess. Only registered windows are
+        counted, so a record whose terminal has already exited cannot inflate
+        the total."""
+        counts = {CONTINUITY_GUARANTEED: 0, CONTINUITY_AT_RISK: 0,
+                  CONTINUITY_UNKNOWN: 0}
+        try:
+            # session_summaries() is the registry's public enumeration; this
+            # runs on the loop like every other registry read, so the snapshot
+            # cannot tear underneath us.
+            window_ids = [int(s["id"])
+                          for s in self._registry.session_summaries()]
+            self._prune_continuity()
+        except Exception:
+            LOGGER.debug("continuity_summary: registry unreadable",
+                         exc_info=True)
+            return counts
+        for wid in window_ids:
+            counts[self.continuity_for(wid)] += 1
+        return counts
+
 
 def _spawn_detached(argv: List[str], cwd: Optional[str],
-                    env: Dict[str, str]) -> subprocess.Popen:
+                    env: Dict[str, str]) -> SpawnResult:
+    """Spawn the agent detached and report which path actually worked.
+
+    The flags and the fallback below are unchanged — they are the whole reason
+    agents outlive a broker restart. All that is new is that the caller now
+    learns which of them this spawn ended up on (#183)."""
     kwargs: Dict[str, Any] = dict(
         cwd=cwd or None,
         env=env,
@@ -254,11 +387,26 @@ def _spawn_detached(argv: List[str], cwd: Optional[str],
                  | subprocess.CREATE_NEW_PROCESS_GROUP
                  | _CREATE_BREAKAWAY_FROM_JOB)
         try:
-            return subprocess.Popen(argv, creationflags=flags, **kwargs)
+            proc = subprocess.Popen(argv, creationflags=flags, **kwargs)
         except OSError:
             # Parent job may forbid breakaway (ERROR_ACCESS_DENIED) — the
             # agent then shares the broker's lifetime, which beats failing.
+            # That shared lifetime IS the at-risk case: a restart takes this
+            # agent (and its terminal) down with the broker, so say so instead
+            # of letting the fallback pass for a normal launch.
             flags = (subprocess.DETACHED_PROCESS
                      | subprocess.CREATE_NEW_PROCESS_GROUP)
-            return subprocess.Popen(argv, creationflags=flags, **kwargs)
-    return subprocess.Popen(argv, start_new_session=True, **kwargs)
+            return SpawnResult(
+                subprocess.Popen(argv, creationflags=flags, **kwargs),
+                CONTINUITY_AT_RISK)
+        # Breakaway accepted: the child is out of the broker's job object, so
+        # nothing kills it when the broker exits.
+        return SpawnResult(proc, CONTINUITY_GUARANTEED)
+    proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
+    # start_new_session is setsid(2): the child leads a NEW session and process
+    # group, so it neither dies with the broker nor sees signals aimed at the
+    # broker's group. Claim that only where the flag means that — on some other
+    # os.name we genuinely do not know what we just did, and "unknown" is the
+    # honest answer rather than the flattering one.
+    return SpawnResult(proc, CONTINUITY_GUARANTEED if os.name == "posix"
+                       else CONTINUITY_UNKNOWN)
