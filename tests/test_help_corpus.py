@@ -212,6 +212,133 @@ def test_entities_decoded():
     assert "<workspace>" in text and "&" in text and "&lt;" not in text
 
 
+# --------------------------------------------------------------------------- #
+# emphasis that CONTAINS a code span (A35)
+#
+# parse_inline used to split on code spans first, so the `**` opener and closer
+# of a bold holding one landed in two different non-code parts, could never
+# pair, and rendered as literal asterisks — on essentially every developer page.
+#
+# The span model is FLAT, so the fix is NOT "a strong span containing a code
+# span": the markers are consumed, the code span stays a code span (it already
+# has its own visual treatment), and the emphasised text AROUND it becomes
+# `strong`. Everything the old code-first split got right — bold without code,
+# italic, kbd, links, an unpaired marker, a `**` inside a code span — must come
+# out byte-identical, which is what the rest of this section pins.
+# --------------------------------------------------------------------------- #
+
+def _pairs(spans):
+    return [(s["t"], s["v"]) for s in spans]
+
+
+def test_bold_containing_a_code_span_keeps_its_emphasis():
+    spans = hc.parse_inline("There is **no `index.html` in this repo** and more")
+    assert _pairs(spans) == [("text", "There is "),
+                             ("strong", "no "),
+                             ("code", "index.html"),
+                             ("strong", " in this repo"),
+                             ("text", " and more")]
+    assert not any(s["t"] == "text" and "**" in s["v"] for s in spans)
+
+
+@pytest.mark.parametrize("line,expect", [
+    # code at the end / at the start / the whole emphasis: no empty strong span
+    ("**bold with `code`**", [("strong", "bold with "), ("code", "code")]),
+    ("**`code` then bold**", [("code", "code"), ("strong", " then bold")]),
+    ("**`code`**", [("code", "code")]),
+    # a combo inside emphasis is still classified as a kbd chip
+    ("**press `Ctrl+Alt+p` now**", [("strong", "press "),
+                                    ("kbd", "Ctrl+Alt+p"),
+                                    ("strong", " now")]),
+    # two code spans in one emphasis
+    ("**`a` and `b`**", [("code", "a"), ("strong", " and "), ("code", "b")]),
+    # emphasis with code, twice on one line, with a bare code span between them
+    ("**x `a`** `m` **`b` y**", [("strong", "x "), ("code", "a"),
+                                 ("text", " "), ("code", "m"),
+                                 ("text", " "),
+                                 ("code", "b"), ("strong", " y")]),
+])
+def test_emphasis_with_code_shapes(line, expect):
+    assert _pairs(hc.parse_inline(line)) == expect
+
+
+def test_emphasis_with_code_emits_no_nested_span():
+    # The renderer knows a fixed, flat set of types; a "strong" carrying spans
+    # would silently render as nothing.
+    for span in hc.parse_inline("**a `b` c**"):
+        assert set(span) == {"t", "v"}
+        assert span["t"] in _ALLOWED_SPAN
+        assert isinstance(span["v"], str)
+
+
+def test_a_link_inside_bold_is_not_dropped():
+    # The text around the code span goes through the ordinary non-code parse, so
+    # a wiki link inside emphasis still renders its label and still feeds search.
+    extra = []
+    spans = hc.parse_inline("**see [[the pager|Workspaces]] and `/state`**", extra)
+    assert _pairs(spans) == [("strong", "see the pager and "), ("code", "/state")]
+    assert "workspaces" in " ".join(extra)
+    # ...and entities inside emphasis are decoded exactly like ordinary text.
+    assert _pairs(hc.parse_inline("**&lt;x&gt; `y`**")) == [("strong", "<x> "),
+                                                           ("code", "y")]
+
+
+@pytest.mark.parametrize("line", [
+    "plain **bold** and `code` and *ital* and _em_",
+    "**bold** [[Window-Modes]] [label](http://example.com) `Ctrl+Alt+p`",
+    "a ** unpaired opener with `code` here",           # unpaired: stays literal
+    "`a **b** c` is literal",                          # markers inside code
+    "**a **b `c` d",                                   # closer-less trailing bold
+    "**bold** then `code` then **more bold**",
+])
+def test_lines_without_the_construct_are_byte_unchanged(line):
+    # The historical parse, verbatim, as the oracle: split on code spans first,
+    # everything else through _parse_non_code. Any line with no bold-that-holds-
+    # code must come out of the new scanner identically.
+    def old(text):
+        spans = []
+        for i, part in enumerate(hc._CODE.split(text)):
+            if i % 2 == 1:
+                spans.append(hc._code_span(part))
+            else:
+                spans.extend(hc._parse_non_code(part, None))
+        return hc._coalesce(spans)
+
+    assert hc.parse_inline(line) == old(line)
+
+
+def test_an_unpaired_marker_and_a_fenced_marker_stay_literal():
+    assert "**" in "".join(s["v"] for s in
+                           hc.parse_inline("an ** unpaired opener with `x`")
+                           if s["t"] == "text")
+    # A `**` that lives inside a code span is content: the code span OPENS first,
+    # so it still wins over any emphasis that would swallow it.
+    assert _pairs(hc.parse_inline("`a **b** c` literal")) == \
+        [("code", "a **b** c"), ("text", " literal")]
+
+
+def test_no_wiki_emphasis_with_code_renders_a_literal_marker():
+    # The drift guard for the 132 single-line occurrences this construct has in
+    # wiki/ today: emphasis holding a code span renders as emphasis + code, never
+    # as literal asterisks. (Two OTHER defects still leave `**` in the corpus and
+    # are deliberately out of scope here: bold with a nested *italic* inside,
+    # which _BOLD's [^*]+ cannot span, and bold whose opener and closer land in
+    # different BLOCKS because a wrapped list item's continuation lines become a
+    # separate paragraph.)
+    seen = 0
+    for path in sorted(hc.WIKI_DIR.glob("*.md")):
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            for m in hc._BOLD.finditer(line):
+                if not hc._CODE.search(m.group(1)):
+                    continue
+                seen += 1
+                spans = hc.parse_inline(m.group(0))
+                assert not any(s["t"] == "text" and "**" in s["v"]
+                               for s in spans), "%s: %s" % (path.name, m.group(0))
+                assert any(s["t"] in ("code", "kbd") for s in spans)
+    assert seen >= 100, "wiki occurrences not found (%d)" % seen
+
+
 def test_table_flattens_with_all_cell_text_in_search(tmp_path):
     wiki = _write_wiki(tmp_path, {"_Sidebar.md": "- [[Sample]]\n", "Sample.md": SAMPLE})
     cards = {c["title"]: c for c in hc.build_corpus(wiki)["sections"][0]["cards"]}

@@ -158,16 +158,104 @@ def parse_inline(text: str, search_extra: list[str] | None = None) -> list[dict]
     HTML entities (decoded). Everything else degrades to plain text. When a
     wiki link is seen, the target's words are appended to ``search_extra`` so
     search still matches the page name even though only the label is rendered.
+
+    Emphasis is recognised BEFORE the code split, so a ``**bold `code` span**``
+    keeps its emphasis instead of rendering its ``**`` markers as literal
+    asterisks. Splitting on code first put the opener and the closer into two
+    different non-code parts, where neither could ever pair — visible on
+    essentially every developer page.
+
+    The span model is FLAT (no nesting), so such a region is emitted as the code
+    span plus ``strong`` spans for the text AROUND it; the code span keeps its
+    own visual treatment, which it already had.
     """
     spans: list[dict] = []
-    # Split on code spans first: their content is literal (no nested parsing).
-    parts = _CODE.split(text)
-    for i, part in enumerate(parts):
+    # ONE left-to-right pass for the emphasis regions, up front: re-scanning
+    # from each new position instead would be quadratic on a paragraph that
+    # holds many code spans ahead of one such region, and this parses at most
+    # 256 KiB of installed-mod help.md on the event loop (see below).
+    bolds = _bold_with_code(text)
+    i = 0
+    pos = 0
+    n = len(text)
+    while pos < n and i < len(bolds):
+        bold = bolds[i]
+        if bold.start() < pos:
+            i += 1              # already consumed (it sat inside a code span)
+            continue
+        code = _CODE.search(text, pos)
+        if code is not None and code.start() < bold.start():
+            # A code span OPENS before the emphasis does, so it wins — exactly
+            # as it did when the whole line was split on code up front. Emit
+            # through its end and look again from there; that keeps a `**`
+            # sitting inside a code span literal, and keeps a straddling
+            # backtick from stealing text out of a code span.
+            spans.extend(_split_code(text[pos:code.end()], search_extra))
+            pos = code.end()
+            continue
+        spans.extend(_split_code(text[pos:bold.start()], search_extra))
+        spans.extend(_emphasized(bold.group(1), search_extra))
+        pos = bold.end()
+        i += 1
+    spans.extend(_split_code(text[pos:], search_extra))
+    return _coalesce(spans)
+
+
+def _bold_with_code(text: str) -> list:
+    """Every ``**...**`` in ``text`` whose content holds a code span.
+
+    ``_BOLD``'s own non-overlapping left-to-right scan decides the pairing, so
+    this sees the same emphasis regions ``_parse_non_code`` always has. Emphasis
+    WITHOUT a code span is left to it (via the ordinary code split) so its
+    output is byte-unchanged: this is a fix for one broken construct, not a new
+    emphasis parser. ``_BOLD``'s ``[^*]+`` also means an unpaired ``**`` — and
+    one wrapped around a nested ``*italic*`` — never matches here and stays
+    exactly as literal as it is today.
+    """
+    return [m for m in _BOLD.finditer(text) if _CODE.search(m.group(1))]
+
+
+def _split_code(text: str, search_extra: list[str] | None) -> list[dict]:
+    """The historical parse: split on code spans (their content is literal,
+    never nested-parsed) and run everything else through ``_parse_non_code``."""
+    spans: list[dict] = []
+    for i, part in enumerate(_CODE.split(text)):
         if i % 2 == 1:
             spans.append(_code_span(part))
         else:
             spans.extend(_parse_non_code(part, search_extra))
-    return _coalesce(spans)
+    return spans
+
+
+def _emphasized(content: str, search_extra: list[str] | None) -> list[dict]:
+    """One ``**...**`` region that contains code -> flat spans.
+
+    Code parts stay code (or kbd); the text around them becomes ``strong``.
+    Those text parts still go through ``_parse_non_code``, so entities are
+    decoded and a wiki/md link inside bold renders its label and feeds
+    ``search_extra`` rather than being silently dropped. Nested bold is
+    impossible (``_BOLD``'s content excludes ``*``), so nothing here can come
+    back as anything but text.
+    """
+    spans: list[dict] = []
+    for i, part in enumerate(_CODE.split(content)):
+        if i % 2 == 1:
+            spans.append(_code_span(part))
+            continue
+        # One run of emphasised text per part: _coalesce only merges `text`
+        # spans, so a part that came back as several (a wiki link plus its
+        # surrounding prose) would otherwise emit adjacent identical `strong`
+        # spans.
+        run: list[dict] = []
+        for span in _parse_non_code(part, search_extra):
+            if span["t"] != "text":       # defensive: nothing emits one today
+                run.append(span)
+            elif run and run[-1]["t"] == "strong":
+                run[-1]["v"] += span["v"]
+            else:
+                run.append({"t": "strong", "v": span["v"]})
+        spans.extend(run)
+    return spans
 
 
 def _parse_non_code(text: str, search_extra: list[str] | None) -> list[dict]:
