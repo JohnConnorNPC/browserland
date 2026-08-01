@@ -400,6 +400,73 @@ def _load_mod_policy(path: Path) -> Dict[str, bool]:
         return _sanitize_mod_policy(data["policy"])
     return _sanitize_mod_policy(data)
 
+# #182: this broker's UPDATE POLICY -- the single bool deciding whether this
+# process is willing to reach github.com, and WHO decided it. Four sources,
+# reported by GET /info so a client can say which one it is looking at instead
+# of showing an unexplained "off":
+#
+#   config   broker_config.json NAMES the key. Authoritative, and the route
+#            below refuses to change it. An operator who wrote "false" there
+#            and restarted must not find a browser had quietly overridden it --
+#            editing the config and bouncing the process is the emergency
+#            response to unwanted egress, and it has to keep working.
+#   stored   the key is ABSENT from the config, so the sidecar governs and the
+#            GUI may write it. This is the case for every broker that never
+#            opted in via a file, which is the common one.
+#   default  neither said anything. Off.
+#   corrupt  the sidecar exists and is unreadable. Off, LOUDLY -- see below.
+#
+# CORRUPTION FAILS CLOSED, and that asymmetry is the point. Treating an
+# unreadable sidecar as "missing" would fall through to the config seed, so a
+# deliberate stored REVOKE that later got truncated would come back up as the
+# seed's "enabled" -- an egress permission resurrected by a damaged file. A
+# permission may only be granted by something that can be read.
+_UPDATE_POLICY_CONFIG = "config"
+_UPDATE_POLICY_STORED = "stored"
+_UPDATE_POLICY_DEFAULT = "default"
+_UPDATE_POLICY_CORRUPT = "corrupt"
+
+
+def _load_update_policy(path: Path) -> Tuple[Optional[bool], bool]:
+    """``(stored check_enabled, corrupt)`` from ``webterm_update_policy.json``.
+
+    ``(None, False)`` when the file is simply absent -- the ordinary case, and
+    the only one that may fall through to the config seed. ``(None, True)`` when
+    it exists but cannot be read as a policy, which the caller turns into "off".
+
+    The value must be a REAL bool, exactly as _sanitize_mod_policy demands of a
+    pin and for the same reason: this is an operator decision, and inferring one
+    from the string ``"false"`` (which is truthy) would grant egress nobody
+    asked for. A wrong type here is corruption, not a value to coerce."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return (None, False)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        LOGGER.error("update policy %s is unreadable (%s); update checking "
+                     "stays OFF until it is fixed or removed", path, exc)
+        return (None, True)
+    if isinstance(data, dict) and isinstance(data.get("check_enabled"), bool):
+        return (bool(data["check_enabled"]), False)
+    LOGGER.error("update policy %s has no boolean check_enabled; update "
+                 "checking stays OFF until it is fixed or removed", path)
+    return (None, True)
+
+
+def update_policy_view(app) -> Dict[str, Any]:
+    """The update capability as GET /info and POST /update/policy both report it.
+
+    ONE function so the two can never drift: the write returns the authoritative
+    state, and a client that repaints from it must be looking at exactly the
+    shape it would have got by re-fetching /info."""
+    return {
+        "check_enabled": bool(app.ctx.update_check_enabled),
+        "apply_enabled": bool(getattr(app.ctx, "update_apply_enabled", False)),
+        "source": app.ctx.update_policy_source,
+        "mutable": app.ctx.update_policy_source != _UPDATE_POLICY_CONFIG,
+    }
+
 # /session/* management RPCs: how long the broker waits for the producer's
 # reply before giving up with 504 (the agent does psutil/git work off its
 # event loop, so this is generous).
@@ -440,10 +507,22 @@ STATUS_CACHE_TTL = 60               # seconds a normalized result is cache-serve
 
 # ---- update check (#182) ----------------------------------------------------
 # The broker's SECOND (and last) egress. Gated TWICE: by the browser token like
-# every other route, and by an operator switch in broker config. The switch is
-# the one that matters here -- the update mod shipping default-OFF does not stop
-# anything from calling this route, so without a server-side gate "no outbound
-# request until you opt in" would be a claim the code does not keep.
+# every other route, and by a switch this process holds in its own state. The
+# switch is the one that matters here -- the update mod shipping default-OFF
+# does not stop anything from calling this route, so without a server-side gate
+# "no outbound request until you opt in" would be a claim the code does not
+# keep.
+#
+# WHAT THE SWITCH IS AND IS NOT, stated here because this is the auditable
+# egress surface and a reader must not have to infer it. It is NOT a second
+# authentication factor: it can be set over the network by a client holding
+# this broker's token (POST /update/policy), which is exactly the client that
+# could already open a shell here. It is a record of a DECISION -- somebody
+# said this machine may contact github.com, it is written down, and it survives
+# a restart. The client half will only ask on a human's click; see the update
+# mod's offerConsent for why an init() is not one. An operator who needs the
+# stronger property -- that no authenticated client can turn this on at all --
+# names the key in broker_config, which locks the route (_UPDATE_POLICY_CONFIG).
 #
 # How long a FAILED check is cached. Successes use update.next_ttl() (daily +
 # jitter); a transient failure must not pin an "unknown" for a whole day, but it
@@ -3112,8 +3191,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # disabled governs what the BROWSER draws, not whether this process is
     # willing to talk to github.com. Without this, "zero outbound requests
     # until you opt in" is not something the broker actually enforces.
-    app.ctx.update_check_enabled = bool(
-        config.get("update_check_enabled", False))
+    #
+    # WHO may set it is resolved further down, beside mod_policy_path: the
+    # sidecar that can now carry this decision is a sibling of the state store,
+    # and state_path does not exist yet at this point in boot. Everything here
+    # is the mechanism; that is the policy.
     # Upstream override for someone genuinely tracking their own fork. Still a
     # CONSTANT from the client's point of view -- it is never read off a
     # request, only out of the broker's own config.
@@ -3301,6 +3383,47 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     ).resolve()
     app.ctx.mod_policy = _load_mod_policy(app.ctx.mod_policy_path)
     app.ctx.mod_policy_lock = asyncio.Lock()
+    # #182: WHO decided whether this broker may reach github.com. Same sidecar
+    # shape as the two above, and the mechanism it governs is set up earlier in
+    # this function (search update_cache) -- only the DECISION lives here,
+    # because the file carrying it is a sibling of the state store, and
+    # state_path is not resolved until this point in boot.
+    #
+    # The config key, WHEN PRESENT, wins over the sidecar and locks
+    # POST /update/policy. Inverting that would make "edit the config and
+    # restart" -- the standard response to egress you did not want -- a silent
+    # no-op, with the file plainly saying false while the process does the
+    # opposite. Its ABSENCE is what hands the decision to the GUI, and absent is
+    # what both shipped example configs and every broker predating this feature
+    # have, so nobody becomes config-managed by accident.
+    #
+    # bool() coercion on the CONFIG path only, matching restart_enabled: a
+    # hand-edited number there resolves to a definite yes/no. The sidecar is
+    # held to the stricter real-bool standard (_load_update_policy) precisely
+    # because a browser writes it.
+    app.ctx.update_policy_path = Path(
+        config.get("update_policy_path")
+        or (app.ctx.state_path.parent / "webterm_update_policy.json")
+    ).resolve()
+    _upd_stored, _upd_corrupt = _load_update_policy(app.ctx.update_policy_path)
+    if "update_check_enabled" in config:
+        app.ctx.update_policy_source = _UPDATE_POLICY_CONFIG
+        app.ctx.update_check_enabled = bool(config["update_check_enabled"])
+    elif _upd_corrupt:
+        app.ctx.update_policy_source = _UPDATE_POLICY_CORRUPT
+        app.ctx.update_check_enabled = False
+    elif _upd_stored is not None:
+        app.ctx.update_policy_source = _UPDATE_POLICY_STORED
+        app.ctx.update_check_enabled = _upd_stored
+    else:
+        app.ctx.update_policy_source = _UPDATE_POLICY_DEFAULT
+        app.ctx.update_check_enabled = False
+    LOGGER.info("update checking: %s (decided by: %s)",
+                "on" if app.ctx.update_check_enabled else "off",
+                app.ctx.update_policy_source)
+    # Held across the whole read / write / live-swap, so two tabs arriving
+    # together produce one file rather than two interleaved ones.
+    app.ctx.update_policy_lock = asyncio.Lock()
     # #163: RUNTIME-INSTALLED mods. A broker-config'd directory beside the /state
     # store ("mods_dir"), deliberately NOT webterm/broker/mods/ -- that tree is
     # the reviewed first-party set and its drift guard is bidirectional, so an
@@ -5807,11 +5930,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            "serve_ui": app.ctx.serve_ui,
                            "mods": app.ctx.mod_catalog,
                            "mod_policy": dict(app.ctx.mod_policy),
-                           "update": {
-                               "check_enabled": app.ctx.update_check_enabled,
-                               "apply_enabled": bool(getattr(
-                                   app.ctx, "update_apply_enabled", False)),
-                           },
+                           # `source` + `mutable` exist so a client can say WHY
+                           # checking is off, and whether asking would help. A
+                           # bare check_enabled:false sent the UI's only honest
+                           # message to "an operator edits the config", which is
+                           # now wrong in three of the four cases: `stored` and
+                           # `default` are the GUI's to change, `corrupt` needs
+                           # a broken FILE fixed, and only `config` is really
+                           # somebody else's decision to go and edit.
+                           "update": update_policy_view(app),
                            "restart": restart_status(app)},
                           headers={"Cache-Control": "no-store"})
 
@@ -6251,6 +6378,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             now = time.time()
             if ent.get("data") is not None and now < ent.get("until", 0.0):
                 return ent["data"]
+            # And re-read THE GATE, for a sharper reason than the cache. A
+            # revoke that lands while this request is queued here would
+            # otherwise be answered "checking stopped" and then be followed by
+            # the outbound request it just forbade -- the one thing a revoke
+            # exists to prevent, performed after it was granted. Checking the
+            # flag only at the top of the handler is a TOCTOU window exactly as
+            # wide as this lock is held, i.e. as wide as a call to GitHub.
+            if not ctx.update_check_enabled:
+                return None
             loop = asyncio.get_running_loop()
             data = await loop.run_in_executor(
                 None, functools.partial(
@@ -6289,7 +6425,101 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "update_check_disabled"},
                               status=503)
         data = await _update_check_cached()
+        if data is None:
+            # Revoked while we were queued on update_lock. Same body as the
+            # check above, because it is the same fact -- this broker is not
+            # opted in -- learned one moment later.
+            return sanic_json({"ok": False, "error": "update_check_disabled"},
+                              status=503)
         return sanic_json({"ok": True, "check": data})
+
+    # ---- update policy write (POST /update/policy, #182) ------------------
+    # The GUI's way to say "yes, this broker may check for updates", so that
+    # opting in no longer means editing a JSON file and bouncing the process.
+    # The flip is LIVE: _update_check reads app.ctx per request, so the very
+    # next poll goes through.
+    #
+    # ORIGIN-GATED, unlike POST /mods/policy which it otherwise copies. That
+    # analogy breaks on one asymmetry: a mod pin is recoverable, whereas
+    # granting egress cannot be taken back after the fact -- once this broker
+    # has contacted GitHub, its address has been disclosed and no later revoke
+    # unsends it. Enabling is deliberately LOCAL-ONLY at the UI too (the fleet
+    # list stays read-only about peers), so nothing legitimate needs the
+    # cross-origin door; the preflight entry exists so that a future peer-enable
+    # is a policy decision rather than a compatibility break.
+    #
+    # REFUSED WHILE QUIESCING, and the lifecycle is re-read after the lock. The
+    # drain snapshots its critical-task set once; a request that passed the
+    # check and then queued would not be in that snapshot, so it could begin a
+    # shielded write inside the stop window -- the one place _shielded_region
+    # says it cannot protect, since loop teardown cancels directly.
+    async def _update_policy_post(request: Request):
+        err = _gated_auth_error(request, "/update/policy")
+        if err is not None:
+            return err
+        if not _origin_permitted(request):
+            LOGGER.warning("refused a cross-origin update-policy write from "
+                           "origin %r (%s)",
+                           request.headers.get("Origin"), request.ip)
+            return sanic_json({"ok": False, "error": "forbidden_origin"},
+                              status=403)
+        busy = _refuse_if_quiescing(app, "update policy write")
+        if busy is not None:
+            return busy
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400)
+        want = body.get("check_enabled")
+        # A REAL bool, never a coercion: this is the grant itself, and reading
+        # "false" (truthy) as yes would be the worst possible place to guess.
+        if not isinstance(want, bool):
+            return sanic_json({"ok": False, "error": "bad_check_enabled"},
+                              status=400)
+        # The config key outranks this route entirely. 409, not 403: nothing is
+        # wrong with the caller or its token -- the setting simply is not this
+        # interface's to change on this broker, and `source` says who owns it so
+        # the UI can name the file instead of showing a dead button.
+        if app.ctx.update_policy_source == _UPDATE_POLICY_CONFIG:
+            return sanic_json({"ok": False, "error": "policy_locked",
+                               "source": _UPDATE_POLICY_CONFIG,
+                               "update": update_policy_view(app)}, status=409)
+
+        async def _locked_write():
+            stage = _lifecycle(app)
+            if stage != LIFECYCLE_RUNNING:
+                return sanic_json({"ok": False, "error": "restarting",
+                                   "lifecycle": stage}, status=503)
+            # Idempotent: N tabs asking for the state it is already in must not
+            # produce N rewrites of the file. Checked under the lock so the
+            # answer cannot go stale between the test and the write.
+            if (app.ctx.update_check_enabled == want
+                    and app.ctx.update_policy_source == _UPDATE_POLICY_STORED):
+                return sanic_json({"ok": True, "update": update_policy_view(app)})
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_state_atomic, app.ctx.update_policy_path,
+                    {"check_enabled": want})
+            except OSError as exc:
+                # Logged with the path, answered without it: an overridden
+                # update_policy_path that is unwritable is an operator problem,
+                # and the browser gets a stable code rather than a
+                # platform-specific message naming a directory.
+                LOGGER.error("could not write update policy %s: %s",
+                             app.ctx.update_policy_path, exc)
+                return sanic_json({"ok": False, "error": "policy_write_failed"},
+                                  status=500)
+            # Disk first, then the live flip -- deliberately this order. Dying
+            # in between leaves the sidecar ahead of memory, and the next boot
+            # reads the sidecar and converges on what the client was told
+            # landed. The reverse order would answer "enabled", then come back
+            # from a restart disabled.
+            app.ctx.update_check_enabled = want
+            app.ctx.update_policy_source = _UPDATE_POLICY_STORED
+            LOGGER.info("update checking %s via /update/policy (%s)",
+                        "enabled" if want else "disabled", request.ip)
+            return sanic_json({"ok": True, "update": update_policy_view(app)})
+
+        return await _shielded_region(app.ctx.update_policy_lock, _locked_write)
 
     # ---- self-restart (POST /restart, #183) -------------------------------
     # POST only, and never 200. "Restarted" is not a claim an HTTP response can
@@ -7271,6 +7501,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_mods_policy_post, "/mods/policy", methods=["POST"])
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])
+    app.add_route(_update_policy_post, "/update/policy", methods=["POST"])
     # POST only (#183): a GET that bounces the process would be followed by
     # every prefetcher, link scanner and browser history restore on the network.
     app.add_route(_restart_post, "/restart", methods=["POST"])
@@ -7338,6 +7569,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/mods/policy", "preflight_mods_policy"),
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/update/check", "preflight_update_check"),
+                             ("/update/policy", "preflight_update_policy"),
                              ("/restart", "preflight_restart"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),
