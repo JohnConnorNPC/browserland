@@ -830,7 +830,23 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                     % EXIT_RESTART)
                 return EXIT_RESTART
 
-            came_up = uptime >= ready_seconds
+            # An AUTHORIZED restart is not a crash, and must not be charged to
+            # the crash budget.
+            #
+            # Reaching here means the sentinel was present and carried our
+            # nonce, so this worker was healthy enough to serve an
+            # authenticated request, run a drain to completion, and arm
+            # deliberately. That is stronger evidence of having come up than
+            # any uptime threshold -- and it is evidence a crash-loop cannot
+            # manufacture, because a broker that dies during startup never
+            # serves a request and so can never arm.
+            #
+            # The uptime test stays for the unarmed paths above. Here it was
+            # actively wrong: restarting a broker that had been up for less
+            # than READY_SECONDS counted against the budget, so a handful of
+            # deliberate back-to-back restarts would exhaust it and stop the
+            # machine -- the one situation the budget was never meant to catch.
+            came_up = True
             now = clock()
             while attempts and now - attempts[0] > window:
                 attempts.popleft()
