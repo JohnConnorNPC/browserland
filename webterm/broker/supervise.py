@@ -830,23 +830,22 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                     % EXIT_RESTART)
                 return EXIT_RESTART
 
-            # An AUTHORIZED restart is not a crash, and must not be charged to
-            # the crash budget.
+            # NOTE (#183, open): an authorized restart arguably should not be
+            # charged to the CRASH budget -- restarting a broker that had been
+            # up for less than READY_SECONDS counts against it today, so a few
+            # deliberate back-to-back restarts can exhaust it and stop the
+            # machine, which is not what the budget is for.
             #
-            # Reaching here means the sentinel was present and carried our
-            # nonce, so this worker was healthy enough to serve an
-            # authenticated request, run a drain to completion, and arm
-            # deliberately. That is stronger evidence of having come up than
-            # any uptime threshold -- and it is evidence a crash-loop cannot
-            # manufacture, because a broker that dies during startup never
-            # serves a request and so can never arm.
-            #
-            # The uptime test stays for the unarmed paths above. Here it was
-            # actively wrong: restarting a broker that had been up for less
-            # than READY_SECONDS counted against the budget, so a handful of
-            # deliberate back-to-back restarts would exhaust it and stop the
-            # machine -- the one situation the budget was never meant to catch.
-            came_up = True
+            # Setting `came_up = True` here is NOT the fix: it clears the budget
+            # on every authorized restart, which removes the only backstop, and
+            # a worker that exits 75 with a fresh sentinel every time then
+            # relaunches forever. test_a_worker_that_always_exits_75_hits_the_
+            # budget and test_the_budget_resets_only_for_a_worker_that_came_up
+            # both hang on it rather than fail, which is how it went unnoticed.
+            # Whatever replaces this needs a SEPARATE allowance for authorized
+            # restarts, so a runaway is still caught while a handful of
+            # deliberate ones are not charged to the crash budget.
+            came_up = uptime >= ready_seconds
             now = clock()
             while attempts and now - attempts[0] > window:
                 attempts.popleft()
