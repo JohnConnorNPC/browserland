@@ -715,7 +715,7 @@
         // below: a render must never re-fetch after a failed fetch, or a sleeping
         // broker turns the section into a hot retry loop. Re-selecting the tab is
         // the retry, and it is a deliberate one.
-        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update}
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart}
         const modCatalogFetching = new Set();   // hostIds with an in-flight GET
         // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
         // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
@@ -734,7 +734,7 @@
         }
         async function fetchModCatalog(host) {
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
-                          policy: {}, update: null };
+                          policy: {}, update: null, restart: null };
             try {
                 const r = await hostFetch(host, '/info', { cache: 'no-store' });
                 if (r.status === 401 || r.status === 403) {
@@ -754,6 +754,13 @@
                         // catalog alone cannot answer that question.
                         rec.update = (j.update && typeof j.update === 'object')
                             ? j.update : null;
+                        // #183, same reasoning: whether this broker can restart
+                        // itself, by what mechanism, and how many live sessions
+                        // a restart would cost. Absent on any broker predating
+                        // it, which is exactly why the reader treats a missing
+                        // key as "no capability reported" rather than as "no".
+                        rec.restart = (j.restart && typeof j.restart === 'object')
+                            ? j.restart : null;
                     } else {
                         // A pre-#157 broker answers /info fine and simply lacks the
                         // keys. This is WHY the catalog rides /info: a brand-new

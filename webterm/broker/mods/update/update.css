@@ -82,3 +82,52 @@
             margin: 6px 0 2px;
             color: var(--accent, #6aa9ff);
         }
+        /* ---- self-restart control (#183) ----------------------------------
+           Lives in the body, beside the local build facts it acts on
+           (Tracking / Upstream sit right above it), not the toolbar — the
+           reason to click it is the sentence just above, not a general
+           toolbar action. */
+        .app-upd-restart-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0 2px;
+            flex-wrap: wrap;
+        }
+        .app-upd-restart-btn {
+            background: var(--bg-2);
+            border: 1px solid var(--danger);
+            border-radius: 3px;
+            color: var(--fg);
+            font-family: monospace;
+            font-size: 11px;
+            padding: 3px 9px;
+            cursor: pointer;
+        }
+        .app-upd-restart-btn:hover:not(:disabled) {
+            background: color-mix(in srgb, var(--danger) 20%, var(--bg-2));
+        }
+        /* Visibly disabled, not merely inert: dimmed fill, dimmed border,
+           and the cursor itself says "no" rather than leaving that to the
+           reason text alone — a control that only READS as disabled once
+           you try it is the half-working outcome this whole feature exists
+           to avoid. */
+        .app-upd-restart-btn:disabled {
+            background: var(--bg);
+            border-color: var(--bg-3);
+            color: var(--fg-dim);
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+        .app-upd-restart-inline {
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        /* The confirm dialog's continuity breakdown: one line per count
+           that is actually nonzero, so a broker with nothing at risk shows
+           nothing to be alarmed about, and one with agents at risk cannot
+           have that line lost inside a paragraph. */
+        .app-upd-restart-continuity { margin: 6px 0 2px; }
+        .app-upd-restart-cline { padding: 2px 0; }
+        .app-upd-restart-bad { color: var(--danger); }
+        .app-upd-restart-warn { color: var(--warn); }

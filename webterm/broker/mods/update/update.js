@@ -808,6 +808,416 @@
                     if (timer) { clearInterval(timer); timer = null; }
                 }
 
+                // ---- self-restart (#183) -----------------------------------
+                // Deliberately scoped to the LOCAL broker, and only the local
+                // broker. The window above lists every configured host, but
+                // POST /restart enforces a same-origin check on the far end
+                // and touching a REMOTE machine from here is an explicit
+                // non-goal — so everything below reads and acts on
+                // updHost(LOCAL_HOST_ID) alone, resolved fresh at every step
+                // (never captured across an await), and the control says so
+                // in its own label rather than leaving the scope to be
+                // inferred from whichever row of the fleet list the reader's
+                // eye happens to be on.
+                //
+                // Human words for every reason_code the broker can hand
+                // back, over both routes that carry one: GET /info's
+                // `restart.reason_code` (why the control is DISABLED) and
+                // POST /restart's own `reason_code` on a non-202 (why an
+                // attempted restart was REFUSED, or failed after it was
+                // accepted). The two sets overlap almost entirely — a
+                // refusal is usually the same gate the button was already
+                // disabled for, caught again server-side in case the two
+                // ever disagree — so one table answers both. An unrecognised
+                // code falls through to a generic sentence in
+                // restartReasonWords() below, never a raw token rendered at
+                // the user — same posture as REASONS above, for the same
+                // reason.
+                const RESTART_REASONS = {
+                    'restart-disabled': 'restarting is switched off on this '
+                        + 'broker. An operator turns it on in the broker '
+                        + 'config',
+                    'no-supervisor': 'this broker was started without the '
+                        + 'launcher that can bring it back, so nothing '
+                        + 'would relaunch it — restart it manually on the '
+                        + 'machine itself',
+                    'supervisor-ppid-mismatch': 'the process that started '
+                        + 'this broker is no longer its parent, so the '
+                        + 'launcher can no longer be trusted to relaunch it',
+                    'systemd-restart-disabled': 'this broker runs under a '
+                        + 'systemd unit whose restart policy will not bring '
+                        + 'it back — stopping it now would leave nothing '
+                        + 'listening',
+                    'systemd-policy-unreadable': 'this broker could not '
+                        + 'read its own systemd unit’s restart policy, so '
+                        + 'it cannot promise a restart would be honoured',
+                    'probe-failed': 'this broker could not determine '
+                        + 'whether anything would bring it back, so it '
+                        + 'refuses to guess',
+                    'restart-in-progress': 'a restart is already under way',
+                    'cross-origin-forbidden': 'this page is not allowed to '
+                        + 'ask this broker to restart',
+                    'restart-error': 'the restart machinery itself failed '
+                        + '— this broker was not touched',
+                    // The three below come back only from a POST /restart
+                    // that got past the gate and then failed to complete —
+                    // never from /info, so they can never be why the button
+                    // was disabled, only why a click did not work.
+                    'critical_sections_timed_out': 'writes already in '
+                        + 'progress on this broker (an upload, a recording '
+                        + 'save) did not finish in time, so the restart was '
+                        + 'abandoned rather than risk losing them. Try '
+                        + 'again shortly',
+                    'not_supervised': 'this broker discovered only at the '
+                        + 'last moment that nothing would relaunch it, so '
+                        + 'the restart was abandoned before anything '
+                        + 'stopped',
+                    'drain_failed': 'this broker could not confirm its '
+                        + 'in-flight writes were safe to leave, so the '
+                        + 'restart was abandoned',
+                };
+                // Never a raw token. A code this mod does not recognise —
+                // including one of the "drain_error: <exception text>"
+                // strings the broker only ever LOGS rather than documents
+                // as UI-facing — reads as this rather than as itself.
+                function restartReasonWords(code) {
+                    return RESTART_REASONS[code]
+                        || 'this broker did not say why';
+                }
+
+                // The local broker's restart capability, read off the SAME
+                // cached /info record the update-check probe above reads
+                // `rec.update` from — modCatalogCache, populated by the
+                // Control Panel's fetchModCatalog and refreshed by this
+                // mod's own poll cycle — never a second fetcher run in
+                // parallel with it. If that record does not carry a
+                // `restart` key at all (an older cache shape, or simply not
+                // fetched yet) this is UNAVAILABLE with `known: false`: the
+                // absence of the capability is not evidence that it is
+                // present, and a control that assumed otherwise would be
+                // exactly the blind attempt this feature exists to refuse.
+                function restartInfo() {
+                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
+                    const r = rec && rec.restart;
+                    if (!r || typeof r !== 'object') {
+                        return { known: false, available: false,
+                                 reason: null,
+                                 continuity: { guaranteed: 0, at_risk: 0,
+                                              unknown: 0 },
+                                 bootId: null };
+                    }
+                    const c = (r.continuity && typeof r.continuity === 'object')
+                        ? r.continuity : {};
+                    const num = function (v) {
+                        return (typeof v === 'number' && v > 0) ? v : 0;
+                    };
+                    return {
+                        known: true,
+                        available: !!r.available,
+                        reason: r.reason_code || null,
+                        continuity: { guaranteed: num(c.guaranteed),
+                                     at_risk: num(c.at_risk),
+                                     unknown: num(c.unknown) },
+                        bootId: (typeof r.bootId === 'string' && r.bootId)
+                            || null,
+                    };
+                }
+
+                // ---- the operation itself -----------------------------
+                // ONE restart, tracked at module scope: this always targets
+                // the one fixed broker, never a row the reader picked, so
+                // there is exactly one outcome to track no matter how many
+                // update windows happen to be open. Every phase transition
+                // calls renderAll(), the same driver poll() already uses,
+                // so every open window (and the taskbar chip, harmlessly)
+                // repaints together.
+                //   null                        nothing happening
+                //   { phase:'waiting', note }    POST sent, or polling
+                //                                /info for a changed bootId
+                //   { phase:'done', note }       bootId changed — confirmed
+                //   { phase:'failed', note }     refused, or the request
+                //                                itself never landed
+                //   { phase:'timeout', note }    the bounded wait ran out
+                let restartOp = null;
+                // Flipped by ctx.onUnload so a wait loop already in flight
+                // when the mod is switched off stops touching the DOM (and
+                // stops polling) rather than running to its own timeout in
+                // the background of a mod that is no longer loaded.
+                let restartOpDead = false;
+
+                function restartSleep(ms) {
+                    return new Promise(function (resolve) {
+                        setTimeout(resolve, ms);
+                    });
+                }
+
+                // How long a click waits for proof before giving up and
+                // saying so, and how often it asks while waiting. Generous
+                // against RESTART_DRAIN_TIMEOUT (20s server-side) plus
+                // whatever the supervisor/systemd takes to relaunch the
+                // process and have it start answering /info again — bounded
+                // regardless, because "wait forever" is a spinner that is
+                // indistinguishable from a broker that is never coming
+                // back.
+                const RESTART_WAIT_TIMEOUT_MS = 90 * 1000;
+                const RESTART_POLL_MS = 2000;
+
+                async function waitForNewBootId(beforeBootId) {
+                    restartOp = { phase: 'waiting', note: 'restarting…' };
+                    renderAll();
+                    const deadline = Date.now() + RESTART_WAIT_TIMEOUT_MS;
+                    while (Date.now() < deadline) {
+                        await restartSleep(RESTART_POLL_MS);
+                        if (restartOpDead) return;
+                        // Resolved fresh every iteration, never carried in —
+                        // the same discipline poll() applies to every other
+                        // host in this mod, and doubly necessary here since
+                        // the very broker being asked is expected to
+                        // disappear and come back mid-loop.
+                        const host = updHost(LOCAL_HOST_ID);
+                        if (!host) {
+                            restartOp = { phase: 'failed',
+                                note: 'the local broker is no longer '
+                                    + 'configured' };
+                            renderAll();
+                            return;
+                        }
+                        let r;
+                        try {
+                            r = await hostFetch(host, '/info',
+                                { cache: 'no-store', timeoutMs: 4000 });
+                        } catch (_) {
+                            // THE expected shape of this loop, not a
+                            // failure: the broker is mid-stop or
+                            // mid-relaunch and simply is not there to
+                            // answer. Reporting this as an error would tell
+                            // the truth about the symptom and lie about
+                            // what it means.
+                            continue;
+                        }
+                        if (!r.ok) continue;
+                        let j = null;
+                        try { j = await r.json(); } catch (_) { continue; }
+                        const bootId = j && j.restart
+                            && typeof j.restart.bootId === 'string'
+                            && j.restart.bootId;
+                        if (!bootId) continue;
+                        if (bootId !== beforeBootId) {
+                            // THE proof. Not the 202 earlier, and not this
+                            // response merely arriving — the identity
+                            // changed, which is the one fact an HTTP
+                            // response from the process being replaced can
+                            // never assert about itself.
+                            restartOp = { phase: 'done',
+                                note: 'restarted — this build is now live' };
+                            // Stale the instant the process changed: the
+                            // capability, the version, everything this
+                            // cached record described belonged to the
+                            // broker that just stopped existing.
+                            modCatalogCache.delete(LOCAL_HOST_ID);
+                            renderAll();
+                            recheck();
+                            return;
+                        }
+                        // Still answering, but still the OLD process (or
+                        // briefly the new one before it has settled) — keep
+                        // waiting.
+                    }
+                    if (restartOpDead) return;
+                    restartOp = { phase: 'timeout',
+                        note: 'this broker did not come back within '
+                            + Math.round(RESTART_WAIT_TIMEOUT_MS / 1000)
+                            + 's. It may still be starting, or it may need '
+                            + 'attention on the machine itself — this '
+                            + 'window cannot tell which.' };
+                    renderAll();
+                }
+
+                async function performRestart() {
+                    const host = updHost(LOCAL_HOST_ID);
+                    if (!host) {
+                        restartOp = { phase: 'failed',
+                            note: 'the local broker is no longer '
+                                + 'configured' };
+                        renderAll();
+                        return;
+                    }
+                    restartOp = { phase: 'waiting',
+                        note: 'sending the restart request…' };
+                    renderAll();
+                    let resp;
+                    try {
+                        resp = await hostFetch(host, '/restart', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({}),
+                            // Comfortably past the server's own 20s drain
+                            // ceiling (RESTART_DRAIN_TIMEOUT) plus room for
+                            // the stop that follows a 202.
+                            timeoutMs: 30000,
+                        });
+                    } catch (e) {
+                        // A rejected POST here is NOT the expected
+                        // connection-drops-mid-restart case — that applies
+                        // only AFTER a 202, once the server has actually
+                        // committed to stopping. A request that never
+                        // landed at all is reported plainly.
+                        restartOp = { phase: 'failed',
+                            note: 'could not reach this broker to ask for '
+                                + 'a restart' };
+                        renderAll();
+                        return;
+                    }
+                    let body = null;
+                    try { body = await resp.json(); } catch (_) {}
+                    if (resp.status !== 202) {
+                        const code = body && body.reason_code;
+                        restartOp = { phase: 'failed',
+                            note: 'restart refused: '
+                                + restartReasonWords(code) };
+                        renderAll();
+                        return;
+                    }
+                    const beforeBootId = body && typeof body.bootId === 'string'
+                        && body.bootId;
+                    if (!beforeBootId) {
+                        // Accepted, but with nothing to compare against —
+                        // there is no honest way from here to later claim
+                        // this succeeded, so it is reported as a failure to
+                        // confirm rather than assumed to have worked.
+                        restartOp = { phase: 'failed',
+                            note: 'the broker accepted the restart but did '
+                                + 'not report a boot id to confirm it by' };
+                        renderAll();
+                        return;
+                    }
+                    await waitForNewBootId(beforeBootId);
+                }
+
+                // The confirm dialog's body: the live-session cost, stated
+                // plainly and never rounded toward safety. `at_risk`
+                // sessions are LOST, `unknown` ones MAY be — presenting
+                // either as "should be fine" would be the same lie this
+                // whole mod exists to refuse, aimed at a button instead of
+                // a chip.
+                function restartConfirmBody(cont) {
+                    return function (c) {
+                        const msg = document.createElement('div');
+                        msg.className = 'app-dialog-msg';
+                        msg.textContent = 'This restarts the broker '
+                            + 'serving this page. Any other broker '
+                            + 'configured here is never touched.';
+                        c.appendChild(msg);
+                        const list = document.createElement('div');
+                        list.className = 'app-upd-restart-continuity';
+                        const line = function (text, cls) {
+                            const d = document.createElement('div');
+                            d.className = 'app-upd-restart-cline'
+                                + (cls ? ' ' + cls : '');
+                            d.textContent = text;
+                            list.appendChild(d);
+                        };
+                        const plural = function (n) {
+                            return n === 1 ? '' : 's';
+                        };
+                        if (cont.guaranteed) {
+                            line(cont.guaranteed + ' agent session'
+                                + plural(cont.guaranteed)
+                                + ' should reconnect.');
+                        }
+                        if (cont.at_risk) {
+                            line(cont.at_risk + ' agent session'
+                                + plural(cont.at_risk) + ' will be LOST.',
+                                'app-upd-restart-bad');
+                        }
+                        if (cont.unknown) {
+                            line(cont.unknown + ' agent session'
+                                + plural(cont.unknown) + ' MAY be lost — '
+                                + 'their fate could not be determined.',
+                                'app-upd-restart-warn');
+                        }
+                        if (!cont.guaranteed && !cont.at_risk
+                                && !cont.unknown) {
+                            line('No agent sessions are tracked on this '
+                                + 'broker right now.');
+                        }
+                        line('Every plain terminal on this broker — not '
+                            + 'an agent session — does not survive a '
+                            + 'restart at all.', 'app-upd-restart-bad');
+                        c.appendChild(list);
+                    };
+                }
+
+                function onRestartClick() {
+                    if (restartOp && restartOp.phase === 'waiting') return;
+                    const info = restartInfo();
+                    if (!info.available) return;  // the button is disabled
+                                                   // for this; defensive only
+                    openDialog({
+                        title: 'Restart this broker?',
+                        body: restartConfirmBody(info.continuity),
+                        buttons: [
+                            { label: 'Restart', value: true, primary: true,
+                              danger: true },
+                            { label: 'Cancel', value: false },
+                        ],
+                    }).then(function (res) {
+                        if (!res || !res.value) return;
+                        return performRestart();
+                    }).catch(function () {});
+                }
+
+                // One row: the button plus its inline status/reason.
+                // Rebuilt on every renderWindow() pass, like every other
+                // row in this window — the button's text/disabled state is
+                // derived fresh from restartOp + restartInfo() each call
+                // rather than held on the element, so a poll tick firing
+                // mid-wait cannot leave a stale label behind.
+                function renderRestartRow(body) {
+                    const info = restartInfo();
+                    const busy = !!(restartOp
+                        && restartOp.phase === 'waiting');
+                    const row = document.createElement('div');
+                    row.className = 'app-upd-restart-row';
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'app-upd-restart-btn';
+                    btn.textContent = busy ? 'Restarting…'
+                        : 'Restart this broker';
+                    btn.title = 'restarts the broker serving THIS page '
+                        + 'only — never a remote host';
+                    btn.disabled = busy || !info.available;
+                    btn.addEventListener('mousedown', function (e) {
+                        e.stopPropagation();
+                    });
+                    btn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        onRestartClick();
+                    });
+                    row.appendChild(btn);
+                    const status = document.createElement('span');
+                    status.className = 'app-upd-restart-inline';
+                    if (restartOp && (busy || restartOp.phase === 'done'
+                            || restartOp.phase === 'timeout'
+                            || restartOp.phase === 'failed')) {
+                        status.textContent = restartOp.note;
+                        if (restartOp.phase === 'done') {
+                            status.classList.add('app-upd-green');
+                        } else if (restartOp.phase === 'timeout'
+                                || restartOp.phase === 'failed') {
+                            status.classList.add('app-upd-amber');
+                        }
+                    } else if (!info.available) {
+                        status.textContent = info.known
+                            ? restartReasonWords(info.reason)
+                            : 'this broker has not reported a restart '
+                                + 'capability yet';
+                        status.classList.add('app-upd-grey');
+                    }
+                    row.appendChild(status);
+                    body.appendChild(row);
+                }
+
                 // ---- detail window (ephemeral, like task-manager) ----
                 function openUpdateWindow(appData) {
                     const id = String(appData.id);
@@ -1018,6 +1428,15 @@
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
 
+                    // ---- restart THIS broker (#183) ----
+                    // Placed here, beside the shared facts about the local
+                    // build that motivate it, and NOT inside the per-broker
+                    // list below: the window names every configured host,
+                    // but this control is about exactly one of them,
+                    // always, regardless of which rows follow.
+                    addHead(body, 'Restart');
+                    renderRestartRow(body);
+
                     // ---- one row per broker ----
                     addHead(body, one ? 'This broker' : 'Brokers');
                     for (const r of rows) {
@@ -1128,6 +1547,12 @@
                 // FIRST: stop the timer and close any live window WHILE the kind
                 // is still registered.
                 ctx.onUnload(function () {
+                    // Also stops the restart wait loop from polling (and
+                    // repainting closed windows) once the mod itself is
+                    // gone, rather than letting it run to its own bounded
+                    // timeout in the background of a mod that is no longer
+                    // loaded.
+                    restartOpDead = true;
                     stop();
                     for (const w of Array.from(windows.values())) {
                         if (w && w.type === 'app' && w.appKind === 'update') {
