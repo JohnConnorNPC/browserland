@@ -1878,7 +1878,7 @@
         //   duplicate id/slot    -> ModConflictError, no last-wins (reason 'conflict')
         //   init() throws        -> rolled back via onUnload    (reason 'init-threw')
         // Siblings and core are unaffected in every case.
-        function initMod(decl) {
+        function initMod(decl, opts) {
             const id = decl && decl.id;
             if (typeof id !== 'string' || !id) {
                 const e = new Error('initMod: a non-empty string id is required');
@@ -1934,6 +1934,22 @@
             let ctx;
             try {
                 ctx = makeCtx(id, rec);
+                // #182: did a HUMAN just turn this mod on, in this browser, in
+                // this gesture? True ONLY on the setModEnabled path — the
+                // Control Panel checkbox — and false for every other way a mod
+                // comes up: boot, a restored or synced preference, a broker-side
+                // pin applied after login (_applyPolicyLive), a dependency
+                // cascade, __test.run().
+                //
+                // The distinction exists because a mod may take a real-world
+                // action on being enabled that it must NOT take merely on being
+                // initialized. The update mod opts its broker in to reaching
+                // github.com; doing that from a plain init would reinterpret a
+                // preference stored months ago — under documentation promising
+                // enabling caused no egress — as fresh consent, and would let a
+                // remote operator's mod pin cause a broker to make outbound
+                // requests. A click is consent. An init is not.
+                ctx.enabledByUser = !!(opts && opts.byUser);
                 decl.init(ctx);
             } catch (e) {
                 console.error('[mods] init failed for "' + id
@@ -2036,9 +2052,14 @@
         // gets init'd. The ordering guard (a dependency is always registered
         // EARLIER than its dependents) makes this deps-first, so one pass suffices
         // even for a chain — no fixpoint loop.
-        function _bringUp(decl) {
+        //
+        // #182: `opts` describes THIS call only and is deliberately not passed
+        // down the cascade below. Turning on a mod that drags a dependency up
+        // with it is a click aimed at the one mod named in the checkbox; the
+        // dependency was enabled by implication, and implication is not consent.
+        function _bringUp(decl, opts) {
             const regs = window.__mods.registered;
-            if (!window.__mods.active.has(decl.id)) initMod(decl);
+            if (!window.__mods.active.has(decl.id)) initMod(decl, opts);
             for (let i = regs.indexOf(decl) + 1; i < regs.length; i++) {
                 const m = regs[i];
                 if (window.__mods.active.has(m.id) || !isModEnabled(m.id)) continue;
@@ -2103,7 +2124,10 @@
             _writeModsDisabled(set);
             if (window.__mods.masterEnabled !== false) {
                 if (on) {
-                    _bringUp(decl);
+                    // byUser: this function IS the Control Panel checkbox's
+                    // handler, so reaching here with on=true means somebody
+                    // clicked. #182 uses it as the consent signal; see initMod.
+                    _bringUp(decl, { byUser: true });
                     // #167: the cascade just registered this mod's window kinds,
                     // so a persisted record that boot had to skip (its kind was
                     // unregistered then, so buildAppWindow returned null and left

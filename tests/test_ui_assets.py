@@ -6158,13 +6158,15 @@ def test_mid_session_mod_enable_restores_its_windows():
     # true across a page reload. Hooked at the two CALLERS of _bringUp, not inside
     # it: _applyPolicyLive calls _bringUp in a loop.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
-    bring = loader[loader.index("function _bringUp(decl)"):
+    # #182 widened the signature to _bringUp(decl, opts) -- match the name, not
+    # the parameter list, so a later parameter does not read as a missing hook.
+    bring = loader[loader.index("function _bringUp(decl"):
                    loader.index("function _takeDown(id)")]
     assert "restoreAppWindowsAfterMods" not in bring,         "_bringUp itself must not restore -- _applyPolicyLive calls it N times"
     setter = loader[loader.index("function setModEnabled"):
                     loader.index("// The boot entry")]
     assert "restoreAppWindowsAfterMods();" in setter
-    assert "_takeDown(id);" in setter and setter.index("_bringUp(decl);") <         setter.index("restoreAppWindowsAfterMods();")
+    assert "_takeDown(id);" in setter and setter.index("_bringUp(decl, { byUser: true });") <         setter.index("restoreAppWindowsAfterMods();")
     policy = loader[loader.index("function _applyPolicyLive"):
                     loader.index("async function notifyModsHostAuth")]
     assert "if (broughtUp) restoreAppWindowsAfterMods();" in policy
@@ -6723,3 +6725,52 @@ def test_portable_mod_lint_actually_detects_a_violation():
         stmts = top(bad)
         assert stmts and not all(s == "registerMod" or _JS_DECL.match(s)
                                  for s in stmts), f"lint missed {bad!r}"
+
+
+def test_only_a_click_marks_a_mod_enable_as_consent():
+    # #182: a mod may take a real-world action on being ENABLED that it must not
+    # take on merely being INITIALIZED. ctx.enabledByUser is what tells those
+    # apart, and it is only honest if exactly one caller sets it. Every other
+    # path into initMod -- boot, the post-login pin apply (_applyPolicyLive), a
+    # dependency cascade, __test.run() -- is a mod coming up for reasons nobody
+    # chose just now, and must arrive with the flag false.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "function initMod(decl, opts)" in loader
+    assert "ctx.enabledByUser = !!(opts && opts.byUser);" in loader
+
+    setter = loader[loader.index("function setModEnabled"):
+                    loader.index("// The boot entry")]
+    assert "_bringUp(decl, { byUser: true });" in setter, \
+        "the Control Panel checkbox is the ONE caller that may claim consent"
+
+    policy = loader[loader.index("function _applyPolicyLive"):
+                    loader.index("async function notifyModsHostAuth")]
+    assert "_bringUp(m);" in policy and "byUser" not in policy, \
+        "a broker-side pin applied after login is not a human clicking"
+
+    # The cascade a bring-up triggers must not inherit it either: enabling a mod
+    # that drags a dependency up is a click aimed at the one mod in the
+    # checkbox, and implication is not consent.
+    bring = loader[loader.index("function _bringUp(decl"):
+                   loader.index("function _takeDown(id)")]
+    assert "initMod(m);" in bring, \
+        "the dependency cascade must init dependencies WITHOUT opts"
+    assert bring.count("opts") == 2, \
+        f"_bringUp should only take opts and pass them to its own init, got {bring.count('opts')}"
+
+
+def test_the_update_mod_only_opts_in_on_that_click():
+    # The one consumer, and the assertion that keeps the seam load-bearing: a
+    # page load must reach pollTick() WITHOUT going through offerConsent().
+    mod = (BROKER_DIR / "mods/update/update.js").read_text(encoding="utf-8")
+    assert "if (ctx.enabledByUser) {" in mod
+    calls = mod.count("offerConsent()") - mod.count("function offerConsent()")
+    assert calls == 1, \
+        f"exactly one call site, guarded by the consent flag (got {calls})"
+    tail = mod[mod.index("renderChip();\n                start();"):]
+    assert tail.index("ctx.enabledByUser") < tail.index("offerConsent()"), \
+        "offerConsent must be reachable only through the flag"
+    # Nothing may post a revoke on its own -- see the mod's own comment on why
+    # an automatic `false` would make two browsers fight over one broker's gate.
+    assert "check_enabled: !!want" in mod
+    assert "check_enabled: false" not in mod
