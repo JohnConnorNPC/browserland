@@ -5,11 +5,19 @@
         //
         // Ships DISABLED (defaultEnabled:false) like aistatus, and for the same
         // reason: nothing here runs at top level except registerMod(), because
-        // a top-level side effect would defeat the default-off contract. But
-        // note the mod's switch is NOT what protects the network — the broker
-        // has its own `update_check_enabled` gate, and answers 503 until an
-        // operator sets it. Enabling this mod on a broker that never opted in
-        // gets you an honest "checking is disabled here", not a silent egress.
+        // a top-level side effect would defeat the default-off contract. The
+        // broker keeps its own `update_check_enabled` gate on top and answers
+        // 503 until it is opted in, so the mod's switch alone has never been
+        // what protects the network.
+        //
+        // What the two gates mean TOGETHER changed once (#182): ticking this mod
+        // on in the Control Panel now asks the local broker to open its gate,
+        // because being made to edit a JSON file and restart the process for a
+        // decision you just expressed in the UI is friction, not safety. The
+        // CLICK is what asks — never a page load, a synced preference or a
+        // broker-side pin (see offerConsent). A broker that was never opted in
+        // and is not being asked still gets you an honest "checking is switched
+        // off here", not a silent egress.
         //
         // The single rule this mod exists to keep: NEVER claim "up to date"
         // when the truth is "I could not check". Every failure lands on
@@ -65,8 +73,9 @@
                     // did not get through, and this one describes an answer.
                     'not-opted-in': 'update checking is switched off on this '
                         + 'broker. That is its operator’s choice, not a fault '
-                        + 'here and not a network problem — an operator enables '
-                        + 'it with "update_check_enabled" in the broker config',
+                        + 'here and not a network problem — it is switched on '
+                        + 'from that broker’s own desktop, or by an operator '
+                        + 'setting "update_check_enabled" in its config',
                     // The five below are raised HERE, in the browser, and
                     // never by a broker. Keeping them separate from 'offline'
                     // is the whole point: 'offline' is the BROKER saying IT
@@ -808,6 +817,159 @@
                     if (timer) { clearInterval(timer); timer = null; }
                 }
 
+                // ---- opting THIS broker in (#182) --------------------------
+                // Turning update checking on used to mean editing
+                // broker_config.json and restarting the process. The broker now
+                // takes the decision over POST /update/policy and applies it
+                // live, and this is the client half.
+                //
+                // WHAT COUNTS AS CONSENT, because this grants egress and that is
+                // not a thing to infer. Exactly two events reach the route:
+                //
+                //   1. `ctx.enabledByUser` — somebody ticked this mod on in the
+                //      Control Panel, in this browser, just now. The loader sets
+                //      that flag ONLY on the setModEnabled path (86, initMod),
+                //      so a page load, a synced or restored preference, a
+                //      dependency cascade, and a broker-side mod pin applied
+                //      after login all arrive with it false. That matters: this
+                //      mod shipped promising that enabling it caused no egress,
+                //      so re-reading an old stored preference as fresh consent
+                //      would be retroactive — and a remote operator who can pin
+                //      mods on a broker could otherwise make that broker start
+                //      making outbound requests without touching it.
+                //   2. The button below, clicked.
+                //
+                // NOTHING SENDS `false` AUTOMATICALLY, and that asymmetry is
+                // deliberate rather than an omission. The gate belongs to the
+                // BROKER while the mod's on/off switch belongs to a BROWSER, so
+                // a browser with the mod off that posted `false` would revoke a
+                // grant some other browser is actively relying on, and the two
+                // would fight every time either one loaded. Turning the mod off
+                // stops this browser drawing anything; the Stop button is how
+                // the grant itself is given back.
+                //
+                // LOCAL BROKER ONLY. Every peer row in this window stays
+                // read-only about its own gate — the route is origin-gated at
+                // the far end anyway, and reaching into another machine's egress
+                // policy is a decision nobody has taken yet.
+                let policyOp = null;     // {phase:'busy'|'failed'|'locked', note}
+                let consentSent = false;  // one attempt per page load, ever
+
+                // What the LOCAL broker last told /info about its own update
+                // capability, or null if it has not answered yet or is running a
+                // build too old to publish one. Read out of the control panel's
+                // shared record for the same reason the capability probe is —
+                // one cache, so two surfaces cannot disagree about one broker.
+                function localUpdateCap() {
+                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
+                    const upd = rec && rec.update;
+                    return (upd && typeof upd === 'object') ? upd : null;
+                }
+                // Can this browser change the local gate at all? `mutable` is
+                // false when broker_config.json NAMES update_check_enabled: that
+                // operator's file wins, on purpose, so that editing it and
+                // restarting stays the reliable way to stop unwanted egress.
+                // Absent (an older broker) reads as "cannot", which is correct —
+                // it has no route to ask.
+                function localPolicyMutable() {
+                    const upd = localUpdateCap();
+                    return !!(upd && upd.mutable === true);
+                }
+
+                // opts.poll defaults ON: a click must produce the answer in the
+                // same beat, not at the next half-hourly tick. offerConsent
+                // turns it off because a full fleet pollTick follows it
+                // immediately, and two checks of the same broker one line apart
+                // is a wasted request however cheap the second one is.
+                async function setChecking(want, opts) {
+                    const host = updHost(LOCAL_HOST_ID);
+                    if (!host) {
+                        policyOp = { phase: 'failed',
+                            note: 'the local broker is no longer configured' };
+                        renderAll();
+                        return false;
+                    }
+                    policyOp = { phase: 'busy',
+                        note: want ? 'switching checking on…'
+                            : 'switching checking off…' };
+                    renderAll();
+                    let resp;
+                    try {
+                        resp = await hostFetch(host, '/update/policy', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ check_enabled: !!want }),
+                            timeoutMs: 15000,
+                        });
+                    } catch (_) {
+                        policyOp = { phase: 'failed',
+                            note: 'could not reach this broker to ask' };
+                        renderAll();
+                        return false;
+                    }
+                    let body = null;
+                    try { body = await resp.json(); } catch (_) {}
+                    if (resp.status === 404) {
+                        // The route does not exist here. Says so as a FACT about
+                        // the build rather than as a failure, and names the one
+                        // thing that does work on it.
+                        policyOp = { phase: 'failed',
+                            note: 'this broker predates the switch — an '
+                                + 'operator sets "update_check_enabled" in its '
+                                + 'config and restarts it' };
+                        renderAll();
+                        return false;
+                    }
+                    if (resp.status === 409 && body
+                            && body.error === 'policy_locked') {
+                        policyOp = { phase: 'locked',
+                            note: 'this broker’s config names '
+                                + '"update_check_enabled", so that file decides '
+                                + 'and this switch does not' };
+                        renderAll();
+                        return false;
+                    }
+                    if (!body || body.ok !== true) {
+                        policyOp = { phase: 'failed',
+                            note: 'this broker refused the change' };
+                        renderAll();
+                        return false;
+                    }
+                    policyOp = null;
+                    // The shared /info record is now stale about this one
+                    // broker, and the whole window derives from it. Patch it
+                    // from the authoritative value the write returned rather
+                    // than re-fetching: the response IS what landed, and a
+                    // re-fetch would be a second opinion about a fact we were
+                    // just handed.
+                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
+                    if (rec && body.update && typeof body.update === 'object') {
+                        rec.update = body.update;
+                    }
+                    if (!opts || opts.poll !== false) {
+                        await poll(LOCAL_HOST_ID, {});
+                    }
+                    renderAll();
+                    return true;
+                }
+
+                // The consent path. Runs at most once per page load, only when a
+                // human just ticked this mod on, and only when the local broker
+                // has actually said it is both off and ours to change — an
+                // unconditional POST would spend a request on every broker that
+                // already had checking on.
+                async function offerConsent() {
+                    if (consentSent) return;
+                    consentSent = true;
+                    const host = updHost(LOCAL_HOST_ID);
+                    if (!host) return;
+                    try { await capabilityFor(host, false); } catch (_) {}
+                    const upd = localUpdateCap();
+                    if (!upd || upd.check_enabled !== false) return;
+                    if (upd.mutable !== true) return;
+                    await setChecking(true, { poll: false });
+                }
+
                 // ---- self-restart (#183) -----------------------------------
                 // Deliberately scoped to the LOCAL broker, and only the local
                 // broker. The window above lists every configured host, but
@@ -1167,6 +1329,79 @@
                     }).catch(function () {});
                 }
 
+                // Is there anything to show under "Checking"? Yes whenever the
+                // local gate is OFF and ours to turn on (the case the user
+                // hits), whenever it is off and NOT ours (so the window can say
+                // whose it is instead of showing nothing), and whenever we hold
+                // a stored grant that can be given back. No when checking is on
+                // because a config file says so: there is no switch to offer and
+                // the Brokers list below already reports the state.
+                function policyRowNeeded() {
+                    const upd = localUpdateCap();
+                    if (policyOp) return true;
+                    if (!upd) return false;         // too old, or not answered
+                    if (upd.check_enabled === false) return true;
+                    return upd.source === 'stored';
+                }
+
+                // One row: the switch plus its inline reason, rebuilt from
+                // policyOp + the shared /info record on every pass exactly like
+                // renderRestartRow — nothing about it is held on the element, so
+                // a poll landing mid-write cannot leave a stale label behind.
+                function renderPolicyRow(body) {
+                    const upd = localUpdateCap();
+                    const on = !!(upd && upd.check_enabled === true);
+                    const busy = !!(policyOp && policyOp.phase === 'busy');
+                    const row = document.createElement('div');
+                    row.className = 'app-upd-restart-row';
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'app-upd-restart-btn';
+                    btn.textContent = busy
+                        ? (on ? 'Stopping…' : 'Enabling…')
+                        : (on ? 'Stop checking on this broker'
+                            : 'Enable checking on this broker');
+                    btn.title = on
+                        ? 'this broker stops contacting GitHub. Its address '
+                            + 'has already been disclosed by the checks it '
+                            + 'has run — this stops future ones'
+                        : 'lets the broker serving THIS page contact GitHub to '
+                            + 'compare its build against upstream. No other '
+                            + 'broker is affected';
+                    btn.disabled = busy || !localPolicyMutable();
+                    btn.addEventListener('mousedown', function (e) {
+                        e.stopPropagation();
+                    });
+                    btn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        setChecking(!on).catch(function () {});
+                    });
+                    row.appendChild(btn);
+                    const status = document.createElement('span');
+                    status.className = 'app-upd-restart-inline';
+                    if (policyOp) {
+                        status.textContent = policyOp.note;
+                        if (policyOp.phase === 'failed'
+                                || policyOp.phase === 'locked') {
+                            status.classList.add('app-upd-amber');
+                        }
+                    } else if (!localPolicyMutable()) {
+                        // The button is dead, so say why rather than leaving a
+                        // greyed control with no explanation beside it.
+                        status.textContent = upd && upd.source === 'config'
+                            ? 'this broker’s config names '
+                                + '"update_check_enabled", so that file decides'
+                            : 'this broker has not reported whether the switch '
+                                + 'can be changed here';
+                    } else if (on) {
+                        status.textContent = 'switched on from here; it stays '
+                            + 'on across restarts until it is switched off';
+                    }
+                    row.appendChild(status);
+                    body.appendChild(row);
+                    return row;
+                }
+
                 // One row: the button plus its inline status/reason.
                 // Rebuilt on every renderWindow() pass, like every other
                 // row in this window — the button's text/disabled state is
@@ -1428,6 +1663,19 @@
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
 
+                    // ---- checking on THIS broker (#182) ----
+                    // Same scope rule as Restart below: about the broker
+                    // serving this page, always, whichever rows follow.
+                    // Rendered only when there is something to DO — a
+                    // broker that is checking and was told to by its own
+                    // config has no switch here to offer, and an empty
+                    // "Checking: on" row would just be the Brokers list
+                    // said twice.
+                    if (policyRowNeeded()) {
+                        addHead(body, 'Checking');
+                        renderPolicyRow(body);
+                    }
+
                     // ---- restart THIS broker (#183) ----
                     // Placed here, beside the shared facts about the local
                     // build that motivate it, and NOT inside the per-broker
@@ -1563,6 +1811,19 @@
 
                 renderChip();
                 start();
-                pollTick();
+                // #182: the consent attempt goes FIRST when there is one, so a
+                // freshly-ticked mod resolves to an answer rather than flashing
+                // "switched off here" and correcting itself a moment later. It
+                // polls the local broker itself on success; the fleet-wide tick
+                // follows either way, and .catch because nobody awaits this —
+                // an unguarded rejection would surface on the page instead of
+                // in this mod.
+                if (ctx.enabledByUser) {
+                    offerConsent()
+                        .catch(function () {})
+                        .then(function () { pollTick(); });
+                } else {
+                    pollTick();
+                }
             },
         });

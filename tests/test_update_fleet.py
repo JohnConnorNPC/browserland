@@ -50,6 +50,10 @@ _CHUNKS = (
     ("function servesUpdateMod(mods) {", "// ---- the poll ----"),
     ("async function poll(hostId, opts) {", "// The driver. EVERY configured host"),
     ("function pollTick(opts) {", "function start() {"),
+    # #182: the local opt-in — localUpdateCap/localPolicyMutable/setChecking/
+    # offerConsent. Declaration-only like the rest; the row that renders it is
+    # deliberately NOT in range (it touches the DOM).
+    ("let policyOp = null;", "// ---- self-restart (#183) ---"),
 )
 
 _REQUIRED = (
@@ -61,6 +65,8 @@ _REQUIRED = (
     "function servesUpdateMod", "function capabilityFrom",
     "async function capabilityFor", "async function poll",
     "function pollTick", "function pruneChecks", "function recheck",
+    "function localUpdateCap", "function localPolicyMutable",
+    "async function setChecking", "async function offerConsent",
 )
 
 
@@ -122,9 +128,15 @@ const INFO_OLD = { state: 'ok', mods: [{ id: 'editor' }, { id: 'aistatus' }],
 const INFO_NOCAP = { state: 'ok', mods: [{ id: 'editor' }, { id: 'update' }],
                      modsEnabled: true, policy: {}, update: null };
 // A current broker, with the capability key saying yes or no.
-const INFO_MODERN = (on) => ({
+// #182: `source`/`mutable` ride the same key. `mutable` is false only when the
+// broker's own config names update_check_enabled, so the default here — the
+// common case — is a gate this browser is allowed to change.
+const INFO_MODERN = (on, over) => ({
     state: 'ok', mods: [{ id: 'update' }], modsEnabled: true, policy: {},
-    update: { check_enabled: on !== false, apply_enabled: false },
+    update: Object.assign(
+        { check_enabled: on !== false, apply_enabled: false,
+          source: on !== false ? 'stored' : 'default', mutable: true },
+        over || {}),
 });
 
 const OK200 = (check) => ({ status: 200, ok: true, body: { ok: true, check } });
@@ -140,10 +152,28 @@ globalThis.fetchModCatalog = async (host) => {
     if (rec === 'throw') throw new Error('probe blew up');
     modCatalogCache.set(host.id, rec || INFO_DOWN);
 };
+// #182: what POST /update/policy answers, per host, and every write that was
+// attempted. `policyCalls` is the evidence for the rule that matters most here
+// — nothing may ask a broker to open its gate except a human's click.
+let POLICY = {};
+const policyCalls = [];
+
 globalThis.hostFetch = async (host, path, opts) => {
     // A null host would silently hit the SERVING origin — the exact lie the
     // mod is written to prevent, so it is a hard failure here.
     if (!host) throw new Error('hostFetch got a null host');
+    if (path === '/update/policy') {
+        const sent = JSON.parse((opts && opts.body) || '{}');
+        policyCalls.push({ id: host.id, method: (opts && opts.method) || 'GET',
+                           want: sent.check_enabled });
+        const spec = POLICY[host.id];
+        if (!spec || spec === 'throw') throw new TypeError('Failed to fetch');
+        return {
+            status: spec.status,
+            ok: spec.status >= 200 && spec.status < 300,
+            json: async () => spec.body,
+        };
+    }
     if (path !== '/update/check') throw new Error('unexpected path: ' + path);
     checkCalls.push(host.id);
     const spec = CHECK[host.id];
@@ -181,7 +211,11 @@ const AHEAD = { check: { state: 'ahead-or-diverged', aheadBy: 2, behindBy: 0 },
                 error: null, checkedAt: 1000 };
 const FAIL = (code) => ({ check: null, error: code, checkedAt: 1000 });
 function setRec(id, rec) { Object.assign(checkStateFor(id), rec); }
-function reset() { hostChecks.clear(); modCatalogCache.clear(); HOSTS = []; }
+function reset() {
+    hostChecks.clear(); modCatalogCache.clear(); HOSTS = [];
+    POLICY = {}; policyCalls.length = 0; infoCalls.length = 0;
+    checkCalls.length = 0; policyOp = null; consentSent = false;
+}
 function rowLine(r) {
     return r.id + '|' + r.ps + '|' + r.words + '|' + (reasonCode(r.st) || '-');
 }
@@ -572,6 +606,152 @@ CASES.single_host = async () => {
     one('unknown', { check: { state: 'unknown', reason: 'rate-limited' },
                      error: null, checkedAt: 1000 });
     one('pending', null);
+    return out;
+};
+
+// --- #182: opting the LOCAL broker in ------------------------------------
+// The rule under test is not "does the button work" but "what is allowed to
+// press it". Granting egress is irreversible in the only way that counts — an
+// address, once disclosed, cannot be undisclosed — so anything that reaches
+// POST /update/policy without a human behind it is a bug.
+CASES.consent = async () => {
+    const out = {};
+    const OK = (on) => ({ status: 200, body: { ok: true, update: {
+        check_enabled: on, apply_enabled: false,
+        source: 'stored', mutable: true } } });
+
+    // A human ticked the mod on and this broker is off, unlocked, ours.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    POLICY = { local: OK(true) };
+    // Exactly what init() does on a freshly-ticked mod: consent, then the
+    // ordinary fleet tick. The check must land in that same pass, and land
+    // ONCE -- offerConsent skips its own poll precisely so this one is not a
+    // duplicate of it.
+    await offerConsent();
+    await pollTick();
+    out.click = { posted: policyCalls.slice(),
+                  cap: localUpdateCap(),
+                  checked: checkCalls.slice(),
+                  state: peerState(checkStateFor('local')) };
+
+    // Same broker, but nobody clicked — this is what a plain page load, a
+    // synced preference or a broker-side pin looks like from here.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(false) };
+    CHECK = { local: R503 };
+    POLICY = { local: OK(true) };
+    await pollTick();
+    out.noClick = { posted: policyCalls.slice(),
+                    state: peerState(checkStateFor('local')) };
+
+    // Once per page load, whatever else happens.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    POLICY = { local: OK(true) };
+    await offerConsent();
+    await offerConsent();
+    await offerConsent();
+    out.onceOnly = policyCalls.length;
+
+    // Already checking: nothing to ask for, so no request is spent.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(true) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    POLICY = { local: OK(true) };
+    await offerConsent();
+    out.alreadyOn = policyCalls.slice();
+
+    // The operator's config names the key. Locked: not ours to change, and the
+    // click must not even try.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(false, { source: 'config', mutable: false }) };
+    CHECK = { local: R503 };
+    POLICY = { local: OK(true) };
+    await offerConsent();
+    out.locked = { posted: policyCalls.slice(),
+                   mutable: localPolicyMutable() };
+
+    // A build too old to have the route publishes no capability at all.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_OLD };
+    CHECK = { local: OK200({ state: 'current' }) };
+    await offerConsent();
+    out.tooOld = { posted: policyCalls.slice(), cap: localUpdateCap() };
+
+    // PEERS. A fleet where every other broker is switched off must produce
+    // exactly one write, aimed at 'local', however many rows there are.
+    reset();
+    fleet(['local', 'peerA', 'peerB']);
+    INFO = { local: INFO_MODERN(false), peerA: INFO_MODERN(false),
+             peerB: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }), peerA: R503, peerB: R503 };
+    POLICY = { local: OK(true), peerA: OK(true), peerB: OK(true) };
+    await offerConsent();
+    await pollTick();
+    out.peers = { posted: policyCalls.slice(),
+                  peerAState: peerState(checkStateFor('peerA')) };
+
+    // Everything below starts from a page that has already polled once, which
+    // is what the button's callers have actually done: /info is cached, so
+    // these exercise the write against a known capability rather than against
+    // an empty cache no real click could see.
+    const primed = async (info, policy) => {
+        reset();
+        fleet(['local']);
+        INFO = { local: info };
+        CHECK = { local: R503 };
+        POLICY = { local: policy };
+        await pollTick();
+        policyCalls.length = 0;
+    };
+
+    // The revoke, and the fact that nothing sends `false` on its own: a full
+    // poll after it must not put the grant back.
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(true) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    POLICY = { local: OK(false) };
+    await pollTick();
+    policyCalls.length = 0;
+    await setChecking(false);
+    const afterRevoke = policyCalls.slice();
+    // The broker now genuinely refuses, and says so on /info too.
+    INFO = { local: INFO_MODERN(false) };
+    CHECK = { local: R503 };
+    await pollTick();
+    out.revoke = { posted: afterRevoke, postedAfterPoll: policyCalls.slice(),
+                   cap: localUpdateCap() };
+
+    // A broker that 404s the route (it predates it) is reported as a fact
+    // about that build, and the failure never claims the gate changed.
+    await primed(INFO_MODERN(false), { status: 404, body: { ok: false } });
+    const ok404 = await setChecking(true);
+    out.notFound = { ok: ok404, note: policyOp && policyOp.note,
+                     phase: policyOp && policyOp.phase,
+                     cap: localUpdateCap() };
+
+    // And a 409 from a config-locked broker says whose decision it is.
+    await primed(INFO_MODERN(false),
+                 { status: 409, body: { ok: false, error: 'policy_locked' } });
+    const ok409 = await setChecking(true);
+    out.lockedWrite = { ok: ok409, phase: policyOp && policyOp.phase,
+                        note: policyOp && policyOp.note };
+
+    // A transport failure must not be reported as a changed gate either.
+    await primed(INFO_MODERN(false), 'throw');
+    const okDead = await setChecking(true);
+    out.unreachable = { ok: okDead, phase: policyOp && policyOp.phase,
+                        cap: localUpdateCap() };
     return out;
 };
 
@@ -1047,3 +1227,87 @@ def test_fanning_out_did_not_change_when_one_broker_goes_quiet(harness):
     assert r["current"]["quietOne"] is True
     assert r["current"]["aggText"] == "1 broker · up to date"
     assert r["unreachable"]["aggText"] == "1 broker · 1 unchecked"
+
+
+# ---- #182: what is allowed to open this broker's gate ----------------------
+
+def test_a_click_is_what_opens_the_gate_and_only_a_click(harness):
+    """The consent rule, both directions, run against the shipped mod.
+
+    A page load, a preference synced in from another browser, a restored
+    session and a broker-side mod pin all reach init() identically — none of
+    them is somebody deciding to let this machine contact GitHub, and the mod
+    shipped promising exactly that. Only ctx.enabledByUser (the Control Panel
+    checkbox) leads here."""
+    out = run(harness, "consent")
+
+    posted = out["click"]["posted"]
+    assert len(posted) == 1, f"a click must post exactly once, got {posted}"
+    assert posted[0] == {"id": "local", "method": "POST", "want": True}
+    # And the answer arrives in the same beat, not at the next half-hourly tick.
+    assert out["click"]["checked"] == ["local"]
+    assert out["click"]["state"] == "current"
+    assert out["click"]["cap"]["check_enabled"] is True
+
+    assert out["noClick"]["posted"] == [], (
+        "a poll with no human behind it asked a broker to open its gate")
+    assert out["noClick"]["state"] == "not-opted-in", (
+        "and it must still report the refusal honestly")
+
+    assert out["onceOnly"] == 1, "the attempt must not repeat within a page load"
+
+
+def test_consent_is_not_spent_where_it_would_do_nothing(harness):
+    out = run(harness, "consent")
+    assert out["alreadyOn"] == [], "a broker already checking was asked anyway"
+    assert out["locked"]["posted"] == [], (
+        "a config-owned gate must not even be attempted")
+    assert out["locked"]["mutable"] is False
+    assert out["tooOld"]["posted"] == [], (
+        "a build with no route was sent a request for it")
+    assert out["tooOld"]["cap"] is None
+
+
+def test_only_the_local_broker_is_ever_asked(harness):
+    """Peers stay read-only about their own egress. Nobody has decided that
+    reaching into another machine's policy from here is acceptable, and the far
+    end origin-gates the route regardless."""
+    out = run(harness, "consent")
+    posted = out["peers"]["posted"]
+    assert [p["id"] for p in posted] == ["local"], (
+        f"a peer's gate was written to: {posted}")
+    assert out["peers"]["peerAState"] == "not-opted-in"
+
+
+def test_nothing_hands_the_grant_back_on_its_own(harness):
+    """The gate is per-BROKER and the mod's switch is per-BROWSER, so an
+    automatic `false` would let one browser revoke what another is relying on,
+    and the two would fight on every load. Revoking is a deliberate act."""
+    out = run(harness, "consent")
+    assert out["revoke"]["posted"] == [
+        {"id": "local", "method": "POST", "want": False}]
+    assert out["revoke"]["postedAfterPoll"] == out["revoke"]["posted"], (
+        "a poll after a revoke put the grant back")
+    assert out["revoke"]["cap"]["check_enabled"] is False
+
+
+def test_a_failed_write_never_reads_as_a_changed_gate(harness):
+    """Three ways it can fail, three distinguishable outcomes — and in none of
+    them may the cached capability start claiming the gate is open."""
+    out = run(harness, "consent")
+
+    assert out["notFound"]["ok"] is False
+    assert out["notFound"]["phase"] == "failed"
+    assert "predates" in out["notFound"]["note"]
+    assert "update_check_enabled" in out["notFound"]["note"], (
+        "on a build with no route, the config key IS the answer — say it")
+    assert out["notFound"]["cap"]["check_enabled"] is False
+
+    assert out["lockedWrite"]["ok"] is False
+    assert out["lockedWrite"]["phase"] == "locked", (
+        "a config-owned gate is not a failure, it is somebody else's decision")
+    assert "config" in out["lockedWrite"]["note"]
+
+    assert out["unreachable"]["ok"] is False
+    assert out["unreachable"]["phase"] == "failed"
+    assert out["unreachable"]["cap"]["check_enabled"] is False
