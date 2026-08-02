@@ -465,6 +465,17 @@ def update_policy_view(app) -> Dict[str, Any]:
         "apply_enabled": bool(getattr(app.ctx, "update_apply_enabled", False)),
         "source": app.ctx.update_policy_source,
         "mutable": app.ctx.update_policy_source != _UPDATE_POLICY_CONFIG,
+        # Whether a browser on ANOTHER broker's page may perform that write.
+        # A separate key from `mutable`, and the separation is load-bearing
+        # rather than tidy: the first build to ship /update/policy origin-gated
+        # it, so it reports mutable:true and REFUSES a cross-origin write. A
+        # remote UI reading `mutable` alone would offer a switch on that broker,
+        # get a 403, and have to describe it as something -- and every available
+        # description ("wrong password", "refused the change") is a lie about a
+        # build that is merely older. The capability is therefore published
+        # only by a build that actually accepts it, exactly like `update`
+        # itself is only published by a build that has the check.
+        "remote_writable": True,
     }
 
 # /session/* management RPCs: how long the broker waits for the producer's
@@ -6439,14 +6450,25 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The flip is LIVE: _update_check reads app.ctx per request, so the very
     # next poll goes through.
     #
-    # ORIGIN-GATED, unlike POST /mods/policy which it otherwise copies. That
-    # analogy breaks on one asymmetry: a mod pin is recoverable, whereas
-    # granting egress cannot be taken back after the fact -- once this broker
-    # has contacted GitHub, its address has been disclosed and no later revoke
-    # unsends it. Enabling is deliberately LOCAL-ONLY at the UI too (the fleet
-    # list stays read-only about peers), so nothing legitimate needs the
-    # cross-origin door; the preflight entry exists so that a future peer-enable
-    # is a policy decision rather than a compatibility break.
+    # NOT origin-gated, exactly like POST /mods/policy which it otherwise
+    # copies. It briefly was, on the theory that granting egress is irreversible
+    # in a way a mod pin is not and that nothing legitimate needed the
+    # cross-origin door. BOTH halves of that were wrong:
+    #
+    #   * The door IS the feature. An operator administers a fleet from ONE
+    #     desktop; a broker they have no local session on is precisely the one
+    #     they need to switch on from somewhere else, and origin-gating made
+    #     that the single case the UI could not perform.
+    #   * The gate protected nothing. This broker authenticates by an EXPLICIT
+    #     token -- query param or Authorization header, never a cookie (see the
+    #     CORS note at the top of this module) -- so there is no ambient
+    #     credential for a page on another origin to ride. A caller without the
+    #     token gets 401 whatever its Origin; a caller WITH it can already POST
+    #     /launch and get a shell on this box, which dwarfs switching a version
+    #     check on. An origin check only filters honest callers.
+    #
+    # POST /restart keeps its origin check, and the difference is deliberate: it
+    # is not recoverable in the moment, and no fleet use case needs it remote.
     #
     # REFUSED WHILE QUIESCING, and the lifecycle is re-read after the lock. The
     # drain snapshots its critical-task set once; a request that passed the
@@ -6457,12 +6479,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _gated_auth_error(request, "/update/policy")
         if err is not None:
             return err
-        if not _origin_permitted(request):
-            LOGGER.warning("refused a cross-origin update-policy write from "
-                           "origin %r (%s)",
-                           request.headers.get("Origin"), request.ip)
-            return sanic_json({"ok": False, "error": "forbidden_origin"},
-                              status=403)
         busy = _refuse_if_quiescing(app, "update policy write")
         if busy is not None:
             return busy

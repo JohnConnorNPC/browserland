@@ -48,6 +48,7 @@ def _make_app(tmp_path, monkeypatch, **cfg_extra):
     global _app_seq
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = {"state_path": str(tmp_path / "webterm_state.json"),
            "auth_token": TEST_TOKEN}
     cfg.update(cfg_extra)
@@ -213,17 +214,45 @@ def test_only_a_real_bool_is_accepted(tmp_path, monkeypatch, body):
     assert not _sidecar(app).exists()
 
 
-def test_a_cross_origin_write_is_refused(tmp_path, monkeypatch):
-    """Origin-gated unlike /mods/policy, which it otherwise copies: a mod pin is
-    recoverable, and a disclosed address is not. Enabling is local-only at the
-    UI too, so nothing legitimate needs this door."""
+def test_a_cross_origin_write_is_the_point(tmp_path, monkeypatch):
+    """This route briefly WAS origin-gated, and that was wrong twice over.
+
+    An operator administers a fleet from one desktop, so the broker they need to
+    switch on is the one they have no local session on — the gate refused the
+    only case that mattered. And it protected nothing: this broker authenticates
+    by an explicit token, never a cookie, so a page on another origin has no
+    ambient credential to ride, and a caller holding the token can already POST
+    /launch for a shell. POST /restart keeps its origin check; this does not."""
     _no_network(monkeypatch)
     app = _make_app(tmp_path, monkeypatch)
     _, r = authed(app).post("/update/policy", json={"check_enabled": True},
                             headers={"Origin": "https://elsewhere.example"})
-    assert r.status == 403
-    assert r.json["error"] == "forbidden_origin"
-    assert app.ctx.update_check_enabled is False
+    assert r.status == 200, "a peer's desktop must be able to make this change"
+    assert app.ctx.update_check_enabled is True
+    # Still worthless without the token, whatever the Origin says.
+    app2 = _make_app(tmp_path / "b", monkeypatch)
+    _, r = app2.test_client.post("/update/policy",
+                                 json={"check_enabled": True},
+                                 headers={"Origin": "https://elsewhere.example"})
+    assert r.status == 401
+    assert app2.ctx.update_check_enabled is False
+
+
+def test_remote_writable_is_published_so_an_older_peer_is_not_offered_one(
+        tmp_path, monkeypatch):
+    """A separate key from `mutable`, and the separation is what keeps a rolling
+    upgrade honest: the first build to ship this route origin-gated it, so it
+    reports mutable:true and refuses the write. Only a build that accepts the
+    write says so."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/info")
+    assert r.json["update"]["remote_writable"] is True
+    # And it stays true even where the setting itself cannot be changed: the two
+    # keys answer different questions, and collapsing them is the bug.
+    locked = _make_app(tmp_path / "c", monkeypatch, update_check_enabled=False)
+    _, r = authed(locked).get("/info")
+    assert r.json["update"]["mutable"] is False
+    assert r.json["update"]["remote_writable"] is True
 
 
 def test_the_preflight_exists_so_the_route_is_not_invisible(tmp_path,
