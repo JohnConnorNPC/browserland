@@ -6,7 +6,9 @@ The mod ships **disabled by default**, and each broker has a second switch of it
 
 If your broker was already checking-off when you upgraded — its mod preference was set before this existed, so no click ever happens — the **Update check** window offers **Enable checking on this broker**. The same row is where you switch it back off, which is the only thing that does: turning the mod off just stops your browser drawing the chip. The grant is stored beside the broker's state file, so it survives restarts.
 
-Only the broker serving the page can be switched on from here. Every other broker in the list is read-only about its own switch, and reports "checking not enabled there" until somebody turns it on from that machine's own desktop.
+**Any broker in the list can be switched on, not just the one serving the page.** That is the case that matters when you administer a fleet remotely: the machine that needs switching on is usually one you have no desktop session on. Each row carries its own control, and enabling a remote broker asks you to confirm first — it names the machine and its address, because the rows look alike and the first check discloses that machine's address to GitHub in a way switching it off later does not undo.
+
+A row shows no control when there is nothing to do: when that broker's config owns the setting, when it is too old to have the switch, when it never answered, or when it is already checking because its own config says so. A broker running the build that first shipped this feature is also left alone — it accepts the change only from its own desktop, so the row says to update it rather than offering a button that would fail.
 
 An operator who wants the decision taken out of the GUI's hands entirely puts `update_check_enabled` in that broker's config file. Naming it there — either way, `true` or `false` — makes the config authoritative, the button goes dead and says so, and editing the file and restarting stays the way that setting changes. It is absent from the shipped example configs on purpose, so a normal install is the browser's to decide.
 

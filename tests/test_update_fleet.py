@@ -50,10 +50,10 @@ _CHUNKS = (
     ("function servesUpdateMod(mods) {", "// ---- the poll ----"),
     ("async function poll(hostId, opts) {", "// The driver. EVERY configured host"),
     ("function pollTick(opts) {", "function start() {"),
-    # #182: the local opt-in — localUpdateCap/localPolicyMutable/setChecking/
-    # offerConsent. Declaration-only like the rest; the row that renders it is
-    # deliberately NOT in range (it touches the DOM).
-    ("let policyOp = null;", "// ---- self-restart (#183) ---"),
+    # #182: the opt-in — updateCapFor/policyMutableFor/hostFingerprint/
+    # setChecking/offerConsent. Declaration-only like the rest; the row that
+    # renders it and its confirm dialog are NOT in range (they touch the DOM).
+    ("const policyOps = new Map();", "// ---- self-restart (#183) ---"),
 )
 
 _REQUIRED = (
@@ -65,7 +65,8 @@ _REQUIRED = (
     "function servesUpdateMod", "function capabilityFrom",
     "async function capabilityFor", "async function poll",
     "function pollTick", "function pruneChecks", "function recheck",
-    "function localUpdateCap", "function localPolicyMutable",
+    "function updateCapFor", "function policyMutableFor",
+    "function hostFingerprint",
     "async function setChecking", "async function offerConsent",
 )
 
@@ -135,7 +136,8 @@ const INFO_MODERN = (on, over) => ({
     state: 'ok', mods: [{ id: 'update' }], modsEnabled: true, policy: {},
     update: Object.assign(
         { check_enabled: on !== false, apply_enabled: false,
-          source: on !== false ? 'stored' : 'default', mutable: true },
+          source: on !== false ? 'stored' : 'default', mutable: true,
+          remote_writable: true },
         over || {}),
 });
 
@@ -214,7 +216,8 @@ function setRec(id, rec) { Object.assign(checkStateFor(id), rec); }
 function reset() {
     hostChecks.clear(); modCatalogCache.clear(); HOSTS = [];
     POLICY = {}; policyCalls.length = 0; infoCalls.length = 0;
-    checkCalls.length = 0; policyOp = null; consentSent = false;
+    checkCalls.length = 0; consentSent = false;
+    policyOps.clear(); lastWrite.clear();
 }
 function rowLine(r) {
     return r.id + '|' + r.ps + '|' + r.words + '|' + (reasonCode(r.st) || '-');
@@ -618,7 +621,7 @@ CASES.consent = async () => {
     const out = {};
     const OK = (on) => ({ status: 200, body: { ok: true, update: {
         check_enabled: on, apply_enabled: false,
-        source: 'stored', mutable: true } } });
+        source: 'stored', mutable: true, remote_writable: true } } });
 
     // A human ticked the mod on and this broker is off, unlocked, ours.
     reset();
@@ -633,7 +636,7 @@ CASES.consent = async () => {
     await offerConsent();
     await pollTick();
     out.click = { posted: policyCalls.slice(),
-                  cap: localUpdateCap(),
+                  cap: updateCapFor('local'),
                   checked: checkCalls.slice(),
                   state: peerState(checkStateFor('local')) };
 
@@ -677,7 +680,7 @@ CASES.consent = async () => {
     POLICY = { local: OK(true) };
     await offerConsent();
     out.locked = { posted: policyCalls.slice(),
-                   mutable: localPolicyMutable() };
+                   mutable: policyMutableFor('local') };
 
     // A build too old to have the route publishes no capability at all.
     reset();
@@ -685,7 +688,7 @@ CASES.consent = async () => {
     INFO = { local: INFO_OLD };
     CHECK = { local: OK200({ state: 'current' }) };
     await offerConsent();
-    out.tooOld = { posted: policyCalls.slice(), cap: localUpdateCap() };
+    out.tooOld = { posted: policyCalls.slice(), cap: updateCapFor('local') };
 
     // PEERS. A fleet where every other broker is switched off must produce
     // exactly one write, aimed at 'local', however many rows there are.
@@ -723,35 +726,137 @@ CASES.consent = async () => {
     POLICY = { local: OK(false) };
     await pollTick();
     policyCalls.length = 0;
-    await setChecking(false);
+    await setChecking('local', false);
     const afterRevoke = policyCalls.slice();
-    // The broker now genuinely refuses, and says so on /info too.
+    // The broker now genuinely refuses, and says so on /info too. refresh:true
+    // because a plain tick reuses the cached /info and would never see it --
+    // "Check now" is the deliberate re-read, and it is what retires the write.
     INFO = { local: INFO_MODERN(false) };
     CHECK = { local: R503 };
-    await pollTick();
+    await pollTick({ refresh: true });
     out.revoke = { posted: afterRevoke, postedAfterPoll: policyCalls.slice(),
-                   cap: localUpdateCap() };
+                   cap: updateCapFor('local') };
 
     // A broker that 404s the route (it predates it) is reported as a fact
     // about that build, and the failure never claims the gate changed.
     await primed(INFO_MODERN(false), { status: 404, body: { ok: false } });
-    const ok404 = await setChecking(true);
-    out.notFound = { ok: ok404, note: policyOp && policyOp.note,
-                     phase: policyOp && policyOp.phase,
-                     cap: localUpdateCap() };
+    const ok404 = await setChecking('local', true);
+    out.notFound = { ok: ok404, note: (policyOps.get('local')||{}).note,
+                     phase: (policyOps.get('local')||{}).phase,
+                     cap: updateCapFor('local') };
 
     // And a 409 from a config-locked broker says whose decision it is.
     await primed(INFO_MODERN(false),
                  { status: 409, body: { ok: false, error: 'policy_locked' } });
-    const ok409 = await setChecking(true);
-    out.lockedWrite = { ok: ok409, phase: policyOp && policyOp.phase,
-                        note: policyOp && policyOp.note };
+    const ok409 = await setChecking('local', true);
+    out.lockedWrite = { ok: ok409, phase: (policyOps.get('local')||{}).phase,
+                        note: (policyOps.get('local')||{}).note };
 
     // A transport failure must not be reported as a changed gate either.
     await primed(INFO_MODERN(false), 'throw');
-    const okDead = await setChecking(true);
-    out.unreachable = { ok: okDead, phase: policyOp && policyOp.phase,
-                        cap: localUpdateCap() };
+    const okDead = await setChecking('local', true);
+    out.unreachable = { ok: okDead, phase: (policyOps.get('local')||{}).phase,
+                        cap: updateCapFor('local') };
+    return out;
+};
+
+// --- #182: switching a PEER on, from another broker's desktop -------------
+// The shape the local-only first cut could not do: an operator sits at one
+// desktop and the broker that needs switching on is a different machine.
+CASES.peers = async () => {
+    const out = {};
+    const OK = (on) => ({ status: 200, body: { ok: true, update: {
+        check_enabled: on, apply_enabled: false, source: 'stored',
+        mutable: true, remote_writable: true } } });
+
+    // Who may be offered a switch at all.
+    reset();
+    fleet(['local', 'modern', 'rolling', 'locked', 'old', 'asleep']);
+    INFO = {
+        local: INFO_MODERN(false),
+        modern: INFO_MODERN(false),
+        // The build that shipped the route ORIGIN-GATED: mutable, but it will
+        // refuse a cross-origin write. No remote_writable key.
+        rolling: INFO_MODERN(false, { remote_writable: undefined }),
+        locked: INFO_MODERN(false, { source: 'config', mutable: false }),
+        old: INFO_OLD,
+        asleep: INFO_DOWN,
+    };
+    CHECK = { local: R503, modern: R503, rolling: R503, locked: R503,
+              old: R503, asleep: 'throw' };
+    await pollTick();
+    out.offered = {};
+    for (const id of ['local', 'modern', 'rolling', 'locked', 'old', 'asleep']) {
+        out.offered[id] = policyMutableFor(id);
+    }
+
+    // Switching a peer on really posts to THAT peer.
+    reset();
+    fleet(['local', 'peer']);
+    INFO = { local: INFO_MODERN(true), peer: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }), peer: R503 };
+    POLICY = { local: OK(true), peer: OK(true) };
+    await pollTick();
+    policyCalls.length = 0;
+    CHECK.peer = OK200({ state: 'current' });
+    const ok = await setChecking('peer', true);
+    out.peerWrite = { ok: ok, posted: policyCalls.slice(),
+                      peerCap: updateCapFor('peer'),
+                      localCap: updateCapFor('local'),
+                      peerState: peerState(checkStateFor('peer')) };
+
+    // The rolling-upgrade refusal must not read as a password problem.
+    reset();
+    fleet(['local', 'rolling']);
+    INFO = { local: INFO_MODERN(true),
+             rolling: INFO_MODERN(false, { remote_writable: undefined }) };
+    CHECK = { local: OK200({ state: 'current' }), rolling: R503 };
+    POLICY = { local: OK(true),
+               rolling: { status: 403,
+                          body: { ok: false, error: 'forbidden_origin' } } };
+    await pollTick();
+    const rolled = await setChecking('rolling', true);
+    out.rolling = { ok: rolled, note: (policyOps.get('rolling') || {}).note,
+                    cap: updateCapFor('rolling') };
+
+    // A genuinely wrong password is still a wrong password.
+    reset();
+    fleet(['local', 'nopw']);
+    INFO = { local: INFO_MODERN(true), nopw: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }), nopw: R503 };
+    POLICY = { local: OK(true), nopw: { status: 401, body: { ok: false } } };
+    await pollTick();
+    await setChecking('nopw', true);
+    out.badPassword = (policyOps.get('nopw') || {}).note;
+
+    // ID REUSE. A write to the machine at one url must never be applied to a
+    // different machine that inherited the id while it was in flight.
+    reset();
+    fleet(['local', 'b']);
+    INFO = { local: INFO_MODERN(true), b: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }), b: R503 };
+    POLICY = { local: OK(true), b: OK(true) };
+    await pollTick();
+    const p = setChecking('b', true);
+    // B1 is replaced by a different machine under the same id, mid-flight.
+    HOSTS = HOSTS.map((h) => (h.id === 'b'
+        ? Object.assign({}, h, { url: 'https://SOMEONE-ELSE.example:4445' }) : h));
+    await p;
+    out.idReuse = { cap: updateCapFor('b'), op: policyOps.get('b') || null };
+
+    // A removed host must not leave its failure behind for the next holder of
+    // that id.
+    reset();
+    fleet(['local', 'gone']);
+    INFO = { local: INFO_MODERN(true), gone: INFO_MODERN(false) };
+    CHECK = { local: OK200({ state: 'current' }), gone: R503 };
+    POLICY = { local: OK(true), gone: { status: 500, body: { ok: false } } };
+    await pollTick();
+    await setChecking('gone', true);
+    const before = !!policyOps.get('gone');
+    fleet(['local']);              // the operator removes it
+    await pollTick();
+    out.removal = { noteBefore: before, noteAfter: !!policyOps.get('gone') };
     return out;
 };
 
@@ -1311,3 +1416,68 @@ def test_a_failed_write_never_reads_as_a_changed_gate(harness):
     assert out["unreachable"]["ok"] is False
     assert out["unreachable"]["phase"] == "failed"
     assert out["unreachable"]["cap"]["check_enabled"] is False
+
+
+# ---- #182: switching a PEER on, from another broker's desktop --------------
+
+def test_a_peer_is_only_offered_a_switch_it_can_actually_accept(harness):
+    """`mutable` is NOT a remote-write capability, and conflating the two breaks
+    exactly during a rolling upgrade: the build that first shipped this route
+    origin-gated it, so it reports mutable:true and then refuses the write. A
+    button there could only ever produce a refusal described wrongly."""
+    out = run(harness, "peers")
+    o = out["offered"]
+    assert o["local"] is True, "the serving broker ships with this page"
+    assert o["modern"] is True
+    assert o["rolling"] is False, (
+        "a broker that reports mutable but not remote_writable must not be "
+        "offered a switch — it will 403 the write")
+    assert o["locked"] is False, "its config owns the setting"
+    assert o["old"] is False, "no route at all"
+    assert o["asleep"] is False, "it never answered"
+
+
+def test_switching_a_peer_on_posts_to_that_peer(harness):
+    out = run(harness, "peers")
+    w = out["peerWrite"]
+    assert w["ok"] is True
+    assert w["posted"] == [{"id": "peer", "method": "POST", "want": True}], (
+        "the write must land on the peer, never on the serving broker")
+    assert w["peerCap"]["check_enabled"] is True
+    assert w["localCap"]["check_enabled"] is True, "local was not touched"
+    assert w["peerState"] == "current", (
+        "the answer must arrive in the same beat as the click")
+
+
+def test_a_refusal_is_diagnosed_as_the_thing_it_actually_is(harness):
+    out = run(harness, "peers")
+    note = out["rolling"]["note"]
+    assert out["rolling"]["ok"] is False
+    assert "update it" in note, f"got {note!r}"
+    assert "password" not in note, (
+        "an origin refusal from an older build is not a credentials problem — "
+        "saying so sends someone to re-enter a password that is fine")
+    assert out["rolling"]["cap"]["check_enabled"] is False, (
+        "a refused write must never leave the cache claiming the gate opened")
+    assert "password" in out["badPassword"], (
+        "a real 401 must still read as a password problem")
+
+
+def test_an_answer_is_never_applied_to_a_machine_that_did_not_give_it(harness):
+    """Host ids are reusable. Remove a broker, add a different one, and the id
+    can be handed out again — so a write still in flight would otherwise land
+    its result on a row describing a machine that never answered it."""
+    out = run(harness, "peers")
+    assert out["idReuse"]["cap"] is None or \
+        out["idReuse"]["cap"].get("check_enabled") is not True, (
+            "the old machine's answer was applied to the new one's row")
+    assert out["idReuse"]["op"] is None, (
+        "and no status from that write may be shown against the new machine")
+
+
+def test_a_removed_broker_leaves_no_note_for_the_next_holder_of_its_id(harness):
+    out = run(harness, "peers")
+    assert out["removal"]["noteBefore"] is True, "the failure was recorded"
+    assert out["removal"]["noteAfter"] is False, (
+        "it must be pruned with the host, or the next broker to get that id "
+        "inherits an error about a machine it is not")

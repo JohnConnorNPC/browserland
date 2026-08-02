@@ -887,7 +887,13 @@ def test_the_info_capability_is_carried_into_the_cached_catalog_record():
     # is how one pane says "asleep" while another says "fine").
     mod = (BROKER_DIR / "mods/update/update.js").read_text(encoding="utf-8")
     assert "const upd = rec.update;" in mod
-    assert "modCatalogCache.get(host.id)" in mod
+    # Read through effectiveRecord (#182), which is modCatalogCache plus any
+    # write this window performed since that record was last fetched. Still ONE
+    # cache and still no second /info: the helper exists so the capability probe
+    # and the on/off switch cannot disagree about the same broker.
+    assert "function effectiveRecord(hostId)" in mod
+    assert "modCatalogCache.get(hid)" in mod
+    assert "capabilityFrom(effectiveRecord(host.id))" in mod
     # Both halves reach the SERVED page, not just the files on disk.
     assert "rec.update = (j.update && typeof j.update === 'object')" in \
         INDEX_HTML

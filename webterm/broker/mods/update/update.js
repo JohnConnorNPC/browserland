@@ -604,6 +604,14 @@
                     // broker that did not answer, every tick, for as long as the
                     // tab is open, is the loop this exists to avoid.
                     if (refresh || !modCatalogCache.has(host.id)) {
+                        // When this READ began. Only a re-read that actually
+                        // went to the broker can supersede a write we performed
+                        // (see lastWrite) -- and only if it started AFTER it.
+                        // The cheap "cache already has a record" path below is
+                        // NOT a read of anything, so retiring a write there
+                        // would replace a fresh answer with a stale cache entry
+                        // nobody re-fetched.
+                        const readSeq = ++opSeq;
                         // Deliberately NOT gated on modCatalogFetching. That set
                         // marks an in-flight GET but carries no promise to wait
                         // on, so skipping on it would leave us with no record
@@ -611,8 +619,10 @@
                         // /info costs one request; a wrong verdict is the bug
                         // this whole mod is written around.
                         try { await fetchModCatalog(host); } catch (_) {}
+                        const lw = lastWrite.get(host.id);
+                        if (lw && readSeq > lw.seq) lastWrite.delete(host.id);
                     }
-                    return capabilityFrom(modCatalogCache.get(host.id));
+                    return capabilityFrom(effectiveRecord(host.id));
                 }
 
                 // ---- the poll ----
@@ -794,6 +804,17 @@
                     for (const id of Array.from(hostChecks.keys())) {
                         if (!ids.has(id)) hostChecks.delete(id);
                     }
+                    // #182: the same GC for this mod's other per-host maps.
+                    // A failed or locked write leaves its note behind on
+                    // purpose (it is what the row is reporting), so without
+                    // this a removed broker's error would be inherited by
+                    // whatever host next gets handed its id.
+                    for (const id of Array.from(policyOps.keys())) {
+                        if (!ids.has(id)) policyOps.delete(id);
+                    }
+                    for (const id of Array.from(lastWrite.keys())) {
+                        if (!ids.has(id)) lastWrite.delete(id);
+                    }
                 }
                 // The deliberate retry. The capability probe caches its outcome
                 // — including its failures — precisely so a tick can never
@@ -848,32 +869,96 @@
                 // stops this browser drawing anything; the Stop button is how
                 // the grant itself is given back.
                 //
-                // LOCAL BROKER ONLY. Every peer row in this window stays
-                // read-only about its own gate — the route is origin-gated at
-                // the far end anyway, and reaching into another machine's egress
-                // policy is a decision nobody has taken yet.
-                let policyOp = null;     // {phase:'busy'|'failed'|'locked', note}
+                // ANY broker in the list, not just the serving one. The first
+                // cut of this was local-only, which turned out to be the one
+                // shape that does not work: an operator administers a fleet
+                // from ONE desktop, so the broker that needs switching on is
+                // exactly the broker they have no local session on. The route
+                // is token-gated at the far end and no longer origin-gated —
+                // see app.py — so a peer is asked with that peer's own saved
+                // token, the same way its version check already is.
+                //
+                // The AUTOMATIC path stays local-only regardless (offerConsent):
+                // ticking this mod on in THIS browser is not a decision about a
+                // remote machine's egress. A peer is only ever changed by its
+                // own row's button being clicked.
+                const policyOps = new Map();   // hostId -> {phase, note, want}
                 let consentSent = false;  // one attempt per page load, ever
+                // A write is authoritative about a broker until something READ
+                // that broker afterwards. Without this, a poll already in flight
+                // when the write lands finishes last and puts the pre-write
+                // /info back in the shared cache, so a switch you just threw
+                // flips back on screen until the next tick.
+                //
+                // `opSeq` is a plain monotonic counter over both operations. A
+                // poll records its own start; on finishing it may only clear a
+                // write it STARTED AFTER. One that began earlier is stale by
+                // definition and leaves the write standing.
+                let opSeq = 0;
+                const lastWrite = new Map();   // hostId -> {update, seq, fp}
 
-                // What the LOCAL broker last told /info about its own update
-                // capability, or null if it has not answered yet or is running a
-                // build too old to publish one. Read out of the control panel's
-                // shared record for the same reason the capability probe is —
-                // one cache, so two surfaces cannot disagree about one broker.
-                function localUpdateCap() {
-                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
+                // What a broker last told /info about its own update capability,
+                // or null if it has not answered yet or runs a build too old to
+                // publish one. Read out of the control panel's shared record for
+                // the same reason the capability probe is — one cache, so two
+                // surfaces cannot disagree about one broker.
+                // The shared /info record for a broker, with any write WE
+                // performed since the last read of it overlaid. ONE reader, used
+                // by both the capability probe and the switch, because two
+                // readers is how a window ends up offering "Enable" on a broker
+                // its own chip has already started checking.
+                //
+                // The overlay rather than patching the cached object in place:
+                // a poll already in flight when the write lands finishes last
+                // and replaces that object wholesale, silently undoing the
+                // patch. lastWrite is retired deliberately, by a read that
+                // began after it (see capabilityFor).
+                //
+                // Guarded on the host FINGERPRINT, so an id since re-pointed at
+                // a different machine cannot inherit the old one's answer.
+                function effectiveRecord(hostId) {
+                    const hid = hostId || LOCAL_HOST_ID;
+                    const rec = modCatalogCache.get(hid);
+                    const lw = lastWrite.get(hid);
+                    if (!lw || lw.fp !== hostFingerprint(hid)) return rec;
+                    return Object.assign({}, rec || {}, { update: lw.update });
+                }
+                function updateCapFor(hostId) {
+                    const rec = effectiveRecord(hostId);
                     const upd = rec && rec.update;
                     return (upd && typeof upd === 'object') ? upd : null;
                 }
-                // Can this browser change the local gate at all? `mutable` is
-                // false when broker_config.json NAMES update_check_enabled: that
-                // operator's file wins, on purpose, so that editing it and
-                // restarting stays the reliable way to stop unwanted egress.
-                // Absent (an older broker) reads as "cannot", which is correct —
-                // it has no route to ask.
-                function localPolicyMutable() {
-                    const upd = localUpdateCap();
-                    return !!(upd && upd.mutable === true);
+                // Can this browser change that broker's gate? `mutable` is false
+                // when its broker_config.json NAMES update_check_enabled: that
+                // operator's file wins, on purpose, so editing it and restarting
+                // stays the reliable way to stop unwanted egress. ABSENT reads as
+                // "cannot", which is what keeps an older peer from being asked at
+                // all: the key only exists on a build that also has the route, so
+                // its absence is proof the POST would die in that broker's
+                // cross-origin preflight and come back as an opaque network error
+                // — the same reasoning the capability probe already runs on.
+                function policyMutableFor(hostId) {
+                    const upd = updateCapFor(hostId);
+                    if (!upd || upd.mutable !== true) return false;
+                    // The serving broker ships with this page, so its build is
+                    // ours by construction and needs no capability handshake.
+                    if ((hostId || LOCAL_HOST_ID) === LOCAL_HOST_ID) return true;
+                    // A PEER must additionally say it accepts a cross-origin
+                    // write. `mutable` alone is not that claim: the first build
+                    // to ship this route origin-gated it, so it reports
+                    // mutable:true and answers 403 -- offering a switch there
+                    // would produce a refusal we could only describe wrongly.
+                    return upd.remote_writable === true;
+                }
+                // A stable-ish fingerprint of WHICH machine an id points at, so
+                // a result can be checked against the host it was asked of. An
+                // id is reusable: remove a broker, add a different one, and the
+                // registry may hand out the same id, at which point an in-flight
+                // answer from the old machine would be applied to the new one's
+                // row. The url is what actually names the box.
+                function hostFingerprint(hostId) {
+                    const h = updHost(hostId);
+                    return h ? String(h.url || '') : null;
                 }
 
                 // opts.poll defaults ON: a click must produce the answer in the
@@ -881,18 +966,37 @@
                 // turns it off because a full fleet pollTick follows it
                 // immediately, and two checks of the same broker one line apart
                 // is a wasted request however cheap the second one is.
-                async function setChecking(want, opts) {
-                    const host = updHost(LOCAL_HOST_ID);
-                    if (!host) {
-                        policyOp = { phase: 'failed',
-                            note: 'the local broker is no longer configured' };
+                //
+                // Takes a host ID, never a host object, and resolves it HERE —
+                // the same rule the poll follows, and for the same reason: a
+                // host object captured before an await can name a broker whose
+                // url or token has since been re-entered, or one that has been
+                // removed outright. A null host must never reach hostFetch,
+                // which would silently aim this write at the SERVING origin and
+                // switch on the wrong machine.
+                async function setChecking(hostId, want, opts) {
+                    // No falsy-id fallback. Defaulting a missing id to the local
+                    // broker is precisely the wrong-machine bug this function is
+                    // written to avoid -- it would aim a write meant for a peer
+                    // at the box serving the page. Callers name their host.
+                    if (typeof hostId !== 'string' || !hostId) return false;
+                    const hid = hostId;
+                    const mark = function (phase, note) {
+                        policyOps.set(hid, { phase: phase, note: note,
+                                             want: !!want });
                         renderAll();
+                    };
+                    const host = updHost(hid);
+                    if (!host) {
+                        mark('failed', 'that broker is no longer configured');
                         return false;
                     }
-                    policyOp = { phase: 'busy',
-                        note: want ? 'switching checking on…'
-                            : 'switching checking off…' };
-                    renderAll();
+                    // Captured BEFORE the await, compared after: if this id has
+                    // been re-pointed at a different machine meanwhile, the
+                    // answer belongs to a broker that is no longer in this row.
+                    const fp = hostFingerprint(hid);
+                    mark('busy', want ? 'switching checking on…'
+                        : 'switching checking off…');
                     let resp;
                     try {
                         resp = await hostFetch(host, '/update/policy', {
@@ -902,52 +1006,68 @@
                             timeoutMs: 15000,
                         });
                     } catch (_) {
-                        policyOp = { phase: 'failed',
-                            note: 'could not reach this broker to ask' };
-                        renderAll();
+                        mark('failed', 'could not reach that broker to ask');
                         return false;
                     }
                     let body = null;
                     try { body = await resp.json(); } catch (_) {}
-                    if (resp.status === 404) {
-                        // The route does not exist here. Says so as a FACT about
-                        // the build rather than as a failure, and names the one
-                        // thing that does work on it.
-                        policyOp = { phase: 'failed',
-                            note: 'this broker predates the switch — an '
-                                + 'operator sets "update_check_enabled" in its '
-                                + 'config and restarts it' };
+                    // The row this answer belongs to may not exist any more.
+                    // Say nothing rather than writing another broker's outcome
+                    // into it; the write itself already landed on the machine we
+                    // asked, which is the correct outcome for a host that has
+                    // since been removed or re-entered.
+                    if (hostFingerprint(hid) !== fp) {
+                        policyOps.delete(hid);
                         renderAll();
                         return false;
                     }
-                    if (resp.status === 409 && body
-                            && body.error === 'policy_locked') {
-                        policyOp = { phase: 'locked',
-                            note: 'this broker’s config names '
-                                + '"update_check_enabled", so that file decides '
-                                + 'and this switch does not' };
-                        renderAll();
+                    const code = body && body.error;
+                    if (resp.status === 403 && code === 'forbidden_origin') {
+                        // NOT a credentials problem, and emphatically not a
+                        // policy one: that broker runs the build that shipped
+                        // this route origin-gated, so it accepts the change only
+                        // from its own page. Naming it as anything else sends
+                        // someone to re-enter a password that is perfectly good.
+                        mark('failed', 'that broker’s build only accepts this '
+                            + 'change from its own desktop — update it, and '
+                            + 'this switch will work from here');
+                        return false;
+                    }
+                    if (resp.status === 401 || resp.status === 403) {
+                        mark('failed', 'that broker refused our password');
+                        return false;
+                    }
+                    if (resp.status === 404) {
+                        // The route does not exist there. Says so as a FACT about
+                        // the build rather than as a failure, and names the one
+                        // thing that does work on it.
+                        mark('failed', 'that broker predates the switch — an '
+                            + 'operator sets "update_check_enabled" in its '
+                            + 'config and restarts it');
+                        return false;
+                    }
+                    if (resp.status === 409 && code === 'policy_locked') {
+                        mark('locked', 'that broker’s config names '
+                            + '"update_check_enabled", so that file decides and '
+                            + 'this switch does not');
                         return false;
                     }
                     if (!body || body.ok !== true) {
-                        policyOp = { phase: 'failed',
-                            note: 'this broker refused the change' };
-                        renderAll();
+                        mark('failed', 'that broker refused the change');
                         return false;
                     }
-                    policyOp = null;
-                    // The shared /info record is now stale about this one
-                    // broker, and the whole window derives from it. Patch it
-                    // from the authoritative value the write returned rather
-                    // than re-fetching: the response IS what landed, and a
-                    // re-fetch would be a second opinion about a fact we were
-                    // just handed.
-                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
-                    if (rec && body.update && typeof body.update === 'object') {
-                        rec.update = body.update;
+                    policyOps.delete(hid);
+                    // What the write returned is authoritative about this broker
+                    // until something reads it again — held HERE rather than
+                    // patched into the shared /info record, because a poll that
+                    // was already in flight finishes last and would put the
+                    // pre-write answer back. See updateCapFor / lastWrite.
+                    if (body.update && typeof body.update === 'object') {
+                        lastWrite.set(hid, { update: body.update,
+                                             seq: ++opSeq, fp: fp });
                     }
                     if (!opts || opts.poll !== false) {
-                        await poll(LOCAL_HOST_ID, {});
+                        await poll(hid, {});
                     }
                     renderAll();
                     return true;
@@ -964,10 +1084,10 @@
                     const host = updHost(LOCAL_HOST_ID);
                     if (!host) return;
                     try { await capabilityFor(host, false); } catch (_) {}
-                    const upd = localUpdateCap();
+                    const upd = updateCapFor(LOCAL_HOST_ID);
                     if (!upd || upd.check_enabled !== false) return;
                     if (upd.mutable !== true) return;
-                    await setChecking(true, { poll: false });
+                    await setChecking(LOCAL_HOST_ID, true, { poll: false });
                 }
 
                 // ---- self-restart (#183) -----------------------------------
@@ -1329,73 +1449,154 @@
                     }).catch(function () {});
                 }
 
-                // Is there anything to show under "Checking"? Yes whenever the
-                // local gate is OFF and ours to turn on (the case the user
-                // hits), whenever it is off and NOT ours (so the window can say
-                // whose it is instead of showing nothing), and whenever we hold
-                // a stored grant that can be given back. No when checking is on
-                // because a config file says so: there is no switch to offer and
-                // the Brokers list below already reports the state.
-                function policyRowNeeded() {
-                    const upd = localUpdateCap();
-                    if (policyOp) return true;
+                // Is there a switch to offer for THIS broker? Yes whenever its
+                // gate is off (so it can be turned on, or so the window can say
+                // whose decision it is when it cannot), and whenever we hold a
+                // stored grant that can be given back. No when checking is on
+                // because a config file says so: there is nothing to offer, and
+                // the row above already reports the state.
+                //
+                // Per host, because the fleet is the point — the broker that
+                // needs switching on is usually not the one serving this page.
+                function policyRowNeeded(hostId) {
+                    const upd = updateCapFor(hostId);
+                    if (policyOps.get(hostId)) return true;
                     if (!upd) return false;         // too old, or not answered
                     if (upd.check_enabled === false) return true;
                     return upd.source === 'stored';
                 }
 
-                // One row: the switch plus its inline reason, rebuilt from
-                // policyOp + the shared /info record on every pass exactly like
-                // renderRestartRow — nothing about it is held on the element, so
-                // a poll landing mid-write cannot leave a stale label behind.
-                function renderPolicyRow(body) {
-                    const upd = localUpdateCap();
+                // Names the machine, not just the label. A label is
+                // user-entered, may be duplicated across rows, and can be long or
+                // deliberately confusable — so the URL, which is what actually
+                // decides where the request goes, is shown alongside it. Both go
+                // in as .textContent.
+                function confirmRemoteEnable(hostId, label) {
+                    const host = updHost(hostId);
+                    const url = host ? String(host.url || '') : '';
+                    return openDialog({
+                        title: 'Let that broker check for updates?',
+                        body: function (c) {
+                            const msg = document.createElement('div');
+                            msg.className = 'app-dialog-msg';
+                            msg.textContent = 'This switches update checking on '
+                                + 'for another machine, not the one serving this '
+                                + 'page.';
+                            c.appendChild(msg);
+                            const list = document.createElement('div');
+                            list.className = 'app-upd-restart-continuity';
+                            const line = function (t, cls) {
+                                const d = document.createElement('div');
+                                d.className = 'app-upd-restart-cline'
+                                    + (cls ? ' ' + cls : '');
+                                d.textContent = t;
+                                list.appendChild(d);
+                            };
+                            line(label);
+                            if (url) line(url);
+                            line('It will contact GitHub, which discloses that '
+                                + 'machine’s address to GitHub. Switching '
+                                + 'checking off later does not undo a disclosure '
+                                + 'already made.', 'app-upd-restart-warn');
+                            c.appendChild(list);
+                        },
+                        buttons: [
+                            { label: 'Enable checking', value: true,
+                              primary: true },
+                            { label: 'Cancel', value: false },
+                        ],
+                    }).then(function (res) {
+                        if (!res || !res.value) return false;
+                        // Re-checked AFTER the dialog: the fleet list can change
+                        // while it is open, and a confirmation is for the machine
+                        // that was named in it.
+                        return updHost(hostId)
+                            && String(updHost(hostId).url || '') === url;
+                    });
+                }
+
+                // One broker's switch plus its inline reason, rebuilt from
+                // policyOps + the shared /info record on every pass exactly like
+                // renderRestartRow — nothing is held on the element, so a poll
+                // landing mid-write cannot leave a stale label behind.
+                //
+                // `local` changes only the WORDS. Acting on the machine you are
+                // sitting at and acting on one across the network are different
+                // enough that the control should not describe them identically,
+                // and "this broker" on a row about someone else's machine is the
+                // kind of quiet mislabel that gets the wrong box switched on.
+                function renderPolicyRow(body, hostId, label) {
+                    const local = (hostId || LOCAL_HOST_ID) === LOCAL_HOST_ID;
+                    const upd = updateCapFor(hostId);
+                    const op = policyOps.get(hostId);
                     const on = !!(upd && upd.check_enabled === true);
-                    const busy = !!(policyOp && policyOp.phase === 'busy');
+                    const busy = !!(op && op.phase === 'busy');
+                    // While a write is in flight the label comes from what was
+                    // ASKED FOR, never from the latest cached state: a poll that
+                    // observes the new value first would otherwise leave an
+                    // enable reading "Stopping…" beside "switching checking on…".
+                    const doing = busy ? !!op.want : !on;
+                    const mutable = policyMutableFor(hostId);
+                    const which = local ? 'this broker' : label;
                     const row = document.createElement('div');
                     row.className = 'app-upd-restart-row';
                     const btn = document.createElement('button');
                     btn.type = 'button';
                     btn.className = 'app-upd-restart-btn';
+                    // .textContent throughout: `label` is user-entered text.
                     btn.textContent = busy
-                        ? (on ? 'Stopping…' : 'Enabling…')
-                        : (on ? 'Stop checking on this broker'
-                            : 'Enable checking on this broker');
+                        ? (doing ? 'Enabling…' : 'Stopping…')
+                        : (on ? 'Stop checking on ' + which
+                            : 'Enable checking on ' + which);
                     btn.title = on
-                        ? 'this broker stops contacting GitHub. Its address '
-                            + 'has already been disclosed by the checks it '
-                            + 'has run — this stops future ones'
-                        : 'lets the broker serving THIS page contact GitHub to '
-                            + 'compare its build against upstream. No other '
-                            + 'broker is affected';
-                    btn.disabled = busy || !localPolicyMutable();
+                        ? 'that broker stops contacting GitHub. Its address has '
+                            + 'already been disclosed by the checks it has run — '
+                            + 'this stops future ones'
+                        : 'lets that broker contact GitHub to compare its build '
+                            + 'against upstream. No other broker is affected';
+                    btn.disabled = busy || !mutable;
                     btn.addEventListener('mousedown', function (e) {
                         e.stopPropagation();
                     });
                     btn.addEventListener('click', function (e) {
                         e.stopPropagation();
-                        setChecking(!on).catch(function () {});
+                        // Enabling a REMOTE machine's egress is confirmed;
+                        // enabling the local one is not, and stopping either is
+                        // not. The asymmetry is about what the click costs, not
+                        // about authority: this is a repetitive list of similar
+                        // rows, a mis-click lands on a box you are not looking
+                        // at, and the first check discloses that box's address
+                        // in a way no later Stop can retract. Stopping is
+                        // reversible and local is where you already are.
+                        if (!local && !on) {
+                            confirmRemoteEnable(hostId, label).then(
+                                function (yes) {
+                                    if (!yes) return;
+                                    return setChecking(hostId, true);
+                                }).catch(function () {});
+                            return;
+                        }
+                        setChecking(hostId, !on).catch(function () {});
                     });
                     row.appendChild(btn);
                     const status = document.createElement('span');
                     status.className = 'app-upd-restart-inline';
-                    if (policyOp) {
-                        status.textContent = policyOp.note;
-                        if (policyOp.phase === 'failed'
-                                || policyOp.phase === 'locked') {
+                    if (op) {
+                        status.textContent = op.note;
+                        if (op.phase === 'failed' || op.phase === 'locked') {
                             status.classList.add('app-upd-amber');
                         }
-                    } else if (!localPolicyMutable()) {
+                    } else if (!mutable) {
                         // The button is dead, so say why rather than leaving a
                         // greyed control with no explanation beside it.
                         status.textContent = upd && upd.source === 'config'
-                            ? 'this broker’s config names '
-                                + '"update_check_enabled", so that file decides'
-                            : 'this broker has not reported whether the switch '
-                                + 'can be changed here';
+                            ? 'its config names "update_check_enabled", so that '
+                                + 'file decides'
+                            : 'it has not reported whether the switch can be '
+                                + 'changed from here';
                     } else if (on) {
-                        status.textContent = 'switched on from here; it stays '
-                            + 'on across restarts until it is switched off';
+                        status.textContent = 'switched on from here; it stays on '
+                            + 'across restarts until it is switched off';
                     }
                     row.appendChild(status);
                     body.appendChild(row);
@@ -1663,19 +1864,6 @@
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
 
-                    // ---- checking on THIS broker (#182) ----
-                    // Same scope rule as Restart below: about the broker
-                    // serving this page, always, whichever rows follow.
-                    // Rendered only when there is something to DO — a
-                    // broker that is checking and was told to by its own
-                    // config has no switch here to offer, and an empty
-                    // "Checking: on" row would just be the Brokers list
-                    // said twice.
-                    if (policyRowNeeded()) {
-                        addHead(body, 'Checking');
-                        renderPolicyRow(body);
-                    }
-
                     // ---- restart THIS broker (#183) ----
                     // Placed here, beside the shared facts about the local
                     // build that motivate it, and NOT inside the per-broker
@@ -1709,6 +1897,16 @@
                         addRow(body, r.label + (r.hidden ? '  (hidden)' : ''),
                                detail.join('  ·  '),
                                'app-upd-' + bandFor(r.ps), 'app-upd-hostrow');
+                        // #182: the switch belongs to the ROW, not to a section
+                        // of its own. It used to sit above, about the serving
+                        // broker only, which made the one broker an operator
+                        // most needs to reach — a remote one they have no local
+                        // session on — the only broker they could not switch on.
+                        // Rendered only where there is something to DO, so a
+                        // fleet that is already checking reads as a plain list.
+                        if (policyRowNeeded(r.id)) {
+                            renderPolicyRow(body, r.id, r.label);
+                        }
                     }
 
                     // Why each silent broker is silent. The most important text
