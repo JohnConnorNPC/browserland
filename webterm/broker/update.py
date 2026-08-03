@@ -39,8 +39,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # ---- constants --------------------------------------------------------------
 
@@ -477,3 +478,246 @@ def next_ttl(rand: Optional[Callable[[], float]] = None) -> float:
     all expire in the same second."""
     r = rand or random.random
     return CHECK_TTL + r() * CHECK_TTL_JITTER
+
+
+# ---- GH#182 Part 2: apply preconditions (A24) --------------------------------
+#
+# "May an update be APPLIED here?" -- answered with the same split the check
+# engine above uses: a PURE evaluator over an injectable snapshot
+# (``apply_preconditions`` / ``evaluate_apply``), and a separate IMPURE
+# collector (``collect_apply_snapshot``) that is the only thing allowed to
+# touch git. The collector runs read-only git commands exclusively (rev-parse
+# via ``local_sha()`` and ``status --porcelain``); the mutation that actually
+# applies an update belongs to a later atom and to a route that does not exist
+# yet. Nothing in this section makes a network request.
+
+# Refusal reason codes. Kebab-case like the check engine's REASON_* codes, and
+# STABLE: the UI and peer brokers will switch on these strings, so they are an
+# API -- renaming one is a breaking change.
+APPLY_NOT_A_CHECKOUT = "not-a-checkout"
+APPLY_DIRTY_TREE = "dirty-tree"
+# Deliberately the same word as STATE_AHEAD: the refusal and the check state
+# describe the same fact.
+APPLY_AHEAD_OR_DIVERGED = "ahead-or-diverged"
+APPLY_STATE_UNKNOWN = "state-unknown"
+APPLY_ALREADY_CURRENT = "already-current"
+APPLY_RESTART_UNAVAILABLE = "restart-unavailable"
+APPLY_DISABLED = "apply-disabled"
+# Seam only: a LATER atom implements the detection; the evaluator just refuses
+# when the snapshot carries a truthy delta.
+APPLY_DEPENDENCY_DELTA = "dependency-delta"
+
+
+@dataclass
+class Refusal:
+    """One unmet apply precondition: a stable machine ``reason_code`` plus one
+    human sentence. Writability is deliberately NOT representable as a Refusal
+    -- it rides alongside as an advisory (see ``writability_advisory``),
+    because it cannot be pre-proved (review point R5)."""
+    reason_code: str
+    message: str
+
+
+@dataclass
+class ApplySnapshot:
+    """Everything the evaluator needs, gathered by the impure collector (or
+    constructed directly by a test). Defaults fail CLOSED: a field nobody
+    filled in reads as 'not safe to apply', never as permission."""
+    local_sha: Optional[str] = None        # None => not a git checkout
+    dirty: Optional[bool] = None           # TRACKED modifications; None = unmeasured
+    check_state: Optional[str] = None      # a STATE_* string; None = never ran
+    target_sha: Optional[str] = None       # upstream sha the check named
+    ahead_by: Optional[int] = None
+    behind_by: Optional[int] = None
+    restart_available: bool = False        # the caller's restart capability...
+    restart_reason: Optional[str] = None   # ...and WHY it is unavailable
+    apply_enabled: bool = False            # per-instance update_apply_enabled gate
+    writable: Optional[bool] = None        # ADVISORY only, never a refusal
+    dependency_delta: Any = None           # seam for a later atom's detection
+
+
+def apply_preconditions(snap: ApplySnapshot) -> List[Refusal]:
+    """Pure. One predicate set; returns EVERY failing precondition, not just
+    the first, so the UI can show the whole list of unmet conditions in one
+    pass. An empty list means the apply may proceed. No I/O, no git, no clock.
+
+    The honesty rule carried forward from the check engine: when ahead/behind
+    was never ESTABLISHED, the refusal is ``state-unknown`` -- it is never
+    guessed into ``ahead-or-diverged`` (the compare-404 trap, refuted in
+    Part 1). Ahead/behind here derive only from established data."""
+    refusals: List[Refusal] = []
+
+    if not snap.local_sha:
+        refusals.append(Refusal(
+            APPLY_NOT_A_CHECKOUT,
+            "This install is not a git checkout (a pip/wheel install), so "
+            "there is nothing here for git to update; updating such an "
+            "install is out of scope for this broker."))
+
+    if snap.dirty:
+        refusals.append(Refusal(
+            APPLY_DIRTY_TREE,
+            "Tracked files carry local modifications (staged or unstaged); "
+            "an update could clobber that work, so commit, stash or revert "
+            "those changes first."))
+
+    if isinstance(snap.ahead_by, int) and snap.ahead_by > 0:
+        refusals.append(Refusal(
+            APPLY_AHEAD_OR_DIVERGED,
+            "This checkout carries %d local commit(s) upstream does not "
+            "have; applying would have to merge or discard work upstream "
+            "has never seen, and that is a human decision." % snap.ahead_by))
+
+    established = (snap.check_state in (STATE_CURRENT, STATE_BEHIND,
+                                        STATE_AHEAD)
+                   and bool(snap.target_sha)
+                   and isinstance(snap.ahead_by, int)
+                   and isinstance(snap.behind_by, int))
+    if not established:
+        refusals.append(Refusal(
+            APPLY_STATE_UNKNOWN,
+            "No established update check names a target commit for this "
+            "apply; run a check that succeeds first, so the apply knows "
+            "exactly which sha it is applying."))
+
+    if isinstance(snap.behind_by, int) and snap.behind_by == 0:
+        refusals.append(Refusal(
+            APPLY_ALREADY_CURRENT,
+            "This checkout is already at the upstream head (0 commits "
+            "behind); there is nothing to apply."))
+
+    if not snap.restart_available:
+        detail = (" (%s)" % snap.restart_reason) if snap.restart_reason else ""
+        refusals.append(Refusal(
+            APPLY_RESTART_UNAVAILABLE,
+            "The broker cannot restart itself on this install%s; applying "
+            "without a restart would leave the old code running while "
+            "claiming the update succeeded." % detail))
+
+    if not snap.apply_enabled:
+        refusals.append(Refusal(
+            APPLY_DISABLED,
+            "The update_apply_enabled gate is off for this broker; applying "
+            "updates is opt-in per instance, and this instance has not "
+            "opted in."))
+
+    if snap.dependency_delta:
+        refusals.append(Refusal(
+            APPLY_DEPENDENCY_DELTA,
+            "This update changes dependency requirements, which an automatic "
+            "apply cannot reconcile on its own; update the dependencies by "
+            "hand first."))
+
+    return refusals
+
+
+def writability_advisory(writable: Optional[bool]) -> Dict[str, Any]:
+    """The advisory that rides ALONGSIDE the refusals, never among them
+    (review point R5): writability cannot be pre-proved -- on Windows
+    especially, a file that opens now can be exclusively locked by another
+    handle at apply time -- so even a failed probe refuses nothing. It informs;
+    the actual write failure, if one happens, is reported when it happens."""
+    caveat = ("this is advisory only, because writability cannot be "
+              "pre-proved -- on Windows especially, a file that opens now "
+              "can be locked by another handle at apply time.")
+    if writable is True:
+        msg = ("An append probe under the checkout succeeded, but " + caveat)
+    elif writable is False:
+        msg = ("An append probe under the checkout failed, so the apply is "
+               "likely to fail at write time; " + caveat)
+    else:
+        msg = ("Writability was not measured; " + caveat)
+    return {"writable": writable, "message": msg}
+
+
+def probe_writability() -> Optional[bool]:
+    """Best-effort, impure, ADVISORY: append-open a file WE own under the
+    checkout's .git directory (a name git ignores, so the probe can never
+    dirty the tree), then remove it. True/False is a hint; None means the
+    probe could not even run (not a checkout, or .git is a worktree pointer
+    file). Never raises."""
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent      # <root>/webterm
+        git_dir = pkg_dir.parent / ".git"
+        if not git_dir.is_dir():
+            return None
+        probe = git_dir / "browserland-apply-write-probe.tmp"
+        with open(probe, "a", encoding="utf-8"):
+            pass
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def collect_apply_snapshot(*, check_result: Optional[Dict[str, Any]] = None,
+                           restart_available: bool = False,
+                           restart_reason: Optional[str] = None,
+                           apply_enabled: bool = False,
+                           dependency_delta: Any = None) -> ApplySnapshot:
+    """The IMPURE half: gather the facts, decide nothing. Runs READ-ONLY git
+    only -- ``local_sha()`` (rev-parse) and ``status --porcelain
+    --untracked-files=no``. Untracked files are excluded STRUCTURALLY, at the
+    git level: an untracked scratch file must not block an update, and a
+    genuinely colliding one surfaces at merge time and is reported then.
+
+    ``check_result`` is the cached output of ``run_check``; restart
+    availability and the apply gate are the caller's facts (app.ctx), passed
+    through untouched. The route that calls this is a later atom."""
+    sha = local_sha()
+    dirty: Optional[bool] = None
+    if sha is not None:
+        status = _git("status", "--porcelain", "--untracked-files=no")
+        if status is not None:
+            dirty = bool(status)
+    check = check_result if isinstance(check_result, dict) else {}
+    upstream = check.get("upstream")
+    target = upstream.get("sha") if isinstance(upstream, dict) else None
+    ahead = check.get("aheadBy")
+    behind = check.get("behindBy")
+    return ApplySnapshot(
+        local_sha=sha,
+        dirty=dirty,
+        check_state=check.get("state"),
+        target_sha=target if isinstance(target, str) else None,
+        ahead_by=ahead if isinstance(ahead, int) else None,
+        behind_by=behind if isinstance(behind, int) else None,
+        restart_available=bool(restart_available),
+        restart_reason=restart_reason,
+        apply_enabled=bool(apply_enabled),
+        writable=probe_writability(),
+        dependency_delta=dependency_delta,
+    )
+
+
+def apply_preview(snap: ApplySnapshot) -> Dict[str, Any]:
+    """What an apply WOULD do, for the route to serve and the UI to render:
+    old sha, target sha, how far behind, and a human compare page. Reuses
+    ``compare_url`` with the local sha as the left ref, so the page shows
+    exactly the commits the apply would bring in."""
+    url = None
+    if snap.local_sha and snap.target_sha:
+        url = compare_url(UPSTREAM_REPO, snap.local_sha, snap.target_sha)
+    return {"oldSha": snap.local_sha,
+            "targetSha": snap.target_sha,
+            "behindBy": snap.behind_by,
+            "compareUrl": url}
+
+
+def evaluate_apply(snap: ApplySnapshot) -> Dict[str, Any]:
+    """One predicate set, ONE output shape -- the structure a later route atom
+    serves verbatim. Refusals accumulate; writability rides alongside as an
+    advisory and never appears inside ``refusals``."""
+    refusals = apply_preconditions(snap)
+    return {
+        "ok": not refusals,
+        "refusals": [{"reason": r.reason_code, "message": r.message}
+                     for r in refusals],
+        "writability_advisory": writability_advisory(snap.writable),
+        "preview": apply_preview(snap),
+    }
