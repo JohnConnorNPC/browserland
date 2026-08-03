@@ -131,3 +131,27 @@
         .app-upd-restart-cline { padding: 2px 0; }
         .app-upd-restart-bad { color: var(--danger); }
         .app-upd-restart-warn { color: var(--warn); }
+        /* ---- after an apply (#182 Part 2, A29) -----------------------------
+           The post-apply strip: one bordered block, banded by outcome the way
+           rows are banded by state — ok (came up on the build the apply
+           named), warn (alive but odd: wrong sha, or cancelled before the
+           restart), bad (the update failed: rolled back, or the rollback
+           itself needs a human). A broker with no deploy history renders no
+           strip at all, so none of this shows on an install that has never
+           applied anything. */
+        .app-upd-deploy {
+            margin: 6px 0 2px;
+            padding: 6px 8px;
+            border-left: 2px solid var(--bg-3);
+            line-height: 1.45;
+        }
+        .app-upd-deploy-ok { border-left-color: var(--ok); }
+        .app-upd-deploy-warn { border-left-color: var(--warn); color: var(--fg); }
+        /* The failed-deploy strip must read LOUDER than a dim note: full
+           foreground on a danger border — the same alarm the restart
+           confirm's will-be-LOST line wears. */
+        .app-upd-deploy-bad { border-left-color: var(--danger); color: var(--fg); }
+        .app-upd-deploy-line { padding: 2px 0; }
+        /* The fresh-terminal button reuses the restart button's shape but not
+           its danger border: opening a terminal destroys nothing. */
+        .app-upd-newterm-btn { border-color: var(--bg-3); }

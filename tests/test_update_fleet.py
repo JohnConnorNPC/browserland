@@ -68,6 +68,12 @@ _REQUIRED = (
     "function updateCapFor", "function policyMutableFor",
     "function hostFingerprint",
     "async function setChecking", "async function offerConsent",
+    # #182 Part 2 (A29): the post-apply model. These live between the opt-in
+    # block and the self-restart marker, so the existing final chunk carries
+    # them without a new anchor.
+    "function deployOutcome", "function shortSha",
+    "function staleSurvivors", "function freshTerminalHost",
+    "function deployStrip",
 )
 
 
@@ -860,6 +866,138 @@ CASES.peers = async () => {
     return out;
 };
 
+// --- #182 Part 2 (A29): the aftermath of an apply -------------------------
+// The `last_deploy` object as the broker really serves it (supervise.py
+// finalize_deploy / update.py cancel_pending_deploy): a validated journal
+// record plus outcome/observedSha/detail. The strip model must survive junk
+// in every optional field, so the helpers below build the honest shape and
+// the cases mangle it.
+const HEX40 = (ch) => ch.repeat(40);
+const LD = (outcome, over) => Object.assign({
+    version: 1,
+    outcome: outcome,
+    observedSha: HEX40('b'),
+    detail: null,
+    finalizedAt: 1000,
+    record: { version: 1, operationId: 'op-1',
+              oldSha: HEX40('a'), targetSha: HEX40('b'),
+              expectedIdentity: 'x', createdAt: 999 },
+}, over || {});
+// A LOCAL record as poll() leaves it after a good check on the new build.
+const stFor = (over) => Object.assign(
+    { hostId: 'local',
+      check: { state: 'current',
+               local: { version: 'NEWBUILD', sha: HEX40('b') } },
+      error: null, checkedAt: 1000, inFlight: false, lastDeploy: null },
+    over || {});
+// A 200 body that carries last_deploy BESIDE the check, like app.py does.
+const OK200D = (check, ld) => ({ status: 200, ok: true,
+    body: { ok: true, check: check, last_deploy: ld } });
+
+CASES.deploy_strip = async () => {
+    const out = {};
+    // The session shapes /sessions really serves per host (registry.summary):
+    // agents carry the build they were launched with; a plain terminal
+    // reports none; junk rows are untrusted input to step over.
+    const sess = [
+        { kind: 'agent', version: 'NEWBUILD' },   // relaunched already
+        { kind: 'agent', version: 'OLDBUILD' },   // survivor on old code
+        { kind: 'agent' },                        // pre-#22 agent: no version
+        { kind: 'term', version: '' },            // plain terminal: never flagged
+        null, 'junk', 7,                          // stepped over, never thrown on
+    ];
+    out.success = deployStrip(
+        stFor({ lastDeploy: LD('came-up-ready-on-target') }), sess);
+    out.successNone = deployStrip(
+        stFor({ lastDeploy: LD('came-up-ready-on-target') }),
+        [{ kind: 'agent', version: 'NEWBUILD' }]);
+    // The broker's own build unreadable -> the count must be "unknown",
+    // never rounded down to a clean-sounding zero.
+    out.successNoVersion = deployStrip(stFor({
+        lastDeploy: LD('came-up-ready-on-target'),
+        check: { state: 'current' } }), sess);
+    out.successNoList = deployStrip(
+        stFor({ lastDeploy: LD('came-up-ready-on-target') }), null);
+    for (const oc of ['rolled-back', 'rollback-failed',
+                      'rollback-impossible', 'came-up-on-wrong-sha',
+                      'cancelled-before-restart']) {
+        out[oc] = deployStrip(stFor({ lastDeploy: LD(oc,
+            { detail: 'why-' + oc, observedSha: HEX40('c') }) }), sess);
+    }
+    out.cancelledTreeMoved = deployStrip(stFor({ lastDeploy:
+        LD('cancelled-before-restart', { observedSha: HEX40('c'),
+            detail: 'restart refused' }) }), sess);
+    out.cancelledTreeSame = deployStrip(stFor({ lastDeploy:
+        LD('cancelled-before-restart',
+           { observedSha: HEX40('a') }) }), sess);
+    out.unknownOutcome = deployStrip(
+        stFor({ lastDeploy: LD('some-future-verdict') }), sess);
+    out.absent = deployStrip(stFor({}), sess);
+    out.junk = [
+        deployStrip(stFor({ lastDeploy: 'nope' }), sess),
+        deployStrip(stFor({ lastDeploy: {} }), sess),
+        deployStrip(stFor({ lastDeploy: { outcome: 7 } }), sess),
+        deployStrip(null, sess),
+    ];
+    out.survivors = {
+        noVersion: staleSurvivors(null, sess),
+        noList: staleSurvivors('NEWBUILD', null),
+        empty: staleSurvivors('NEWBUILD', []),
+        counted: staleSurvivors('NEWBUILD', sess),
+    };
+    return out;
+};
+
+// --- last_deploy rides the poll, and dies with the answer -----------------
+CASES.deploy_rides_the_poll = async () => {
+    const out = {};
+    fleet(['local', 'peer']);
+    INFO = { local: INFO_MODERN(true), peer: INFO_MODERN(true) };
+    CHECK = {
+        local: OK200D(
+            { state: 'current',
+              local: { version: 'NEW', sha: HEX40('b') } },
+            LD('rolled-back', { detail: 'worker-never-ready' })),
+        peer: OK200({ state: 'current' }),   // no last_deploy key at all
+    };
+    await pollTick();
+    const st1 = checkStateFor('local');
+    out.afterOk = {
+        hasLd: !!st1.lastDeploy,
+        outcome: st1.lastDeploy && st1.lastDeploy.outcome,
+        peerLd: checkStateFor('peer').lastDeploy,
+        stripOutcome: (deployStrip(st1, []) || {}).outcome,
+    };
+    // The broker stops answering; the strip must die with the answer, the
+    // same way a stored 'current' does.
+    INFO = { local: INFO_DOWN, peer: INFO_MODERN(true) };
+    CHECK = { peer: OK200({ state: 'current' }) };
+    modCatalogCache.clear();
+    await pollTick();
+    out.afterDown = { ld: checkStateFor('local').lastDeploy,
+                      strip: deployStrip(checkStateFor('local'), []) };
+    // …and a 503 (the gate closed meanwhile) equally leaves none behind.
+    INFO = { local: INFO_MODERN(true), peer: INFO_MODERN(true) };
+    CHECK = { local: R503, peer: OK200({ state: 'current' }) };
+    modCatalogCache.clear();
+    await pollTick();
+    out.after503 = { ld: checkStateFor('local').lastDeploy };
+    return out;
+};
+
+// --- the fresh terminal targets the LOCAL broker, explicitly --------------
+CASES.fresh_terminal_host = async () => {
+    fleet(['local', 'peerA', 'peerB']);
+    const h = freshTerminalHost();
+    const out = { id: h && h.id, isNull: h === null };
+    HOSTS = [];
+    // No local broker configured: the resolver answers null, and the click
+    // handler stops on null rather than letting the launcher fall through
+    // to the serving origin.
+    out.unconfigured = freshTerminalHost();
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -1481,3 +1619,143 @@ def test_a_removed_broker_leaves_no_note_for_the_next_holder_of_its_id(harness):
     assert out["removal"]["noteAfter"] is False, (
         "it must be pruned with the host, or the next broker to get that id "
         "inherits an error about a machine it is not")
+
+
+# ---- #182 Part 2 (A29): the aftermath of an apply --------------------------
+
+SUCCESS_LINE = "This broker was updated and came back on the build the apply"
+
+
+def test_the_post_apply_strip_renders_success_with_survivors(harness):
+    # #182 trap 9: agents survive a broker restart by design and reconnect
+    # still running the old code, so a successful self-update leaves a new
+    # broker talking to old agents. The strip must SAY so — new build id,
+    # survivor count derived by #22's own rule — and offer a fresh terminal,
+    # never a replay of an existing session.
+    r = run(harness, "deploy_strip")
+    ok = r["success"]
+    assert ok is not None
+    assert ok["outcome"] == "came-up-ready-on-target"
+    assert ok["cls"] == "app-upd-deploy-ok"
+    assert ok["newTerminal"] is True
+    # OLDBUILD agent + the version-less pre-#22 agent; the relaunched agent
+    # and the plain terminal are not counted, junk rows are stepped over.
+    assert ok["survivors"] == 2
+    assert ok["lines"][0].startswith(SUCCESS_LINE)
+    assert "bbbbbbbbbb" in ok["lines"][0], "the new build's short sha"
+    assert "2 surviving agent sessions are" in ok["lines"][1]
+    assert "relaunched by hand" in ok["lines"][1]
+    # A clean broker still says so, rather than silently dropping the line.
+    assert r["successNone"]["survivors"] == 0
+    assert "No surviving agent session" in r["successNone"]["lines"][1]
+    # …but an UNREADABLE count is null, never rounded down to zero: "could
+    # not count" rendered as "none are stale" is the mod's one forbidden
+    # sentence wearing a different hat.
+    for key in ("successNoVersion", "successNoList"):
+        assert r[key]["survivors"] is None, key
+        assert "could not be determined" in r[key]["lines"][1], key
+    assert r["survivors"] == {"noVersion": None, "noList": None,
+                              "empty": 0, "counted": 2}
+
+
+def test_every_deploy_failure_renders_distinctly_and_never_as_success(harness):
+    r = run(harness, "deploy_strip")
+    keys = ["rolled-back", "rollback-failed", "rollback-impossible",
+            "came-up-on-wrong-sha", "cancelled-before-restart"]
+    firsts = {}
+    for k in keys:
+        row = r[k]
+        assert row is not None, k
+        assert row["outcome"] == k
+        assert row["cls"] != "app-upd-deploy-ok", f"{k} banded as success"
+        assert row["newTerminal"] is False, (
+            f"{k}: the fresh-terminal offer belongs to a deploy that "
+            "actually came up on its target")
+        assert not row["lines"][0].startswith(SUCCESS_LINE), k
+        firsts[k] = row["lines"][0]
+        # The broker's own account of what happened rides along.
+        assert any(("why-" + k) in ln for ln in row["lines"]), (
+            f"{k} dropped the broker's detail sentence")
+    assert len(set(firsts.values())) == len(firsts), (
+        f"two outcomes read the same: {firsts}")
+    # The rollback that failed or could not happen is louder than the one
+    # that worked: it names the human the tree now needs.
+    assert "human" in firsts["rollback-failed"]
+    assert "human" in firsts["rollback-impossible"]
+    assert "human" not in firsts["rolled-back"]
+    assert "rolled back" in firsts["rolled-back"]
+    assert "aaaaaaaaaa" in firsts["rolled-back"], "the sha it went back to"
+    # Wrong-sha is odd but alive, and names both commits.
+    assert "cccccccccc" in firsts["came-up-on-wrong-sha"]
+    assert "bbbbbbbbbb" in firsts["came-up-on-wrong-sha"]
+
+
+def test_a_cancelled_apply_says_where_the_tree_stands(harness):
+    # cancelled-before-restart can leave the checkout already updated while
+    # the process keeps running the old build — the one state where the code
+    # on disk and the code in memory are known to differ without a restart
+    # having happened. The strip says which of the two it is.
+    r = run(harness, "deploy_strip")
+    moved = r["cancelledTreeMoved"]["lines"]
+    assert any("cccccccccc" in ln for ln in moved)
+    assert any("already moved" in ln for ln in moved)
+    assert any("restart refused" in ln for ln in moved)
+    same = r["cancelledTreeSame"]["lines"]
+    assert any("not changed" in ln for ln in same)
+
+
+def test_no_deploy_history_renders_no_strip(harness):
+    r = run(harness, "deploy_strip")
+    assert r["absent"] is None
+    assert r["junk"] == [None, None, None, None], (
+        "a junk last_deploy must read as absent, never render half a strip")
+    # A verdict this build does not recognise is NOT success either.
+    unknown = r["unknownOutcome"]
+    assert unknown["cls"] == "app-upd-deploy-bad"
+    assert unknown["newTerminal"] is False
+    assert "must not be read as a success" in unknown["lines"][0]
+
+
+def test_last_deploy_rides_the_local_poll_and_dies_with_the_answer(harness):
+    r = run(harness, "deploy_rides_the_poll")
+    assert r["afterOk"]["hasLd"] is True
+    assert r["afterOk"]["outcome"] == "rolled-back"
+    assert r["afterOk"]["stripOutcome"] == "rolled-back"
+    # A peer that sent no last_deploy holds none — and a peer that DID send
+    # one is still never rendered: the strip reads the local record only.
+    assert r["afterOk"]["peerLd"] is None
+    # The answer went away; the outcome that rode it goes too, exactly like
+    # the stored 'current' does.
+    assert r["afterDown"]["ld"] is None
+    assert r["afterDown"]["strip"] is None
+    assert r["after503"]["ld"] is None
+
+
+def test_the_fresh_terminal_targets_the_local_broker_explicitly(harness):
+    # Inherited refutation R7: no durable session identity survives a
+    # restart, so the ONLY affordance is a fresh terminal — and it goes to
+    # the LOCAL broker, resolved from the literal id at click time, never a
+    # null host that launchProfile would default to the serving origin.
+    r = run(harness, "fresh_terminal_host")
+    assert r["id"] == "local"
+    assert r["isNull"] is False
+    assert r["unconfigured"] is None
+    # The wiring: resolved at click time, guarded on null, through the
+    # core's own (+) quick-launch path.
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("function renderDeployStrip"):
+              src.index("function renderChecked")]
+    assert "const h = freshTerminalHost();" in seg
+    assert "if (!h) return;" in seg
+    assert "launchProfile(h, hostDefaultProfile(h))" in seg
+
+
+def test_the_restart_confirm_names_the_old_code_cost():
+    # Pre-flight honesty: the confirm's continuity counts already exist; the
+    # sentence beside them must say that surviving is not updating.
+    src = MOD_JS.read_text(encoding="utf-8")
+    body = src[src.index("function restartConfirmBody"):
+               src.index("function onRestartClick")]
+    assert "keeps running " in body
+    assert "the code it was started with" in body
+    assert "relaunched by hand" in body

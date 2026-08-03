@@ -145,12 +145,18 @@
                 //              one global one would let a single black-holed
                 //              broker sit on the 20s timeout and suppress
                 //              every other host's poll for the whole window.
+                //   lastDeploy the `last_deploy` object riding this host's
+                //              last good check, or null (#182 Part 2, A29).
+                //              Cleared wherever `check` is nulled: a deploy
+                //              outcome must not outlive the answer that
+                //              carried it, exactly like the check itself.
                 const hostChecks = new Map();   // hostId -> check state record
                 function checkStateFor(hostId) {
                     let st = hostChecks.get(hostId);
                     if (!st) {
                         st = { hostId: hostId, check: null, error: null,
-                               checkedAt: 0, inFlight: false };
+                               checkedAt: 0, inFlight: false,
+                               lastDeploy: null };
                         hostChecks.set(hostId, st);
                     }
                     return st;
@@ -649,6 +655,7 @@
                         // degrades to unknown rather than asking anyone.
                         st.check = null;
                         st.error = 'no-such-host';
+                        st.lastDeploy = null;
                         st.checkedAt = Date.now();
                         renderAll();
                         return;
@@ -687,6 +694,7 @@
                         if (cap !== 'ready' && cap !== 'unproven') {
                             st.check = null;
                             st.error = cap;
+                            st.lastDeploy = null;
                             st.checkedAt = Date.now();
                         } else {
                             const r = await hostFetch(host, '/update/check',
@@ -715,6 +723,7 @@
                                 // other about one broker.
                                 st.check = null;
                                 st.error = 'unauthorized';
+                                st.lastDeploy = null;
                             } else if (r.status === 503) {
                                 // The broker's own gate. A capability that is
                                 // absent here — NOT an error, NOT "up to date",
@@ -733,6 +742,7 @@
                                 // does not need to) which of the two said it.
                                 st.check = null;
                                 st.error = 'not-opted-in';
+                                st.lastDeploy = null;
                             } else if (!r.ok) {
                                 throw new Error('HTTP ' + r.status);
                             } else {
@@ -742,6 +752,16 @@
                                 }
                                 st.check = j.check;
                                 st.error = null;
+                                // #182 Part 2 (A29): the finalized deploy
+                                // outcome rides BESIDE the check (app.py
+                                // _update_check), so it is adopted and
+                                // dropped in the same breath as the answer
+                                // it came with. Walked as untrusted input
+                                // later, in deployOutcome; only ever SHOWN
+                                // for the local broker (deployStrip).
+                                st.lastDeploy = (j.last_deploy
+                                    && typeof j.last_deploy === 'object')
+                                    ? j.last_deploy : null;
                             }
                             st.checkedAt = Date.now();
                         }
@@ -749,6 +769,7 @@
                         // Degrade to unknown — never to "current".
                         st.check = null;
                         st.error = failure;
+                        st.lastDeploy = null;
                         st.checkedAt = Date.now();
                     } finally {
                         st.inFlight = false;
@@ -1090,6 +1111,192 @@
                     await setChecking(LOCAL_HOST_ID, true, { poll: false });
                 }
 
+                // ---- after an apply (#182 Part 2, A29) ---------------------
+                // A broker that has been through an apply-restart reports the
+                // finalized outcome as `last_deploy` beside its check payload,
+                // because the process that could have said it live is the one
+                // the restart replaced. Everything in this block derives what
+                // the window renders from that object plus the live session
+                // list — pure, no DOM, so test_update_fleet.py can execute it.
+                //
+                // Scoped to the LOCAL broker, deliberately: sessions on any
+                // host can be stale, but an apply happens on the machine whose
+                // page you are looking at, and a peer's deploy history belongs
+                // on that peer's own desktop, not on a row of this fleet list.
+
+                // The outcome object, walked as UNTRUSTED input the way
+                // servesUpdateMod walks a catalog: the broker only promises a
+                // string `outcome`; every other field is taken only when it
+                // has the advertised type, and anything else reads as absent.
+                // null = no deploy history, and no deploy history renders
+                // NOTHING — an empty strip would be a claim about an apply
+                // that never happened.
+                function deployOutcome(ld) {
+                    if (!ld || typeof ld !== 'object') return null;
+                    if (typeof ld.outcome !== 'string' || !ld.outcome) {
+                        return null;
+                    }
+                    const rec = (ld.record && typeof ld.record === 'object')
+                        ? ld.record : {};
+                    const str = function (v) {
+                        return (typeof v === 'string' && v) ? v : null;
+                    };
+                    return {
+                        outcome: ld.outcome,
+                        detail: str(ld.detail),
+                        observedSha: str(ld.observedSha),
+                        oldSha: str(rec.oldSha),
+                        targetSha: str(rec.targetSha),
+                    };
+                }
+                function shortSha(sha) {
+                    return sha ? String(sha).slice(0, 10) : null;
+                }
+
+                // #22's stale rule, computed the way the broker itself
+                // computes it (app.py: `version != broker_version`): an AGENT
+                // session whose reported build differs from this broker's own
+                // — a pre-#22 agent reporting none included — is still running
+                // code this broker no longer runs. Agents only: a plain
+                // terminal legitimately reports no version (flagging it would
+                // be noise), and a plain terminal cannot survive a restart
+                // anyway. Returns null — never 0 — when either side is
+                // unreadable, because "could not count" rendered as "none are
+                // stale" would be this mod's one forbidden sentence wearing a
+                // different hat.
+                function staleSurvivors(brokerVersion, sessionList) {
+                    if (typeof brokerVersion !== 'string' || !brokerVersion) {
+                        return null;
+                    }
+                    if (!Array.isArray(sessionList)) return null;
+                    let n = 0;
+                    for (const s of sessionList) {
+                        if (!s || typeof s !== 'object') continue;
+                        if (s.kind !== 'agent') continue;
+                        if (String(s.version || '') !== brokerVersion) n += 1;
+                    }
+                    return n;
+                }
+
+                // Where a fresh terminal goes: the LOCAL broker, resolved at
+                // CLICK time from the literal id — the same rule every action
+                // in this mod follows. The null matters: launchProfile
+                // defaults a missing host positionally to whoever served the
+                // page, which is exactly the fallback this mod bans, so a
+                // caller getting null here must stop instead of falling
+                // through to it.
+                function freshTerminalHost() {
+                    return updHost(LOCAL_HOST_ID);
+                }
+
+                // What the post-apply strip says — or null, which renders
+                // nothing at all. One branch per outcome the supervisor or
+                // the worker's own cancel path can finalize, plus a refusal
+                // to read anything unrecognised as success. `cls` bands the
+                // strip the way bandFor bands a row (ok / warn / bad), and
+                // `newTerminal` is the ONLY affordance: there is no relaunch
+                // and no replay, because after a restart the broker's
+                // in-memory registry is gone and "bring my session back on
+                // the new code" is a promise this code cannot keep.
+                // Surviving sessions are left running, counted, and named
+                // for what they are.
+                function deployStrip(st, sessionList) {
+                    const d = deployOutcome(st && st.lastDeploy);
+                    if (!d) return null;
+                    const chk = st && st.check;
+                    const bv = (chk && chk.local
+                        && typeof chk.local.version === 'string'
+                        && chk.local.version) ? chk.local.version : null;
+                    const out = { outcome: d.outcome,
+                                  cls: 'app-upd-deploy-bad',
+                                  lines: [], survivors: null,
+                                  newTerminal: false };
+                    const why = function (label) {
+                        if (d.detail) out.lines.push(label + d.detail);
+                    };
+                    if (d.outcome === 'came-up-ready-on-target') {
+                        out.cls = 'app-upd-deploy-ok';
+                        out.newTerminal = true;
+                        out.survivors = staleSurvivors(bv, sessionList);
+                        out.lines.push('This broker was updated and came '
+                            + 'back on the build the apply named'
+                            + (shortSha(d.observedSha)
+                                ? (' (' + shortSha(d.observedSha) + ')') : '')
+                            + '.');
+                        if (out.survivors === null) {
+                            out.lines.push('Whether any surviving session '
+                                + 'is still on the previous build could not '
+                                + 'be determined from here.');
+                        } else if (out.survivors > 0) {
+                            out.lines.push(out.survivors
+                                + ' surviving agent session'
+                                + (out.survivors === 1 ? ' is' : 's are')
+                                + ' still running the previous build — a '
+                                + 'restart never reloads a session’s code, '
+                                + 'so each keeps its old build until it is '
+                                + 'relaunched by hand.');
+                        } else {
+                            out.lines.push('No surviving agent session is '
+                                + 'still running a previous build.');
+                        }
+                    } else if (d.outcome === 'rolled-back') {
+                        out.lines.push('The last update failed to start and '
+                            + 'was rolled back'
+                            + (shortSha(d.oldSha)
+                                ? (' to ' + shortSha(d.oldSha)) : '')
+                            + ' — this broker is running the build from '
+                            + 'before that update.');
+                        why('What failed: ');
+                    } else if (d.outcome === 'rollback-failed') {
+                        out.lines.push('The last update failed to start AND '
+                            + 'rolling back to the previous build also '
+                            + 'failed — this checkout may need a human on '
+                            + 'the machine itself.');
+                        why('What failed: ');
+                    } else if (d.outcome === 'rollback-impossible') {
+                        out.lines.push('The last update failed to start and '
+                            + 'could not be rolled back — this checkout may '
+                            + 'need a human on the machine itself.');
+                        why('What failed: ');
+                    } else if (d.outcome === 'came-up-on-wrong-sha') {
+                        out.cls = 'app-upd-deploy-warn';
+                        out.lines.push('This broker came back up, but on '
+                            + (shortSha(d.observedSha)
+                                || 'a commit it could not read')
+                            + (shortSha(d.targetSha)
+                                ? (' rather than the '
+                                    + shortSha(d.targetSha)
+                                    + ' the apply named') : '')
+                            + ' — alive, but not the build that was asked '
+                            + 'for.');
+                        why('What it reported: ');
+                    } else if (d.outcome === 'cancelled-before-restart') {
+                        out.cls = 'app-upd-deploy-warn';
+                        out.lines.push('The last apply stopped before its '
+                            + 'restart, so this broker never stopped '
+                            + 'running the build it was on.');
+                        if (d.observedSha && d.oldSha) {
+                            out.lines.push(d.observedSha !== d.oldSha
+                                ? ('The files on disk were already moved '
+                                    + 'to ' + shortSha(d.observedSha)
+                                    + ' — newer than the code this broker '
+                                    + 'is running.')
+                                : 'The files on disk were not changed.');
+                        }
+                        why('Why it stopped: ');
+                    } else {
+                        // A verdict this build does not know. NEVER read as
+                        // success: an unrecognised outcome reported
+                        // optimistically is the same lie as an unchecked
+                        // "up to date".
+                        out.lines.push('The last update reported an outcome '
+                            + 'this page does not recognise — it must not '
+                            + 'be read as a success.');
+                        why('What it reported: ');
+                    }
+                    return out;
+                }
+
                 // ---- self-restart (#183) -----------------------------------
                 // Deliberately scoped to the LOCAL broker, and only the local
                 // broker. The window above lists every configured host, but
@@ -1417,6 +1624,19 @@
                                 + plural(cont.unknown) + ' MAY be lost — '
                                 + 'their fate could not be determined.',
                                 'app-upd-restart-warn');
+                        }
+                        if (cont.guaranteed || cont.unknown) {
+                            // #182 Part 2 (A29): reconnecting is not
+                            // updating. One sentence, beside the count it
+                            // is about — after an apply-restart these are
+                            // exactly the sessions #22 flags as stale
+                            // (their build no longer matches the broker's),
+                            // and the window's post-apply strip counts them
+                            // by the same rule.
+                            line('A session that survives keeps running '
+                                + 'the code it was started with — if this '
+                                + 'restart brings up a new build, it stays '
+                                + 'on the old one until relaunched by hand.');
                         }
                         if (!cont.guaranteed && !cont.at_risk
                                 && !cont.unknown) {
@@ -1785,6 +2005,73 @@
                     return el;
                 }
 
+                // The strip deployStrip feeds (#182 Part 2, A29). LOCAL by
+                // construction: it reads exactly one record — the serving
+                // broker's — and the session list is the core poll's own
+                // last-good list for that same broker, read at PAINT time so
+                // a session relaunched by hand falls out of the count on the
+                // next repaint rather than being carried from a snapshot.
+                // Every string lands via textContent; the detail sentence is
+                // the broker's own text.
+                function renderDeployStrip(body) {
+                    const sessList = (typeof pollStateFor === 'function')
+                        ? pollStateFor(LOCAL_HOST_ID).sessions : null;
+                    const strip = deployStrip(
+                        checkStateFor(LOCAL_HOST_ID), sessList);
+                    if (!strip) return;
+                    addHead(body, 'Last update');
+                    const box = document.createElement('div');
+                    box.className = 'app-upd-deploy ' + strip.cls;
+                    for (const t of strip.lines) {
+                        const ln = document.createElement('div');
+                        ln.className = 'app-upd-deploy-line';
+                        ln.textContent = t;
+                        box.appendChild(ln);
+                    }
+                    if (strip.newTerminal) {
+                        // A FRESH terminal on the new build — the one honest
+                        // offer. Never a relaunch of a surviving session:
+                        // after a restart the broker's in-memory registry is
+                        // gone, so nothing here can recreate what a session
+                        // held, and pretending otherwise would be worse than
+                        // the staleness it papered over.
+                        const row = document.createElement('div');
+                        row.className = 'app-upd-restart-row';
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className =
+                            'app-upd-restart-btn app-upd-newterm-btn';
+                        btn.textContent = 'New terminal';
+                        btn.title = 'opens a fresh terminal on this broker, '
+                            + 'running the new build. Existing sessions are '
+                            + 'never touched';
+                        btn.addEventListener('mousedown', function (e) {
+                            e.stopPropagation();
+                        });
+                        btn.addEventListener('click', function (e) {
+                            e.stopPropagation();
+                            const h = freshTerminalHost();
+                            if (!h) return;
+                            // The core's own (+) quick-launch path, aimed at
+                            // the resolved local host and that host's default
+                            // profile — the same terminal the (+) button
+                            // itself would open.
+                            Promise.resolve(
+                                launchProfile(h, hostDefaultProfile(h)))
+                                .catch(function () {});
+                        });
+                        row.appendChild(btn);
+                        const note = document.createElement('span');
+                        note.className = 'app-upd-restart-inline';
+                        note.textContent = 'a fresh terminal starts on the '
+                            + 'new build; surviving sessions keep their old '
+                            + 'code until relaunched by hand';
+                        row.appendChild(note);
+                        box.appendChild(row);
+                    }
+                    body.appendChild(box);
+                }
+
                 // The toolbar's timestamp. Across several brokers it reports the
                 // OLDEST completed check, never the newest: the newest would
                 // date the freshest row and silently imply the same freshness
@@ -1863,6 +2150,14 @@
                             || (up.sha ? String(up.sha).slice(0, 10) : '—')
                             + (up.branch ? ('  on ' + up.branch) : ''));
                     }
+
+                    // ---- after an apply (#182 Part 2, A29) ----
+                    // Above the restart control on purpose: a deploy that
+                    // failed, rolled back, or left survivors on old code is
+                    // the loudest fact in this window, and it must not sit
+                    // below the fold of a list of healthy rows. A broker
+                    // with no deploy history renders nothing here at all.
+                    renderDeployStrip(body);
 
                     // ---- restart THIS broker (#183) ----
                     // Placed here, beside the shared facts about the local
