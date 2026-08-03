@@ -3435,6 +3435,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # Held across the whole read / write / live-swap, so two tabs arriving
     # together produce one file rather than two interleaved ones.
     app.ctx.update_policy_lock = asyncio.Lock()
+    # #182 apply half: the operator switch for actually downloading and
+    # EXECUTING code as this process's user. Deliberately NOT layered like
+    # update_check_enabled above -- config-file key ONLY, default FALSE, no
+    # sidecar, no GUI path, no remote-writable path. The check merely asks "is
+    # there something newer"; applying replaces files on disk and re-execs
+    # this process, so it is deployment policy in the same sense
+    # restart_enabled is (see ~3234), not a browser preference: an operator
+    # edits broker_config.json and restarts the process to turn it on. This is
+    # also what keeps it off on the hands-off deploy instance even once that
+    # instance's operator opts the CHECK in from the GUI (#182 trap 14).
+    app.ctx.update_apply_enabled = bool(config.get("update_apply_enabled", False))
+    LOGGER.info("update apply: %s (config-file gate only)",
+                "on" if app.ctx.update_apply_enabled else "off")
     # #163: RUNTIME-INSTALLED mods. A broker-config'd directory beside the /state
     # store ("mods_dir"), deliberately NOT webterm/broker/mods/ -- that tree is
     # the reviewed first-party set and its drift guard is bidirectional, so an
@@ -5914,10 +5927,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # normally (it just lacks the key), instead of an older peer's
         # cross-origin OPTIONS preflight 404ing on a brand-new path and the
         # browser surfacing that as an opaque network error indistinguishable
-        # from "that machine is asleep". `apply_enabled` is read defensively
-        # (the apply half does not exist yet -- a later checkpoint) so this
-        # key is honest about a capability that is not implemented rather than
-        # silently omitted or hardcoded true.
+        # from "that machine is asleep". `apply_enabled` tracks the real
+        # `update_apply_enabled` gate (config-file only, no sidecar/GUI/remote
+        # path -- see its definition beside restart_enabled); the `getattr`
+        # default above is just defensive, not a stand-in for a missing
+        # implementation.
         #
         # #183: `restart` rides here for the SAME compatibility reason, and its
         # shape is a deliberate refusal to collapse states. A bare

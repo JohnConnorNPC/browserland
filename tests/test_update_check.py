@@ -734,13 +734,12 @@ def test_info_reports_update_check_enabled_when_configured(tmp_path, monkeypatch
     assert r.json["update"]["check_enabled"] is True
 
 
-def test_info_reports_apply_enabled_false_though_the_gate_does_not_exist_yet(
-        tmp_path, monkeypatch):
-    """No `update_apply_enabled` config key exists yet -- apply is a LATER
-    checkpoint -- so this must read as an honest, present, off-by-default
+def test_info_reports_apply_enabled_false_by_default(tmp_path, monkeypatch):
+    """The apply gate exists but defaults off, and enabling the CHECK must not
+    drag it along -- /info reads as an honest, present, off-by-default
     capability rather than being silently omitted or hardcoded true."""
     app = _make_app(tmp_path, monkeypatch, enabled=True)
-    assert not hasattr(app.ctx, "update_apply_enabled")
+    assert app.ctx.update_apply_enabled is False
     _, r = authed(app).get("/info")
     assert r.status == 200
     assert r.json["update"]["apply_enabled"] is False

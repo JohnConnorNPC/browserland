@@ -335,6 +335,69 @@ def test_revoking_stops_the_next_check(tmp_path, monkeypatch):
     assert r.json["error"] == "update_check_disabled"
 
 
+# ---- the apply gate: config-file only, never coupled to the check (A26) -----
+#
+# `update_apply_enabled` deliberately does NOT follow update_check_enabled's
+# layering above (config > sidecar > default-off, with a GUI/route opt-in).
+# It follows restart_enabled's posture instead: config-file key only, default
+# False, no sidecar, no GUI, no remote-writable path -- applying an update
+# downloads and executes code as the broker's user, so it is deployment
+# policy an operator opts into by editing the file and restarting, not
+# something a browser click or a peer's opted-in check can reach. The whole
+# point of these tests is that turning the CHECK on must never turn the APPLY
+# on: that coupling is exactly the bug #182 warned about.
+
+def test_apply_gate_defaults_false_when_key_absent(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    assert app.ctx.update_apply_enabled is False
+
+
+def test_apply_gate_is_config_key_only(tmp_path, monkeypatch):
+    off = _make_app(tmp_path, monkeypatch, update_apply_enabled=False)
+    assert off.ctx.update_apply_enabled is False
+
+    on = _make_app(tmp_path / "b", monkeypatch, update_apply_enabled=True)
+    assert on.ctx.update_apply_enabled is True
+
+
+def test_a_stored_check_grant_does_not_leak_into_the_apply_gate(
+        tmp_path, monkeypatch):
+    """Independence, direction 1: a sidecar that flips the CHECK gate on must
+    have no effect on the apply gate -- there is no sidecar for it at all."""
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text(json.dumps({"check_enabled": True}), encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path))
+    assert app.ctx.update_check_enabled is True
+    assert app.ctx.update_policy_source == "stored"
+    assert app.ctx.update_apply_enabled is False, (
+        "a stored grant for the CHECK must not also grant the APPLY")
+
+
+def test_enabling_the_check_via_config_does_not_enable_apply(
+        tmp_path, monkeypatch):
+    """Independence, direction 2: `update_check_enabled: true` in the config,
+    with `update_apply_enabled` absent, must leave the apply gate off. This is
+    the exact coupling bug the atom exists to rule out."""
+    app = _make_app(tmp_path, monkeypatch, update_check_enabled=True)
+    assert app.ctx.update_check_enabled is True
+    assert app.ctx.update_apply_enabled is False
+
+
+def test_info_reports_the_real_apply_gate(tmp_path, monkeypatch):
+    off = _make_app(tmp_path, monkeypatch)
+    _, r = authed(off).get("/info")
+    assert r.json["update"]["apply_enabled"] is False
+
+    on = _make_app(tmp_path / "b", monkeypatch, update_apply_enabled=True)
+    _, r = authed(on).get("/info")
+    assert r.json["update"]["apply_enabled"] is True
+    # And still independent of the check on the wire, not just in ctx.
+    both = _make_app(tmp_path / "c", monkeypatch, update_check_enabled=True)
+    _, r = authed(both).get("/info")
+    assert r.json["update"]["check_enabled"] is True
+    assert r.json["update"]["apply_enabled"] is False
+
+
 def test_a_revoke_beats_a_check_already_queued_on_the_lock(tmp_path,
                                                            monkeypatch):
     """The TOCTOU the gate re-read inside update_lock exists for.
