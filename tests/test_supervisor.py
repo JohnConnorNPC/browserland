@@ -842,3 +842,340 @@ def test_killing_the_supervisor_takes_the_worker_with_it(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+# --------------------------------------------------------------------------- #
+# the deploy journal (A23)
+# --------------------------------------------------------------------------- #
+#
+# The seam under test: the WORKER journals a deploy (update.begin_deploy)
+# before its apply-restart, and the SUPERVISOR -- the only process that
+# outlives the restart -- adjudicates the next worker generation into exactly
+# one of came-up-ready-on-target / came-up-on-wrong-sha / never-came-up, then
+# hands (record, outcome) to the deploy_hook exactly once. The hook is where
+# a later atom (A28) attaches the actual rollback; here it only records.
+
+OLD_SHA = "a" * 40
+NEW_SHA = "b" * 40
+
+
+# ---- pure record + classification --------------------------------------------
+
+def test_deploy_record_roundtrip():
+    record = supervise.build_deploy_record(
+        OLD_SHA, NEW_SHA, {"brokerId": "b1", "port": 4445}, "op-1", now=123.0)
+    assert record is not None
+    decoded = supervise.decode_deploy_record(
+        supervise.encode_deploy_record(record))
+    assert decoded == record
+    assert decoded["version"] == supervise.DEPLOY_JOURNAL_VERSION
+    assert decoded["oldSha"] == OLD_SHA
+    assert decoded["targetSha"] == NEW_SHA
+    assert decoded["expectedIdentity"] == {"brokerId": "b1", "port": 4445}
+    assert decoded["createdAt"] == 123.0
+
+
+def test_build_deploy_record_refuses_bad_input():
+    good = dict(old_sha=OLD_SHA, target_sha=NEW_SHA,
+                expected_identity=None, operation_id="op")
+    assert supervise.build_deploy_record(**good) is not None
+    for over in (dict(old_sha="HEAD"), dict(old_sha=OLD_SHA[:7]),
+                 dict(old_sha=OLD_SHA.upper()), dict(old_sha=None),
+                 dict(target_sha="main"), dict(target_sha=None),
+                 dict(operation_id=""), dict(operation_id="   "),
+                 dict(operation_id=None), dict(operation_id=7),
+                 dict(expected_identity=object())):
+        bad = dict(good)
+        bad.update(over)
+        assert supervise.build_deploy_record(**bad) is None, over
+
+
+def test_decode_deploy_record_rejects_garbage():
+    for text in ("", "not json", "[]", "42", '"str"', "{}", None,
+                 json.dumps({"version": 2, "oldSha": OLD_SHA,
+                             "targetSha": NEW_SHA, "operationId": "x"}),
+                 json.dumps({"version": 1, "oldSha": "xyz",
+                             "targetSha": NEW_SHA, "operationId": "x"}),
+                 json.dumps({"version": 1, "oldSha": OLD_SHA,
+                             "targetSha": NEW_SHA, "operationId": ""})):
+        assert supervise.decode_deploy_record(text) is None, text
+
+
+def test_classify_deploy_outcomes():
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op")
+    ready_on_target = supervise.classify_deploy_outcome(
+        record, ready=True, observed_sha=NEW_SHA)
+    assert ready_on_target["outcome"] == supervise.DEPLOY_READY_ON_TARGET
+    assert ready_on_target["observedSha"] == NEW_SHA
+    wrong = supervise.classify_deploy_outcome(record, ready=True,
+                                              observed_sha=OLD_SHA)
+    assert wrong["outcome"] == supervise.DEPLOY_WRONG_SHA
+    assert wrong["observedSha"] == OLD_SHA
+    never = supervise.classify_deploy_outcome(record, ready=False,
+                                              observed_sha=None)
+    assert never["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+
+
+def test_an_unreadable_sha_is_never_reported_as_success():
+    """R10: success requires the observed sha to equal the target. A worker
+    that is up but whose sha cannot be read is NOT a verified deploy."""
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op")
+    out = supervise.classify_deploy_outcome(record, ready=True,
+                                            observed_sha=None)
+    assert out["outcome"] == supervise.DEPLOY_WRONG_SHA
+    assert out["detail"] == "sha-unreadable"
+
+
+def test_deploy_outcome_names_are_pinned():
+    """A28 and the UI will switch on these strings; a rename must fail a test
+    rather than silently orphan a consumer."""
+    assert supervise.DEPLOY_READY_ON_TARGET == "came-up-ready-on-target"
+    assert supervise.DEPLOY_WRONG_SHA == "came-up-on-wrong-sha"
+    assert supervise.DEPLOY_NEVER_CAME_UP == "never-came-up"
+
+
+# ---- the journal on disk -----------------------------------------------------
+
+def test_journal_write_read_roundtrip_on_disk(tmp_path):
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, "identity", "op")
+    assert supervise.write_deploy_journal(str(tmp_path), record) is True
+    assert not list(tmp_path.glob("*.tmp")), "no temp debris"
+    logs = []
+    assert supervise.read_pending_deploy(str(tmp_path), logs.append) == record
+    assert logs == []
+    # Reading does not consume: still pending until finalized.
+    assert supervise.read_pending_deploy(str(tmp_path), logs.append) == record
+
+
+def test_a_missing_journal_is_quietly_absent(tmp_path):
+    logs = []
+    assert supervise.read_pending_deploy(str(tmp_path), logs.append) is None
+    assert logs == []
+    assert not (tmp_path / supervise.DEPLOY_QUARANTINE_FILENAME).exists()
+
+
+def test_a_corrupt_journal_is_quarantined_loudly_and_reads_absent(tmp_path):
+    journal = tmp_path / supervise.DEPLOY_JOURNAL_FILENAME
+    journal.write_text("{not json", encoding="utf-8")
+    logs = []
+    assert supervise.read_pending_deploy(str(tmp_path), logs.append) is None
+    assert any("corrupt" in line for line in logs), logs
+    assert not journal.exists()
+    quarantined = tmp_path / supervise.DEPLOY_QUARANTINE_FILENAME
+    assert quarantined.read_text(encoding="utf-8") == "{not json", \
+        "the corrupt journal must be preserved as evidence, never deleted"
+
+
+def test_a_wrong_shape_journal_is_also_quarantined(tmp_path):
+    """Valid JSON that fails validation (unknown version, bad shas) is just as
+    unadjudicable as garbage bytes -- an older supervisor must quarantine a
+    newer journal rather than misread it."""
+    journal = tmp_path / supervise.DEPLOY_JOURNAL_FILENAME
+    journal.write_text(json.dumps({"version": 99}), encoding="utf-8")
+    logs = []
+    assert supervise.read_pending_deploy(str(tmp_path), logs.append) is None
+    assert (tmp_path / supervise.DEPLOY_QUARANTINE_FILENAME).exists()
+    assert any("corrupt" in line for line in logs), logs
+
+
+def test_the_journal_write_is_atomic_no_file_on_failure(tmp_path, monkeypatch):
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op")
+
+    def boom(_src, _dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(supervise.os, "replace", boom)
+    assert supervise.write_deploy_journal(str(tmp_path), record) is False
+    assert not (tmp_path / supervise.DEPLOY_JOURNAL_FILENAME).exists(), \
+        "a failed write must leave NO journal, partial or otherwise"
+
+
+def test_finalize_persists_one_outcome_and_consumes_the_journal(tmp_path):
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-9")
+    assert supervise.write_deploy_journal(str(tmp_path), record)
+    outcome = supervise.classify_deploy_outcome(record, ready=True,
+                                                observed_sha=NEW_SHA)
+    assert supervise.finalize_deploy(str(tmp_path), record, outcome,
+                                     now=456.0) is True
+    assert not (tmp_path / supervise.DEPLOY_JOURNAL_FILENAME).exists(), \
+        "finalize must consume the journal: one deploy, one adjudication"
+    saved = json.loads((tmp_path / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["outcome"] == supervise.DEPLOY_READY_ON_TARGET
+    assert saved["record"] == record
+    assert saved["finalizedAt"] == 456.0
+    # ONE current outcome file: a second deploy overwrites, never appends.
+    second = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-10")
+    supervise.finalize_deploy(
+        str(tmp_path), second,
+        supervise.classify_deploy_outcome(second, ready=False,
+                                          observed_sha=None))
+    saved = json.loads((tmp_path / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["record"]["operationId"] == "op-10"
+
+
+# ---- adjudication through the real loop --------------------------------------
+
+# argv: <counter> <sleep_s> <old_sha> <target_sha>
+#
+# Run 1 is the pre-update worker: it journals the deploy through the REAL
+# production writer (update.begin_deploy), arms, and exits 75 -- the order the
+# apply route will use. Every later run is "the new build": it stays up
+# sleep_s and exits 0.
+_DEPLOY_CHILD = '''\
+import os
+import sys
+import time
+
+from webterm.broker import supervise as sv
+from webterm.broker import update
+
+counter, sleep_s, old_sha, target_sha = (
+    sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4])
+
+n = 0
+try:
+    with open(counter) as fh:
+        n = int(fh.read().strip() or "0")
+except (OSError, ValueError):
+    pass
+n += 1
+with open(counter, "w") as fh:
+    fh.write(str(n))
+
+if n == 1:
+    if not update.begin_deploy(old_sha, target_sha,
+                               {"brokerId": "test-broker", "port": 0},
+                               "op-test-1"):
+        sys.exit(9)
+    if not sv.arm_restart():
+        sys.exit(9)
+    sys.exit(sv.EXIT_RESTART)
+
+time.sleep(sleep_s)
+sys.exit(0)
+'''
+
+
+def _drive_deploy(tmp_path, *, observed, sleep=1.5, ready=0.5):
+    """One full deploy through the real supervisor loop: journal -> armed 75
+    -> next generation -> adjudication. ``observed`` is what the injected
+    sha_reader reports at ready-time."""
+    script = tmp_path / "deploy_worker.py"
+    script.write_text(_DEPLOY_CHILD, encoding="utf-8")
+    counter = tmp_path / "count"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    hook_calls = []
+    logs = []
+    code = supervise.supervise(
+        [], child_cmd=[sys.executable, str(script), str(counter), str(sleep),
+                       OLD_SHA, NEW_SHA],
+        env=_child_env(), log=logs.append, install_signals=False,
+        run_dir=str(run_dir), ready_seconds=ready, backoff_base=0.0,
+        sha_reader=lambda: observed,
+        deploy_hook=lambda record, outcome: hook_calls.append(
+            (record, outcome)))
+    try:
+        count = int(counter.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        count = 0
+    return code, count, logs, hook_calls, run_dir
+
+
+def test_a_deploy_that_comes_back_ready_on_target_is_success(tmp_path):
+    """R10 end to end: the SECOND generation -- a fresh pid the supervisor
+    itself spawned -- stayed up past ready and reports the target sha."""
+    code, count, logs, hooks, run_dir = _drive_deploy(tmp_path,
+                                                      observed=NEW_SHA)
+    assert (code, count) == (0, 2)
+    assert len(hooks) == 1, "the hook fires exactly once per deploy"
+    record, outcome = hooks[0]
+    assert record["oldSha"] == OLD_SHA
+    assert record["targetSha"] == NEW_SHA
+    assert record["operationId"] == "op-test-1"
+    assert record["expectedIdentity"]["brokerId"] == "test-broker"
+    assert outcome["outcome"] == supervise.DEPLOY_READY_ON_TARGET
+    assert outcome["observedSha"] == NEW_SHA
+    # Finalized: outcome persisted, journal consumed.
+    assert not (run_dir / supervise.DEPLOY_JOURNAL_FILENAME).exists()
+    saved = json.loads((run_dir / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["outcome"] == supervise.DEPLOY_READY_ON_TARGET
+    assert saved["record"]["targetSha"] == NEW_SHA
+    assert any("adjudicated" in line for line in logs), logs
+
+
+def test_a_deploy_that_comes_back_on_the_wrong_sha(tmp_path):
+    """The worker came up -- but not on the build the journal named. Never
+    reported as success; the outcome names what was actually observed."""
+    code, count, _, hooks, run_dir = _drive_deploy(tmp_path,
+                                                   observed=OLD_SHA)
+    assert (code, count) == (0, 2)
+    assert len(hooks) == 1
+    record, outcome = hooks[0]
+    assert record["targetSha"] == NEW_SHA
+    assert outcome["outcome"] == supervise.DEPLOY_WRONG_SHA
+    assert outcome["observedSha"] == OLD_SHA
+    assert not (run_dir / supervise.DEPLOY_JOURNAL_FILENAME).exists()
+
+
+def test_a_deploy_whose_worker_never_comes_up_is_never_came_up(tmp_path):
+    """A journal is pending and every generation exits 75 (armed) without ever
+    staying up: the budget runs out, and the supervisor -- the only process
+    still alive to observe it -- adjudicates never-came-up."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA,
+                                           {"brokerId": "t"}, "op-nvr")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    code, count, logs = _drive(tmp_path, limit=10 ** 6, arm="good",
+                               max_restarts=2, ready_seconds=30.0,
+                               run_dir=str(run_dir),
+                               sha_reader=lambda: NEW_SHA,
+                               deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert code == supervise.EXIT_SUPERVISOR_FAILED
+    assert len(hooks) == 1, "exactly one adjudication per deploy"
+    got_record, outcome = hooks[0]
+    assert got_record["operationId"] == "op-nvr"
+    assert outcome["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert outcome["detail"] == "restart-budget-exhausted"
+    assert not (run_dir / supervise.DEPLOY_JOURNAL_FILENAME).exists()
+    saved = json.loads((run_dir / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+
+
+def test_a_plain_crash_during_a_deploy_is_never_came_up(tmp_path):
+    """The post-deploy generation dies with an ordinary exit code before
+    reaching ready: the supervisor stops, and the deploy is adjudicated
+    never-came-up with the exit recorded in the detail."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-crash")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    code, count, _ = _drive(tmp_path, limit=0, final=1,
+                            run_dir=str(run_dir), ready_seconds=30.0,
+                            deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (1, 1)
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert hooks[0][1]["detail"] == "worker-exited-1"
+
+
+def test_a_non_deploy_restart_adjudicates_nothing(tmp_path):
+    """An ordinary armed restart with NO journal must not invent a deploy: no
+    hook call, no outcome file, no quarantine."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    hooks = []
+    code, count, _ = _drive(tmp_path, limit=1, arm="good",
+                            run_dir=str(run_dir),
+                            deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (0, 2)
+    assert hooks == []
+    assert not (run_dir / supervise.DEPLOY_OUTCOME_FILENAME).exists()
+    assert not (run_dir / supervise.DEPLOY_QUARANTINE_FILENAME).exists()

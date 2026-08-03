@@ -32,6 +32,7 @@ Design notes that are load-bearing, each from the adversarial review of the plan
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import subprocess
@@ -42,6 +43,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from . import supervise
 
 # ---- constants --------------------------------------------------------------
 
@@ -721,3 +724,41 @@ def evaluate_apply(snap: ApplySnapshot) -> Dict[str, Any]:
         "writability_advisory": writability_advisory(snap.writable),
         "preview": apply_preview(snap),
     }
+
+
+# ---- GH#182 Part 2: the deploy journal seam (A23) ----------------------------
+
+def begin_deploy(old_sha: Any, target_sha: Any, expected_identity: Any,
+                 operation_id: Any, *, run_dir: Optional[str] = None) -> bool:
+    """Journal a deploy BEFORE its apply-restart is requested. True when the
+    journal is on disk; False when it is not -- and a False is the caller's
+    cue that the apply must NOT proceed to a restart, because without a
+    journal the supervisor adjudicates nothing, and a deploy nobody
+    adjudicates is a deploy whose failure nobody observes.
+
+    Written OUTSIDE the worktree, into the supervisor's run dir -- the same
+    place the restart-intent sentinel lives (``$BROWSERLAND_RUN_DIR``,
+    defaulted from the environment exactly like ``supervise.arm_restart``) --
+    so no git operation on the checkout can delete or alter it, and a
+    mid-pull inconsistent tree cannot affect it. The record format and the
+    atomic write live in ``supervise`` because they are a worker->supervisor
+    contract, like the sentinel: this worker WRITES the journal, and the
+    supervisor (the only process that outlives the restart) CONSUMES it and
+    adjudicates the next worker generation into came-up-ready-on-target /
+    came-up-on-wrong-sha / never-came-up, handing the outcome to the rollback
+    seam (``deploy_hook``, A28).
+
+    Runs no git at all: ``old_sha`` and ``target_sha`` are the evaluator's
+    already-established facts (``ApplySnapshot.local_sha`` / ``target_sha``),
+    full 40-hex, passed in. ``expected_identity`` is the broker identity the
+    deploy expects to survive (broker_id when the route has one, else config
+    path + port); it is journal data for A28 and the audit trail, never
+    adjudicated here."""
+    run_dir = run_dir or os.environ.get(supervise.ENV_RUN_DIR)
+    if not run_dir:
+        return False
+    record = supervise.build_deploy_record(
+        old_sha, target_sha, expected_identity, operation_id)
+    if record is None:
+        return False
+    return supervise.write_deploy_journal(run_dir, record)

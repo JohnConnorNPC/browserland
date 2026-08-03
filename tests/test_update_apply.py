@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from webterm.broker import update
+from webterm.broker import supervise, update
 
 
 SHA = "a" * 40
@@ -330,6 +330,61 @@ def test_evaluate_apply_always_returns_the_full_shape():
             assert key in out["preview"]
         for r in out["refusals"]:
             assert set(r) == {"reason", "message"}
+
+
+# ---- the deploy journal seam (A23) -------------------------------------------
+#
+# begin_deploy is the WORKER half of the deploy seam: it journals the deploy
+# (outside the worktree, in the supervisor's run dir) before the apply-restart
+# is requested. The supervisor half -- adjudication of the next generation --
+# is tested in test_supervisor.py; here we prove the writer produces exactly
+# what the supervisor's reader accepts, and that it fails closed.
+
+def test_begin_deploy_writes_a_journal_the_supervisor_can_read(tmp_path):
+    run_dir = tmp_path / "run"
+    ok = update.begin_deploy(
+        SHA, TARGET,
+        {"brokerId": "b-1", "configPath": "broker_config.json", "port": 4445},
+        "op-42", run_dir=str(run_dir))
+    assert ok is True
+    record = supervise.read_pending_deploy(str(run_dir))
+    assert record is not None
+    assert record["oldSha"] == SHA
+    assert record["targetSha"] == TARGET
+    assert record["operationId"] == "op-42"
+    # expected_identity is journal DATA (for A28 and the audit trail),
+    # preserved verbatim -- adjudication never keys on it.
+    assert record["expectedIdentity"] == {
+        "brokerId": "b-1", "configPath": "broker_config.json", "port": 4445}
+
+
+def test_begin_deploy_defaults_to_the_supervisors_run_dir(tmp_path,
+                                                          monkeypatch):
+    """The same environment default as arm_restart, so the apply route can
+    call it bare inside a supervised worker."""
+    monkeypatch.setenv(supervise.ENV_RUN_DIR, str(tmp_path / "envrun"))
+    assert update.begin_deploy(SHA, TARGET, None, "op-env") is True
+    record = supervise.read_pending_deploy(str(tmp_path / "envrun"))
+    assert record is not None
+    assert record["operationId"] == "op-env"
+
+
+def test_begin_deploy_without_a_supervisor_refuses(monkeypatch):
+    """No run dir means no supervisor to adjudicate: a False is the caller's
+    cue that the apply must not proceed to a restart."""
+    monkeypatch.delenv(supervise.ENV_RUN_DIR, raising=False)
+    assert update.begin_deploy(SHA, TARGET, None, "op") is False
+
+
+def test_begin_deploy_refuses_anything_but_full_shas(tmp_path):
+    """Short shas and refs are the ambiguity local_sha() already refuses; a
+    journal carrying one could be adjudicated against the wrong commit."""
+    run_dir = tmp_path / "run"
+    for old, target in ((SHA[:7], TARGET), (SHA, "main"),
+                        (None, TARGET), (SHA, None)):
+        assert update.begin_deploy(old, target, None, "op",
+                                   run_dir=str(run_dir)) is False, (old, target)
+    assert not run_dir.exists(), "a refused begin_deploy must write nothing"
 
 
 # ---- no git mutations, structurally -----------------------------------------

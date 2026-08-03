@@ -3,8 +3,9 @@
 ``python -m webterm.broker`` is no longer the server. It is a small, stable
 *supervisor* that spawns ``python -m webterm.broker --worker`` as a direct
 child and relaunches it when the worker asks. The server lives in the child;
-the supervisor imports nothing that can crash it and does no I/O beyond one
-sentinel file.
+the supervisor imports nothing that can crash it and does no I/O beyond its
+sentinel and deploy-journal files (plus one read-only git query when a deploy
+is being adjudicated -- see the deploy journal section).
 
 Why here, and not in the launcher scripts. The obvious design -- wrap
 ``launchers/run-broker.sh`` / ``run-broker.ps1`` in a relaunch loop -- was
@@ -76,6 +77,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import json
 import os
 import re
 import secrets
@@ -390,6 +392,297 @@ def worker_env(base: Optional[Dict[str, str]], pid: int, nonce: str,
     return env
 
 
+# ---- the deploy journal (A23) -----------------------------------------------
+#
+# GH#182 Part 2. A process that has exited cannot probe its replacement, so the
+# question "did the new build come back?" can only be answered by the one
+# component that outlives the restart: this supervisor. The WORKER writes a
+# journal (via ``update.begin_deploy``) before it requests its apply-restart;
+# the SUPERVISOR consumes it and adjudicates the next worker generation into
+# exactly one of three outcomes. The journal lives in the run dir -- the same
+# place as the intent sentinel, OUTSIDE the worktree -- so no git operation on
+# the checkout (a rollback's reset included) can delete or alter it, and a
+# mid-pull inconsistent tree cannot affect it.
+#
+# Lifecycle: one current journal (pending), one current outcome file
+# (finalized; deliberately not a growing log), one quarantine name for a
+# corrupt journal (preserved as evidence, never silently deleted). The record
+# format is a worker -> supervisor contract exactly like the sentinel: the
+# supervisor may be OLDER than the worker that wrote the journal, so the
+# format is versioned and anything this build cannot validate is quarantined
+# rather than guessed at.
+
+DEPLOY_JOURNAL_FILENAME = "deploy.journal"
+DEPLOY_OUTCOME_FILENAME = "deploy.outcome"
+DEPLOY_QUARANTINE_FILENAME = "deploy.journal.corrupt"
+DEPLOY_JOURNAL_VERSION = 1
+
+# The three adjudications. The UI / rollback atom (A28) switch on these
+# strings, so they are API: add new ones rather than repurposing old ones.
+DEPLOY_READY_ON_TARGET = "came-up-ready-on-target"
+DEPLOY_WRONG_SHA = "came-up-on-wrong-sha"
+DEPLOY_NEVER_CAME_UP = "never-came-up"
+
+_DEPLOY_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def encode_deploy_record(record: Dict[str, Any]) -> str:
+    """One canonical serialization (sorted keys). Raises TypeError on an
+    unserializable value -- ``build_deploy_record`` turns that into a None."""
+    return json.dumps(record, sort_keys=True)
+
+
+def decode_deploy_record(text: Any) -> Optional[Dict[str, Any]]:
+    """A validated journal record, or None for ANYTHING else. Pure.
+
+    Strict on purpose: the shas must be full 40-hex (short shas are the
+    ambiguity ``update.local_sha`` already refuses), the operation id must be a
+    non-empty string, and an unknown version is invalid -- an older supervisor
+    must quarantine a newer journal rather than misread it."""
+    try:
+        obj = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("version") != DEPLOY_JOURNAL_VERSION:
+        return None
+    old = obj.get("oldSha")
+    target = obj.get("targetSha")
+    operation = obj.get("operationId")
+    if not (isinstance(old, str) and _DEPLOY_SHA_RE.fullmatch(old)):
+        return None
+    if not (isinstance(target, str) and _DEPLOY_SHA_RE.fullmatch(target)):
+        return None
+    if not (isinstance(operation, str) and operation.strip()):
+        return None
+    return obj
+
+
+def build_deploy_record(old_sha: Any, target_sha: Any, expected_identity: Any,
+                        operation_id: Any, *,
+                        now: Optional[float] = None
+                        ) -> Optional[Dict[str, Any]]:
+    """A validated version-1 journal record, or None when the inputs cannot
+    make one (bad shas, empty operation id, unserializable identity). Pure.
+
+    Validated by round-tripping through ``decode_deploy_record`` -- the
+    READER'S own rules -- so the writer can never produce a journal the
+    supervisor would quarantine.
+
+    ``expected_identity`` is journal DATA for the rollback atom (A28) and the
+    audit trail: the broker identity the deploy expects to survive (broker_id
+    when the caller has one, else the config path + port). Adjudication keys
+    on generation + sha, never on it."""
+    try:
+        record = {
+            "version": DEPLOY_JOURNAL_VERSION,
+            "operationId": operation_id,
+            "oldSha": old_sha,
+            "targetSha": target_sha,
+            "expectedIdentity": expected_identity,
+            "createdAt": time.time() if now is None else float(now),
+        }
+        return decode_deploy_record(encode_deploy_record(record))
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_deploy_outcome(record: Dict[str, Any], *, ready: bool,
+                            observed_sha: Optional[str],
+                            detail: Optional[str] = None) -> Dict[str, Any]:
+    """One (journal, observation) pair -> one outcome dict. Pure.
+
+        {"outcome": DEPLOY_*, "observedSha": str|None, "detail": str|None}
+
+    The honesty rules (R10):
+
+    * success REQUIRES a fresh generation that reported ready AND carries the
+      journalled target sha. "A process is listening" is never success, and a
+      build id alone is never success.
+    * a sha that could not be read while the worker IS up classifies as
+      ``came-up-on-wrong-sha`` with detail ``sha-unreadable``, never as
+      success: a deploy that cannot be verified must not be reported as
+      verified.
+    """
+    if not ready:
+        return {"outcome": DEPLOY_NEVER_CAME_UP, "observedSha": None,
+                "detail": detail or "worker-never-ready"}
+    if observed_sha and observed_sha == record.get("targetSha"):
+        return {"outcome": DEPLOY_READY_ON_TARGET,
+                "observedSha": observed_sha, "detail": detail}
+    return {"outcome": DEPLOY_WRONG_SHA, "observedSha": observed_sha,
+            "detail": detail or (None if observed_sha else "sha-unreadable")}
+
+
+def write_deploy_journal(run_dir: Optional[str],
+                         record: Optional[Dict[str, Any]]) -> bool:
+    """Atomically put one pending journal on disk. True only when the rename
+    landed -- the same temp + ``os.replace`` discipline as ``arm_restart``, so
+    the supervisor can never read a half-written record."""
+    if not run_dir or not isinstance(record, dict):
+        return False
+    try:
+        directory = Path(run_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / (DEPLOY_JOURNAL_FILENAME + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encode_deploy_record(record))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp), str(directory / DEPLOY_JOURNAL_FILENAME))
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _quarantine_deploy_journal(path: Path, log: Callable[[str], None]) -> None:
+    try:
+        os.replace(str(path), str(path.parent / DEPLOY_QUARANTINE_FILENAME))
+    except OSError as exc:
+        log("could not quarantine the deploy journal (%s); leaving it in "
+            "place -- it will be reported again but never adjudicated" % exc)
+
+
+def read_pending_deploy(run_dir: Optional[str],
+                        log: Optional[Callable[[str], None]] = None
+                        ) -> Optional[Dict[str, Any]]:
+    """The pending deploy journal as a validated record, or None.
+
+    None means NO PENDING DEPLOY, covering both "no journal" (silent) and
+    "corrupt/unreadable journal" (loud). A corrupt journal is preserved under
+    the quarantine name, never silently deleted: adjudicating garbage would
+    invent a deploy outcome, and deleting it would destroy the evidence.
+    Reading does NOT consume -- only ``finalize_deploy`` does."""
+    log = log or _stderr_log
+    if not run_dir:
+        return None
+    try:
+        path = Path(run_dir) / DEPLOY_JOURNAL_FILENAME
+    except (TypeError, ValueError):
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        log("deploy journal unreadable (%s); quarantining it and treating "
+            "it as no pending deploy" % exc)
+        _quarantine_deploy_journal(path, log)
+        return None
+    record = decode_deploy_record(raw)
+    if record is None:
+        log("deploy journal is corrupt (undecodable or invalid); moving it "
+            "to %s and treating it as no pending deploy"
+            % DEPLOY_QUARANTINE_FILENAME)
+        _quarantine_deploy_journal(path, log)
+        return None
+    return record
+
+
+def finalize_deploy(run_dir: str, record: Dict[str, Any],
+                    outcome: Dict[str, Any], *, now: Optional[float] = None,
+                    log: Optional[Callable[[str], None]] = None) -> bool:
+    """Persist ONE current outcome file (atomically) and consume the journal.
+
+    The outcome file is the audit trail the rollback atom (A28) and operators
+    read; one current file, deliberately not a growing log. The journal is
+    destroyed the way the intent sentinel is -- unlink, then blank when
+    Windows refuses the unlink -- because a journal that survives its
+    adjudication would be adjudicated AGAIN on the next generation, and one
+    deploy gets exactly one outcome. (A blanked journal fails validation and
+    is quarantined on the next read, never re-adjudicated.)"""
+    log = log or _stderr_log
+    ok = True
+    try:
+        directory = Path(run_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": DEPLOY_JOURNAL_VERSION,
+            "record": record,
+            "outcome": outcome.get("outcome"),
+            "observedSha": outcome.get("observedSha"),
+            "detail": outcome.get("detail"),
+            "finalizedAt": time.time() if now is None else float(now),
+        }
+        tmp = directory / (DEPLOY_OUTCOME_FILENAME + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp), str(directory / DEPLOY_OUTCOME_FILENAME))
+    except (OSError, TypeError, ValueError) as exc:
+        log("could not persist the deploy outcome: %s" % exc)
+        ok = False
+    journal: Optional[Path] = None
+    try:
+        journal = Path(run_dir) / DEPLOY_JOURNAL_FILENAME
+        journal.unlink()
+    except FileNotFoundError:
+        pass
+    except (OSError, TypeError, ValueError):
+        try:
+            if journal is not None:
+                with open(str(journal), "w", encoding="utf-8"):
+                    pass
+        except OSError:
+            ok = False
+            log("could not consume the deploy journal; it may be "
+                "adjudicated again")
+    return ok
+
+
+def _worktree_sha() -> Optional[str]:
+    """The full commit sha of the checkout this module was imported from, or
+    None. Twin of ``update.local_sha`` -- deliberately NOT imported from
+    update.py: that module is part of the code an update REPLACES, and the
+    supervisor must stay correct with nothing but itself (see the
+    backward-compat note in the module docstring). Same guard: only trusted
+    when the package's parent holds the .git. Read-only, never raises."""
+    try:
+        root = Path(__file__).resolve().parent.parent.parent
+        if not (root / ".git").exists():
+            return None
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        sha = (out.stdout or "").strip()
+        if out.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _conclude_deploy(run_dir: str, record: Dict[str, Any],
+                     outcome: Dict[str, Any], log: Callable[[str], None],
+                     hook: Optional[Callable[[Dict[str, Any],
+                                              Dict[str, Any]], None]]) -> None:
+    """Finalize + log one adjudicated deploy, then hand it to the hook.
+
+    THE A28 SEAM. ``hook`` (the ``deploy_hook`` parameter of ``supervise``) is
+    where the rollback atom attaches the actual revert; today the default is
+    None, so a deploy outcome only finalizes the journal and logs. The hook
+    receives ``(record, outcome)`` exactly once per deploy generation --
+    exactly-once is structural, because ``finalize_deploy`` consumes the
+    journal before the hook runs and an absent journal adjudicates nothing. A
+    hook that raises is logged and contained: the supervisor's loop survives
+    its plugins."""
+    finalize_deploy(run_dir, record, outcome, log=log)
+    log("deploy %s adjudicated: %s (old %s -> target %s, observed %s%s)"
+        % (record.get("operationId"), outcome.get("outcome"),
+           record.get("oldSha"), record.get("targetSha"),
+           outcome.get("observedSha"),
+           ("; " + str(outcome["detail"])) if outcome.get("detail") else ""))
+    if hook is None:
+        return
+    try:
+        hook(record, outcome)
+    except Exception as exc:  # noqa: BLE001
+        log("deploy outcome hook failed: %r" % (exc,))
+
+
 # ---- capability reporting (A13) ---------------------------------------------
 
 _UNIT_RE = re.compile(r"([^/\s]+\.service)")
@@ -670,17 +963,37 @@ def _forward(proc, signum: int) -> None:
 
 def _wait_for(proc, state: Dict[str, Any], *, poll: float = POLL_INTERVAL,
               grace: float = STOP_GRACE,
-              clock: Callable[[], float] = time.monotonic) -> Optional[int]:
+              clock: Callable[[], float] = time.monotonic,
+              ready_after: Optional[float] = None,
+              on_ready: Optional[Callable[[], None]] = None) -> Optional[int]:
     """Wait in slices so signal handlers actually run (see POLL_INTERVAL), and
-    escalate to a kill if the worker ignores the stop signal."""
+    escalate to a kill if the worker ignores the stop signal.
+
+    ``on_ready`` fires AT MOST ONCE, the first time the child has stayed alive
+    ``ready_after`` seconds -- i.e. while the process is STILL RUNNING, which
+    is what lets a pending deploy be adjudicated for a worker that came up and
+    never exits (the success case). It is the same uptime proxy the budget
+    uses (READY_SECONDS), observed live instead of post-mortem. Deliberately
+    NOT fired once a stop signal has arrived: a worker that is being shut down
+    is not "up"."""
     signalled_at: Optional[float] = None
     last_kill: Optional[float] = None
+    started = clock()
+    ready_fired = False
     while True:
         try:
             return proc.wait(timeout=poll)
         except subprocess.TimeoutExpired:
             if state.get("signum") and signalled_at is None:
                 signalled_at = clock()
+            if (on_ready is not None and not ready_fired
+                    and ready_after is not None and signalled_at is None
+                    and clock() - started >= ready_after):
+                ready_fired = True
+                try:
+                    on_ready()
+                except Exception:  # noqa: BLE001 -- adjudication must never
+                    pass           # take down the wait loop
             if signalled_at is None:
                 continue
             now = clock()
@@ -728,13 +1041,20 @@ def supervise(args: Optional[Sequence[str]] = None, *,
               ready_seconds: float = READY_SECONDS,
               backoff_base: float = BACKOFF_BASE,
               backoff_max: float = BACKOFF_MAX,
-              install_signals: bool = True) -> int:
+              install_signals: bool = True,
+              deploy_hook: Optional[Callable[[Dict[str, Any],
+                                              Dict[str, Any]], None]] = None,
+              sha_reader: Optional[Callable[[], Optional[str]]] = None) -> int:
     """Run the worker, relaunch it when it asks, and return an exit code.
 
     ``args`` are this process's own CLI arguments; they are replayed to the
     worker verbatim after ``--worker`` so the child is configured identically.
     Everything else is injectable so the loop can be driven by a trivial fake
-    child instead of a real broker."""
+    child instead of a real broker.
+
+    ``deploy_hook`` is the A28 rollback seam (see ``_conclude_deploy``);
+    ``sha_reader`` is how a ready worker's build is identified for deploy
+    adjudication (default: this checkout's HEAD via ``_worktree_sha``)."""
     args = list(sys.argv[1:] if args is None else args)
     popen = popen or subprocess.Popen
     clock = clock or time.monotonic
@@ -761,8 +1081,28 @@ def supervise(args: Optional[Sequence[str]] = None, *,
     child_env = worker_env(env, os.getpid(), nonce, run_dir)
 
     # Mutable box shared with the signal handler; a handler cannot rebind a
-    # closure local.
-    state: Dict[str, Any] = {"signum": 0, "child": None}
+    # closure local. pending_deploy / deploy_detail belong to the deploy
+    # journal (A23): the per-spawn journal snapshot, and why the loop exited.
+    state: Dict[str, Any] = {"signum": 0, "child": None,
+                             "pending_deploy": None, "deploy_detail": None}
+    sha_read = sha_reader or _worktree_sha
+
+    def _deploy_ready() -> None:
+        # Runs from inside _wait_for while the CURRENT worker -- a fresh pid
+        # this supervisor itself spawned -- is still alive past ready_seconds.
+        # That conjunction (fresh generation + ready + sha) is the R10 proof:
+        # never "something is listening on the port", never a build id alone.
+        record = state.get("pending_deploy")
+        if not record:
+            return
+        state["pending_deploy"] = None
+        try:
+            observed = sha_read()
+        except Exception:  # noqa: BLE001 -- an injected reader must not
+            observed = None            # take down the loop
+        outcome = classify_deploy_outcome(record, ready=True,
+                                          observed_sha=observed)
+        _conclude_deploy(run_dir, record, outcome, log, deploy_hook)
 
     def _handler(signum, _frame):
         state["signum"] = signum
@@ -789,11 +1129,17 @@ def supervise(args: Optional[Sequence[str]] = None, *,
     consecutive = 0               # fast deaths since the last worker that came up
     try:
         while True:
+            # The pending deploy journal is snapshotted PER SPAWN: the
+            # generation it adjudicates is the one about to be spawned, never
+            # the (still-running) worker that wrote it. A journal written
+            # mid-flight is therefore only picked up by the NEXT generation.
+            state["pending_deploy"] = read_pending_deploy(run_dir, log)
             started = clock()
             try:
                 proc = popen(child_cmd, env=child_env)
             except OSError as exc:
                 log("could not start the broker worker: %s" % exc)
+                state["deploy_detail"] = "spawn-failed"
                 return EXIT_SUPERVISOR_FAILED
             state["child"] = proc
             _assign_to_job(job, proc)
@@ -801,13 +1147,15 @@ def supervise(args: Optional[Sequence[str]] = None, *,
             # the child would have found state["child"] empty; deliver it now.
             if state.get("signum"):
                 _forward(proc, state["signum"])
-            raw = _wait_for(proc, state, clock=clock)
+            raw = _wait_for(proc, state, clock=clock,
+                            ready_after=ready_seconds, on_ready=_deploy_ready)
             state["child"] = None
             uptime = clock() - started
 
             if state.get("signum"):
                 log("stopping on signal %d; not relaunching"
                     % state["signum"])
+                state["deploy_detail"] = "stopped-by-signal"
                 return _exit_code_for(raw, state["signum"])
 
             if raw == EXIT_ADDR_IN_USE:
@@ -817,9 +1165,11 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                 log("the broker could not bind its port (see the message "
                     "above). Not relaunching: a bind that failed for a "
                     "structural reason fails identically next time.")
+                state["deploy_detail"] = "bind-failed"
                 return EXIT_ADDR_IN_USE
 
             if raw != EXIT_RESTART:
+                state["deploy_detail"] = "worker-exited-%s" % raw
                 return _exit_code_for(raw, 0)
 
             # ---- exit 75: a restart REQUEST, to be authorized ----
@@ -828,6 +1178,7 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                     "sentinel, or the wrong nonce). Treating it as a crash "
                     "and stopping -- an unauthorized 75 is not a restart."
                     % EXIT_RESTART)
+                state["deploy_detail"] = "unauthorized-restart-request"
                 return EXIT_RESTART
 
             # NOTE (#183, open): an authorized restart arguably should not be
@@ -861,6 +1212,7 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                     "and no worker stayed up %.0fs. Giving up -- the broker "
                     "is crash-looping, and restarting it again would only "
                     "hide that." % (len(attempts), window, ready_seconds))
+                state["deploy_detail"] = "restart-budget-exhausted"
                 return EXIT_SUPERVISOR_FAILED
             attempts.append(now)
 
@@ -894,6 +1246,7 @@ def supervise(args: Optional[Sequence[str]] = None, *,
             if state.get("signum"):
                 log("stopping on signal %d; not relaunching"
                     % state["signum"])
+                state["deploy_detail"] = "stopped-by-signal"
                 return _exit_code_for(0, state["signum"])
     finally:
         for sig, previous in installed:
@@ -902,5 +1255,21 @@ def supervise(args: Optional[Sequence[str]] = None, *,
             except (ValueError, OSError, RuntimeError, TypeError):
                 pass
         _close_job(job)
+        # A deploy still pending when the loop is over means the new build
+        # NEVER CAME BACK: no generation reached ready before the supervisor
+        # gave up (budget, bind failure, a plain crash, a stop signal --
+        # deploy_detail says which). Adjudicated HERE because a process that
+        # has exited cannot probe its replacement; the supervisor is the only
+        # component positioned to observe this. The file is re-read as a
+        # fallback so a journal written mid-flight by a worker that then never
+        # restarted is finalized too, not left pending in a dying run dir.
+        record = state.get("pending_deploy")
+        if record is None:
+            record = read_pending_deploy(run_dir, log)
+        if record is not None:
+            outcome = classify_deploy_outcome(
+                record, ready=False, observed_sha=None,
+                detail=state.get("deploy_detail") or "supervisor-exited")
+            _conclude_deploy(run_dir, record, outcome, log, deploy_hook)
         if owned_dir:
             shutil.rmtree(owned_dir, ignore_errors=True)
