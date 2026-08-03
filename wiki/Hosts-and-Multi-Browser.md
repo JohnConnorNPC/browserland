@@ -121,6 +121,18 @@ The (off-by-default) **update check** mod is fleet-wide the same way the host ba
 
 Its hidden-broker rule is the **opposite** of the host badge's, on purpose. Above, a broker you hide yourself drops out of the host badge entirely — it is not counted and does not color it, because hiding is a choice, not a fault. The update chip does not extend that courtesy: a hidden broker still counts toward its color and its `N behind` / `N ahead` / `N unchecked` counts, and still shows up in its tooltip, suffixed `— hidden`. The reasoning is that hiding a broker only parks it on the desktop — it does not make that broker's build any less stale, so this chip may stop *claiming* a fault for a broker you hid but must never stop *reporting* one.
 
+## Updating the broker
+
+The **Update check** window shows an **Update…** button when the broker is behind upstream and update apply is available. Clicking it applies the previewed commit, then restarts the broker to run the new code. Applying an update is **manual-trigger only** — no schedule, no auto-install — and it requires three config gates on the broker:
+
+- `update_check_enabled: true` (must have checked for updates first)
+- `update_apply_enabled: true` (gates the apply itself)
+- `restart_enabled: true` (gates the restart that follows)
+
+All three are **config-file only**; there is no GUI switch. The button is unavailable (and greyed with a reason) when one or more gates are off, or when the current state does not permit applying — the upstream commit is unreachable, the working tree is dirty, there are local commits to merge, or a dependency has changed. Clicking the button shows a confirm dialog with the commit range, count, and GitHub compare link, plus a preview of what happens to your sessions.
+
+The update fetches from the pinned upstream with an explicit git subprocess and verifies the target before applying. See [[Technical-Reference#update-apply]] for the complete technical details, rollback story, and what happens to sessions when the broker restarts.
+
 ## Restarting this broker
 
 The **Update check** window also carries a **Restart this broker** button (when available). Clicking it triggers a *broker-generation restart* — the broker process is replaced with fresh code without stopping the machine; agents you launched stay alive and reconnect to the new broker. See [[Technical-Reference#broker-restart-183]] for full details on what a restart is, how to enable it, what happens to your sessions, and when the button is greyed out.

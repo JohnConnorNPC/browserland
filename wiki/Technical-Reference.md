@@ -104,6 +104,28 @@ client-supplied command/cwd/env. Responses: `200` registered, `202` spawned
 but no hello within 10 s, `400` unknown profile, `401`/`403` auth, `429`
 too many pending, `500` agent exited early.
 
+### Update apply (#182 Part 2)
+
+**`POST /update/apply` applies the previewed upstream commit**, then exits with code 75 so the supervisor restarts into the new code. It is **manual-trigger only** — no schedule, no timer, no auto-install. Requires `update_check_enabled`, `update_apply_enabled`, and `restart_enabled` in `broker_config.json` (all must be true, and all are config-file only — no GUI, no sidecar gate).
+
+The route takes `{"target_sha": "<40-hex>"}` — exactly the commit the UI previewed in the last successful check. The server re-proves every precondition fresh:
+
+- The target commit is not some random hash — it is the one the latest check named as ahead of / current-with upstream.
+- The working tree is clean (no staged/unstaged changes; uncommitted work must be committed or stashed).
+- No local commits would be discarded (if the check said "3 behind", applying is safe; if it said "2 ahead / 3 behind", applying would discard work).
+- Dependencies match or are acceptable (a dependency added/removed by the update is reported so the operator can decide whether to install/uninstall first).
+- Restart is possible (the gate is on, the supervisor exists, the mechanism is available).
+
+The git phase lives in `webterm/broker/update.py`'s marked mutation section: `git fetch <explicit https URL> <ref>` (never `git pull`, never a remote name — a fork's `origin` must be irrelevant), then `git merge --ff-only <sha>` with hooks disabled. Objects are fetched with a 120-second timeout; the merge with a 60-second timeout. Stderr is captured for reporting; the report names every locked file on Windows, bounded to 2000 bytes.
+
+Failures are reported **accumulating every reason** — the UI shows all unmet preconditions in one pass rather than trial-and-error. The response is `202` with a `last_deploy` section surfaced in the next `/update/check` so the UI can report the outcome.
+
+**The broker that was running the old code exits and is replaced.** A rollback is automatic: if the new broker never comes up (supervisor restarts it, but it exits again before a worker-ready timeout), the supervisor automatically reverts to the recorded prior commit sha (held in `deploy.journal` beside the checkout). The outcome (`rolled-back`, `deploy-failed`, etc.) rides in the next check response under `last_deploy.outcome`, visible to the operator.
+
+**Agents survive the restart** and reconnect to the new worker, but terminals do not re-execute: they keep running the old code they imported. The UI offers a **Fresh terminal** button to spawn a new one. Agents (AI coding assistants) also survive, but any in-memory state (context, plan, accumulated tokens) is lost — the restart is opaque to them, so they reconnect to an empty board.
+
+The `deploy.journal` records every apply attempt (sha before, sha after, outcome, why it failed if it did) outside the checkout, so `git gc` cannot erase it. Rollback success is proved by a changed `bootId` (reported in `/info`); rollback failure is kept as `rollback-impossible` and requires manual repair.
+
 ### Broker restart (#183)
 
 **`python -m webterm.broker` is now a supervisor** that spawns the actual server as a worker subprocess. The launcher scripts (bash and PowerShell) and the systemd unit all use `exec` to start the supervisor, making it the main process — there is no wrapper loop. When restarted from the UI, the supervisor stays alive and re-spawns the worker, a *broker-generation restart*: the server process is replaced with fresh code, but agents reconnect to the new worker and survive. It is not a service restart — the launcher preamble and systemd unit environment are not re-run.

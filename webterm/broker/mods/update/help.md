@@ -64,6 +64,38 @@ After a restart, a new `bootId` is reported by the broker. Observe it in the **R
 
 When the broker runs under a Windows scheduled task (instead of systemd), the **Stop** task gives the broker no graceful shutdown window — it terminates the process immediately. Draining has no time to run, and sessions are disconnected without warning. If you use a scheduled task and need orderly restarts, stop the task, wait a moment for the broker to exit, then restart it by hand or let the scheduler do it on schedule. This is honest rather than hidden: the scheduled-task path stops brokers abruptly whether you restart or not, so the restart machinery has no grace period to exploit.
 
+## Applying an update
+
+The **Update…** button in the update window (available only on the serving broker) applies the update that the check has previewed. It is manual-trigger only — no schedule, no auto-install, never automatic. Clicking it shows a confirm dialog with the commit range from the current build to the target, the commit count, a GitHub compare link, and a preview of your session cost — which terminals and agents will survive the restart, and which will be lost.
+
+Applying an update requires **two config gates**, both on the broker that is doing the applying. They are **config-file only**; there is no GUI switch:
+
+- `update_check_enabled: true` — the broker has checked for updates (required to know what commit to apply).
+- `update_apply_enabled: true` — the broker is permitted to apply updates.
+- `restart_enabled: true` — the broker is permitted to restart itself after applying (a restart without this gate is refused; applying without restarting would leave old code running).
+
+If all three are enabled and the current state allows applying, clicking **Update…** starts the apply:
+
+1. The broker **fetches from the pinned upstream** (a git subprocess to GitHub with the explicit HTTPS URL and explicit ref, never a remote name).
+2. It **verifies** the target commit is now present and that a fast-forward is safe (no local work would be lost).
+3. It **checks dependencies**: if the apply introduces a dependency change (e.g. `pyproject.toml` was edited), the apply is refused with details so you can decide whether to run the installer first.
+4. It **applies** the commit via git fast-forward with repository hooks disabled, then re-spawns the broker process.
+
+An update may be refused for any of these reasons:
+
+- **Not a git checkout** — this is a pip/wheel install, not a source checkout (out of scope for apply).
+- **Dirty working tree** — staged or unstaged local modifications exist; commit, stash, or revert them first.
+- **Local commits ahead of upstream** — the checkout carries commits upstream doesn't have; this is a human decision, so the apply refuses.
+- **No established update check** — run a check that succeeds first, so the apply knows which commit it is applying.
+- **Already current** — the checkout is already at the upstream head.
+- **Restart is not available** — the broker cannot restart itself (the button shows why).
+- **Apply is not enabled** — the broker's config has not set `update_apply_enabled: true`.
+- **Dependency mismatch** — the apply would introduce new or removed dependencies; install or uninstall them manually first.
+
+After an update applies and the broker restarts, the **last deploy** outcome is visible in the next update check — it shows whether the restart succeeded, whether the new build came up, and whether a rollback happened. A build that never comes up is automatically rolled back to the recorded previous commit, visible as a `rolled-back` outcome; the UI shows this so you know why the build changed back rather than forward.
+
+**The broker that was running the old code exits and is replaced with new code.** Agents and their sessions survive the restart and reconnect to the new process, but **terminals and agents do not live-reload**: they keep running the old code they imported at startup. The update window offers a **Fresh terminal** button to spawn a new one with the updated code.
+
 ## What this does not claim
 
 The working tree is not inspected: build ids carry no dirty-tree marker, so uncommitted local changes are invisible and the report reflects your last commit only. The comparison is taken from the serving broker; each remote broker's own comparison would be the same repository read hours apart and is not particularly useful.

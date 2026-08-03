@@ -484,11 +484,14 @@ def update_policy_view(app) -> Dict[str, Any]:
 RPC_TIMEOUT = 10.0
 
 # ---- AI-provider status proxy (#112) ---------------------------------------
-# The broker makes exactly TWO outbound HTTP requests, and they are the only
-# egress in the process: GET /status/fetch (here, #112) and GET /update/check
-# (the version check, #182 -- see _update_check and broker/update.py). Both are
-# operator-gated and off until opted in; keep this comment true if a third is
-# ever added, because this is where the egress surface is meant to be auditable.
+# The broker makes exactly two outbound HTTP requests via urllib: GET /status/fetch
+# (here, #112) and GET /update/check (the version check, #182 -- see _update_check
+# and broker/update.py). Both are operator-gated and off until opted in. A third
+# egress path is POST /update/apply, which spawns a git subprocess to fetch from
+# the pinned upstream GitHub URL (a git fetch, not urllib). It is operator-gated
+# by update_apply_enabled (config-file key only, default false) and manual-trigger
+# only — keep this comment true if further egress is ever added, because this is
+# where the surface is meant to be auditable.
 #
 # The aistatus mod (which ships DISABLED — no request until the operator
 # opts in) needs a server-side, ALLOWLISTED, cached proxy so browser JS can read
