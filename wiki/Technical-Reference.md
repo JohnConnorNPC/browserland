@@ -104,6 +104,16 @@ client-supplied command/cwd/env. Responses: `200` registered, `202` spawned
 but no hello within 10 s, `400` unknown profile, `401`/`403` auth, `429`
 too many pending, `500` agent exited early.
 
+### Broker restart (#183)
+
+**`python -m webterm.broker` is now a supervisor** that spawns the actual server as a worker subprocess. The launcher scripts (bash and PowerShell) and the systemd unit all use `exec` to start the supervisor, making it the main process — there is no wrapper loop. When restarted from the UI, the supervisor stays alive and re-spawns the worker, a *broker-generation restart*: the server process is replaced with fresh code, but agents reconnect to the new worker and survive. It is not a service restart — the launcher preamble and systemd unit environment are not re-run.
+
+Restart is **opt-in** via config: an operator places `restart_enabled: true` in `broker_config.json`, and only someone who can edit the config file can enable it. The UI offers no switch. A restart from the UI drains gracefully (stops accepting new work, waits for in-flight critical writes to finish or time out, disconnects idle sessions), and the confirm dialog reports session continuity: guaranteed (agents that survive), at_risk (lost), and unknown.
+
+The mechanism is a sentinel file and exit code 75: the worker exits 75 (normally reserved for another purpose — this supervisor owns it now) **and** writes a nonce-matched intent sentinel. The supervisor relaunches only if the sentinel matches, refuses any exit-75 without a sentinel, and treats an unarmed 75 as a crash. A restart can happen from systemd (`Restart=always` or `on-failure`, not `on-success`), a Windows scheduled task (`Stop-ScheduledTask` kills abruptly — graceful drains do not complete), or `python -m webterm.broker` by hand (no restart). The supervisor has a restart budget — five relaunches inside 60 seconds with exponential backoff (0.5 s initial, doubling per crash, clamped at 30 s, reset only when a worker stays up 10 s). A crash loop that exhausts the budget exits with a non-zero code; systemd's own `StartLimitAction` can then step in.
+
+`GET /info` reports `restart.available` (can we restart now), `restart.mechanism` (supervisor / systemd / none), `restart.bootId` (this process's id — changes on restart, lets a client confirm it happened), and session continuity. A client confirms a restart by watching `bootId` change.
+
 ### Which build is running (#22)
 
 There is one build id in this project: `webterm.build_version()` — the package

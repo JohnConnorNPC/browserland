@@ -7,6 +7,18 @@
 # webterm_token.json beside its state store, which works - but under systemd
 # the value is never printed to a terminal, so you would have to fetch it with
 #   python3 -m webterm.broker --print-token
+#
+# ExecStart's `exec` (launcher wrapper) makes the supervisor the main PID
+# (#183): the launcher shells to a supervisor that starts the actual server,
+# and systemd's KillMode=control-group then brings the worker down when the
+# supervisor stops. Restart= below applies to the supervisor's exit code — the
+# worker always exits when signalled by the supervisor, so the supervisor's
+# handling is what matters here. A worker exit-75 (restart request) causes the
+# supervisor to re-spawn, which systemd sees as the supervisor staying alive
+# (it manages the worker internally). An actual supervisor crash is rare and
+# is a different exit code (70). systemd's own restart budget (StartLimitBurst
+# / StartLimitIntervalSec) sits on top of the supervisor's (five relaunches
+# per minute with exponential backoff); either or both can be exhausted.
 [Unit]
 Description=webterm broker (WebSocket terminal relay on :4445)
 After=network-online.target

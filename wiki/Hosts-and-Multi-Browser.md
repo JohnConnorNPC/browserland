@@ -121,6 +121,12 @@ The (off-by-default) **update check** mod is fleet-wide the same way the host ba
 
 Its hidden-broker rule is the **opposite** of the host badge's, on purpose. Above, a broker you hide yourself drops out of the host badge entirely — it is not counted and does not color it, because hiding is a choice, not a fault. The update chip does not extend that courtesy: a hidden broker still counts toward its color and its `N behind` / `N ahead` / `N unchecked` counts, and still shows up in its tooltip, suffixed `— hidden`. The reasoning is that hiding a broker only parks it on the desktop — it does not make that broker's build any less stale, so this chip may stop *claiming* a fault for a broker you hid but must never stop *reporting* one.
 
+## Restarting this broker
+
+The **Update check** window also carries a **Restart this broker** button (when available). Clicking it triggers a *broker-generation restart* — the broker process is replaced with fresh code without stopping the machine; agents you launched stay alive and reconnect to the new broker. See [[Technical-Reference#broker-restart-183]] for full details on what a restart is, how to enable it, what happens to your sessions, and when the button is greyed out.
+
+Restart is opt-in via the broker's `broker_config.json` only — there is no GUI switch — so only someone who can edit the config file can enable it. This is deployment policy: a restart is a maintenance choice, not something a browser session earns by being logged in.
+
 ## Single active browser (the lease)
 
 A broker allows only **one active browser at a time** to be the WRITER of its layout. That permission is a *lease*: the browser holding it owns the window arrangement for that broker. This prevents two open tabs from overwriting each other's layout.

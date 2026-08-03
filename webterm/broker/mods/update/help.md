@@ -40,6 +40,30 @@ Click the chip to open the **Update check** window. It shows every configured br
 
 When a broker did not answer, the window explains why in full sentences. When you are behind it spells out the manual update: stop the broker, `git pull --ff-only`, reinstall dependencies if `pyproject.toml` changed, then start it again and reload the page.
 
+## Restarting the broker
+
+This window also carries a **Restart this broker** button (where it is available). Clicking it triggers a *broker-generation restart*: the supervisor process stays alive and re-spawns the broker worker, which picks up any code changes on disk without stopping the machine. It is not a service restart — systemd's launcher preamble and the unit environment are not re-run, and agents you launched before the restart reconnect to the new worker and survive.
+
+Restart is **opt-in** through the broker's config file only: an operator puts `restart_enabled: true` in `broker_config.json`, and there is no GUI switch. The intent is that a restart is a deliberate maintenance choice, not something a browser session earns by being logged in.
+
+Before restarting, the broker **drains** — it stops accepting new work, waits for critical writes (uploads, recording saves) already in flight to finish or time out, and disconnects idle sessions (those not currently running a command) with a warning. Sessions that survive are reported in a confirm dialog before anything stops: **guaranteed** (agents that survive the restart), **at_risk** (sessions that will be lost), and **unknown** (those whose fate couldn't be determined). Every plain terminal on this broker — not an agent session — is lost. The restart waits up to 90 seconds for the new broker to start answering; if it does not, the UI says so and you may need to check the machine itself.
+
+The button is disabled with a reason when:
+- **Restart is switched off on this broker** — the config does not have `restart_enabled: true`. This is deployment policy, not a permission a session earns.
+- **This broker was started without the launcher** — it is running `python -m webterm.broker` by hand or in a way the supervisor cannot restart it. Restart it manually on the machine itself.
+- **The launcher's parent is no longer running** — the process tree changed (you might have reparented the broker to a different shell). Restart manually.
+- **Systemd will not restart this unit** — the unit's `Restart=` policy is `no`, `on-success`, `on-abort`, `on-abnormal`, or `on-watchdog`, none of which respawn on a plain non-zero exit. A graceful stop now would leave nothing listening. Restart manually or change the unit.
+- **A restart is already under way** — wait for it to finish and check back.
+- **This broker could not read its restart policy** — the broker could not contact systemd or parse the unit. Restart manually or give the broker time to try again.
+
+The button's label also reports one number: your browser's **current** session count on this broker, or `loading…` if it is being fetched. That is a preview; the final confirm dialog shows the full continuity breakdown a moment before the restart.
+
+After a restart, a new `bootId` is reported by the broker. Observe it in the **Restart** button's label (or in the browser's developer console: `GET /info` returns `restart.bootId`). If it did not change after you clicked **Restart**, the restart did not happen, and the broker either refused it or failed to relaunch.
+
+## Windows scheduled-task note
+
+When the broker runs under a Windows scheduled task (instead of systemd), the **Stop** task gives the broker no graceful shutdown window — it terminates the process immediately. Draining has no time to run, and sessions are disconnected without warning. If you use a scheduled task and need orderly restarts, stop the task, wait a moment for the broker to exit, then restart it by hand or let the scheduler do it on schedule. This is honest rather than hidden: the scheduled-task path stops brokers abruptly whether you restart or not, so the restart machinery has no grace period to exploit.
+
 ## What this does not claim
 
 The working tree is not inspected: build ids carry no dirty-tree marker, so uncommitted local changes are invisible and the report reflects your last commit only. The comparison is taken from the serving broker; each remote broker's own comparison would be the same repository read hours apart and is not particularly useful.
