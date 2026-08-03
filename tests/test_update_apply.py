@@ -1458,3 +1458,35 @@ def test_an_unarmable_restart_cancels_the_journal(tmp_path, monkeypatch):
     assert cancels and "critical_sections_timed_out" in cancels[0]
     assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
     assert app.ctx.update_apply_claim is None
+
+
+def test_begin_deploy_refuses_over_a_pending_journal(tmp_path):
+    """codex review: a second apply accepted before the previous generation
+    reached ready (only possible with the restart cooldown disabled) must not
+    clobber the pending record and orphan the earlier deploy."""
+    run_dir = tmp_path / "run"
+    assert update.begin_deploy(SHA, TARGET, None, "op-1",
+                               run_dir=str(run_dir)) is True
+    assert update.begin_deploy(SHA, TARGET, None, "op-2",
+                               run_dir=str(run_dir)) is False
+    record = supervise.read_pending_deploy(str(run_dir))
+    assert record is not None and record["operationId"] == "op-1"
+
+
+def test_perform_apply_refuses_when_head_is_already_the_target(tmp_path,
+                                                               monkeypatch):
+    """codex review: a journal whose oldSha == targetSha makes rollback a
+    no-op that "reverts" to the very build being judged -- reachable when a
+    prior apply moved the tree but could not restart and a retry rides a
+    stale cached check. Refused before any subprocess runs."""
+    events = []
+    _phase_fakes(monkeypatch, events)
+    monkeypatch.setattr(update, "local_sha", lambda: TARGET)
+    out = update.perform_apply(target_sha=TARGET, operation_id="op-eq",
+                               run_dir=str(tmp_path / "run"))
+    assert out["ok"] is False
+    assert out["refusals"] == [{
+        "reason": update.APPLY_ALREADY_CURRENT,
+        "message": out["refusals"][0]["message"]}]
+    assert "nothing to apply" in out["refusals"][0]["message"]
+    assert events == [], "the refusal must precede every git subprocess"

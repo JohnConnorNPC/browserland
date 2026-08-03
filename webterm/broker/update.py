@@ -765,6 +765,12 @@ def begin_deploy(old_sha: Any, target_sha: Any, expected_identity: Any,
     run_dir = run_dir or os.environ.get(supervise.ENV_RUN_DIR)
     if not run_dir:
         return False
+    if supervise.read_pending_deploy(run_dir) is not None:
+        # Never overwrite a journal nobody has adjudicated yet: a second
+        # apply accepted before the previous generation reached ready (only
+        # possible with the restart cooldown disabled) would otherwise
+        # clobber the pending record and orphan the earlier deploy.
+        return False
     record = supervise.build_deploy_record(
         old_sha, target_sha, expected_identity, operation_id)
     if record is None:
@@ -1210,6 +1216,15 @@ def perform_apply(*, target_sha: Any, repo: str = UPSTREAM_REPO,
         return _fail("verify", APPLY_NOT_A_CHECKOUT,
                      "This install is not a git checkout; there is nothing "
                      "here for git to update.")
+    if old == target_sha:
+        # A journal whose oldSha == targetSha makes rollback a no-op that
+        # "reverts" to the very build being judged. Reachable when a prior
+        # apply moved the tree but could not restart (tree_updated), and a
+        # retry rides a stale cached check that still says "behind".
+        return _fail("verify", APPLY_ALREADY_CURRENT,
+                     "HEAD is already the previewed commit; there is "
+                     "nothing to apply. Re-run the check -- the preview "
+                     "that led here was stale.")
 
     # ---- 1. fetch: explicit URL + explicit ref, never a remote name --------
     url = upstream_git_url(repo)

@@ -798,7 +798,8 @@ def _run_rollback_git(argv: Sequence[str]) -> Any:
         return None, "git did not run: %r" % (exc,)
 
 
-def perform_rollback(old_sha: Any, *, root: Optional[Any] = None,
+def perform_rollback(old_sha: Any, *, expect_head: Optional[str] = None,
+                     root: Optional[Any] = None,
                      git_runner: Optional[Callable[[Sequence[str]], Any]]
                      = None) -> Dict[str, Any]:
     """Revert the checkout to the journalled pre-deploy sha. Never raises.
@@ -826,6 +827,25 @@ def perform_rollback(old_sha: Any, *, root: Optional[Any] = None,
         if checkout is None or not (checkout / ".git").exists():
             return {"ok": False, "outcome": DEPLOY_ROLLBACK_IMPOSSIBLE,
                     "detail": "no-git-checkout"}
+        if expect_head is not None:
+            # A hard reset is only vouched-for while the tree still sits
+            # where the deploy left it. If HEAD moved (an operator committed
+            # or reset by hand between the failed boot and this revert), or
+            # cannot be read at all, refuse VISIBLY rather than erase work
+            # the journal knows nothing about.
+            try:
+                probe = subprocess.run(
+                    ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=5)
+                seen = (probe.stdout.strip()
+                        if probe.returncode == 0 else None)
+            except Exception:  # noqa: BLE001 -- probe failure = unprovable
+                seen = None
+            if seen != expect_head:
+                return {"ok": False, "outcome": DEPLOY_ROLLBACK_IMPOSSIBLE,
+                        "detail": "tree-moved-since-deploy: HEAD is %s, "
+                                  "the deploy left %s"
+                                  % (seen or "unreadable", expect_head)}
         runner = git_runner or _run_rollback_git
         rc, stderr = runner(rollback_argv(str(checkout), old_sha))
         if rc == 0:
@@ -1291,7 +1311,13 @@ def supervise(args: Optional[Sequence[str]] = None, *,
         if rollback_decision(DEPLOY_NEVER_CAME_UP, detail) != ROLLBACK_REVERT:
             return False
         try:
-            result = revert(record.get("oldSha"))
+            if revert is perform_rollback:
+                # The real revert gets the tree-moved guard; an injected fake
+                # keeps its one-argument contract.
+                result = revert(record.get("oldSha"),
+                                expect_head=record.get("targetSha"))
+            else:
+                result = revert(record.get("oldSha"))
         except Exception as exc:  # noqa: BLE001 -- an injected revert must
             result = {"ok": False,   # not take down the loop
                       "outcome": DEPLOY_ROLLBACK_FAILED,

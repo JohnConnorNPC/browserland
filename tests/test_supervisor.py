@@ -1523,3 +1523,43 @@ def test_a_revert_that_raises_is_contained_and_reported(tmp_path):
     assert len(hooks) == 1
     assert hooks[0][1]["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
     assert "revert exploded" in hooks[0][1]["detail"]
+
+
+def test_perform_rollback_refuses_when_the_tree_moved_since_the_deploy(
+        tmp_path):
+    """codex review: a hard reset is only vouched-for while HEAD still sits
+    where the failed deploy left it. A moved or unreadable HEAD refuses
+    VISIBLY (rollback-impossible) instead of erasing work the journal knows
+    nothing about."""
+    (tmp_path / ".git").mkdir()  # rev-parse fails here -> HEAD unreadable
+    called = []
+    out = supervise.perform_rollback(
+        OLD_SHA, expect_head="b" * 40, root=str(tmp_path),
+        git_runner=lambda a: called.append(a) or (0, ""))
+    assert out["ok"] is False
+    assert out["outcome"] == supervise.DEPLOY_ROLLBACK_IMPOSSIBLE
+    assert "tree-moved-since-deploy" in out["detail"]
+    assert called == [], "a refused rollback must never reach git"
+
+
+def test_perform_rollback_proceeds_when_head_is_where_the_deploy_left_it(
+        tmp_path):
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=env)
+    (tmp_path / "f").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "f"],
+                   check=True, env=env)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "c"],
+                   check=True, env=env)
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    seen = []
+    out = supervise.perform_rollback(
+        OLD_SHA, expect_head=head, root=str(tmp_path),
+        git_runner=lambda a: seen.append(a) or (0, ""))
+    assert out["ok"] is True
+    assert seen == [supervise.rollback_argv(str(tmp_path), OLD_SHA)]
