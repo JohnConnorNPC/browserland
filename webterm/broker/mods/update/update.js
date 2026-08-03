@@ -1111,72 +1111,18 @@
                     await setChecking(LOCAL_HOST_ID, true, { poll: false });
                 }
 
-                // ---- after an apply (#182 Part 2, A29) ---------------------
-                // A broker that has been through an apply-restart reports the
-                // finalized outcome as `last_deploy` beside its check payload,
-                // because the process that could have said it live is the one
-                // the restart replaced. Everything in this block derives what
-                // the window renders from that object plus the live session
-                // list — pure, no DOM, so test_update_fleet.py can execute it.
-                //
-                // Scoped to the LOCAL broker, deliberately: sessions on any
-                // host can be stale, but an apply happens on the machine whose
-                // page you are looking at, and a peer's deploy history belongs
-                // on that peer's own desktop, not on a row of this fleet list.
-
-                // The outcome object, walked as UNTRUSTED input the way
-                // servesUpdateMod walks a catalog: the broker only promises a
-                // string `outcome`; every other field is taken only when it
-                // has the advertised type, and anything else reads as absent.
-                // null = no deploy history, and no deploy history renders
-                // NOTHING — an empty strip would be a claim about an apply
-                // that never happened.
-                function deployOutcome(ld) {
-                    if (!ld || typeof ld !== 'object') return null;
-                    if (typeof ld.outcome !== 'string' || !ld.outcome) {
-                        return null;
-                    }
-                    const rec = (ld.record && typeof ld.record === 'object')
-                        ? ld.record : {};
-                    const str = function (v) {
-                        return (typeof v === 'string' && v) ? v : null;
-                    };
-                    return {
-                        outcome: ld.outcome,
-                        detail: str(ld.detail),
-                        observedSha: str(ld.observedSha),
-                        oldSha: str(rec.oldSha),
-                        targetSha: str(rec.targetSha),
-                    };
-                }
-                function shortSha(sha) {
-                    return sha ? String(sha).slice(0, 10) : null;
-                }
-
-                // #22's stale rule, computed the way the broker itself
-                // computes it (app.py: `version != broker_version`): an AGENT
-                // session whose reported build differs from this broker's own
-                // — a pre-#22 agent reporting none included — is still running
-                // code this broker no longer runs. Agents only: a plain
-                // terminal legitimately reports no version (flagging it would
-                // be noise), and a plain terminal cannot survive a restart
-                // anyway. Returns null — never 0 — when either side is
-                // unreadable, because "could not count" rendered as "none are
-                // stale" would be this mod's one forbidden sentence wearing a
-                // different hat.
-                function staleSurvivors(brokerVersion, sessionList) {
-                    if (typeof brokerVersion !== 'string' || !brokerVersion) {
-                        return null;
-                    }
-                    if (!Array.isArray(sessionList)) return null;
-                    let n = 0;
-                    for (const s of sessionList) {
-                        if (!s || typeof s !== 'object') continue;
-                        if (s.kind !== 'agent') continue;
-                        if (String(s.version || '') !== brokerVersion) n += 1;
-                    }
-                    return n;
-                }
+                // ---- apply / post-apply pure helpers moved out ------------
+                // applyTargetSha/applyGateFromFacts/applyGateWords/
+                // applyRefusalOutcome (#182 Part 2, atom A30) and
+                // deployOutcome/shortSha/staleSurvivors/deployStrip (#182
+                // Part 2, A29) now live in mods/update/update-apply.js --
+                // same mod, spliced immediately before this file in ui.py's
+                // _MODS (the same split editor.js/codemirror.js already use,
+                // #146). One shared inline <script>, so a plain top-level
+                // declaration there is a name this closure can still call
+                // exactly as before; only WHERE they are defined changed.
+                // freshTerminalHost stays HERE (below) because it is not
+                // pure -- it reads this closure's own updHost/LOCAL_HOST_ID.
 
                 // Where a fresh terminal goes: the LOCAL broker, resolved at
                 // CLICK time from the literal id — the same rule every action
@@ -1187,114 +1133,6 @@
                 // through to it.
                 function freshTerminalHost() {
                     return updHost(LOCAL_HOST_ID);
-                }
-
-                // What the post-apply strip says — or null, which renders
-                // nothing at all. One branch per outcome the supervisor or
-                // the worker's own cancel path can finalize, plus a refusal
-                // to read anything unrecognised as success. `cls` bands the
-                // strip the way bandFor bands a row (ok / warn / bad), and
-                // `newTerminal` is the ONLY affordance: there is no relaunch
-                // and no replay, because after a restart the broker's
-                // in-memory registry is gone and "bring my session back on
-                // the new code" is a promise this code cannot keep.
-                // Surviving sessions are left running, counted, and named
-                // for what they are.
-                function deployStrip(st, sessionList) {
-                    const d = deployOutcome(st && st.lastDeploy);
-                    if (!d) return null;
-                    const chk = st && st.check;
-                    const bv = (chk && chk.local
-                        && typeof chk.local.version === 'string'
-                        && chk.local.version) ? chk.local.version : null;
-                    const out = { outcome: d.outcome,
-                                  cls: 'app-upd-deploy-bad',
-                                  lines: [], survivors: null,
-                                  newTerminal: false };
-                    const why = function (label) {
-                        if (d.detail) out.lines.push(label + d.detail);
-                    };
-                    if (d.outcome === 'came-up-ready-on-target') {
-                        out.cls = 'app-upd-deploy-ok';
-                        out.newTerminal = true;
-                        out.survivors = staleSurvivors(bv, sessionList);
-                        out.lines.push('This broker was updated and came '
-                            + 'back on the build the apply named'
-                            + (shortSha(d.observedSha)
-                                ? (' (' + shortSha(d.observedSha) + ')') : '')
-                            + '.');
-                        if (out.survivors === null) {
-                            out.lines.push('Whether any surviving session '
-                                + 'is still on the previous build could not '
-                                + 'be determined from here.');
-                        } else if (out.survivors > 0) {
-                            out.lines.push(out.survivors
-                                + ' surviving agent session'
-                                + (out.survivors === 1 ? ' is' : 's are')
-                                + ' still running the previous build — a '
-                                + 'restart never reloads a session’s code, '
-                                + 'so each keeps its old build until it is '
-                                + 'relaunched by hand.');
-                        } else {
-                            out.lines.push('No surviving agent session is '
-                                + 'still running a previous build.');
-                        }
-                    } else if (d.outcome === 'rolled-back') {
-                        out.lines.push('The last update failed to start and '
-                            + 'was rolled back'
-                            + (shortSha(d.oldSha)
-                                ? (' to ' + shortSha(d.oldSha)) : '')
-                            + ' — this broker is running the build from '
-                            + 'before that update.');
-                        why('What failed: ');
-                    } else if (d.outcome === 'rollback-failed') {
-                        out.lines.push('The last update failed to start AND '
-                            + 'rolling back to the previous build also '
-                            + 'failed — this checkout may need a human on '
-                            + 'the machine itself.');
-                        why('What failed: ');
-                    } else if (d.outcome === 'rollback-impossible') {
-                        out.lines.push('The last update failed to start and '
-                            + 'could not be rolled back — this checkout may '
-                            + 'need a human on the machine itself.');
-                        why('What failed: ');
-                    } else if (d.outcome === 'came-up-on-wrong-sha') {
-                        out.cls = 'app-upd-deploy-warn';
-                        out.lines.push('This broker came back up, but on '
-                            + (shortSha(d.observedSha)
-                                || 'a commit it could not read')
-                            + (shortSha(d.targetSha)
-                                ? (' rather than the '
-                                    + shortSha(d.targetSha)
-                                    + ' the apply named') : '')
-                            + ' — alive, but not the build that was asked '
-                            + 'for.');
-                        why('What it reported: ');
-                    } else if (d.outcome === 'cancelled-before-restart') {
-                        out.cls = 'app-upd-deploy-warn';
-                        out.lines.push('The last apply stopped before its '
-                            + 'restart, so this broker never stopped '
-                            + 'running the build it was on.');
-                        if (d.observedSha && d.oldSha) {
-                            out.lines.push(d.observedSha !== d.oldSha
-                                ? ('The files on disk were already moved '
-                                    + 'to ' + shortSha(d.observedSha)
-                                    + ' — newer than the code this broker '
-                                    + 'is running.')
-                                : 'The files on disk were not changed.');
-                        }
-                        why('Why it stopped: ');
-                    } else {
-                        // A verdict this build does not know. NEVER read as
-                        // success: an unrecognised outcome reported
-                        // optimistically is the same lie as an unchecked
-                        // "up to date".
-                        out.lines.push('The last update reported an outcome '
-                            + 'this page does not recognise — it must not '
-                            + 'be read as a success.');
-                        why('What it reported: ');
-                    }
-                    return out;
                 }
 
                 // ---- self-restart (#183) -----------------------------------
@@ -1451,74 +1289,46 @@
                 const RESTART_WAIT_TIMEOUT_MS = 90 * 1000;
                 const RESTART_POLL_MS = 2000;
 
+                // The polling loop lives in pollUntilNewBootId (#182 Part 2,
+                // atom A30 -- shared with waitForApplyBootId, since an apply
+                // ends in this same wait): resolves the host fresh every
+                // iteration, exactly as this loop always did, since the very
+                // broker being asked is expected to disappear and come back
+                // mid-wait. A transport failure there is THE expected shape
+                // of this loop, not a fault -- the broker is mid-stop or
+                // mid-relaunch and simply not there to answer.
                 async function waitForNewBootId(beforeBootId) {
                     restartOp = { phase: 'waiting', note: 'restarting…' };
                     renderAll();
-                    const deadline = Date.now() + RESTART_WAIT_TIMEOUT_MS;
-                    while (Date.now() < deadline) {
-                        await restartSleep(RESTART_POLL_MS);
-                        if (restartOpDead) return;
-                        // Resolved fresh every iteration, never carried in —
-                        // the same discipline poll() applies to every other
-                        // host in this mod, and doubly necessary here since
-                        // the very broker being asked is expected to
-                        // disappear and come back mid-loop.
-                        const host = updHost(LOCAL_HOST_ID);
-                        if (!host) {
-                            restartOp = { phase: 'failed',
-                                note: 'the local broker is no longer '
-                                    + 'configured' };
-                            renderAll();
-                            return;
-                        }
-                        let r;
-                        try {
-                            r = await hostFetch(host, '/info',
-                                { cache: 'no-store', timeoutMs: 4000 });
-                        } catch (_) {
-                            // THE expected shape of this loop, not a
-                            // failure: the broker is mid-stop or
-                            // mid-relaunch and simply is not there to
-                            // answer. Reporting this as an error would tell
-                            // the truth about the symptom and lie about
-                            // what it means.
-                            continue;
-                        }
-                        if (!r.ok) continue;
-                        let j = null;
-                        try { j = await r.json(); } catch (_) { continue; }
-                        const bootId = j && j.restart
-                            && typeof j.restart.bootId === 'string'
-                            && j.restart.bootId;
-                        if (!bootId) continue;
-                        if (bootId !== beforeBootId) {
-                            // THE proof. Not the 202 earlier, and not this
-                            // response merely arriving — the identity
-                            // changed, which is the one fact an HTTP
-                            // response from the process being replaced can
-                            // never assert about itself.
-                            restartOp = { phase: 'done',
-                                note: 'restarted — this build is now live' };
-                            // Stale the instant the process changed: the
-                            // capability, the version, everything this
-                            // cached record described belonged to the
-                            // broker that just stopped existing.
-                            modCatalogCache.delete(LOCAL_HOST_ID);
-                            renderAll();
-                            recheck();
-                            return;
-                        }
-                        // Still answering, but still the OLD process (or
-                        // briefly the new one before it has settled) — keep
-                        // waiting.
+                    const res = await pollUntilNewBootId(beforeBootId,
+                        () => restartOpDead);
+                    if (restartOpDead || res === 'dead') return;
+                    if (res === 'no-host') {
+                        restartOp = { phase: 'failed',
+                            note: 'the local broker is no longer '
+                                + 'configured' };
+                    } else if (res === 'changed') {
+                        // THE proof. Not the 202 earlier, and not this
+                        // response merely arriving — the identity changed,
+                        // the one fact a response from the process being
+                        // replaced can never assert about itself. Stale the
+                        // instant it did: everything the cached record
+                        // described belonged to the broker that just
+                        // stopped existing.
+                        restartOp = { phase: 'done',
+                            note: 'restarted — this build is now live' };
+                        modCatalogCache.delete(LOCAL_HOST_ID);
+                        renderAll();
+                        recheck();
+                        return;
+                    } else {
+                        restartOp = { phase: 'timeout',
+                            note: 'this broker did not come back within '
+                                + Math.round(RESTART_WAIT_TIMEOUT_MS / 1000)
+                                + 's. It may still be starting, or it may need '
+                                + 'attention on the machine itself — this '
+                                + 'window cannot tell which.' };
                     }
-                    if (restartOpDead) return;
-                    restartOp = { phase: 'timeout',
-                        note: 'this broker did not come back within '
-                            + Math.round(RESTART_WAIT_TIMEOUT_MS / 1000)
-                            + 's. It may still be starting, or it may need '
-                            + 'attention on the machine itself — this '
-                            + 'window cannot tell which.' };
                     renderAll();
                 }
 
@@ -1874,6 +1684,237 @@
                     body.appendChild(row);
                 }
 
+                // ---- update APPLY (#182 Part 2, atom A30): LOCAL ONLY,
+                // like the restart control -- host/state resolved fresh at
+                // every step. note is always an array of lines.
+                let applyOp = null;
+                let applyOpDead = false;
+
+                function mkEl(tag, cls, text) {
+                    const e = document.createElement(tag);
+                    if (cls) e.className = cls;
+                    if (text !== undefined) e.textContent = text;
+                    return e;
+                }
+
+                // Shared with waitForNewBootId above (#183, refactored to
+                // call this too): polls /info until the boot id changes,
+                // timing out the same bounded way either caller already did.
+                async function pollUntilNewBootId(beforeBootId, isDead) {
+                    const deadline = Date.now() + RESTART_WAIT_TIMEOUT_MS;
+                    while (Date.now() < deadline) {
+                        await restartSleep(RESTART_POLL_MS);
+                        if (isDead()) return 'dead';
+                        const host = updHost(LOCAL_HOST_ID);
+                        if (!host) return 'no-host';
+                        let r;
+                        try {
+                            r = await hostFetch(host, '/info',
+                                { cache: 'no-store', timeoutMs: 4000 });
+                        } catch (_) { continue; }
+                        if (!r.ok) continue;
+                        let j = null;
+                        try { j = await r.json(); } catch (_) { continue; }
+                        const bootId = j && j.restart
+                            && typeof j.restart.bootId === 'string'
+                            && j.restart.bootId;
+                        if (!bootId) continue;
+                        if (bootId !== beforeBootId) return 'changed';
+                    }
+                    return 'timeout';
+                }
+
+                async function waitForApplyBootId(beforeBootId) {
+                    applyOp = { phase: 'waiting',
+                        note: ['applying — this broker is restarting itself…'] };
+                    renderAll();
+                    const res = await pollUntilNewBootId(beforeBootId,
+                        () => applyOpDead);
+                    if (applyOpDead || res === 'dead') return;
+                    if (res === 'no-host') {
+                        applyOp = { phase: 'failed',
+                            note: ['the local broker is no longer configured'] };
+                    } else if (res === 'changed') {
+                        // A restart is PROVEN, not that it hit the target --
+                        // deployStrip reads that off recheck() below.
+                        applyOp = { phase: 'done', note: ['this broker '
+                            + 'restarted — checking what build it came up on…'] };
+                        modCatalogCache.delete(LOCAL_HOST_ID);
+                        renderAll();
+                        await recheck();
+                        return;
+                    } else {
+                        applyOp = { phase: 'timeout', note: ['this broker '
+                            + 'did not come back within '
+                            + Math.round(RESTART_WAIT_TIMEOUT_MS / 1000)
+                            + 's — this window cannot tell whether it is '
+                            + 'still starting.'] };
+                    }
+                    renderAll();
+                }
+
+                // The ONLY caller of POST /update/apply -- no timer, no poll.
+                async function performApply(targetSha) {
+                    if (applyOp && applyOp.phase === 'waiting') return;
+                    const host = updHost(LOCAL_HOST_ID);
+                    if (!host) {
+                        applyOp = { phase: 'failed',
+                            note: ['the local broker is no longer configured'] };
+                        renderAll();
+                        return;
+                    }
+                    applyOp = { phase: 'waiting',
+                        note: ['sending the update request…'] };
+                    renderAll();
+                    let resp = null;
+                    try {
+                        resp = await hostFetch(host, '/update/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ target_sha: targetSha }),
+                            timeoutMs: 30000,
+                        });
+                    } catch (e) {
+                        applyOp = { phase: 'failed',
+                            note: applyRefusalOutcome(null, null).lines };
+                        renderAll();
+                        return;
+                    }
+                    let body = null;
+                    try { body = await resp.json(); } catch (_) {}
+                    if (resp.status === 202 && body && body.ok === true) {
+                        if (typeof body.bootId === 'string' && body.bootId) {
+                            await waitForApplyBootId(body.bootId);
+                            return;
+                        }
+                        // Accepted -- the broker may already be merging or
+                        // restarting -- but with nothing to confirm it by.
+                        // NOT a refusal (it was accepted) and never assumed
+                        // to have failed: a naive retry here could start a
+                        // SECOND apply on top of one already under way.
+                        applyOp = { phase: 'failed', note: ['the broker '
+                            + 'accepted the update but did not report a '
+                            + 'boot id to confirm it by -- it may already '
+                            + 'be applying; check before trying again'] };
+                        renderAll();
+                        return;
+                    }
+                    const outcome = applyRefusalOutcome(resp.status, body);
+                    const lines = outcome ? outcome.lines.slice()
+                        : ['the broker answered, but not in a shape this '
+                            + 'page recognises.'];
+                    if (outcome && outcome.kind === 'incomplete'
+                            && outcome.reasonCode) {
+                        lines.push('Why the restart could not be armed: '
+                            + restartReasonWords(outcome.reasonCode));
+                    }
+                    applyOp = { phase: 'failed', note: lines };
+                    renderAll();
+                }
+
+                // Commit range/count/compare link, then the SAME live-
+                // session cost block restartConfirmBody renders (#183) --
+                // an apply ends in that same restart.
+                function applyConfirmBody(oldSha, targetSha, behindBy,
+                                          compareUrl, cont) {
+                    const restartPart = restartConfirmBody(cont);
+                    return function (c) {
+                        const range = (oldSha ? shortSha(oldSha) : 'unknown')
+                            + '..' + (targetSha ? shortSha(targetSha)
+                                : 'unknown');
+                        c.appendChild(mkEl('div', 'app-dialog-msg', 'This '
+                            + 'pulls ' + range + (typeof behindBy === 'number'
+                                ? (' (' + behindBy + ' commit'
+                                    + (behindBy === 1 ? '' : 's') + ')') : '')
+                            + ' from the pinned upstream repository, then '
+                            + 'restarts this broker to bring it into '
+                            + 'effect.'));
+                        if (compareUrl) {
+                            const a = mkEl('a', 'app-upd-link',
+                                'view this commit range on GitHub');
+                            a.target = '_blank';
+                            a.rel = 'noopener noreferrer';
+                            a.href = compareUrl;
+                            c.appendChild(a);
+                        }
+                        restartPart(c);
+                    };
+                }
+
+                // Rebuilt fresh every renderWindow() pass, like
+                // renderRestartRow beside it. The click handler recomputes
+                // nothing it does not already have in scope from this same
+                // paint -- a repaint always precedes a click on a control
+                // that was enabled, and the server re-checks regardless.
+                function renderApplyRow(body) {
+                    const st = checkStateFor(LOCAL_HOST_ID);
+                    const upd = updateCapFor(LOCAL_HOST_ID);
+                    const info = restartInfo();
+                    const chk = st.check;
+                    const target = applyTargetSha(chk);
+                    const code = applyGateFromFacts(state(st), target,
+                        !!(upd && upd.apply_enabled === true),
+                        info.available);
+                    const busy = !!(applyOp && applyOp.phase === 'waiting');
+                    const row = mkEl('div', 'app-upd-restart-row');
+                    const btn = mkEl('button', 'app-upd-restart-btn',
+                        busy ? 'Applying…' : 'Update…');
+                    btn.type = 'button';
+                    btn.title = 'pulls the pinned commit range from '
+                        + 'upstream and restarts THIS broker onto it — '
+                        + 'never a remote host';
+                    btn.disabled = busy || !!code;
+                    btn.addEventListener('mousedown', (e) => e.stopPropagation());
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (code || busy) return;  // defensive; disabled already
+                        // Captured HERE, carried UNCHANGED into the POST body
+                        // -- a moved upstream is the server's preview-sha-
+                        // mismatch to catch, never this code's to paper over.
+                        const oldSha = (chk.local && chk.local.sha) || null;
+                        const behindBy = (typeof chk.behindBy === 'number')
+                            ? chk.behindBy : null;
+                        const compareUrl = (chk.upstream && chk.upstream.url)
+                            || null;
+                        openDialog({
+                            title: 'Apply this update?',
+                            body: applyConfirmBody(oldSha, target, behindBy,
+                                compareUrl, info.continuity),
+                            buttons: [
+                                { label: 'Apply and restart', value: true,
+                                  primary: true, danger: true },
+                                { label: 'Cancel', value: false },
+                            ],
+                        }).then((res) => {
+                            if (!res || !res.value) return;
+                            return performApply(target);
+                        }).catch(() => {});
+                    });
+                    row.appendChild(btn);
+                    const stat = mkEl('div', 'app-upd-restart-inline');
+                    if (applyOp && (busy || applyOp.phase === 'done'
+                            || applyOp.phase === 'timeout'
+                            || applyOp.phase === 'failed')) {
+                        for (const t of applyOp.note) {
+                            stat.appendChild(mkEl('div', null, t));
+                        }
+                        if (applyOp.phase === 'done') {
+                            stat.classList.add('app-upd-green');
+                        } else if (applyOp.phase === 'timeout'
+                                || applyOp.phase === 'failed') {
+                            stat.classList.add('app-upd-amber');
+                        }
+                    } else if (code) {
+                        stat.textContent = applyGateWords(code, info.known
+                            ? restartReasonWords(info.reason)
+                            : 'this broker has not reported a restart '
+                                + 'capability yet');
+                        stat.classList.add('app-upd-grey');
+                    }
+                    row.appendChild(stat);
+                    body.appendChild(row);
+                }
+
                 // ---- detail window (ephemeral, like task-manager) ----
                 function openUpdateWindow(appData) {
                     const id = String(appData.id);
@@ -2167,6 +2208,12 @@
                     // always, regardless of which rows follow.
                     addHead(body, 'Restart');
                     renderRestartRow(body);
+                    // ---- apply an update THIS broker (#182 Part 2, A30) ----
+                    // Same section as the restart control above: an apply
+                    // ENDS in exactly that restart, and the row it renders
+                    // is LOCAL ONLY for the same reason (apply never touches
+                    // a remote host).
+                    renderApplyRow(body);
 
                     // ---- one row per broker ----
                     addHead(body, one ? 'This broker' : 'Brokers');
@@ -2294,6 +2341,7 @@
                     // timeout in the background of a mod that is no longer
                     // loaded.
                     restartOpDead = true;
+                    applyOpDead = true;
                     stop();
                     for (const w of Array.from(windows.values())) {
                         if (w && w.type === 'app' && w.appKind === 'update') {

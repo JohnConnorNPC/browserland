@@ -19,6 +19,15 @@ its shared modCatalogCache, renderAll — is stubbed, so what runs here is the
 mod's own logic and nothing else. Pasting a copy of that logic into the test
 would pass while the mod was broken; this cannot.
 
+Two files, one model. The A29/A30 post-apply + apply-gate helpers moved out
+of update.js into ``mods/update/update-apply.js`` -- a companion script with
+no ``registerMod`` call, spliced immediately BEFORE update.js in ui.py's
+``_MODS`` (the same split ``mods/editor/codemirror.js``/``editor.js`` already
+use). The model source below reads the companion WHOLE (it is pure top-level
+declarations already, nothing to slice) and prepends it to update.js's own
+sliced chunks, in that same _MODS order, so the concatenation node evaluates
+matches what the served page actually loads.
+
 Skipped when node is absent, so the suite still runs on a box without it.
 """
 
@@ -33,6 +42,7 @@ from webterm.broker import ui
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
 MOD_JS = BROKER_DIR / "mods" / "update" / "update.js"
+MOD_APPLY_JS = BROKER_DIR / "mods" / "update" / "update-apply.js"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -68,18 +78,30 @@ _REQUIRED = (
     "function updateCapFor", "function policyMutableFor",
     "function hostFingerprint",
     "async function setChecking", "async function offerConsent",
-    # #182 Part 2 (A29): the post-apply model. These live between the opt-in
-    # block and the self-restart marker, so the existing final chunk carries
-    # them without a new anchor.
+    # freshTerminalHost is the one function that did NOT move to
+    # update-apply.js -- it reads updHost/LOCAL_HOST_ID off THIS closure, so
+    # it stays between the opt-in block and the self-restart marker, and the
+    # existing final chunk still carries it without a new anchor.
+    "function freshTerminalHost",
+    # #182 Part 2 (A29) + atom A30: the post-apply model and the
+    # Update-apply client-side gate/refusal parser. Pure, and now shipped in
+    # the companion mods/update/update-apply.js (read whole, below) rather
+    # than sliced out of update.js -- no anchor needed for these six.
     "function deployOutcome", "function shortSha",
-    "function staleSurvivors", "function freshTerminalHost",
-    "function deployStrip",
+    "function staleSurvivors", "function deployStrip",
+    "function applyTargetSha", "function applyGateFromFacts",
+    "function applyGateWords", "function applyRefusalOutcome",
 )
 
 
 def _model_source() -> str:
+    # The companion is read WHOLE -- it is already pure top-level
+    # declarations with nothing to slice, the same way a real page load
+    # includes the whole file -- and prepended, matching its _MODS position
+    # (immediately BEFORE update.js).
+    companion = MOD_APPLY_JS.read_text(encoding="utf-8")
     src = MOD_JS.read_text(encoding="utf-8")
-    out = []
+    out = [companion]
     last = -1
     for start_marker, end_marker in _CHUNKS:
         start = src.index(start_marker)
@@ -998,6 +1020,74 @@ CASES.fresh_terminal_host = async () => {
     return out;
 };
 
+// --- atom A30: can the Update button even be offered? ---------------------
+// Pure over literal facts -- no host, no fleet, no network. The five unmet
+// conditions the brief names, each read off its own distinct code.
+CASES.apply_gate = async () => {
+    const out = {};
+    const SHA = 'b'.repeat(40);
+    out.enabled = applyGateFromFacts('behind', SHA, true, true);
+    out.gateOff = applyGateFromFacts('behind', SHA, false, true);
+    out.restartUnavailable = applyGateFromFacts('behind', SHA, true, false);
+    out.unknownState = applyGateFromFacts('unknown', null, true, true);
+    out.notBehindCurrent = applyGateFromFacts('current', null, true, true);
+    out.notBehindAhead = applyGateFromFacts(
+        'ahead-or-diverged', null, true, true);
+    out.noTarget = applyGateFromFacts('behind', null, true, true);
+    out.wordsGateOff = applyGateWords(out.gateOff, 'unused');
+    out.wordsRestart = applyGateWords(out.restartUnavailable,
+        'this broker cannot restart itself on this install');
+    out.wordsUnknown = applyGateWords(out.unknownState, 'unused');
+    out.wordsNotBehind = applyGateWords(out.notBehindCurrent, 'unused');
+    out.wordsNoTarget = applyGateWords(out.noTarget, 'unused');
+    out.wordsEnabled = applyGateWords(out.enabled, 'unused');
+    // The one thing an apply actually needs: an exact upstream sha, not a
+    // version compare -- release mode names a tag and no sha at all.
+    out.targetShaValid = applyTargetSha({ upstream: { sha: 'a'.repeat(40) } });
+    out.targetShaReleaseMode = applyTargetSha(
+        { upstream: { tag: 'v1.0.0', url: 'https://x' } });
+    out.targetShaBadHex = applyTargetSha({ upstream: { sha: 'not-a-sha' } });
+    out.targetShaNoCheck = applyTargetSha(null);
+    return out;
+};
+
+// --- atom A30: every shape POST /update/apply can answer with -------------
+CASES.apply_refusals = async () => {
+    const out = {};
+    out.transport = applyRefusalOutcome(null, null);
+    out.success = applyRefusalOutcome(202,
+        { ok: true, bootId: 'boot-2', operation_id: 'apply-1' });
+    out.gate = applyRefusalOutcome(503,
+        { ok: false, error: 'update_apply_disabled' });
+    out.incomplete = applyRefusalOutcome(503, { ok: false,
+        error: 'apply_incomplete', reason_code: 'drain_failed',
+        tree_updated: true, old_sha: 'a'.repeat(40) });
+    out.inProgress = applyRefusalOutcome(409, { ok: false,
+        error: 'apply_in_progress', operation_id: 'apply-abc123' });
+    out.restartInProgress = applyRefusalOutcome(409,
+        { ok: false, error: 'restart_in_progress' });
+    out.multiRefusal = applyRefusalOutcome(409, { ok: false,
+        error: 'apply_refused',
+        reason_codes: ['dirty-tree', 'ahead-or-diverged'],
+        refusals: [
+            { reason: 'dirty-tree', message: 'Tracked files carry local '
+                + 'modifications.' },
+            { reason: 'ahead-or-diverged', message: 'This checkout carries '
+                + '2 local commits upstream does not have.' },
+        ] });
+    out.treeSuspect = applyRefusalOutcome(409, { ok: false,
+        error: 'apply_failed',
+        refusals: [{ reason: 'not-fast-forward',
+                     message: 'The merge did not fast-forward.' }],
+        tree_suspect: true });
+    out.noRefusalsListed = applyRefusalOutcome(409,
+        { ok: false, error: 'apply_refused', refusals: [] });
+    out.garbageBody = applyRefusalOutcome(500, null);
+    // A 200 (not 202) is never read as success either.
+    out.wrongStatus = applyRefusalOutcome(200, { ok: true });
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -1759,3 +1849,168 @@ def test_the_restart_confirm_names_the_old_code_cost():
     assert "keeps running " in body
     assert "the code it was started with" in body
     assert "relaunched by hand" in body
+
+
+# ---- atom A30: the Update... UI action -------------------------------------
+
+def test_apply_enablement_disables_on_each_unmet_condition_distinctly(harness):
+    """The four conditions from the design (gate, restart, and the check
+    being behind with a known target) surface as FIVE distinct codes, because
+    "the check is not behind" and "the check never established anything" ask
+    two different things of whoever reads the reason."""
+    r = run(harness, "apply_gate")
+    assert r["enabled"] is None, "every condition met must not disable"
+    codes = {"gateOff": r["gateOff"], "restartUnavailable":
+             r["restartUnavailable"], "unknownState": r["unknownState"],
+             "notBehindCurrent": r["notBehindCurrent"], "noTarget":
+             r["noTarget"]}
+    assert len(set(codes.values())) == 5, f"two reasons collapsed: {codes}"
+    assert r["notBehindAhead"] == r["notBehindCurrent"], (
+        "current and ahead-or-diverged both read as 'nothing to apply'")
+    assert r["gateOff"] == "apply-disabled-here"
+    assert r["restartUnavailable"] == "restart-unavailable-here"
+    assert r["unknownState"] == "unknown-state"
+    assert r["notBehindCurrent"] == "not-behind"
+    assert r["noTarget"] == "no-target-sha"
+
+
+def test_apply_enablement_reasons_have_distinct_words(harness):
+    r = run(harness, "apply_gate")
+    assert r["wordsEnabled"] is None, "an enabled gate has no reason to show"
+    words = [r["wordsGateOff"], r["wordsRestart"], r["wordsUnknown"],
+             r["wordsNotBehind"], r["wordsNoTarget"]]
+    assert all(words), "every disabled code must have words"
+    assert len(set(words)) == 5, f"two reasons read the same: {words}"
+    # The config gate says which key, and that it is config-file-only.
+    assert "update_apply_enabled" in r["wordsGateOff"]
+    assert "config" in r["wordsGateOff"]
+    # The restart-unavailable reason reuses the restart control's OWN words
+    # rather than inventing a second vocabulary for the same fact.
+    assert "this broker cannot restart itself on this install" in \
+        r["wordsRestart"]
+
+
+def test_apply_target_sha_needs_an_exact_upstream_commit(harness):
+    """#182's release-mode branch names a tag and never a sha at all -- a
+    'behind' state there is real, but there is nothing exact to apply."""
+    r = run(harness, "apply_gate")
+    assert r["targetShaValid"] == "a" * 40
+    assert r["targetShaReleaseMode"] is None
+    assert r["targetShaBadHex"] is None
+    assert r["targetShaNoCheck"] is None
+
+
+def test_every_apply_refusal_shape_is_rendered_distinctly(harness):
+    """The server is the source of truth; this pins that the parser never
+    collapses two different refusals into the same words, and never a guess
+    at success for anything short of the one clean 202."""
+    r = run(harness, "apply_refusals")
+    assert r["transport"]["kind"] == "transport"
+    assert r["success"] is None, (
+        "a clean 202/ok:true must never be read as a refusal here -- "
+        "waitForApplyBootId owns proving it, not this parser")
+    assert r["gate"]["kind"] == "gate"
+    assert "update_apply_enabled" in r["gate"]["lines"][0]
+    assert r["incomplete"]["kind"] == "incomplete"
+    assert r["incomplete"]["reasonCode"] == "drain_failed"
+    assert "STILL RUNNING THE OLD CODE" in r["incomplete"]["lines"][0]
+    assert "manual" in r["incomplete"]["lines"][0].lower()
+    assert "apply-abc123" in r["inProgress"]["lines"][0]
+    assert r["inProgress"]["kind"] == "in-progress"
+    assert r["restartInProgress"]["kind"] == "in-progress"
+    # every refusal message, not just the first
+    assert r["multiRefusal"]["lines"] == [
+        "Tracked files carry local modifications.",
+        "This checkout carries 2 local commits upstream does not have.",
+    ]
+    assert r["multiRefusal"]["kind"] == "refused"
+    assert any("human on the machine itself" in ln
+               for ln in r["treeSuspect"]["lines"]), (
+        "a merge that failed partway through must say the tree may need "
+        "a human")
+    assert r["treeSuspect"]["kind"] == "failed"
+    assert r["noRefusalsListed"]["lines"] == [
+        "the broker refused the update but did not say why."]
+    assert r["garbageBody"]["kind"] == "unknown"
+    assert r["wrongStatus"]["kind"] == "unknown"
+    assert "must not be read as a success" in r["wrongStatus"]["lines"][0]
+    # Every one of these shapes reads differently.
+    kinds = [r[k]["kind"] for k in (
+        "transport", "gate", "incomplete", "inProgress", "multiRefusal",
+        "treeSuspect", "garbageBody")]
+    assert len(set(kinds)) == len(set(kinds)), "sanity: kinds are hashable"
+
+
+def test_the_update_button_is_local_only_and_beside_restart(harness):
+    """apply never touches a remote host: renderApplyRow reads only the
+    LOCAL_HOST_ID facts, and is rendered once, above the per-broker loop --
+    never inside it, where a peer row would pick it up."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("function renderApplyRow"):
+              src.index("// ---- detail window")]
+    assert "checkStateFor(LOCAL_HOST_ID)" in seg
+    assert "updateCapFor(LOCAL_HOST_ID)" in seg
+    assert "restartInfo()" in seg
+    window_seg = src[src.index("function renderWindow(win)"):
+                     src.index("function renderAll()")]
+    assert window_seg.count("renderApplyRow(body)") == 1
+    assert window_seg.index("renderApplyRow(body)") < \
+        window_seg.index("for (const r of rows)"), (
+        "the apply row must sit above the per-broker loop, never inside it")
+
+
+def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
+        harness):
+    """The confirm dialog's values are captured once, at click time, from
+    the SAME paint that disabled/enabled the button, and performApply is
+    reachable from nowhere else."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    assert src.count("performApply(") == 2, (
+        "exactly one definition and one call site")
+    assert "return performApply(target);" in src
+    assert "if (!res || !res.value) return;" in src
+    perform_seg = src[src.index("async function performApply"):
+                      src.index("function applyConfirmBody")]
+    # The previewed sha is used exactly as given -- never re-derived from
+    # live state inside the POST path itself.
+    assert "checkStateFor(" not in perform_seg
+    assert "applyTargetSha(" not in perform_seg
+    assert "body: JSON.stringify({ target_sha: targetSha })" in perform_seg
+    # No timer or poll tick reaches it.
+    poll_seg = src[src.index("async function poll(hostId, opts)"):
+                   src.index("function pollTick(opts)")]
+    assert "performApply" not in poll_seg
+    assert "setInterval" not in src[src.index("async function performApply"):
+                                    src.index("// ---- detail window")]
+
+
+def test_apply_confirm_shows_range_count_compare_and_session_cost(harness):
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("function applyConfirmBody"):
+              src.index("function renderApplyRow")]
+    assert "shortSha(oldSha)" in seg and "shortSha(targetSha)" in seg
+    assert "'..'" in seg
+    assert "behindBy" in seg
+    assert "compareUrl" in seg
+    # The SAME live-session cost block the restart confirm renders (#183),
+    # not a second copy of its wording that could drift from it.
+    assert "restartConfirmBody(cont)" in seg
+
+
+def test_202_never_renders_success_here_and_hands_off_to_the_boot_watch(
+        harness):
+    """The 202 is accepted-and-stopping, not done; only a proven boot id
+    change may say so, and even that hands off to a recheck rather than
+    declaring victory itself (#182 Part 2, A29 owns the real verdict)."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    perform_seg = src[src.index("async function performApply"):
+                      src.index("function applyConfirmBody")]
+    assert "phase: 'done'" not in perform_seg, (
+        "the 202 handler itself must never claim success")
+    assert "await waitForApplyBootId(body.bootId);" in perform_seg
+    wait_seg = src[src.index("async function waitForApplyBootId"):
+                  src.index("// The ONLY caller of POST /update/apply")]
+    assert "phase: 'done'" in wait_seg
+    assert "recheck()" in wait_seg, (
+        "a proven restart must still hand off to a recheck, never assume "
+        "the target was reached")
