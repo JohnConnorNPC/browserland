@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,12 @@ def _make_app(tmp_path, monkeypatch, **cfg):
     base = {"auth_token": TEST_TOKEN,
             "editor_root": str(tmp_path),
             "state_path": str(tmp_path / "webterm_state.json"),
-            "recordings_dir": str(tmp_path / "recs")}
+            "recordings_dir": str(tmp_path / "recs"),
+            # The post-boot cooldown (#183, R6) defaults to 90s, which would
+            # make every fresh test app refuse a restart for its whole life.
+            # Pinned OFF here; the cooldown's own tests below override this
+            # key (base.update(cfg) lets them) and patch BOOT_TIME.
+            "restart_cooldown_seconds": 0}
     base.update(cfg)
     return create_app(base, name=f"webterm-restart-test-{_app_seq}")
 
@@ -143,6 +149,11 @@ def test_the_example_configs_carry_the_key():
             f"{name} must ship the key, defaulting to false"
         assert "_restart_enabled_note" in cfg, \
             f"{name} needs the note explaining what the key does"
+        # The cooldown (#183, R6) ships beside it, at its real default.
+        assert cfg.get("restart_cooldown_seconds") == 90, \
+            f"{name} must ship restart_cooldown_seconds at the 90s default"
+        assert "_restart_cooldown_seconds_note" in cfg, \
+            f"{name} needs the note explaining the cooldown"
 
 
 # ---- E16: refusing new work while quiescing ---------------------------------
@@ -716,6 +727,7 @@ def test_the_reason_codes_are_all_distinct():
     one cause's text for another's problem."""
     codes = [app_mod.REASON_RESTART_DISABLED,
              app_mod.REASON_RESTART_IN_PROGRESS,
+             app_mod.REASON_RESTART_COOLDOWN,
              app_mod.REASON_ORIGIN_FORBIDDEN,
              app_mod.REASON_RESTART_ERROR,
              supervise.REASON_NO_SUPERVISOR,
@@ -724,6 +736,108 @@ def test_the_reason_codes_are_all_distinct():
              supervise.REASON_SYSTEMD_POLICY_UNKNOWN,
              supervise.REASON_PROBE_FAILED]
     assert len(set(codes)) == len(codes), codes
+
+
+# ---- E15/E17 (R6): the post-boot restart cooldown ---------------------------
+
+def _cooled(tmp_path, monkeypatch, seconds=90, uptime=0.0, **cfg):
+    """A restartable app with a real cooldown and a PINNED uptime.
+
+    BOOT_TIME is module-level (one process, one boot), so without pinning it
+    these tests would depend on how long ago this test session imported
+    app.py — a suite that ran longer than the cooldown would quietly flip
+    every expectation."""
+    monkeypatch.setattr(app_mod, "BOOT_TIME", time.monotonic() - uptime)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True,
+                    restart_cooldown_seconds=seconds, **cfg)
+    return _capability(app, supervise.MECHANISM_SUPERVISOR)
+
+
+def test_the_capability_reports_cooldown_while_it_is_fresh(tmp_path,
+                                                           monkeypatch):
+    """configured:true / available:false / reason "cooldown", plus the one
+    number no other reason gets: WHEN to come back."""
+    app = _cooled(tmp_path, monkeypatch)
+    _, r = authed(app).get("/info")
+    block = r.json["restart"]
+    assert block["configured"] is True, block
+    assert block["available"] is False, block
+    assert block["reason_code"] == app_mod.REASON_RESTART_COOLDOWN, block
+    assert isinstance(block["retry_after_s"], int), block
+    assert 0 < block["retry_after_s"] <= 90, block
+
+
+def test_the_capability_recovers_once_the_cooldown_has_passed(tmp_path,
+                                                              monkeypatch):
+    """The one reason that clears by ITSELF — no operator action, no request."""
+    app = _cooled(tmp_path, monkeypatch, uptime=90.5)
+    _, r = authed(app).get("/info")
+    block = r.json["restart"]
+    assert block["available"] is True, block
+    assert block["reason_code"] is None, block
+    assert "retry_after_s" not in block, \
+        "retry_after_s is the cooldown's key alone; absent means available"
+
+
+def test_cooldown_zero_disables_and_a_negative_clamps_to_zero(tmp_path,
+                                                              monkeypatch):
+    """0 is the documented off switch (the fixtures and the e2e need it), and
+    a negative hand-edit clamps rather than erroring or going truthy."""
+    app = _cooled(tmp_path, monkeypatch, seconds=0)
+    assert app.ctx.restart_cooldown_seconds == 0
+    _, r = authed(app).get("/info")
+    assert r.json["restart"]["available"] is True, r.json["restart"]
+    app = _cooled(tmp_path, monkeypatch, seconds=-30)
+    assert app.ctx.restart_cooldown_seconds == 0
+    _, r = authed(app).get("/info")
+    assert r.json["restart"]["available"] is True, r.json["restart"]
+
+
+def test_the_cooldown_defaults_to_90_when_the_config_is_silent(tmp_path,
+                                                               monkeypatch):
+    """create_app directly — _make_app pins the key to 0 for every other test
+    in this file, precisely because this default would otherwise refuse each
+    fresh test app. And unreadable garbage falls back to the DEFAULT, never to
+    off: a typo must not silently remove the guard."""
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    app = create_app({"auth_token": TEST_TOKEN,
+                      "state_path": str(tmp_path / "s.json")},
+                     name="webterm-restart-cooldown-default")
+    assert app.ctx.restart_cooldown_seconds == 90
+    # The arithmetic the default exists for: strictly longer than the
+    # supervisor's budget window (5 per 60s), so deliberate restarts land at
+    # most one per window and can never exhaust the budget on their own.
+    assert app.ctx.restart_cooldown_seconds > supervise.RESTART_WINDOW
+    app = create_app({"auth_token": TEST_TOKEN,
+                      "state_path": str(tmp_path / "s2.json"),
+                      "restart_cooldown_seconds": "soon"},
+                     name="webterm-restart-cooldown-garbage")
+    assert app.ctx.restart_cooldown_seconds == 90
+
+
+def test_the_gate_and_mechanism_and_in_progress_outrank_the_cooldown(
+        tmp_path, monkeypatch):
+    """Precedence: an operator must be told about a missing gate or mechanism
+    FIRST — those need a human fix, while the cooldown clears by itself, so
+    "cooldown" over either would invite waiting out a refusal that waiting
+    cannot fix. And an in-flight restart is the truth of the moment."""
+    monkeypatch.setattr(app_mod, "BOOT_TIME", time.monotonic())
+    app = _make_app(tmp_path, monkeypatch,        # the gate is off
+                    restart_cooldown_seconds=90)
+    _capability(app, supervise.MECHANISM_SUPERVISOR)
+    _, r = authed(app).get("/info")
+    assert r.json["restart"]["reason_code"] == app_mod.REASON_RESTART_DISABLED
+    assert "retry_after_s" not in r.json["restart"]
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True,
+                    restart_cooldown_seconds=90)   # nothing to relaunch us
+    _capability(app, supervise.MECHANISM_NONE, supervise.REASON_NO_SUPERVISOR)
+    _, r = authed(app).get("/info")
+    assert r.json["restart"]["reason_code"] == supervise.REASON_NO_SUPERVISOR
+    app = _cooled(tmp_path, monkeypatch)           # one already under way
+    app.ctx.lifecycle = app_mod.LIFECYCLE_DRAINING
+    _, r = authed(app).get("/info")
+    assert r.json["restart"]["reason_code"] == \
+        app_mod.REASON_RESTART_IN_PROGRESS
 
 
 def test_the_capability_is_probed_once_per_process_not_per_request(
@@ -975,6 +1089,44 @@ def test_restart_409s_when_one_is_already_in_progress(tmp_path, monkeypatch):
         "a second restart drained a broker that was already draining"
 
 
+def test_restart_409s_during_the_cooldown_and_consumes_no_claim(tmp_path,
+                                                                monkeypatch):
+    """R6 at the route: refused BEFORE the CAS, with the same graded-409 shape
+    as the mechanism refusals plus the retry_after_s the reason earns. The
+    load-bearing half is what does NOT happen — no drain, no claim — so a
+    retry after the window starts from a clean RUNNING broker and wins."""
+    drains = _spy_drain(monkeypatch)
+    restarts = _spy_restart(monkeypatch)
+    app = _cooled(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 409, r.json
+    assert r.json["error"] == "restart_cooldown"
+    assert r.json["reason_code"] == app_mod.REASON_RESTART_COOLDOWN
+    assert isinstance(r.json["retry_after_s"], int), r.json
+    assert r.json["retry_after_s"] > 0, r.json
+    assert drains == [] and restarts == [], "a cooled-down restart drained"
+    assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING, \
+        "the cooldown refusal consumed the claim"
+    # The window passes (the boot recedes); the SAME app now restarts.
+    monkeypatch.setattr(app_mod, "BOOT_TIME", time.monotonic() - 91)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 202, r.json
+    assert len(restarts) == 1
+
+
+def test_a_202_carries_the_operation_id_the_claim_minted(tmp_path,
+                                                         monkeypatch):
+    """R16: the claim mints the id (the same shape /update/apply mints at its
+    claim), and the 202 hands it back."""
+    _spy_restart(monkeypatch)
+    app = _restartable(tmp_path, monkeypatch)
+    _, r = authed(app).post("/restart", json={})
+    assert r.status == 202, r.json
+    op = r.json["operation_id"]
+    assert isinstance(op, str) and op.startswith("restart-"), r.json
+    assert op == app.ctx.restart_operation_id
+
+
 def test_a_cross_origin_post_is_refused_before_anything_happens(tmp_path,
                                                                 monkeypatch):
     """_cors_headers answers ACAO:* unconditionally, so the BROWSER will not
@@ -1118,6 +1270,14 @@ def test_two_simultaneous_requests_produce_one_restart(tmp_path, monkeypatch):
     loser = [r for r in responses if r.status_code == 409][0]
     assert loser.json()["error"] == "restart_in_progress"
     assert loser.json()["reason_code"] == app_mod.REASON_RESTART_IN_PROGRESS
+    # R16: the loser is told WHICH restart beat it — the winner's own
+    # operation id, so a client retrying a request it thought had timed out
+    # can recognise its work already running rather than assuming a stranger's.
+    winner = [r for r in responses if r.status_code == 202][0]
+    op = winner.json()["operation_id"]
+    assert isinstance(op, str) and op.startswith("restart-"), winner.json()
+    assert loser.json()["operation_id"] == op, (
+        "the concurrent loser's 409 did not carry the winner's operation id")
 
 
 def test_the_claim_is_a_compare_and_swap(tmp_path, monkeypatch):

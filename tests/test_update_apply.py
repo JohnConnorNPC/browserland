@@ -1069,7 +1069,13 @@ def _apply_app(tmp_path, monkeypatch, *, apply_enabled=True,
     base = {"auth_token": TEST_TOKEN,
             "state_path": str(tmp_path / "webterm_state.json"),
             "update_apply_enabled": apply_enabled,
-            "restart_enabled": restart_enabled}
+            "restart_enabled": restart_enabled,
+            # The post-boot cooldown (#183, R6) defaults to 90s and reports
+            # the restart unavailable, which the apply preconditions would
+            # then refuse on — every fresh test app here is by definition
+            # inside it. 0 is the documented off switch; the cooldown itself
+            # is tested in test_restart.py.
+            "restart_cooldown_seconds": 0}
     base.update(cfg)
     app = create_app(base, name=f"webterm-apply-route-{_route_seq}")
     # The documented per-app capability seam (see test_restart.py): the route

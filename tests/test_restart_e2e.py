@@ -156,6 +156,11 @@ def _write_config(work: Path, *, restart_enabled) -> Path:
         "state_path": str(work / "webterm_state.json"),
         "recordings_dir": str(work / "recordings"),
         "editor_root": str(work),
+        # The post-boot cooldown (#183, R6) defaults to 90s, and this file
+        # restarts a broker moments after it boots — 0 is the documented off
+        # switch for exactly this. The cooldown has its own tests in
+        # test_restart.py; what is graded here is survival, not pacing.
+        "restart_cooldown_seconds": 0,
     }
     if restart_enabled is not None:
         config["restart_enabled"] = restart_enabled

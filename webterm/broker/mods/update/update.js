@@ -1182,6 +1182,9 @@
                         + 'whether anything would bring it back, so it '
                         + 'refuses to guess',
                     'restart-in-progress': 'a restart is already under way',
+                    'cooldown': 'this broker came back up moments ago, so '
+                        + 'another restart is held off for a short cooldown '
+                        + 'that clears by itself — try again shortly',
                     'cross-origin-forbidden': 'this page is not allowed to '
                         + 'ask this broker to restart',
                     'restart-error': 'the restart machinery itself failed '
@@ -1207,9 +1210,20 @@
                 // including one of the "drain_error: <exception text>"
                 // strings the broker only ever LOGS rather than documents
                 // as UI-facing — reads as this rather than as itself.
-                function restartReasonWords(code) {
-                    return RESTART_REASONS[code]
+                function restartReasonWords(code, retryAfterS) {
+                    const words = RESTART_REASONS[code]
                         || 'this broker did not say why';
+                    // The cooldown is the ONE reason with an honest number
+                    // attached (/info and the 409 both carry retry_after_s);
+                    // any other code — or a value that is not a positive
+                    // number — renders the sentence alone.
+                    if (code === 'cooldown'
+                            && typeof retryAfterS === 'number'
+                            && isFinite(retryAfterS) && retryAfterS > 0) {
+                        return words + ' (about '
+                            + Math.ceil(retryAfterS) + 's left)';
+                    }
+                    return words;
                 }
 
                 // The local broker's restart capability, read off the SAME
@@ -1228,7 +1242,7 @@
                     const r = rec && rec.restart;
                     if (!r || typeof r !== 'object') {
                         return { known: false, available: false,
-                                 reason: null,
+                                 reason: null, retryAfterS: null,
                                  continuity: { guaranteed: 0, at_risk: 0,
                                               unknown: 0 },
                                  bootId: null };
@@ -1242,6 +1256,9 @@
                         known: true,
                         available: !!r.available,
                         reason: r.reason_code || null,
+                        // Only the cooldown reason ever carries this (#183
+                        // R6); walked as untrusted like everything else here.
+                        retryAfterS: num(r.retry_after_s) || null,
                         continuity: { guaranteed: num(c.guaranteed),
                                      at_risk: num(c.at_risk),
                                      unknown: num(c.unknown) },
@@ -1373,7 +1390,8 @@
                         const code = body && body.reason_code;
                         restartOp = { phase: 'failed',
                             note: 'restart refused: '
-                                + restartReasonWords(code) };
+                                + restartReasonWords(code,
+                                    body && body.retry_after_s) };
                         renderAll();
                         return;
                     }
@@ -1675,7 +1693,7 @@
                         }
                     } else if (!info.available) {
                         status.textContent = info.known
-                            ? restartReasonWords(info.reason)
+                            ? restartReasonWords(info.reason, info.retryAfterS)
                             : 'this broker has not reported a restart '
                                 + 'capability yet';
                         status.classList.add('app-upd-grey');
@@ -1906,7 +1924,7 @@
                         }
                     } else if (code) {
                         stat.textContent = applyGateWords(code, info.known
-                            ? restartReasonWords(info.reason)
+                            ? restartReasonWords(info.reason, info.retryAfterS)
                             : 'this broker has not reported a restart '
                                 + 'capability yet');
                         stat.classList.add('app-upd-grey');

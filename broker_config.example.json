@@ -6,6 +6,8 @@
     "serve_ui": true,
     "_restart_enabled_note": "Off by default. When true, this broker is allowed to restart itself (drain, then exit for its supervisor to relaunch). Deliberately NOT implied by being logged in: the token already grants shell access, but bouncing a broker that is hosting live sessions is deployment policy, so only someone who can edit this file can allow it.",
     "restart_enabled": false,
+    "_restart_cooldown_seconds_note": "Minimum seconds after boot before this broker accepts another authorized restart. Default 90: the supervisor's crash budget is 5 relaunches per 60s, so restarts at least 90s apart can never exhaust it. 0 disables the cooldown.",
+    "restart_cooldown_seconds": 90,
     "_update_apply_enabled_note": "Off by default. When true, this broker may download and apply an update to itself. Deliberately config-file only, like restart_enabled above -- no sidecar, no GUI switch, no remote write: applying downloads and executes code as this process's user, so only someone who can edit this file can allow it. Independent of update_check_enabled/the update mod's GUI toggle, which merely ask whether something newer exists.",
     "update_apply_enabled": false,
     "editor_root": null,

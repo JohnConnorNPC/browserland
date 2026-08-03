@@ -1313,6 +1313,28 @@ RESTART_STOP_DELAY = 0.25
 #: per-app id would report a restart that never happened.
 BOOT_ID = secrets.token_hex(8)
 
+#: When this PROCESS came up — minted at the same moment as BOOT_ID, and
+#: module-level for the same reason: two apps in one interpreter are one
+#: process, and the restart cooldown below measures THIS process's own uptime.
+#: Our own clock on purpose: the supervisor's view of when it spawned us is not
+#: readable from here, and nothing a request carries may be allowed to move it.
+#: Monotonic, so stepping the wall clock can neither stretch the cooldown nor
+#: wave it away.
+BOOT_TIME = time.monotonic()
+
+#: Default for the ``restart_cooldown_seconds`` config key (#183, R6): how long
+#: after boot this broker refuses ANOTHER authorized restart. The supervisor
+#: charges authorized restarts to its crash budget today (see the NOTE in
+#: supervise.py's supervisor loop), and that budget is ``MAX_RESTARTS`` (5)
+#: relaunches per ``RESTART_WINDOW`` (60 s) — so a handful of deliberate
+#: back-to-back restarts could exhaust it and STOP the machine. The arithmetic
+#: behind 90: consecutive authorized restarts are then at least 90 s apart, and
+#: 90 > 60 means at most ONE of them can ever land inside any 60 s budget
+#: window — deliberate restarts alone can never spend the 5 the budget allows,
+#: while a genuine crash-loop is still caught exactly as before. 0 disables the
+#: cooldown (the tests and the e2e suite need that); negatives clamp to 0.
+RESTART_COOLDOWN_DEFAULT = 90
+
 #: ``restart.reason_code`` on /info, on top of ``supervise``'s vocabulary —
 #: which names only the MECHANISM's reasons (no supervisor, ppid mismatch, a
 #: systemd unit that will not respawn us). These two are BROKER-policy reasons
@@ -1321,6 +1343,12 @@ BOOT_ID = secrets.token_hex(8)
 #: exist. The UI renders these strings, so they are API — add, never repurpose.
 REASON_RESTART_DISABLED = "restart-disabled"          # the operator gate is off
 REASON_RESTART_IN_PROGRESS = "restart-in-progress"    # one is already under way
+#: This process came up too recently (#183, R6): back-to-back restarts are held
+#: off until the post-boot cooldown passes, so deliberate restarts can never
+#: exhaust the supervisor's crash budget (see RESTART_COOLDOWN_DEFAULT for the
+#: arithmetic). Unlike every reason above it clears BY ITSELF, which is why it
+#: is the one reason /info pairs with ``retry_after_s``.
+REASON_RESTART_COOLDOWN = "cooldown"
 #: POST /restart only: the caller is a page on some other origin.
 REASON_ORIGIN_FORBIDDEN = "cross-origin-forbidden"
 #: POST /restart only, and it should be unreachable: the machinery itself blew
@@ -1416,6 +1444,27 @@ def _continuity_summary(app) -> Dict[str, int]:
     return out
 
 
+def _restart_cooldown_remaining(app) -> float:
+    """Seconds left of the post-boot restart cooldown (#183, R6) — 0.0 once it
+    has passed, or when the operator disabled it (``restart_cooldown_seconds``
+    of 0).
+
+    Measured against BOOT_TIME, the worker's OWN boot (the same moment BOOT_ID
+    was minted): the cooldown exists to space out the exits the supervisor's
+    crash budget counts, and each of those exits is followed by exactly one
+    boot of ours, so our uptime is the honest proxy for "how recently was the
+    budget last charged". Defensive ``float()`` for the same reason
+    :func:`restart_status` never raises — /info is polled, and a hand-edited
+    ctx value must degrade to a definite number, not a 500."""
+    try:
+        cooldown = float(getattr(app.ctx, "restart_cooldown_seconds", 0.0))
+    except (TypeError, ValueError):
+        cooldown = 0.0
+    if cooldown <= 0:
+        return 0.0
+    return max(0.0, cooldown - (time.monotonic() - BOOT_TIME))
+
+
 def restart_status(app) -> Dict[str, Any]:
     """What GET /info reports under ``restart``, and what POST /restart refuses
     with (#183).
@@ -1433,9 +1482,16 @@ def restart_status(app) -> Dict[str, Any]:
     NOW), and ``reason_code`` names which of them said no.
 
     Reason precedence: the gate first (it is the one an operator can change,
-    and it is a broker-wide fact rather than a moment), then the mechanism, then
-    "already in progress". The last two cannot both be true — a restart cannot
-    be under way on a broker that has nothing to relaunch it.
+    and it is a broker-wide fact rather than a moment), then the mechanism,
+    then "already in progress", then the post-boot cooldown. The middle two
+    cannot both be true — a restart cannot be under way on a broker that has
+    nothing to relaunch it. The cooldown comes LAST deliberately (#183, R6):
+    it only masks an otherwise-available restart and it clears by itself, so
+    an operator shown "cooldown" over a missing gate or mechanism would wait
+    out a refusal that no amount of waiting can fix. When it IS the reason,
+    the block also carries ``retry_after_s`` (ceil of the seconds left) so a
+    client can say WHEN rather than just "not now" — the one reason with an
+    honest number attached, which is why the key is conditional.
 
     Never raises: every input is read through a defensive helper. An /info that
     500s because a capability probe hiccupped is worse than one that says
@@ -1445,6 +1501,7 @@ def restart_status(app) -> Dict[str, Any]:
     configured = bool(getattr(app.ctx, "restart_enabled", False))
     stage = _lifecycle(app)
     reason: Optional[str] = None
+    cooldown_left = 0.0
     if not configured:
         reason = REASON_RESTART_DISABLED
     elif mechanism == supervise.MECHANISM_NONE or not cap.get("supported"):
@@ -1455,13 +1512,20 @@ def restart_status(app) -> Dict[str, Any]:
         reason = str(cap.get("reason_code") or supervise.REASON_NO_SUPERVISOR)
     elif stage != LIFECYCLE_RUNNING:
         reason = REASON_RESTART_IN_PROGRESS
-    return {"configured": configured,
-            "available": reason is None,
-            "mechanism": mechanism,
-            "reason_code": reason,
-            "continuity": _continuity_summary(app),
-            "lifecycle": stage,
-            "bootId": BOOT_ID}
+    else:
+        cooldown_left = _restart_cooldown_remaining(app)
+        if cooldown_left > 0:
+            reason = REASON_RESTART_COOLDOWN
+    out = {"configured": configured,
+           "available": reason is None,
+           "mechanism": mechanism,
+           "reason_code": reason,
+           "continuity": _continuity_summary(app),
+           "lifecycle": stage,
+           "bootId": BOOT_ID}
+    if reason == REASON_RESTART_COOLDOWN:
+        out["retry_after_s"] = math.ceil(cooldown_left)
+    return out
 
 
 def _claim_restart(app) -> bool:
@@ -1482,6 +1546,13 @@ def _claim_restart(app) -> bool:
     if _lifecycle(app) != LIFECYCLE_RUNNING:
         return False
     app.ctx.lifecycle = LIFECYCLE_QUIESCING
+    # R16: the claim is where the operation gets its identity — the same shape
+    # /update/apply mints at ITS claim ("apply-" + hex), so the loser of this
+    # CAS can be answered with the id of the restart that beat it and a client
+    # retrying a request it thought had timed out can recognise its own work.
+    # Minted HERE and not in the route, because /update/apply claims the
+    # restart through this same function and its restart must not be anonymous.
+    app.ctx.restart_operation_id = "restart-" + secrets.token_hex(8)
     return True
 
 
@@ -3266,6 +3337,21 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # standing order; it must be impossible to bounce it merely by being
     # logged in, and only someone who can edit broker_config can change that.
     app.ctx.restart_enabled = bool(config.get("restart_enabled", False))
+    # How long after boot ANOTHER authorized restart is refused (#183, R6).
+    # Same posture and placement as restart_enabled above: config-file only —
+    # no sidecar, no GUI switch, no remote write — because it exists to protect
+    # the supervisor's crash budget (MAX_RESTARTS=5 relaunches per
+    # RESTART_WINDOW=60 s; see RESTART_COOLDOWN_DEFAULT for the 90 > 60
+    # arithmetic), and anything a logged-in session could lower would let it
+    # exhaust that budget anyway. 0 disables; negatives clamp to 0; an
+    # unreadable value falls back to the DEFAULT, never to "off" — a typo in
+    # the config must not silently remove the guard.
+    try:
+        _cooldown = float(config.get("restart_cooldown_seconds",
+                                     RESTART_COOLDOWN_DEFAULT))
+    except (TypeError, ValueError):
+        _cooldown = float(RESTART_COOLDOWN_DEFAULT)
+    app.ctx.restart_cooldown_seconds = max(0.0, _cooldown)
     # The drain state machine's one variable (see drain_for_restart). Every
     # handler that creates new work reads it through _refuse_if_quiescing, so a
     # broker on its way out stops accepting what it cannot finish.
@@ -3273,6 +3359,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # Strong ref to the deferred stop task, once a restart is under way.
     app.ctx.restart_stop_task = None
     app.ctx.restart_task = None
+    # R16: the in-flight restart's identity, minted by _claim_restart at claim
+    # time (None until a claim has ever been won). A losing concurrent caller's
+    # 409 carries the WINNER's id — the twin of update_apply_claim below.
+    app.ctx.restart_operation_id = None
     # CAN this process be restarted by exiting — probed ONCE, here, and never
     # again (see _probe_restart_capability: it can block for 5 s on `systemctl
     # show`, and /info is polled). Seeded onto ctx so a test can override ONE
@@ -6639,13 +6729,36 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "restart_unsupported",
                                "reason_code": status["reason_code"],
                                "restart": status}, status=409)
+        if status["reason_code"] == REASON_RESTART_COOLDOWN:
+            # The post-boot cooldown (#183, R6), refused BEFORE the claim
+            # deliberately: a cooled-down caller must neither consume the CAS
+            # nor observe it — the lifecycle is untouched, so a retry after
+            # retry_after_s starts from a clean RUNNING broker. 409 like the
+            # mechanism refusals above (a state this process happens to be in,
+            # not a permission), except this state clears by itself and the
+            # body says WHEN.
+            LOGGER.warning("restart refused: cooldown, %ss left (%s)",
+                           status.get("retry_after_s"), request.ip)
+            return sanic_json({"ok": False, "error": "restart_cooldown",
+                               "reason_code": REASON_RESTART_COOLDOWN,
+                               "retry_after_s": status.get("retry_after_s"),
+                               "restart": status}, status=409)
         # THE CLAIM. Two clicks, a double-submit, or a client retrying a request
         # it thought had timed out must produce ONE restart; the loser is told
         # so rather than starting a second drain and a second stop.
         if not _claim_restart(app):
             return sanic_json({"ok": False, "error": "restart_in_progress",
                                "reason_code": REASON_RESTART_IN_PROGRESS,
+                               # R16: the WINNER's id, so a client retrying a
+                               # request it thought had timed out can tell its
+                               # own restart from a stranger's — the exact
+                               # shape /update/apply's 409 already has.
+                               "operation_id": getattr(
+                                   app.ctx, "restart_operation_id", None),
                                "restart": restart_status(app)}, status=409)
+        # Captured NOW, while this request still owns the claim: a failed
+        # restart resumes the broker, and a later winner would re-mint it.
+        operation_id = app.ctx.restart_operation_id
         # AUDIT. This bounces a machine, so it is a warning and it is written
         # BEFORE anything happens — a restart that wedges half way must still
         # leave a record of who asked. We know the caller's address and that
@@ -6680,6 +6793,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                "reason_code": REASON_RESTART_ERROR,
                                "restart": restart_status(app)}, status=503)
         body = {"ok": bool(result.get("ok")),
+                # R16: the id the claim minted, in every outcome of the
+                # operation it names — the 202 a poller correlates with a
+                # concurrent 409's operation_id, and the failure shapes too.
+                "operation_id": operation_id,
                 # The whole drain report: what was waited for, what timed out,
                 # and which upload/recording sessions the restart cost. An
                 # operator gets told what it destroyed, not just that it worked.

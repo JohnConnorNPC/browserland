@@ -64,6 +64,11 @@ _CHUNKS = (
     # setChecking/offerConsent. Declaration-only like the rest; the row that
     # renders it and its confirm dialog are NOT in range (they touch the DOM).
     ("const policyOps = new Map();", "// ---- self-restart (#183) ---"),
+    # #183: the restart reason words (RESTART_REASONS + restartReasonWords),
+    # so the R6 cooldown sentence is proven against the SHIPPED table.
+    # restartInfo() just past the end anchor reads modCatalogCache, so the
+    # range stops before it.
+    ("const RESTART_REASONS = {", "// The local broker's restart capability"),
 )
 
 _REQUIRED = (
@@ -91,6 +96,9 @@ _REQUIRED = (
     "function staleSurvivors", "function deployStrip",
     "function applyTargetSha", "function applyGateFromFacts",
     "function applyGateWords", "function applyRefusalOutcome",
+    # #183 R6: the restart reason words, sliced from update.js's own
+    # self-restart block so the cooldown sentence tested is the shipped one.
+    "const RESTART_REASONS", "function restartReasonWords",
 )
 
 
@@ -1088,6 +1096,26 @@ CASES.apply_refusals = async () => {
     return out;
 };
 
+// --- #183 R6: the cooldown reason's words ---------------------------------
+// Pure over the shipped RESTART_REASONS table -- no host, no fleet.
+CASES.restart_cooldown_words = async () => {
+    const out = {};
+    out.known = Object.prototype.hasOwnProperty.call(
+        RESTART_REASONS, 'cooldown');
+    out.plain = restartReasonWords('cooldown');
+    out.withRetry = restartReasonWords('cooldown', 42);
+    out.badRetry = restartReasonWords('cooldown', 'soon');
+    out.otherReasonIgnoresRetry = restartReasonWords('restart-disabled', 42);
+    out.unknownCode = restartReasonWords('never-a-code', 42);
+    // The Update... button's gate: a cooldown flows through as the ordinary
+    // restart-unavailable wording, no special-casing anywhere.
+    out.applyGateCode = applyGateFromFacts('behind', 'b'.repeat(40),
+        true, false);
+    out.applyGateWords = applyGateWords(out.applyGateCode,
+        restartReasonWords('cooldown', 30));
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -2014,3 +2042,31 @@ def test_202_never_renders_success_here_and_hands_off_to_the_boot_watch(
     assert "recheck()" in wait_seg, (
         "a proven restart must still hand off to a recheck, never assume "
         "the target was reached")
+
+
+# ---- #183 R6: the cooldown reason has honest words -------------------------
+
+def test_the_cooldown_reason_has_honest_words(harness):
+    """The broker's new "cooldown" reason_code must render as a sentence that
+    says it clears by itself — never the raw token, and never the generic
+    "did not say why" — and the retry_after_s the broker pairs with it is
+    shown only when it is a genuine positive number."""
+    r = run(harness, "restart_cooldown_words")
+    assert r["known"] is True, "RESTART_REASONS has no 'cooldown' entry"
+    assert r["plain"] != "this broker did not say why", (
+        "the cooldown fell through to the generic sentence")
+    assert "clears by itself" in r["plain"], r["plain"]
+    # The number is additive: same sentence, plus WHEN.
+    assert r["withRetry"].startswith(r["plain"]), r["withRetry"]
+    assert "42" in r["withRetry"]
+    # ...and only when it really is a positive number, only for the cooldown.
+    assert r["badRetry"] == r["plain"], (
+        "a non-numeric retry_after_s leaked into the rendered words")
+    assert "42" not in r["otherReasonIgnoresRetry"]
+    assert r["unknownCode"] == "this broker did not say why"
+    # The Update… button's gate needs NO extra work for a cooldown: restart
+    # unavailable is restart unavailable, and the reason words flow through.
+    assert r["applyGateCode"] == "restart-unavailable-here"
+    assert "applying needs a restart to take effect" in r["applyGateWords"]
+    assert r["plain"] in r["applyGateWords"], (
+        "the cooldown words did not flow through the apply gate wording")
