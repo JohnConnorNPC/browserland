@@ -54,11 +54,12 @@ The button is disabled with a reason when:
 - **The launcher's parent is no longer running** — the process tree changed (you might have reparented the broker to a different shell). Restart manually.
 - **Systemd will not restart this unit** — the unit's `Restart=` policy is `no`, `on-success`, `on-abort`, `on-abnormal`, or `on-watchdog`, none of which respawn on a plain non-zero exit. A graceful stop now would leave nothing listening. Restart manually or change the unit.
 - **A restart is already under way** — wait for it to finish and check back.
+- **The broker started moments ago** — a cooldown (`restart_cooldown_seconds`, default 90, config-file only, `0` disables) refuses back-to-back restarts so a run of deliberate clicks cannot exhaust the supervisor's crash budget. It clears by itself, and the message says roughly how long is left.
 - **This broker could not read its restart policy** — the broker could not contact systemd or parse the unit. Restart manually or give the broker time to try again.
 
-The button's label also reports one number: your browser's **current** session count on this broker, or `loading…` if it is being fetched. That is a preview; the final confirm dialog shows the full continuity breakdown a moment before the restart.
+The session cost is shown in the confirm dialog itself, a moment before anything stops.
 
-After a restart, a new `bootId` is reported by the broker. Observe it in the **Restart** button's label (or in the browser's developer console: `GET /info` returns `restart.bootId`). If it did not change after you clicked **Restart**, the restart did not happen, and the broker either refused it or failed to relaunch.
+After a restart, a new `bootId` is reported by the broker (`GET /info` returns `restart.bootId`). The window watches it for you: only a *changed* `bootId` is treated as proof the restart happened. If it never changes, the restart did not happen — the broker either refused it or failed to relaunch, and the window says so.
 
 ## Windows scheduled-task note
 
@@ -68,7 +69,7 @@ When the broker runs under a Windows scheduled task (instead of systemd), the **
 
 The **Update…** button in the update window (available only on the serving broker) applies the update that the check has previewed. It is manual-trigger only — no schedule, no auto-install, never automatic. Clicking it shows a confirm dialog with the commit range from the current build to the target, the commit count, a GitHub compare link, and a preview of your session cost — which terminals and agents will survive the restart, and which will be lost.
 
-Applying an update requires **two config gates**, both on the broker that is doing the applying. They are **config-file only**; there is no GUI switch:
+Applying an update requires **three config gates**, all on the broker that is doing the applying. They are **config-file only**; there is no GUI switch:
 
 - `update_check_enabled: true` — the broker has checked for updates (required to know what commit to apply).
 - `update_apply_enabled: true` — the broker is permitted to apply updates.

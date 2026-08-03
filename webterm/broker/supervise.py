@@ -1412,11 +1412,13 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                 state["deploy_detail"] = "unauthorized-restart-request"
                 return EXIT_RESTART
 
-            # NOTE (#183, open): an authorized restart arguably should not be
-            # charged to the CRASH budget -- restarting a broker that had been
-            # up for less than READY_SECONDS counts against it today, so a few
-            # deliberate back-to-back restarts can exhaust it and stop the
-            # machine, which is not what the budget is for.
+            # NOTE (#183): an authorized restart is still charged to the CRASH
+            # budget -- restarting a broker that had been up for less than
+            # READY_SECONDS counts against it. The worker-side restart cooldown
+            # (`restart_cooldown_seconds`, app.py, default 90 > the 60 s budget
+            # window) now bounds AUTHORIZED restarts to at most one per window,
+            # so deliberate clicking can no longer exhaust the budget; only a
+            # crash loop can, which is what the budget is for.
             #
             # Setting `came_up = True` here is NOT the fix: it clears the budget
             # on every authorized restart, which removes the only backstop, and

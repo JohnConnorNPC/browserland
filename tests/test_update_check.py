@@ -738,11 +738,14 @@ def test_the_check_response_omits_last_deploy_when_there_is_none(
 
 def test_the_egress_comment_names_both_routes():
     """app.py's egress comment is load-bearing for reviewing this codebase's
-    threat model. Adding a second outbound route made the old wording false."""
+    threat model. Adding a second outbound route made the old wording false,
+    and the apply's git-fetch (a subprocess, not urllib) is a third egress
+    path that must stay named there too."""
     src = Path(broker_app.__file__).read_text(encoding="utf-8")
     assert "GET /status/fetch is its ONLY" not in src
     head = src[:src.index("STATUS_ALLOWLIST")]
     assert "/update/check" in head and "/status/fetch" in head
+    assert "/update/apply" in head and "git" in head
 
 
 # ---- A1: the capability signal on GET /info ---------------------------------
