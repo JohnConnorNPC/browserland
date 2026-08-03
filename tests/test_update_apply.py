@@ -497,7 +497,7 @@ def test_unrelated_paths_do_not_fire():
     rep = update.dependency_delta([
         "webterm/broker/update.py", "wiki/Home.md", "10_css_root.css",
         "webterm/broker/vendor/codemirror/state.mjs", "media/shot.png",
-        "docs/requirements.md",        # requirements-named, but not a .txt
+        "notes/requirements.md",       # requirements-named, but not a .txt
         "setup.pyc",                   # not setup.py
         "tests/test_update_apply.py",
     ])
