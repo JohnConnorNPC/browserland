@@ -1058,10 +1058,26 @@ sys.exit(0)
 '''
 
 
+def _fake_revert(result=None):
+    """A recording stand-in for the A28 revert. Injected into EVERY loop test
+    that has a pending journal, because the default (perform_rollback) runs
+    git against the real checkout this test file lives in."""
+    calls = []
+
+    def revert(old_sha):
+        calls.append(old_sha)
+        if result is not None:
+            return dict(result)
+        return {"ok": True, "outcome": supervise.DEPLOY_ROLLED_BACK,
+                "detail": None}
+    return revert, calls
+
+
 def _drive_deploy(tmp_path, *, observed, sleep=1.5, ready=0.5):
     """One full deploy through the real supervisor loop: journal -> armed 75
     -> next generation -> adjudication. ``observed`` is what the injected
-    sha_reader reports at ready-time."""
+    sha_reader reports at ready-time. The injected revert records; a deploy
+    that came up (on either sha) must never call it."""
     script = tmp_path / "deploy_worker.py"
     script.write_text(_DEPLOY_CHILD, encoding="utf-8")
     counter = tmp_path / "count"
@@ -1069,27 +1085,29 @@ def _drive_deploy(tmp_path, *, observed, sleep=1.5, ready=0.5):
     run_dir.mkdir()
     hook_calls = []
     logs = []
+    revert, reverts = _fake_revert()
     code = supervise.supervise(
         [], child_cmd=[sys.executable, str(script), str(counter), str(sleep),
                        OLD_SHA, NEW_SHA],
         env=_child_env(), log=logs.append, install_signals=False,
         run_dir=str(run_dir), ready_seconds=ready, backoff_base=0.0,
-        sha_reader=lambda: observed,
+        sha_reader=lambda: observed, rollback=revert,
         deploy_hook=lambda record, outcome: hook_calls.append(
             (record, outcome)))
     try:
         count = int(counter.read_text(encoding="utf-8").strip() or "0")
     except (OSError, ValueError):
         count = 0
-    return code, count, logs, hook_calls, run_dir
+    return code, count, logs, hook_calls, run_dir, reverts
 
 
 def test_a_deploy_that_comes_back_ready_on_target_is_success(tmp_path):
     """R10 end to end: the SECOND generation -- a fresh pid the supervisor
     itself spawned -- stayed up past ready and reports the target sha."""
-    code, count, logs, hooks, run_dir = _drive_deploy(tmp_path,
-                                                      observed=NEW_SHA)
+    code, count, logs, hooks, run_dir, reverts = _drive_deploy(
+        tmp_path, observed=NEW_SHA)
     assert (code, count) == (0, 2)
+    assert reverts == [], "a successful deploy must never revert"
     assert len(hooks) == 1, "the hook fires exactly once per deploy"
     record, outcome = hooks[0]
     assert record["oldSha"] == OLD_SHA
@@ -1109,10 +1127,14 @@ def test_a_deploy_that_comes_back_ready_on_target_is_success(tmp_path):
 
 def test_a_deploy_that_comes_back_on_the_wrong_sha(tmp_path):
     """The worker came up -- but not on the build the journal named. Never
-    reported as success; the outcome names what was actually observed."""
-    code, count, _, hooks, run_dir = _drive_deploy(tmp_path,
-                                                   observed=OLD_SHA)
+    reported as success; the outcome names what was actually observed. And
+    NEVER reverted (A28): that worker is alive and healthy, and killing a
+    live worker to fix a bookkeeping surprise is worse than the loud
+    wrong-sha verdict, which stays visible in the outcome file."""
+    code, count, _, hooks, run_dir, reverts = _drive_deploy(
+        tmp_path, observed=OLD_SHA)
     assert (code, count) == (0, 2)
+    assert reverts == [], "wrong-sha must never revert a live worker"
     assert len(hooks) == 1
     record, outcome = hooks[0]
     assert record["targetSha"] == NEW_SHA
@@ -1121,49 +1143,68 @@ def test_a_deploy_that_comes_back_on_the_wrong_sha(tmp_path):
     assert not (run_dir / supervise.DEPLOY_JOURNAL_FILENAME).exists()
 
 
-def test_a_deploy_whose_worker_never_comes_up_is_never_came_up(tmp_path):
-    """A journal is pending and every generation exits 75 (armed) without ever
-    staying up: the budget runs out, and the supervisor -- the only process
-    still alive to observe it -- adjudicates never-came-up."""
+def test_a_deploy_whose_worker_never_comes_up_is_rolled_back(tmp_path):
+    """A journal is pending and every generation exits 75 (armed) without
+    ever staying up: the budget runs out and the supervisor -- the only
+    process still alive to observe it -- adjudicates the failure and, since
+    A28, REVERTS to the journalled old sha and respawns the old code with one
+    fresh budget. The old code (the same fake) cannot come up either, so the
+    budget exhausts a second time -- with no journal left to revert -- and
+    the supervisor exits: the test terminating at all IS the no-infinite-loop
+    proof."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     record = supervise.build_deploy_record(OLD_SHA, NEW_SHA,
                                            {"brokerId": "t"}, "op-nvr")
     assert supervise.write_deploy_journal(str(run_dir), record)
     hooks = []
+    revert, reverts = _fake_revert()
     code, count, logs = _drive(tmp_path, limit=10 ** 6, arm="good",
                                max_restarts=2, ready_seconds=30.0,
                                run_dir=str(run_dir),
-                               sha_reader=lambda: NEW_SHA,
+                               sha_reader=lambda: NEW_SHA, rollback=revert,
                                deploy_hook=lambda r, o: hooks.append((r, o)))
     assert code == supervise.EXIT_SUPERVISOR_FAILED
+    assert reverts == [OLD_SHA], "one revert, to the exact journalled sha"
     assert len(hooks) == 1, "exactly one adjudication per deploy"
     got_record, outcome = hooks[0]
     assert got_record["operationId"] == "op-nvr"
-    assert outcome["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
-    assert outcome["detail"] == "restart-budget-exhausted"
+    assert outcome["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert "restart-budget-exhausted" in outcome["detail"], \
+        "the original failure must stay visible in the rolled-back outcome"
     assert not (run_dir / supervise.DEPLOY_JOURNAL_FILENAME).exists()
     saved = json.loads((run_dir / supervise.DEPLOY_OUTCOME_FILENAME)
                        .read_text(encoding="utf-8"))
-    assert saved["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert saved["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert saved["record"]["targetSha"] == NEW_SHA, \
+        "the failed target sha stays visible alongside the verdict"
+    # 3 spawns burned the budget, the revert reset it once, 3 more burned it
+    # again: bounded, and visibly so.
+    assert count == 6
+    assert any("rolled the checkout back" in line for line in logs), logs
 
 
-def test_a_plain_crash_during_a_deploy_is_never_came_up(tmp_path):
+def test_a_plain_crash_during_a_deploy_rolls_back_then_old_code_runs(tmp_path):
     """The post-deploy generation dies with an ordinary exit code before
-    reaching ready: the supervisor stops, and the deploy is adjudicated
-    never-came-up with the exit recorded in the detail."""
+    reaching ready: since A28 the checkout is reverted and the loop respawns
+    (the old code -- here the same fake, which exits 1 again with no journal
+    pending, so the exit code propagates as before the deploy)."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-crash")
     assert supervise.write_deploy_journal(str(run_dir), record)
     hooks = []
+    revert, reverts = _fake_revert()
     code, count, _ = _drive(tmp_path, limit=0, final=1,
                             run_dir=str(run_dir), ready_seconds=30.0,
+                            rollback=revert,
                             deploy_hook=lambda r, o: hooks.append((r, o)))
-    assert (code, count) == (1, 1)
+    assert (code, count) == (1, 2), \
+        "revert, ONE respawn on old code, then the old-code exit propagates"
+    assert reverts == [OLD_SHA]
     assert len(hooks) == 1
-    assert hooks[0][1]["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
-    assert hooks[0][1]["detail"] == "worker-exited-1"
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert "worker-exited-1" in hooks[0][1]["detail"]
 
 
 def test_a_non_deploy_restart_adjudicates_nothing(tmp_path):
@@ -1179,3 +1220,306 @@ def test_a_non_deploy_restart_adjudicates_nothing(tmp_path):
     assert hooks == []
     assert not (run_dir / supervise.DEPLOY_OUTCOME_FILENAME).exists()
     assert not (run_dir / supervise.DEPLOY_QUARANTINE_FILENAME).exists()
+
+
+# --------------------------------------------------------------------------- #
+# rollback through the deploy coordinator (A28)
+# --------------------------------------------------------------------------- #
+#
+# The #182 acceptance line: "A build that fails to start is rolled back to the
+# recorded sha automatically, and the failure is visible afterwards." The
+# decision is a pure table (revert ONLY on a genuine startup failure); the
+# revert is one pinned argv (a hard reset to the exact journalled sha, hooks
+# disabled); and every outcome -- rolled-back, refused, failed -- lands in the
+# outcome file. Loop tests inject _fake_revert, never the real thing: the
+# default revert runs git against the checkout THIS test file lives in.
+
+
+def test_rollback_outcome_names_are_pinned():
+    """The UI and last_deploy_outcome consumers switch on these strings; a
+    rename must fail a test rather than silently orphan a consumer."""
+    assert supervise.DEPLOY_ROLLED_BACK == "rolled-back"
+    assert supervise.DEPLOY_ROLLBACK_IMPOSSIBLE == "rollback-impossible"
+    assert supervise.DEPLOY_ROLLBACK_FAILED == "rollback-failed"
+    assert supervise.ROLLBACK_REVERT == "revert"
+    assert supervise.ROLLBACK_LEAVE == "leave"
+
+
+@pytest.mark.parametrize("outcome,detail,expected", [
+    # revert: ONLY never-came-up whose detail is a genuine startup failure
+    (supervise.DEPLOY_NEVER_CAME_UP, "restart-budget-exhausted", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "bind-failed", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "spawn-failed", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "worker-exited-0", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "worker-exited-1", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "worker-exited-78", "revert"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "worker-exited--15", "revert"),
+    # leave: an operator stop is not a failed build
+    (supervise.DEPLOY_NEVER_CAME_UP, "stopped-by-signal", "leave"),
+    # leave: a forged or crashed 75 proves nothing about the build
+    (supervise.DEPLOY_NEVER_CAME_UP, "unauthorized-restart-request", "leave"),
+    # leave: an unknown cause must never mutate the checkout
+    (supervise.DEPLOY_NEVER_CAME_UP, "supervisor-exited", "leave"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "worker-never-ready", "leave"),
+    (supervise.DEPLOY_NEVER_CAME_UP, "something-new", "leave"),
+    (supervise.DEPLOY_NEVER_CAME_UP, None, "leave"),
+    (supervise.DEPLOY_NEVER_CAME_UP, 42, "leave"),
+    # leave: a live worker is never killed over bookkeeping (wrong-sha), and
+    # success obviously never reverts -- whatever the detail claims
+    (supervise.DEPLOY_WRONG_SHA, "sha-unreadable", "leave"),
+    (supervise.DEPLOY_WRONG_SHA, None, "leave"),
+    (supervise.DEPLOY_WRONG_SHA, "worker-exited-1", "leave"),
+    (supervise.DEPLOY_READY_ON_TARGET, None, "leave"),
+    (supervise.DEPLOY_READY_ON_TARGET, "restart-budget-exhausted", "leave"),
+    ("cancelled-before-restart", "spawn-failed", "leave"),
+    (None, "worker-exited-1", "leave"),
+])
+def test_rollback_decision_table(outcome, detail, expected):
+    assert supervise.rollback_decision(outcome, detail) == expected
+
+
+def test_rollback_argv_is_a_hard_reset_with_hooks_disabled():
+    """Pinned literally: reset --hard to the EXACT journalled sha, hooks
+    disabled the same way the apply's merge disables them, and nothing else
+    in the argv at all."""
+    assert supervise.rollback_argv("/checkout", OLD_SHA) == [
+        "git", "-C", "/checkout", "-c", "core.hooksPath=" + os.devnull,
+        "reset", "--hard", OLD_SHA]
+
+
+def test_perform_rollback_runs_exactly_the_pinned_argv(tmp_path):
+    (tmp_path / ".git").mkdir()
+    seen = []
+
+    def runner(argv):
+        seen.append(list(argv))
+        return 0, ""
+
+    out = supervise.perform_rollback(OLD_SHA, root=str(tmp_path),
+                                     git_runner=runner)
+    assert out == {"ok": True, "outcome": supervise.DEPLOY_ROLLED_BACK,
+                   "detail": None}
+    assert seen == [supervise.rollback_argv(str(tmp_path), OLD_SHA)]
+
+
+def test_perform_rollback_refuses_a_malformed_old_sha(tmp_path):
+    """Full lowercase 40-hex only, checked before ANY argv is built -- the
+    same rule as begin_deploy, and what makes option injection structurally
+    impossible. The refusal is rollback-impossible, visibly."""
+    (tmp_path / ".git").mkdir()
+    called = []
+    for bad in (None, "HEAD", OLD_SHA[:7], OLD_SHA.upper(), OLD_SHA + "aa",
+                "main", 42, "--hard"):
+        out = supervise.perform_rollback(
+            bad, root=str(tmp_path),
+            git_runner=lambda a: called.append(a) or (0, ""))
+        assert out["ok"] is False, bad
+        assert out["outcome"] == supervise.DEPLOY_ROLLBACK_IMPOSSIBLE, bad
+    assert called == [], "a refused sha must never reach git"
+
+
+def test_perform_rollback_refuses_without_a_git_checkout(tmp_path):
+    called = []
+    out = supervise.perform_rollback(
+        OLD_SHA, root=str(tmp_path / "not-a-checkout"),
+        git_runner=lambda a: called.append(a) or (0, ""))
+    assert out["ok"] is False
+    assert out["outcome"] == supervise.DEPLOY_ROLLBACK_IMPOSSIBLE
+    assert out["detail"] == "no-git-checkout"
+    assert called == []
+
+
+def test_a_failed_git_reset_reports_bounded_stderr(tmp_path):
+    """A failed tree rewrite can name every locked file; the outcome file
+    must not carry all of it."""
+    (tmp_path / ".git").mkdir()
+    out = supervise.perform_rollback(OLD_SHA, root=str(tmp_path),
+                                     git_runner=lambda a: (128, "x" * 10_000))
+    assert out["ok"] is False
+    assert out["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
+    assert len(out["detail"]) <= supervise.ROLLBACK_STDERR_CAP + 20
+
+
+def test_a_git_that_could_not_run_is_rollback_failed_not_a_crash(tmp_path):
+    (tmp_path / ".git").mkdir()
+    out = supervise.perform_rollback(
+        OLD_SHA, root=str(tmp_path),
+        git_runner=lambda a: (None, "git did not run: timeout"))
+    assert out["ok"] is False
+    assert out["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
+    assert "timeout" in out["detail"]
+
+
+def test_the_rollback_speaks_no_other_git_verb():
+    """The hard rule, held structurally: the revert is reset --hard ONLY. No
+    network verb (a rollback must never generate egress) and no other
+    mutation verb ever appears as a quoted argument in supervise.py -- the
+    same quoted-literal trick as update.py's mutation-section guard."""
+    body = Path(supervise.__file__).read_text(encoding="utf-8")
+    for verb in ('"pull"', '"merge"', '"fetch"', '"clean"', '"stash"',
+                 '"checkout"'):
+        assert verb not in body, (
+            "%s must never appear as a git argument in supervise.py; the "
+            "rollback is a hard reset to an on-disk sha and nothing else"
+            % verb)
+
+
+# ---- rollback through the real loop ------------------------------------------
+
+
+def test_a_bind_failure_during_a_deploy_rolls_back(tmp_path):
+    """The new build cannot bind (a changed default, a config it reads
+    differently): revert, then ONE fresh chance for the old code. The fake
+    old code fails the same way -- with no journal left -- and the bind stop
+    behaves exactly as before the deploy."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-bind")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    revert, reverts = _fake_revert()
+    code, count, logs = _drive(tmp_path, limit=0,
+                               final=supervise.EXIT_ADDR_IN_USE,
+                               run_dir=str(run_dir), ready_seconds=30.0,
+                               rollback=revert,
+                               deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (supervise.EXIT_ADDR_IN_USE, 2)
+    assert reverts == [OLD_SHA]
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert "bind-failed" in hooks[0][1]["detail"]
+    assert any("bind" in line for line in logs), logs
+
+
+def test_a_spawn_failure_during_a_deploy_rolls_back(tmp_path):
+    """The new build cannot even be spawned: revert, one fresh chance, and
+    when the spawn fails again (no journal left) the supervisor gives up as
+    it always did."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-spawn")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    revert, reverts = _fake_revert()
+    logs = []
+    code = supervise.supervise(
+        [], child_cmd=[str(tmp_path / "definitely-not-an-executable")],
+        env=_child_env(), log=logs.append, install_signals=False,
+        run_dir=str(run_dir), rollback=revert,
+        deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert code == supervise.EXIT_SUPERVISOR_FAILED
+    assert reverts == [OLD_SHA]
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert "spawn-failed" in hooks[0][1]["detail"]
+
+
+def test_an_operator_stop_during_a_deploy_never_reverts(tmp_path):
+    """An operator's SIGTERM/SIGINT is not a failed build. The deploy is
+    finalized never-came-up/stopped-by-signal for the record -- visible --
+    but the checkout is left exactly where the operator stopped it."""
+    import signal as signal_mod
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-stop")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    script = tmp_path / "fake_worker.py"
+    script.write_text(_FAKE_CHILD, encoding="utf-8")
+    counter = tmp_path / "count"
+    fired = []
+
+    def sleeper(_seconds):
+        if not fired:
+            fired.append(True)
+            signal_mod.raise_signal(signal_mod.SIGINT)
+
+    hooks = []
+    revert, reverts = _fake_revert()
+    logs = []
+    code = supervise.supervise(
+        [], child_cmd=[sys.executable, str(script), str(counter),
+                       "1000000", "0", "good", "0"],
+        env=_child_env(), log=logs.append, install_signals=True,
+        run_dir=str(run_dir), backoff_base=1.0, sleeper=sleeper,
+        rollback=revert, deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert code == 128 + int(signal_mod.SIGINT)
+    assert reverts == [], "an operator stop must never revert the checkout"
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert hooks[0][1]["detail"] == "stopped-by-signal"
+    saved = json.loads((run_dir / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+
+
+def test_an_unauthorized_75_during_a_deploy_never_reverts(tmp_path):
+    """An unarmed 75 is a crash whose meaning is unknown -- it proves nothing
+    about the build, so the checkout is left alone and the deploy finalizes
+    never-came-up with the unauthorized detail, visibly."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-unauth")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    revert, reverts = _fake_revert()
+    code, count, _ = _drive(tmp_path, limit=5, arm="none",
+                            run_dir=str(run_dir), rollback=revert,
+                            deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (supervise.EXIT_RESTART, 1)
+    assert reverts == []
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert hooks[0][1]["detail"] == "unauthorized-restart-request"
+
+
+def test_a_failed_revert_is_visible_and_does_not_respawn(tmp_path):
+    """When git itself fails the outcome file says rollback-failed -- with
+    the ORIGINAL failure and the git error both in the detail -- and the
+    supervisor exits on the original failure path. No retry loop: a revert
+    that already failed is not attempted again."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-rbf")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+    revert, reverts = _fake_revert(result={
+        "ok": False, "outcome": supervise.DEPLOY_ROLLBACK_FAILED,
+        "detail": "fatal: unable to write new index file"})
+    code, count, _ = _drive(tmp_path, limit=0, final=1,
+                            run_dir=str(run_dir), ready_seconds=30.0,
+                            rollback=revert,
+                            deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (1, 1), "a failed revert must NOT respawn"
+    assert reverts == [OLD_SHA]
+    assert len(hooks) == 1
+    outcome = hooks[0][1]
+    assert outcome["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
+    assert "worker-exited-1" in outcome["detail"]
+    assert "unable to write new index" in outcome["detail"]
+    saved = json.loads((run_dir / supervise.DEPLOY_OUTCOME_FILENAME)
+                       .read_text(encoding="utf-8"))
+    assert saved["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
+
+
+def test_a_revert_that_raises_is_contained_and_reported(tmp_path):
+    """An injected revert (or a bug in the real one) must never take down the
+    loop: the deploy finalizes rollback-failed and the original exit
+    propagates."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    record = supervise.build_deploy_record(OLD_SHA, NEW_SHA, None, "op-boom")
+    assert supervise.write_deploy_journal(str(run_dir), record)
+    hooks = []
+
+    def exploding(_old_sha):
+        raise RuntimeError("revert exploded")
+
+    code, count, _ = _drive(tmp_path, limit=0, final=1,
+                            run_dir=str(run_dir), ready_seconds=30.0,
+                            rollback=exploding,
+                            deploy_hook=lambda r, o: hooks.append((r, o)))
+    assert (code, count) == (1, 1)
+    assert len(hooks) == 1
+    assert hooks[0][1]["outcome"] == supervise.DEPLOY_ROLLBACK_FAILED
+    assert "revert exploded" in hooks[0][1]["detail"]

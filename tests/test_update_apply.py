@@ -960,6 +960,78 @@ def test_cancel_pending_deploy_consumes_and_records(tmp_path, monkeypatch):
     assert update.cancel_pending_deploy("again", run_dir=run_dir) is False
 
 
+# ---- the last-deploy outcome accessor (A28) -----------------------------------
+#
+# The surfacing half of the rollback atom: the supervisor finalizes every
+# deploy into ONE current outcome file, and last_deploy_outcome is the
+# read-only accessor the route layer uses so a browser can render "apply
+# failed, rolled back" AFTER the restart that did it. Tolerant of absence and
+# corruption -> None, because "no outcome to show" must never take down the
+# response that would have carried it.
+
+def test_last_deploy_outcome_roundtrips_a_finalized_outcome(tmp_path):
+    run_dir = str(tmp_path / "run")
+    record = supervise.build_deploy_record(SHA, TARGET, None, "op-ld")
+    outcome = supervise.classify_deploy_outcome(
+        record, ready=False, observed_sha=None, detail="worker-exited-1")
+    assert supervise.finalize_deploy(run_dir, record, outcome, now=99.0)
+    out = update.last_deploy_outcome(run_dir=run_dir)
+    assert out is not None
+    assert out["outcome"] == supervise.DEPLOY_NEVER_CAME_UP
+    assert out["detail"] == "worker-exited-1"
+    assert out["record"]["oldSha"] == SHA
+    assert out["record"]["targetSha"] == TARGET, \
+        "the failed target sha must stay visible to the UI"
+    assert out["finalizedAt"] == 99.0
+
+
+def test_last_deploy_outcome_carries_a_rolled_back_verdict(tmp_path):
+    """The shape the UI atom will render: rolled-back, with the original
+    failure in the detail."""
+    run_dir = str(tmp_path / "run")
+    record = supervise.build_deploy_record(SHA, TARGET, None, "op-rb")
+    assert supervise.finalize_deploy(
+        run_dir, record,
+        {"outcome": supervise.DEPLOY_ROLLED_BACK, "observedSha": None,
+         "detail": "restart-budget-exhausted"})
+    out = update.last_deploy_outcome(run_dir=run_dir)
+    assert out["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert out["detail"] == "restart-budget-exhausted"
+
+
+def test_last_deploy_outcome_defaults_to_the_supervisors_run_dir(
+        tmp_path, monkeypatch):
+    """Same environment default as begin_deploy, so the route can call it
+    bare inside a supervised worker."""
+    run_dir = str(tmp_path / "envrun")
+    record = supervise.build_deploy_record(SHA, TARGET, None, "op-env2")
+    assert supervise.finalize_deploy(
+        run_dir, record,
+        {"outcome": supervise.DEPLOY_READY_ON_TARGET, "observedSha": TARGET,
+         "detail": None})
+    monkeypatch.setenv(supervise.ENV_RUN_DIR, run_dir)
+    out = update.last_deploy_outcome()
+    assert out is not None
+    assert out["outcome"] == supervise.DEPLOY_READY_ON_TARGET
+
+
+def test_last_deploy_outcome_tolerates_absence_and_corruption(tmp_path,
+                                                              monkeypatch):
+    monkeypatch.delenv(supervise.ENV_RUN_DIR, raising=False)
+    assert update.last_deploy_outcome() is None            # unsupervised
+    assert update.last_deploy_outcome(
+        run_dir=str(tmp_path / "never-existed")) is None   # absent dir
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assert update.last_deploy_outcome(run_dir=str(run_dir)) is None  # no file
+    path = run_dir / supervise.DEPLOY_OUTCOME_FILENAME
+    for junk in ("{not json", "[]", '"a string"', "42",
+                 json.dumps({"no": "outcome key"}),
+                 json.dumps({"outcome": 42})):
+        path.write_text(junk, encoding="utf-8")
+        assert update.last_deploy_outcome(run_dir=str(run_dir)) is None, junk
+
+
 # ---- the preview-mismatch refusal (pure) --------------------------------------
 
 def test_preview_mismatch_fires_only_when_both_facts_exist_and_differ():

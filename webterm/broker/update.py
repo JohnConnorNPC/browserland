@@ -752,8 +752,9 @@ def begin_deploy(old_sha: Any, target_sha: Any, expected_identity: Any,
     contract, like the sentinel: this worker WRITES the journal, and the
     supervisor (the only process that outlives the restart) CONSUMES it and
     adjudicates the next worker generation into came-up-ready-on-target /
-    came-up-on-wrong-sha / never-came-up, handing the outcome to the rollback
-    seam (``deploy_hook``, A28).
+    came-up-on-wrong-sha / never-came-up, running the A28 rollback decision
+    over that verdict (``supervise.rollback_decision``) before handing the
+    final outcome to ``deploy_hook``.
 
     Runs no git at all: ``old_sha`` and ``target_sha`` are the evaluator's
     already-established facts (``ApplySnapshot.local_sha`` / ``target_sha``),
@@ -1042,6 +1043,37 @@ def cancel_pending_deploy(reason: str, *,
     outcome = {"outcome": DEPLOY_CANCELLED, "observedSha": local_sha(),
                "detail": str(reason)}
     return supervise.finalize_deploy(run_dir, record, outcome)
+
+
+def last_deploy_outcome(run_dir: Optional[str] = None
+                        ) -> Optional[Dict[str, Any]]:
+    """The most recent finalized deploy outcome, or None. Read-only.
+
+    The A28 surfacing seam. Every deploy is finalized into ONE current
+    outcome file in the supervisor's run dir -- by the supervisor
+    (ready-on-target / wrong-sha / never-came-up / rolled-back /
+    rollback-impossible / rollback-failed) or by the worker's own cancel path
+    (cancelled-before-restart) -- and this accessor is how the route layer
+    lets a browser render "apply failed, rolled back" AFTER the restart that
+    did it. The run dir defaults from the environment exactly like
+    ``begin_deploy``, so an unsupervised broker simply answers None.
+
+    Tolerant by design, never raises: an absent file, an unreadable file, or
+    one that does not decode to a dict carrying a string ``outcome`` all read
+    as None, because "no outcome to show" must never take down the response
+    that would have carried it."""
+    run_dir = run_dir or os.environ.get(supervise.ENV_RUN_DIR)
+    if not run_dir:
+        return None
+    try:
+        raw = (Path(run_dir)
+               / supervise.DEPLOY_OUTCOME_FILENAME).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not (isinstance(data, dict) and isinstance(data.get("outcome"), str)):
+        return None
+    return data
 
 
 # =============================================================================

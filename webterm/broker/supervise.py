@@ -661,14 +661,20 @@ def _conclude_deploy(run_dir: str, record: Dict[str, Any],
                                               Dict[str, Any]], None]]) -> None:
     """Finalize + log one adjudicated deploy, then hand it to the hook.
 
-    THE A28 SEAM. ``hook`` (the ``deploy_hook`` parameter of ``supervise``) is
-    where the rollback atom attaches the actual revert; today the default is
-    None, so a deploy outcome only finalizes the journal and logs. The hook
-    receives ``(record, outcome)`` exactly once per deploy generation --
-    exactly-once is structural, because ``finalize_deploy`` consumes the
-    journal before the hook runs and an absent journal adjudicates nothing. A
-    hook that raises is logged and contained: the supervisor's loop survives
-    its plugins."""
+    ``hook`` (the ``deploy_hook`` parameter of ``supervise``) is an OBSERVER
+    seam: it receives ``(record, outcome)`` exactly once per deploy
+    generation -- exactly-once is structural, because ``finalize_deploy``
+    consumes the journal before the hook runs and an absent journal
+    adjudicates nothing. A hook that raises is logged and contained: the
+    supervisor's loop survives its plugins.
+
+    The A28 rollback is deliberately NOT this hook. The revert has to change
+    the LOOP's control flow (respawn on the old code instead of returning)
+    and has to decide the outcome string that gets finalized, and a void
+    observer that runs after the outcome file is already written can express
+    neither. The rollback is wired inside ``supervise`` itself (see
+    ``_rollback_after_failure`` there); this hook then observes whatever
+    outcome that wiring finalized -- ``rolled-back`` included."""
     finalize_deploy(run_dir, record, outcome, log=log)
     log("deploy %s adjudicated: %s (old %s -> target %s, observed %s%s)"
         % (record.get("operationId"), outcome.get("outcome"),
@@ -681,6 +687,155 @@ def _conclude_deploy(run_dir: str, record: Dict[str, Any],
         hook(record, outcome)
     except Exception as exc:  # noqa: BLE001
         log("deploy outcome hook failed: %r" % (exc,))
+
+
+# ---- rollback through the deploy coordinator (A28) ---------------------------
+#
+# GH#182 Part 2, the acceptance line this section delivers: "A build that
+# fails to start is rolled back to the recorded sha automatically, and the
+# failure is visible afterwards." The DECISION is one pure table over the
+# adjudicated outcome; the REVERT is one bounded git command run by the
+# SUPERVISOR (the worker is dead when a never-came-up is adjudicated, so only
+# this process can revert -- same argument as the adjudication itself); the
+# visibility is the outcome file, which records what happened in every case:
+# rolled back, refused, or failed. R10 carries through untouched: what proves
+# the failure is the fresh worker generation this supervisor itself spawned,
+# never a port probe or a build id.
+
+#: The revert landed: the checkout is back on the journalled oldSha and the
+#: loop respawns the OLD code with a fresh (bounded) budget. The detail keeps
+#: the ORIGINAL failure and the record keeps the failed target sha, so the
+#: outcome file still says why -- the failure stays visible after the revert.
+DEPLOY_ROLLED_BACK = "rolled-back"
+#: The revert was refused BEFORE git ran: the journalled oldSha is not one
+#: full 40-hex sha, or the checkout root has no .git to revert. Visible in
+#: the outcome file; never retried.
+DEPLOY_ROLLBACK_IMPOSSIBLE = "rollback-impossible"
+#: git itself failed or could not run; the detail carries bounded stderr.
+#: Visible; never retried -- the supervisor exits on the original failure
+#: path rather than looping over a revert that already failed.
+DEPLOY_ROLLBACK_FAILED = "rollback-failed"
+
+#: ``rollback_decision``'s two verdicts.
+ROLLBACK_REVERT = "revert"
+ROLLBACK_LEAVE = "leave"
+
+#: The revert only rewrites the worktree from objects already on disk; it
+#: never touches the network, so a minute is generous.
+ROLLBACK_TIMEOUT = 60.0
+#: Same bound and reason as update.py's MUTATION_STDERR_CAP (not imported --
+#: this module stays dependency-free): a failed tree rewrite can name every
+#: locked file, and this text lands in a small JSON outcome file.
+ROLLBACK_STDERR_CAP = 2000
+
+#: never-came-up details that PROVE the new build failed to start. Everything
+#: else leaves the tree alone:
+#: * ``stopped-by-signal`` -- an operator stop is not a failed build;
+#: * ``unauthorized-restart-request`` -- a forged or crashed 75 proves
+#:   nothing about the build;
+#: * ``supervisor-exited`` / ``worker-never-ready`` / anything unrecognized
+#:   -- an UNKNOWN cause must never trigger a mutation of the checkout.
+_ROLLBACK_STARTUP_FAILURES = frozenset({
+    "restart-budget-exhausted", "bind-failed", "spawn-failed"})
+_ROLLBACK_EXIT_PREFIX = "worker-exited-"
+
+
+def rollback_decision(outcome: Any, detail: Any) -> str:
+    """outcome + detail -> ``revert`` | ``leave``. Pure; the ONLY authority
+    on whether an adjudicated deploy reverts the checkout.
+
+    Revert ONLY on ``never-came-up`` whose detail names a genuine startup
+    failure. ``came-up-on-wrong-sha`` deliberately never reverts: that worker
+    is ALIVE and healthy, and killing a live worker to fix a bookkeeping
+    surprise is worse than finalizing loudly as wrong-sha (which A23 already
+    does, and which stays visible). Success obviously never reverts, and an
+    unknown detail is treated as unknown -- never guessed into a revert."""
+    if outcome != DEPLOY_NEVER_CAME_UP:
+        return ROLLBACK_LEAVE
+    if not isinstance(detail, str):
+        return ROLLBACK_LEAVE
+    if detail in _ROLLBACK_STARTUP_FAILURES:
+        return ROLLBACK_REVERT
+    if detail.startswith(_ROLLBACK_EXIT_PREFIX):
+        return ROLLBACK_REVERT
+    return ROLLBACK_LEAVE
+
+
+def rollback_argv(root: str, old_sha: str) -> List[str]:
+    """The ONE argv a rollback may run: a hard reset to the exact journalled
+    sha, hooks disabled the same way the apply's ff-only merge disables them
+    (``core.hooksPath=os.devnull`` -- a device that can never be a directory,
+    on both platforms, so no repository-local hook can run code out of the
+    tree being reverted). Never a network verb: the old sha's objects are
+    necessarily on disk already (HEAD descends from it), so nothing needs
+    fetching, and this loop must never generate egress."""
+    return ["git", "-C", str(root), "-c", "core.hooksPath=" + os.devnull,
+            "reset", "--hard", old_sha]
+
+
+def _rollback_checkout_root() -> Optional[Path]:
+    """The checkout this module was imported from -- the same derivation as
+    ``_worktree_sha``, kept separate so each stays a one-screen read."""
+    try:
+        return Path(__file__).resolve().parent.parent.parent
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _bounded_rollback_text(text: Any, cap: int = ROLLBACK_STDERR_CAP) -> str:
+    s = str(text or "").strip()
+    return s if len(s) <= cap else s[:cap] + " ...[truncated]"
+
+
+def _run_rollback_git(argv: Sequence[str]) -> Any:
+    """``(returncode|None, stderr text)``; None means git did not run at all
+    (missing binary, timeout, OS refusal). Never raises."""
+    try:
+        out = subprocess.run(list(argv), capture_output=True, text=True,
+                             timeout=ROLLBACK_TIMEOUT)
+        return out.returncode, out.stderr or ""
+    except Exception as exc:  # noqa: BLE001
+        return None, "git did not run: %r" % (exc,)
+
+
+def perform_rollback(old_sha: Any, *, root: Optional[Any] = None,
+                     git_runner: Optional[Callable[[Sequence[str]], Any]]
+                     = None) -> Dict[str, Any]:
+    """Revert the checkout to the journalled pre-deploy sha. Never raises.
+
+        {"ok": bool,
+         "outcome": DEPLOY_ROLLED_BACK | DEPLOY_ROLLBACK_IMPOSSIBLE
+                    | DEPLOY_ROLLBACK_FAILED,
+         "detail": str|None}
+
+    WHY a hard reset is safe here, encoded once: the apply's preconditions
+    proved a CLEAN tree (no tracked modifications) and its merge was ff-only,
+    so the journalled old sha is an ancestor of HEAD and the reset only
+    unwinds the tracked changes that merge introduced; untracked files are
+    not touched by a reset at all. Bounded, not assumed: a malformed old sha
+    or a root with no .git refuses BEFORE any argv is built, and a git
+    failure is reported with bounded stderr -- every one of those lands in
+    the outcome file, so a rollback that could not happen is exactly as
+    visible as one that did."""
+    try:
+        if not (isinstance(old_sha, str)
+                and _DEPLOY_SHA_RE.fullmatch(old_sha)):
+            return {"ok": False, "outcome": DEPLOY_ROLLBACK_IMPOSSIBLE,
+                    "detail": "old-sha-not-full-hex"}
+        checkout = _rollback_checkout_root() if root is None else Path(root)
+        if checkout is None or not (checkout / ".git").exists():
+            return {"ok": False, "outcome": DEPLOY_ROLLBACK_IMPOSSIBLE,
+                    "detail": "no-git-checkout"}
+        runner = git_runner or _run_rollback_git
+        rc, stderr = runner(rollback_argv(str(checkout), old_sha))
+        if rc == 0:
+            return {"ok": True, "outcome": DEPLOY_ROLLED_BACK, "detail": None}
+        return {"ok": False, "outcome": DEPLOY_ROLLBACK_FAILED,
+                "detail": _bounded_rollback_text(stderr)
+                or ("git exited %s" % rc)}
+    except Exception as exc:  # noqa: BLE001 -- must never take down the loop
+        return {"ok": False, "outcome": DEPLOY_ROLLBACK_FAILED,
+                "detail": "rollback machinery failed: %r" % (exc,)}
 
 
 # ---- capability reporting (A13) ---------------------------------------------
@@ -1044,7 +1199,9 @@ def supervise(args: Optional[Sequence[str]] = None, *,
               install_signals: bool = True,
               deploy_hook: Optional[Callable[[Dict[str, Any],
                                               Dict[str, Any]], None]] = None,
-              sha_reader: Optional[Callable[[], Optional[str]]] = None) -> int:
+              sha_reader: Optional[Callable[[], Optional[str]]] = None,
+              rollback: Optional[Callable[[Any], Dict[str, Any]]]
+              = None) -> int:
     """Run the worker, relaunch it when it asks, and return an exit code.
 
     ``args`` are this process's own CLI arguments; they are replayed to the
@@ -1052,9 +1209,13 @@ def supervise(args: Optional[Sequence[str]] = None, *,
     Everything else is injectable so the loop can be driven by a trivial fake
     child instead of a real broker.
 
-    ``deploy_hook`` is the A28 rollback seam (see ``_conclude_deploy``);
-    ``sha_reader`` is how a ready worker's build is identified for deploy
-    adjudication (default: this checkout's HEAD via ``_worktree_sha``)."""
+    ``deploy_hook`` observes every adjudicated deploy (see
+    ``_conclude_deploy``); ``sha_reader`` is how a ready worker's build is
+    identified for deploy adjudication (default: this checkout's HEAD via
+    ``_worktree_sha``); ``rollback`` is the A28 revert (default:
+    ``perform_rollback`` against the real checkout -- tests MUST inject a
+    fake, or a pending journal makes the loop run git against the repo the
+    tests live in)."""
     args = list(sys.argv[1:] if args is None else args)
     popen = popen or subprocess.Popen
     clock = clock or time.monotonic
@@ -1086,6 +1247,7 @@ def supervise(args: Optional[Sequence[str]] = None, *,
     state: Dict[str, Any] = {"signum": 0, "child": None,
                              "pending_deploy": None, "deploy_detail": None}
     sha_read = sha_reader or _worktree_sha
+    revert = perform_rollback if rollback is None else rollback
 
     def _deploy_ready() -> None:
         # Runs from inside _wait_for while the CURRENT worker -- a fresh pid
@@ -1103,6 +1265,57 @@ def supervise(args: Optional[Sequence[str]] = None, *,
         outcome = classify_deploy_outcome(record, ready=True,
                                           observed_sha=observed)
         _conclude_deploy(run_dir, record, outcome, log, deploy_hook)
+
+    def _rollback_after_failure(detail: str) -> bool:
+        """The A28 wiring, called at each return site whose ``detail`` marks
+        the just-spawned generation as never-came-up. True ONLY when the
+        checkout was actually reverted -- the caller then clears the budget
+        (the same bounded reset a worker that came up earns; the failed
+        new-code spawns already charged it) and continues the loop, so the
+        OLD code respawns with one fresh, bounded chance. If the old code
+        cannot come up either, the budget exhausts again with NO journal left
+        to revert, and the supervisor exits: never an infinite loop. In every
+        other case the caller falls through to its original return.
+
+        Exactly-once still holds structurally: every path through here that
+        adjudicates also consumes the journal (finalize inside
+        ``_conclude_deploy``) and clears the snapshot, so neither the finally
+        block nor a later generation can adjudicate this deploy again. A
+        LEAVE decision adjudicates nothing here -- the finally block then
+        finalizes never-came-up exactly as it did before A28."""
+        record = state.get("pending_deploy")
+        if record is None:
+            record = read_pending_deploy(run_dir, log)
+        if record is None:
+            return False
+        if rollback_decision(DEPLOY_NEVER_CAME_UP, detail) != ROLLBACK_REVERT:
+            return False
+        try:
+            result = revert(record.get("oldSha"))
+        except Exception as exc:  # noqa: BLE001 -- an injected revert must
+            result = {"ok": False,   # not take down the loop
+                      "outcome": DEPLOY_ROLLBACK_FAILED,
+                      "detail": "the revert callable raised: %r" % (exc,)}
+        if not isinstance(result, dict):
+            result = {"ok": False, "outcome": DEPLOY_ROLLBACK_FAILED,
+                      "detail": "the revert callable returned %r" % (result,)}
+        why = result.get("detail")
+        outcome = {
+            "outcome": result.get("outcome") or DEPLOY_ROLLBACK_FAILED,
+            # No ready worker observed anything; observedSha stays honest.
+            "observedSha": None,
+            # The ORIGINAL failure stays visible ahead of the revert's own
+            # note; the failed target sha rides in the record alongside.
+            "detail": detail if not why else "%s; %s" % (detail, why),
+        }
+        state["pending_deploy"] = None
+        _conclude_deploy(run_dir, record, outcome, log, deploy_hook)
+        if not result.get("ok"):
+            return False
+        log("rolled the checkout back to %s after the new build never came "
+            "up (%s); relaunching on the old code with a fresh budget"
+            % (record.get("oldSha"), detail))
+        return True
 
     def _handler(signum, _frame):
         state["signum"] = signum
@@ -1139,6 +1352,10 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                 proc = popen(child_cmd, env=child_env)
             except OSError as exc:
                 log("could not start the broker worker: %s" % exc)
+                if _rollback_after_failure("spawn-failed"):
+                    attempts.clear()
+                    consecutive = 0
+                    continue
                 state["deploy_detail"] = "spawn-failed"
                 return EXIT_SUPERVISOR_FAILED
             state["child"] = proc
@@ -1159,6 +1376,15 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                 return _exit_code_for(raw, state["signum"])
 
             if raw == EXIT_ADDR_IN_USE:
+                # A pending deploy first: the bind may have failed BECAUSE of
+                # the new build (a changed default, a config it now reads
+                # differently), so the reverted code gets ONE fresh chance. A
+                # purely environmental clash then simply fails the same way
+                # once more -- with no journal left -- and stops below.
+                if _rollback_after_failure("bind-failed"):
+                    attempts.clear()
+                    consecutive = 0
+                    continue
                 # The worker has already printed WHICH kind of bind failure it
                 # was (taken vs refused) on the inherited stderr; repeating a
                 # guess here would contradict it.
@@ -1169,7 +1395,12 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                 return EXIT_ADDR_IN_USE
 
             if raw != EXIT_RESTART:
-                state["deploy_detail"] = "worker-exited-%s" % raw
+                detail = "worker-exited-%s" % raw
+                if _rollback_after_failure(detail):
+                    attempts.clear()
+                    consecutive = 0
+                    continue
+                state["deploy_detail"] = detail
                 return _exit_code_for(raw, 0)
 
             # ---- exit 75: a restart REQUEST, to be authorized ----
@@ -1212,6 +1443,10 @@ def supervise(args: Optional[Sequence[str]] = None, *,
                     "and no worker stayed up %.0fs. Giving up -- the broker "
                     "is crash-looping, and restarting it again would only "
                     "hide that." % (len(attempts), window, ready_seconds))
+                if _rollback_after_failure("restart-budget-exhausted"):
+                    attempts.clear()
+                    consecutive = 0
+                    continue
                 state["deploy_detail"] = "restart-budget-exhausted"
                 return EXIT_SUPERVISOR_FAILED
             attempts.append(now)

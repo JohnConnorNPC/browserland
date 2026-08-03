@@ -30,7 +30,7 @@ import pytest
 
 from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker import app as broker_app
-from webterm.broker import update
+from webterm.broker import supervise, update
 from webterm.broker.app import create_app
 
 
@@ -698,6 +698,42 @@ def test_a_success_is_cached_for_a_day(tmp_path, monkeypatch):
     authed(app).get("/update/check")
     ahead = app.ctx.update_cache["until"] - _time.time()
     assert ahead >= update.CHECK_TTL - 2
+
+
+def test_the_check_response_carries_the_last_deploy_outcome_when_present(
+        tmp_path, monkeypatch):
+    """A28 surfacing: GET /update/check is the one place the update mod
+    polls, so the finalized deploy outcome rides there as an OPTIONAL field
+    -- read fresh per request, not from the daily check cache -- and a
+    browser can render "apply failed, rolled back" after the restart."""
+    run_dir = str(tmp_path / "run")
+    record = supervise.build_deploy_record("a" * 40, "b" * 40, None, "op-ld")
+    assert supervise.finalize_deploy(
+        run_dir, record,
+        {"outcome": supervise.DEPLOY_ROLLED_BACK, "observedSha": None,
+         "detail": "worker-exited-1"})
+    monkeypatch.setenv(supervise.ENV_RUN_DIR, run_dir)
+    _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/update/check")
+    assert r.status == 200
+    assert r.json["ok"] is True and "check" in r.json
+    assert r.json["last_deploy"]["outcome"] == supervise.DEPLOY_ROLLED_BACK
+    assert r.json["last_deploy"]["detail"] == "worker-exited-1"
+    assert r.json["last_deploy"]["record"]["operationId"] == "op-ld"
+
+
+def test_the_check_response_omits_last_deploy_when_there_is_none(
+        tmp_path, monkeypatch):
+    """Optional means ABSENT when there is nothing to show -- never a null
+    placeholder an older client would have to special-case."""
+    monkeypatch.delenv(supervise.ENV_RUN_DIR, raising=False)
+    _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/update/check")
+    assert r.status == 200
+    assert r.json["ok"] is True
+    assert "last_deploy" not in r.json
 
 
 def test_the_egress_comment_names_both_routes():

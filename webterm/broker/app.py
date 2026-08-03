@@ -6487,7 +6487,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # opted in -- learned one moment later.
             return sanic_json({"ok": False, "error": "update_check_disabled"},
                               status=503)
-        return sanic_json({"ok": True, "check": data})
+        payload = {"ok": True, "check": data}
+        # A28 surfacing, in the ONE place the update mod polls. Optional --
+        # present only when a finalized deploy outcome exists in this
+        # supervisor's run dir -- and read fresh per request rather than
+        # riding the daily check cache, because the outcome changes exactly
+        # when a restart happens and a day-old snapshot of "rolled back"
+        # would defeat its purpose. A tiny local-file read; the accessor
+        # answers None (key omitted) for absent/corrupt/unsupervised.
+        last_deploy = update_check.last_deploy_outcome()
+        if last_deploy is not None:
+            payload["last_deploy"] = last_deploy
+        return sanic_json(payload)
 
     # ---- update policy write (POST /update/policy, #182) ------------------
     # The GUI's way to say "yes, this broker may check for updates", so that
