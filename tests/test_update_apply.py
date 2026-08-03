@@ -391,12 +391,216 @@ def test_begin_deploy_refuses_anything_but_full_shas(tmp_path):
 
 def test_the_module_never_shells_out_to_a_git_mutation():
     """This atom runs no git mutations at all: the evaluator is pure and the
-    collector is read-only (status / rev-parse / cat-file / rev-list).
-    Asserted as QUOTED argument literals, so prose in a docstring naming the
-    forbidden command cannot trip it."""
+    collectors are read-only (status / rev-parse / cat-file / rev-list, plus
+    A25's diff --name-only). Asserted as QUOTED argument literals, so prose
+    in a docstring naming the forbidden command cannot trip it."""
     with open(update.__file__, "r", encoding="utf-8") as fh:
         body = fh.read()
     for verb in ('"pull"', '"merge"', '"reset"', '"clean"', '"stash"',
                  '"checkout"', '"fetch"'):
         assert verb not in body, (
             "%s must never appear as a git argument in update.py" % verb)
+
+
+# ---- dependency-delta detection over a broad file set (A25) -------------------
+#
+# #182 trap 7: a git pull updates code only; a build that needs a new
+# dependency then fails to import, and the box is down along with the UI you
+# would fix it with. Decision D4: NEVER auto-install -- a delta only ever
+# REFUSES the apply. Three honest outcomes: established-empty (falsy),
+# established-non-empty (refuse, naming files), and UNKNOWN (the diff could
+# not be taken -- refuses, never passes).
+
+
+@pytest.mark.parametrize("path", [
+    # python project metadata
+    "pyproject.toml", "setup.py", "setup.cfg",
+    # requirements/constraints variants, incl. the requirements/ dir shape
+    "requirements.txt", "requirements-dev.txt", "requirements_extra.txt",
+    "requirements/dev.txt", "tools/requirements/prod.txt",
+    "constraints.txt", "constraints-ci.txt",
+    # lockfiles
+    "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock",
+    # conda
+    "environment.yml", "environment.yaml", "conda-lock.yml",
+    # vendored wheels, at any depth
+    "wheels/httpx-0.27.0-py3-none-any.whl",
+    # node manifests/locks: none exist in this repo today (vendored JS is
+    # checked in and served as-is) -- see update.py's A25 section comment for
+    # why the pattern is kept anyway
+    "package.json", "package-lock.json", "npm-shrinkwrap.json",
+    "yarn.lock", "pnpm-lock.yaml",
+    # nested at depth: root-only would miss a future sub-package manifest
+    "sub/pkg/pyproject.toml", "deep/er/requirements.txt",
+    # case handling: manifests are conventionally cased, filesystems vary
+    "PYPROJECT.TOML", "Requirements-Dev.TXT", "PIPFILE",
+])
+def test_every_pattern_family_fires(path):
+    rep = update.dependency_delta(["webterm/broker/app.py", path])
+    assert rep.known is True
+    assert rep.matched == [path]
+    assert bool(rep) is True, "a non-empty delta must be truthy (refuse)"
+
+
+def test_unrelated_paths_do_not_fire():
+    rep = update.dependency_delta([
+        "webterm/broker/update.py", "wiki/Home.md", "10_css_root.css",
+        "webterm/broker/vendor/codemirror/state.mjs", "media/shot.png",
+        "docs/requirements.md",        # requirements-named, but not a .txt
+        "setup.pyc",                   # not setup.py
+        "tests/test_update_apply.py",
+    ])
+    assert rep.known is True and rep.matched == []
+    assert bool(rep) is False, "an established empty delta must be falsy"
+
+
+def test_an_empty_change_list_is_no_delta():
+    rep = update.dependency_delta([])
+    assert rep.known is True and rep.matched == []
+    assert bool(rep) is False
+    assert update.apply_preconditions(_snap(dependency_delta=rep)) == []
+
+
+def test_families_say_why_each_path_matched():
+    rep = update.dependency_delta(
+        ["uv.lock", "requirements/dev.txt", "package.json",
+         "vendored/x-1.0-py3-none-any.whl"])
+    assert rep.families["uv.lock"] == "python-lock"
+    assert rep.families["requirements/dev.txt"] == "requirements"
+    assert rep.families["package.json"] == "node"
+    assert rep.families["vendored/x-1.0-py3-none-any.whl"] == "wheel"
+
+
+# ---- unknown refuses, never passes -------------------------------------------
+
+def test_an_unknown_report_is_truthy_and_refuses():
+    """The honesty rule: a diff that could not be taken must refuse -- a
+    failed diff silently passing is exactly the trap-7 outage."""
+    rep = update.DeltaReport(known=False, reason="target-object-absent")
+    assert bool(rep) is True
+    refusals = update.apply_preconditions(_snap(dependency_delta=rep))
+    assert [r.reason_code for r in refusals] == [update.APPLY_DEPENDENCY_DELTA]
+    assert "could not be established" in refusals[0].message
+    assert "target-object-absent" in refusals[0].message
+
+
+def test_the_classifier_never_launders_no_data_into_no_delta():
+    """None, a bare string (whose CHARS would iterate and match nothing), and
+    outright junk all come back unknown -- truthy, so they refuse."""
+    for junk in (None, "pyproject.toml", b"pyproject.toml", 42):
+        rep = update.dependency_delta(junk)
+        assert rep.known is False, junk
+        assert bool(rep) is True, junk
+
+
+# ---- the refusal sentence ----------------------------------------------------
+
+def test_the_delta_sentence_names_files_and_states_the_rule():
+    rep = update.dependency_delta(["pyproject.toml", "uv.lock"])
+    refusals = update.apply_preconditions(_snap(dependency_delta=rep))
+    msg = refusals[0].message
+    assert "pyproject.toml" in msg and "uv.lock" in msg
+    assert "never installs" in msg, "the rule must be stated"
+    assert "restart" in msg, "the by-hand procedure must be stated"
+
+
+def test_the_sentence_is_bounded_for_a_fifty_file_delta():
+    paths = ["requirements/extra-%02d.txt" % i for i in range(50)]
+    rep = update.dependency_delta(paths)
+    assert len(rep.matched) == 50
+    msg = update.apply_preconditions(_snap(dependency_delta=rep))[0].message
+    assert "requirements/extra-00.txt" in msg      # the first few are named...
+    assert "requirements/extra-49.txt" not in msg  # ...but never all fifty
+    assert "(+45 more)" in msg                     # the rest are counted
+    assert len(msg) < 600
+
+
+# ---- evaluator integration ---------------------------------------------------
+
+def test_a_real_delta_report_fires_alongside_other_refusals():
+    rep = update.dependency_delta(["uv.lock"])
+    codes = _codes(_snap(dependency_delta=rep, dirty=True,
+                         apply_enabled=False))
+    assert set(codes) == {update.APPLY_DEPENDENCY_DELTA,
+                          update.APPLY_DIRTY_TREE,
+                          update.APPLY_DISABLED}
+    out = update.evaluate_apply(_snap(dependency_delta=rep))
+    assert out["ok"] is False
+    assert [r["reason"] for r in out["refusals"]] == [
+        update.APPLY_DEPENDENCY_DELTA]
+    assert "uv.lock" in out["refusals"][0]["message"]
+
+
+def test_a_no_delta_report_lets_a_clean_snapshot_proceed():
+    rep = update.dependency_delta(["webterm/broker/update.py", "wiki/Home.md"])
+    assert update.apply_preconditions(_snap(dependency_delta=rep)) == []
+
+
+# ---- the impure collector (read-only git, injected) --------------------------
+
+def _fake_delta_git(diff_output, *, have_target=True):
+    """Stand-in for update._git covering the collector's two calls."""
+    calls = []
+
+    def fake(*args, timeout=5.0):
+        calls.append(args)
+        if args and args[0] == "cat-file":
+            return "" if have_target else None
+        if args and args[0] == "diff":
+            return diff_output
+        return ""
+    return fake, calls
+
+
+def test_the_collector_diffs_old_to_target_read_only(monkeypatch):
+    fake, calls = _fake_delta_git("pyproject.toml\nwebterm/broker/app.py\n")
+    monkeypatch.setattr(update, "_git", fake)
+    rep = update.collect_dependency_delta(SHA, TARGET)
+    assert rep.known is True and rep.matched == ["pyproject.toml"]
+    diff_calls = [c for c in calls if c and c[0] == "diff"]
+    assert diff_calls == [("diff", "--name-only",
+                           "%s..%s" % (SHA, TARGET))], (
+        "one name-only diff over old..target, and nothing else")
+
+
+def test_an_absent_target_object_is_unknown(monkeypatch):
+    """Pre-fetch, or a garbage-collected sha: the local store does not hold
+    the target's objects, so the diff CANNOT be taken."""
+    fake, _ = _fake_delta_git("", have_target=False)
+    monkeypatch.setattr(update, "_git", fake)
+    rep = update.collect_dependency_delta(SHA, TARGET)
+    assert rep.known is False and bool(rep) is True
+    assert rep.reason == "target-object-absent"
+
+
+def test_a_failed_diff_is_unknown_not_empty(monkeypatch):
+    fake, _ = _fake_delta_git(None)
+    monkeypatch.setattr(update, "_git", fake)
+    rep = update.collect_dependency_delta(SHA, TARGET)
+    assert rep.known is False and bool(rep) is True
+    assert rep.reason == "diff-failed"
+
+
+def test_an_empty_diff_is_established_no_delta(monkeypatch):
+    """'' from a zero-exit git is a REAL answer (no files changed) and must
+    never be confused with the None a failed git returns."""
+    fake, _ = _fake_delta_git("")
+    monkeypatch.setattr(update, "_git", fake)
+    rep = update.collect_dependency_delta(SHA, TARGET)
+    assert rep.known is True and rep.matched == []
+    assert bool(rep) is False
+
+
+def test_the_collector_refuses_anything_but_full_shas(monkeypatch):
+    """Same rule as begin_deploy: a short sha or ref name could name a
+    different commit than the check established, and full-hex is also what
+    makes option injection structurally impossible. Nothing reaches git."""
+    called = []
+    monkeypatch.setattr(update, "_git",
+                        lambda *a, **k: called.append(a) or "")
+    for old, target in ((SHA[:7], TARGET), (SHA, "main"), (None, TARGET),
+                        (SHA, None), ("HEAD", TARGET)):
+        rep = update.collect_dependency_delta(old, target)
+        assert rep.known is False and bool(rep) is True, (old, target)
+        assert rep.reason == "bad-ref", (old, target)
+    assert not called, "a refused ref must never reach git"

@@ -40,7 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -506,8 +506,10 @@ APPLY_STATE_UNKNOWN = "state-unknown"
 APPLY_ALREADY_CURRENT = "already-current"
 APPLY_RESTART_UNAVAILABLE = "restart-unavailable"
 APPLY_DISABLED = "apply-disabled"
-# Seam only: a LATER atom implements the detection; the evaluator just refuses
-# when the snapshot carries a truthy delta.
+# The detection lives in the A25 section below (``dependency_delta`` /
+# ``collect_dependency_delta``); the evaluator refuses whenever the snapshot
+# carries a truthy delta -- and an UNKNOWN ``DeltaReport`` is truthy on
+# purpose, so "could not diff" refuses instead of silently passing.
 APPLY_DEPENDENCY_DELTA = "dependency-delta"
 
 
@@ -536,7 +538,7 @@ class ApplySnapshot:
     restart_reason: Optional[str] = None   # ...and WHY it is unavailable
     apply_enabled: bool = False            # per-instance update_apply_enabled gate
     writable: Optional[bool] = None        # ADVISORY only, never a refusal
-    dependency_delta: Any = None           # seam for a later atom's detection
+    dependency_delta: Any = None           # a DeltaReport (A25); None = never measured
 
 
 def apply_preconditions(snap: ApplySnapshot) -> List[Refusal]:
@@ -605,11 +607,12 @@ def apply_preconditions(snap: ApplySnapshot) -> List[Refusal]:
             "opted in."))
 
     if snap.dependency_delta:
+        # Truthiness is the seam: an established non-empty DeltaReport AND an
+        # UNKNOWN one both land here (the A25 section explains why unknown
+        # must refuse); the message helper distinguishes them for the human.
         refusals.append(Refusal(
             APPLY_DEPENDENCY_DELTA,
-            "This update changes dependency requirements, which an automatic "
-            "apply cannot reconcile on its own; update the dependencies by "
-            "hand first."))
+            _dependency_delta_message(snap.dependency_delta)))
 
     return refusals
 
@@ -671,7 +674,11 @@ def collect_apply_snapshot(*, check_result: Optional[Dict[str, Any]] = None,
 
     ``check_result`` is the cached output of ``run_check``; restart
     availability and the apply gate are the caller's facts (app.ctx), passed
-    through untouched. The route that calls this is a later atom."""
+    through untouched. ``dependency_delta`` is the A25 ``DeltaReport``, which
+    the route computes via ``collect_dependency_delta`` only POST-fetch (the
+    diff needs the target's objects on disk); before that it stays None --
+    unmeasured, covered by the state-unknown refusal until a check
+    establishes a target. The route that calls this is a later atom."""
     sha = local_sha()
     dirty: Optional[bool] = None
     if sha is not None:
@@ -762,3 +769,193 @@ def begin_deploy(old_sha: Any, target_sha: Any, expected_identity: Any,
     if record is None:
         return False
     return supervise.write_deploy_journal(run_dir, record)
+
+
+# ---- GH#182 Part 2: dependency-delta detection (A25) -------------------------
+#
+# #182 trap 7: a newer build may need dependencies the old environment does
+# not have. A git pull updates CODE only; the new process then fails to
+# import, and the box is down along with the UI you would have fixed it with
+# -- the single most likely way an apply breaks a remote machine. Decision D4:
+# the updater NEVER installs anything. This section only DETECTS: a heuristic
+# over the paths changed between old and target sha, whose one power is to
+# make the apply refuse (APPLY_DEPENDENCY_DELTA above). There is deliberately
+# no code path from a detected delta to any install, ever.
+#
+# Same split as the rest of this module: a PURE classifier
+# (``dependency_delta``) over an injected path list, and an IMPURE collector
+# (``collect_dependency_delta``) that is the only piece allowed to run git --
+# one read-only ``diff --name-only`` plus a cat-file existence probe, nothing
+# that mutates. The diff can only be taken once the target's objects are in
+# the local store (post-fetch, which is when the apply route calls it); before
+# that the honest answer is UNKNOWN, and unknown REFUSES -- never treat a
+# failed diff as "no delta".
+
+# Basename -> family, matched case-insensitively at ANY depth. This repo keeps
+# its one manifest (pyproject.toml) at the root and has no requirements.txt at
+# all today, but the boundary being guarded is upstream's FUTURE shape, so
+# root-only would be a silent hole: a sub-package manifest added later must be
+# caught, and a false positive here merely refuses with named files -- the
+# safe direction for a heuristic guarding remote boxes.
+#
+# The node family is included although this repo has NO package.json anywhere
+# today and serves its vendored JS from checked-in files only: everything
+# under webterm/broker/vendor/** is git-tracked, byte-for-byte published
+# assets, and vendor_codemirror.py is a by-hand re-vendor tool whose OUTPUT is
+# committed -- so a pull delivers ready-to-serve JS with no build step. That
+# is exactly why the patterns stay: they cannot fire on today's upstream, and
+# if one ever appears in a diff it means upstream introduced a Node-side
+# dependency or build boundary a pull cannot satisfy -- precisely the case to
+# refuse and hand to a human.
+_DEP_FAMILIES: Dict[str, str] = {
+    "pyproject.toml": "python-project",
+    "setup.py": "python-project",
+    "setup.cfg": "python-project",
+    "poetry.lock": "python-lock",
+    "uv.lock": "python-lock",
+    "pipfile": "python-lock",
+    "pipfile.lock": "python-lock",
+    "environment.yml": "conda",
+    "environment.yaml": "conda",
+    "conda-lock.yml": "conda",
+    "conda-lock.yaml": "conda",
+    "package.json": "node",
+    "package-lock.json": "node",
+    "npm-shrinkwrap.json": "node",
+    "yarn.lock": "node",
+    "pnpm-lock.yaml": "node",
+}
+
+# How many matched files the refusal sentence names before switching to a
+# count: enough for the operator to know what to install by hand, not a wall.
+_DELTA_NAME_CAP = 5
+
+
+@dataclass
+class DeltaReport:
+    """The classifier's verdict over one old..target changed-path set.
+
+    Three honest outcomes, not two:
+
+    * established, empty      -> ``known=True``, no matches -- FALSY
+    * established, non-empty  -> ``known=True``, matches    -- truthy (refuse)
+    * could not be diffed     -> ``known=False``            -- truthy (refuse)
+
+    Truthiness IS the evaluator seam (``if snap.dependency_delta``), so the
+    one thing this type must never do is let UNKNOWN read as falsy: a failed
+    diff that silently passed the precondition would be exactly the trap-7
+    outage this section exists to prevent."""
+    known: bool
+    matched: List[str] = field(default_factory=list)       # in diff order
+    families: Dict[str, str] = field(default_factory=dict)  # path -> family
+    reason: Optional[str] = None       # why unknown, when known is False
+
+    def __bool__(self) -> bool:
+        return (not self.known) or bool(self.matched)
+
+
+def _classify_dep_path(path: Any) -> Optional[str]:
+    """The dependency family one changed path belongs to, or None.
+    Case-insensitive on the whole path (manifests are conventionally cased --
+    Pipfile -- and Browserland runs on case-insensitive filesystems too);
+    separators normalised so a Windows-shaped input cannot dodge a match."""
+    p = str(path).replace("\\", "/").strip().strip("/").lower()
+    if not p:
+        return None
+    parts = p.split("/")
+    base = parts[-1]
+    fam = _DEP_FAMILIES.get(base)
+    if fam is not None:
+        return fam
+    if base.endswith(".whl"):
+        # A vendored wheel changing IS a dependency changing, wherever it sits.
+        return "wheel"
+    if base.endswith(".txt"):
+        if base.startswith("requirements") or base.startswith("constraints"):
+            return "requirements"
+        if "requirements" in parts[:-1]:
+            # The requirements/*.txt convention: the DIRECTORY names the
+            # family and the files inside are free-form (dev.txt, prod.txt).
+            return "requirements"
+    return None
+
+
+def dependency_delta(changed_paths: Any) -> DeltaReport:
+    """PURE classifier: the paths changed between old and target sha ->
+    ``DeltaReport``. No I/O, no git.
+
+    Only a real iterable of paths can establish "no delta": ``None`` -- and
+    any junk that is not a path list, including a bare string, whose chars
+    would iterate cleanly and match nothing -- comes back UNKNOWN, so no
+    caller can accidentally launder "no data" into "no delta". The matching
+    itself is a heuristic: broad families, any depth, case-insensitive,
+    because its false positives cost one named refusal while a false negative
+    costs a remote box."""
+    if changed_paths is None or isinstance(changed_paths, (str, bytes)):
+        return DeltaReport(known=False, reason="paths-unavailable")
+    matched: List[str] = []
+    families: Dict[str, str] = {}
+    try:
+        for raw in changed_paths:
+            fam = _classify_dep_path(raw)
+            if fam is not None:
+                name = str(raw)
+                matched.append(name)
+                families[name] = fam
+    except TypeError:
+        return DeltaReport(known=False, reason="paths-unavailable")
+    return DeltaReport(known=True, matched=matched, families=families)
+
+
+def collect_dependency_delta(old_sha: Any, target_sha: Any) -> DeltaReport:
+    """IMPURE collector: what changed between two commits, from LOCAL
+    read-only git (``diff --name-only`` over old..target). It can only answer
+    once the target's objects are on disk -- post-fetch, which is when the
+    apply route calls it; for a sha the local store has never seen, the
+    honest answer is an UNKNOWN report, which refuses.
+
+    Full 40-hex shas only, the same rule as ``begin_deploy``: a ref name here
+    could name a different commit than the one the check established, and the
+    strictness also makes option injection structurally impossible."""
+    for sha in (old_sha, target_sha):
+        if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)):
+            return DeltaReport(known=False, reason="bad-ref")
+    # Distinguish "the object is not here" (pre-fetch, or garbage-collected)
+    # from a diff that failed some other way -- the operator sentences differ.
+    if _git("cat-file", "-e", target_sha + "^{commit}") is None:
+        return DeltaReport(known=False, reason="target-object-absent")
+    out = _git("diff", "--name-only", "%s..%s" % (old_sha, target_sha))
+    if out is None:
+        return DeltaReport(known=False, reason="diff-failed")
+    # "" from a zero-exit git is a REAL answer (no files changed); only None
+    # means the command failed. _git strips, so splitlines of "" is [].
+    paths = [line.strip() for line in out.splitlines() if line.strip()]
+    return dependency_delta(paths)
+
+
+def _dependency_delta_message(delta: Any) -> str:
+    """The refusal's human sentence. Names the matched files (bounded: the
+    first ``_DELTA_NAME_CAP`` plus a count) so the operator knows what to
+    install by hand, and always states the rule."""
+    rule = ("The updater never installs dependencies (decision D4): update "
+            "this box by hand -- git pull, install what changed, then "
+            "restart -- so a human sees any install failure while the old "
+            "broker is still serving.")
+    if isinstance(delta, DeltaReport):
+        if not delta.known:
+            return ("Whether this update changes dependency files could not "
+                    "be established (%s); refusing rather than guessing, "
+                    "because a missing dependency takes the new process down "
+                    "along with the UI you would fix it with. %s"
+                    % (delta.reason or "diff unavailable", rule))
+        shown = delta.matched[:_DELTA_NAME_CAP]
+        rest = len(delta.matched) - len(shown)
+        names = ", ".join(shown) + (" (+%d more)" % rest if rest else "")
+        return ("This update changes dependency files -- %s -- and a git "
+                "pull updates code only, installing nothing; the new process "
+                "could fail to import and take the box down. %s"
+                % (names, rule))
+    # A truthy non-DeltaReport (the pre-A25 seam shape): the generic sentence.
+    return ("This update changes dependency requirements, which an automatic "
+            "apply cannot reconcile on its own; update the dependencies by "
+            "hand first. " + rule)
