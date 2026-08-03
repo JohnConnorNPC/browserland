@@ -1324,6 +1324,14 @@ REASON_ORIGIN_FORBIDDEN = "cross-origin-forbidden"
 #: up. Distinct from every reason above so a client renders "something went
 #: wrong here" rather than a confident explanation that is not the truth.
 REASON_RESTART_ERROR = "restart-error"
+#: POST /update/apply only: a second apply while one is in flight. The refusal
+#: body carries the in-flight apply's OWN operation id, so a client retrying a
+#: request it thought had timed out can recognise its work already running
+#: rather than assuming a stranger's.
+REASON_APPLY_IN_PROGRESS = "apply-in-progress"
+#: POST /update/apply only, the twin of REASON_RESTART_ERROR: the apply
+#: machinery itself blew up, which is a different fact from any named refusal.
+REASON_APPLY_ERROR = "apply-error"
 
 #: Zeros, not None: a confirmation dialog has to render SOMETHING, and "0 at
 #: risk" from an unreadable registry is the same shape as "0 at risk" from an
@@ -1487,6 +1495,22 @@ def _log_orphaned_restart(task) -> None:
     exc = task.exception()
     if exc is not None:
         LOGGER.error("the restart failed after its request had gone: %r", exc)
+
+
+def _log_orphaned_apply(task) -> None:
+    """Twin of :func:`_log_orphaned_restart` for POST /update/apply: the
+    client that asked can disconnect mid-fetch or mid-merge, the shielded task
+    carries on (abandoning a merge half way is exactly the suspect-tree
+    outcome the shield exists to prevent), and whatever it concludes must
+    still be loud — there is nobody left to answer."""
+    if task.cancelled():
+        LOGGER.error("the update apply task was cancelled outright; the tree "
+                     "may be mid-apply and no restart will follow")
+        return
+    exc = task.exception()
+    if exc is not None:
+        LOGGER.error("the update apply failed after its request had gone: %r",
+                     exc)
 
 
 def _origin_permitted(request) -> bool:
@@ -3223,6 +3247,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # upstream request, not ten -- the unauthenticated budget is 60/hour for
     # the whole source IP, shared with CI and everything else on it.
     app.ctx.update_lock = asyncio.Lock()
+    # A27: the in-flight apply claim -- None, or {"operation_id": str}. A CAS
+    # like the restart claim (read+write with no await between, on the one
+    # loop): the second concurrent POST /update/apply is answered 409 with the
+    # SAME operation id immediately, never queued on update_lock behind a
+    # fetch. Cleared when an apply fails; deliberately KEPT once one has armed
+    # its restart, so the claim dies with the process it doomed.
+    app.ctx.update_apply_claim = None
     # ---- restart (#183) --------------------------------------------------
     # The operator switch for restarting this process. Default FALSE, and
     # deliberately independent of AUTHENTICATION: holding the browser token
@@ -6658,6 +6689,260 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # 202, never 200: accepted, drained, armed, and stopping in a moment.
         return sanic_json(body, status=202)
 
+    # ---- update apply (POST /update/apply, #182 Part 2) --------------------
+    # The ONE route that mutates the checkout, and it mirrors existing
+    # discipline rather than inventing any:
+    #
+    #   * token first, then the SAME strict Origin check as POST /restart —
+    #     this replaces the running code, _cors_headers answers ACAO:* to
+    #     everyone, so for a non-recoverable action the token cannot be the
+    #     only gate.
+    #   * the operator gate (update_apply_enabled, config-file only) answers
+    #     503 like /update/check's disabled shape, and is RE-READ inside
+    #     update_lock for the same revoke-TOCTOU reason the check gate is.
+    #   * the client names the EXACT sha it previewed; the server re-proves
+    #     the preconditions fresh and refuses (accumulating ALL reasons) —
+    #     including when the live check no longer names that sha, because a
+    #     human who previewed stale facts must re-preview, never have a
+    #     different commit silently applied.
+    #   * the git phase lives in update_check.perform_apply (the marked
+    #     mutation section): explicit https URL + ref, never `git pull`,
+    #     never a remote name, ff-only to the exact sha, hooks disabled,
+    #     journalled via begin_deploy BEFORE the merge.
+    #   * 202, never 200/"updated": the process answering is the one being
+    #     replaced. The client proves the update by a CHANGED bootId and a
+    #     fresh check reporting current; the journalled deploy is what makes
+    #     the supervisor adjudicate the next generation.
+    #
+    # NO code path calls this without a request: applying is manual-trigger
+    # only, ever — no schedule, no timer, no auto-install.
+    async def _update_apply_post(request: Request):
+        err = _gated_auth_error(request, "/update/apply")
+        if err is not None:
+            return err
+        # no-store on every answer: each one describes a moment (a claim, a
+        # refusal set, a merge outcome) that a shared cache must never replay.
+        no_store = {"Cache-Control": "no-store"}
+        # Origin BEFORE the gate, exactly like /restart: a refused caller
+        # learns nothing about this broker's deployment policy.
+        if not _origin_permitted(request):
+            LOGGER.warning("refused a cross-origin update apply from origin "
+                           "%r (%s)", request.headers.get("Origin"),
+                           request.ip)
+            return sanic_json({"ok": False, "error": "forbidden_origin",
+                               "reason_code": REASON_ORIGIN_FORBIDDEN},
+                              status=403, headers=no_store)
+        if not app.ctx.update_apply_enabled:
+            # 503 like /update/check's disabled shape: an ABSENT capability,
+            # not an unauthorized caller. Re-read inside the lock below.
+            return sanic_json({"ok": False, "error": "update_apply_disabled"},
+                              status=503, headers=no_store)
+        body = _json_object_body(request)
+        if body is None:
+            return sanic_json({"ok": False, "error": "bad_json"}, status=400,
+                              headers=no_store)
+        target = body.get("target_sha")
+        # One full 40-hex sha, strictly: the client applies exactly what the
+        # human previewed, and full-hex is also what makes the value inert as
+        # a git argument (same rule as begin_deploy).
+        if not (isinstance(target, str)
+                and re.fullmatch(r"[0-9a-f]{40}", target)):
+            return sanic_json({"ok": False, "error": "bad_target_sha"},
+                              status=400, headers=no_store)
+        # THE APPLY CLAIM. A CAS like _claim_restart: no await between the
+        # read and the write, so exactly one request mints the operation. The
+        # loser is answered NOW, with the winner's operation id, rather than
+        # queued on update_lock behind a fetch that can take minutes.
+        claim = app.ctx.update_apply_claim
+        if claim is not None:
+            return sanic_json({"ok": False, "error": "apply_in_progress",
+                               "reason_code": REASON_APPLY_IN_PROGRESS,
+                               "operation_id": claim["operation_id"]},
+                              status=409, headers=no_store)
+        operation_id = "apply-" + secrets.token_hex(8)
+        app.ctx.update_apply_claim = {"operation_id": operation_id}
+
+        async def _locked_apply():
+            armed = False
+            claimed_restart = False
+            try:
+                # update_lock is the check's single-flight lock, reused on
+                # purpose: one apply at a time is the claim's job, but the
+                # LOCK is what excludes a concurrent check run touching
+                # update_cache while the tree underneath it is changing.
+                async with app.ctx.update_lock:
+                    # THE GATE, re-read inside the lock — same revoke-TOCTOU
+                    # reason as _update_check_cached: a revoke that landed
+                    # while this request was queued here must win.
+                    if not app.ctx.update_apply_enabled:
+                        return sanic_json(
+                            {"ok": False, "error": "update_apply_disabled"},
+                            status=503, headers=no_store)
+                    # Preconditions re-proven FRESH, server-side. The client's
+                    # preview is a proposal, not evidence.
+                    status = restart_status(app)
+                    check_data = (app.ctx.update_cache or {}).get("data")
+                    loop = asyncio.get_running_loop()
+                    snap = await loop.run_in_executor(
+                        None, functools.partial(
+                            update_check.collect_apply_snapshot,
+                            check_result=check_data,
+                            restart_available=status["available"],
+                            restart_reason=status["reason_code"],
+                            apply_enabled=True))
+                    refusals = update_check.apply_preconditions(snap)
+                    mismatch = update_check.preview_mismatch_refusal(
+                        snap.target_sha, target)
+                    if mismatch is not None:
+                        refusals.append(mismatch)
+                    if refusals:
+                        # ALL of them, not the first: the evaluator
+                        # accumulates so the human fixes the whole list once.
+                        return sanic_json(
+                            {"ok": False, "error": "apply_refused",
+                             "refusals": [{"reason": r.reason_code,
+                                           "message": r.message}
+                                          for r in refusals],
+                             "reason_codes": [r.reason_code
+                                              for r in refusals]},
+                            status=409, headers=no_store)
+                    # AUDIT, before anything mutates — a merge that wedges
+                    # half way must still leave a record of who asked.
+                    LOGGER.warning(
+                        "UPDATE APPLY requested by %s (origin %s, boot %s): "
+                        "%s -> %s (operation %s)", request.ip,
+                        request.headers.get("Origin") or "-", BOOT_ID,
+                        snap.local_sha, target, operation_id)
+                    # Claim the RESTART before mutating: a concurrent
+                    # POST /restart landing mid-merge would drain and stop
+                    # this process on top of a half-applied tree.
+                    if not _claim_restart(app):
+                        return sanic_json(
+                            {"ok": False, "error": "restart_in_progress",
+                             "reason_code": REASON_RESTART_IN_PROGRESS,
+                             "restart": restart_status(app)},
+                            status=409, headers=no_store)
+                    claimed_restart = True
+                    outcome = await loop.run_in_executor(
+                        None, functools.partial(
+                            update_check.perform_apply,
+                            target_sha=target,
+                            repo=app.ctx.update_repo,
+                            branch=app.ctx.update_branch,
+                            expected_identity={
+                                "brokerId": app.ctx.broker_id},
+                            operation_id=operation_id))
+                    if not outcome.get("ok"):
+                        # Includes tree-suspect: perform_apply has already
+                        # finalized (cancelled) the journal on any failure
+                        # past begin_deploy, so nothing is left pending with
+                        # no restart coming — and we do NOT restart onto a
+                        # tree nobody can vouch for.
+                        resume_from_quiesce(app)
+                        claimed_restart = False
+                        LOGGER.error(
+                            "update apply %s failed at stage %s: %s",
+                            operation_id, outcome.get("stage"),
+                            outcome.get("stderr")
+                            or outcome.get("refusals"))
+                        return sanic_json(
+                            {"ok": False, "error": "apply_failed",
+                             "stage": outcome.get("stage"),
+                             "refusals": outcome.get("refusals") or [],
+                             "reason_codes": [
+                                 r.get("reason")
+                                 for r in outcome.get("refusals") or []],
+                             "tree_suspect": bool(
+                                 outcome.get("tree_suspect")),
+                             "journal_cancelled": outcome.get(
+                                 "journal_cancelled"),
+                             "stderr": outcome.get("stderr"),
+                             "operation_id": operation_id},
+                            status=409, headers=no_store)
+                    # Merged. Between here and the arm: journal/audit only —
+                    # the inconsistent window (new tree, old process) is
+                    # closed by the restart, so nothing else may widen it.
+                    result = await request_restart(app)
+                    if not result.get("ok"):
+                        # The tree IS on the target (the merge landed) but no
+                        # restart will follow, so the pending journal must be
+                        # finalized NOW — left pending, the next manual
+                        # restart (hours later) would be adjudicated against
+                        # a deploy that was abandoned. request_restart has
+                        # already un-quiesced the broker on this path.
+                        claimed_restart = False
+                        reason = str(result.get("reason")
+                                     or "restart_failed")
+                        cancelled = await loop.run_in_executor(
+                            None, functools.partial(
+                                update_check.cancel_pending_deploy,
+                                "restart-not-armed: " + reason))
+                        LOGGER.error(
+                            "update apply %s merged %s -> %s but the restart "
+                            "could not be armed (%s); the OLD code is still "
+                            "running on the NEW tree until this broker is "
+                            "restarted by hand", operation_id,
+                            outcome.get("old_sha"), target, reason)
+                        return sanic_json(
+                            {"ok": False, "error": "apply_incomplete",
+                             "reason_code": reason,
+                             "tree_updated": True,
+                             "old_sha": outcome.get("old_sha"),
+                             "target_sha": target,
+                             "operation_id": operation_id,
+                             "journal_cancelled": cancelled,
+                             "drain": result},
+                            status=503, headers=no_store)
+                    armed = True
+                    # 202, never 200, and never the word "updated": this
+                    # response is written by the process being replaced. The
+                    # client proves the update by a CHANGED bootId and a
+                    # fresh check reporting current.
+                    return sanic_json(
+                        {"ok": True,
+                         "operation_id": operation_id,
+                         "bootId": BOOT_ID,
+                         "old_sha": outcome.get("old_sha"),
+                         "target_sha": target,
+                         "drain": result,
+                         "mechanism": result.get("mechanism"),
+                         "restart": restart_status(app)},
+                        status=202, headers=no_store)
+            except Exception:  # noqa: BLE001 -- a bug in the machinery must
+                # not strand the broker quiesced, and must not leave a
+                # journal pending that no restart will follow.
+                LOGGER.exception("the update apply machinery failed")
+                if claimed_restart and not armed:
+                    resume_from_quiesce(app)
+                try:
+                    update_check.cancel_pending_deploy(
+                        "apply-error: the apply machinery failed")
+                except Exception:  # noqa: BLE001
+                    LOGGER.exception(
+                        "could not cancel the pending deploy journal")
+                return sanic_json({"ok": False, "error": "apply_failed",
+                                   "reason_code": REASON_APPLY_ERROR,
+                                   "operation_id": operation_id},
+                                  status=503, headers=no_store)
+            finally:
+                # The claim outlives a SUCCESSFUL apply on purpose (it dies
+                # with the process); every other outcome releases it.
+                if not armed:
+                    app.ctx.update_apply_claim = None
+
+        # SHIELDED, like /restart's drain and for the same reason: Sanic
+        # cancels the handler when the client disconnects, and abandoning a
+        # fetch/merge half way is exactly the suspect-tree outcome this route
+        # exists to prevent. The task carries on; a failure after the client
+        # has gone is logged loudly instead of vanishing.
+        task = asyncio.ensure_future(_locked_apply())
+        app.ctx.update_apply_task = task
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(_log_orphaned_apply)
+            raise
+
     # ---- shared UI state (/state) ----------------------------------------
     # Per-broker settings + layout, shared across a user's browsers. Optimistic
     # concurrency on an integer rev: GET returns {rev, settings, layout}; PUT
@@ -7532,6 +7817,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.add_route(_status_fetch, "/status/fetch", methods=["GET"])
     app.add_route(_update_check, "/update/check", methods=["GET"])
     app.add_route(_update_policy_post, "/update/policy", methods=["POST"])
+    # POST only, like /restart and for the same reason: a GET that rewrites
+    # the checkout and bounces the process would be followed by prefetchers.
+    app.add_route(_update_apply_post, "/update/apply", methods=["POST"])
     # POST only (#183): a GET that bounces the process would be followed by
     # every prefetcher, link scanner and browser history restore on the network.
     app.add_route(_restart_post, "/restart", methods=["POST"])
@@ -7600,6 +7888,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                              ("/status/fetch", "preflight_status_fetch"),
                              ("/update/check", "preflight_update_check"),
                              ("/update/policy", "preflight_update_policy"),
+                             ("/update/apply", "preflight_update_apply"),
                              ("/restart", "preflight_restart"),
                              ("/state", "preflight_state"),
                              ("/mod-store/<modId>", "preflight_mod_store"),

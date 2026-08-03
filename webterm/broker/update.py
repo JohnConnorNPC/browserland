@@ -959,3 +959,303 @@ def _dependency_delta_message(delta: Any) -> str:
     return ("This update changes dependency requirements, which an automatic "
             "apply cannot reconcile on its own; update the dependencies by "
             "hand first. " + rule)
+
+
+# ---- GH#182 Part 2: route-phase apply support (A27) --------------------------
+#
+# Pure helpers the POST /update/apply route uses AROUND the git phase. Nothing
+# here mutates; the mutation section is the clearly-marked block at the end of
+# this file, and the structural tests in tests/test_update_apply.py hold that
+# line.
+
+# The check's established target no longer matches the sha the human previewed:
+# upstream moved between the preview and the click. Same stability contract as
+# every other APPLY_* code -- the UI switches on it, so it is API.
+APPLY_PREVIEW_MISMATCH = "preview-sha-mismatch"
+# The git phase's own refusal codes (details in perform_apply).
+APPLY_BAD_TARGET = "bad-target-sha"
+APPLY_FETCH_FAILED = "fetch-failed"
+APPLY_TARGET_MISSING = "target-object-missing"
+APPLY_NOT_FAST_FORWARD = "not-fast-forward"
+APPLY_TARGET_NOT_UPSTREAM = "target-not-upstream"
+# "no-deploy-journal", not "journal-unwritable": the R5 guard pins that no
+# APPLY_* code may contain "writ" (writability is an advisory, never a
+# refusal), and the fact here is the JOURNAL's absence, not the tree's
+# writability.
+APPLY_NO_JOURNAL = "no-deploy-journal"
+APPLY_TREE_SUSPECT = "tree-suspect"
+
+#: ``deploy.outcome`` verdict for a journal finalized because NO restart will
+#: follow (merge failed, or the restart could not be armed). Lives here rather
+#: than in ``supervise`` because the supervisor never writes it -- only the
+#: worker cancels its own deploy; the supervisor's three adjudications describe
+#: a restart that actually happened. Same add-never-repurpose rule.
+DEPLOY_CANCELLED = "cancelled-before-restart"
+
+
+def preview_mismatch_refusal(established_target: Any,
+                             requested_target: Any) -> Optional[Refusal]:
+    """A ``Refusal`` when the live check names a DIFFERENT upstream sha than
+    the one the client previewed, else None.
+
+    The server never applies "whatever is newest": it applies exactly what the
+    human saw. When upstream moved between the preview and the click, the
+    honest answer is "re-preview and decide again", never a silent apply of a
+    sha nobody looked at. Absence of either sha returns None on purpose --
+    that case is already the ``state-unknown`` refusal, and doubling it up
+    would show one fact twice."""
+    if not (isinstance(established_target, str) and established_target):
+        return None
+    if not (isinstance(requested_target, str) and requested_target):
+        return None
+    if established_target == requested_target:
+        return None
+    return Refusal(
+        APPLY_PREVIEW_MISMATCH,
+        "The current check names upstream commit %s, not the %s this apply "
+        "previewed; upstream moved since the preview was taken, so re-run "
+        "the preview and decide again from current facts -- this broker "
+        "never silently applies a commit the human did not see."
+        % (established_target[:12], requested_target[:12]))
+
+
+def cancel_pending_deploy(reason: str, *,
+                          run_dir: Optional[str] = None) -> bool:
+    """Finalize (consume) a pending deploy journal that NO restart will
+    follow. True when a pending journal was found and finalized.
+
+    The invariant this enforces is A23's: a journal must never be left pending
+    without a restart coming, because the next generation -- whenever an
+    operator happens to bounce the process, hours later -- would be
+    adjudicated against a deploy that was already abandoned, and A28's hook
+    would act on a verdict about the wrong boot. ``finalize_deploy`` is the
+    same consume path the supervisor uses, so one deploy still gets exactly
+    one outcome; the outcome string is ``DEPLOY_CANCELLED`` with ``reason`` as
+    its detail, and ``observedSha`` records where HEAD actually is so the
+    audit trail says what state the cancel left behind."""
+    run_dir = run_dir or os.environ.get(supervise.ENV_RUN_DIR)
+    if not run_dir:
+        return False
+    record = supervise.read_pending_deploy(run_dir)
+    if record is None:
+        return False
+    outcome = {"outcome": DEPLOY_CANCELLED, "observedSha": local_sha(),
+               "detail": str(reason)}
+    return supervise.finalize_deploy(run_dir, record, outcome)
+
+
+# =============================================================================
+# ==== THE APPLY MUTATION SECTION (A27) =======================================
+#
+# The ONLY place in this module -- and, by policy, in this codebase -- that may
+# run a git command that MUTATES the checkout. The structural tests in
+# tests/test_update_apply.py split this file on the marker line above: every
+# quoted git-mutation argument is banned BEFORE the marker, and `git pull` is
+# banned everywhere INCLUDING here. Keep any future mutation inside this
+# section, and keep it to exactly the two verbs an apply needs.
+#
+# WHY NEVER `git pull` (the inherited correction this section exists to
+# encode): pull follows the branch's CONFIGURED upstream -- whatever `origin`
+# happens to point at on this machine -- not the constant the check verified.
+# On a fork that is a different repository; after a remote rename it is a dead
+# one; on a machine someone re-pointed it is an arbitrary one. So the git
+# phase names the pinned https URL derived from the same constant the check
+# used, plus the explicit ref, and then fast-forwards to the EXACT sha the
+# human previewed. A remote NAME never appears in any argv here.
+#
+# WHY core.hooksPath=os.devnull on the merge: merge can run repository-local
+# hooks (post-merge in particular, which is how `git pull` runs code straight
+# out of the tree being replaced, authored by whoever last wrote the hook).
+# os.devnull is "nul" on Windows and "/dev/null" on POSIX -- in both cases a
+# device that can never be a DIRECTORY, so git's hook lookup
+# (<hooksPath>/<hook-name>) can never resolve to an executable file and every
+# hook is skipped, identically on both platforms. An EMPTY hooksPath is
+# deliberately not used: git's treatment of "" is version-dependent, and
+# anything that falls back to the repo's own .git/hooks re-opens the hole.
+
+MUTATION_FETCH_TIMEOUT = 120.0     # a fetch pulls objects; give it real time
+MUTATION_MERGE_TIMEOUT = 60.0      # an ff merge only rewrites the worktree
+# How much captured git stderr a failure report carries. Bounded because a
+# failed checkout can name every locked file in the tree, and the transport
+# for this text is a JSON error body.
+MUTATION_STDERR_CAP = 2000
+
+
+def upstream_git_url(repo: str = UPSTREAM_REPO) -> str:
+    """The EXPLICIT https fetch URL, derived from the same constant the check
+    verified. Never a remote name: a fork's `origin` must be irrelevant."""
+    return "%s/%s.git" % (GITHUB_WEB.rstrip("/"), repo)
+
+
+def _bounded_stderr(text: Any, cap: int = MUTATION_STDERR_CAP) -> Optional[str]:
+    if not text:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    return s if len(s) <= cap else s[:cap] + " ...[truncated]"
+
+
+def _git_mutation(args: List[str], *, timeout: float) -> Dict[str, Any]:
+    """Run ONE mutating git command in the package's repo. Argv only, never a
+    shell; stdout/stderr captured so a failure can be REPORTED rather than
+    lost. Never raises: ``returncode`` None means the command did not run at
+    all (no checkout, no git binary, timeout), which every caller treats as
+    failure. Twin of the read-only ``_git`` above, kept separate so the
+    read-only helper stays structurally incapable of mutating."""
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent
+        if not (pkg_dir.parent / ".git").exists():
+            return {"returncode": None, "stdout": "",
+                    "stderr": "not a git checkout"}
+        out = subprocess.run(["git", "-C", str(pkg_dir)] + list(args),
+                             capture_output=True, text=True, timeout=timeout)
+        return {"returncode": out.returncode, "stdout": out.stdout or "",
+                "stderr": out.stderr or ""}
+    except Exception as exc:  # noqa: BLE001 -- timeout, missing git, OS errors
+        return {"returncode": None, "stdout": "",
+                "stderr": "git did not run: %r" % (exc,)}
+
+
+def perform_apply(*, target_sha: Any, repo: str = UPSTREAM_REPO,
+                  branch: str = UPSTREAM_BRANCH,
+                  expected_identity: Any = None,
+                  operation_id: str,
+                  run_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch the pinned upstream, verify, journal, and fast-forward to EXACTLY
+    ``target_sha``. Blocking (subprocesses); the route runs it off-loop.
+    Never raises. The result says what happened::
+
+        {"ok": bool, "stage": str|None, "old_sha": str|None,
+         "target_sha": str, "operation_id": str,
+         "refusals": [{"reason": str, "message": str}],
+         "tree_suspect": bool, "journal_cancelled": bool|None,
+         "stderr": str|None}
+
+    The order IS the contract, and each step aborts the rest:
+
+    1. **fetch** ``<explicit https url> <ref>`` -- never ``git pull``, never a
+       remote name (see the section comment).
+    2. **verify**, read-only: the target commit object is now present; local
+       HEAD is an ancestor of the target (a fast-forward is possible); and the
+       target is reachable from the fetched ref head (this broker never
+       applies a sha the pinned upstream does not have -- possession of a
+       40-hex string is not provenance).
+    3. **dependency delta** over old..target -- only possible POST-fetch, when
+       the target's objects are on disk. A delta, or an UNKNOWN one, refuses.
+    4. **begin_deploy** -- the journal the supervisor adjudicates the next
+       generation against. A journal that cannot be written refuses, because
+       a deploy nobody adjudicates is a deploy whose failure nobody observes.
+    5. **merge --ff-only <sha>** with hooks disabled. Nothing runs between the
+       merge and the caller arming the restart except journal/audit writes.
+
+    Steps 1-4 leave the worktree untouched, so their failures are plain
+    refusals. A merge that fails partway -- Windows file locking is the
+    realistic case -- leaves a SUSPECT tree: that is reported honestly as
+    ``tree-suspect`` with the git stderr (bounded), the pending journal is
+    finalized as cancelled (no restart will follow), and the caller must NOT
+    restart onto a tree nobody can vouch for."""
+    def _fail(stage: str, code: str, message: str, *,
+              stderr: Any = None, tree_suspect: bool = False,
+              journal_cancelled: Optional[bool] = None) -> Dict[str, Any]:
+        return {"ok": False, "stage": stage, "old_sha": old,
+                "target_sha": target_sha, "operation_id": operation_id,
+                "refusals": [{"reason": code, "message": message}],
+                "tree_suspect": tree_suspect,
+                "journal_cancelled": journal_cancelled,
+                "stderr": _bounded_stderr(stderr)}
+
+    old: Optional[str] = None
+    if not (isinstance(target_sha, str)
+            and re.fullmatch(r"[0-9a-f]{40}", target_sha)):
+        # The route already 400s this; kept because this function is the last
+        # line before argv construction, and full-hex is also what makes
+        # option injection structurally impossible (same rule as begin_deploy).
+        return _fail("verify", APPLY_BAD_TARGET,
+                     "The apply target must be one full 40-hex commit sha.")
+    old = local_sha()
+    if not old:
+        return _fail("verify", APPLY_NOT_A_CHECKOUT,
+                     "This install is not a git checkout; there is nothing "
+                     "here for git to update.")
+
+    # ---- 1. fetch: explicit URL + explicit ref, never a remote name --------
+    url = upstream_git_url(repo)
+    fetched_res = _git_mutation(["fetch", url, branch],
+                                timeout=MUTATION_FETCH_TIMEOUT)
+    if fetched_res["returncode"] != 0:
+        return _fail("fetch", APPLY_FETCH_FAILED,
+                     "Fetching %s (%s) failed; the tree was not touched."
+                     % (url, branch), stderr=fetched_res["stderr"])
+
+    # ---- 2. verify (read-only) ---------------------------------------------
+    if _git("cat-file", "-e", target_sha + "^{commit}") is None:
+        return _fail("verify", APPLY_TARGET_MISSING,
+                     "The previewed commit is not present even after "
+                     "fetching the pinned upstream; it may have been "
+                     "garbage-collected or force-pushed away. Re-run the "
+                     "preview.")
+    if _git("merge-base", "--is-ancestor", "HEAD", target_sha) is None:
+        return _fail("verify", APPLY_NOT_FAST_FORWARD,
+                     "Local HEAD is not an ancestor of the previewed commit, "
+                     "so no fast-forward exists; merging or discarding local "
+                     "history is a human decision this route refuses to "
+                     "make.")
+    fetched_head = _git("rev-parse", "FETCH_HEAD")
+    if not (fetched_head and re.fullmatch(r"[0-9a-f]{40}", fetched_head)):
+        return _fail("verify", APPLY_TARGET_NOT_UPSTREAM,
+                     "The fetched ref head could not be resolved, so the "
+                     "previewed commit cannot be proven to belong to the "
+                     "pinned upstream.")
+    if _git("merge-base", "--is-ancestor", target_sha, fetched_head) is None:
+        return _fail("verify", APPLY_TARGET_NOT_UPSTREAM,
+                     "The previewed commit is not reachable from the pinned "
+                     "upstream's %s; this broker never applies a sha "
+                     "upstream does not have." % branch)
+
+    # ---- 3. dependency delta (post-fetch: the objects are now on disk) -----
+    delta = collect_dependency_delta(old, target_sha)
+    if delta:
+        return _fail("delta", APPLY_DEPENDENCY_DELTA,
+                     _dependency_delta_message(delta))
+
+    # ---- 4. journal BEFORE the mutation ------------------------------------
+    if not begin_deploy(old, target_sha, expected_identity, operation_id,
+                        run_dir=run_dir):
+        return _fail("journal", APPLY_NO_JOURNAL,
+                     "The deploy journal could not be written, so the "
+                     "supervisor would adjudicate nothing; applying without "
+                     "it would be a deploy whose failure nobody observes. "
+                     "The tree was not touched.")
+
+    # ---- 5. the one mutation of the worktree -------------------------------
+    merge_res = _git_mutation(
+        ["-c", "core.hooksPath=" + os.devnull, "merge", "--ff-only",
+         target_sha],
+        timeout=MUTATION_MERGE_TIMEOUT)
+    if merge_res["returncode"] != 0:
+        cancelled = cancel_pending_deploy(
+            "tree-suspect: the ff-only merge failed", run_dir=run_dir)
+        return _fail("merge", APPLY_TREE_SUSPECT,
+                     "The fast-forward merge failed partway; the working "
+                     "tree is SUSPECT (on Windows a locked file can leave a "
+                     "half-updated checkout) and must be inspected by a "
+                     "human before this broker is restarted.",
+                     stderr=merge_res["stderr"], tree_suspect=True,
+                     journal_cancelled=cancelled)
+    now_sha = local_sha()
+    if now_sha != target_sha:
+        cancelled = cancel_pending_deploy(
+            "tree-suspect: post-merge HEAD is %s, not the target"
+            % (now_sha or "unreadable"), run_dir=run_dir)
+        return _fail("merge", APPLY_TREE_SUSPECT,
+                     "The merge reported success but HEAD is not the "
+                     "previewed commit; the tree cannot be vouched for and "
+                     "must be inspected by a human.",
+                     stderr=merge_res["stderr"], tree_suspect=True,
+                     journal_cancelled=cancelled)
+
+    return {"ok": True, "stage": None, "old_sha": old,
+            "target_sha": target_sha, "operation_id": operation_id,
+            "refusals": [], "tree_suspect": False,
+            "journal_cancelled": None, "stderr": None}
