@@ -543,6 +543,24 @@ STATUS_CACHE_TTL = 60               # seconds a normalized result is cache-serve
 # must not retry-storm either. A rate-limited result ignores both and waits for
 # the reset the response itself named.
 UPDATE_RETRY_TTL = 15 * 60
+# A FORCED refresh (`GET /update/check?refresh=1`, the "Check now" button)
+# bypasses the daily TTL, so it bypasses the entire quota strategy with it --
+# and the budget it spends is 60/hour for the whole SOURCE IP, shared with CI
+# and everything else on that machine. Two limits, because one is not enough:
+# a floor stops a double-click costing two requests, and an hourly cap stops a
+# patient clicker (or a row of tabs taking turns) draining the allowance a
+# minute at a time. 6/hour leaves ~90% of the budget for everything else, and
+# is still far more manual refreshes than anyone has a reason to want.
+UPDATE_REFRESH_MIN_INTERVAL = 60.0
+UPDATE_REFRESH_BUDGET = 6
+UPDATE_REFRESH_BUDGET_WINDOW = 60 * 60
+# KNOWN SCOPE, stated rather than implied: this accounting is per PROCESS,
+# while GitHub meters per source IP. The broker runs single-process, so the
+# only ways to exceed the budget are a restart (a human action, not a loop) or
+# several brokers sharing one NAT -- and the day-long cache underneath has
+# exactly the same property. Making it IP-wide needs coordination this project
+# does not have; six per hour per broker is small enough that it stays a
+# rounding error against 60 even with a handful of them.
 # Statuspage summary.json overall indicators, worst last. Anything else (or a
 # fetch/parse failure) normalizes to "unknown" so the UI greys the row.
 _STATUS_INDICATORS = ("none", "minor", "major", "critical")
@@ -3317,6 +3335,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # timestamp and mixing the two clocks is how you get a cache that expires
     # in 1970 or never.
     app.ctx.update_cache = {"data": None, "until": 0.0}
+    # Bumped on every publish into update_cache. A forced refresh reads it
+    # BEFORE queueing on the lock and again inside: if it moved, somebody
+    # else's fetch already landed after this request began, which is exactly
+    # what the refresh asked for -- so it coalesces instead of spending a
+    # second request to learn the same thing.
+    app.ctx.update_serial = 0
+    # Forced-refresh accounting: when the last one was admitted, and the
+    # admission stamps inside the rolling budget window. Attempts are stamped
+    # BEFORE the request goes out, because a fetch that fails spends exactly
+    # as much quota as one that succeeds.
+    app.ctx.update_refresh = {"last": 0.0, "stamps": []}
     # Single-flight. Ten tabs opening at once on a cold cache must produce ONE
     # upstream request, not ten -- the unauthenticated budget is 60/hour for
     # the whole source IP, shared with CI and everything else on it.
@@ -6512,12 +6541,66 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # the upstream comes from broker config or the module constant, so this
     # route cannot be pointed at an internal address the way a URL parameter
     # would let it be. Same structural posture as /status/fetch's allowlist.
-    async def _update_check_cached() -> Dict[str, Any]:
+    def _reserve_refresh(mono: float) -> None:
+        """Spend one forced-refresh slot. Called before the request goes out,
+        because a fetch that fails costs GitHub's allowance exactly as much as
+        one that succeeds -- and on EVERY admitted forced path, including the
+        cold-cache one that is never refused, or the floor it skips would be a
+        floor a caller can step over by arriving first."""
+        ref = app.ctx.update_refresh
+        ref["last"] = mono
+        ref["stamps"].append(mono)
+
+    def _refresh_refusal(now: float, mono: float,
+                         ent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Why this forced refresh must not go out, or None to admit it.
+
+        Called ONLY with a populated cache and ONLY inside update_lock, so the
+        decision and the reservation that follows it are atomic: checking
+        admission before the lock would let a queue of requests all
+        pre-authorize themselves and then fetch one after another, which is
+        the stampede the lock exists to prevent wearing a different hat.
+        """
+        ref = app.ctx.update_refresh
+        # TWO CLOCKS, deliberately. Our own pacing (floor + window) is
+        # monotonic, so a system-clock correction cannot hand out a fresh
+        # budget by pruning live stamps, nor strand a refusal for hours. The
+        # rate-limit check below stays on the wall clock because the reset it
+        # compares against is an absolute unix timestamp GitHub sent us.
+        ref["stamps"] = [t for t in ref["stamps"]
+                         if mono - t < UPDATE_REFRESH_BUDGET_WINDOW]
+        data = ent.get("data") or {}
+        until = ent.get("until", 0.0)
+        # GitHub told us, in a header, exactly when it will answer again.
+        # A manual click is not a licence to ignore that -- it is the same
+        # limit, and hammering it is what turns a 30-minute wait into a
+        # longer one. This outranks the other two: it is upstream's word.
+        if (data.get("state") == update_check.STATE_UNKNOWN
+                and data.get("reason") == update_check.REASON_RATE_LIMITED
+                and now < until):
+            return {"reason": "rate-limited",
+                    "retry_after_s": int(until - now) + 1}
+        if mono - ref["last"] < UPDATE_REFRESH_MIN_INTERVAL:
+            return {"reason": "too-soon",
+                    "retry_after_s": int(UPDATE_REFRESH_MIN_INTERVAL
+                                         - (mono - ref["last"])) + 1}
+        if len(ref["stamps"]) >= UPDATE_REFRESH_BUDGET:
+            oldest = min(ref["stamps"])
+            return {"reason": "hourly-budget",
+                    "retry_after_s": int(oldest + UPDATE_REFRESH_BUDGET_WINDOW
+                                         - mono) + 1}
+        return None
+
+    async def _update_check_cached(force: bool = False,
+                                   meta: Optional[Dict[str, Any]] = None
+                                   ) -> Dict[str, Any]:
         ctx = app.ctx
         now = time.time()
         ent = ctx.update_cache
-        if ent.get("data") is not None and now < ent.get("until", 0.0):
+        if not force and ent.get("data") is not None and now < ent.get("until", 0.0):
             return ent["data"]
+        # Read BEFORE queueing on the lock -- see the field's comment.
+        serial_before = ctx.update_serial
         async with ctx.update_lock:
             # Re-read INSIDE the lock: while we waited, the request that held
             # it may have filled the cache. Without this the lock serializes
@@ -6525,7 +6608,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # take their turn making the very call the first one just made.
             ent = ctx.update_cache
             now = time.time()
-            if ent.get("data") is not None and now < ent.get("until", 0.0):
+            if not force and ent.get("data") is not None and now < ent.get("until", 0.0):
                 return ent["data"]
             # And re-read THE GATE, for a sharper reason than the cache. A
             # revoke that lands while this request is queued here would
@@ -6536,6 +6619,32 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # wide as this lock is held, i.e. as wide as a call to GitHub.
             if not ctx.update_check_enabled:
                 return None
+            if force:
+                mono = time.monotonic()
+                have = ent.get("data") is not None
+                # Somebody published while we waited: that answer was fetched
+                # AFTER this request began, so it already IS the fresh one.
+                # Costs nothing, because it spent no request.
+                if have and ctx.update_serial != serial_before:
+                    if meta is not None:
+                        meta["refreshed"] = False
+                        meta["coalesced"] = True
+                    return ent["data"]
+                # Only an answer already in hand can be REFUSED. With an empty
+                # cache the ordinary miss below fetches anyway, so a refusal
+                # would withhold the only answer there is and buy no quota --
+                # but it is still a forced request, so it is still reserved
+                # below. Skipping that is a floor the first caller steps over.
+                if have:
+                    refusal = _refresh_refusal(now, mono, ent)
+                    if refusal is not None:
+                        if meta is not None:
+                            meta["refreshed"] = False
+                            meta["refresh_refused"] = refusal
+                        return ent["data"]
+                _reserve_refresh(mono)
+                if meta is not None:
+                    meta["refreshed"] = True
             loop = asyncio.get_running_loop()
             data = await loop.run_in_executor(
                 None, functools.partial(
@@ -6555,6 +6664,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             else:
                 until = now + update_check.next_ttl()
             ctx.update_cache = {"data": data, "until": until}
+            ctx.update_serial += 1
             return data
 
     # Exposed so the single-flight property can be tested under real
@@ -6573,7 +6683,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # "up to date".
             return sanic_json({"ok": False, "error": "update_check_disabled"},
                               status=503)
-        data = await _update_check_cached()
+        # The ONLY thing the client may say, and it is a boolean: strictly
+        # "1", so a stray ?refresh=0 or ?refresh=maybe cannot spend quota by
+        # accident. The upstream repo and ref stay server-side constants.
+        force = request.args.get("refresh") == "1"
+        meta: Dict[str, Any] = {}
+        data = await _update_check_cached(force=force, meta=meta)
         if data is None:
             # Revoked while we were queued on update_lock. Same body as the
             # check above, because it is the same fact -- this broker is not
@@ -6581,6 +6696,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "update_check_disabled"},
                               status=503)
         payload = {"ok": True, "check": data}
+        if force:
+            # Say plainly whether this response cost a request, because the
+            # button's whole promise is "this is current as of now". A client
+            # that ignored these fields and rendered a refused refresh as
+            # "just checked" would be lying on our behalf -- and `check`
+            # already carries checkedAt, so a refusal is always checkable
+            # against the clock too.
+            payload["refreshed"] = bool(meta.get("refreshed"))
+            if meta.get("refresh_refused") is not None:
+                payload["refresh_refused"] = meta["refresh_refused"]
         # A28 surfacing, in the ONE place the update mod polls. Optional --
         # present only when a finalized deploy outcome exists in this
         # supervisor's run dir -- and read fresh per request rather than

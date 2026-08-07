@@ -20,6 +20,7 @@ fetch-path tests monkeypatch the module-level `_OPENER`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import urllib.error
@@ -800,3 +801,202 @@ def test_info_update_key_is_additive_not_conditional(tmp_path, monkeypatch):
                 "mods", "mod_policy", "update"):
         assert key in body
     assert "check_enabled" in body["update"] and "apply_enabled" in body["update"]
+
+
+# ---- forced refresh (?refresh=1) -------------------------------------------
+#
+# The button that re-asks GitHub. It bypasses the daily TTL, which means it
+# bypasses the whole quota strategy with it -- so every one of these tests is
+# really about the 60/hour that GitHub gives the WHOLE source IP.
+
+def _fresh_cache(app, state=None, reason=None, until_ahead=10_000.0):
+    """Seed a populated, unexpired cache the way a completed check leaves one."""
+    data = {"state": state or update.STATE_CURRENT, "reason": reason,
+            "mode": "commit", "local": {"version": "0.8.0", "sha": SHA},
+            "repo": update.UPSTREAM_REPO, "checkedAt": 1,
+            "upstream": {"sha": SHA}, "treeVerified": False}
+    app.ctx.update_cache = {"data": data, "until": time.time() + until_ahead}
+    app.ctx.update_serial += 1
+    return data
+
+
+def test_a_plain_request_still_never_re_asks_within_the_ttl(tmp_path,
+                                                            monkeypatch):
+    """The 30-minute poll must stay free. Only ?refresh=1 may spend quota."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    _, r = authed(app).get("/update/check")
+    assert r.status == 200 and calls == []
+    assert "refreshed" not in r.json, "freshness fields are for ?refresh=1 only"
+
+
+def test_refresh_1_re_asks_through_a_valid_cache(tmp_path, monkeypatch):
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    _, r = authed(app).get("/update/check?refresh=1")
+    assert r.status == 200
+    assert len(calls) == 1, "a forced refresh must actually re-ask"
+    assert r.json["refreshed"] is True
+    assert "refresh_refused" not in r.json
+
+
+@pytest.mark.parametrize("q", ["refresh=0", "refresh=true", "refresh=yes",
+                               "refresh=", "refresh=1x", "REFRESH=1"])
+def test_only_the_exact_flag_spends_quota(tmp_path, monkeypatch, q):
+    """Anything but a literal 1 is an ordinary request. A near-miss that
+    silently re-asked would be a quota leak nobody typed."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    _, r = authed(app).get("/update/check?" + q)
+    assert r.status == 200 and calls == [], q
+
+
+def test_a_second_refresh_inside_the_floor_is_refused_and_says_so(tmp_path,
+                                                                  monkeypatch):
+    """A double-click costs one request, and the second answer SAYS it is the
+    same one -- refreshed:false plus a reason, never a bare 200 that a client
+    would render as 'just checked'."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    _, r1 = authed(app).get("/update/check?refresh=1")
+    _, r2 = authed(app).get("/update/check?refresh=1")
+    assert len(calls) == 1, "the second click must not reach GitHub"
+    assert r1.json["refreshed"] is True
+    assert r2.json["refreshed"] is False
+    assert r2.json["refresh_refused"]["reason"] == "too-soon"
+    assert r2.json["refresh_refused"]["retry_after_s"] > 0
+    assert r2.json["check"] is not None, "a refusal still answers honestly"
+
+
+def test_the_hourly_budget_caps_a_patient_clicker(tmp_path, monkeypatch):
+    """The floor alone would allow 60/hour -- the entire allowance. Waiting
+    out the floor each time must still meet a ceiling."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    refusal = None
+    for _ in range(broker_app.UPDATE_REFRESH_BUDGET + 3):
+        # Wait out the floor without waiting out the rolling window.
+        app.ctx.update_refresh["last"] = 0.0
+        _, r = authed(app).get("/update/check?refresh=1")
+        if r.json.get("refresh_refused"):
+            refusal = r.json["refresh_refused"]
+    assert len(calls) == broker_app.UPDATE_REFRESH_BUDGET
+    assert refusal is not None and refusal["reason"] == "hourly-budget"
+    assert refusal["retry_after_s"] > 0
+    assert broker_app.UPDATE_REFRESH_BUDGET * 4 < 60, (
+        "the manual allowance must leave most of GitHub's 60/hour for "
+        "everything else sharing this IP")
+
+
+def test_a_rate_limit_negative_cache_outranks_the_button(tmp_path, monkeypatch):
+    """GitHub named a reset in a header. A click is not a licence to ignore
+    it -- hammering a limit is what extends it."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app, state=update.STATE_UNKNOWN,
+                 reason=update.REASON_RATE_LIMITED, until_ahead=1800.0)
+    _, r = authed(app).get("/update/check?refresh=1")
+    assert calls == [], "a forced refresh must not defeat the negative cache"
+    assert r.json["refreshed"] is False
+    assert r.json["refresh_refused"]["reason"] == "rate-limited"
+    assert r.json["refresh_refused"]["retry_after_s"] > 0
+
+
+def test_a_refresh_over_an_empty_cache_answers_but_still_costs_its_slot(
+        tmp_path, monkeypatch):
+    """Refusing here would withhold the only answer there is -- a plain
+    request would have fetched anyway, so a refusal buys no quota. But it IS
+    a forced request, so it must still be stamped: skipping the reservation
+    leaves `last` at zero, and the next click steps straight over the floor
+    (and adds a seventh request to a six-request hour)."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/update/check?refresh=1")
+    assert r.status == 200 and len(calls) == 1
+    assert r.json["check"] is not None
+    assert r.json["refreshed"] is True, "it DID re-ask; saying otherwise lies"
+    assert len(app.ctx.update_refresh["stamps"]) == 1
+    # ...and the very next click is now floored like any other.
+    app.ctx.update_cache["until"] = time.time() + 10_000
+    _, r2 = authed(app).get("/update/check?refresh=1")
+    assert len(calls) == 1, "the cold-cache path must not be a floor bypass"
+    assert r2.json["refresh_refused"]["reason"] == "too-soon"
+
+
+def test_our_own_pacing_survives_a_system_clock_jump(tmp_path, monkeypatch):
+    """The floor and the rolling window are monotonic on purpose: a wall-clock
+    correction must not hand out a fresh budget by pruning live stamps. Only
+    the rate-limit reset -- an absolute timestamp GitHub sent us -- is wall."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    _, r1 = authed(app).get("/update/check?refresh=1")
+    assert r1.json["refreshed"] is True and len(calls) == 1
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 7200)  # +2h
+    app.ctx.update_cache["until"] = real_time() + 17200            # still valid
+    _, r2 = authed(app).get("/update/check?refresh=1")
+    assert len(calls) == 1, "a clock jump must not buy another request"
+    assert r2.json["refresh_refused"]["reason"] == "too-soon"
+
+
+def test_the_gate_is_still_re_read_inside_the_lock_for_a_refresh(tmp_path,
+                                                                 monkeypatch):
+    """A revoke must still win over a forced refresh: the refresh path must
+    not route around the TOCTOU guard the ordinary path has."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    app.ctx.update_check_enabled = False
+    _, r = authed(app).get("/update/check?refresh=1")
+    assert r.status == 503 and calls == []
+
+
+def test_the_budget_counts_attempts_not_successes(tmp_path, monkeypatch):
+    """A fetch that fails spends exactly as much of GitHub's allowance as one
+    that succeeds, so it must cost the same budget -- which means the stamp is
+    taken BEFORE the request goes out, not after it comes back."""
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+
+    def boom(**kwargs):
+        raise RuntimeError("upstream blew up")
+    monkeypatch.setattr(broker_app.update_check, "run_check", boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(app.ctx.update_check_run(force=True, meta={}))
+    assert len(app.ctx.update_refresh["stamps"]) == 1, (
+        "a failed forced refresh must still cost its slot")
+
+
+def test_a_refresh_coalesces_with_a_fetch_that_landed_while_it_waited(
+        tmp_path, monkeypatch):
+    """The publish SERIAL, not the clock: if somebody else's fetch landed
+    after this request began, that answer already IS the fresh one the button
+    asked for, and re-asking would spend quota to learn the same thing."""
+    calls = _patch_run_check(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _fresh_cache(app)
+    meta = {}
+
+    async def drive():
+        async with app.ctx.update_lock:
+            # A forced refresh arrives and queues behind the lock...
+            task = asyncio.ensure_future(
+                app.ctx.update_check_run(force=True, meta=meta))
+            await asyncio.sleep(0)
+            # ...and a fetch publishes before we release, exactly as a
+            # concurrent ordinary miss would.
+            _fresh_cache(app)
+        return await task
+
+    asyncio.run(drive())
+    assert calls == [], "the queued refresh must not re-ask what just landed"
+    assert meta.get("coalesced") is True
+    assert meta.get("refreshed") is False
+    assert app.ctx.update_refresh["stamps"] == [], (
+        "a coalesced refresh spent no request, so it must spend no budget")
