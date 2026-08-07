@@ -96,6 +96,9 @@ _REQUIRED = (
     "function staleSurvivors", "function deployStrip",
     "function applyTargetSha", "function applyGateFromFacts",
     "function applyGateWords", "function applyRefusalOutcome",
+    # The forced-refresh refusal sentences: a "Check now" the broker declined
+    # must never read as "just checked".
+    "function refreshRefusedWords",
     # #183 R6: the restart reason words, sliced from update.js's own
     # self-restart block so the cooldown sentence tested is the shipped one.
     "const RESTART_REASONS", "function restartReasonWords",
@@ -1116,6 +1119,23 @@ CASES.restart_cooldown_words = async () => {
     return out;
 };
 
+CASES.refresh_refused_words = async () => {
+    const out = {};
+    out.rateLimited = refreshRefusedWords(
+        { reason: 'rate-limited', retry_after_s: 1800 });
+    out.tooSoon = refreshRefusedWords(
+        { reason: 'too-soon', retry_after_s: 42 });
+    out.budget = refreshRefusedWords(
+        { reason: 'hourly-budget', retry_after_s: 900 });
+    out.unknownReason = refreshRefusedWords(
+        { reason: 'not-a-reason-this-build-knows', retry_after_s: 5 });
+    out.noRetry = refreshRefusedWords({ reason: 'too-soon' });
+    out.junkRetry = refreshRefusedWords(
+        { reason: 'too-soon', retry_after_s: 'soon' });
+    out.empty = refreshRefusedWords(null);
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -2070,3 +2090,31 @@ def test_the_cooldown_reason_has_honest_words(harness):
     assert "applying needs a restart to take effect" in r["applyGateWords"]
     assert r["plain"] in r["applyGateWords"], (
         "the cooldown words did not flow through the apply gate wording")
+
+
+def test_a_refused_refresh_never_reads_as_just_checked(harness):
+    """The broker floors and budgets forced refreshes, and answers a refused
+    one with a 200 carrying the answer it already had. These sentences are the
+    only thing standing between that and a page claiming it just checked."""
+    out = run(harness, "refresh_refused_words")
+    # Each refusal names its own cause, and none of them claim freshness.
+    assert "rate-limiting" in out["rateLimited"]
+    assert "moments ago" in out["tooSoon"]
+    assert "hour" in out["budget"]
+    for k in ("rateLimited", "tooSoon", "budget", "unknownReason", "empty"):
+        low = out[k].lower()
+        assert "just checked" not in low and "up to date" not in low, k
+        assert ("kept" in low or "did not re-ask" in low
+                or "already had" in low), k
+    # Distinct, so an operator can tell a self-clearing floor from a real
+    # upstream limit -- one is a moment, the other is GitHub's word.
+    said = [out["rateLimited"], out["tooSoon"], out["budget"]]
+    assert len(set(said)) == 3
+    # A retry hint when there is one, silence when there is not, and never a
+    # fabricated number from junk.
+    assert "42s" in out["tooSoon"]
+    assert "30 min" in out["rateLimited"], "long waits read in minutes"
+    assert "try again" not in out["noRetry"]
+    assert "try again" not in out["junkRetry"]
+    # An unrecognised reason still refuses honestly rather than inventing one.
+    assert out["unknownReason"] and "did not re-ask" in out["unknownReason"]

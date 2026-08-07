@@ -156,7 +156,8 @@
                     if (!st) {
                         st = { hostId: hostId, check: null, error: null,
                                checkedAt: 0, inFlight: false,
-                               lastDeploy: null };
+                               lastDeploy: null,
+                               refreshRefused: null };
                         hostChecks.set(hostId, st);
                     }
                     return st;
@@ -656,6 +657,7 @@
                         st.check = null;
                         st.error = 'no-such-host';
                         st.lastDeploy = null;
+                        st.refreshRefused = null;
                         st.checkedAt = Date.now();
                         renderAll();
                         return;
@@ -695,10 +697,21 @@
                             st.check = null;
                             st.error = cap;
                             st.lastDeploy = null;
+                            st.refreshRefused = null;
                             st.checkedAt = Date.now();
                         } else {
-                            const r = await hostFetch(host, '/update/check',
-                                                      { timeoutMs: 20000 });
+                            // "Check now" says refresh=1, the 30-minute tick
+                            // never does. Without it the button re-requested
+                            // an answer the broker had cached for a DAY, so a
+                            // commit pushed in the last 24h stayed invisible
+                            // and the apply had no fresh sha to act on. The
+                            // broker floors and budgets these; a refusal comes
+                            // back as a 200 that says so (refreshed:false).
+                            const r = await hostFetch(
+                                host,
+                                '/update/check'
+                                    + ((opts && opts.refresh) ? '?refresh=1' : ''),
+                                { timeoutMs: 20000 });
                             // This broker answered. Anything that goes wrong
                             // from here on is its ANSWER being unusable, not the
                             // trip to it, and the two must not be reported as
@@ -724,6 +737,7 @@
                                 st.check = null;
                                 st.error = 'unauthorized';
                                 st.lastDeploy = null;
+                                st.refreshRefused = null;
                             } else if (r.status === 503) {
                                 // The broker's own gate. A capability that is
                                 // absent here — NOT an error, NOT "up to date",
@@ -743,6 +757,7 @@
                                 st.check = null;
                                 st.error = 'not-opted-in';
                                 st.lastDeploy = null;
+                                st.refreshRefused = null;
                             } else if (!r.ok) {
                                 throw new Error('HTTP ' + r.status);
                             } else {
@@ -752,6 +767,17 @@
                                 }
                                 st.check = j.check;
                                 st.error = null;
+                                // A refused refresh must never read as "just
+                                // checked": the answer is honest, but it is
+                                // as old as its own checkedAt, and the button
+                                // promised otherwise. Recorded only when the
+                                // broker actually refused one, and cleared on
+                                // every other answer so it cannot outlive the
+                                // click that earned it.
+                                st.refreshRefused =
+                                    (opts && opts.refresh && j.refreshed === false
+                                     && j.refresh_refused)
+                                        ? j.refresh_refused : null;
                                 // #182 Part 2 (A29): the finalized deploy
                                 // outcome rides BESIDE the check (app.py
                                 // _update_check), so it is adopted and
@@ -770,6 +796,7 @@
                         st.check = null;
                         st.error = failure;
                         st.lastDeploy = null;
+                        st.refreshRefused = null;
                         st.checkedAt = Date.now();
                     } finally {
                         st.inFlight = false;
@@ -2150,12 +2177,26 @@
                         try { t = new Date(oldest).toLocaleTimeString(); }
                         catch (_) {}
                     }
+                    // A broker that REFUSED the forced refresh is named here
+                    // rather than left to imply it answered afresh: the words
+                    // below say the answer is the one it already had, and the
+                    // clock above says how old that is.
+                    const refused = rows.filter(r => r.st.refreshRefused);
                     win.checkedEl.textContent = oldest
                         ? ('checked ' + t) : 'checking…';
-                    win.checkedEl.title = rows.length > 1
-                        ? 'the oldest of these checks — each broker is asked, '
-                            + 'and answers, separately'
-                        : '';
+                    if (refused.length) {
+                        const w = refreshRefusedWords(refused[0].st.refreshRefused);
+                        win.checkedEl.textContent += refused.length > 1
+                            ? (' — ' + refused.length + ' brokers did not re-ask')
+                            : (' — ' + w);
+                    }
+                    win.checkedEl.title = refused.length
+                        ? refused.map(r => (r.label || 'this broker') + ': '
+                              + refreshRefusedWords(r.st.refreshRefused)).join('\n')
+                        : (rows.length > 1
+                            ? 'the oldest of these checks — each broker is asked, '
+                                + 'and answers, separately'
+                            : '');
                 }
 
                 // Idempotent: rebuild from the records every call. ONE ROW PER

@@ -308,3 +308,36 @@
             return out;
         }
 
+        // ---- forced-refresh refusals (Check now) ---------------------------
+        //
+        // The broker floors and budgets forced refreshes because they bypass
+        // the daily TTL, and the budget they spend is GitHub's 60/hour for the
+        // WHOLE source IP. When it refuses it still answers 200 with the
+        // answer it already had -- so these words exist to stop that reading
+        // as "just checked". Pure: reason in, sentence out.
+        function refreshRefusedWords(ref) {
+            const secs = (ref && typeof ref.retry_after_s === 'number'
+                          && ref.retry_after_s > 0) ? ref.retry_after_s : null;
+            const soon = secs
+                ? (secs >= 90 ? (' -- try again in about '
+                                 + Math.round(secs / 60) + ' min')
+                              : (' -- try again in about ' + secs + 's'))
+                : '';
+            const reason = ref && ref.reason;
+            if (reason === 'rate-limited') {
+                // Upstream's own word, not ours. Clicking harder is what made
+                // this, and would extend it.
+                return 'GitHub is rate-limiting this broker, so it kept the '
+                    + 'answer it had' + soon;
+            }
+            if (reason === 'too-soon') {
+                return 'it re-asked GitHub moments ago, so it kept that '
+                    + 'answer' + soon;
+            }
+            if (reason === 'hourly-budget') {
+                return 'it has spent this hour of manual re-asks and kept '
+                    + 'the answer it had' + soon;
+            }
+            return 'it did not re-ask GitHub, so this is the answer it '
+                + 'already had' + soon;
+        }
