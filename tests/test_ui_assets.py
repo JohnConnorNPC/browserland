@@ -1067,6 +1067,21 @@ def test_every_fragment_ends_in_newline_and_has_no_bom():
         assert "﻿" not in raw, f"{name} carries a UTF-8 BOM"
 
 
+def test_no_fragment_carries_a_raw_nul_byte():
+    # #181 shipped `content: "\00a0"` into 15_css_dialogs.css with the escape
+    # COLLAPSED into a literal 0x00. Two costs, and the second is the reason
+    # this test exists: the rule can never render its intended NBSP (U+0000
+    # parses as U+FFFD), and ripgrep classifies the whole file as BINARY, so
+    # every rg-backed search, review and drift guard silently skips it. Python
+    # read_text() passes NUL through happily, which is exactly why no existing
+    # hygiene test caught it -- assert on the BYTES.
+    for name in (*ui._ORDERED, *ui._MODS, *_declared_mod_css()):
+        raw = (BROKER_DIR / name).read_bytes()
+        assert b"\x00" not in raw, (
+            f"{name} carries a raw NUL byte -- rg will treat it as binary and "
+            f"silently miss every match in it")
+
+
 # --------------------------------------------------------------------------- #
 # assembly integrity
 # --------------------------------------------------------------------------- #
