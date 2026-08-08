@@ -21,6 +21,19 @@
         // Per-gate policy words/helpers land here next; today this file
         // carries only the restart-reason words.
 
+        // Human words for every reason_code the broker can hand
+        // back, over both routes that carry one: GET /info's
+        // `restart.reason_code` (why the control is DISABLED) and
+        // POST /restart's own `reason_code` on a non-202 (why an
+        // attempted restart was REFUSED, or failed after it was
+        // accepted). The two sets overlap almost entirely — a
+        // refusal is usually the same gate the button was already
+        // disabled for, caught again server-side in case the two
+        // ever disagree — so one table answers both. An unrecognised
+        // code falls through to a generic sentence in
+        // restartReasonWords() below, never a raw token rendered at
+        // the user — same posture as update.js's REASONS table, for
+        // the same reason.
         const RESTART_REASONS = {
             'restart-disabled': 'restarting is switched off on this '
                 + 'broker. An operator turns it on in the broker '

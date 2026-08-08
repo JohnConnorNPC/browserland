@@ -3622,11 +3622,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # the config and restart" -- the standard response to a capability you did
     # not want granted -- a silent no-op, with the file plainly saying false
     # while the process does the opposite. A key's ABSENCE is what hands that
-    # gate's decision to the GUI; update_check_enabled is absent from both
-    # shipped example configs, while restart_enabled ships PINNED false in
-    # them, exactly because being logged in must never be enough to bounce a
-    # broker hosting other people's live terminals -- deployment policy, not a
-    # permission a session earns by authenticating.
+    # gate's decision to the GUI; the shipped example configs carry NONE of
+    # the three keys (their _note lines document the override instead), so a
+    # fresh install's gates all belong to the desktop switch until an
+    # operator pins them -- the tool for a deployment where being logged in
+    # must never be enough to bounce a broker hosting other people's live
+    # terminals: deployment policy, not a permission a session earns by
+    # authenticating.
     #
     # bool() coercion on the CONFIG path only: a hand-edited number in the
     # operator's own file resolves to a definite yes/no. The sidecar is held
@@ -3643,7 +3645,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # SAME consent seam as the check -- a stored sidecar grant can open them.
     # What survives of the old posture is the half that mattered: config
     # presence is still the operator override, so PINNING the keys in
-    # broker_config (as both shipped examples do for restart_enabled) is what
+    # broker_config (the example configs' _note lines say how) is what
     # keeps a hands-off deployment un-grantable from the GUI -- the sidecar
     # can never outvote a key that is present, however damaged or however
     # recently written. All six fields are assigned back to back with no

@@ -1173,20 +1173,6 @@
                 // in its own label rather than leaving the scope to be
                 // inferred from whichever row of the fleet list the reader's
                 // eye happens to be on.
-                //
-                // Human words for every reason_code the broker can hand
-                // back, over both routes that carry one: GET /info's
-                // `restart.reason_code` (why the control is DISABLED) and
-                // POST /restart's own `reason_code` on a non-202 (why an
-                // attempted restart was REFUSED, or failed after it was
-                // accepted). The two sets overlap almost entirely — a
-                // refusal is usually the same gate the button was already
-                // disabled for, caught again server-side in case the two
-                // ever disagree — so one table answers both. An unrecognised
-                // code falls through to a generic sentence in
-                // restartReasonWords() below, never a raw token rendered at
-                // the user — same posture as REASONS above, for the same
-                // reason.
                 // ---- restart-reason words moved out ------------------------
                 // RESTART_REASONS/restartReasonWords (#182 Part 2, atom A4)
                 // now live in mods/update/update-policy.js -- same mod,
