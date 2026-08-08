@@ -426,6 +426,11 @@ _UPDATE_POLICY_STORED = "stored"
 _UPDATE_POLICY_DEFAULT = "default"
 _UPDATE_POLICY_CORRUPT = "corrupt"
 
+#: The three recognized sidecar/wire keys, in the ONE fixed order every
+#: consumer uses: POST /update/policy's validation order (first offender
+#: answers), its 409 ``locked`` list, and the on-disk key layout.
+_UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled")
+
 
 def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
     """``(stored gates, corrupt)`` from ``webterm_update_policy.json``.
@@ -6786,10 +6791,27 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json(payload)
 
     # ---- update policy write (POST /update/policy, #182) ------------------
-    # The GUI's way to say "yes, this broker may check for updates", so that
-    # opting in no longer means editing a JSON file and bouncing the process.
-    # The flip is LIVE: _update_check reads app.ctx per request, so the very
-    # next poll goes through.
+    # The GUI's way to grant -- or revoke -- what this broker may do to
+    # itself: CHECK for updates (check_enabled), APPLY one (apply_enabled),
+    # RESTART the process (restart_enabled). One route for all three gates,
+    # and a body may carry any SUBSET of the keys: the ones it does not
+    # mention are preserved exactly as the sidecar has them, so two operators
+    # flipping different gates cannot erase each other's grants. Opting in no
+    # longer means editing a JSON file and bouncing the process, and the flip
+    # is LIVE in both directions: every consumer (_update_check, the apply
+    # route's two gate reads, restart_status) reads app.ctx per request, so
+    # the very next call sees the new verdict.
+    #
+    # REVOCATION IS PROSPECTIVE, and that is the whole contract. A revoke
+    # gates ADMISSION: an apply already queued on update_lock re-reads
+    # app.ctx.update_apply_enabled after acquiring it and is refused, and a
+    # queued check comes back None the same way. It never cancels work
+    # already admitted -- a git phase that began before the revoke landed
+    # runs to its own verdict -- and an already-armed restart claim dies with
+    # the process it doomed (the arm is the point of no return; see
+    # request_restart). Anything stronger would mean killing a subprocess
+    # halfway through a merge, which is exactly the suspect-tree outcome the
+    # apply engine exists to avoid.
     #
     # NOT origin-gated, exactly like POST /mods/policy which it otherwise
     # copies. It briefly was, on the theory that granting egress is irreversible
@@ -6826,19 +6848,42 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
-        want = body.get("check_enabled")
-        # A REAL bool, never a coercion: this is the grant itself, and reading
-        # "false" (truthy) as yes would be the worst possible place to guess.
-        if not isinstance(want, bool):
+        # The subset this request asks to change, in the one fixed order.
+        # Unknown body keys are IGNORED -- an old client posting extra fields
+        # must not break -- and a body with NO recognized key ({} included)
+        # answers bad_check_enabled, the shape the empty body has always
+        # answered with, kept deliberately so an old single-key client sees
+        # nothing new.
+        changes = {key: body[key] for key in _UPDATE_POLICY_KEYS
+                   if key in body}
+        if not changes:
             return sanic_json({"ok": False, "error": "bad_check_enabled"},
                               status=400)
-        # The config key outranks this route entirely. 409, not 403: nothing is
-        # wrong with the caller or its token -- the setting simply is not this
-        # interface's to change on this broker, and `source` says who owns it so
-        # the UI can name the file instead of showing a dead button.
-        if app.ctx.update_policy_source == _UPDATE_POLICY_CONFIG:
+        # REAL bools, never a coercion: these are the grants themselves, and
+        # reading "false" (truthy) as yes would be the worst possible place
+        # to guess. Types answer BEFORE ownership, first offender in fixed
+        # order, so a malformed request learns about its own shape before it
+        # learns whose gate it is.
+        for key, want in changes.items():
+            if not isinstance(want, bool):
+                return sanic_json({"ok": False, "error": "bad_%s" % key},
+                                  status=400)
+        # A config key outranks this route entirely, PER GATE. 409, not 403:
+        # nothing is wrong with the caller or its token -- those settings
+        # simply are not this interface's to change on this broker, and
+        # `locked` names exactly which requested keys the config owns so the
+        # UI can name the file instead of showing a dead switch. All-or-
+        # nothing, and BEFORE any idempotence answer: asking a config-owned
+        # gate for the value it already has is still asking the wrong owner.
+        sources = {"check_enabled": app.ctx.update_policy_source,
+                   "apply_enabled": app.ctx.update_apply_source,
+                   "restart_enabled": app.ctx.restart_source}
+        locked = [key for key in changes
+                  if sources[key] == _UPDATE_POLICY_CONFIG]
+        if locked:
             return sanic_json({"ok": False, "error": "policy_locked",
                                "source": _UPDATE_POLICY_CONFIG,
+                               "locked": locked,
                                "update": update_policy_view(app)}, status=409)
 
         async def _locked_write():
@@ -6846,21 +6891,49 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             if stage != LIFECYCLE_RUNNING:
                 return sanic_json({"ok": False, "error": "restarting",
                                    "lifecycle": stage}, status=503)
-            # Idempotent: N tabs asking for the state it is already in must not
-            # produce N rewrites of the file. Checked under the lock so the
-            # answer cannot go stale between the test and the write.
-            if (app.ctx.update_check_enabled == want
-                    and app.ctx.update_policy_source == _UPDATE_POLICY_STORED):
-                return sanic_json({"ok": True, "update": update_policy_view(app)})
+            loop = asyncio.get_running_loop()
+            # Re-read the sidecar INSIDE the lock -- never trust a pre-lock
+            # read. Concurrent subset writes serialize here, and each must
+            # merge over what the OTHER actually landed, or the loser's keys
+            # silently vanish. Corrupt or absent starts from {}: a good write
+            # is how a damaged file gets repaired.
+            stored, corrupt = await loop.run_in_executor(
+                None, _load_update_policy, app.ctx.update_policy_path)
+            base = dict(stored) if (stored and not corrupt) else {}
+            merged: Dict[str, bool] = {}
+            for key in _UPDATE_POLICY_KEYS:
+                if key in changes:
+                    merged[key] = changes[key]
+                elif key in base:
+                    merged[key] = base[key]
+            if "check_enabled" not in merged:
+                # Every writer of this file has always carried check_enabled
+                # (the loader reads its absence as corruption), so when
+                # nothing supplies one, synthesize the DEFAULT: off. Never
+                # the live ctx value -- if the config owns the check, copying
+                # its True in here would mint a stored grant nobody clicked,
+                # and deleting the config key later would leave that grant
+                # silently in force.
+                merged = {"check_enabled": False, **merged}
+            # Idempotent: N tabs asking for the state already on disk must
+            # not produce N rewrites of the file. Compared against the
+            # in-lock disk read, so the answer cannot go stale between the
+            # test and the write -- and only when the file was READABLE,
+            # because a corrupt file always deserves the repairing write.
+            if not corrupt and merged == stored:
+                return sanic_json({"ok": True,
+                                   "update": update_policy_view(app)})
             try:
-                await asyncio.get_running_loop().run_in_executor(
+                await loop.run_in_executor(
                     None, _write_state_atomic, app.ctx.update_policy_path,
-                    {"check_enabled": want})
+                    merged)
             except OSError as exc:
                 # Logged with the path, answered without it: an overridden
                 # update_policy_path that is unwritable is an operator problem,
                 # and the browser gets a stable code rather than a
-                # platform-specific message naming a directory.
+                # platform-specific message naming a directory. ctx is not
+                # touched on this path: what the gates said before the failed
+                # write is exactly what they still say.
                 LOGGER.error("could not write update policy %s: %s",
                              app.ctx.update_policy_path, exc)
                 return sanic_json({"ok": False, "error": "policy_write_failed"},
@@ -6869,11 +6942,34 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # in between leaves the sidecar ahead of memory, and the next boot
             # reads the sidecar and converges on what the client was told
             # landed. The reverse order would answer "enabled", then come back
-            # from a restart disabled.
-            app.ctx.update_check_enabled = want
-            app.ctx.update_policy_source = _UPDATE_POLICY_STORED
-            LOGGER.info("update checking %s via /update/policy (%s)",
-                        "enabled" if want else "disabled", request.ip)
+            # from a restart disabled. All six fields re-resolve through the
+            # SAME per-key layering boot uses -- so a config-owned sibling
+            # keeps its config verdict -- and are assigned back to back with
+            # no await between them, so no request can observe a half-updated
+            # policy.
+            before = (app.ctx.update_check_enabled,
+                      app.ctx.update_apply_enabled,
+                      app.ctx.restart_enabled)
+            app.ctx.update_check_enabled, app.ctx.update_policy_source = \
+                _resolve_update_gate(config, "update_check_enabled",
+                                     merged, "check_enabled", False)
+            app.ctx.update_apply_enabled, app.ctx.update_apply_source = \
+                _resolve_update_gate(config, "update_apply_enabled",
+                                     merged, "apply_enabled", False)
+            app.ctx.restart_enabled, app.ctx.restart_source = \
+                _resolve_update_gate(config, "restart_enabled",
+                                     merged, "restart_enabled", False)
+            after = (app.ctx.update_check_enabled,
+                     app.ctx.update_apply_enabled,
+                     app.ctx.restart_enabled)
+            moved = ["%s %s" % (label, "enabled" if now else "disabled")
+                     for label, was, now in zip(
+                         ("update checking", "update apply", "restart"),
+                         before, after) if was != now]
+            LOGGER.info("update policy via /update/policy: %s (%s)",
+                        "; ".join(moved)
+                        or "stored record rewritten, no gate moved",
+                        request.ip)
             return sanic_json({"ok": True, "update": update_policy_view(app)})
 
         return await _shielded_region(app.ctx.update_policy_lock, _locked_write)

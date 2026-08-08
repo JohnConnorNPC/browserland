@@ -20,6 +20,11 @@ design and would otherwise be a comment nobody checks:
 * **A revoke that returns success must actually stop the next request**, even
   one already queued on the single-flight lock -- otherwise the grant is
   withdrawn and then honoured anyway.
+* **A subset write must not erase its siblings.** The route accepts any
+  subset of the three recognized keys and merges over what is on disk,
+  re-read under its own lock, so granting one gate never clobbers a stored
+  grant for another -- and never copies a config-owned value into the
+  sidecar.
 
 No network anywhere: every test that could reach GitHub patches ``run_check``
 with a fake that raises if it is called at all.
@@ -32,7 +37,7 @@ import json
 
 import pytest
 
-from .auth_helpers import TEST_TOKEN, authed
+from .auth_helpers import TEST_TOKEN, authed, authed_reusable, with_token
 from webterm.broker import app as broker_app
 from webterm.broker import update
 from webterm.broker.app import create_app
@@ -294,13 +299,17 @@ def test_the_write_is_idempotent(tmp_path, monkeypatch):
 def test_what_landed_on_disk_is_what_info_reports(tmp_path, monkeypatch):
     _no_network(monkeypatch)
     app = _make_app(tmp_path, monkeypatch)
-    _, w = authed(app).post("/update/policy", json={"check_enabled": True})
+    _, w = authed(app).post("/update/policy",
+                            json={"check_enabled": True,
+                                  "apply_enabled": True,
+                                  "restart_enabled": True})
     _, i = authed(app).get("/info")
     assert w.json["update"] == i.json["update"], (
         "the write's response is what a client repaints from; it must equal "
         "what re-fetching /info would have given")
     stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
-    assert stored["check_enabled"] is True
+    assert stored == {"check_enabled": True, "apply_enabled": True,
+                      "restart_enabled": True}
 
 
 # ---- the gate it governs ----------------------------------------------------
@@ -556,3 +565,314 @@ def test_a_revoke_beats_a_check_already_queued_on_the_lock(tmp_path,
     assert result is None, "a revoked check must not return a result"
     assert not calls, (
         "the revoke was granted and then the forbidden request was made anyway")
+
+
+# ---- the multi-key write: one route, three gates, subset bodies -------------
+#
+# POST /update/policy grew from a single-key (check) write into the one wire
+# for all three gates. The rules a subset write must hold: unknown keys are
+# ignored, a body with NO recognized key keeps the historical bad_check_enabled
+# answer, types answer before ownership (first offender in fixed
+# check/apply/restart order), a config-owned REQUESTED key locks the whole
+# write and is named in `locked`, and the merge under the lock preserves every
+# sibling the body did not mention -- synthesizing check_enabled: False (never
+# the config's value) when nothing else supplies the one key the loader
+# demands.
+
+SHA = "a" * 40
+TARGET = "b" * 40
+
+
+def _apply_snap(**over):
+    """A snapshot that passes every apply precondition unless a test flips a
+    field -- the injected-verdict idiom test_update_apply.py drives the route
+    with, so nothing here touches the real checkout or the network."""
+    base = dict(local_sha=SHA, dirty=False, check_state=update.STATE_BEHIND,
+                target_sha=TARGET, ahead_by=0, behind_by=5,
+                restart_available=True, restart_reason=None,
+                apply_enabled=True, writable=True, dependency_delta=None)
+    base.update(over)
+    return update.ApplySnapshot(**base)
+
+
+def _stub_apply_machinery(monkeypatch, snap):
+    """collect_apply_snapshot answers ``snap`` verbatim; perform_apply raises
+    if the route ever reaches the git phase, so no test below can mutate the
+    real checkout even by accident."""
+    monkeypatch.setattr(update, "collect_apply_snapshot", lambda **kw: snap)
+
+    def explode(**kwargs):
+        raise AssertionError("the git phase was reached when it must not be")
+
+    monkeypatch.setattr(update, "perform_apply", explode)
+
+
+def test_one_request_can_grant_all_three_gates(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/update/policy", json={
+        "check_enabled": True, "apply_enabled": True, "restart_enabled": True})
+    assert r.status == 200, r.json
+    policy = r.json["update"]["policy"]
+    for gate in ("check", "apply", "restart"):
+        assert policy[gate] == {"enabled": True, "source": "stored",
+                                "mutable": True}, gate
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": True, "apply_enabled": True,
+                      "restart_enabled": True}
+
+
+def test_a_subset_write_leaves_the_other_gates_alone(tmp_path, monkeypatch):
+    """The merge is re-read from disk under the lock, so revoking ONE gate
+    must leave the other two exactly as their grants were written."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, r = client.post("/update/policy", json={
+        "check_enabled": True, "apply_enabled": True, "restart_enabled": True})
+    assert r.status == 200
+    _, r = client.post("/update/policy", json={"apply_enabled": False})
+    assert r.status == 200, r.json
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": True, "apply_enabled": False,
+                      "restart_enabled": True}
+    policy = r.json["update"]["policy"]
+    assert policy["apply"] == {"enabled": False, "source": "stored",
+                               "mutable": True}
+    assert policy["check"] == {"enabled": True, "source": "stored",
+                               "mutable": True}
+    assert policy["restart"] == {"enabled": True, "source": "stored",
+                                 "mutable": True}
+
+
+def test_a_config_owned_key_locks_the_whole_write_and_names_it(tmp_path,
+                                                               monkeypatch):
+    """All-or-nothing: one requested key the config owns refuses the WHOLE
+    write -- a partial landing would tell the client half its request holds
+    -- and `locked` names exactly which keys, so the UI can name the file."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch, restart_enabled=True)
+    _, r = authed(app).post("/update/policy", json={
+        "apply_enabled": True, "restart_enabled": True})
+    assert r.status == 409, r.json
+    assert r.json["error"] == "policy_locked"
+    assert r.json["source"] == "config"
+    assert r.json["locked"] == ["restart_enabled"]
+    assert app.ctx.update_apply_enabled is False, \
+        "the grantable half of a locked write must not land"
+    assert not _sidecar(app).exists()
+    # Ownership answers before idempotence: asking the config-owned key for
+    # the very value it already has still 409s -- the setting is not this
+    # interface's to confirm, either.
+    _, r = authed(app).post("/update/policy", json={"restart_enabled": True})
+    assert r.status == 409, r.json
+    assert r.json["locked"] == ["restart_enabled"]
+
+
+def test_only_a_real_bool_is_accepted_for_each_key(tmp_path, monkeypatch):
+    """Each gate has its own 400 code, and mixed offenders answer the FIRST
+    in the fixed check/apply/restart order -- deterministic, never dict-order
+    luck."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, r = client.post("/update/policy", json={"apply_enabled": 1})
+    assert (r.status, r.json["error"]) == (400, "bad_apply_enabled")
+    _, r = client.post("/update/policy",
+                       json={"check_enabled": True, "restart_enabled": "true"})
+    assert (r.status, r.json["error"]) == (400, "bad_restart_enabled")
+    _, r = client.post("/update/policy",
+                       json={"check_enabled": 1, "restart_enabled": "x"})
+    assert (r.status, r.json["error"]) == (400, "bad_check_enabled")
+    # Nothing moved for any of them: the well-formed half of a half-bad body
+    # must not land.
+    assert app.ctx.update_check_enabled is False
+    assert not _sidecar(app).exists()
+
+
+def test_an_empty_body_still_answers_bad_check_enabled(tmp_path, monkeypatch):
+    """The historical empty-body answer, kept deliberately: {} and a body of
+    only unknown keys carry no recognized key, and an old client that knows
+    only check_enabled keeps seeing the error it always saw."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    for body in ({}, {"unknown_key": True}):
+        _, r = authed(app).post("/update/policy", json=body)
+        assert r.status == 400, body
+        assert r.json["error"] == "bad_check_enabled", body
+    assert not _sidecar(app).exists()
+
+
+def test_a_grant_of_apply_alone_records_check_as_off_not_as_the_config_value(
+        tmp_path, monkeypatch):
+    """The no-minting rule. The loader demands check_enabled be present, so a
+    write that carries no check key synthesizes False -- NEVER the config's
+    live True, because deleting the config key later must not uncover a
+    stored check grant nobody clicked."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch, update_check_enabled=True)
+    _, r = authed(app).post("/update/policy", json={"apply_enabled": True})
+    assert r.status == 200, r.json
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": False, "apply_enabled": True}
+    # The view still shows the check enabled, owned by the config: the
+    # sidecar's synthesized False is layered UNDER a present config key.
+    policy = r.json["update"]["policy"]
+    assert policy["check"] == {"enabled": True, "source": "config",
+                               "mutable": False}
+    assert policy["apply"] == {"enabled": True, "source": "stored",
+                               "mutable": True}
+
+
+def test_a_stored_three_gate_grant_outlives_the_process(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/update/policy", json={
+        "check_enabled": True, "apply_enabled": True, "restart_enabled": True})
+    assert r.status == 200
+    fresh = _make_app(tmp_path, monkeypatch)
+    assert fresh.ctx.update_check_enabled is True
+    assert fresh.ctx.update_policy_source == "stored"
+    assert fresh.ctx.update_apply_enabled is True
+    assert fresh.ctx.update_apply_source == "stored"
+    assert fresh.ctx.restart_enabled is True
+    assert fresh.ctx.restart_source == "stored"
+
+
+def test_a_repeated_grant_performs_no_second_write(tmp_path, monkeypatch):
+    """The multi-key no-op proof: a second identical POST -- and a subset
+    asking for what already holds -- answers ok without touching the disk.
+    Counted, not mtime'd, same as the single-key idempotency test."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    everything = {"check_enabled": True, "apply_enabled": True,
+                  "restart_enabled": True}
+    _, r = client.post("/update/policy", json=everything)
+    assert r.status == 200
+    writes = []
+    real = broker_app._write_state_atomic
+
+    def counting(path, state):
+        writes.append(dict(state))
+        return real(path, state)
+
+    monkeypatch.setattr(broker_app, "_write_state_atomic", counting)
+    _, r = client.post("/update/policy", json=everything)
+    assert r.status == 200
+    _, r = client.post("/update/policy", json={"apply_enabled": True})
+    assert r.status == 200
+    assert writes == [], \
+        f"re-asserting the on-disk state rewrote the file: {writes}"
+    # ...and a genuine change still writes, once, preserving its siblings.
+    _, r = client.post("/update/policy", json={"apply_enabled": False})
+    assert r.status == 200
+    assert writes == [{"check_enabled": True, "apply_enabled": False,
+                       "restart_enabled": True}]
+
+
+def test_a_policy_revoke_of_restart_flips_restart_status_live(tmp_path,
+                                                              monkeypatch):
+    """restart_status reads app.ctx per call, so a stored-grant revoke lands
+    on the very next /info -- same process, no reboot anywhere."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, r = client.post("/update/policy", json={"restart_enabled": True})
+    assert r.status == 200
+    _, r = client.get("/info")
+    assert r.json["restart"]["configured"] is True
+    assert r.json["restart"]["reason_code"] != \
+        broker_app.REASON_RESTART_DISABLED
+
+    _, r = client.post("/update/policy", json={"restart_enabled": False})
+    assert r.status == 200
+    # The flip IS the ctx assignment: provable without another request.
+    assert app.ctx.restart_enabled is False
+    assert app.ctx.restart_source == "stored"
+    _, r = client.get("/info")
+    block = r.json["restart"]
+    assert block["configured"] is False
+    assert block["available"] is False
+    assert block["reason_code"] == broker_app.REASON_RESTART_DISABLED
+    assert r.json["update"]["policy"]["restart"] == {
+        "enabled": False, "source": "stored", "mutable": True}
+
+
+def test_a_stored_grant_opens_the_real_apply_gate(tmp_path, monkeypatch):
+    """The positive integration proof: with no config key the apply route
+    refuses at the gate; a grant via THIS route gets the SAME request past
+    that refusal, into the controlled precondition refusal the stubbed
+    snapshot arranges. perform_apply raises if reached, so nothing real can
+    happen past the seam."""
+    _no_network(monkeypatch)
+    _stub_apply_machinery(monkeypatch, _apply_snap(dirty=True))
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    body = {"target_sha": TARGET}
+    _, r = client.post("/update/apply", json=body)
+    assert r.status == 503, r.json
+    assert r.json["error"] == "update_apply_disabled"
+
+    _, r = client.post("/update/policy", json={"apply_enabled": True})
+    assert r.status == 200
+
+    _, r = client.post("/update/apply", json=body)
+    assert r.status == 409, r.json
+    assert r.json["error"] == "apply_refused", \
+        "the stored grant must reach the real gate, not just the view"
+    assert r.json["reason_codes"] == [update.APPLY_DIRTY_TREE]
+
+
+def test_a_policy_revoke_beats_an_apply_already_queued_on_the_lock(
+        tmp_path, monkeypatch):
+    """The apply twin of the queued-check revoke above, driven end to end
+    through the real routes: an apply that claimed its operation and queued
+    on update_lock is refused at admission when a POST /update/policy revoke
+    (which takes update_policy_lock, NOT update_lock, so it can land while
+    the apply waits) got there first. The control arm runs the SAME setup
+    without the revoke and gets PAST the gate to the controlled precondition
+    refusal -- without it, a gate that refuses everyone would pass the revoke
+    arm vacuously."""
+    _no_network(monkeypatch)
+    _stub_apply_machinery(monkeypatch, _apply_snap(dirty=True))
+    app = _make_app(tmp_path, monkeypatch)
+    with authed_reusable(app) as client:
+        apply_url = with_token(
+            f"http://{client.host}:{client.port}/update/apply",
+            app.ctx.auth_token)
+        policy_url = with_token(
+            f"http://{client.host}:{client.port}/update/policy",
+            app.ctx.auth_token)
+        _, r = client.post("/update/policy", json={"apply_enabled": True})
+        assert r.status == 200
+
+        async def _drive(revoke):
+            # Hold update_lock so the apply below queues behind it, exactly
+            # as it would behind a concurrent check's upstream request.
+            await app.ctx.update_lock.acquire()
+            req = asyncio.ensure_future(
+                client._session.post(apply_url, json={"target_sha": TARGET}))
+            for _ in range(500):
+                if app.ctx.update_apply_claim is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert app.ctx.update_apply_claim is not None, \
+                "the apply never passed the top-of-handler gate"
+            if revoke:
+                resp = await client._session.post(
+                    policy_url, json={"apply_enabled": False})
+                assert resp.status_code == 200, resp.text
+            app.ctx.update_lock.release()
+            return await req
+
+        control = client._loop.run_until_complete(_drive(revoke=False))
+        assert control.status_code == 409, control.text
+        assert control.json()["error"] == "apply_refused"
+        assert update.APPLY_DIRTY_TREE in control.json()["reason_codes"]
+
+        revoked = client._loop.run_until_complete(_drive(revoke=True))
+        assert revoked.status_code == 503, revoked.text
+        assert revoked.json()["error"] == "update_apply_disabled"
+    assert app.ctx.update_apply_claim is None, \
+        "a refused admission must release the claim"
