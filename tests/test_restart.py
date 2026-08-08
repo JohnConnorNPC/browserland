@@ -169,22 +169,49 @@ def test_a_stored_grant_opens_the_gate_and_a_config_key_still_closes_it(
         "enabled": False, "source": "config", "mutable": False}
 
 
-def test_the_example_configs_carry_the_key():
-    """Both shipped examples must mention it, or the switch is undiscoverable.
+def test_the_example_configs_document_the_override_but_do_not_carry_it():
+    """Both shipped examples must mention the two gates, but must NOT ship
+    either key: a PRESENT key (either value) owns the gate and locks it away
+    from the GUI, and the new default hands that decision to the desktop's
+    "Allow this broker to update itself" row in the Update window instead.
 
     Strict JSON has no comments, so the repo's convention is a sibling
-    ``_<key>_note`` string (see ``_auth_token_note``)."""
+    ``_<key>_note`` string (see ``_auth_token_note``) that survives even
+    though the key itself is gone."""
     import json
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
     for name in ("broker_config.example.json",
                  "broker_config.linux.example.json"):
-        cfg = json.loads((root / name).read_text(encoding="utf-8"))
-        assert cfg.get("restart_enabled") is False, \
-            f"{name} must ship the key, defaulting to false"
+        raw = (root / name).read_text(encoding="utf-8")
+        cfg = json.loads(raw)          # must parse as JSON
+        assert "restart_enabled" not in cfg, \
+            f"{name} must not ship restart_enabled: a present key (either " \
+            "value) would pin this install away from the GUI row"
+        assert "update_apply_enabled" not in cfg, \
+            f"{name} must not ship update_apply_enabled: a present key " \
+            "(either value) would pin this install away from the GUI row"
+        # The exact key-with-colon form: the note keys legitimately contain
+        # these substrings (`_restart_enabled_note`, ...), so the check must
+        # be for the real key, not just the substring.
+        assert '"restart_enabled":' not in raw, name
+        assert '"update_apply_enabled":' not in raw, name
+
         assert "_restart_enabled_note" in cfg, \
-            f"{name} needs the note explaining what the key does"
+            f"{name} needs the note explaining what restart_enabled does"
+        assert "_update_apply_enabled_note" in cfg, \
+            f"{name} needs the note explaining what update_apply_enabled does"
+        for key in ("_restart_enabled_note", "_update_apply_enabled_note"):
+            note = cfg[key]
+            # A reader must be able to find the override this note documents.
+            gated_key = key[1:-len("_note")]
+            assert gated_key in note, \
+                f"{name}'s {key} does not name {gated_key}"
+            assert "Allow this broker to update itself" in note, \
+                f"{name}'s {key} does not name the desktop row that decides " \
+                "when the key is absent"
+
         # The cooldown (#183, R6) ships beside it, at its real default.
         assert cfg.get("restart_cooldown_seconds") == 90, \
             f"{name} must ship restart_cooldown_seconds at the 90s default"
