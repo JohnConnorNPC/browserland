@@ -427,31 +427,75 @@ _UPDATE_POLICY_DEFAULT = "default"
 _UPDATE_POLICY_CORRUPT = "corrupt"
 
 
-def _load_update_policy(path: Path) -> Tuple[Optional[bool], bool]:
-    """``(stored check_enabled, corrupt)`` from ``webterm_update_policy.json``.
+def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
+    """``(stored gates, corrupt)`` from ``webterm_update_policy.json``.
 
+    ``stored`` is a dict carrying whichever of the three recognized keys --
+    ``check_enabled``, ``apply_enabled``, ``restart_enabled`` -- the file has.
     ``(None, False)`` when the file is simply absent -- the ordinary case, and
-    the only one that may fall through to the config seed. ``(None, True)`` when
-    it exists but cannot be read as a policy, which the caller turns into "off".
+    the only one that may fall through to a per-gate default. ``(None, True)``
+    when it exists but cannot be read as a policy, which the caller turns into
+    "off" for every gate the config has not pinned.
 
-    The value must be a REAL bool, exactly as _sanitize_mod_policy demands of a
-    pin and for the same reason: this is an operator decision, and inferring one
-    from the string ``"false"`` (which is truthy) would grant egress nobody
-    asked for. A wrong type here is corruption, not a value to coerce."""
+    Every value must be a REAL bool, exactly as _sanitize_mod_policy demands of
+    a pin and for the same reason: this is an operator decision, and inferring
+    one from the string ``"false"`` (which is truthy) would grant egress nobody
+    asked for. A wrong type here is corruption, not a value to coerce -- and it
+    is all-or-nothing: one malformed key condemns the whole file, because a
+    half-trustworthy consent file is not one at all. ``check_enabled`` must be
+    present (every writer of this file has always carried it); the other two
+    are optional. Validation spans ONLY the three recognized keys -- an unknown
+    future field must not brick the file on an older build. The converse cost
+    is accepted: an OLD broker's policy write rewrites the file with only
+    ``check_enabled``, erasing newer stored grants -- fail-closed state loss,
+    never an escalation."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except FileNotFoundError:
         return (None, False)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        LOGGER.error("update policy %s is unreadable (%s); update checking "
-                     "stays OFF until it is fixed or removed", path, exc)
+        LOGGER.error("update policy %s is unreadable (%s); its gates stay "
+                     "OFF until it is fixed or removed", path, exc)
         return (None, True)
-    if isinstance(data, dict) and isinstance(data.get("check_enabled"), bool):
-        return (bool(data["check_enabled"]), False)
-    LOGGER.error("update policy %s has no boolean check_enabled; update "
-                 "checking stays OFF until it is fixed or removed", path)
-    return (None, True)
+    if not isinstance(data, dict) \
+            or not isinstance(data.get("check_enabled"), bool):
+        LOGGER.error("update policy %s has no boolean check_enabled; its "
+                     "gates stay OFF until it is fixed or removed", path)
+        return (None, True)
+    stored: Dict[str, bool] = {"check_enabled": data["check_enabled"]}
+    for key in ("apply_enabled", "restart_enabled"):
+        if key not in data:
+            continue
+        if not isinstance(data[key], bool):
+            LOGGER.error("update policy %s has a non-boolean %s; its gates "
+                         "stay OFF until it is fixed or removed", path, key)
+            return (None, True)
+        stored[key] = data[key]
+    return (stored, False)
+
+
+def _resolve_update_gate(config: Dict[str, Any], config_key: str,
+                         stored: Optional[Dict[str, bool]], stored_key: str,
+                         corrupt: bool) -> Tuple[bool, str]:
+    """One gate's boot-time resolution: ``(enabled, source)``.
+
+    Per key, independent of its siblings: config-key PRESENCE wins (bool()
+    coercion on this path only -- a hand-edited number in the operator's own
+    file resolves to a definite yes/no, the posture restart_enabled has always
+    had); a corrupt sidecar then fails the gate CLOSED, never through to a
+    default; a stored real-bool grant is honoured; absent-everywhere is off.
+    The one deliberate asymmetry: corruption fails only UNPINNED gates closed.
+    A present config key decides its gate whatever state the sidecar is in --
+    the config file is the operator override, and a damaged sidecar must not
+    be able to countermand it."""
+    if config_key in config:
+        return (bool(config[config_key]), _UPDATE_POLICY_CONFIG)
+    if corrupt:
+        return (False, _UPDATE_POLICY_CORRUPT)
+    if stored is not None and stored_key in stored:
+        return (stored[stored_key], _UPDATE_POLICY_STORED)
+    return (False, _UPDATE_POLICY_DEFAULT)
 
 
 def update_policy_view(app) -> Dict[str, Any]:
@@ -476,7 +520,26 @@ def update_policy_view(app) -> Dict[str, Any]:
         # only by a build that actually accepts it, exactly like `update`
         # itself is only published by a build that has the check.
         "remote_writable": True,
+        # The three-key view. The five flat fields above describe the CHECK
+        # (they predate apply/restart joining the sidecar and older clients
+        # read them), so they stay exactly as they are; `policy` is where a
+        # current client reads all three gates uniformly. `mutable` per gate
+        # means the same thing the flat one does: a present config key owns
+        # the gate, so no write can move it.
+        "policy": {
+            "check": _gate_view(app.ctx.update_check_enabled,
+                                app.ctx.update_policy_source),
+            "apply": _gate_view(app.ctx.update_apply_enabled,
+                                app.ctx.update_apply_source),
+            "restart": _gate_view(app.ctx.restart_enabled,
+                                  app.ctx.restart_source),
+        },
     }
+
+
+def _gate_view(enabled: bool, source: str) -> Dict[str, Any]:
+    return {"enabled": bool(enabled), "source": source,
+            "mutable": source != _UPDATE_POLICY_CONFIG}
 
 # /session/* management RPCs: how long the broker waits for the producer's
 # reply before giving up with 504 (the agent does psutil/git work off its
@@ -489,9 +552,9 @@ RPC_TIMEOUT = 10.0
 # and broker/update.py). Both are operator-gated and off until opted in. A third
 # egress path is POST /update/apply, which spawns a git subprocess to fetch from
 # the pinned upstream GitHub URL (a git fetch, not urllib). It is operator-gated
-# by update_apply_enabled (config-file key only, default false) and manual-trigger
-# only — keep this comment true if further egress is ever added, because this is
-# where the surface is meant to be auditable.
+# by update_apply_enabled (config key, or a stored sidecar grant; default false)
+# and manual-trigger only — keep this comment true if further egress is ever
+# added, because this is where the surface is meant to be auditable.
 #
 # The aistatus mod (which ships DISABLED — no request until the operator
 # opts in) needs a server-side, ALLOWLISTED, cached proxy so browser JS can read
@@ -3358,17 +3421,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # its restart, so the claim dies with the process it doomed.
     app.ctx.update_apply_claim = None
     # ---- restart (#183) --------------------------------------------------
-    # The operator switch for restarting this process. Default FALSE, and
-    # deliberately independent of AUTHENTICATION: holding the browser token
-    # already means shell-level access to this box, but "can restart the
-    # broker" is deployment policy, not a permission a session earns by logging
-    # in. One deployment here hosts live user sessions and is hands-off by
-    # standing order; it must be impossible to bounce it merely by being
-    # logged in, and only someone who can edit broker_config can change that.
-    app.ctx.restart_enabled = bool(config.get("restart_enabled", False))
+    # The operator switch (restart_enabled) is resolved in the update-policy
+    # block further down, beside update_check/update_apply: all three gates
+    # share the config-presence-beats-sidecar resolution as of the three-key
+    # sidecar, and the sidecar cannot be read until state_path is known. Only
+    # the DECISION moved; the rest of the restart machinery still lives here.
     # How long after boot ANOTHER authorized restart is refused (#183, R6).
-    # Same posture and placement as restart_enabled above: config-file only —
-    # no sidecar, no GUI switch, no remote write — because it exists to protect
+    # Same posture as restart_enabled's CONFIG path, but deliberately NOT part
+    # of the sidecar resolution below: config-file only — no sidecar, no GUI
+    # switch, no remote write — because it exists to protect
     # the supervisor's crash budget (MAX_RESTARTS=5 relaunches per
     # RESTART_WINDOW=60 s; see RESTART_COOLDOWN_DEFAULT for the 90 > 60
     # arithmetic), and anything a logged-in session could lower would let it
@@ -3400,13 +3461,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.restart_capability = _probe_restart_capability()
     # This PROCESS's id, so a client can tell a restart actually happened (see
     # BOOT_ID). Deliberately NOT broker_id, which survives restarts by design.
+    # The gate log rides with the gate's resolution in the sidecar block below.
     app.ctx.boot_id = BOOT_ID
-    LOGGER.info("restart: gate=%s mechanism=%s%s boot=%s",
-                "on" if app.ctx.restart_enabled else "off",
-                app.ctx.restart_capability.get("mechanism"),
-                (" (%s)" % app.ctx.restart_capability.get("reason_code")
-                 if app.ctx.restart_capability.get("reason_code") else ""),
-                BOOT_ID)
     # Shared per-broker UI state (settings + layout) for /state. Persisted as
     # JSON beside the broker config (override with "state_path"); rev lives in
     # the file so a restart preserves optimistic-concurrency ordering. The lock
@@ -3547,60 +3603,71 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     ).resolve()
     app.ctx.mod_policy = _load_mod_policy(app.ctx.mod_policy_path)
     app.ctx.mod_policy_lock = asyncio.Lock()
-    # #182: WHO decided whether this broker may reach github.com. Same sidecar
-    # shape as the two above, and the mechanism it governs is set up earlier in
-    # this function (search update_cache) -- only the DECISION lives here,
-    # because the file carrying it is a sibling of the state store, and
-    # state_path is not resolved until this point in boot.
+    # #182/#183: WHO decided what this broker may do to itself -- reach
+    # github.com to CHECK (update_check_enabled), download-and-execute an
+    # APPLY (update_apply_enabled), restart the process (restart_enabled).
+    # Same sidecar shape as the two above, and the mechanisms these govern are
+    # set up earlier in this function (search update_cache, restart_capability)
+    # -- only the DECISIONS live here, because the file carrying them is a
+    # sibling of the state store, and state_path is not resolved until this
+    # point in boot.
     #
-    # The config key, WHEN PRESENT, wins over the sidecar and locks
-    # POST /update/policy. Inverting that would make "edit the config and
-    # restart" -- the standard response to egress you did not want -- a silent
-    # no-op, with the file plainly saying false while the process does the
-    # opposite. Its ABSENCE is what hands the decision to the GUI, and absent is
-    # what both shipped example configs and every broker predating this feature
-    # have, so nobody becomes config-managed by accident.
+    # A config key, WHEN PRESENT, wins over the sidecar for ITS gate and locks
+    # that gate against POST /update/policy. Inverting that would make "edit
+    # the config and restart" -- the standard response to a capability you did
+    # not want granted -- a silent no-op, with the file plainly saying false
+    # while the process does the opposite. A key's ABSENCE is what hands that
+    # gate's decision to the GUI; update_check_enabled is absent from both
+    # shipped example configs, while restart_enabled ships PINNED false in
+    # them, exactly because being logged in must never be enough to bounce a
+    # broker hosting other people's live terminals -- deployment policy, not a
+    # permission a session earns by authenticating.
     #
-    # bool() coercion on the CONFIG path only, matching restart_enabled: a
-    # hand-edited number there resolves to a definite yes/no. The sidecar is
-    # held to the stricter real-bool standard (_load_update_policy) precisely
+    # bool() coercion on the CONFIG path only: a hand-edited number in the
+    # operator's own file resolves to a definite yes/no. The sidecar is held
+    # to the stricter real-bool standard (_load_update_policy) precisely
     # because a browser writes it.
     app.ctx.update_policy_path = Path(
         config.get("update_policy_path")
         or (app.ctx.state_path.parent / "webterm_update_policy.json")
     ).resolve()
     _upd_stored, _upd_corrupt = _load_update_policy(app.ctx.update_policy_path)
-    if "update_check_enabled" in config:
-        app.ctx.update_policy_source = _UPDATE_POLICY_CONFIG
-        app.ctx.update_check_enabled = bool(config["update_check_enabled"])
-    elif _upd_corrupt:
-        app.ctx.update_policy_source = _UPDATE_POLICY_CORRUPT
-        app.ctx.update_check_enabled = False
-    elif _upd_stored is not None:
-        app.ctx.update_policy_source = _UPDATE_POLICY_STORED
-        app.ctx.update_check_enabled = _upd_stored
-    else:
-        app.ctx.update_policy_source = _UPDATE_POLICY_DEFAULT
-        app.ctx.update_check_enabled = False
+    # #182 trap 14, REVERSED as of the three-key sidecar: the first build held
+    # apply (and restart) to config-file-only, so that opting the CHECK in
+    # from the GUI could never open either. Apply and restart now ride the
+    # SAME consent seam as the check -- a stored sidecar grant can open them.
+    # What survives of the old posture is the half that mattered: config
+    # presence is still the operator override, so PINNING the keys in
+    # broker_config (as both shipped examples do for restart_enabled) is what
+    # keeps a hands-off deployment un-grantable from the GUI -- the sidecar
+    # can never outvote a key that is present, however damaged or however
+    # recently written. All six fields are assigned back to back with no
+    # await between them, so no request can observe a half-resolved policy.
+    app.ctx.update_check_enabled, app.ctx.update_policy_source = \
+        _resolve_update_gate(config, "update_check_enabled",
+                             _upd_stored, "check_enabled", _upd_corrupt)
+    app.ctx.update_apply_enabled, app.ctx.update_apply_source = \
+        _resolve_update_gate(config, "update_apply_enabled",
+                             _upd_stored, "apply_enabled", _upd_corrupt)
+    app.ctx.restart_enabled, app.ctx.restart_source = \
+        _resolve_update_gate(config, "restart_enabled",
+                             _upd_stored, "restart_enabled", _upd_corrupt)
     LOGGER.info("update checking: %s (decided by: %s)",
                 "on" if app.ctx.update_check_enabled else "off",
                 app.ctx.update_policy_source)
+    LOGGER.info("update apply: %s (decided by: %s)",
+                "on" if app.ctx.update_apply_enabled else "off",
+                app.ctx.update_apply_source)
+    LOGGER.info("restart: gate=%s (decided by: %s) mechanism=%s%s boot=%s",
+                "on" if app.ctx.restart_enabled else "off",
+                app.ctx.restart_source,
+                app.ctx.restart_capability.get("mechanism"),
+                (" (%s)" % app.ctx.restart_capability.get("reason_code")
+                 if app.ctx.restart_capability.get("reason_code") else ""),
+                BOOT_ID)
     # Held across the whole read / write / live-swap, so two tabs arriving
     # together produce one file rather than two interleaved ones.
     app.ctx.update_policy_lock = asyncio.Lock()
-    # #182 apply half: the operator switch for actually downloading and
-    # EXECUTING code as this process's user. Deliberately NOT layered like
-    # update_check_enabled above -- config-file key ONLY, default FALSE, no
-    # sidecar, no GUI path, no remote-writable path. The check merely asks "is
-    # there something newer"; applying replaces files on disk and re-execs
-    # this process, so it is deployment policy in the same sense
-    # restart_enabled is (see ~3234), not a browser preference: an operator
-    # edits broker_config.json and restarts the process to turn it on. This is
-    # also what keeps it off on the hands-off deploy instance even once that
-    # instance's operator opts the CHECK in from the GUI (#182 trap 14).
-    app.ctx.update_apply_enabled = bool(config.get("update_apply_enabled", False))
-    LOGGER.info("update apply: %s (config-file gate only)",
-                "on" if app.ctx.update_apply_enabled else "off")
     # #163: RUNTIME-INSTALLED mods. A broker-config'd directory beside the /state
     # store ("mods_dir"), deliberately NOT webterm/broker/mods/ -- that tree is
     # the reviewed first-party set and its drift guard is bidirectional, so an
@@ -6081,8 +6148,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # cross-origin OPTIONS preflight 404ing on a brand-new path and the
         # browser surfacing that as an opaque network error indistinguishable
         # from "that machine is asleep". `apply_enabled` tracks the real
-        # `update_apply_enabled` gate (config-file only, no sidecar/GUI/remote
-        # path -- see its definition beside restart_enabled); the `getattr`
+        # `update_apply_enabled` gate (config key or stored sidecar grant --
+        # see the three-key resolution in create_app); the `getattr`
         # default above is just defensive, not a stand-in for a missing
         # implementation.
         #
@@ -6953,9 +7020,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #     this replaces the running code, _cors_headers answers ACAO:* to
     #     everyone, so for a non-recoverable action the token cannot be the
     #     only gate.
-    #   * the operator gate (update_apply_enabled, config-file only) answers
-    #     503 like /update/check's disabled shape, and is RE-READ inside
-    #     update_lock for the same revoke-TOCTOU reason the check gate is.
+    #   * the operator gate (update_apply_enabled, config key or stored
+    #     sidecar grant) answers 503 like /update/check's disabled shape, and
+    #     is RE-READ inside update_lock for the same revoke-TOCTOU reason the
+    #     check gate is.
     #   * the client names the EXACT sha it previewed; the server re-proves
     #     the preconditions fresh and refuses (accumulating ALL reasons) —
     #     including when the live check no longer names that sha, because a

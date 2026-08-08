@@ -4,11 +4,13 @@ restart intent (#183).
 Three things are pinned here, and they are pinned separately because they fail
 separately:
 
-  * **the gate** (``restart_enabled``) defaults OFF and is read from the broker
-    config alone. It is NOT an authentication question. Holding the browser
-    token already means shell-level access to the box, so gating a restart on
-    "is this caller logged in" would give every logged-in session the power to
-    bounce a broker that is hosting other people's live terminals.
+  * **the gate** (``restart_enabled``) defaults OFF and resolves like the
+    update gates: a PRESENT config key owns it outright, else a stored grant
+    in the update-policy sidecar, else off. It is NOT an authentication
+    question. Holding the browser token already means shell-level access to
+    the box, so gating a restart on "is this caller logged in" would give
+    every logged-in session the power to bounce a broker that is hosting
+    other people's live terminals.
 
   * **the drain**: while it runs, the three entry points that CREATE new work
     (``/file/upload_begin``, ``/recording/begin``, ``/launch``) are refused,
@@ -28,6 +30,7 @@ the critical section rather than at some sleep-guessed moment.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -129,8 +132,41 @@ def test_the_gate_is_independent_of_authentication(tmp_path, monkeypatch):
     _, r = authed(app).get("/info")
     assert r.status == 200, "the token used here must genuinely authenticate"
     assert app.ctx.restart_enabled is False, (
-        "an authenticated broker must not be a restartable one: the config key "
-        "is the only thing that may turn this on")
+        "an authenticated broker must not be a restartable one: only an "
+        "explicit operator grant (config key or stored sidecar) may turn "
+        "this on")
+
+
+def test_a_stored_grant_opens_the_gate_and_a_config_key_still_closes_it(
+        tmp_path, monkeypatch):
+    """restart_enabled rides the three-key update-policy sidecar now: a stored
+    grant opens the gate with no config key at all -- and a PRESENT config key
+    still outranks it, because the config file remains the operator override a
+    sidecar can never outvote. The shipped examples pin the key false, which
+    is exactly what keeps the hands-off deploy un-grantable from the GUI."""
+    (tmp_path / "webterm_update_policy.json").write_text(
+        json.dumps({"check_enabled": False, "restart_enabled": True}),
+        encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch)
+    assert app.ctx.restart_enabled is True
+    assert app.ctx.restart_source == "stored"
+    _, r = authed(app).get("/info")
+    # The same surface the gate tests above read: /info. `configured` is the
+    # gate; only this file's pinned no-supervisor capability keeps
+    # `available` false here.
+    assert r.json["restart"]["configured"] is True
+    assert r.json["update"]["policy"]["restart"] == {
+        "enabled": True, "source": "stored", "mutable": True}
+    # And the sidecar's own check:false was honoured beside the grant.
+    assert app.ctx.update_check_enabled is False
+
+    closed = _make_app(tmp_path, monkeypatch, restart_enabled=False)
+    assert closed.ctx.restart_enabled is False
+    assert closed.ctx.restart_source == "config"
+    _, r = authed(closed).get("/info")
+    assert r.json["restart"]["configured"] is False
+    assert r.json["update"]["policy"]["restart"] == {
+        "enabled": False, "source": "config", "mutable": False}
 
 
 def test_the_example_configs_carry_the_key():

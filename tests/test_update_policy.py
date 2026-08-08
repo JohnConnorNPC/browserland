@@ -335,35 +335,48 @@ def test_revoking_stops_the_next_check(tmp_path, monkeypatch):
     assert r.json["error"] == "update_check_disabled"
 
 
-# ---- the apply gate: config-file only, never coupled to the check (A26) -----
+# ---- the apply and restart gates: same seam, never coupled to the check -----
 #
-# `update_apply_enabled` deliberately does NOT follow update_check_enabled's
-# layering above (config > sidecar > default-off, with a GUI/route opt-in).
-# It follows restart_enabled's posture instead: config-file key only, default
-# False, no sidecar, no GUI, no remote-writable path -- applying an update
-# downloads and executes code as the broker's user, so it is deployment
-# policy an operator opts into by editing the file and restarting, not
-# something a browser click or a peer's opted-in check can reach. The whole
-# point of these tests is that turning the CHECK on must never turn the APPLY
-# on: that coupling is exactly the bug #182 warned about.
+# REVERSED from the first build, which held `update_apply_enabled` (and
+# `restart_enabled`) to config-file-only. All three gates now resolve through
+# the same per-key layering -- config-key presence > corrupt-fails-closed >
+# stored sidecar grant > default off -- each key INDEPENDENTLY. What these
+# tests pin instead is the part that must survive the reversal: turning the
+# CHECK on, by config key or by stored grant, must never turn the APPLY or the
+# RESTART on; a malformed key condemns the whole sidecar; and a PRESENT config
+# key still outranks anything the sidecar says, which is what keeps a
+# hands-off deployment (keys pinned in broker_config) un-grantable from the
+# GUI.
 
 def test_apply_gate_defaults_false_when_key_absent(tmp_path, monkeypatch):
     app = _make_app(tmp_path, monkeypatch)
     assert app.ctx.update_apply_enabled is False
 
 
-def test_apply_gate_is_config_key_only(tmp_path, monkeypatch):
+def test_a_present_apply_config_key_owns_the_gate(tmp_path, monkeypatch):
+    """Either value: presence is ownership. The `false` case is the emergency
+    stop -- source "config", immutable in the view, and no browser write can
+    move it. The `true` case is the same ownership pointing the other way."""
     off = _make_app(tmp_path, monkeypatch, update_apply_enabled=False)
     assert off.ctx.update_apply_enabled is False
+    assert off.ctx.update_apply_source == "config"
+    _, r = authed(off).get("/info")
+    assert r.json["update"]["policy"]["apply"] == {
+        "enabled": False, "source": "config", "mutable": False}
 
     on = _make_app(tmp_path / "b", monkeypatch, update_apply_enabled=True)
     assert on.ctx.update_apply_enabled is True
+    assert on.ctx.update_apply_source == "config"
+    _, r = authed(on).get("/info")
+    assert r.json["update"]["policy"]["apply"] == {
+        "enabled": True, "source": "config", "mutable": False}
 
 
 def test_a_stored_check_grant_does_not_leak_into_the_apply_gate(
         tmp_path, monkeypatch):
-    """Independence, direction 1: a sidecar that flips the CHECK gate on must
-    have no effect on the apply gate -- there is no sidecar for it at all."""
+    """Independence, direction 1 -- the no-escalation pin: a sidecar that flips
+    the CHECK gate on carries no apply key, and an absent key must resolve to
+    default-off, never to a sibling's value."""
     path = tmp_path / "webterm_update_policy.json"
     path.write_text(json.dumps({"check_enabled": True}), encoding="utf-8")
     app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path))
@@ -371,6 +384,94 @@ def test_a_stored_check_grant_does_not_leak_into_the_apply_gate(
     assert app.ctx.update_policy_source == "stored"
     assert app.ctx.update_apply_enabled is False, (
         "a stored grant for the CHECK must not also grant the APPLY")
+
+
+def test_an_old_sidecar_never_escalates_into_apply_or_restart(tmp_path,
+                                                              monkeypatch):
+    """A sidecar written before apply/restart joined the seam carries only
+    check_enabled. Its grant is honoured for the check and for NOTHING else,
+    and /info's `policy` block is where a client reads all three verdicts."""
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text(json.dumps({"check_enabled": True}), encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path))
+    assert app.ctx.update_check_enabled is True
+    assert app.ctx.update_policy_source == "stored"
+    assert app.ctx.update_apply_enabled is False
+    assert app.ctx.update_apply_source == "default"
+    assert app.ctx.restart_enabled is False
+    assert app.ctx.restart_source == "default"
+    _, r = authed(app).get("/info")
+    assert r.json["update"]["policy"] == {
+        "check": {"enabled": True, "source": "stored", "mutable": True},
+        "apply": {"enabled": False, "source": "default", "mutable": True},
+        "restart": {"enabled": False, "source": "default", "mutable": True}}
+
+
+def test_a_present_but_malformed_key_corrupts_the_whole_sidecar(tmp_path,
+                                                                monkeypatch):
+    """All-or-nothing: `apply_enabled: 1` is not one bad key, it is an
+    untrustworthy file. Even the check -- whose own key here is a perfectly
+    fine bool -- fails closed, because half-trusting a damaged consent file
+    is how a permission gets granted by accident."""
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text(json.dumps({"check_enabled": True, "apply_enabled": 1}),
+                    encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path))
+    verdicts = [
+        (app.ctx.update_check_enabled, app.ctx.update_policy_source),
+        (app.ctx.update_apply_enabled, app.ctx.update_apply_source),
+        (app.ctx.restart_enabled, app.ctx.restart_source)]
+    assert verdicts == [(False, "corrupt")] * 3, verdicts
+
+
+def test_a_corrupt_sidecar_fails_every_gate_closed(tmp_path, monkeypatch):
+    """The check's fail-closed rule, extended verbatim to its two siblings:
+    unreadable is never "absent", for any of the three gates."""
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text("{ not json", encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path))
+    verdicts = [
+        (app.ctx.update_check_enabled, app.ctx.update_policy_source),
+        (app.ctx.update_apply_enabled, app.ctx.update_apply_source),
+        (app.ctx.restart_enabled, app.ctx.restart_source)]
+    assert verdicts == [(False, "corrupt")] * 3, verdicts
+
+
+def test_a_config_key_still_wins_over_a_corrupt_sidecar(tmp_path, monkeypatch):
+    """Corruption fails closed only for UNPINNED gates. A present config key
+    decides its gate whatever state the sidecar is in -- restart comes up TRUE
+    here, from the operator's own file -- while apply, unpinned, stays
+    corrupt-closed beside it."""
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text("<<<garbage>>>", encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch, update_policy_path=str(path),
+                    restart_enabled=True)
+    assert app.ctx.restart_enabled is True
+    assert app.ctx.restart_source == "config"
+    assert app.ctx.update_apply_enabled is False
+    assert app.ctx.update_apply_source == "corrupt"
+    assert app.ctx.update_check_enabled is False
+    assert app.ctx.update_policy_source == "corrupt"
+
+
+def test_restart_resolves_from_the_sidecar_after_state_path_is_known(
+        tmp_path, monkeypatch):
+    """The boot-order move: restart_enabled used to be assigned long before
+    state_path was resolved, where a sidecar grant could not possibly be seen.
+    A custom state dir whose sidecar grants restart proves the resolution now
+    runs after the path is known -- and the sidecar's own check:false is
+    honoured beside the grant, so this is per-key reading, not a blanket."""
+    custom = tmp_path / "elsewhere"
+    custom.mkdir()
+    (custom / "webterm_update_policy.json").write_text(
+        json.dumps({"check_enabled": False, "restart_enabled": True}),
+        encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch,
+                    state_path=str(custom / "webterm_state.json"))
+    assert app.ctx.restart_enabled is True
+    assert app.ctx.restart_source == "stored"
+    assert app.ctx.update_check_enabled is False
+    assert app.ctx.update_policy_source == "stored"
 
 
 def test_enabling_the_check_via_config_does_not_enable_apply(
