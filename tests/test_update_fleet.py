@@ -19,13 +19,15 @@ its shared modCatalogCache, renderAll — is stubbed, so what runs here is the
 mod's own logic and nothing else. Pasting a copy of that logic into the test
 would pass while the mod was broken; this cannot.
 
-Two files, one model. The A29/A30 post-apply + apply-gate helpers moved out
-of update.js into ``mods/update/update-apply.js`` -- a companion script with
-no ``registerMod`` call, spliced immediately BEFORE update.js in ui.py's
-``_MODS`` (the same split ``mods/editor/codemirror.js``/``editor.js`` already
-use). The model source below reads the companion WHOLE (it is pure top-level
-declarations already, nothing to slice) and prepends it to update.js's own
-sliced chunks, in that same _MODS order, so the concatenation node evaluates
+Three files, one model. The A29/A30 post-apply + apply-gate helpers moved out
+of update.js into ``mods/update/update-apply.js``, and (atom A4) the #183
+restart-reason words moved into ``mods/update/update-policy.js`` -- companion
+scripts with no ``registerMod`` call, spliced immediately BEFORE update.js in
+ui.py's ``_MODS`` in that order (policy, apply, update.js -- the same split
+``mods/editor/codemirror.js``/``editor.js`` already use). The model source
+below reads both companions WHOLE (each is pure top-level declarations
+already, nothing to slice) and prepends them to update.js's own sliced
+chunks, in that same _MODS order, so the concatenation node evaluates
 matches what the served page actually loads.
 
 Skipped when node is absent, so the suite still runs on a box without it.
@@ -42,6 +44,7 @@ from webterm.broker import ui
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
 MOD_JS = BROKER_DIR / "mods" / "update" / "update.js"
+MOD_POLICY_JS = BROKER_DIR / "mods" / "update" / "update-policy.js"
 MOD_APPLY_JS = BROKER_DIR / "mods" / "update" / "update-apply.js"
 NODE = shutil.which("node")
 
@@ -64,11 +67,10 @@ _CHUNKS = (
     # setChecking/offerConsent. Declaration-only like the rest; the row that
     # renders it and its confirm dialog are NOT in range (they touch the DOM).
     ("const policyOps = new Map();", "// ---- self-restart (#183) ---"),
-    # #183: the restart reason words (RESTART_REASONS + restartReasonWords),
-    # so the R6 cooldown sentence is proven against the SHIPPED table.
-    # restartInfo() just past the end anchor reads modCatalogCache, so the
-    # range stops before it.
-    ("const RESTART_REASONS = {", "// The local broker's restart capability"),
+    # #183: the restart reason words (RESTART_REASONS + restartReasonWords)
+    # moved out of update.js into the mods/update/update-policy.js companion
+    # (atom A4) -- read whole below, the same way MOD_APPLY_JS already is --
+    # so the R6 cooldown sentence is still proven against the SHIPPED table.
 )
 
 _REQUIRED = (
@@ -99,20 +101,23 @@ _REQUIRED = (
     # The forced-refresh refusal sentences: a "Check now" the broker declined
     # must never read as "just checked".
     "function refreshRefusedWords",
-    # #183 R6: the restart reason words, sliced from update.js's own
-    # self-restart block so the cooldown sentence tested is the shipped one.
+    # #183 R6: the restart reason words, now shipped in the companion
+    # mods/update/update-policy.js (read whole, above) rather than sliced
+    # out of update.js -- so the cooldown sentence tested is still the
+    # shipped one.
     "const RESTART_REASONS", "function restartReasonWords",
 )
 
 
 def _model_source() -> str:
-    # The companion is read WHOLE -- it is already pure top-level
+    # Both companions are read WHOLE -- each is already pure top-level
     # declarations with nothing to slice, the same way a real page load
-    # includes the whole file -- and prepended, matching its _MODS position
-    # (immediately BEFORE update.js).
-    companion = MOD_APPLY_JS.read_text(encoding="utf-8")
+    # includes the whole file -- and prepended in their _MODS order
+    # (policy, then apply, both immediately BEFORE update.js).
+    policy = MOD_POLICY_JS.read_text(encoding="utf-8")
+    apply_companion = MOD_APPLY_JS.read_text(encoding="utf-8")
     src = MOD_JS.read_text(encoding="utf-8")
-    out = [companion]
+    out = [policy, apply_companion]
     last = -1
     for start_marker, end_marker in _CHUNKS:
         start = src.index(start_marker)
