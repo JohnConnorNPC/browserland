@@ -857,8 +857,13 @@
                     // purpose (it is what the row is reporting), so without
                     // this a removed broker's error would be inherited by
                     // whatever host next gets handed its id.
-                    for (const id of Array.from(policyOps.keys())) {
-                        if (!ids.has(id)) policyOps.delete(id);
+                    // policyOps is keyed hostId + '|' + kind (A5), so the
+                    // host id is parsed back out of the key. The kind never
+                    // carries a '|', so the last one always ends the id.
+                    for (const key of Array.from(policyOps.keys())) {
+                        const cut = key.lastIndexOf('|');
+                        const hid = cut === -1 ? key : key.slice(0, cut);
+                        if (!ids.has(hid)) policyOps.delete(key);
                     }
                     for (const id of Array.from(lastWrite.keys())) {
                         if (!ids.has(id)) lastWrite.delete(id);
@@ -930,7 +935,12 @@
                 // ticking this mod on in THIS browser is not a decision about a
                 // remote machine's egress. A peer is only ever changed by its
                 // own row's button being clicked.
-                const policyOps = new Map();   // hostId -> {phase, note, want}
+                // Keyed hostId + '|' + kind, where the kind names which row
+                // the write reports into ('check' for the checking switch;
+                // A6's self-update row brings its own) — so one broker can
+                // carry two independent write notes without either
+                // clobbering the other's.
+                const policyOps = new Map();  // key -> {phase, note, want}
                 let consentSent = false;  // one attempt per page load, ever
                 // A write is authoritative about a broker until something READ
                 // that broker afterwards. Without this, a poll already in flight
@@ -1015,6 +1025,11 @@
                 // immediately, and two checks of the same broker one line apart
                 // is a wasted request however cheap the second one is.
                 //
+                // opts.kind names which row's op this write reports into
+                // (default 'check', the checking switch; A6's self-update
+                // row passes its own) — policyOps is keyed on it, so two
+                // rows about one broker never overwrite each other's notes.
+                //
                 // Takes a host ID, never a host object, and resolves it HERE —
                 // the same rule the poll follows, and for the same reason: a
                 // host object captured before an await can name a broker whose
@@ -1022,16 +1037,23 @@
                 // removed outright. A null host must never reach hostFetch,
                 // which would silently aim this write at the SERVING origin and
                 // switch on the wrong machine.
-                async function setChecking(hostId, want, opts) {
+                async function setPolicy(hostId, changes, opts) {
                     // No falsy-id fallback. Defaulting a missing id to the local
                     // broker is precisely the wrong-machine bug this function is
                     // written to avoid -- it would aim a write meant for a peer
                     // at the box serving the page. Callers name their host.
                     if (typeof hostId !== 'string' || !hostId) return false;
                     const hid = hostId;
+                    const kind = (opts && opts.kind) || 'check';
+                    const opKey = hid + '|' + kind;
+                    const wantKeys = Object.keys(changes || {});
+                    // What the check row's busy label renders from. The
+                    // multi-grant consent body carries the check key too, so
+                    // this reads for it exactly as for the single switch.
+                    const wantOn = !!(changes && changes.check_enabled);
                     const mark = function (phase, note) {
-                        policyOps.set(hid, { phase: phase, note: note,
-                                             want: !!want });
+                        policyOps.set(opKey, { phase: phase, note: note,
+                                               want: wantOn });
                         renderAll();
                     };
                     const host = updHost(hid);
@@ -1043,14 +1065,14 @@
                     // been re-pointed at a different machine meanwhile, the
                     // answer belongs to a broker that is no longer in this row.
                     const fp = hostFingerprint(hid);
-                    mark('busy', want ? 'switching checking on…'
+                    mark('busy', wantOn ? 'switching checking on…'
                         : 'switching checking off…');
                     let resp;
                     try {
                         resp = await hostFetch(host, '/update/policy', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ check_enabled: !!want }),
+                            body: JSON.stringify(changes),
                             timeoutMs: 15000,
                         });
                     } catch (_) {
@@ -1065,46 +1087,21 @@
                     // asked, which is the correct outcome for a host that has
                     // since been removed or re-entered.
                     if (hostFingerprint(hid) !== fp) {
-                        policyOps.delete(hid);
+                        policyOps.delete(opKey);
                         renderAll();
                         return false;
                     }
-                    const code = body && body.error;
-                    if (resp.status === 403 && code === 'forbidden_origin') {
-                        // NOT a credentials problem, and emphatically not a
-                        // policy one: that broker runs the build that shipped
-                        // this route origin-gated, so it accepts the change only
-                        // from its own page. Naming it as anything else sends
-                        // someone to re-enter a password that is perfectly good.
-                        mark('failed', 'that broker’s build only accepts this '
-                            + 'change from its own desktop — update it, and '
-                            + 'this switch will work from here');
+                    // The interpretation is pure and shared — see
+                    // policyWriteOutcome in update-policy.js. The single-key
+                    // check sentences are byte-for-byte what this machinery
+                    // said before it generalized (A5).
+                    const out = policyWriteOutcome(resp.status, body,
+                                                   wantKeys);
+                    if (!out.ok) {
+                        mark(out.phase, out.note);
                         return false;
                     }
-                    if (resp.status === 401 || resp.status === 403) {
-                        mark('failed', 'that broker refused our password');
-                        return false;
-                    }
-                    if (resp.status === 404) {
-                        // The route does not exist there. Says so as a FACT about
-                        // the build rather than as a failure, and names the one
-                        // thing that does work on it.
-                        mark('failed', 'that broker predates the switch — an '
-                            + 'operator sets "update_check_enabled" in its '
-                            + 'config and restarts it');
-                        return false;
-                    }
-                    if (resp.status === 409 && code === 'policy_locked') {
-                        mark('locked', 'that broker’s config names '
-                            + '"update_check_enabled", so that file decides and '
-                            + 'this switch does not');
-                        return false;
-                    }
-                    if (!body || body.ok !== true) {
-                        mark('failed', 'that broker refused the change');
-                        return false;
-                    }
-                    policyOps.delete(hid);
+                    policyOps.delete(opKey);
                     // What the write returned is authoritative about this broker
                     // until something reads it again — held HERE rather than
                     // patched into the shared /info record, because a poll that
@@ -1121,11 +1118,35 @@
                     return true;
                 }
 
+                // The checking switch, exactly as it always behaved: one
+                // gate, one key, same op key ('check') and the same words.
+                // Kept as the named entry point because the row's click
+                // handlers call it — and the body it builds is the shape
+                // the no-auto-revoke guard pins: the value is always
+                // derived from what a human just asked for, never a
+                // hardcoded literal.
+                async function setChecking(hostId, want, opts) {
+                    return setPolicy(hostId, { check_enabled: !!want }, opts);
+                }
+
                 // The consent path. Runs at most once per page load, only when a
                 // human just ticked this mod on, and only when the local broker
-                // has actually said it is both off and ours to change — an
+                // has actually said something is closed and ours to change — an
                 // unconditional POST would spend a request on every broker that
-                // already had checking on.
+                // already had everything on.
+                //
+                // ONE request, all three gates (A5): the click that consents
+                // to checking consents to the broker keeping itself up to
+                // date, so every gate the broker will let this browser open
+                // — mutable and not already open, per consentBody — rides
+                // the same POST. A gate the config owns is silently left to
+                // its file, and a stored "off" the sidecar merely
+                // synthesized for the check is granted like a default, not
+                // honoured like a revoke. When the serving view carries no
+                // `policy` block this degrades to the single-key write it
+                // always was — unreachable live, since the serving broker
+                // runs this build by construction, but the fleet model
+                // exercises it through policyKeysFor.
                 async function offerConsent() {
                     if (consentSent) return;
                     consentSent = true;
@@ -1133,7 +1154,17 @@
                     if (!host) return;
                     try { await capabilityFor(host, false); } catch (_) {}
                     const upd = updateCapFor(LOCAL_HOST_ID);
-                    if (!upd || upd.check_enabled !== false) return;
+                    const keys = policyKeysFor(upd);
+                    if (keys.length > 1) {
+                        const grants = consentBody(upd.policy);
+                        if (!Object.keys(grants).length) return;
+                        await setPolicy(LOCAL_HOST_ID, grants,
+                                        { poll: false });
+                        return;
+                    }
+                    // The single-key degradation: the exact pre-A5 path.
+                    if (keys.length !== 1) return;
+                    if (upd.check_enabled !== false) return;
                     if (upd.mutable !== true) return;
                     await setChecking(LOCAL_HOST_ID, true, { poll: false });
                 }
@@ -1464,7 +1495,9 @@
                 // needs switching on is usually not the one serving this page.
                 function policyRowNeeded(hostId) {
                     const upd = updateCapFor(hostId);
-                    if (policyOps.get(hostId)) return true;
+                    // The 'check'-kind op only: another kind's write (A6's
+                    // self-update row) must not conjure a checking row.
+                    if (policyOps.get(hostId + '|check')) return true;
                     if (!upd) return false;         // too old, or not answered
                     if (upd.check_enabled === false) return true;
                     return upd.source === 'stored';
@@ -1532,7 +1565,7 @@
                 function renderPolicyRow(body, hostId, label) {
                     const local = (hostId || LOCAL_HOST_ID) === LOCAL_HOST_ID;
                     const upd = updateCapFor(hostId);
-                    const op = policyOps.get(hostId);
+                    const op = policyOps.get(hostId + '|check');
                     const on = !!(upd && upd.check_enabled === true);
                     const busy = !!(op && op.phase === 'busy');
                     // While a write is in flight the label comes from what was

@@ -85,6 +85,12 @@ _REQUIRED = (
     "function updateCapFor", "function policyMutableFor",
     "function hostFingerprint",
     "async function setChecking", "async function offerConsent",
+    # #182 Part 2 (A5): the three-grant consent. The pure half ships in the
+    # update-policy.js companion (read whole, above); setPolicy is the
+    # machinery in update.js's own sliced range that the check switch and
+    # the consent click both go through.
+    "function policyKeysFor", "function consentBody",
+    "function policyWriteOutcome", "async function setPolicy",
     # freshTerminalHost is the one function that did NOT move to
     # update-apply.js -- it reads updHost/LOCAL_HOST_ID off THIS closure, so
     # it stays between the opt-in block and the self-restart marker, and the
@@ -176,14 +182,30 @@ const INFO_NOCAP = { state: 'ok', mods: [{ id: 'editor' }, { id: 'update' }],
 // #182: `source`/`mutable` ride the same key. `mutable` is false only when the
 // broker's own config names update_check_enabled, so the default here — the
 // common case — is a gate this browser is allowed to change.
-const INFO_MODERN = (on, over) => ({
-    state: 'ok', mods: [{ id: 'update' }], modsEnabled: true, policy: {},
-    update: Object.assign(
+// A5: the three-key `policy` block rides the same view. Derived from the
+// MERGED flat fields — so an `over` that locks the check cannot leave the
+// block contradicting it — with apply/restart defaulting to config-owned-off
+// here, which keeps the pre-A5 consent cases meaning what they meant (one
+// grantable gate). A case about the other gates overrides `policy` itself;
+// `policy: undefined` in `over` models the flat-only build that predates it.
+const INFO_MODERN = (on, over) => {
+    const upd = Object.assign(
         { check_enabled: on !== false, apply_enabled: false,
           source: on !== false ? 'stored' : 'default', mutable: true,
           remote_writable: true },
-        over || {}),
-});
+        over || {});
+    if (!('policy' in upd)) {
+        upd.policy = {
+            check: { enabled: upd.check_enabled, source: upd.source,
+                     mutable: upd.source !== 'config' },
+            apply: { enabled: upd.apply_enabled, source: 'config',
+                     mutable: false },
+            restart: { enabled: false, source: 'config', mutable: false },
+        };
+    }
+    return { state: 'ok', mods: [{ id: 'update' }], modsEnabled: true,
+             policy: {}, update: upd };
+};
 
 const OK200 = (check) => ({ status: 200, ok: true, body: { ok: true, check } });
 // What a broker that never opted in actually sends (app.py's gate).
@@ -201,8 +223,12 @@ globalThis.fetchModCatalog = async (host) => {
 // #182: what POST /update/policy answers, per host, and every write that was
 // attempted. `policyCalls` is the evidence for the rule that matters most here
 // — nothing may ask a broker to open its gate except a human's click.
+// `policyBodies` (A5) is the WHOLE posted body, one entry per policyCalls
+// entry at the same index — the three-grant consent is about exactly which
+// keys ride one request, which the `want` shorthand cannot show.
 let POLICY = {};
 const policyCalls = [];
+const policyBodies = [];
 
 globalThis.hostFetch = async (host, path, opts) => {
     // A null host would silently hit the SERVING origin — the exact lie the
@@ -212,6 +238,7 @@ globalThis.hostFetch = async (host, path, opts) => {
         const sent = JSON.parse((opts && opts.body) || '{}');
         policyCalls.push({ id: host.id, method: (opts && opts.method) || 'GET',
                            want: sent.check_enabled });
+        policyBodies.push(sent);
         const spec = POLICY[host.id];
         if (!spec || spec === 'throw') throw new TypeError('Failed to fetch');
         return {
@@ -259,10 +286,14 @@ const FAIL = (code) => ({ check: null, error: code, checkedAt: 1000 });
 function setRec(id, rec) { Object.assign(checkStateFor(id), rec); }
 function reset() {
     hostChecks.clear(); modCatalogCache.clear(); HOSTS = [];
-    POLICY = {}; policyCalls.length = 0; infoCalls.length = 0;
+    POLICY = {}; policyCalls.length = 0; policyBodies.length = 0;
+    infoCalls.length = 0;
     checkCalls.length = 0; consentSent = false;
     policyOps.clear(); lastWrite.clear();
 }
+// policyOps is keyed hostId + '|' + kind since A5; every case here is about
+// the checking switch, so the reads go through this.
+const opFor = (id) => policyOps.get(id + '|check');
 function rowLine(r) {
     return r.id + '|' + r.ps + '|' + r.words + '|' + (reasonCode(r.st) || '-');
 }
@@ -785,21 +816,21 @@ CASES.consent = async () => {
     // about that build, and the failure never claims the gate changed.
     await primed(INFO_MODERN(false), { status: 404, body: { ok: false } });
     const ok404 = await setChecking('local', true);
-    out.notFound = { ok: ok404, note: (policyOps.get('local')||{}).note,
-                     phase: (policyOps.get('local')||{}).phase,
+    out.notFound = { ok: ok404, note: (opFor('local')||{}).note,
+                     phase: (opFor('local')||{}).phase,
                      cap: updateCapFor('local') };
 
     // And a 409 from a config-locked broker says whose decision it is.
     await primed(INFO_MODERN(false),
                  { status: 409, body: { ok: false, error: 'policy_locked' } });
     const ok409 = await setChecking('local', true);
-    out.lockedWrite = { ok: ok409, phase: (policyOps.get('local')||{}).phase,
-                        note: (policyOps.get('local')||{}).note };
+    out.lockedWrite = { ok: ok409, phase: (opFor('local')||{}).phase,
+                        note: (opFor('local')||{}).note };
 
     // A transport failure must not be reported as a changed gate either.
     await primed(INFO_MODERN(false), 'throw');
     const okDead = await setChecking('local', true);
-    out.unreachable = { ok: okDead, phase: (policyOps.get('local')||{}).phase,
+    out.unreachable = { ok: okDead, phase: (opFor('local')||{}).phase,
                         cap: updateCapFor('local') };
     return out;
 };
@@ -860,7 +891,7 @@ CASES.peers = async () => {
                           body: { ok: false, error: 'forbidden_origin' } } };
     await pollTick();
     const rolled = await setChecking('rolling', true);
-    out.rolling = { ok: rolled, note: (policyOps.get('rolling') || {}).note,
+    out.rolling = { ok: rolled, note: (opFor('rolling') || {}).note,
                     cap: updateCapFor('rolling') };
 
     // A genuinely wrong password is still a wrong password.
@@ -871,7 +902,7 @@ CASES.peers = async () => {
     POLICY = { local: OK(true), nopw: { status: 401, body: { ok: false } } };
     await pollTick();
     await setChecking('nopw', true);
-    out.badPassword = (policyOps.get('nopw') || {}).note;
+    out.badPassword = (opFor('nopw') || {}).note;
 
     // ID REUSE. A write to the machine at one url must never be applied to a
     // different machine that inherited the id while it was in flight.
@@ -886,7 +917,7 @@ CASES.peers = async () => {
     HOSTS = HOSTS.map((h) => (h.id === 'b'
         ? Object.assign({}, h, { url: 'https://SOMEONE-ELSE.example:4445' }) : h));
     await p;
-    out.idReuse = { cap: updateCapFor('b'), op: policyOps.get('b') || null };
+    out.idReuse = { cap: updateCapFor('b'), op: opFor('b') || null };
 
     // A removed host must not leave its failure behind for the next holder of
     // that id.
@@ -897,10 +928,71 @@ CASES.peers = async () => {
     POLICY = { local: OK(true), gone: { status: 500, body: { ok: false } } };
     await pollTick();
     await setChecking('gone', true);
-    const before = !!policyOps.get('gone');
+    const before = !!opFor('gone');
     fleet(['local']);              // the operator removes it
     await pollTick();
-    out.removal = { noteBefore: before, noteAfter: !!policyOps.get('gone') };
+    out.removal = { noteBefore: before, noteAfter: !!opFor('gone') };
+    return out;
+};
+
+// --- #182 Part 2 (A5): one consent click, every grantable gate ------------
+// The broker takes any non-empty subset of the three keys in one POST, so
+// the click that used to grant checking alone now grants everything the
+// broker will let this browser open — and ONLY that: a config-owned gate is
+// its file's decision, and a view without the `policy` block degrades to
+// the single-key write through policyKeysFor.
+CASES.consent_three_gates = async () => {
+    const out = {};
+    const OKPOST = { status: 200, body: { ok: true, update: {
+        check_enabled: true, apply_enabled: true,
+        source: 'stored', mutable: true, remote_writable: true } } };
+    const GATE = (enabled, source) => ({ enabled: enabled, source: source,
+                                         mutable: source !== 'config' });
+    const grantCase = async (policyBlock, flatOver) => {
+        reset();
+        fleet(['local']);
+        INFO = { local: INFO_MODERN(false, Object.assign(
+            { policy: policyBlock }, flatOver || {})) };
+        CHECK = { local: R503 };
+        POLICY = { local: OKPOST };
+        await offerConsent();
+        return { posted: policyCalls.slice(), bodies: policyBodies.slice() };
+    };
+
+    // All three default-off and mutable: ONE request carries all three.
+    out.allThree = await grantCase({
+        check: GATE(false, 'default'), apply: GATE(false, 'default'),
+        restart: GATE(false, 'default') });
+
+    // Ledger AS10: a stored "off" the sidecar synthesized for the check —
+    // nobody ever clicked off — is grantable, not a standing revoke.
+    out.storedFalse = await grantCase({
+        check: GATE(false, 'stored'), apply: GATE(false, 'default'),
+        restart: GATE(false, 'default') });
+
+    // restart config-pinned: the body carries exactly the two mutable keys.
+    out.degraded = await grantCase({
+        check: GATE(false, 'default'), apply: GATE(false, 'default'),
+        restart: GATE(false, 'config') });
+
+    // The config owns everything: nothing grantable, zero requests spent.
+    out.allConfig = await grantCase({
+        check: GATE(false, 'config'), apply: GATE(false, 'config'),
+        restart: GATE(false, 'config') },
+        { source: 'config', mutable: false });
+
+    // The helpers themselves, over the shapes the fleet can serve.
+    out.keysModern = policyKeysFor(INFO_MODERN(false).update);
+    out.keysFlatOnly = policyKeysFor(INFO_MODERN(false,
+        { policy: undefined }).update);
+    out.keysNone = policyKeysFor(null);
+    out.keysPlaceholder = policyKeysFor({ check_enabled: false });
+
+    // A 409 that does come back names the file-owned keys, quoted.
+    out.lockedNote = policyWriteOutcome(409, { ok: false,
+        error: 'policy_locked', source: 'config',
+        locked: ['apply_enabled', 'restart_enabled'] },
+        ['check_enabled', 'apply_enabled', 'restart_enabled']).note;
     return out;
 };
 
@@ -1762,6 +1854,58 @@ def test_a_removed_broker_leaves_no_note_for_the_next_holder_of_its_id(harness):
     assert out["removal"]["noteAfter"] is False, (
         "it must be pruned with the host, or the next broker to get that id "
         "inherits an error about a machine it is not")
+
+
+# ---- #182 Part 2 (A5): one consent click, every grantable gate -------------
+
+def test_a_click_now_grants_all_three_gates_in_one_request(harness):
+    """The click that consents to checking consents to the broker keeping
+    itself up to date, so every gate the broker will let this browser open
+    rides ONE POST — never three requests, and never a value but true."""
+    out = run(harness, "consent_three_gates")
+    posted = out["allThree"]["posted"]
+    assert len(posted) == 1, f"one request, got {posted}"
+    assert posted[0]["id"] == "local" and posted[0]["method"] == "POST"
+    assert out["allThree"]["bodies"] == [
+        {"check_enabled": True, "apply_enabled": True,
+         "restart_enabled": True}]
+    # Ledger AS10: a stored "off" the sidecar synthesized for the check —
+    # nobody ever clicked off — is grantable, not a standing revoke, so it
+    # reads exactly like a default here.
+    assert out["storedFalse"]["bodies"] == [
+        {"check_enabled": True, "apply_enabled": True,
+         "restart_enabled": True}]
+    # The capability ladder underneath: three keys on a `policy` block, one
+    # on the flat-only build, none on anything older.
+    assert out["keysModern"] == ["check_enabled", "apply_enabled",
+                                 "restart_enabled"]
+    assert out["keysFlatOnly"] == ["check_enabled"]
+    assert out["keysNone"] == []
+    assert out["keysPlaceholder"] == [], (
+        "a placeholder update key without `mutable` predates ANY policy "
+        "write and must not be offered one")
+
+
+def test_consent_degrades_to_the_keys_the_config_does_not_own(harness):
+    out = run(harness, "consent_three_gates")
+    assert out["degraded"]["bodies"] == [
+        {"check_enabled": True, "apply_enabled": True}], (
+        "a config-pinned restart is its file's decision — the other two "
+        "gates must still be granted, and the pinned one never asked for")
+    # A 409 that does come back names the file-owned keys, quoted, so the
+    # words point at the operator's config rather than at a dead switch.
+    assert '"update_apply_enabled"' in out["lockedNote"]
+    assert '"restart_enabled"' in out["lockedNote"]
+    assert '"update_check_enabled"' not in out["lockedNote"], (
+        "a key the broker did not name as locked must not be blamed")
+
+
+def test_consent_still_posts_nothing_when_config_owns_everything(harness):
+    out = run(harness, "consent_three_gates")
+    assert out["allConfig"]["posted"] == [], (
+        "all three gates config-owned: the click has nothing to grant and "
+        "must not spend a request learning so")
+    assert out["allConfig"]["bodies"] == []
 
 
 # ---- #182 Part 2 (A29): the aftermath of an apply --------------------------

@@ -18,8 +18,12 @@
         // reason they were pure in update.js: test_update_fleet.py's node
         // harness executes them.
         //
-        // Per-gate policy words/helpers land here next; today this file
-        // carries only the restart-reason words.
+        // Beside the restart-reason words, this file carries the pure
+        // half of writing POST /update/policy (#182 Part 2, atom A5):
+        // which keys a broker's view accepts, what one consent click
+        // grants, and how a write's answer reads. update.js's
+        // setPolicy/offerConsent own the fetch, the op map and the
+        // repaint.
 
         // Human words for every reason_code the broker can hand
         // back, over both routes that carry one: GET /info's
@@ -98,4 +102,145 @@
                     + Math.ceil(retryAfterS) + 's left)';
             }
             return words;
+        }
+
+        // ---- per-gate policy writes (#182 Part 2, atom A5) -------------
+        // The broker's update view carries a three-key `policy` block
+        // beside its five flat fields (app.py update_policy_view):
+        // check/apply/restart, each {enabled, source, mutable}, where
+        // `mutable` per gate means what the flat one always did — a
+        // present config key owns the gate, so no write can move it.
+
+        // The keys POST /update/policy can be asked to change, in the
+        // one fixed order the broker walks them in.
+        const POLICY_WRITE_KEYS = ['check_enabled', 'apply_enabled',
+                                   'restart_enabled'];
+        // The broker_config.json key that owns each gate — what a 409's
+        // `locked` list is really naming, so the words can point at the
+        // operator's file instead of at a dead switch. Only ever called
+        // on a key already validated against POLICY_WRITE_KEYS.
+        function policyConfigKeyName(key) {
+            if (key === 'apply_enabled') return 'update_apply_enabled';
+            if (key === 'restart_enabled') return 'restart_enabled';
+            return 'update_check_enabled';
+        }
+
+        // Which policy keys a broker's update view says a write could
+        // even name. A `policy` block is proof of the three-gate build;
+        // a flat view with a real `mutable` bool is the single-key
+        // build that shipped first, which accepts only check_enabled;
+        // and anything else — no update key at all, or a placeholder
+        // that never published `mutable` — predates ANY policy write.
+        // This is the old-peer degradation seam the self-update row
+        // (A6) builds on: ABSENCE of `policy` on a peer reads as a
+        // pre-this-build broker, the same pattern remote_writable's
+        // absence already follows.
+        function policyKeysFor(upd) {
+            if (!upd || typeof upd !== 'object') return [];
+            if (upd.policy && typeof upd.policy === 'object') {
+                return POLICY_WRITE_KEYS.slice();
+            }
+            if (typeof upd.mutable === 'boolean') return ['check_enabled'];
+            return [];
+        }
+
+        // What ONE consent click grants: every gate that is ours to
+        // move and not already open, in the fixed check/apply/restart
+        // order. `mutable && !enabled` on purpose — a stored "off" that
+        // a sidecar write merely synthesized for the check gate (nobody
+        // ever clicked off) is GRANTABLE, not a standing revoke, so it
+        // reads exactly like a default here. Values are only ever
+        // `true`: a revoke is a deliberate per-gate act and nothing may
+        // build one from a consent click. Empty object when nothing is
+        // grantable — the caller must then not spend a request.
+        function consentBody(pol) {
+            const body = {};
+            if (!pol || typeof pol !== 'object') return body;
+            const gates = [['check', 'check_enabled'],
+                           ['apply', 'apply_enabled'],
+                           ['restart', 'restart_enabled']];
+            for (const pair of gates) {
+                const g = pol[pair[0]];
+                if (g && typeof g === 'object' && g.mutable === true
+                        && !g.enabled) {
+                    body[pair[1]] = true;
+                }
+            }
+            return body;
+        }
+
+        // One interpretation of POST /update/policy's answer, shared by
+        // every writer — the checking switch's single-key write and the
+        // multi-grant consent alike. `{ ok: true }` on success, else
+        // `{ ok: false, phase, note }` where phase/note are exactly
+        // what the policy row renders; the sentences for the single-key
+        // check cases are byte-for-byte what setChecking always said.
+        // Transport failures and the id-reuse fingerprint check stay
+        // with the caller: they are about the request and the row, not
+        // about the broker's answer.
+        function policyWriteOutcome(status, body, wantKeys) {
+            const code = body && body.error;
+            if (status === 403 && code === 'forbidden_origin') {
+                // NOT a credentials problem, and emphatically not a
+                // policy one: that broker runs the build that shipped
+                // this route origin-gated, so it accepts the change
+                // only from its own page. Naming it as anything else
+                // sends someone to re-enter a password that is
+                // perfectly good.
+                return { ok: false, phase: 'failed',
+                         note: 'that broker’s build only accepts this '
+                             + 'change from its own desktop — update it, '
+                             + 'and this switch will work from here' };
+            }
+            if (status === 401 || status === 403) {
+                return { ok: false, phase: 'failed',
+                         note: 'that broker refused our password' };
+            }
+            if (status === 404) {
+                // The route does not exist there — the peer predates
+                // ANY policy write. Said as a FACT about the build
+                // rather than as a failure, naming the one key that
+                // does work on it. (A peer that has the route but not
+                // the `policy` block is recognised UPSTREAM, via
+                // policyKeysFor, before a request is ever built.)
+                return { ok: false, phase: 'failed',
+                         note: 'that broker predates the switch — an '
+                             + 'operator sets "update_check_enabled" in '
+                             + 'its config and restarts it' };
+            }
+            if (status === 409 && code === 'policy_locked') {
+                // Which file-owned keys blocked the write. The broker
+                // names the config-owned requested keys in `locked`
+                // (fixed order); walked as untrusted input, falling
+                // back to the keys this write asked for, and to the
+                // check alone — today's exact single-key sentence —
+                // when neither names one.
+                const sent = Array.isArray(body && body.locked)
+                    ? body.locked : [];
+                let known = sent.filter(function (k) {
+                    return POLICY_WRITE_KEYS.indexOf(k) !== -1; });
+                if (!known.length) {
+                    known = (wantKeys || []).filter(function (k) {
+                        return POLICY_WRITE_KEYS.indexOf(k) !== -1; });
+                }
+                if (!known.length) known = ['check_enabled'];
+                const names = POLICY_WRITE_KEYS.filter(function (k) {
+                    return known.indexOf(k) !== -1;
+                }).map(function (k) {
+                    return '"' + policyConfigKeyName(k) + '"';
+                });
+                const named = names.length > 1
+                    ? names.slice(0, -1).join(', ') + ' and '
+                        + names[names.length - 1]
+                    : names[0];
+                return { ok: false, phase: 'locked',
+                         note: 'that broker’s config names ' + named
+                             + ', so that file decides and this switch '
+                             + 'does not' };
+            }
+            if (!body || body.ok !== true) {
+                return { ok: false, phase: 'failed',
+                         note: 'that broker refused the change' };
+            }
+            return { ok: true };
         }

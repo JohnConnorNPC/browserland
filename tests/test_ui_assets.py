@@ -6793,5 +6793,13 @@ def test_the_update_mod_only_opts_in_on_that_click():
         "offerConsent must be reachable only through the flag"
     # Nothing may post a revoke on its own -- see the mod's own comment on why
     # an automatic `false` would make two browsers fight over one broker's gate.
+    # A5 extends the guard to all three gates and to the update-policy.js
+    # companion (the pure half of the write lives there now): a revoke must
+    # always be variable-built from a human click, never a hardcoded false.
     assert "check_enabled: !!want" in mod
-    assert "check_enabled: false" not in mod
+    companion = (BROKER_DIR / "mods/update/update-policy.js").read_text(
+        encoding="utf-8")
+    for label, src in (("update.js", mod), ("update-policy.js", companion)):
+        for literal in ("check_enabled: false", "apply_enabled: false",
+                        "restart_enabled: false"):
+            assert literal not in src, f"hardcoded revoke in {label}: {literal}"
