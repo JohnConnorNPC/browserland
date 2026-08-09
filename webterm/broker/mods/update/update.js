@@ -948,11 +948,13 @@
                     const opKey = hid + '|' + kind;
                     const wantKeys = Object.keys(changes || {});
                     // What the row's busy label renders from. The check row's
-                    // write derives it from the one key it posts (the
-                    // multi-grant consent body carries the check key too); a
-                    // caller whose body never carries check_enabled — the
-                    // self-update row (A6) — names its direction, and its own
-                    // busy words, via opts instead.
+                    // write derives it from the one key it posts; every OTHER
+                    // caller names its direction, and its own busy words, via
+                    // opts — the self-update row (A6) because its body never
+                    // carries check_enabled, and the consent write because its
+                    // body MAY not (a check already on, config-pinned or a
+                    // standing grant, is rightly omitted — deriving direction
+                    // from the absent key would read that grant as a revoke).
                     const wantOn = (opts && typeof opts.want === 'boolean')
                         ? opts.want : !!(changes && changes.check_enabled);
                     const mark = function (phase, note) {
@@ -1068,8 +1070,16 @@
                     if (keys.length > 1) {
                         const grants = consentBody(upd.policy);
                         if (!Object.keys(grants).length) return;
+                        // want/busyNote are NAMED, never derived: this body
+                        // omits check_enabled whenever the check is already
+                        // on, and a consent is always a grant — without these
+                        // a failed write would strand a checking-off note on
+                        // a row that was never being switched off.
                         await setPolicy(LOCAL_HOST_ID, grants,
-                                        { poll: false });
+                                        { poll: false, want: true,
+                                          busyNote: 'granting what the '
+                                              + 'enable click consented '
+                                              + 'to…' });
                         return;
                     }
                     // The single-key degradation: the exact pre-A5 path.

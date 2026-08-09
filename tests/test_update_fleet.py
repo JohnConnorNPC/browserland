@@ -993,6 +993,31 @@ CASES.consent_three_gates = async () => {
         restart: GATE(false, 'config') },
         { source: 'config', mutable: false });
 
+    // A consent body WITHOUT the check key — the check is already on and
+    // config-owned, so consentBody rightly omits it — must still read as a
+    // GRANT: the op a failed write leaves behind carries want=true and
+    // never the checking-off words (the critic's stuck-amber-row finding).
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(true, Object.assign(
+        { source: 'config', mutable: false },
+        { policy: { check: GATE(true, 'config'),
+                    apply: GATE(false, 'default'),
+                    restart: GATE(false, 'default') } })) };
+    CHECK = { local: R503 };
+    POLICY = { local: { status: 500, body: { ok: false } } };
+    await offerConsent();
+    out.noCheckKey = { bodies: policyBodies.slice(),
+                       op: opFor('local') || null };
+
+    // Ledger AS12: a mutable gate whose `enabled` is missing or junk-falsy
+    // reads as closed and GRANTABLE — and the body may only ever carry
+    // true, whatever the junk was.
+    out.junkEnabled = consentBody({
+        check: GATE(true, 'stored'),
+        apply: { mutable: true },
+        restart: { enabled: 0, source: 'stored', mutable: true } });
+
     // The helpers themselves, over the shapes the fleet can serve.
     out.keysModern = policyKeysFor(INFO_MODERN(false).update);
     out.keysFlatOnly = policyKeysFor(INFO_MODERN(false,
@@ -2149,6 +2174,32 @@ def test_consent_degrades_to_the_keys_the_config_does_not_own(harness):
     assert '"restart_enabled"' in out["lockedNote"]
     assert '"update_check_enabled"' not in out["lockedNote"], (
         "a key the broker did not name as locked must not be blamed")
+
+
+def test_a_consent_grant_never_reads_as_switching_checking_off(harness):
+    """A broker whose check is already config-ON gets a consent body of
+    apply+restart alone. That write is a GRANT: its direction and words are
+    named at the call site, so a failure strands an honest granting note,
+    never a 'switching checking off…' one on a row nobody touched."""
+    out = run(harness, "consent_three_gates")
+    nk = out["noCheckKey"]
+    assert nk["bodies"] == [
+        {"apply_enabled": True, "restart_enabled": True}], (
+        "the config-owned check must not be asked for")
+    assert nk["op"] is not None, "the failed write leaves its note behind"
+    assert nk["op"]["want"] is True, (
+        "a consent write is a grant whatever keys its body carries")
+    assert "switching checking off" not in (nk["op"]["note"] or "")
+
+
+def test_a_mutable_gate_with_junk_enabled_grants_true_never_false(harness):
+    """Ledger AS12's pin: `mutable === true && !enabled` means a gate whose
+    `enabled` is missing (or junk-falsy) is grantable — and the body carries
+    true for it, never anything else."""
+    out = run(harness, "consent_three_gates")
+    assert out["junkEnabled"] == {
+        "apply_enabled": True, "restart_enabled": True}
+    assert all(v is True for v in out["junkEnabled"].values())
 
 
 def test_consent_still_posts_nothing_when_config_owns_everything(harness):
