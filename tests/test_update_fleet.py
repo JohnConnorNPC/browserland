@@ -56,7 +56,9 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 _CHUNKS = (
     # REASONS + the per-host record map (hostChecks/checkStateFor) + updHost
     ("const REASONS = {", "let timer = null;"),
-    # state/reasonCode/bandFor/peerState/answered/stateWords/hostRows/aggregate
+    # state/reasonCode/bandFor/peerState/hostRows (answered/stateWords/
+    # WORST_FIRST/aggregate/chipLabel moved WHOLE to the update-policy.js
+    # companion in A6, so they ride the prepended read below instead)
     ("function state(st) {", "// ONE chip for the whole fleet."),
     ("function chipTitle(st) {", "// ---- can this broker even be asked? (#182) ----"),
     # the capability probe
@@ -112,6 +114,16 @@ _REQUIRED = (
     # out of update.js -- so the cooldown sentence tested is still the
     # shipped one.
     "const RESTART_REASONS", "function restartReasonWords",
+    # #182 Part 2 (A6): the self-update row. The pure model and its
+    # word-builders ship in update-policy.js; the non-DOM closure wiring
+    # (needed/model-for/the post-dialog commit) rides update.js's sliced
+    # opt-in range so the harness runs the shipped code paths a click
+    # exercises, minus the button itself.
+    "function selfUpdateRowModel", "function policyChangesFor",
+    "function selfUpdateBusyNote", "function selfUpdateConfirmWords",
+    "function policyCheckSource",
+    "function selfUpdateRowNeeded", "function selfUpdateModelFor",
+    "async function commitRemoteSelfUpdate",
 )
 
 
@@ -1233,6 +1245,226 @@ CASES.refresh_refused_words = async () => {
     return out;
 };
 
+// --- #182 Part 2 (A6): the self-update row --------------------------------
+// "Allow this broker to update itself" — apply_enabled + restart_enabled as
+// ONE switch, never check_enabled. The DOM row and its dialog are not in the
+// sliced range; what runs here is the shipped model (selfUpdateRowModel,
+// update-policy.js), the shipped wiring that feeds it (selfUpdateModelFor /
+// selfUpdateRowNeeded) and the shipped writers (setPolicy under the 'self'
+// op kind, commitRemoteSelfUpdate) — the exact code paths a click
+// exercises, minus the button itself.
+const SGATE = (enabled, source) => ({ enabled: enabled, source: source,
+                                      mutable: source !== 'config' });
+const SCONF = (enabled) => ({ enabled: enabled, source: 'config',
+                              mutable: false });
+const SPOL = (apply, restart) => ({
+    check: SGATE(true, 'stored'), apply: apply, restart: restart });
+const SVIEW = (apply, restart) => INFO_MODERN(true,
+    { policy: SPOL(apply, restart) });
+
+CASES.self_update_model = async () => {
+    const out = {};
+    out.bothOffMutable = selfUpdateRowModel(
+        SPOL(SGATE(false, 'default'), SGATE(false, 'default')), null);
+    out.applyOffRestartConfigTrue = selfUpdateRowModel(
+        SPOL(SGATE(false, 'stored'), SCONF(true)), null);
+    out.restartConfigFalse = selfUpdateRowModel(
+        SPOL(SGATE(false, 'stored'), SCONF(false)), null);
+    out.restartConfigFalseApplyGranted = selfUpdateRowModel(
+        SPOL(SGATE(true, 'stored'), SCONF(false)), null);
+    out.bothConfigFalse = selfUpdateRowModel(
+        SPOL(SCONF(false), SCONF(false)), null);
+    out.onBothMutable = selfUpdateRowModel(
+        SPOL(SGATE(true, 'stored'), SGATE(true, 'stored')), null);
+    out.onRestartConfigTrue = selfUpdateRowModel(
+        SPOL(SGATE(true, 'stored'), SCONF(true)), null);
+    out.onBothConfigTrue = selfUpdateRowModel(
+        SPOL(SCONF(true), SCONF(true)), null);
+    out.flatBuild = selfUpdateRowModel(null, null);
+    // Present-but-malformed `policy` blocks: fail closed, and NEVER the
+    // flat-build degradation (those words belong to a block that is
+    // genuinely absent).
+    out.malformed = [
+        selfUpdateRowModel('nope', null),
+        selfUpdateRowModel({}, null),
+        selfUpdateRowModel({ apply: SGATE(false, 'default') }, null),
+        selfUpdateRowModel({ apply: { enabled: 'yes', mutable: true },
+                             restart: SGATE(false, 'default') }, null),
+        selfUpdateRowModel({ apply: SGATE(false, 'default'),
+                             restart: { enabled: false } }, null),
+    ];
+    out.busyOn = selfUpdateRowModel(
+        SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { phase: 'busy', note: selfUpdateBusyNote(true), want: true });
+    out.busyOff = selfUpdateRowModel(
+        SPOL(SGATE(true, 'stored'), SGATE(true, 'stored')),
+        { phase: 'busy', note: selfUpdateBusyNote(false), want: false });
+    out.failedOp = selfUpdateRowModel(
+        SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { phase: 'locked', note: 'locked words', want: true });
+    return out;
+};
+
+CASES.self_update_writes = async () => {
+    const out = {};
+    const prime = async (pol, policyAnswer) => {
+        reset();
+        fleet(['local']);
+        INFO = { local: INFO_MODERN(true, { policy: pol }) };
+        CHECK = { local: OK200({ state: 'current' }) };
+        POLICY = { local: policyAnswer };
+        await pollTick();
+        policyCalls.length = 0; policyBodies.length = 0;
+    };
+    // Exactly what renderSelfUpdateRow's local click does: build the
+    // body from the model's postKeys with the direction variable, then
+    // write under the 'self' op kind.
+    const click = async () => {
+        const m = selfUpdateModelFor('local');
+        const grant = !m.on;
+        const ok = await setPolicy('local',
+            policyChangesFor(m.postKeys, grant),
+            { kind: 'self', want: grant,
+              busyNote: selfUpdateBusyNote(grant) });
+        return { before: m, ok: ok };
+    };
+
+    // Both gates default-off + mutable: ONE post carries both keys.
+    await prime(SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(true, 'stored'),
+                          SGATE(true, 'stored')).update } });
+    let c = await click();
+    out.grant = { before: c.before, ok: c.ok,
+                  calls: policyCalls.slice(),
+                  bodies: policyBodies.slice(),
+                  after: selfUpdateModelFor('local'),
+                  checkOp: policyOps.get('local|check') || null,
+                  selfOp: policyOps.get('local|self') || null };
+
+    // restart config-TRUE + apply stored-false: the body carries only
+    // the key the config does not own, and granting it turns the row ON.
+    await prime(SPOL(SGATE(false, 'stored'), SCONF(true)),
+        { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(true, 'stored'), SCONF(true)).update } });
+    c = await click();
+    out.partial = { before: c.before, ok: c.ok,
+                    bodies: policyBodies.slice(),
+                    after: selfUpdateModelFor('local') };
+
+    // Stop: both mutable and on -> false for both, never check_enabled.
+    await prime(SPOL(SGATE(true, 'stored'), SGATE(true, 'stored')),
+        { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(false, 'stored'),
+                          SGATE(false, 'stored')).update } });
+    c = await click();
+    out.stop = { before: c.before, ok: c.ok,
+                 bodies: policyBodies.slice(),
+                 after: selfUpdateModelFor('local') };
+
+    // A 409 policy_locked: the operator's file changed under us. The
+    // note names the locked key, the refusal's authoritative view is
+    // installed, and no residual POST follows.
+    const view409 = SVIEW(SGATE(false, 'default'), SCONF(false)).update;
+    await prime(SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { status: 409, body: { ok: false, error: 'policy_locked',
+            source: 'config', locked: ['restart_enabled'],
+            update: view409 } });
+    c = await click();
+    out.locked = { before: c.before, ok: c.ok,
+                   op: policyOps.get('local|self') || null,
+                   calls: policyCalls.length,
+                   bodies: policyBodies.slice(),
+                   after: selfUpdateModelFor('local'),
+                   cap: updateCapFor('local') };
+    return out;
+};
+
+CASES.self_update_old_peers = async () => {
+    reset();
+    fleet(['local', 'flat', 'ancient']);
+    INFO = { local: INFO_MODERN(true),
+             // the flat single-key build: real `mutable`, no `policy`
+             flat: INFO_MODERN(false, { policy: undefined }),
+             ancient: INFO_OLD };
+    CHECK = { local: OK200({ state: 'current' }) };
+    await pollTick();
+    return {
+        localNeeded: selfUpdateRowNeeded('local'),
+        flatNeeded: selfUpdateRowNeeded('flat'),
+        flatModel: selfUpdateModelFor('flat'),
+        ancientNeeded: selfUpdateRowNeeded('ancient'),
+        keysFlat: policyKeysFor(updateCapFor('flat')),
+        keysAncient: policyKeysFor(updateCapFor('ancient')),
+    };
+};
+
+CASES.self_update_remote = async () => {
+    const out = {};
+    const setup = async () => {
+        reset();
+        fleet(['local', 'peer']);
+        INFO = { local: INFO_MODERN(true),
+                 peer: SVIEW(SGATE(false, 'default'),
+                             SGATE(false, 'default')) };
+        CHECK = { local: OK200({ state: 'current' }),
+                  peer: OK200({ state: 'current' }) };
+        POLICY = { peer: { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(true, 'stored'),
+                          SGATE(true, 'stored')).update } } };
+        await pollTick();
+        policyCalls.length = 0; policyBodies.length = 0;
+        return hostById('peer').url;
+    };
+
+    // Nothing posts until the dialog's OK reaches the commit: the
+    // remote-enable click only opens the confirm and returns.
+    let url = await setup();
+    out.beforeConfirm = policyCalls.slice();
+    const ok = await commitRemoteSelfUpdate('peer', url, 'peer');
+    out.confirmed = { ok: ok, calls: policyCalls.slice(),
+                      bodies: policyBodies.slice(),
+                      after: selfUpdateModelFor('peer') };
+
+    // The id was re-pointed at a different machine while the dialog was
+    // open: abort with a note, nothing sent.
+    url = await setup();
+    HOSTS = HOSTS.map((h) => (h.id === 'peer'
+        ? Object.assign({}, h, { url: 'https://SOMEONE-ELSE.example:1' })
+        : h));
+    out.moved = { ok: await commitRemoteSelfUpdate('peer', url, 'peer'),
+                  calls: policyCalls.slice(),
+                  op: policyOps.get('peer|self') || null };
+
+    // Its label changed: the dialog named a machine, so same abort.
+    url = await setup();
+    HOSTS = HOSTS.map((h) => (h.id === 'peer'
+        ? Object.assign({}, h, { label: 'someone else' }) : h));
+    out.relabelled = { ok: await commitRemoteSelfUpdate('peer', url,
+                                                        'peer'),
+                       calls: policyCalls.slice() };
+
+    // It vanished outright.
+    url = await setup();
+    fleet(['local']);
+    out.vanished = { ok: await commitRemoteSelfUpdate('peer', url,
+                                                      'peer'),
+                     calls: policyCalls.slice(),
+                     op: policyOps.get('peer|self') || null };
+
+    // The row turned ON while the dialog was open (another browser
+    // granted it): an enable confirmation finishes with NO post — it
+    // must never become a Stop.
+    url = await setup();
+    lastWrite.set('peer', { update: SVIEW(SGATE(true, 'stored'),
+        SGATE(true, 'stored')).update, seq: ++opSeq,
+        fp: hostFingerprint('peer') });
+    out.meanwhileOn = { ok: await commitRemoteSelfUpdate('peer', url,
+                                                         'peer'),
+                        calls: policyCalls.slice() };
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -2154,6 +2386,14 @@ def test_the_update_button_is_local_only_and_beside_restart(harness):
     assert window_seg.index("renderApplyRow(body)") < \
         window_seg.index("for (const r of rows)"), (
         "the apply row must sit above the per-broker loop, never inside it")
+    # A6: the self-update row is the opposite shape — per broker, so it
+    # rides INSIDE the loop, exactly once, right after the checking row.
+    # It must not migrate up beside the local-only apply/restart controls.
+    assert window_seg.count("renderSelfUpdateRow(body, r.id, r.label)") == 1
+    assert window_seg.index("for (const r of rows)") < \
+        window_seg.index("renderSelfUpdateRow(")
+    assert window_seg.index("renderPolicyRow(body, r.id, r.label)") < \
+        window_seg.index("renderSelfUpdateRow(body, r.id, r.label)")
 
 
 def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
@@ -2267,3 +2507,186 @@ def test_a_refused_refresh_never_reads_as_just_checked(harness):
     assert "try again" not in out["junkRetry"]
     # An unrecognised reason still refuses honestly rather than inventing one.
     assert out["unknownReason"] and "did not re-ask" in out["unknownReason"]
+
+
+# ---- #182 Part 2 (A6): the self-update row ---------------------------------
+
+def test_the_second_row_grants_apply_and_restart_together(harness):
+    """One click, one POST, both grants — and never the check key, which
+    has a row of its own."""
+    r = run(harness, "self_update_writes")
+    g = r["grant"]
+    assert g["before"]["on"] is False
+    assert g["before"]["disabled"] is False
+    assert g["before"]["postKeys"] == ["apply_enabled", "restart_enabled"]
+    assert g["before"]["labelWords"] == "Allow this broker to update itself"
+    assert g["ok"] is True
+    assert len(g["calls"]) == 1
+    assert g["bodies"] == [{"apply_enabled": True, "restart_enabled": True}]
+    assert "check_enabled" not in g["bodies"][0]
+    assert g["after"]["on"] is True
+    # the write reported into its own 'self' lane and cleared on success;
+    # the checking row's lane was never touched
+    assert g["selfOp"] is None
+    assert g["checkOp"] is None
+
+
+def test_the_second_row_posts_only_the_keys_the_config_does_not_own(harness):
+    """A config-owned TRUE gate never blocks enabling the other one: the
+    row stays live, the body carries exactly the stored-false key, and
+    granting it turns the row ON."""
+    r = run(harness, "self_update_writes")
+    p = r["partial"]
+    assert p["before"]["on"] is False
+    assert p["before"]["disabled"] is False
+    assert p["before"]["postKeys"] == ["apply_enabled"]
+    assert p["ok"] is True
+    assert p["bodies"] == [{"apply_enabled": True}]
+    assert p["after"]["on"] is True
+
+
+def test_stop_posts_false_for_every_mutable_gate_and_never_check(harness):
+    """The values are computed from the direction the human asked for —
+    the ui_assets no-auto-revoke guard forbids a `*_enabled: false`
+    literal anywhere in the mod, so this proves the built body still
+    revokes both grants and leaves checking alone."""
+    r = run(harness, "self_update_writes")
+    s = r["stop"]
+    assert s["before"]["on"] is True
+    assert s["before"]["postKeys"] == ["apply_enabled", "restart_enabled"]
+    assert s["ok"] is True
+    assert s["bodies"] == [{"apply_enabled": False,
+                            "restart_enabled": False}]
+    assert all("check_enabled" not in b for b in s["bodies"])
+    assert s["after"]["on"] is False
+
+
+def test_a_locked_self_update_write_names_the_locked_key(harness):
+    """The 409 names ONLY the key the broker said its file owns, the
+    refusal's authoritative `update` view repaints the row, and nothing
+    retries."""
+    r = run(harness, "self_update_writes")
+    lk = r["locked"]
+    assert lk["ok"] is False
+    assert lk["op"] is not None and lk["op"]["phase"] == "locked"
+    assert '"restart_enabled"' in lk["op"]["note"]
+    assert "update_apply_enabled" not in lk["op"]["note"]
+    assert "update_check_enabled" not in lk["op"]["note"]
+    assert lk["calls"] == 1, "a refusal must not be followed by another POST"
+    # the 409's `update` view was installed: the row now reads the
+    # config-owned restart off what the broker just said
+    assert lk["cap"]["policy"]["restart"]["source"] == "config"
+    assert lk["after"]["on"] is False
+    assert lk["after"]["disabled"] is True
+    assert lk["after"]["postKeys"] == []
+
+
+def test_a_peer_that_predates_per_key_grants_gets_told_to_update_not_a_dead_switch(
+        harness):
+    """The flat single-key build can take a check write but knows nothing
+    of per-gate grants: it gets a row that is present but dead, wearing
+    words that say what fixes it — never a switch that would 400."""
+    r = run(harness, "self_update_old_peers")
+    assert r["flatNeeded"] is True
+    m = r["flatModel"]
+    assert m["on"] is False
+    assert m["disabled"] is True
+    assert m["postKeys"] == []
+    assert "predates self-update grants" in m["note"]
+    assert "update that broker" in m["note"]
+    # …and the two neighbours: a modern build gets a row, a build with no
+    # update view at all gets NO row.
+    assert r["localNeeded"] is True
+    assert r["ancientNeeded"] is False
+    assert r["keysFlat"] == ["check_enabled"]
+    assert r["keysAncient"] == []
+
+
+def test_a_remote_self_update_grant_lands_on_that_peer_and_only_after_the_confirm(
+        harness):
+    r = run(harness, "self_update_remote")
+    assert r["beforeConfirm"] == [], "no POST before the confirm resolves"
+    c = r["confirmed"]
+    assert c["ok"] is True
+    assert [x["id"] for x in c["calls"]] == ["peer"], (
+        "the grant must land on THAT peer, never the serving broker")
+    assert c["bodies"] == [{"apply_enabled": True, "restart_enabled": True}]
+    assert c["after"]["on"] is True
+    # The dialog named a machine; a changed url/label or a vanished host
+    # aborts silently-with-note, and an already-ON row posts nothing.
+    assert r["moved"]["ok"] is False and r["moved"]["calls"] == []
+    assert r["moved"]["op"] is not None
+    assert "nothing was sent" in r["moved"]["op"]["note"]
+    assert r["relabelled"]["ok"] is False and r["relabelled"]["calls"] == []
+    assert r["vanished"]["ok"] is False and r["vanished"]["calls"] == []
+    assert "nothing was sent" in r["vanished"]["op"]["note"]
+    assert r["meanwhileOn"]["ok"] is False
+    assert r["meanwhileOn"]["calls"] == [], (
+        "an enable confirmation must never turn into a Stop")
+    # The wiring: the remote-enable click reaches setPolicy only through
+    # the confirm, whose OK button hands off to commitRemoteSelfUpdate.
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("function renderSelfUpdateRow"):
+              src.index("function renderRestartRow")]
+    branch = seg[seg.index("if (!local && !m.on)"):]
+    branch = branch[:branch.index("const grant")]
+    assert "confirmRemoteSelfUpdate(hostId, label)" in branch
+    assert "setPolicy(" not in branch
+    cseg = src[src.index("function confirmRemoteSelfUpdate"):
+               src.index("// One broker's switch plus its inline reason")]
+    assert "commitRemoteSelfUpdate(hostId, url, label)" in cseg
+    assert "if (!res || !res.value) return false;" in cseg
+    assert "selfConfirms.has(hostId)" in cseg, "one pending confirm per host"
+
+
+def test_the_row_surfaces_config_owners_and_standing_grants(harness):
+    """The mixed-owner matrix, over the pure model: a config-owned FALSE
+    gate kills the row and is NAMED; a config-owned TRUE gate never
+    blocks the other; a standing grant behind an OFF aggregate is said
+    out loud; and a malformed block fails closed source-neutrally."""
+    r = run(harness, "self_update_model")
+    m = r["bothOffMutable"]
+    assert (m["on"], m["disabled"]) == (False, False)
+    assert m["postKeys"] == ["apply_enabled", "restart_enabled"]
+    assert m["note"] == ""
+    live = r["applyOffRestartConfigTrue"]
+    assert live["disabled"] is False
+    assert live["postKeys"] == ["apply_enabled"]
+    assert "restarting itself is still granted" in live["note"]
+    dead = r["restartConfigFalse"]
+    assert dead["disabled"] is True and dead["postKeys"] == []
+    assert 'its config names "restart_enabled", so that file decides' in \
+        dead["note"]
+    granted = r["restartConfigFalseApplyGranted"]
+    assert granted["disabled"] is True and granted["postKeys"] == []
+    assert '"restart_enabled"' in granted["note"]
+    assert "applying updates is still granted" in granted["note"], (
+        "a standing grant must be surfaced, never hidden behind an "
+        "aggregate that reads OFF")
+    both = r["bothConfigFalse"]
+    assert '"update_apply_enabled"' in both["note"]
+    assert '"restart_enabled"' in both["note"]
+    on = r["onBothMutable"]
+    assert on["on"] is True and on["disabled"] is False
+    assert on["postKeys"] == ["apply_enabled", "restart_enabled"]
+    on_part = r["onRestartConfigTrue"]
+    assert on_part["on"] is True and on_part["postKeys"] == ["apply_enabled"]
+    dead_on = r["onBothConfigTrue"]
+    assert dead_on["on"] is True and dead_on["disabled"] is True
+    assert dead_on["postKeys"] == []
+    assert '"update_apply_enabled"' in dead_on["note"]
+    assert '"restart_enabled"' in dead_on["note"]
+    # Fail closed on shape: never ON, never live, source-neutral words,
+    # and never the flat-build words while a block was present.
+    for i, bad in enumerate(r["malformed"]):
+        assert bad["on"] is False, i
+        assert bad["disabled"] is True, i
+        assert bad["postKeys"] == [], i
+        assert "config" not in bad["note"], i
+        assert "update that broker" not in bad["note"], i
+    assert "update that broker" in r["flatBuild"]["note"]
+    # An in-flight op wears the asked-for direction, not the cached state.
+    assert r["busyOn"]["labelWords"] == "Allowing…"
+    assert r["busyOn"]["disabled"] is True
+    assert r["busyOff"]["labelWords"] == "Stopping…"
+    assert r["failedOp"]["note"] == "locked words"

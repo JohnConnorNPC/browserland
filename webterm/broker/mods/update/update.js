@@ -284,54 +284,12 @@
                     }
                     return (st.check && st.check.state) || 'unknown';
                 }
-                // Did this host actually TELL us something? Only these three
-                // come from a version check that ran to completion. Every
-                // aggregate below keys "may I say up to date" on this and on
-                // nothing else, so a state added later is un-answered until
-                // somebody deliberately says otherwise.
-                function answered(ps) {
-                    return ps === 'current' || ps === 'behind'
-                        || ps === 'ahead-or-diverged';
-                }
-                // A host's state in words — short enough for one tooltip line
-                // or one window row, and distinct for every state, so two hosts
-                // in different states can never read the same. The long-form
-                // sentence lives in REASONS and rides the window's why-notes.
-                function stateWords(ps, st) {
-                    const chk = st && st.check;
-                    if (ps === 'current') return 'up to date';
-                    if (ps === 'behind') {
-                        const n = chk && chk.behindBy;
-                        return (typeof n === 'number' && n > 0)
-                            ? (n + ' commit' + (n === 1 ? '' : 's') + ' behind')
-                            : 'behind upstream';
-                    }
-                    if (ps === 'ahead-or-diverged') {
-                        const a = (chk && chk.aheadBy) || 0;
-                        const b = (chk && chk.behindBy) || 0;
-                        return 'ahead by ' + a + ' commit' + (a === 1 ? '' : 's')
-                            + (b ? (', behind by ' + b) : '');
-                    }
-                    if (ps === 'pending') return 'checking…';
-                    if (ps === 'route-absent') return 'too old to check';
-                    if (ps === 'not-opted-in') return 'checking not enabled there';
-                    if (ps === 'unauthorized') return 'password refused';
-                    if (ps === 'unreachable') return 'did not answer';
-                    if (ps === 'unreachable-or-too-old') {
-                        return 'no answer — asleep, or too old to check';
-                    }
-                    return 'could not be checked';
-                }
-                // Worst first (#149's badge rule: a fault is never hidden behind
-                // a healthy majority). 'behind' leads because it is the one
-                // state with something to DO about it; the peer failures follow;
-                // 'current' is LAST, which is what makes the chip's colour
-                // honest — green is reachable only when every other entry in
-                // this list is absent from the fleet.
-                const WORST_FIRST = ['behind', 'unauthorized', 'unreachable',
-                                     'unreachable-or-too-old', 'route-absent',
-                                     'not-opted-in', 'unknown',
-                                     'pending', 'ahead-or-diverged', 'current'];
+                // answered/stateWords/WORST_FIRST moved to
+                // mods/update/update-policy.js (#182 Part 2, A6) — the
+                // same shared-scope split RESTART_REASONS took in A4.
+                // Pure over their arguments, so hostRows/renderWindow
+                // call them exactly as before; only WHERE they are
+                // defined changed.
                 // One snapshot row per CONFIGURED host, in host-list order.
                 // Hosts are resolved HERE, at render time, so a broker added or
                 // removed in Settings is in or out of the very next paint with
@@ -346,67 +304,9 @@
                                  st: st, ps: ps, words: stateWords(ps, st) };
                     });
                 }
-                // The fleet in one line. Mirrors the host aggregate badge in 75
-                // (renderAggregateChip): the WORST state colours it, but the
-                // TEXT counts every abnormal host, so one broker that is behind
-                // cannot mask two that never answered.
-                //
-                // The honesty rule lives in `allCurrent`, and that is why this
-                // returns a flag instead of leaving callers to pattern-match the
-                // text: it is true only when the parts list came out EMPTY —
-                // every configured host answered, and every answer was
-                // 'current'. A host that is pending, ahead, unreachable, too
-                // old, or not opted in each puts a part on that list and thereby
-                // takes the phrase "up to date" off the chip.
-                function aggregate(rows) {
-                    const worst = WORST_FIRST.find(function (s) {
-                        return rows.some(function (r) { return r.ps === s; });
-                    }) || 'unknown';
-                    const count = function (fn) { return rows.filter(fn).length; };
-                    const behind = count(function (r) {
-                        return r.ps === 'behind'; });
-                    const ahead = count(function (r) {
-                        return r.ps === 'ahead-or-diverged'; });
-                    const silent = count(function (r) {
-                        return !answered(r.ps); });
-                    const parts = [];
-                    if (behind) parts.push(behind + ' behind');
-                    if (ahead) parts.push(ahead + ' ahead');
-                    if (silent) parts.push(silent + ' unchecked');
-                    // rows is never empty in practice — getHosts() always
-                    // unshifts the local broker — but an empty list must not
-                    // fall out of the counts below as "everything is current".
-                    // Vacuously true is still the one sentence this mod may
-                    // never print without having checked something.
-                    if (!rows.length) parts.push('none configured');
-                    // Every host on its own line, hidden ones included. #178's
-                    // rule, and it applies doubly to a version: hiding a broker
-                    // parks it on the desktop, it does not make that broker's
-                    // build any less stale, so the badge may stop CLAIMING a
-                    // fault but must never stop REPORTING one.
-                    const lines = rows.map(function (r) {
-                        return r.label + ' — ' + r.words
-                            + (r.hidden ? ' — hidden' : '');
-                    });
-                    return {
-                        worst: worst,
-                        allCurrent: parts.length === 0,
-                        text: rows.length
-                            + (rows.length === 1 ? ' broker · ' : ' brokers · ')
-                            + (parts.length ? parts.join(', ') : 'up to date'),
-                        lines: lines,
-                    };
-                }
-                function chipLabel(st, s) {
-                    if (s === 'behind') {
-                        const n = st && st.check && st.check.behindBy;
-                        return (typeof n === 'number' && n > 0)
-                            ? (n + ' behind') : 'update';
-                    }
-                    if (s === 'current') return 'up to date';
-                    if (s === 'ahead-or-diverged') return 'ahead';
-                    return 'version ?';
-                }
+                // aggregate/chipLabel moved to update-policy.js too (A6):
+                // both are pure over the rows/record they are handed, and
+                // the fleet harness runs the shipped copies either way.
 
                 // ONE chip for the whole fleet. Two brokers cannot have two
                 // chips: the taskbar is not a dashboard, and #149 already
@@ -1047,10 +947,14 @@
                     const kind = (opts && opts.kind) || 'check';
                     const opKey = hid + '|' + kind;
                     const wantKeys = Object.keys(changes || {});
-                    // What the check row's busy label renders from. The
-                    // multi-grant consent body carries the check key too, so
-                    // this reads for it exactly as for the single switch.
-                    const wantOn = !!(changes && changes.check_enabled);
+                    // What the row's busy label renders from. The check row's
+                    // write derives it from the one key it posts (the
+                    // multi-grant consent body carries the check key too); a
+                    // caller whose body never carries check_enabled — the
+                    // self-update row (A6) — names its direction, and its own
+                    // busy words, via opts instead.
+                    const wantOn = (opts && typeof opts.want === 'boolean')
+                        ? opts.want : !!(changes && changes.check_enabled);
                     const mark = function (phase, note) {
                         policyOps.set(opKey, { phase: phase, note: note,
                                                want: wantOn });
@@ -1065,8 +969,9 @@
                     // been re-pointed at a different machine meanwhile, the
                     // answer belongs to a broker that is no longer in this row.
                     const fp = hostFingerprint(hid);
-                    mark('busy', wantOn ? 'switching checking on…'
-                        : 'switching checking off…');
+                    mark('busy', (opts && opts.busyNote)
+                        || (wantOn ? 'switching checking on…'
+                            : 'switching checking off…'));
                     let resp;
                     try {
                         resp = await hostFetch(host, '/update/policy', {
@@ -1097,20 +1002,25 @@
                     // said before it generalized (A5).
                     const out = policyWriteOutcome(resp.status, body,
                                                    wantKeys);
-                    if (!out.ok) {
-                        mark(out.phase, out.note);
-                        return false;
-                    }
-                    policyOps.delete(opKey);
                     // What the write returned is authoritative about this broker
                     // until something reads it again — held HERE rather than
                     // patched into the shared /info record, because a poll that
                     // was already in flight finishes last and would put the
                     // pre-write answer back. See updateCapFor / lastWrite.
-                    if (body.update && typeof body.update === 'object') {
+                    // Installed on REFUSALS too (A6): a 409 policy_locked
+                    // carries the broker's own authoritative view, and every
+                    // row must repaint from what it just said rather than
+                    // from the stale cache the click was drawn against.
+                    if (body && body.update
+                            && typeof body.update === 'object') {
                         lastWrite.set(hid, { update: body.update,
                                              seq: ++opSeq, fp: fp });
                     }
+                    if (!out.ok) {
+                        mark(out.phase, out.note);
+                        return false;
+                    }
+                    policyOps.delete(opKey);
                     if (!opts || opts.poll !== false) {
                         await poll(hid, {});
                     }
@@ -1191,6 +1101,61 @@
                 // through to it.
                 function freshTerminalHost() {
                     return updHost(LOCAL_HOST_ID);
+                }
+
+                // ---- the self-update row's non-DOM half (A6) --------------
+                // Offered for any build a policy write could reach: a
+                // modern peer shows its state even when config owns
+                // everything (a standing grant must never be invisible),
+                // the flat single-key build gets a dead row that says to
+                // update it, and a peer with no update view at all gets
+                // nothing — there is no fact to report.
+                function selfUpdateRowNeeded(hostId) {
+                    if (policyOps.get(hostId + '|self')) return true;
+                    return policyKeysFor(updateCapFor(hostId)).length > 0;
+                }
+                // ONE derivation of the row's model for a host: the
+                // `policy` block when the view carries the key (a
+                // malformed block fails closed inside the model — never
+                // a fallback to the flat fields), the flat build's null
+                // otherwise, plus this host's own 'self'-kind op.
+                function selfUpdateModelFor(hostId) {
+                    const upd = updateCapFor(hostId);
+                    const pol = (upd && 'policy' in upd)
+                        ? upd.policy : null;
+                    return selfUpdateRowModel(pol,
+                        policyOps.get(hostId + '|self') || null);
+                }
+                // The post-dialog half of the remote enable. The dialog
+                // named a machine (url + label captured before it
+                // opened); if the id now resolves elsewhere — or to
+                // nothing — the confirmation belongs to a machine no
+                // longer in that row, so nothing is sent and the row
+                // says so. The grant itself is REBUILT from the current
+                // facts: a stale paint's keys are never replayed, and a
+                // row that turned ON meanwhile finishes with NO post —
+                // an enable confirmation never becomes a Stop.
+                async function commitRemoteSelfUpdate(hostId, url, label) {
+                    const now = updHost(hostId);
+                    if (!now || String(now.url || '') !== String(url || '')
+                            || String(now.label || '')
+                                !== String(label || '')) {
+                        policyOps.set(hostId + '|self', {
+                            phase: 'failed', want: true,
+                            note: 'that broker changed while the '
+                                + 'confirmation was open — nothing was '
+                                + 'sent' });
+                        renderAll();
+                        return false;
+                    }
+                    const m = selfUpdateModelFor(hostId);
+                    if (m.on || m.disabled || !m.postKeys.length) {
+                        return false;
+                    }
+                    return setPolicy(hostId,
+                        policyChangesFor(m.postKeys, true),
+                        { kind: 'self', want: true,
+                          busyNote: selfUpdateBusyNote(true) });
                 }
 
                 // ---- self-restart (#183) -----------------------------------
@@ -1552,6 +1517,52 @@
                     });
                 }
 
+                // A6: the remote self-update confirm. Same skeleton as
+                // confirmRemoteEnable above — machine named by label AND
+                // url, re-verified after the dialog — but the grant is
+                // rebuilt from the CURRENT facts by commitRemoteSelfUpdate
+                // instead of trusting the paint the click came from. One
+                // pending confirm per host, ever.
+                const selfConfirms = new Set();
+                function confirmRemoteSelfUpdate(hostId, label) {
+                    const host = updHost(hostId);
+                    if (!host || selfConfirms.has(hostId)) {
+                        return Promise.resolve(false);
+                    }
+                    const url = String(host.url || '');
+                    const w = selfUpdateConfirmWords(label, url);
+                    selfConfirms.add(hostId);
+                    return openDialog({
+                        title: w.title,
+                        body: function (c) {
+                            c.appendChild(mkEl('div', 'app-dialog-msg',
+                                w.intro));
+                            const list = mkEl('div',
+                                'app-upd-restart-continuity');
+                            for (const t of w.lines) {
+                                list.appendChild(mkEl('div',
+                                    'app-upd-restart-cline', t));
+                            }
+                            list.appendChild(mkEl('div',
+                                'app-upd-restart-cline app-upd-restart-warn',
+                                w.warning));
+                            c.appendChild(list);
+                        },
+                        buttons: [
+                            { label: w.okLabel, value: true,
+                              primary: true, danger: true },
+                            { label: 'Cancel', value: false },
+                        ],
+                    }).then(function (res) {
+                        selfConfirms.delete(hostId);
+                        if (!res || !res.value) return false;
+                        return commitRemoteSelfUpdate(hostId, url, label);
+                    }, function (e) {
+                        selfConfirms.delete(hostId);
+                        throw e;
+                    });
+                }
+
                 // One broker's switch plus its inline reason, rebuilt from
                 // policyOps + the shared /info record on every pass exactly like
                 // renderRestartRow — nothing is held on the element, so a poll
@@ -1625,8 +1636,11 @@
                         }
                     } else if (!mutable) {
                         // The button is dead, so say why rather than leaving a
-                        // greyed control with no explanation beside it.
-                        status.textContent = upd && upd.source === 'config'
+                        // greyed control with no explanation beside it. Judged
+                        // off the per-gate check facts when the `policy` block
+                        // exists (A6); flat-field fallback for old peers. The
+                        // words themselves are unchanged.
+                        status.textContent = policyCheckSource(upd) === 'config'
                             ? 'its config names "update_check_enabled", so that '
                                 + 'file decides'
                             : 'it has not reported whether the switch can be '
@@ -1634,6 +1648,68 @@
                     } else if (on) {
                         status.textContent = 'switched on from here; it stays on '
                             + 'across restarts until it is switched off';
+                    }
+                    row.appendChild(status);
+                    body.appendChild(row);
+                    return row;
+                }
+
+                // A6: the second per-broker row — may this broker pull new
+                // code and restart itself? apply + restart TOGETHER, never
+                // check_enabled; the words and the transition feasibility
+                // all live in selfUpdateRowModel (update-policy.js), this
+                // is only the wiring.
+                function renderSelfUpdateRow(body, hostId, label) {
+                    const local = (hostId || LOCAL_HOST_ID)
+                        === LOCAL_HOST_ID;
+                    const upd = updateCapFor(hostId);
+                    const op = policyOps.get(hostId + '|self');
+                    const m = selfUpdateModelFor(hostId);
+                    const busy = !!(op && op.phase === 'busy');
+                    // A peer must additionally accept a cross-origin write
+                    // at all — policyMutableFor's doctrine; the serving
+                    // broker needs no handshake.
+                    const writable = local
+                        || !!(upd && upd.remote_writable === true);
+                    const row = mkEl('div', 'app-upd-restart-row');
+                    const btn = mkEl('button', 'app-upd-restart-btn',
+                        m.labelWords);
+                    btn.type = 'button';
+                    btn.title = m.on
+                        ? 'withdraws this broker’s permission to pull new '
+                            + 'code and restart itself. Nothing already '
+                            + 'applied is undone'
+                        : 'lets this broker download code from GitHub and '
+                            + 'restart itself when its Update button is '
+                            + 'used';
+                    btn.disabled = busy || m.disabled || !writable
+                        || !m.postKeys.length;
+                    btn.addEventListener('mousedown',
+                        (e) => e.stopPropagation());
+                    btn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        if (btn.disabled) return;
+                        // Enabling a REMOTE machine is confirmed; Stop and
+                        // local are not — the checking row's asymmetry,
+                        // for the same reasons.
+                        if (!local && !m.on) {
+                            confirmRemoteSelfUpdate(hostId, label)
+                                .catch(function () {});
+                            return;
+                        }
+                        const grant = !m.on;
+                        setPolicy(hostId,
+                            policyChangesFor(m.postKeys, grant),
+                            { kind: 'self', want: grant,
+                              busyNote: selfUpdateBusyNote(grant) })
+                            .catch(function () {});
+                    });
+                    row.appendChild(btn);
+                    const status = mkEl('span', 'app-upd-restart-inline',
+                        m.note || '');
+                    if (op && (op.phase === 'failed'
+                            || op.phase === 'locked')) {
+                        status.classList.add('app-upd-amber');
                     }
                     row.appendChild(status);
                     body.appendChild(row);
@@ -2269,6 +2345,11 @@
                         // fleet that is already checking reads as a plain list.
                         if (policyRowNeeded(r.id)) {
                             renderPolicyRow(body, r.id, r.label);
+                        }
+                        // A6: the self-update grant row, right below the
+                        // checking switch it generalizes.
+                        if (selfUpdateRowNeeded(r.id)) {
+                            renderSelfUpdateRow(body, r.id, r.label);
                         }
                     }
 
