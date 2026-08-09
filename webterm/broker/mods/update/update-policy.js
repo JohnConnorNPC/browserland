@@ -39,9 +39,15 @@
         // the user — same posture as update.js's REASONS table, for
         // the same reason.
         const RESTART_REASONS = {
+            // Qualified rather than a flat claim (#182 Part 2, atom
+            // A7): this table is static/factless -- it cannot see the
+            // gate's CURRENT source the way applyGateWords can -- so
+            // it names both paths a human could use rather than
+            // asserting the config file is the only one.
             'restart-disabled': 'restarting is switched off on this '
-                + 'broker. An operator turns it on in the broker '
-                + 'config',
+                + 'broker — the "Allow this broker to update itself" '
+                + 'row switches it on when that row is writable; '
+                + 'otherwise the broker’s config decides',
             'no-supervisor': 'this broker was started without the '
                 + 'launcher that can bring it back, so nothing '
                 + 'would relaunch it — restart it manually on the '

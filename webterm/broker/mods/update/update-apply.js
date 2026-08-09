@@ -56,11 +56,45 @@
             return null;
         }
 
-        function applyGateWords(code, restartWords) {
-            return code === APPLY_GATE_RESTART
-                ? ('applying needs a restart to take effect, and '
-                    + restartWords)
-                : (APPLY_GATE_WORDS[code] || null);
+        // The second row's own sentence for the disabled-apply gate
+        // (#182 Part 2, atom A6/A7): shown INSTEAD of the config-file
+        // sentence above whenever the gate's CURRENT source is one the
+        // row can actually move. Built fresh by applyGateWords below on
+        // every call -- never cached -- so a gate that moves from
+        // stored/default to config-owned (or back) reads correctly on
+        // the very next render, with no stale sentence surviving it.
+        const APPLY_GATE_ROW_WORDS = 'applying updates is switched '
+            + 'off on this broker — "Allow this broker to update '
+            + 'itself" below switches it on';
+
+        // `applyPolicy` is the apply gate's CURRENT {enabled, source,
+        // mutable} facts (update.js's renderApplyRow reads them off the
+        // host's live update view at render time) -- optional, because
+        // an older view predates the three-gate `policy` block
+        // entirely. Only the disabled-here code branches on it; every
+        // other code's words are exactly what they always were.
+        // source 'stored'/'default'/'corrupt' names a gate the row can
+        // move, so the row sentence names the row. source 'config', or
+        // no facts at all (an old view, or a call that predates A6),
+        // fails toward the historically-true config-file sentence --
+        // the one thing this code can still say for certain when it
+        // cannot see the gate's real source.
+        function applyGateWords(code, restartWords, applyPolicy) {
+            if (code === APPLY_GATE_RESTART) {
+                return 'applying needs a restart to take effect, and '
+                    + restartWords;
+            }
+            if (code === APPLY_GATE_DISABLED) {
+                const source = (applyPolicy
+                    && typeof applyPolicy === 'object')
+                    ? applyPolicy.source : null;
+                if (source === 'stored' || source === 'default'
+                        || source === 'corrupt') {
+                    return APPLY_GATE_ROW_WORDS;
+                }
+                return APPLY_GATE_WORDS[code];
+            }
+            return APPLY_GATE_WORDS[code] || null;
         }
 
         // Every shape POST /update/apply answers with -- every 409
@@ -76,10 +110,16 @@
             const err = (body && typeof body === 'object')
                 ? body.error : null;
             if (status === 503 && err === 'update_apply_disabled') {
+                // Source-neutral on purpose: a refusal carries no
+                // fresh facts about WHICH source disabled the gate,
+                // so it names both paths rather than claiming one --
+                // the row below when the gate is writable, the
+                // config file when an operator has pinned it.
                 return { kind: 'gate', lines: ['applying updates '
-                    + 'is switched off on this broker; an operator '
-                    + 'sets "update_apply_enabled" in its config '
-                    + 'and restarts it.'] };
+                    + 'is switched off on this broker — the "Allow '
+                    + 'this broker to update itself" row switches it '
+                    + 'on when it is writable; a config key naming '
+                    + 'it overrides the row.'] };
             }
             if (status === 503 && err === 'apply_incomplete') {
                 const rc = (body

@@ -1161,6 +1161,18 @@ CASES.apply_gate = async () => {
     out.wordsNotBehind = applyGateWords(out.notBehindCurrent, 'unused');
     out.wordsNoTarget = applyGateWords(out.noTarget, 'unused');
     out.wordsEnabled = applyGateWords(out.enabled, 'unused');
+    // atom A7: the disabled-here words derive from the gate's CURRENT
+    // source, handed in as a third arg -- stored/default/corrupt (the
+    // row can move these) get the row sentence; config (or no facts
+    // at all, the call above) keeps the config-file sentence.
+    out.wordsGateOffStored = applyGateWords(out.gateOff, 'unused',
+        { enabled: false, source: 'stored', mutable: true });
+    out.wordsGateOffDefault = applyGateWords(out.gateOff, 'unused',
+        { enabled: false, source: 'default', mutable: true });
+    out.wordsGateOffCorrupt = applyGateWords(out.gateOff, 'unused',
+        { enabled: false, source: 'corrupt', mutable: true });
+    out.wordsGateOffConfig = applyGateWords(out.gateOff, 'unused',
+        { enabled: false, source: 'config', mutable: false });
     // The one thing an apply actually needs: an exact upstream sha, not a
     // version compare -- release mode names a tag and no sha at all.
     out.targetShaValid = applyTargetSha({ upstream: { sha: 'a'.repeat(40) } });
@@ -1205,6 +1217,13 @@ CASES.apply_refusals = async () => {
     out.garbageBody = applyRefusalOutcome(500, null);
     // A 200 (not 202) is never read as success either.
     out.wrongStatus = applyRefusalOutcome(200, { ok: true });
+    return out;
+};
+
+// --- atom A7: the restart-disabled reason points at the row too -----------
+CASES.restart_disabled_words = async () => {
+    const out = {};
+    out.words = restartReasonWords('restart-disabled');
     return out;
 };
 
@@ -2319,6 +2338,25 @@ def test_apply_enablement_reasons_have_distinct_words(harness):
         r["wordsRestart"]
 
 
+def test_apply_disabled_words_point_at_the_row_when_it_is_writable(harness):
+    """atom A7: the disabled-apply words derive from the gate's CURRENT
+    source at render time, not a cached sentence. stored/default/corrupt
+    (the second row can move all three) get the row's own sentence; a
+    config-owned gate -- or a call with no facts at all, the historic
+    signature -- keeps today's config-file sentence byte-for-byte."""
+    r = run(harness, "apply_gate")
+    row_label = 'Allow this broker to update itself'
+    for key in ("wordsGateOffStored", "wordsGateOffDefault",
+                "wordsGateOffCorrupt"):
+        assert row_label in r[key], (key, r[key])
+        assert "update_apply_enabled" not in r[key], (key, r[key])
+    # config-owned reads exactly like the facts-absent (two-arg) call --
+    # the byte-for-byte rule the brief pins.
+    assert r["wordsGateOffConfig"] == r["wordsGateOff"]
+    assert "update_apply_enabled" in r["wordsGateOffConfig"]
+    assert "config" in r["wordsGateOffConfig"]
+
+
 def test_apply_target_sha_needs_an_exact_upstream_commit(harness):
     """#182's release-mode branch names a tag and never a sha at all -- a
     'behind' state there is real, but there is nothing exact to apply."""
@@ -2339,7 +2377,10 @@ def test_every_apply_refusal_shape_is_rendered_distinctly(harness):
         "a clean 202/ok:true must never be read as a refusal here -- "
         "waitForApplyBootId owns proving it, not this parser")
     assert r["gate"]["kind"] == "gate"
-    assert "update_apply_enabled" in r["gate"]["lines"][0]
+    # atom A7: source-neutral at refusal time -- names BOTH paths a
+    # human could use, never claims the config file is the only one.
+    assert 'Allow this broker to update itself' in r["gate"]["lines"][0]
+    assert "config" in r["gate"]["lines"][0]
     assert r["incomplete"]["kind"] == "incomplete"
     assert r["incomplete"]["reasonCode"] == "drain_failed"
     assert "STILL RUNNING THE OLD CODE" in r["incomplete"]["lines"][0]
@@ -2451,6 +2492,19 @@ def test_202_never_renders_success_here_and_hands_off_to_the_boot_watch(
     assert "recheck()" in wait_seg, (
         "a proven restart must still hand off to a recheck, never assume "
         "the target was reached")
+
+
+# ---- atom A7: restart-disabled points at the row too -----------------------
+
+def test_restart_disabled_words_carry_the_qualified_row_and_config_phrasing(
+        harness):
+    """RESTART_REASONS is static/factless -- it cannot see the restart
+    gate's current source the way applyGateWords can -- so its
+    'restart-disabled' entry is qualified rather than a flat claim: it
+    names the row AND the config file, never just one."""
+    r = run(harness, "restart_disabled_words")
+    assert 'Allow this broker to update itself' in r["words"]
+    assert "config" in r["words"]
 
 
 # ---- #183 R6: the cooldown reason has honest words -------------------------

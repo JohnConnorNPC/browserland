@@ -1988,10 +1988,16 @@
                             stat.classList.add('app-upd-amber');
                         }
                     } else if (code) {
+                        // The apply gate's CURRENT source, read off this
+                        // same paint's live view -- never cached, so the
+                        // words derive from what is true right now (A7).
+                        const applyPolicy = (upd && upd.policy
+                            && typeof upd.policy === 'object')
+                            ? upd.policy.apply : null;
                         stat.textContent = applyGateWords(code, info.known
                             ? restartReasonWords(info.reason, info.retryAfterS)
                             : 'this broker has not reported a restart '
-                                + 'capability yet');
+                                + 'capability yet', applyPolicy);
                         stat.classList.add('app-upd-grey');
                     }
                     row.appendChild(stat);
