@@ -4,7 +4,7 @@
   "ctxVersion": 1,
   "defaultEnabled": false,
   "title": "Update check",
-  "description": "Taskbar chip + window reporting whether this build is current with upstream, via the broker's GET /update/check. Ships disabled; turning it on asks the serving broker to open its own update-check switch, which an operator can override with update_check_enabled in the broker config.",
+  "description": "Taskbar chip + window reporting whether this build is current with upstream, via the broker's GET /update/check. Ships disabled; turning it on asks the serving broker to open every gate your click is allowed to open -- checking, applying, and restarting -- skipping only the ones its own config already owns, each overridable per key (update_check_enabled, update_apply_enabled, restart_enabled).",
   "entry": "update.js",
   "author": "JohnConnorNPC",
   "styles": ["update.css"],

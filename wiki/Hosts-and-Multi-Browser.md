@@ -123,13 +123,16 @@ Its hidden-broker rule is the **opposite** of the host badge's, on purpose. Abov
 
 ## Updating the broker
 
-The **Update check** window shows an **Update…** button when the broker is behind upstream and update apply is available. Clicking it applies the previewed commit, then restarts the broker to run the new code. Applying an update is **manual-trigger only** — no schedule, no auto-install — and it requires three config gates on the broker:
+The **Update check** window shows an **Update…** button when the broker is behind upstream and update apply is available. Clicking it applies the previewed commit, then restarts the broker to run the new code. Applying an update is **manual-trigger only** — no schedule, no auto-install — and it requires three gates on the broker: checking, applying, and restarting.
 
-- `update_check_enabled: true` (must have checked for updates first)
-- `update_apply_enabled: true` (gates the apply itself)
-- `restart_enabled: true` (gates the restart that follows)
+Each gate is granted from one of two places, and only one at a time owns it. On the same window, two rows do the granting:
 
-All three are **config-file only**; there is no GUI switch. The button is unavailable (and greyed with a reason) when one or more gates are off, or when the current state does not permit applying — the upstream commit is unreachable, the working tree is dirty, there are local commits to merge, or a dependency has changed. Clicking the button shows a confirm dialog with the commit range, count, and GitHub compare link, plus a preview of what happens to your sessions.
+- **Enable checking on this broker** grants `update_check_enabled` — turning the update mod on for the first time asks for this automatically, on the broker serving the page.
+- **Allow this broker to update itself** grants `update_apply_enabled` and `restart_enabled` **together**, since applying without being able to restart would just leave the old code running. **Stop** on this row gives back only those two — checking stays on, so the window keeps reporting what's available.
+
+Either row can instead go **dead and name a config key** — an operator who puts `update_check_enabled`, `update_apply_enabled`, or `restart_enabled` in that broker's `broker_config.json` (`true` or `false`, either way) takes that one gate out of the GUI's hands entirely; only editing the file changes it from then on, and nothing granted from the window can escalate past it. A gate the config hasn't named stays the window's to grant, so a fresh install with no config overrides leaves all three to a human click.
+
+The **Update…** button is unavailable (and greyed with a reason) when one or more gates are still closed, or when the current state does not permit applying — the upstream commit is unreachable, the working tree is dirty, there are local commits to merge, or a dependency has changed. Clicking the button shows a confirm dialog with the commit range, count, and GitHub compare link, plus a preview of what happens to your sessions.
 
 The update fetches from the pinned upstream with an explicit git subprocess and verifies the target before applying. See [[Technical-Reference#update-apply]] for the complete technical details, rollback story, and what happens to sessions when the broker restarts.
 
@@ -137,7 +140,9 @@ The update fetches from the pinned upstream with an explicit git subprocess and 
 
 The **Update check** window also carries a **Restart this broker** button (when available). Clicking it triggers a *broker-generation restart* — the broker process is replaced with fresh code without stopping the machine; agents you launched stay alive and reconnect to the new broker. See [[Technical-Reference#broker-restart-183]] for full details on what a restart is, how to enable it, what happens to your sessions, and when the button is greyed out.
 
-Restart is opt-in via the broker's `broker_config.json` only — there is no GUI switch — so only someone who can edit the config file can enable it. This is deployment policy: a restart is a maintenance choice, not something a browser session earns by being logged in.
+Restart is granted the same way as the other two gates above: from the **Allow this broker to update itself** row when it is writable, or from the broker's own `broker_config.json` when a `restart_enabled` key already owns it. This is deployment policy either way: a restart is a maintenance choice, not something a browser session earns just by being logged in.
+
+**Granting a remote broker's row asks for its own confirmation first.** Checking on a remote broker names the machine and its address before switching it on. Self-update goes further: the confirm dialog is titled **Let that broker update itself?**, names that machine and its address, and warns plainly that it lets that machine download and run code from GitHub and restart itself. A broker running a build older than this fleet story degrades gracefully — its row is shown but says to update that broker rather than offering a switch that would fail.
 
 ## Single active browser (the lease)
 
