@@ -6803,3 +6803,103 @@ def test_the_update_mod_only_opts_in_on_that_click():
         for literal in ("check_enabled: false", "apply_enabled: false",
                         "restart_enabled: false"):
             assert literal not in src, f"hardcoded revoke in {label}: {literal}"
+
+
+# --------------------------------------------------------------------------- #
+# visibility-aware polling: a hidden tab slows to HIDDEN_MULT, never stops
+# --------------------------------------------------------------------------- #
+
+def test_visibility_timers_present_and_control_keepalive_stays_plain():
+    # The shared machinery -- onVisibility (the callback registry),
+    # visibilityInterval (the slow-while-hidden setInterval wrapper) and the
+    # mod-facing makeModVisibilityApi -- lives once in core, keyed off both
+    # 'visibilitychange' and 'pageshow' (a bfcache restore fires the latter but
+    # skips the former), and a hidden tick slows to HIDDEN_MULT rather than
+    # stopping outright.
+    s64 = (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(encoding="utf-8")
+    for sentinel in (
+        "function onVisibility",
+        "function visibilityInterval",
+        "function makeModVisibilityApi",
+        "HIDDEN_MULT = 10",
+        "visibilitychange",
+        "pageshow",
+    ):
+        assert sentinel in s64, f"missing visibility-timer sentinel: {sentinel!r}"
+    # The single-active-browser control WS ping is a PLAIN setInterval, never a
+    # visibilityInterval: it is what keeps the lease socket alive through an
+    # idle proxy, and slowing it 10x in a hidden tab would let the socket time
+    # out from under a tab that still holds the lease.
+    assert "rec.pingTimer = setInterval" in s64
+
+
+def test_refresh_taskbar_pollers_ride_the_visibility_interval():
+    # refreshTaskbar has two independent callers on their own timers -- the
+    # active-view lifecycle's slow poll (84) and the launch menu's fast poll
+    # (76) -- and BOTH must go through visibilityInterval, not a plain
+    # setInterval: either one left un-slowed would keep hammering every
+    # configured host's /sessions at full cadence from a tab nobody is
+    # looking at.
+    for rel in ("84_js_active_view_lifecycle.js", "76_js_launch_fullscreen.js"):
+        src = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert "setInterval(refreshTaskbar" not in src, \
+            f"{rel} must not poll refreshTaskbar on a plain interval"
+        assert "visibilityInterval(refreshTaskbar" in src, \
+            f"{rel} must poll refreshTaskbar through visibilityInterval"
+
+
+def test_mod_loader_exposes_visibility_api():
+    # Every mod record gets its own ctx.visibility, built from its own rec --
+    # so a mod's pausableInterval/onVisibility subscriptions ride rec.unloads
+    # and die with the mod exactly like every other per-mod seam.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    assert "visibility: makeModVisibilityApi(rec)," in loader
+
+
+def test_update_mod_poll_ticks_visibility_aware_but_restart_never_does():
+    mod = (BROKER_DIR / "mods/update/update.js").read_text(encoding="utf-8")
+    # The 30-minute check poll feature-detects ctx.visibility (a runtime-
+    # installed copy of this mod can run against an older core that never
+    # offers it) and, when present, ticks through pausableInterval.
+    assert "ctx.visibility.pausableInterval(pollTick, POLL_MS)" in mod
+    # The restart-wait machinery (restartSleep onward) must stay entirely free
+    # of the visibility timers: it is a short, bounded wait for a broker that
+    # is mid-relaunch, not a background poll, and slowing it while the tab is
+    # hidden would leave the tab that just clicked "restart" stuck watching a
+    # spinner long after the wait should have given up.
+    tail = mod[mod.index("function restartSleep"):]
+    assert "visibility" not in tail, \
+        "the restart-wait machinery must not adopt the visibility timers"
+
+
+def test_feature_detected_mods_adopt_pausable_interval():
+    # Same feature-detect shape as the update mod (ctx.visibility ? ... :
+    # plain setInterval), in every other shipped mod that runs its own poll.
+    for rel in ("mods/aistatus/aistatus.js", "mods/git/git.js",
+                "mods/task-manager/task-manager.js", "mods/clock/clock.js"):
+        src = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert "pausableInterval" in src, \
+            f"{rel} must feature-detect ctx.visibility.pausableInterval"
+
+
+def test_launch_host_items_and_launch_profile_respect_hidden_hosts():
+    s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
+    body = s76[s76.index("function launchHostItems"):
+               s76.index("function buildLaunchMenuItems")]
+    # Index-order assertion (like the file's other auth/down checks): a hidden
+    # host is PARKED, not down, so its early-return must come AFTER the
+    # auth/down check rather than folding into it -- the two states offer
+    # different rows (a hidden host still offers its unhide-on-click broker
+    # row; an auth/down host offers nothing).
+    assert body.index("if (state === 'auth' || state === 'down') return items;") \
+        < body.index("if (host.hidden) return items;")
+
+    prof = s76[s76.index("async function launchProfile"):
+               s76.index("function profilesFailedRecently")]
+    # launchProfile re-reads the host and its state at CLICK time (a menu row
+    # can outlive the state it was painted from) and refuses a hidden host the
+    # same way it refuses auth/down, surfacing the refusal through the shared
+    # info modal rather than dialing a parked or unreachable broker.
+    assert "hostMenuState(pollStateFor" in prof
+    assert "fresh.hidden" in prof
+    assert "openInfoModal" in prof
