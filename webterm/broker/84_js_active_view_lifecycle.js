@@ -35,7 +35,7 @@
 
         function startSlowPoll() {
             if (_slowPollTimer) return;
-            _slowPollTimer = setInterval(refreshTaskbar, POLL_MS);
+            _slowPollTimer = visibilityInterval(refreshTaskbar, POLL_MS);
         }
 
         // Re-create persisted client-only app windows (sticky notes / text
@@ -250,7 +250,7 @@
             _deactivated = true;             // gate every shared-state mutation
             _viewEpoch++;                    // supersede any in-flight boot/rebuild
             stopFastPoll();
-            if (_slowPollTimer) { clearInterval(_slowPollTimer); _slowPollTimer = null; }
+            if (_slowPollTimer) { _slowPollTimer.stop(); _slowPollTimer = null; }
             if (_statePushTimer) { clearTimeout(_statePushTimer); _statePushTimer = null; }
             pendingOpens.clear();
             restoreKeys.clear();

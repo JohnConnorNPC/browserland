@@ -2,11 +2,11 @@
         let fastPollTimer = null;
         function startFastPoll() {
             if (fastPollTimer) return;
-            fastPollTimer = setInterval(refreshTaskbar, FAST_POLL_MS);
+            fastPollTimer = visibilityInterval(refreshTaskbar, FAST_POLL_MS);
         }
         function stopFastPoll() {
             if (!fastPollTimer) return;
-            clearInterval(fastPollTimer);
+            fastPollTimer.stop();
             fastPollTimer = null;
         }
 
