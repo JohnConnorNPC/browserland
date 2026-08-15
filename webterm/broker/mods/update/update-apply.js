@@ -79,7 +79,19 @@
         // fails toward the historically-true config-file sentence --
         // the one thing this code can still say for certain when it
         // cannot see the gate's real source.
-        function applyGateWords(code, restartWords, applyPolicy) {
+        //
+        // `brokerWords` (A4) is optional and defaults to 'this broker',
+        // which keeps every local sentence byte-identical; a remote
+        // row passes 'that broker' and gets the same facts with ITS
+        // broker named. The quoted "Allow this broker to update
+        // itself" is the consent row's LITERAL LABEL -- one per host
+        // in this same window -- so it stays verbatim either way; only
+        // the unquoted prose swaps.
+        function applyGateWords(code, restartWords, applyPolicy,
+                                brokerWords) {
+            const bw = (typeof brokerWords === 'string' && brokerWords)
+                ? brokerWords : 'this broker';
+            const remote = bw !== 'this broker';
             if (code === APPLY_GATE_RESTART) {
                 return 'applying needs a restart to take effect, and '
                     + restartWords;
@@ -90,9 +102,22 @@
                     ? applyPolicy.source : null;
                 if (source === 'stored' || source === 'default'
                         || source === 'corrupt') {
-                    return APPLY_GATE_ROW_WORDS;
+                    return remote
+                        ? ('applying updates is switched off on ' + bw
+                            + ' — its own "Allow this broker to update '
+                            + 'itself" row below switches it on')
+                        : APPLY_GATE_ROW_WORDS;
                 }
-                return APPLY_GATE_WORDS[code];
+                return remote
+                    ? ('applying updates is switched off on ' + bw
+                        + '; an operator sets "update_apply_enabled" '
+                        + 'in its config and restarts it -- a '
+                        + 'config-file decision')
+                    : APPLY_GATE_WORDS[code];
+            }
+            if (remote && code === APPLY_GATE_NOT_BEHIND) {
+                return bw + ' is not behind upstream -- there is '
+                    + 'nothing to apply';
             }
             return APPLY_GATE_WORDS[code] || null;
         }
@@ -101,10 +126,16 @@
         // refusal message rendered, never a guess at success.
         // status===null is a transport failure; 202/ok:true returns
         // null (waitForApplyBootId owns that, not this function).
-        function applyRefusalOutcome(status, body) {
+        // `brokerWords` (A4) defaults to 'this broker' -- byte-identical
+        // local sentences -- and makeApplyFlow passes its own
+        // brokerName(hostId) through, so a remote target's refusals
+        // name the broker they describe.
+        function applyRefusalOutcome(status, body, brokerWords) {
+            const bw = (typeof brokerWords === 'string' && brokerWords)
+                ? brokerWords : 'this broker';
             if (status === null) {
                 return { kind: 'transport', lines: ['could not '
-                    + 'reach this broker to ask for the update.'] };
+                    + 'reach ' + bw + ' to ask for the update.'] };
             }
             if (status === 202 && body && body.ok === true) return null;
             const err = (body && typeof body === 'object')
@@ -116,7 +147,7 @@
                 // the row below when the gate is writable, the
                 // config file when an operator has pinned it.
                 return { kind: 'gate', lines: ['applying updates '
-                    + 'is switched off on this broker — the "Allow '
+                    + 'is switched off on ' + bw + ' — the "Allow '
                     + 'this broker to update itself" row switches it '
                     + 'on when it is writable; a config key naming '
                     + 'it overrides the row.'] };
@@ -139,8 +170,8 @@
                     && typeof body.operation_id === 'string')
                     ? (' (operation ' + body.operation_id + ')')
                     : '';
-                return { kind: 'in-progress', lines: ['this broker '
-                    + 'already has an update or restart under way'
+                return { kind: 'in-progress', lines: [bw
+                    + ' already has an update or restart under way'
                     + opId + ' -- try again once it finishes.'] };
             }
             if (status === 409
@@ -165,12 +196,148 @@
                 return { kind: (err === 'apply_refused')
                     ? 'refused' : 'failed', lines: lines };
             }
+            // A4: the first build to ship POST /update/apply
+            // origin-gated it, so it answers a cross-origin apply
+            // with 403 forbidden_origin even though its own page can
+            // apply fine. NOT a credentials problem and NOT an
+            // unknown shape -- the fix is on that machine, once.
+            // `err` is only trusted as the exact string: a body with
+            // no error key, or a non-string one, falls through to
+            // the honest unknown below rather than earning this.
+            if (status === 403 && err === 'forbidden_origin') {
+                return { kind: 'forbidden-origin', lines: [bw
+                    + '’s build still refuses applies driven from '
+                    + 'another broker’s page — update it by hand '
+                    + 'this once; its newer build will accept '
+                    + 'them.'] };
+            }
             // Anything else (a wrong password, a malformed request,
             // an unrecognised shape): never a guess at success.
             return { kind: 'unknown', lines: ['the broker '
                 + 'answered, but not in a shape this page '
                 + 'recognises -- it must not be read as a '
                 + 'success.'] };
+        }
+
+        // ---- the remote rows' Update button (#182 Part 2, atom A4) --
+        // One PURE decision per remote row, over that broker's OWN
+        // facts and nobody else's -- its check, its update view, its
+        // restart block, its op -- so N rows can disagree honestly and
+        // the fleet harness can execute the whole ladder.
+        //
+        // f = { behind      the row's ps === 'behind'
+        //       op          applyFlow.opFor(id) (or the confirm-time
+        //                   refusal note), or null
+        //       upd         updateCapFor(id) -- that broker's update
+        //                   view, or null
+        //       coarseState state(st) for that broker's record
+        //       check       st.check, that broker's own check payload
+        //       restart     restartInfoFor(id) -- its restart block,
+        //                   walked untrusted }
+        //
+        // show: behind OR an op -- the OR is what keeps a busy/settled
+        // op's notes on screen while the host flips unreachable
+        // mid-restart. live: STRICT flat apply_enabled === true,
+        // exactly like the local row -- never a fallback chain from
+        // policy.apply.enabled, which would let a legacy flat true
+        // resurrect an explicit policy false. Every dead button
+        // carries words; the two missing-capability shapes get
+        // DIFFERENT sentences, because a missing `policy` block proves
+        // an old build while a missing remote_applyable can also be a
+        // stale or partial record -- claiming age there would be a
+        // guess dressed as a diagnosis.
+        function remoteApplyRowModel(f) {
+            const op = (f && f.op) || null;
+            const busy = !!(op && op.phase === 'waiting');
+            const behind = !!(f && f.behind);
+            const upd = (f && f.upd && typeof f.upd === 'object')
+                ? f.upd : null;
+            const target = applyTargetSha(f && f.check);
+            const out = { show: !!op || behind, busy: busy,
+                          live: false, gate: null, targetSha: target,
+                          words: null };
+            if (!out.show) return out;
+            if (!upd) {
+                // No update view at all: nothing to say -- unless an
+                // op is still reporting, whose notes ARE the row.
+                out.show = !!op;
+                return out;
+            }
+            if (!('policy' in upd)) {
+                out.words = 'predates remote updates — update that '
+                    + 'broker';
+                return out;
+            }
+            if (upd.remote_applyable !== true) {
+                out.words = 'that broker has not reported support '
+                    + 'for applies driven from another broker’s page '
+                    + '— update that broker on its own machine';
+                return out;
+            }
+            const rst = (f && f.restart
+                && typeof f.restart === 'object')
+                ? f.restart : { known: false, available: false };
+            out.gate = applyGateFromFacts(
+                (f && f.coarseState) || 'unknown', target,
+                upd.apply_enabled === true, !!rst.available);
+            if (out.gate !== null) {
+                const rw = rst.known === true
+                    ? restartReasonWords(rst.reason, rst.retryAfterS)
+                    : 'that broker has not reported a restart '
+                        + 'capability yet';
+                const ap = (upd.policy
+                    && typeof upd.policy === 'object')
+                    ? upd.policy.apply : null;
+                out.words = applyGateWords(out.gate, rw, ap,
+                    'that broker');
+                return out;
+            }
+            out.live = !busy;
+            return out;
+        }
+
+        // The confirm dialog's decidable half (A4): title/wording
+        // naming the broker, the same range/count guards the local
+        // dialog has, the compare url linkified ONLY when it is a
+        // plain http(s) url (it is broker-controlled input), and the
+        // session cost as what THAT broker reports -- or an explicit
+        // unknown when its restart block is absent/malformed, never
+        // the serving broker's numbers and never silence.
+        function remoteApplyConfirmModel(label, check, restart) {
+            const name = (typeof label === 'string' && label)
+                ? label : 'that broker';
+            const rst = (restart && typeof restart === 'object')
+                ? restart : { known: false };
+            const known = rst.known === true;
+            const cu = check && check.upstream && check.upstream.url;
+            return {
+                title: 'Apply this update to ' + name + '?',
+                restarts: name,
+                oldSha: (check && check.local && check.local.sha)
+                    || null,
+                behindBy: (check
+                    && typeof check.behindBy === 'number')
+                    ? check.behindBy : null,
+                compareUrl: (typeof cu === 'string'
+                    && /^https?:\/\//i.test(cu)) ? cu : null,
+                continuity: (known && rst.continuity
+                    && typeof rst.continuity === 'object')
+                    ? rst.continuity
+                    : { guaranteed: 0, at_risk: 0, unknown: 0 },
+                restart: {
+                    ref: 'that broker',
+                    intro: 'This updates and restarts ' + name
+                        + ' — a broker on another machine, not the '
+                        + 'one serving this page.'
+                        + (known ? (' The session counts below are '
+                            + 'what that broker reports about '
+                            + 'itself.') : ''),
+                    unknown: known ? null
+                        : ('Session impact unknown — that broker '
+                            + 'has not reported what a restart costs '
+                            + 'its live sessions.'),
+                },
+            };
         }
 
         // ---- after an apply (#182 Part 2, A29) ---------------------
@@ -562,7 +729,8 @@
                     // connection death -- that grace applies only AFTER a
                     // 202, once the broker has committed to stopping.
                     settle(hostId, op, 'failed',
-                        applyRefusalOutcome(null, null).lines);
+                        applyRefusalOutcome(null, null,
+                            brokerName(hostId)).lines);
                     return;
                 }
                 let body = null;
@@ -585,7 +753,8 @@
                         + 'check before trying again']);
                     return;
                 }
-                const outcome = applyRefusalOutcome(resp.status, body);
+                const outcome = applyRefusalOutcome(resp.status, body,
+                    brokerName(hostId));
                 const lines = outcome ? outcome.lines.slice()
                     : ['the broker answered, but not in a shape this '
                         + 'page recognises.'];

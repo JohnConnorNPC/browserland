@@ -130,6 +130,13 @@ _REQUIRED = (
     # the companion; update.js's init only builds the deps object.
     "function makeApplyFlow", "async function performApply",
     "async function pollBootId", "async function waitForApplyBootId",
+    # #182 Part 2 (A4): the remote rows' Update button. The row's whole
+    # decision and the confirm dialog's decidable half ship in the
+    # update-apply.js companion (read whole); the confirm-time re-verify
+    # and its refusal-note map ride update.js's sliced opt-in range, the
+    # commitRemoteSelfUpdate pattern.
+    "function remoteApplyRowModel", "function remoteApplyConfirmModel",
+    "const applyConfirmOps", "async function commitRemoteApply",
 )
 
 
@@ -307,7 +314,7 @@ function reset() {
     POLICY = {}; policyCalls.length = 0; policyBodies.length = 0;
     infoCalls.length = 0;
     checkCalls.length = 0; consentSent = false;
-    policyOps.clear(); lastWrite.clear();
+    policyOps.clear(); lastWrite.clear(); applyConfirmOps.clear();
 }
 // policyOps is keyed hostId + '|' + kind since A5; every case here is about
 // the checking switch, so the reads go through this.
@@ -1515,6 +1522,160 @@ CASES.self_update_remote = async () => {
     return out;
 };
 
+// --- atom A4: the remote rows' Update button model -------------------------
+// Pure over ONE broker's own facts -- check, update view, restart block,
+// op -- so two rows in one paint can disagree honestly. RUPD is a modern
+// remote-applyable view; RRST a healthy restart block; each case overrides
+// exactly the facts it is about.
+const RUPD = (over) => Object.assign({
+    check_enabled: true, apply_enabled: true, source: 'stored',
+    mutable: true, remote_writable: true, remote_applyable: true,
+    policy: { check: SGATE(true, 'stored'), apply: SGATE(true, 'stored'),
+              restart: SGATE(true, 'stored') } }, over || {});
+const RRST = (over) => Object.assign({ known: true, available: true,
+    reason: null, retryAfterS: null,
+    continuity: { guaranteed: 2, at_risk: 1, unknown: 0 },
+    bootId: 'boot-1' }, over || {});
+CASES.remote_apply_row_model = async () => {
+    const out = {};
+    // TWO hosts, DIFFERENT facts, one paint: X live on its own target, Y
+    // dead on ITS OWN policy -- neither row may read the other's facts.
+    out.x = remoteApplyRowModel({ behind: true, coarseState: 'behind',
+        check: { upstream: { sha: HEX40('a') }, behindBy: 3 }, op: null,
+        upd: RUPD(), restart: RRST() });
+    out.y = remoteApplyRowModel({ behind: true, coarseState: 'behind',
+        check: { upstream: { sha: HEX40('b') } }, op: null,
+        upd: RUPD({ apply_enabled: false,
+            policy: { check: SGATE(true, 'stored'),
+                      apply: SGATE(false, 'stored'),
+                      restart: SGATE(true, 'stored') } }),
+        restart: RRST() });
+    // the gate words derive from THAT broker's own facts: its config-owned
+    // apply gate, its own cooldown through the restart gate, and an honest
+    // absence when it never reported a restart block at all.
+    out.configGate = remoteApplyRowModel({ behind: true,
+        coarseState: 'behind', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: RUPD({ apply_enabled: false,
+            policy: { check: SGATE(true, 'stored'), apply: SCONF(false),
+                      restart: SGATE(true, 'stored') } }),
+        restart: RRST() });
+    out.restartGate = remoteApplyRowModel({ behind: true,
+        coarseState: 'behind', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: RUPD(),
+        restart: RRST({ available: false, reason: 'cooldown',
+                        retryAfterS: 30 }) });
+    out.restartUnknown = remoteApplyRowModel({ behind: true,
+        coarseState: 'behind', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: RUPD(),
+        restart: { known: false, available: false } });
+    // the two missing-capability degradations, plus no view at all
+    out.noView = remoteApplyRowModel({ behind: true, coarseState: 'behind',
+        check: { upstream: { sha: HEX40('c') } }, op: null, upd: null,
+        restart: RRST() });
+    out.noViewWithOp = remoteApplyRowModel({ behind: false,
+        coarseState: 'unknown', check: null,
+        op: { phase: 'failed', note: ['went dark'] }, upd: null,
+        restart: { known: false } });
+    out.predates = remoteApplyRowModel({ behind: true,
+        coarseState: 'behind', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: { check_enabled: true, apply_enabled: true,
+                         mutable: true },
+        restart: RRST() });
+    out.noRemoteApplyable = remoteApplyRowModel({ behind: true,
+        coarseState: 'behind', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: RUPD({ remote_applyable: undefined }),
+        restart: RRST() });
+    // the OR: an op keeps its row while ps flips off 'behind'; a quiet
+    // current host renders nothing; and only 'waiting' blocks the button.
+    out.opKeepsRow = remoteApplyRowModel({ behind: false,
+        coarseState: 'unknown', check: null,
+        op: { phase: 'waiting', note: ['applying…'] }, upd: RUPD(),
+        restart: RRST() });
+    out.hiddenWhenQuiet = remoteApplyRowModel({ behind: false,
+        coarseState: 'current', check: { upstream: { sha: HEX40('c') } },
+        op: null, upd: RUPD(), restart: RRST() });
+    out.waiting = remoteApplyRowModel({ behind: true, coarseState: 'behind',
+        check: { upstream: { sha: HEX40('a') } },
+        op: { phase: 'waiting', note: ['sending…'] }, upd: RUPD(),
+        restart: RRST() });
+    out.settled = remoteApplyRowModel({ behind: true, coarseState: 'behind',
+        check: { upstream: { sha: HEX40('a') } },
+        op: { phase: 'failed', note: ['no'] }, upd: RUPD(),
+        restart: RRST() });
+    // the confirm dialog's decidable half: broker named, link scheme-
+    // filtered, session cost from ITS restart block or an explicit unknown.
+    out.confirm = remoteApplyConfirmModel('peer-label',
+        { local: { sha: HEX40('a') }, behindBy: 3,
+          upstream: { sha: HEX40('b'),
+                      url: 'https://github.com/x/y/compare/a...b' } },
+        RRST());
+    out.confirmUnknown = remoteApplyConfirmModel('peer-label',
+        { upstream: { sha: HEX40('b'), url: 'javascript:alert(1)' } },
+        { known: false });
+    return out;
+};
+
+// --- atom A4: refusals name the broker they describe -----------------------
+CASES.remote_apply_refusal_words = async () => {
+    const out = {};
+    out.transportLocal = applyRefusalOutcome(null, null);
+    out.transportRemote = applyRefusalOutcome(null, null, 'that broker');
+    out.gateLocal = applyRefusalOutcome(503,
+        { ok: false, error: 'update_apply_disabled' });
+    out.gateRemote = applyRefusalOutcome(503,
+        { ok: false, error: 'update_apply_disabled' }, 'that broker');
+    out.busyLocal = applyRefusalOutcome(409,
+        { ok: false, error: 'apply_in_progress' });
+    out.busyRemote = applyRefusalOutcome(409,
+        { ok: false, error: 'apply_in_progress' }, 'that broker');
+    // the pre-CP1 peer: 403 forbidden_origin gets its OWN sentence, and a
+    // malformed body never earns it.
+    out.forbidden = applyRefusalOutcome(403,
+        { ok: false, error: 'forbidden_origin' }, 'that broker');
+    out.forbiddenDefault = applyRefusalOutcome(403,
+        { ok: false, error: 'forbidden_origin' });
+    out.forbiddenNoError = applyRefusalOutcome(403, { ok: false });
+    out.forbiddenJunkError = applyRefusalOutcome(403,
+        { ok: false, error: 42 });
+    out.forbiddenNullBody = applyRefusalOutcome(403, null);
+    return out;
+};
+
+// --- atom A4: the confirm-time re-verify (commitRemoteSelfUpdate's twin) ---
+CASES.remote_apply_commit_guard = async () => {
+    const out = {};
+    const sent = [];
+    globalThis.applyFlow = {
+        performApply: async (id, sha) => { sent.push([id, sha]); },
+        opFor: () => null,
+    };
+    fleet(['local', 'peer']);
+    const url = 'https://peer.example:4445';
+    // clean pass-through: the captured sha rides unchanged
+    out.ok = { r: await commitRemoteApply('peer', url, 'peer', HEX40('b')),
+               sent: sent.slice(),
+               op: applyConfirmOps.get('peer') || null };
+    // the url moved while the confirmation was open
+    HOSTS = HOSTS.map((h) => (h.id === 'peer'
+        ? Object.assign({}, h, { url: 'https://ELSEWHERE.example' }) : h));
+    await commitRemoteApply('peer', url, 'peer', HEX40('b'));
+    out.moved = { sent: sent.slice(),
+                  op: applyConfirmOps.get('peer') || null };
+    // relabelled
+    fleet(['local', 'peer']);
+    HOSTS = HOSTS.map((h) => (h.id === 'peer'
+        ? Object.assign({}, h, { label: 'someone else' }) : h));
+    await commitRemoteApply('peer', url, 'peer', HEX40('b'));
+    out.relabelled = { sent: sent.slice() };
+    // vanished outright
+    fleet(['local']);
+    await commitRemoteApply('peer', url, 'peer', HEX40('b'));
+    out.vanished = { sent: sent.slice(),
+                     op: applyConfirmOps.get('peer') || null };
+    delete globalThis.applyFlow;
+    return out;
+};
+
 // --- atom A3: the host-parameterized apply flow ----------------------------
 // makeApplyFlow is driven here with every dependency stubbed: the fetch
 // records every request WITH the host it was aimed at (and hard-fails on a
@@ -1695,6 +1856,13 @@ CASES.apply_poll_transport_grace = async () => {
     out.postDied = { phase: env.flow.opFor('x').phase,
                      note: env.flow.opFor('x').note,
                      infoPolls: env.infoPolls('x') };
+
+    // (f) the same POST death aimed at the LOCAL broker keeps the local
+    // words -- brokerName flows through applyRefusalOutcome (A4/R6).
+    env = applyEnv();
+    env.resp.local = ['reject'];
+    await env.flow.performApply('local', HEX40('b'));
+    out.postDiedLocal = { note: env.flow.opFor('local').note };
     return out;
 };
 
@@ -2698,13 +2866,14 @@ def test_every_apply_refusal_shape_is_rendered_distinctly(harness):
 
 
 def test_the_update_button_is_local_only_and_beside_restart(harness):
-    """The visible Update button stays local-only (A3 host-parameterized
-    the MACHINERY, not this row): renderApplyRow reads only the
-    LOCAL_HOST_ID facts, and is rendered once, above the per-broker loop --
-    never inside it, where a peer row would pick it up."""
+    """The LOCAL Update button stays where it was -- above the per-broker
+    loop, in the Restart section, reading only the LOCAL_HOST_ID facts.
+    A4 adds a per-broker button INSIDE the loop, guarded to remote rows
+    only and reading only THAT row's facts -- the local row must never
+    double up, and the remote one must never read the serving broker."""
     src = MOD_JS.read_text(encoding="utf-8")
     seg = src[src.index("function renderApplyRow"):
-              src.index("// ---- detail window")]
+              src.index("function renderRemoteApplyRow")]
     assert "checkStateFor(LOCAL_HOST_ID)" in seg
     assert "updateCapFor(LOCAL_HOST_ID)" in seg
     assert "restartInfo()" in seg
@@ -2713,7 +2882,7 @@ def test_the_update_button_is_local_only_and_beside_restart(harness):
     assert window_seg.count("renderApplyRow(body)") == 1
     assert window_seg.index("renderApplyRow(body)") < \
         window_seg.index("for (const r of rows)"), (
-        "the apply row must sit above the per-broker loop, never inside it")
+        "the local apply row must sit above the per-broker loop")
     # A6: the self-update row is the opposite shape — per broker, so it
     # rides INSIDE the loop, exactly once, right after the checking row.
     # It must not migrate up beside the local-only apply/restart controls.
@@ -2722,6 +2891,21 @@ def test_the_update_button_is_local_only_and_beside_restart(harness):
         window_seg.index("renderSelfUpdateRow(")
     assert window_seg.index("renderPolicyRow(body, r.id, r.label)") < \
         window_seg.index("renderSelfUpdateRow(body, r.id, r.label)")
+    # A4: the remote button, inside the loop, remote rows only, last.
+    assert window_seg.count("renderRemoteApplyRow(body, r)") == 1
+    loop_seg = window_seg[window_seg.index("for (const r of rows)"):]
+    assert "if (r.id !== LOCAL_HOST_ID) {" in loop_seg
+    assert loop_seg.index("if (r.id !== LOCAL_HOST_ID) {") < \
+        loop_seg.index("renderRemoteApplyRow(body, r)")
+    assert loop_seg.index("renderSelfUpdateRow(body, r.id, r.label)") < \
+        loop_seg.index("renderRemoteApplyRow(body, r)")
+    # ...and it reads THAT broker's facts, never the serving broker's.
+    rseg = src[src.index("function renderRemoteApplyRow"):
+               src.index("// ---- detail window")]
+    assert "updateCapFor(r.id)" in rseg
+    assert "restartInfoFor(r.id)" in rseg
+    assert "remoteApplyRowModel(" in rseg
+    assert "LOCAL_HOST_ID" not in rseg
 
 
 def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
@@ -2729,14 +2913,18 @@ def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
     """The confirm dialog's values are captured once, at click time, from
     the SAME paint that disabled/enabled the button, and performApply is
     reachable from nowhere else. A3 moved the flow into update-apply.js's
-    makeApplyFlow; update.js keeps exactly ONE call site, and it names its
-    target host explicitly -- never a null that hostFetch would silently
-    aim at the serving origin."""
+    makeApplyFlow; update.js keeps exactly TWO call sites (A4 added the
+    remote commit beside the local row's), and each names its target host
+    explicitly -- never a null that hostFetch would silently aim at the
+    serving origin."""
     src = MOD_JS.read_text(encoding="utf-8")
-    assert src.count("performApply(") == 1, (
-        "exactly one call site; the definition lives in update-apply.js")
+    assert src.count("performApply(") == 2, (
+        "two call sites -- the local row and the remote confirm-commit; "
+        "the definition lives in update-apply.js")
     assert "return applyFlow.performApply(" in src
     assert "LOCAL_HOST_ID, target);" in src
+    assert "await applyFlow.performApply(hostId, targetSha);" in src, (
+        "the remote call site must ride commitRemoteApply's named host")
     assert "if (!res || !res.value) return;" in src
     apply_src = MOD_APPLY_JS.read_text(encoding="utf-8")
     perform_seg = apply_src[apply_src.index("async function performApply"):
@@ -2765,8 +2953,18 @@ def test_apply_confirm_shows_range_count_compare_and_session_cost(harness):
     assert "behindBy" in seg
     assert "compareUrl" in seg
     # The SAME live-session cost block the restart confirm renders (#183),
-    # not a second copy of its wording that could drift from it.
-    assert "restartConfirmBody(cont)" in seg
+    # not a second copy of its wording that could drift from it. A4 hands
+    # optional remote words THROUGH it rather than forking the body.
+    assert "restartConfirmBody(cont, w && w.restart)" in seg
+    # A4: an unreadable restart block renders an explicit unknown line
+    # INSTEAD of the continuity counts, and the remote compare link is
+    # scheme-filtered in the companion model (broker-controlled input).
+    body_seg = src[src.index("function restartConfirmBody"):
+                   src.index("function onRestartClick")]
+    assert "if (w.unknown)" in body_seg
+    apply_src = MOD_APPLY_JS.read_text(encoding="utf-8")
+    mseg = apply_src[apply_src.index("function remoteApplyConfirmModel"):]
+    assert r"/^https?:\/\//i" in mseg
 
 
 def test_202_never_renders_success_here_and_hands_off_to_the_boot_watch(
@@ -3114,10 +3312,13 @@ def test_apply_poll_survives_transport_errors_until_the_deadline(harness):
     assert r["sameBoot"]["infoPolls"] == 4
     # ...but the POST itself dying is NOT the mid-restart grace: nothing
     # was accepted yet, so it is reported plainly and no poll follows.
+    # A4: host 'x' is REMOTE, so the sentence names THAT broker; the same
+    # death aimed at the local broker keeps the local wording.
     post = r["postDied"]
     assert post["phase"] == "failed"
     assert post["infoPolls"] == 0
-    assert "could not reach this broker" in post["note"][0]
+    assert "could not reach that broker" in post["note"][0]
+    assert "could not reach this broker" in r["postDiedLocal"]["note"][0]
 
 
 def test_apply_wait_is_pinned_to_the_machine_it_asked(harness):
@@ -3142,3 +3343,148 @@ def test_apply_wait_is_pinned_to_the_machine_it_asked(harness):
     # A null fingerprint skips the pin: the #183 restart flow's exact old
     # shape, shared through the same loop.
     assert r["nullFp"] == "changed"
+
+
+# ---- atom A4: remote broker rows get the Update button ----------------------
+
+def test_remote_apply_row_binds_each_brokers_own_facts(harness):
+    """E5: two remote hosts with DIFFERENT facts in one paint -- X live on
+    its own target while Y is dead on ITS OWN policy -- plus the OR that
+    keeps an op's row visible after 'behind' goes away, and the busy rule
+    (only a 'waiting' op blocks the button; a settled one does not)."""
+    r = run(harness, "remote_apply_row_model")
+    x, y = r["x"], r["y"]
+    assert x["show"] is True and x["live"] is True and x["busy"] is False
+    assert x["words"] is None and x["gate"] is None
+    assert x["targetSha"] == "a" * 40
+    assert y["show"] is True and y["live"] is False
+    assert y["targetSha"] == "b" * 40, "Y's target leaked from X's facts"
+    assert "applying updates is switched off on that broker" in y["words"]
+    assert '"Allow this broker to update itself"' in y["words"], (
+        "the consent row's LABEL stays quoted verbatim")
+    # An active op keeps its row while ps flips off 'behind'...
+    ok = r["opKeepsRow"]
+    assert ok["show"] is True and ok["busy"] is True and ok["live"] is False
+    # ...but a quiet current host renders nothing at all.
+    assert r["hiddenWhenQuiet"]["show"] is False
+    assert r["waiting"]["live"] is False and r["waiting"]["busy"] is True
+    assert r["settled"]["live"] is True and r["settled"]["busy"] is False
+
+
+def test_remote_apply_row_words_come_from_that_brokers_own_gates(harness):
+    """E6: a dead button's words derive from THAT broker's own facts --
+    its config-owned apply gate, its own cooldown flowing through the
+    restart gate, and an honest absence sentence when it never reported a
+    restart block at all."""
+    r = run(harness, "remote_apply_row_model")
+    cfg = r["configGate"]
+    assert cfg["live"] is False
+    assert "applying updates is switched off on that broker" in cfg["words"]
+    assert '"update_apply_enabled"' in cfg["words"]
+    assert "config-file decision" in cfg["words"]
+    rg = r["restartGate"]
+    assert rg["live"] is False
+    assert "applying needs a restart to take effect" in rg["words"]
+    assert "clears by itself" in rg["words"], (
+        "that broker's own cooldown words did not flow through")
+    ru = r["restartUnknown"]
+    assert ru["live"] is False
+    assert "has not reported a restart capability" in ru["words"]
+
+
+def test_remote_apply_row_degradations_have_distinct_honest_words(harness):
+    """E7: no update view -> no row (an op still keeps one); no `policy`
+    block -> the predates wording; policy present but no remote_applyable
+    -> the NON-CAUSAL wording (a missing key can be a stale or partial
+    record, so those words must not claim age)."""
+    r = run(harness, "remote_apply_row_model")
+    assert r["noView"]["show"] is False
+    nvo = r["noViewWithOp"]
+    assert nvo["show"] is True and nvo["live"] is False
+    pre = r["predates"]
+    assert pre["live"] is False
+    assert "predates remote updates" in pre["words"]
+    assert "update that broker" in pre["words"]
+    nra = r["noRemoteApplyable"]
+    assert nra["live"] is False
+    assert "has not reported support" in nra["words"]
+    assert "another broker" in nra["words"]
+    assert "on its own machine" in nra["words"]
+    assert "predates" not in nra["words"]
+    assert pre["words"] != nra["words"]
+
+
+def test_remote_apply_confirm_names_the_broker_and_its_own_session_cost(
+        harness):
+    """The dialog's decidable half: title names the broker, the compare
+    link is scheme-filtered (broker-controlled input), the continuity is
+    THAT broker's own block, and an unreadable restart block becomes an
+    explicit session-impact-unknown line -- never zeros, never silence."""
+    r = run(harness, "remote_apply_row_model")
+    c = r["confirm"]
+    assert c["title"] == "Apply this update to peer-label?"
+    assert c["restarts"] == "peer-label"
+    assert c["oldSha"] == "a" * 40 and c["behindBy"] == 3
+    assert c["compareUrl"] == "https://github.com/x/y/compare/a...b"
+    assert c["continuity"] == {"guaranteed": 2, "at_risk": 1, "unknown": 0}
+    assert c["restart"]["unknown"] is None
+    assert "what that broker reports" in c["restart"]["intro"]
+    u = r["confirmUnknown"]
+    assert u["compareUrl"] is None, "a non-http url must never linkify"
+    assert u["restart"]["unknown"].startswith("Session impact unknown")
+    assert u["continuity"] == {"guaranteed": 0, "at_risk": 0, "unknown": 0}
+
+
+def test_apply_refusals_name_the_broker_they_describe(harness):
+    """E10: applyRefusalOutcome's optional broker words -- the default
+    keeps every local sentence byte-identical, and the remote flow's own
+    brokerName rides through makeApplyFlow (the transport case is proven
+    against the live flow in the transport-grace test above)."""
+    r = run(harness, "remote_apply_refusal_words")
+    assert r["transportLocal"]["lines"][0] == (
+        "could not reach this broker to ask for the update.")
+    assert r["transportRemote"]["lines"][0] == (
+        "could not reach that broker to ask for the update.")
+    assert "switched off on this broker" in r["gateLocal"]["lines"][0]
+    assert "switched off on that broker" in r["gateRemote"]["lines"][0]
+    assert '"Allow this broker to update itself"' in \
+        r["gateRemote"]["lines"][0], "the row LABEL stays verbatim"
+    assert r["busyLocal"]["lines"][0].startswith("this broker already has")
+    assert r["busyRemote"]["lines"][0].startswith("that broker already has")
+
+
+def test_a_403_forbidden_origin_names_the_real_cause(harness):
+    """E11: a peer whose build still origin-gates POST /update/apply
+    answers 403 forbidden_origin; that earns its own sentence -- update it
+    by hand once -- with precedence over the generic unknown-shape
+    fallthrough, which a malformed body still lands on."""
+    r = run(harness, "remote_apply_refusal_words")
+    f = r["forbidden"]
+    assert f["kind"] == "forbidden-origin"
+    assert "still refuses applies driven from another broker" in f["lines"][0]
+    assert "update it by hand this once" in f["lines"][0]
+    assert "newer build will accept them" in f["lines"][0]
+    assert "not in a shape this page" not in f["lines"][0]
+    assert r["forbiddenDefault"]["kind"] == "forbidden-origin"
+    # tolerance: an absent or non-string error key never earns the
+    # sentence -- it lands on the honest never-read-as-success unknown.
+    for k in ("forbiddenNoError", "forbiddenJunkError", "forbiddenNullBody"):
+        assert r[k]["kind"] == "unknown", k
+        assert "must not be read as a" in r[k]["lines"][0], k
+
+
+def test_a_remote_apply_commit_re_verifies_the_machine_it_named(harness):
+    """R5: the dialog captured url+label; a host that moved, was
+    relabelled or vanished while it was open gets NOTHING sent and an
+    honest note, and a clean confirm sends exactly the paint's sha."""
+    r = run(harness, "remote_apply_commit_guard")
+    assert r["ok"]["r"] is True
+    assert r["ok"]["sent"] == [["peer", "b" * 40]]
+    assert r["ok"]["op"] is None
+    assert r["moved"]["sent"] == [["peer", "b" * 40]], (
+        "a moved url still reached performApply")
+    assert r["moved"]["op"]["phase"] == "failed"
+    assert "nothing was sent" in r["moved"]["op"]["note"][0]
+    assert r["relabelled"]["sent"] == [["peer", "b" * 40]]
+    assert r["vanished"]["sent"] == [["peer", "b" * 40]]
+    assert "nothing was sent" in r["vanished"]["op"]["note"][0]

@@ -768,6 +768,9 @@
                     for (const id of Array.from(lastWrite.keys())) {
                         if (!ids.has(id)) lastWrite.delete(id);
                     }
+                    for (const id of Array.from(applyConfirmOps.keys())) {
+                        if (!ids.has(id)) applyConfirmOps.delete(id);
+                    }
                 }
                 // The deliberate retry. The capability probe caches its outcome
                 // — including its failures — precisely so a tick can never
@@ -849,6 +852,8 @@
                 // carry two independent write notes without either
                 // clobbering the other's.
                 const policyOps = new Map();  // key -> {phase, note, want}
+                // A4: the remote Update button's confirm-time refusal notes.
+                const applyConfirmOps = new Map();   // hostId -> op-shaped
                 let consentSent = false;  // one attempt per page load, ever
                 // A write is authoritative about a broker until something READ
                 // that broker afterwards. Without this, a poll already in flight
@@ -1176,6 +1181,25 @@
                           busyNote: selfUpdateBusyNote(true) });
                 }
 
+                // A4: the commitRemoteSelfUpdate pattern for the remote
+                // Update button — the dialog named a machine (url + label);
+                // an id resolving elsewhere, or to nothing, sends NOTHING
+                // and the row says so. The server re-proves the paint's sha.
+                async function commitRemoteApply(hostId, url, label, targetSha) {
+                    const now = updHost(hostId);
+                    if (!now || String(now.url || '') !== String(url || '')
+                            || String(now.label || '') !== String(label || '')) {
+                        applyConfirmOps.set(hostId, { phase: 'failed',
+                            note: ['that broker changed while the confirmation '
+                                + 'was open — nothing was sent'] });
+                        renderAll();
+                        return false;
+                    }
+                    applyConfirmOps.delete(hostId);
+                    await applyFlow.performApply(hostId, targetSha);
+                    return true;
+                }
+
                 // ---- self-restart (#183) -----------------------------------
                 // Deliberately scoped to the LOCAL broker, and only the local
                 // broker. The window above lists every configured host, but
@@ -1196,7 +1220,7 @@
                 // name this closure can still call exactly as before; only
                 // WHERE it is defined changed.
 
-                // The local broker's restart capability, read off the SAME
+                // A broker's restart capability, read off the SAME
                 // cached /info record the update-check probe above reads
                 // `rec.update` from — modCatalogCache, populated by the
                 // Control Panel's fetchModCatalog and refreshed by this
@@ -1207,8 +1231,8 @@
                 // absence of the capability is not evidence that it is
                 // present, and a control that assumed otherwise would be
                 // exactly the blind attempt this feature exists to refuse.
-                function restartInfo() {
-                    const rec = modCatalogCache.get(LOCAL_HOST_ID);
+                function restartInfoFor(hostId) {
+                    const rec = modCatalogCache.get(hostId || LOCAL_HOST_ID);
                     const r = rec && rec.restart;
                     if (!r || typeof r !== 'object') {
                         return { known: false, available: false,
@@ -1236,6 +1260,7 @@
                             || null,
                     };
                 }
+                function restartInfo() { return restartInfoFor(LOCAL_HOST_ID); }
 
                 // ---- the operation itself -----------------------------
                 // ONE restart, tracked at module scope: this always targets
@@ -1390,13 +1415,17 @@
                 // either as "should be fine" would be the same lie this
                 // whole mod exists to refuse, aimed at a button instead of
                 // a chip.
-                function restartConfirmBody(cont) {
+                // `words` (A4) optionally names a remote broker; absent,
+                // the local dialog is byte-identical. A truthy `unknown`
+                // REPLACES the continuity block — its counts are nobody's.
+                function restartConfirmBody(cont, words) {
+                    const w = words || {}, ref = w.ref || 'this broker';
                     return function (c) {
                         const msg = document.createElement('div');
                         msg.className = 'app-dialog-msg';
-                        msg.textContent = 'This restarts the broker '
-                            + 'serving this page. Any other broker '
-                            + 'configured here is never touched.';
+                        msg.textContent = w.intro || ('This restarts the '
+                            + 'broker serving this page. Any other broker '
+                            + 'configured here is never touched.');
                         c.appendChild(msg);
                         const list = document.createElement('div');
                         list.className = 'app-upd-restart-continuity';
@@ -1407,6 +1436,11 @@
                             d.textContent = text;
                             list.appendChild(d);
                         };
+                        if (w.unknown) {
+                            line(w.unknown, 'app-upd-restart-warn');
+                            c.appendChild(list);
+                            return;
+                        }
                         const plural = function (n) {
                             return n === 1 ? '' : 's';
                         };
@@ -1441,10 +1475,10 @@
                         }
                         if (!cont.guaranteed && !cont.at_risk
                                 && !cont.unknown) {
-                            line('No agent sessions are tracked on this '
-                                + 'broker right now.');
+                            line('No agent sessions are tracked on '
+                                + ref + ' right now.');
                         }
-                        line('Every plain terminal on this broker — not '
+                        line('Every plain terminal on ' + ref + ' — not '
                             + 'an agent session — does not survive a '
                             + 'restart at all.', 'app-upd-restart-bad');
                         c.appendChild(list);
@@ -1830,10 +1864,11 @@
 
                 // Commit range/count/compare link, then the SAME live-
                 // session cost block restartConfirmBody renders (#183) --
-                // an apply ends in that same restart.
+                // an apply ends in that same restart. `w` (A4) is the
+                // remoteApplyConfirmModel output; absent, local words.
                 function applyConfirmBody(oldSha, targetSha, behindBy,
-                                          compareUrl, cont) {
-                    const restartPart = restartConfirmBody(cont);
+                                          compareUrl, cont, w) {
+                    const restartPart = restartConfirmBody(cont, w && w.restart);
                     return function (c) {
                         const range = (oldSha ? shortSha(oldSha) : 'unknown')
                             + '..' + (targetSha ? shortSha(targetSha)
@@ -1843,8 +1878,8 @@
                                 ? (' (' + behindBy + ' commit'
                                     + (behindBy === 1 ? '' : 's') + ')') : '')
                             + ' from the pinned upstream repository, then '
-                            + 'restarts this broker to bring it into '
-                            + 'effect.'));
+                            + 'restarts ' + ((w && w.restarts) || 'this broker')
+                            + ' to bring it into effect.'));
                         if (compareUrl) {
                             const a = mkEl('a', 'app-upd-link',
                                 'view this commit range on GitHub');
@@ -1856,6 +1891,22 @@
                         restartPart(c);
                     };
                 }
+
+                // Shared op-note painter for the two apply rows: the op's
+                // lines land in `stat`, green/amber banded ('waiting' has
+                // no band); returns whether it painted anything.
+                function applyOpNotes(stat, op, busy) {
+                    if (!op || !(busy || ['done', 'timeout', 'failed']
+                            .indexOf(op.phase) !== -1)) return false;
+                    for (const t of op.note) stat.appendChild(mkEl('div', null, t));
+                    if (op.phase !== 'waiting') stat.classList.add(
+                        op.phase === 'done' ? 'app-upd-green' : 'app-upd-amber');
+                    return true;
+                }
+                const APPLY_BUTTONS = [
+                    { label: 'Apply and restart', value: true,
+                      primary: true, danger: true },
+                    { label: 'Cancel', value: false }];
 
                 // Rebuilt fresh every renderWindow() pass, like
                 // renderRestartRow beside it. The click handler recomputes
@@ -1899,11 +1950,7 @@
                             title: 'Apply this update?',
                             body: applyConfirmBody(oldSha, target, behindBy,
                                 compareUrl, info.continuity),
-                            buttons: [
-                                { label: 'Apply and restart', value: true,
-                                  primary: true, danger: true },
-                                { label: 'Cancel', value: false },
-                            ],
+                            buttons: APPLY_BUTTONS,
                         }).then((res) => {
                             if (!res || !res.value) return;
                             return applyFlow.performApply(
@@ -1912,19 +1959,7 @@
                     });
                     row.appendChild(btn);
                     const stat = mkEl('div', 'app-upd-restart-inline');
-                    if (applyOp && (busy || applyOp.phase === 'done'
-                            || applyOp.phase === 'timeout'
-                            || applyOp.phase === 'failed')) {
-                        for (const t of applyOp.note) {
-                            stat.appendChild(mkEl('div', null, t));
-                        }
-                        if (applyOp.phase === 'done') {
-                            stat.classList.add('app-upd-green');
-                        } else if (applyOp.phase === 'timeout'
-                                || applyOp.phase === 'failed') {
-                            stat.classList.add('app-upd-amber');
-                        }
-                    } else if (code) {
+                    if (!applyOpNotes(stat, applyOp, busy) && code) {
                         // The apply gate's CURRENT source, read off this
                         // same paint's live view -- never cached, so the
                         // words derive from what is true right now (A7).
@@ -1935,6 +1970,52 @@
                             ? restartReasonWords(info.reason, info.retryAfterS)
                             : 'this broker has not reported a restart '
                                 + 'capability yet', applyPolicy);
+                        stat.classList.add('app-upd-grey');
+                    }
+                    row.appendChild(stat);
+                    body.appendChild(row);
+                }
+
+                // A4: the remote rows' own Update button — every fact is
+                // THAT broker's; remoteApplyRowModel (companion) decides.
+                function renderRemoteApplyRow(body, r) {
+                    const op = applyFlow.opFor(r.id)
+                        || applyConfirmOps.get(r.id) || null;
+                    const m = remoteApplyRowModel({
+                        behind: r.ps === 'behind', op: op,
+                        upd: updateCapFor(r.id), coarseState: state(r.st),
+                        check: r.st.check, restart: restartInfoFor(r.id) });
+                    if (!m.show) return;
+                    const row = mkEl('div', 'app-upd-restart-row');
+                    const btn = mkEl('button', 'app-upd-restart-btn',
+                        m.busy ? 'Applying…' : 'Update…');
+                    btn.type = 'button';
+                    btn.title = 'pulls the update onto that broker and restarts it';
+                    btn.disabled = !m.live;
+                    btn.addEventListener('mousedown', (e) => e.stopPropagation());
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (!m.live) return;
+                        const host = updHost(r.id);
+                        if (!host) return;
+                        // Captured with the dialog; the commit re-verifies.
+                        const url = String(host.url || '');
+                        const w = remoteApplyConfirmModel(r.label,
+                            r.st.check, restartInfoFor(r.id));
+                        openDialog({ title: w.title,
+                            body: applyConfirmBody(w.oldSha, m.targetSha,
+                                w.behindBy, w.compareUrl, w.continuity, w),
+                            buttons: APPLY_BUTTONS,
+                        }).then((res) => {
+                            if (!res || !res.value) return;
+                            return commitRemoteApply(r.id, url, r.label,
+                                m.targetSha);
+                        }).catch(() => {});
+                    });
+                    row.appendChild(btn);
+                    const stat = mkEl('div', 'app-upd-restart-inline');
+                    if (!applyOpNotes(stat, op, m.busy) && m.words) {
+                        stat.textContent = m.words;
                         stat.classList.add('app-upd-grey');
                     }
                     row.appendChild(stat);
@@ -2250,9 +2331,8 @@
                     renderRestartRow(body);
                     // ---- apply an update THIS broker (#182 Part 2, A30) ----
                     // Same section as the restart control above: an apply
-                    // ENDS in exactly that restart, and the row it renders
-                    // is LOCAL ONLY for the same reason (apply never touches
-                    // a remote host).
+                    // ENDS in exactly that restart. This row is LOCAL; a
+                    // remote broker's Update button rides its row below (A4).
                     renderApplyRow(body);
 
                     // ---- one row per broker ----
@@ -2293,6 +2373,10 @@
                         // checking switch it generalizes.
                         if (selfUpdateRowNeeded(r.id)) {
                             renderSelfUpdateRow(body, r.id, r.label);
+                        }
+                        // A4: a remote broker's own Update button.
+                        if (r.id !== LOCAL_HOST_ID) {
+                            renderRemoteApplyRow(body, r);
                         }
                     }
 
