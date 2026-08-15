@@ -213,6 +213,7 @@
             return {
                 id: modId,
                 ctxVersion: window.__mods.ctxVersion,
+                visibility: makeModVisibilityApi(rec),
                 // Register a teardown fn (reverses init); LIFO, isolated.
                 onUnload: function (fn) {
                     if (typeof fn === 'function') rec.unloads.push(fn);
