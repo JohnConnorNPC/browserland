@@ -4,14 +4,25 @@
         // because a bfcache restore skips 'visibilitychange'.
         const HIDDEN_MULT = 10;
         const _visibilityCbs = new Set();
+        // _wasHidden gates the dispatch to real hidden->visible transitions:
+        // without it the load-time 'pageshow' fires subscribers on a page that
+        // was never hidden, and a bfcache restore (pagehide + pageshow +
+        // visibilitychange, order browser-dependent) fires them twice.
+        let _wasHidden = document.visibilityState === 'hidden';
         function _dispatchVisible() {
             if (document.visibilityState !== 'visible') return;
+            if (!_wasHidden) return;
+            _wasHidden = false;
             for (const fn of _visibilityCbs) {
                 // Isolated: one throwing callback must not starve the rest.
                 try { fn(); } catch (_) {}
             }
         }
-        document.addEventListener('visibilitychange', _dispatchVisible);
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'hidden') { _wasHidden = true; return; }
+            _dispatchVisible();
+        });
+        window.addEventListener('pagehide', function () { _wasHidden = true; });
         window.addEventListener('pageshow', _dispatchVisible);
         function onVisibility(fn) {
             _visibilityCbs.add(fn);
@@ -24,23 +35,32 @@
         // run, otherwise it sets a missed flag. On becoming visible a missed
         // run fires exactly once (N missed ticks coalesce — never queued).
         function visibilityInterval(fn, ms) {
-            let lastRun = Date.now();
+            // performance.now(): a wall-clock step (NTP, DST, manual set) must
+            // not stretch or collapse the hidden cadence.
+            let lastRun = performance.now();
             let missed = false;
             function runNow() {
-                lastRun = Date.now();
+                lastRun = performance.now();
                 missed = false;
                 fn();
             }
             const timer = setInterval(function () {
+                const elapsed = performance.now() - lastRun;
                 if (document.visibilityState === 'hidden') {
-                    if (Date.now() - lastRun >= ms * HIDDEN_MULT) runNow();
+                    if (elapsed >= ms * HIDDEN_MULT) runNow();
                     else missed = true;
-                } else {
+                } else if (elapsed >= ms / 2) {
+                    // The half-interval floor swallows the tick already queued
+                    // behind a resume catch-up, which would otherwise run fn
+                    // twice back-to-back.
                     runNow();
                 }
             }, ms);
             const offVisible = onVisibility(function () {
-                if (missed) runNow();
+                // Catch up on a run skipped while hidden — including when the
+                // browser froze the timer outright (bfcache, throttled tab):
+                // no tick fired there, so `missed` alone cannot be trusted.
+                if (missed || performance.now() - lastRun >= ms) runNow();
             });
             return {
                 stop: function () {
@@ -53,20 +73,37 @@
         // Mod-facing wrapper: every teardown rides rec.unloads (drained LIFO by
         // _runUnloads in 86_js_mod_loader.js), so a disabled mod's timers and
         // subscriptions die with it; the !rec.unloading guard keeps a callback
-        // quiet while its mod is mid-teardown.
+        // quiet while its mod is mid-teardown, and a create AFTER teardown
+        // began fails closed (a surviving async continuation would otherwise
+        // leave a permanent timer whose cleanup can never drain).
         function makeModVisibilityApi(rec) {
+            // A manual stop removes its own rec.unloads record, or a churny
+            // mod (one timer per window) grows the list for its whole life.
+            // Safe against the drain itself: _runUnloads splices the array
+            // empty before running anything, so indexOf misses there.
+            function unloadable(teardown) {
+                function stop() {
+                    const i = rec.unloads.indexOf(stop);
+                    if (i !== -1) rec.unloads.splice(i, 1);
+                    teardown();
+                }
+                rec.unloads.push(stop);
+                return stop;
+            }
             return {
                 pausableInterval: function (fn, ms) {
-                    const handle = visibilityInterval(fn, ms);
-                    rec.unloads.push(handle.stop);
-                    return handle;
+                    if (rec.unloading) return { stop: function () {} };
+                    const handle = visibilityInterval(function () {
+                        if (!rec.unloading) fn();
+                    }, ms);
+                    return { stop: unloadable(handle.stop) };
                 },
                 onVisibility: function (fn) {
+                    if (rec.unloading) return function () {};
                     const off = onVisibility(function () {
                         if (!rec.unloading) fn();
                     });
-                    rec.unloads.push(off);
-                    return off;
+                    return unloadable(off);
                 },
             };
         }
