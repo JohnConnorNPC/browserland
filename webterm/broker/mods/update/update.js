@@ -1974,6 +1974,7 @@
                     }
                     row.appendChild(stat);
                     body.appendChild(row);
+                    return code === null;
                 }
 
                 // A4: the remote rows' own Update button — every fact is
@@ -1985,7 +1986,7 @@
                         behind: r.ps === 'behind', op: op,
                         upd: updateCapFor(r.id), coarseState: state(r.st),
                         check: r.st.check, restart: restartInfoFor(r.id) });
-                    if (!m.show) return;
+                    if (!m.show) return m.live;
                     const row = mkEl('div', 'app-upd-restart-row');
                     const btn = mkEl('button', 'app-upd-restart-btn',
                         m.busy ? 'Applying…' : 'Update…');
@@ -2020,6 +2021,7 @@
                     }
                     row.appendChild(stat);
                     body.appendChild(row);
+                    return m.live || m.busy;
                 }
 
                 // ---- detail window (ephemeral, like task-manager) ----
@@ -2333,10 +2335,11 @@
                     // Same section as the restart control above: an apply
                     // ENDS in exactly that restart. This row is LOCAL; a
                     // remote broker's Update button rides its row below (A4).
-                    renderApplyRow(body);
+                    const localLive = renderApplyRow(body);
 
                     // ---- one row per broker ----
                     addHead(body, one ? 'This broker' : 'Brokers');
+                    const verdicts = [];
                     for (const r of rows) {
                         // The state in words first, because it is the answer;
                         // the build second, because it is the evidence. Both
@@ -2375,9 +2378,12 @@
                             renderSelfUpdateRow(body, r.id, r.label);
                         }
                         // A4: a remote broker's own Update button.
+                        let live = localLive;
                         if (r.id !== LOCAL_HOST_ID) {
-                            renderRemoteApplyRow(body, r);
+                            live = renderRemoteApplyRow(body, r);
                         }
+                        verdicts.push({ label: r.label,
+                            behind: r.ps === 'behind', live: live });
                     }
 
                     // Why each silent broker is silent. The most important text
@@ -2424,13 +2430,8 @@
                         + 'changes are invisible here and this reflects your '
                         + 'last commit only.', 'app-upd-caveat');
 
-                    if (rows.some(function (r) { return r.ps === 'behind'; })) {
-                        addNote(body, 'To update a broker that is behind: stop '
-                            + 'it, run "git pull --ff-only" in its checkout, '
-                            + 'reinstall dependencies if pyproject.toml '
-                            + 'changed, then start it again and reload this '
-                            + 'page.', 'app-upd-howto');
-                    }
+                    const howTo = manualPullNote(verdicts);
+                    if (howTo) addNote(body, howTo.text, howTo.cls);
                 }
 
                 function renderAll() {

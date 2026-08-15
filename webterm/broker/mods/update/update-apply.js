@@ -340,6 +340,50 @@
             };
         }
 
+        // ---- the manual-pull how-to note (atom A5) ------------------
+        // Before A4, every behind row needed the exact same by-hand
+        // instructions, so one blanket note under the row list was
+        // accurate for the whole fleet. A4 gave a live remote row its
+        // own Update button, and the local broker already has its own
+        // apply row above -- so a behind row can now have a live path,
+        // and the old note started rendering beside rows it had
+        // nothing left to say to. It renders now only for the brokers
+        // that are behind and have NONE, and it names them -- the same
+        // way the per-broker reason notes above it do ("r.label + ' — '
+        // + reason"): among N rows an unattributed sentence belongs to
+        // nobody.
+        //
+        // verdicts: [{ label, behind, live }, ...] -- update.js's own
+        // per-row assembly. `live` is never re-decided here: it is the
+        // SAME fact each row's own control already read -- the local
+        // apply row's applyGateFromFacts result for the local broker,
+        // remoteApplyRowModel's own verdict for every other one -- so
+        // this note can never disagree with a button sitting right
+        // beside it. Rows that are not behind are never named: an
+        // unreachable row already carries its own reason note above,
+        // and a current one needs nothing said about it here.
+        function manualPullNote(verdicts) {
+            const list = Array.isArray(verdicts) ? verdicts : [];
+            const names = list.filter(function (v) {
+                return v && v.behind && !v.live;
+            }).map(function (v) {
+                return (v && typeof v.label === 'string' && v.label)
+                    || 'an unnamed broker';
+            });
+            if (!names.length) return null;
+            const named = names.length > 1
+                ? names.slice(0, -1).join(', ') + ' and '
+                    + names[names.length - 1]
+                : names[0];
+            const each = names.length > 1 ? 'each one' : 'it';
+            const whose = names.length > 1 ? 'that broker' : named;
+            return { cls: 'app-upd-howto', text: 'To update ' + named
+                + ': stop ' + each + ', then on ' + whose + '’s own '
+                + 'machine run "git pull --ff-only" in its checkout, '
+                + 'reinstall dependencies if pyproject.toml changed, '
+                + 'then start it again and reload this page.' };
+        }
+
         // ---- after an apply (#182 Part 2, A29) ---------------------
         // A broker that has been through an apply-restart reports the
         // finalized outcome as `last_deploy` beside its check payload,

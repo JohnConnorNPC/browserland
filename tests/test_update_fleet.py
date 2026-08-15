@@ -137,6 +137,11 @@ _REQUIRED = (
     # commitRemoteSelfUpdate pattern.
     "function remoteApplyRowModel", "function remoteApplyConfirmModel",
     "const applyConfirmOps", "async function commitRemoteApply",
+    # atom A5: the manual-pull how-to note is now residual -- it renders
+    # only for the brokers that are behind and have no live path, and
+    # names them. Pure over update.js's own per-row verdict assembly;
+    # ships in update-apply.js (read whole, above).
+    "function manualPullNote",
 )
 
 
@@ -1615,6 +1620,53 @@ CASES.remote_apply_row_model = async () => {
     return out;
 };
 
+// --- atom A5: the how-to note is residual and names its brokers -----------
+// Pure over update.js's own per-row verdict assembly -- {label, behind,
+// live} -- so every case here is about the DECISION and the WORDING, not
+// about how `live` gets decided (that is remoteApplyRowModel's and the
+// local apply row's own gate, both pinned elsewhere).
+CASES.manual_pull_note = async () => {
+    const out = {};
+    // Both directions: a behind row with no live path renders the note...
+    out.rendersWhenDead = manualPullNote(
+        [{ label: 'peer-b', behind: true, live: false }]);
+    // ...and the SAME row, live, renders nothing at all.
+    out.silentWhenLive = manualPullNote(
+        [{ label: 'peer-b', behind: true, live: true }]);
+    // A row that is not behind is never named, live or not -- an
+    // unreachable row already carries its own reason note above this one.
+    out.silentWhenNotBehind = manualPullNote(
+        [{ label: 'peer-c', behind: false, live: false }]);
+    out.empty = manualPullNote([]);
+    out.zeroBehind = manualPullNote([
+        { label: 'local', behind: false, live: true },
+        { label: 'peer-a', behind: false, live: false }]);
+    // The R2 trap: the LOCAL broker, behind but with its own live apply
+    // row, must not be counted -- only a dead local counts.
+    out.localLive = manualPullNote(
+        [{ label: 'this broker', behind: true, live: true }]);
+    out.localDead = manualPullNote(
+        [{ label: 'this broker', behind: true, live: false }]);
+    // A mixed fleet: one behind+live, one behind+dead, one not behind at
+    // all -- the note names only the dead one.
+    out.mixed = manualPullNote([
+        { label: 'this broker', behind: true, live: true },
+        { label: 'peer-dead', behind: true, live: false },
+        { label: 'peer-current', behind: false, live: false }]);
+    // Three or more named brokers join the same way the per-broker reason
+    // notes' own list-building precedent does ("X, Y and Z").
+    out.multiNamed = manualPullNote([
+        { label: 'peer-a', behind: true, live: false },
+        { label: 'peer-b', behind: true, live: false },
+        { label: 'peer-c', behind: true, live: false }]);
+    // Untrusted input -- a verdict list is update.js's own assembly, but
+    // this stays defensive the same way every other companion helper is.
+    out.junkRows = manualPullNote([null, 'nope', 7,
+        { label: 42, behind: true, live: false },
+        { behind: true, live: false }]);
+    return out;
+};
+
 // --- atom A4: refusals name the broker they describe -----------------------
 CASES.remote_apply_refusal_words = async () => {
     const out = {};
@@ -2908,6 +2960,46 @@ def test_the_update_button_is_local_only_and_beside_restart(harness):
     assert "LOCAL_HOST_ID" not in rseg
 
 
+def test_the_how_to_note_is_wired_to_the_same_gates_as_the_buttons(harness):
+    """Atom A5: the note must never re-decide 'live' with a rule looser
+    than the button beside it. The local verdict is renderApplyRow's own
+    `code === null` (captured by return value, the SAME code its button's
+    `disabled` reads); the remote verdict is renderRemoteApplyRow's own
+    `m.live` (the SAME m.live its button's `disabled` reads). update.js
+    assembles one verdict per row and makes exactly one render call; the
+    decision and the sentence both live in manualPullNote (companion)."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    apply_seg = src[src.index("function renderApplyRow"):
+                    src.index("function renderRemoteApplyRow")]
+    assert "return code === null;" in apply_seg
+    assert "btn.disabled = busy || !!code;" in apply_seg
+    remote_seg = src[src.index("function renderRemoteApplyRow"):
+                     src.index("// ---- detail window")]
+    # Both exits carry a verdict: the early "nothing to show" return and
+    # the row's own final return -- never a bare `return;` that would
+    # silently read as "not behind". The final exit ORs in m.busy on
+    # purpose: a row mid-apply IS using its live path, so the manual
+    # note must not flash for a broker whose own row says "Applying...".
+    # (The early exit cannot be busy -- no op means m.busy is false.)
+    assert remote_seg.count("return m.live || m.busy;") == 1
+    assert "if (!m.show) return m.live;" in remote_seg
+    assert "btn.disabled = !m.live;" in remote_seg
+    window_seg = src[src.index("function renderWindow(win)"):
+                     src.index("function renderAll()")]
+    assert "const localLive = renderApplyRow(body);" in window_seg
+    loop_seg = window_seg[window_seg.index("for (const r of rows)"):]
+    assert "let live = localLive;" in loop_seg
+    assert "live = renderRemoteApplyRow(body, r);" in loop_seg
+    assert window_seg.count("manualPullNote(verdicts)") == 1
+    assert "if (howTo) addNote(body, howTo.text, howTo.cls);" in window_seg
+    # The old blanket sentence, and its rendering-whenever-any-row-is-
+    # behind test, are both gone -- the wording and the decision moved to
+    # the companion in full.
+    assert "To update a broker that is behind" not in src
+    apply_src = MOD_APPLY_JS.read_text(encoding="utf-8")
+    assert "'To update '" in apply_src
+
+
 def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
         harness):
     """The confirm dialog's values are captured once, at click time, from
@@ -3433,6 +3525,81 @@ def test_remote_apply_confirm_names_the_broker_and_its_own_session_cost(
     assert u["compareUrl"] is None, "a non-http url must never linkify"
     assert u["restart"]["unknown"].startswith("Session impact unknown")
     assert u["continuity"] == {"guaranteed": 0, "at_risk": 0, "unknown": 0}
+
+
+# --- atom A5: the how-to note is residual and names its brokers -----------
+
+def test_the_how_to_note_renders_only_when_a_behind_row_has_no_live_path(
+        harness):
+    """Both directions pinned on the SAME row: behind and dead renders
+    the note, the identical row live renders nothing at all."""
+    r = run(harness, "manual_pull_note")
+    dead = r["rendersWhenDead"]
+    assert dead is not None
+    assert dead["cls"] == "app-upd-howto"
+    assert "peer-b" in dead["text"]
+    assert r["silentWhenLive"] is None
+    # Not behind at all is never this note's business, live or not.
+    assert r["silentWhenNotBehind"] is None
+    assert r["empty"] is None
+    assert r["zeroBehind"] is None
+
+
+def test_the_how_to_note_keeps_its_instructions_and_names_the_machine(
+        harness):
+    """R3: the substance survives (stop it, pull --ff-only, reinstall
+    deps, start it again, reload the page) but the sentence now names
+    which broker it is for and says the commands run on ITS OWN
+    machine -- not the machine the reader is looking at this page from."""
+    r = run(harness, "manual_pull_note")
+    text = r["rendersWhenDead"]["text"]
+    assert "peer-b" in text
+    assert 'git pull --ff-only' in text
+    assert "its checkout" in text
+    assert "pyproject.toml" in text
+    assert "reload this page" in text
+    assert "own machine" in text
+    assert "start it again" in text
+
+
+def test_the_how_to_note_joins_several_names_the_same_way_reasons_do(
+        harness):
+    """Precedent for naming is the per-broker reason notes just above it
+    -- an unattributed sentence belongs to nobody among N rows."""
+    r = run(harness, "manual_pull_note")
+    text = r["multiNamed"]["text"]
+    assert "peer-a" in text and "peer-b" in text and "peer-c" in text
+    assert "peer-a, peer-b and peer-c" in text
+
+
+def test_a_local_broker_with_its_own_live_apply_row_is_not_counted(
+        harness):
+    """The R2 trap: a LOCAL broker that is behind but whose own apply row
+    is live must not be named -- only a dead local counts."""
+    r = run(harness, "manual_pull_note")
+    assert r["localLive"] is None
+    dead = r["localDead"]
+    assert dead is not None
+    assert "this broker" in dead["text"]
+
+
+def test_a_mixed_fleet_names_only_the_row_with_no_live_path(harness):
+    """One behind+live (local), one behind+dead (a peer), one not behind
+    at all -- the note names the dead peer and nobody else."""
+    r = run(harness, "manual_pull_note")
+    text = r["mixed"]["text"]
+    assert "peer-dead" in text
+    assert "this broker" not in text
+    assert "peer-current" not in text
+
+
+def test_the_how_to_note_never_throws_on_a_junk_verdict_list(harness):
+    """`verdicts` is update.js's own assembly, not wire input, but this
+    stays defensive like every other companion helper here."""
+    r = run(harness, "manual_pull_note")
+    junk = r["junkRows"]
+    assert junk is not None
+    assert "an unnamed broker" in junk["text"]
 
 
 def test_apply_refusals_name_the_broker_they_describe(harness):
