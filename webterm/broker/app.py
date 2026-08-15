@@ -525,6 +525,10 @@ def update_policy_view(app) -> Dict[str, Any]:
         # only by a build that actually accepts it, exactly like `update`
         # itself is only published by a build that has the check.
         "remote_writable": True,
+        # Same pattern as `remote_writable` immediately above, for POST
+        # /update/apply: that route dropped its own origin gate (#205), so a
+        # remote UI may now be offered an Update button that will not 403.
+        "remote_applyable": True,
         # The three-key view. The five flat fields above describe the CHECK
         # (they predate apply/restart joining the sidecar and older clients
         # read them), so they stay exactly as they are; `policy` is where a

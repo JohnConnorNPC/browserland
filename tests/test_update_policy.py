@@ -260,6 +260,26 @@ def test_remote_writable_is_published_so_an_older_peer_is_not_offered_one(
     assert r.json["update"]["remote_writable"] is True
 
 
+def test_remote_applyable_is_published_so_an_older_peer_is_not_offered_a_button(
+        tmp_path, monkeypatch):
+    """Same pattern as `remote_writable` (#205): only a build whose POST
+    /update/apply accepts a cross-origin call may say so, so an older peer's
+    silence is what keeps a remote UI from offering a button it can only
+    misdescribe when it 403s. Pinned on both wires the shared view feeds."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, w = authed(app).post("/update/policy", json={"check_enabled": True})
+    assert w.json["update"]["remote_applyable"] is True
+    _, r = authed(app).get("/info")
+    assert r.json["update"]["remote_applyable"] is True
+    # Independent of whether apply itself is currently grantable: the
+    # capability key describes the code, `policy.apply` the live gate.
+    locked = _make_app(tmp_path / "c", monkeypatch, update_apply_enabled=False)
+    _, r = authed(locked).get("/info")
+    assert r.json["update"]["policy"]["apply"]["enabled"] is False
+    assert r.json["update"]["remote_applyable"] is True
+
+
 def test_the_preflight_exists_so_the_route_is_not_invisible(tmp_path,
                                                             monkeypatch):
     """A new path with no OPTIONS route 405s before any middleware, which a
