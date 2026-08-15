@@ -37,13 +37,11 @@
                 // broker's own cache turned over.
                 const POLL_MS = 30 * 60 * 1000;
 
-                // Chip colour bands — border + text only, background stays the
-                // theme bg, so it reads on any theme exactly like .host-chip.
-                const BANDS = {
-                    green: { border: '#3a6a4a', fg: 'var(--ok)' },
-                    amber: { border: '#a8842c', fg: 'var(--warn)' },
-                    grey:  { border: 'var(--bg-3)', fg: 'var(--fg-dim)' },
-                };
+                // BANDS (chip colour bands) moved to
+                // mods/update/update-policy.js as UPDATE_CHIP_BANDS
+                // (atom A2) — a plain object literal, no closure
+                // reference, same shared-scope split RESTART_REASONS
+                // took in A4.
                 // Why we could not answer, in words. The broker sends a stable
                 // machine reason; anything unrecognised falls through to a
                 // generic line rather than rendering a raw token at the user.
@@ -238,58 +236,13 @@
                     if (st.error) return 'unknown';
                     return (st.check && st.check.state) || 'unknown';
                 }
-                function reasonCode(st) {
-                    if (!st) return null;
-                    if (st.error) return st.error;
-                    return (st.check && st.check.reason) || null;
-                }
-                function bandFor(s) {
-                    if (s === 'current') return 'green';
-                    if (s === 'behind') return 'amber';
-                    return 'grey';   // every non-answer, and ahead, land here
-                }
-
-                // ---- one host, one state --------------------------------
-                // The four ways a PEER can leave us without an answer. Each is
-                // its own state rather than one lumped 'unknown', because they
-                // ask four different things of whoever reads them: update that
-                // broker, switch checking on over there, re-enter its password,
-                // or go find out why the machine is not answering. Telling an
-                // operator to chase a network fault when the truth is "that
-                // operator never opted in" is the same class of mistake as
-                // claiming 'current' — a confident sentence about the wrong
-                // thing. They are exactly the capability probe's non-'ready'
-                // outcomes, and every one is a REASONS key, so each has words.
-                const PEER_FAILURES = ['route-absent', 'not-opted-in',
-                                       'unauthorized', 'unreachable',
-                                       'unreachable-or-too-old'];
-                // The fine-grained read of a record: what state() returns, plus
-                // 'pending' for a host nothing has come back from yet, plus the
-                // four above pulled up out of 'unknown'. state() is deliberately
-                // left alone — the single-broker chip still speaks its coarse
-                // vocabulary, so none of this can change what one broker reads
-                // as. Nothing here can return 'current' for a host that did not
-                // answer: 'current' arrives only on st.check.state, which is
-                // only ever assigned from a parsed 200 body.
-                function peerState(st) {
-                    if (!st) return 'unknown';
-                    // No poll has COMPLETED for this host. Its own state on
-                    // purpose (75's 'pending' precedent): 'unknown' would
-                    // announce a failure that has not happened, and 'current'
-                    // would be the exact lie this mod exists to prevent.
-                    if (!st.checkedAt) return 'pending';
-                    if (st.error) {
-                        return PEER_FAILURES.indexOf(st.error) !== -1
-                            ? st.error : 'unknown';
-                    }
-                    return (st.check && st.check.state) || 'unknown';
-                }
-                // answered/stateWords/WORST_FIRST moved to
-                // mods/update/update-policy.js (#182 Part 2, A6) — the
-                // same shared-scope split RESTART_REASONS took in A4.
-                // Pure over their arguments, so hostRows/renderWindow
-                // call them exactly as before; only WHERE they are
-                // defined changed.
+                // reasonCode/bandFor/PEER_FAILURES/peerState moved to
+                // mods/update/update-policy.js (atom A2), joining
+                // answered/stateWords/WORST_FIRST (#182 Part 2, A6) —
+                // the same shared-scope split RESTART_REASONS took in
+                // A4. Pure over their arguments, so hostRows/
+                // renderWindow/chipTitle call them exactly as before;
+                // only WHERE they are defined changed.
                 // One snapshot row per CONFIGURED host, in host-list order.
                 // Hosts are resolved HERE, at render time, so a broker added or
                 // removed in Settings is in or out of the very next paint with
@@ -336,7 +289,7 @@
                     const allCurrent = one ? (s === 'current') : agg.allCurrent;
                     const quiet = quietSetting.get() && allCurrent;
                     chip.style.display = quiet ? 'none' : 'inline-flex';
-                    const band = BANDS[bandFor(one ? s : agg.worst)];
+                    const band = UPDATE_CHIP_BANDS[bandFor(one ? s : agg.worst)];
                     chip.style.borderColor = band.border;
                     chip.style.color = band.fg;
                     chipText.textContent = one ? chipLabel(st, s) : agg.text;
@@ -1216,46 +1169,16 @@
                 // name this closure can still call exactly as before; only
                 // WHERE it is defined changed.
 
-                // A broker's restart capability, read off the SAME
-                // cached /info record the update-check probe above reads
-                // `rec.update` from — modCatalogCache, populated by the
-                // Control Panel's fetchModCatalog and refreshed by this
-                // mod's own poll cycle — never a second fetcher run in
-                // parallel with it. If that record does not carry a
-                // `restart` key at all (an older cache shape, or simply not
-                // fetched yet) this is UNAVAILABLE with `known: false`: the
-                // absence of the capability is not evidence that it is
-                // present, and a control that assumed otherwise would be
-                // exactly the blind attempt this feature exists to refuse.
-                function restartInfoFor(hostId) {
-                    const rec = modCatalogCache.get(hostId || LOCAL_HOST_ID);
-                    const r = rec && rec.restart;
-                    if (!r || typeof r !== 'object') {
-                        return { known: false, available: false,
-                                 reason: null, retryAfterS: null,
-                                 continuity: { guaranteed: 0, at_risk: 0,
-                                              unknown: 0 },
-                                 bootId: null };
-                    }
-                    const c = (r.continuity && typeof r.continuity === 'object')
-                        ? r.continuity : {};
-                    const num = function (v) {
-                        return (typeof v === 'number' && v > 0) ? v : 0;
-                    };
-                    return {
-                        known: true,
-                        available: !!r.available,
-                        reason: r.reason_code || null,
-                        // Only the cooldown reason ever carries this (#183
-                        // R6); walked as untrusted like everything else here.
-                        retryAfterS: num(r.retry_after_s) || null,
-                        continuity: { guaranteed: num(c.guaranteed),
-                                     at_risk: num(c.at_risk),
-                                     unknown: num(c.unknown) },
-                        bootId: (typeof r.bootId === 'string' && r.bootId)
-                            || null,
-                    };
-                }
+                // restartInfoFor moved to mods/update/update-policy.js
+                // (atom A2) -- pure over modCatalogCache (a shared
+                // GLOBAL from core, not this closure) and its hostId
+                // argument; the `hostId || LOCAL_HOST_ID` fallback
+                // became `hostId || 'local'` there since LOCAL_HOST_ID
+                // itself is this closure's own literal id -- byte-
+                // identical, since LOCAL_HOST_ID is that same const
+                // string and every call site here already passes a
+                // resolved, truthy id (restartInfo() below, and
+                // restartInfoFor(r.id) in the fleet rows).
                 function restartInfo() { return restartInfoFor(LOCAL_HOST_ID); }
 
                 // ---- the operation itself -----------------------------
@@ -1286,16 +1209,9 @@
                     });
                 }
 
-                // How long a click waits for proof before giving up and
-                // saying so, and how often it asks while waiting. Generous
-                // against RESTART_DRAIN_TIMEOUT (20s server-side) plus
-                // whatever the supervisor/systemd takes to relaunch the
-                // process and have it start answering /info again — bounded
-                // regardless, because "wait forever" is a spinner that is
-                // indistinguishable from a broker that is never coming
-                // back.
-                const RESTART_WAIT_TIMEOUT_MS = 90 * 1000;
-                const RESTART_POLL_MS = 2000;
+                // RESTART_WAIT_TIMEOUT_MS/RESTART_POLL_MS moved to
+                // mods/update/update-policy.js (atom A2) -- plain
+                // numeric consts, no closure reference.
 
                 // The polling loop lives in applyFlow.pollBootId (#182
                 // Part 2, A30/A3 -- an apply ends in this same wait, so
@@ -1851,13 +1767,10 @@
                     pollMs: RESTART_POLL_MS,
                 });
 
-                function mkEl(tag, cls, text) {
-                    const e = document.createElement(tag);
-                    if (cls) e.className = cls;
-                    if (text !== undefined) e.textContent = text;
-                    return e;
-                }
-
+                // mkEl moved to mods/update/update-widgets.js (atom
+                // A2), joining applyOpNotes/APPLY_BUTTONS below and
+                // addRow/addNote/addHead further down -- DOM widget
+                // helpers, args-only, no reference to this closure.
                 // Commit range/count/compare link, then the SAME live-
                 // session cost block restartConfirmBody renders (#183) --
                 // an apply ends in that same restart. `w` (A4) is the
@@ -1888,21 +1801,8 @@
                     };
                 }
 
-                // Shared op-note painter for the two apply rows: the op's
-                // lines land in `stat`, green/amber banded ('waiting' has
-                // no band); returns whether it painted anything.
-                function applyOpNotes(stat, op, busy) {
-                    if (!op || !(busy || ['done', 'timeout', 'failed']
-                            .indexOf(op.phase) !== -1)) return false;
-                    for (const t of op.note) stat.appendChild(mkEl('div', null, t));
-                    if (op.phase !== 'waiting') stat.classList.add(
-                        op.phase === 'done' ? 'app-upd-green' : 'app-upd-amber');
-                    return true;
-                }
-                const APPLY_BUTTONS = [
-                    { label: 'Apply and restart', value: true,
-                      primary: true, danger: true },
-                    { label: 'Cancel', value: false }];
+                // applyOpNotes/APPLY_BUTTONS moved to
+                // mods/update/update-widgets.js too (atom A2).
 
                 // Rebuilt fresh every renderWindow() pass, like
                 // renderRestartRow beside it. The click handler recomputes
@@ -2109,46 +2009,11 @@
                     return win;
                 }
 
-                // One labelled row. Values go through .textContent — everything
-                // here except our own literals came off the network, and a
-                // broker label is user-entered text on top of that. rowCls lets
-                // the per-broker block widen its own label column without
-                // needing a second copy of this function.
-                function addRow(body, label, value, cls, rowCls) {
-                    const row = document.createElement('div');
-                    row.className = 'app-upd-row' + (rowCls ? ' ' + rowCls : '');
-                    const k = document.createElement('span');
-                    k.className = 'app-upd-key';
-                    k.textContent = label;
-                    const v = document.createElement('span');
-                    v.className = 'app-upd-val' + (cls ? ' ' + cls : '');
-                    v.textContent = value;
-                    row.appendChild(k);
-                    row.appendChild(v);
-                    body.appendChild(row);
-                    return v;
-                }
-
-                function addNote(body, text, cls) {
-                    const el = document.createElement('div');
-                    el.className = 'app-upd-note' + (cls ? ' ' + cls : '');
-                    el.textContent = text;
-                    body.appendChild(el);
-                    return el;
-                }
-
-                // A section divider. The window now has two kinds of row —
-                // facts about the comparison (shared by every broker, because
-                // the upstream is one constant repository) and facts about one
-                // broker — and a reader who cannot tell them apart would read a
-                // shared "Upstream" line as belonging to the row above it.
-                function addHead(body, text) {
-                    const el = document.createElement('div');
-                    el.className = 'app-upd-head';
-                    el.textContent = text;
-                    body.appendChild(el);
-                    return el;
-                }
+                // addRow/addNote/addHead moved to
+                // mods/update/update-widgets.js too (atom A2) --
+                // DOM widget helpers, args-only, no reference to this
+                // closure; renderWindow/renderDeployStrip/openUpdateWindow
+                // (etc.) call them exactly as before.
 
                 // The strip deployStrip feeds (#182 Part 2, A29). LOCAL by
                 // construction: it reads exactly one record — the serving

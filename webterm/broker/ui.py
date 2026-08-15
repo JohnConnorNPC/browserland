@@ -207,6 +207,7 @@ _MODS = [
     "mods/aistatus/aistatus.js",  # #112 AI-provider status chip + window; ships default-off, polls /status/fetch; ships aistatus.css
     "mods/update/update-policy.js",  # #182 Part 2 (atom A4) policy words/helpers companion, starts with RESTART_REASONS/restartReasonWords -- helpers only
     "mods/update/update-apply.js",  # #182 Part 2 (A29/A30) pure apply/post-apply helpers, helpers only -- same split as editor/codemirror.js
+    "mods/update/update-widgets.js",  # #188 precondition (atom A2) DOM widget helpers (mkEl/addRow/addNote/addHead/applyOpNotes/APPLY_BUTTONS) split out of update.js to stay under the fragment cap -- helpers only, no registerMod
     "mods/update/update.js",   # #182 is this build current with upstream? taskbar chip + detail window over the broker's GET /update/check; default-off, and the BROKER has its own update_check_enabled gate on top; ships update.css
     "mods/git/git.js",         # S14 (#116) per-terminal git status widget via ctx.windows.onTerminalCreate + ctx.session.git; default-off; ships git.css
     "mods/clipboard/clipboard.js",  # #106 rolling copy/paste history window via ctx.clipboard.observe + ctx.registerWindowKind; default-off (secrets); ephemeral; ships clipboard.css

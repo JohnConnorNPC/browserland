@@ -25,6 +25,83 @@
         // setPolicy/offerConsent own the fetch, the op map and the
         // repaint.
 
+        // ---- version-check words moved out of update.js
+        // (atom A2) -------------------------------------------------
+        // update.js sat at 2495/2500 against the fragment cap. These
+        // four (UPDATE_CHIP_BANDS/reasonCode/bandFor/PEER_FAILURES+
+        // peerState) are the same shape as everything else in this
+        // file: pure over their arguments, no reference to update.js's
+        // own closure (ctx, checkStateFor, updHost, LOCAL_HOST_ID,
+        // hostFetch, modCatalogCache/lastWrite/opSeq, ...) --
+        // update.js's renderChip/renderWindow/chipTitle/hostRows call
+        // them exactly as if they were still declared inside it; only
+        // WHERE they are defined changed.
+
+        // Chip colour bands — border + text only, background stays the
+        // theme bg, so it reads on any theme exactly like .host-chip.
+        // ASSUMPTION: named UPDATE_CHIP_BANDS rather than the bare
+        // BANDS update.js used while this lived in its own closure --
+        // a top-level name is shared across every mod script in the
+        // one spliced inline <script>, and aistatus.js's own (locally
+        // scoped) BANDS constant would otherwise read as a same-name
+        // cross-fragment collision to the portable-mod-lint test.
+        const UPDATE_CHIP_BANDS = {
+            green: { border: '#3a6a4a', fg: 'var(--ok)' },
+            amber: { border: '#a8842c', fg: 'var(--warn)' },
+            grey:  { border: 'var(--bg-3)', fg: 'var(--fg-dim)' },
+        };
+
+        // The readers all take the RECORD they are describing (the
+        // same doctrine update.js's own state() follows, which stays
+        // there as a fragment-cap _CHUNKS anchor for
+        // test_update_fleet.py's node harness).
+        function reasonCode(st) {
+            if (!st) return null;
+            if (st.error) return st.error;
+            return (st.check && st.check.reason) || null;
+        }
+        function bandFor(s) {
+            if (s === 'current') return 'green';
+            if (s === 'behind') return 'amber';
+            return 'grey';   // every non-answer, and ahead, land here
+        }
+
+        // ---- one host, one state --------------------------------
+        // The four ways a PEER can leave us without an answer. Each is
+        // its own state rather than one lumped 'unknown', because they
+        // ask four different things of whoever reads them: update that
+        // broker, switch checking on over there, re-enter its password,
+        // or go find out why the machine is not answering. Telling an
+        // operator to chase a network fault when the truth is "that
+        // operator never opted in" is the same class of mistake as
+        // claiming 'current' — a confident sentence about the wrong
+        // thing. They are exactly the capability probe's non-'ready'
+        // outcomes, and every one is a REASONS key, so each has words.
+        const PEER_FAILURES = ['route-absent', 'not-opted-in',
+                               'unauthorized', 'unreachable',
+                               'unreachable-or-too-old'];
+        // The fine-grained read of a record: what state() returns, plus
+        // 'pending' for a host nothing has come back from yet, plus the
+        // four above pulled up out of 'unknown'. state() is deliberately
+        // left alone — the single-broker chip still speaks its coarse
+        // vocabulary, so none of this can change what one broker reads
+        // as. Nothing here can return 'current' for a host that did not
+        // answer: 'current' arrives only on st.check.state, which is
+        // only ever assigned from a parsed 200 body.
+        function peerState(st) {
+            if (!st) return 'unknown';
+            // No poll has COMPLETED for this host. Its own state on
+            // purpose (75's 'pending' precedent): 'unknown' would
+            // announce a failure that has not happened, and 'current'
+            // would be the exact lie this mod exists to prevent.
+            if (!st.checkedAt) return 'pending';
+            if (st.error) {
+                return PEER_FAILURES.indexOf(st.error) !== -1
+                    ? st.error : 'unknown';
+            }
+            return (st.check && st.check.state) || 'unknown';
+        }
+
         // Human words for every reason_code the broker can hand
         // back, over both routes that carry one: GET /info's
         // `restart.reason_code` (why the control is DISABLED) and
@@ -543,4 +620,69 @@
                 return pol.check.source;
             }
             return upd.source;
+        }
+
+        // ---- self-restart (#183) words/facts moved out of update.js
+        // (atom A2) ---------------------------------------------------
+        // How long a click waits for proof before giving up and
+        // saying so, and how often it asks while waiting. Generous
+        // against RESTART_DRAIN_TIMEOUT (20s server-side) plus
+        // whatever the supervisor/systemd takes to relaunch the
+        // process and have it start answering /info again — bounded
+        // regardless, because "wait forever" is a spinner that is
+        // indistinguishable from a broker that is never coming
+        // back. Plain numeric consts, no closure reference --
+        // update.js's waitForNewBootId and its makeApplyFlow deps
+        // object read them exactly as before; only WHERE they are
+        // defined changed.
+        const RESTART_WAIT_TIMEOUT_MS = 90 * 1000;
+        const RESTART_POLL_MS = 2000;
+
+        // A broker's restart capability, read off the SAME cached
+        // /info record the update-check probe reads `rec.update`
+        // from — modCatalogCache, a shared GLOBAL from core (NOT
+        // update.js's own closure), populated by the Control Panel's
+        // fetchModCatalog and refreshed by that mod's own poll cycle
+        // — never a second fetcher run in parallel with it. If that
+        // record does not carry a `restart` key at all (an older
+        // cache shape, or simply not fetched yet) this is UNAVAILABLE
+        // with `known: false`: the absence of the capability is not
+        // evidence that it is present, and a control that assumed
+        // otherwise would be exactly the blind attempt this feature
+        // exists to refuse.
+        //
+        // ASSUMPTION: `hostId || 'local'` (byte-identical to
+        // update.js's own `hostId || LOCAL_HOST_ID` -- LOCAL_HOST_ID
+        // is that same literal const string, and this function's
+        // signature is pinned by test_update_fleet.py's call-site
+        // checks (`restartInfoFor(r.id)`), so it cannot take a second
+        // injected parameter the way makeApplyFlow's deps do).
+        function restartInfoFor(hostId) {
+            const rec = modCatalogCache.get(hostId || 'local');
+            const r = rec && rec.restart;
+            if (!r || typeof r !== 'object') {
+                return { known: false, available: false,
+                         reason: null, retryAfterS: null,
+                         continuity: { guaranteed: 0, at_risk: 0,
+                                      unknown: 0 },
+                         bootId: null };
+            }
+            const c = (r.continuity && typeof r.continuity === 'object')
+                ? r.continuity : {};
+            const num = function (v) {
+                return (typeof v === 'number' && v > 0) ? v : 0;
+            };
+            return {
+                known: true,
+                available: !!r.available,
+                reason: r.reason_code || null,
+                // Only the cooldown reason ever carries this (#183
+                // R6); walked as untrusted like everything else here.
+                retryAfterS: num(r.retry_after_s) || null,
+                continuity: { guaranteed: num(c.guaranteed),
+                             at_risk: num(c.at_risk),
+                             unknown: num(c.unknown) },
+                bootId: (typeof r.bootId === 'string' && r.bootId)
+                    || null,
+            };
         }
