@@ -6875,11 +6875,52 @@ def test_update_mod_poll_ticks_visibility_aware_but_restart_never_does():
 def test_feature_detected_mods_adopt_pausable_interval():
     # Same feature-detect shape as the update mod (ctx.visibility ? ... :
     # plain setInterval), in every other shipped mod that runs its own poll.
+    #
+    # git.js and task-manager.js don't inline the ternary at the timer site --
+    # they route it through a local wrapper (`pausable` in git.js, named
+    # `tmPausableInterval` in task-manager.js) that does the feature-detect
+    # once, called from the real timer site further down the file. Pinning
+    # only the word "pausableInterval" is too weak for that
+    # shape: reverting the CALL SITE back to a plain setInterval leaves the
+    # now-unused wrapper (and the pinned word) sitting in the file, so the
+    # old word-only assert stayed green while the mod was silently
+    # un-adopted -- and its teardown `.stop()` would throw on the raw
+    # interval id. Pin the call site itself, per file, alongside the
+    # ctx.visibility feature-detect, so a call-site revert fails even with
+    # the wrapper left behind.
     for rel in ("mods/aistatus/aistatus.js", "mods/git/git.js",
                 "mods/task-manager/task-manager.js", "mods/clock/clock.js"):
         src = (BROKER_DIR / rel).read_text(encoding="utf-8")
         assert "pausableInterval" in src, \
             f"{rel} must feature-detect ctx.visibility.pausableInterval"
+
+    git = (BROKER_DIR / "mods/git/git.js").read_text(encoding="utf-8")
+    # The refresh poll must call the wrapper -- not just define it.
+    assert "gitTimer = pausable(" in git, \
+        "git.js's refresh poll must call the pausable() wrapper at its timer site"
+    assert "ctx.visibility" in git, \
+        "git.js must feature-detect ctx.visibility"
+
+    tm = (BROKER_DIR / "mods/task-manager/task-manager.js").read_text(encoding="utf-8")
+    assert "const timer = tmPausableInterval(" in tm, \
+        "task-manager.js's periodic refresh must call the tmPausableInterval() wrapper at its timer site"
+    assert "ctx.visibility" in tm, \
+        "task-manager.js must feature-detect ctx.visibility"
+
+    aistatus = (BROKER_DIR / "mods/aistatus/aistatus.js").read_text(encoding="utf-8")
+    # aistatus.js inlines the ternary at the timer site (no separate
+    # wrapper), so pin both branches of it: the pausableInterval call and
+    # the plain-setInterval fallback it degrades to on an older core.
+    assert "ctx.visibility.pausableInterval(tick, ms)" in aistatus, \
+        "aistatus.js's poll must call ctx.visibility.pausableInterval at its timer site"
+    assert "const id = setInterval(tick, ms);" in aistatus, \
+        "aistatus.js must keep the plain-setInterval fallback branch"
+
+    clock = (BROKER_DIR / "mods/clock/clock.js").read_text(encoding="utf-8")
+    assert "ctx.visibility.pausableInterval(render, 1000)" in clock, \
+        "clock.js's render timer must call ctx.visibility.pausableInterval at its timer site"
+    assert "ctx.visibility" in clock, \
+        "clock.js must feature-detect ctx.visibility"
 
 
 def test_launch_host_items_and_launch_profile_respect_hidden_hosts():
