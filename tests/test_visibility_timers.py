@@ -53,7 +53,7 @@ MARKER = "// ---- shared state"
 
 # Every ok() the scenario script makes. The summary test pins this so a
 # scenario silently dropped from the harness cannot pass by absence.
-EXPECTED_ASSERTS = 21
+EXPECTED_ASSERTS = 31
 
 _HARNESS = r"""
 'use strict';
@@ -62,7 +62,7 @@ _HARNESS = r"""
 const fs = require('fs');
 const src = fs.readFileSync(__SRC_PATH__, 'utf8');
 const cut = src.indexOf('// ---- shared state');
-if (cut < 0) { console.error('marker missing'); process.exit(1); }
+if (cut < 0) throw new Error('marker missing');
 const slice = src.slice(0, cut);
 
 // ---- stubs --------------------------------------------------------------
@@ -115,7 +115,17 @@ ok(s1 === 1, 'S2 hidden->visible fires once');
 fire('win', 'pagehide'); documentStub.visibilityState = 'visible';
 fire('win', 'pageshow'); fire('doc', 'visibilitychange');
 ok(s1 === 2, 'S3 bfcache restore fires once, not twice');
+
+// S3c: the same restore with the two events in the OTHER order -- the claim
+// is "order browser-dependent", so both orders must coalesce to one fire.
+fire('win', 'pagehide'); documentStub.visibilityState = 'visible';
+fire('doc', 'visibilitychange'); fire('win', 'pageshow');
+ok(s1 === 3, 'S3c bfcache restore fires once in the reverse event order');
+
+// S3b: the returned unsubscribe actually unsubscribes.
 off1();
+setVisibility('hidden'); setVisibility('visible');
+ok(s1 === 3, 'S3b off() unsubscribes');
 
 // S4: visible cadence -- tick at ~ms runs fn
 let runs = 0; const h = api.visibilityInterval(() => runs++, 1000);
@@ -134,35 +144,71 @@ setVisibility('visible');
 ok(runs === 2, 'S6a resume catch-up ran fn once');
 fireTick(tid); // already-queued tick right behind the catch-up (elapsed ~0)
 ok(runs === 2, 'S6b back-to-back tick swallowed by half-interval floor');
+// ...and the floor sits at exactly ms/2 -- one tick under it skips, one at
+// it runs, so a floor quietly shrunk toward 0 (or grown past ms) fails here.
+now += 499; fireTick(tid);
+ok(runs === 2, 'S6c tick under the half-interval floor skips');
+now += 1; fireTick(tid);
+ok(runs === 3, 'S6d tick at exactly the half-interval floor runs');
 
-// S7: hidden run at the slow cadence (>= 10x) fires without waiting for
-// the page to come back.
+// S7: the hidden cadence boundary is exactly ms*HIDDEN_MULT -- one tick
+// 1ms under it skips, one at it runs, so 6x..9x cannot pass as "10x".
 setVisibility('hidden');
-now += 10000; fireTick(tid);
-ok(runs === 3, 'S7 hidden slow-cadence run fires at 10x');
+now += 9999; fireTick(tid);
+ok(runs === 3, 'S7a hidden tick at 10x-1ms still skips');
+now += 1; fireTick(tid);
+ok(runs === 4, 'S7 hidden slow-cadence run fires at exactly 10x');
 
 // S8: frozen-timer resume -- hidden, NO ticks ever fire (bfcache/throttled
 // tab), restore => due-based catch-up; missed alone would have said no.
-now += 3000; // > ms, but no tick observed => missed stays false
+// The catch-up threshold is one full ms: under it, nothing was due.
+now += 999; // < ms and no tick observed
 setVisibility('visible');
-ok(runs === 4, 'S8 frozen-timer resume catches up without a missed flag');
+ok(runs === 4, 'S8a frozen resume under one interval does not run');
+setVisibility('hidden');
+now += 3000; // > ms, still no tick observed => missed stays false
+setVisibility('visible');
+ok(runs === 5, 'S8b frozen-timer resume catches up without a missed flag');
+
+// S8c/S8d: on a real resume the queued interval task and the
+// visibilitychange task race in browser-chosen order; S6 proved
+// dispatch-then-tick, this proves tick-then-dispatch.
+setVisibility('hidden');
+now += 1500; fireTick(tid); // sub-cadence: sets missed
+documentStub.visibilityState = 'visible'; // flips BEFORE any handler runs
+fireTick(tid); // the queued tick lands first and runs (past the floor)
+ok(runs === 6, 'S8c queued tick can run first on resume');
+fire('doc', 'visibilitychange'); // the dispatch lands second
+ok(runs === 6, 'S8d the late dispatch does not double-run');
 
 // S9: stop() unregisters -- later transitions do not run fn, and the
 // underlying interval is gone.
 h.stop();
 setVisibility('hidden'); now += 50000; setVisibility('visible');
-ok(runs === 4, 'S9 stop() severs the visibility hook');
+ok(runs === 6, 'S9 stop() severs the visibility hook');
 ok(!intervals.has(tid), 'S9b stop() cleared the interval');
 
-// S10: mod API -- a manual stop removes its own rec.unloads record
+// S10: mod API -- TWO live resources, so a stop that wipes the whole array
+// (or splices the wrong slot) cannot pass as "removed its own record".
 const rec = { unloads: [], unloading: false };
 const mod = api.makeModVisibilityApi(rec);
-const mh = mod.pausableInterval(() => {}, 500);
-ok(rec.unloads.length === 1, 'S10a create registers one unload record');
-mh.stop();
-ok(rec.unloads.length === 0, 'S10b manual stop removes its record');
-mh.stop(); // double-stop harmless
-ok(rec.unloads.length === 0, 'S10c double-stop idempotent');
+const mhA = mod.pausableInterval(() => {}, 500);
+const tidA = nextId - 1;
+const mhB = mod.pausableInterval(() => {}, 500);
+const tidB = nextId - 1;
+ok(rec.unloads.length === 2, 'S10a each create registers its own unload record');
+mhA.stop();
+ok(rec.unloads.length === 1 && !intervals.has(tidA) && intervals.has(tidB),
+    'S10b manual stop removes ITS record and only its timer');
+mhA.stop(); // double-stop harmless
+ok(rec.unloads.length === 1, 'S10c double-stop idempotent');
+// ...and the drain itself (splice-empty then run, like _runUnloads) kills
+// the survivor's registration for real.
+rec.unloading = true;
+for (const fn of rec.unloads.splice(0).reverse()) fn();
+ok(rec.unloads.length === 0 && !intervals.has(tidB),
+    'S10d the unload drain stops the surviving timer');
+rec.unloading = false;
 
 // S11: creates after unload began fail closed
 rec.unloading = true;
@@ -170,6 +216,9 @@ const dead = mod.pausableInterval(() => { throw new Error('must never run'); }, 
 ok(rec.unloads.length === 0, 'S11a post-unload create registers nothing');
 ok(typeof dead.stop === 'function', 'S11b dead handle still has stop()');
 ok(intervals.size === 0, 'S11c post-unload create started no timer');
+dead.stop(); // the promised harmless handle, actually exercised
+ok(intervals.size === 0 && rec.unloads.length === 0,
+    'S11c2 calling the dead stop is harmless');
 // ...and the mod-facing onVisibility fails closed the same way: a callable
 // unsubscribe comes back, but nothing is registered anywhere.
 let deadVisRuns = 0;
@@ -195,7 +244,9 @@ setVisibility('hidden'); setVisibility('visible');
 ok(deadVisRuns === 0, 'S12b dead subscription stayed dead after teardown ended');
 
 console.log(pass + ' passed, ' + fail + ' failed');
-process.exit(fail ? 1 : 0);
+// exitCode, not exit(): a hard exit can truncate the piped stdout this
+// harness is graded by, turning a real failure into an unreadable one.
+process.exitCode = fail ? 1 : 0;
 """
 
 
@@ -207,6 +258,11 @@ def scenario_run(tmp_path_factory):
     assert MARKER in src, (
         f"{MARKER!r} marker missing from {SRC_JS} -- the visibility-timer "
         "slice boundary moved; restore the marker or retarget this test")
+    # ...and unique: a second occurrence would silently shrink the slice to
+    # whichever copy indexOf finds first.
+    assert src.count(MARKER) == 1, (
+        f"{MARKER!r} occurs {src.count(MARKER)}x in {SRC_JS}; the slice "
+        "boundary is ambiguous")
     harness = tmp_path_factory.mktemp("visibility-timers") / "harness.js"
     harness.write_text(
         _HARNESS.replace("__SRC_PATH__", json.dumps(str(SRC_JS))),
@@ -221,6 +277,12 @@ def scenario_run(tmp_path_factory):
                     lines[-1] if lines else "")
     assert tail is not None, (
         "harness produced no machine-readable tail (node crashed?)\n"
+        f"rc={proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
+    # Integrity is enforced HERE, not only in the catch-all test: a -k run
+    # that selects one scenario must still fail if the harness failed at
+    # all, or a red node run passes green under pytest selection.
+    assert proc.returncode == 0 and tail.group(2) == "0", (
+        "harness failed -- no scenario result from this run is trustworthy\n"
         f"rc={proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
     results = {}
     for line in lines[:-1]:
@@ -254,8 +316,12 @@ def test_exactly_one_dispatch_per_hidden_to_visible_transition(scenario_run):
     _ok(scenario_run, "S2 hidden->visible fires once")
     # ...and a bfcache restore delivers pagehide, then pageshow AND
     # visibilitychange in a browser-dependent order. The first dispatch
-    # consumes _wasHidden, so the second event is a no-op, not a re-fire.
+    # consumes _wasHidden, so the second event is a no-op, not a re-fire --
+    # in BOTH event orders, since the order really is browser-dependent.
     _ok(scenario_run, "S3 bfcache restore fires once, not twice")
+    _ok(scenario_run, "S3c bfcache restore fires once in the reverse event order")
+    # The unsubscribe handed back by onVisibility must actually unsubscribe.
+    _ok(scenario_run, "S3b off() unsubscribes")
 
 
 # ---- the hidden cadence ---------------------------------------------------
@@ -267,9 +333,11 @@ def test_hidden_ticks_slow_to_hidden_mult_times_the_interval(scenario_run):
     # until ms*HIDDEN_MULT has elapsed -- they only set the missed flag,
     # whose observable effect is the exactly-once resume in S6a below.
     _ok(scenario_run, "S5 hidden ticks below 10x cadence skip fn")
-    # A tab left hidden long enough still gets its slow-cadence run: at
-    # >= ms*HIDDEN_MULT the hidden tick fires fn without waiting for focus.
-    _ok(scenario_run, "S7 hidden slow-cadence run fires at 10x")
+    # A tab left hidden long enough still gets its slow-cadence run -- and
+    # the boundary is EXACTLY ms*HIDDEN_MULT: 1ms under skips, at it runs,
+    # so a multiplier quietly drifting to 6x..9x cannot pass as 10x.
+    _ok(scenario_run, "S7a hidden tick at 10x-1ms still skips")
+    _ok(scenario_run, "S7 hidden slow-cadence run fires at exactly 10x")
 
 
 def test_resume_runs_once_and_the_queued_tick_is_swallowed(scenario_run):
@@ -278,16 +346,24 @@ def test_resume_runs_once_and_the_queued_tick_is_swallowed(scenario_run):
     _ok(scenario_run, "S6a resume catch-up ran fn once")
     # The interval tick already queued behind that catch-up arrives with
     # ~0 elapsed; the half-interval floor is what keeps it from running fn
-    # twice back-to-back.
+    # twice back-to-back -- and the floor sits at exactly ms/2, so a floor
+    # shrunk toward 0 (any positive value swallows the ~0 tick) fails here.
     _ok(scenario_run, "S6b back-to-back tick swallowed by half-interval floor")
+    _ok(scenario_run, "S6c tick under the half-interval floor skips")
+    _ok(scenario_run, "S6d tick at exactly the half-interval floor runs")
 
 
 def test_a_frozen_timer_still_catches_up_on_elapsed_time(scenario_run):
     # bfcache and aggressive throttling freeze the interval outright: no
     # hidden tick ever fires, so `missed` stays false. The resume hook's
     # elapsed-time check (now - lastRun >= ms) is the only thing that can
-    # notice, and it must.
-    _ok(scenario_run, "S8 frozen-timer resume catches up without a missed flag")
+    # notice, and it must -- but only once a full interval was actually due.
+    _ok(scenario_run, "S8a frozen resume under one interval does not run")
+    _ok(scenario_run, "S8b frozen-timer resume catches up without a missed flag")
+    # On a real resume the queued tick and the visibility dispatch race in
+    # browser-chosen order; S6 proved dispatch-first, this proves tick-first.
+    _ok(scenario_run, "S8c queued tick can run first on resume")
+    _ok(scenario_run, "S8d the late dispatch does not double-run")
 
 
 def test_stop_clears_the_interval_and_the_visibility_hook(scenario_run):
@@ -302,10 +378,13 @@ def test_stop_clears_the_interval_and_the_visibility_hook(scenario_run):
 
 def test_a_manual_stop_removes_its_own_unload_record(scenario_run):
     # A churny mod (one timer per window) would otherwise grow rec.unloads
-    # for its whole life; the record must die with the timer it guards.
-    _ok(scenario_run, "S10a create registers one unload record")
-    _ok(scenario_run, "S10b manual stop removes its record")
+    # for its whole life; the record must die with the timer it guards --
+    # and ONLY that record: two live resources prove a stop that wipes the
+    # array (or splices the wrong slot) cannot pass.
+    _ok(scenario_run, "S10a each create registers its own unload record")
+    _ok(scenario_run, "S10b manual stop removes ITS record and only its timer")
     _ok(scenario_run, "S10c double-stop idempotent")
+    _ok(scenario_run, "S10d the unload drain stops the surviving timer")
 
 
 def test_creates_after_unload_began_are_inert(scenario_run):
@@ -315,6 +394,7 @@ def test_creates_after_unload_began_are_inert(scenario_run):
     _ok(scenario_run, "S11a post-unload create registers nothing")
     _ok(scenario_run, "S11b dead handle still has stop()")
     _ok(scenario_run, "S11c post-unload create started no timer")
+    _ok(scenario_run, "S11c2 calling the dead stop is harmless")
     # ...and the mod-facing onVisibility fails closed identically.
     _ok(scenario_run, "S11d post-unload onVisibility registers nothing")
     _ok(scenario_run, "S11e dead unsubscribe is still a function")
