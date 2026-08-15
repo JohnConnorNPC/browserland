@@ -30,6 +30,25 @@
         // existing call site at the broker's own default cwd.
         async function launchProfile(host, name, cwd) {
             host = host || localHost();
+            // Decided at CLICK time (the hostMenuItems rule): a menu row can
+            // outlive the state it was painted from, so re-read the host and
+            // its state now and refuse a hidden / auth / down host instead of
+            // dialing it. 'lease' and 'pending' launch normally.
+            const fresh = allHosts().find(h => h.id === host.id) || host;
+            const state = hostMenuState(pollStateFor(fresh.id));
+            if (fresh.hidden || state === 'auth' || state === 'down') {
+                const why = fresh.hidden
+                    ? 'hidden — show it via its broker row in the (+) '
+                        + 'menu first'
+                    : (state === 'auth'
+                        ? 'password required — sign in via its broker row'
+                        : 'unreachable (broker down)');
+                openInfoModal({
+                    title: 'Cannot launch',
+                    rows: [{ k: fresh.label, v: why }],
+                });
+                return;
+            }
             // Issue #10: when no explicit cwd was chosen (e.g. via "Open in
             // folder…"), fall back to the configured default start path for this
             // host. resolveStartPath returns '' (and skips the /profiles
@@ -341,6 +360,9 @@
             const items = hostMenuItems(host);
             const state = hostMenuState(pollStateFor(host.id));
             if (state === 'auth' || state === 'down') return items;
+            // A hidden host is parked: its broker row (which says '— hidden'
+            // and unhides on click) is the only row worth offering.
+            if (host.hidden) return items;
             const d = profilesCache.get(host.id);
             if (d && d.profiles.length) {
                 items.push(...profileMenuItems(host, d));
