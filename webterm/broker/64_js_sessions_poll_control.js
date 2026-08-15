@@ -1,3 +1,76 @@
+        // ---- visibility-aware timers ----------------------------------------
+        // One shared listener pair feeds every subscriber; callbacks fire only
+        // on the transition TO visible. 'pageshow' rides the same dispatch
+        // because a bfcache restore skips 'visibilitychange'.
+        const HIDDEN_MULT = 10;
+        const _visibilityCbs = new Set();
+        function _dispatchVisible() {
+            if (document.visibilityState !== 'visible') return;
+            for (const fn of _visibilityCbs) {
+                // Isolated: one throwing callback must not starve the rest.
+                try { fn(); } catch (_) {}
+            }
+        }
+        document.addEventListener('visibilitychange', _dispatchVisible);
+        window.addEventListener('pageshow', _dispatchVisible);
+        function onVisibility(fn) {
+            _visibilityCbs.add(fn);
+            return function () { _visibilityCbs.delete(fn); };
+        }
+
+        // setInterval that slows to ms*HIDDEN_MULT while the page is hidden.
+        // The interval itself keeps ticking at the base ms; a hidden tick only
+        // runs fn once the slowed cadence has elapsed since the last actual
+        // run, otherwise it sets a missed flag. On becoming visible a missed
+        // run fires exactly once (N missed ticks coalesce — never queued).
+        function visibilityInterval(fn, ms) {
+            let lastRun = Date.now();
+            let missed = false;
+            function runNow() {
+                lastRun = Date.now();
+                missed = false;
+                fn();
+            }
+            const timer = setInterval(function () {
+                if (document.visibilityState === 'hidden') {
+                    if (Date.now() - lastRun >= ms * HIDDEN_MULT) runNow();
+                    else missed = true;
+                } else {
+                    runNow();
+                }
+            }, ms);
+            const offVisible = onVisibility(function () {
+                if (missed) runNow();
+            });
+            return {
+                stop: function () {
+                    clearInterval(timer);
+                    offVisible();
+                },
+            };
+        }
+
+        // Mod-facing wrapper: every teardown rides rec.unloads (drained LIFO by
+        // _runUnloads in 86_js_mod_loader.js), so a disabled mod's timers and
+        // subscriptions die with it; the !rec.unloading guard keeps a callback
+        // quiet while its mod is mid-teardown.
+        function makeModVisibilityApi(rec) {
+            return {
+                pausableInterval: function (fn, ms) {
+                    const handle = visibilityInterval(fn, ms);
+                    rec.unloads.push(handle.stop);
+                    return handle;
+                },
+                onVisibility: function (fn) {
+                    const off = onVisibility(function () {
+                        if (!rec.unloading) fn();
+                    });
+                    rec.unloads.push(off);
+                    return off;
+                },
+            };
+        }
+
         // ---- shared state -------------------------------------------------
         // key -> merged session object (built in refreshTaskbarInner):
         //   {key, id (real numeric), sid (String(id)), title, cols, rows,
