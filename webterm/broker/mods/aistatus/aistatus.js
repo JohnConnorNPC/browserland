@@ -200,14 +200,22 @@
 
                 // ---- polling ----
                 function stop() {
-                    if (timer) { clearInterval(timer); timer = null; }
+                    if (timer) { timer.stop(); timer = null; }
                 }
                 function start() {
                     stop();
-                    timer = setInterval(function () {
-                        // A tick must never throw out (unhandled rejection).
-                        try { poll(); } catch (_) {}
-                    }, intervalMs());
+                    const ms = intervalMs();
+                    // A tick must never throw out (unhandled rejection).
+                    const tick = function () { try { poll(); } catch (_) {} };
+                    // Feature-detected: a runtime-installed copy of this mod
+                    // can run against an older core with no ctx.visibility.
+                    // Either way `timer` holds a {stop}-shaped handle.
+                    timer = ctx.visibility
+                        ? ctx.visibility.pausableInterval(tick, ms)
+                        : (function () {
+                            const id = setInterval(tick, ms);
+                            return { stop: function () { clearInterval(id); } };
+                        })();
                 }
                 function restart() { if (timer) start(); }
 

@@ -72,17 +72,28 @@
                     if (on) {
                         chip.style.display = 'inline-flex';
                         render();
-                        if (!timer) timer = setInterval(render, 1000);
+                        if (!timer) {
+                            // Feature-detected: a runtime-installed copy of
+                            // this mod can run against an older core with no
+                            // ctx.visibility. Either way `timer` holds a
+                            // {stop}-shaped handle.
+                            timer = ctx.visibility
+                                ? ctx.visibility.pausableInterval(render, 1000)
+                                : (function () {
+                                    const id = setInterval(render, 1000);
+                                    return { stop: function () { clearInterval(id); } };
+                                })();
+                        }
                     } else {
                         chip.style.display = 'none';
-                        if (timer) { clearInterval(timer); timer = null; }
+                        if (timer) { timer.stop(); timer = null; }
                         chip.textContent = '';
                     }
                 }
                 // Teardown stops the tick (the chip + checkbox are removed by the
                 // ctx primitives that mounted them).
                 ctx.onUnload(function () {
-                    if (timer) { clearInterval(timer); timer = null; }
+                    if (timer) { timer.stop(); timer = null; }
                 });
 
                 // #104/#168: mount the time-zone box. The zone list is built

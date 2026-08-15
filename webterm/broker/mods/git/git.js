@@ -49,6 +49,20 @@
                 // closed win is GC'd out of the set).
                 const decorated = new WeakSet();
 
+                // Feature-detected {stop}-shaped interval: a runtime-installed
+                // copy of this mod can run against an older core with no
+                // ctx.visibility, in which case this degrades to a plain
+                // setInterval wrapped in the same { stop } shape so every
+                // teardown site below can call .stop() unconditionally.
+                function pausable(fn, ms) {
+                    return ctx.visibility
+                        ? ctx.visibility.pausableInterval(fn, ms)
+                        : (function () {
+                            const id = setInterval(fn, ms);
+                            return { stop: function () { clearInterval(id); } };
+                        })();
+                }
+
                 ctx.windows.onTerminalCreate(function (info) {
                     const win = info.win;
                     const titleBar = info.titleBar;
@@ -158,7 +172,7 @@
                             gitState = 'unavailable';
                             // Old broker without the route: stop the keep-alive poll
                             // — it will only keep 404ing. The button stays hidden.
-                            if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
+                            if (gitTimer) { gitTimer.stop(); gitTimer = null; }
                         } else if (j.ok) {
                             gitState = 'repo';
                             gitStatus = j;
@@ -290,7 +304,7 @@
                         gitBtn.removeEventListener('mousedown', stopProp);
                         gitBtn.removeEventListener('click', onGitClick);
                         closeGitPopover();
-                        if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
+                        if (gitTimer) { gitTimer.stop(); gitTimer = null; }
                         try { gitBtn.remove(); } catch (_) {}
                         try { gitLabel.remove(); } catch (_) {}
                     };
@@ -304,7 +318,7 @@
                     setTimeout(function () {
                         if (!win.disposed && !torn) refreshGit();
                     }, 800);
-                    gitTimer = setInterval(function () {
+                    gitTimer = pausable(function () {
                         if (!win.disposed && !torn) refreshGit();
                     }, 15000);
                 });

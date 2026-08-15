@@ -55,6 +55,23 @@
             };
         }
 
+        // ---- ctx.visibility accessor ---------------------------------------
+        // Mirrors tmSession(): openTaskManagerWindow is a hoisted top-level
+        // function outside init()'s closure, so the per-mod ctx.visibility
+        // capability (feature-detected — a runtime-installed copy of this mod
+        // can run against an older core without it) is stashed on
+        // tmPausableInterval.cap the same way ctx.session lands on
+        // tmSession.cap. Falls back to a plain setInterval wrapped in the
+        // same { stop } shape so every call site can just call .stop().
+        function tmPausableInterval(fn, ms) {
+            return tmPausableInterval.cap
+                ? tmPausableInterval.cap(fn, ms)
+                : (function () {
+                    const id = setInterval(fn, ms);
+                    return { stop: function () { clearInterval(id); } };
+                })();
+        }
+
         // Live "Task manager" app window: lists every real terminal/agent
         // session (sessions with kind !== 'app') across all hosts, each
         // expandable to its child-process tree, with End-process + Destroy-
@@ -552,7 +569,7 @@
             // tick re-renders the list from `sessions` and re-pulls procs only for
             // EXPANDED sessions whose fetch isn't already in flight / auth-blocked.
             // Interval is cleared via win.cleanups (closeWindow runs them).
-            const timer = setInterval(() => {
+            const timer = tmPausableInterval(() => {
                 if (win.disposed) return;
                 try {
                     render();
@@ -565,7 +582,7 @@
                     }
                 } catch (_) { /* never let a tick throw */ }
             }, 2500);
-            win.cleanups.push(() => clearInterval(timer));
+            win.cleanups.push(() => timer.stop());
 
             render();
             finishWindowPlacement(win);
@@ -590,6 +607,11 @@
                 // task-manager mod falls back to the hoisted _modSessionApi the
                 // tmSession() accessor mirrors.
                 tmSession.cap = ctx.session;
+                // Same stash for the visibility-aware timer (feature-detected:
+                // an older core has no ctx.visibility, so cap stays undefined
+                // and tmPausableInterval falls back to a plain setInterval).
+                tmPausableInterval.cap = ctx.visibility
+                    ? ctx.visibility.pausableInterval : null;
                 // Register the task-manager kind (the #80 built-in spec, moved
                 // here) with NO serialize — it is EPHEMERAL, never written to the
                 // app store, exactly like the old core built-in. A duplicate
@@ -621,6 +643,7 @@
                         }
                     }
                     tmSession.cap = null;
+                    tmPausableInterval.cap = null;
                 });
             },
         });
