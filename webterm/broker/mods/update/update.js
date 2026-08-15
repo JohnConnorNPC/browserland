@@ -768,9 +768,6 @@
                     for (const id of Array.from(lastWrite.keys())) {
                         if (!ids.has(id)) lastWrite.delete(id);
                     }
-                    for (const id of Array.from(applyConfirmOps.keys())) {
-                        if (!ids.has(id)) applyConfirmOps.delete(id);
-                    }
                 }
                 // The deliberate retry. The capability probe caches its outcome
                 // — including its failures — precisely so a tick can never
@@ -852,8 +849,6 @@
                 // carry two independent write notes without either
                 // clobbering the other's.
                 const policyOps = new Map();  // key -> {phase, note, want}
-                // A4: the remote Update button's confirm-time refusal notes.
-                const applyConfirmOps = new Map();   // hostId -> op-shaped
                 let consentSent = false;  // one attempt per page load, ever
                 // A write is authoritative about a broker until something READ
                 // that broker afterwards. Without this, a poll already in flight
@@ -1189,23 +1184,24 @@
                     const now = updHost(hostId);
                     if (!now || String(now.url || '') !== String(url || '')
                             || String(now.label || '') !== String(label || '')) {
-                        applyConfirmOps.set(hostId, { phase: 'failed',
-                            note: ['that broker changed while the confirmation '
-                                + 'was open — nothing was sent'] });
-                        renderAll();
+                        // Into the flow's OWN per-host op surface, so a
+                        // settled earlier apply can never shadow this note
+                        // (and a live 'waiting' op is never shadowed by it).
+                        applyFlow.noteRefusal(hostId,
+                            ['that broker changed while the confirmation '
+                                + 'was open — nothing was sent']);
                         return false;
                     }
-                    applyConfirmOps.delete(hostId);
                     await applyFlow.performApply(hostId, targetSha);
                     return true;
                 }
 
                 // ---- self-restart (#183) -----------------------------------
                 // Deliberately scoped to the LOCAL broker, and only the local
-                // broker. The window above lists every configured host, but
-                // POST /restart enforces a same-origin check on the far end
-                // and touching a REMOTE machine from here is an explicit
-                // non-goal — so everything below reads and acts on
+                // broker. The window above lists every configured host, and
+                // since #205 a remote row can drive its own APPLY — but a
+                // bare remote restart still has no fleet use case, so no
+                // control offers one; everything below reads and acts on
                 // updHost(LOCAL_HOST_ID) alone, resolved fresh at every step
                 // (never captured across an await), and the control says so
                 // in its own label rather than leaving the scope to be
@@ -1980,8 +1976,7 @@
                 // A4: the remote rows' own Update button — every fact is
                 // THAT broker's; remoteApplyRowModel (companion) decides.
                 function renderRemoteApplyRow(body, r) {
-                    const op = applyFlow.opFor(r.id)
-                        || applyConfirmOps.get(r.id) || null;
+                    const op = applyFlow.opFor(r.id) || null;
                     const m = remoteApplyRowModel({
                         behind: r.ps === 'behind', op: op,
                         upd: updateCapFor(r.id), coarseState: state(r.st),
@@ -2021,7 +2016,7 @@
                     }
                     row.appendChild(stat);
                     body.appendChild(row);
-                    return m.live || m.busy;
+                    return m.livePath;
                 }
 
                 // ---- detail window (ephemeral, like task-manager) ----

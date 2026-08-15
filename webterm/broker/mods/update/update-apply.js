@@ -87,6 +87,28 @@
         // itself" is the consent row's LITERAL LABEL -- one per host
         // in this same window -- so it stays verbatim either way; only
         // the unquoted prose swaps.
+        // The one deixis rewriter (A4 remediation): RESTART_REASONS'
+        // sentences say 'this broker' because #183 wrote them for the
+        // one local control, and a remote row splices them in whole.
+        // The quoted "Allow this broker to update itself" is a LITERAL
+        // control label and must survive verbatim, so the swap works
+        // around it rather than through it. bw 'this broker' (or
+        // absent) is a byte-identical no-op.
+        const APPLY_CONSENT_ROW_LABEL =
+            'Allow this broker to update itself';
+        function swapDeixis(words, bw) {
+            if (typeof words !== 'string'
+                    || typeof bw !== 'string' || !bw
+                    || bw === 'this broker') {
+                return words;
+            }
+            return words.split(APPLY_CONSENT_ROW_LABEL)
+                .map(function (part) {
+                    return part.split('this broker').join(bw);
+                })
+                .join(APPLY_CONSENT_ROW_LABEL);
+        }
+
         function applyGateWords(code, restartWords, applyPolicy,
                                 brokerWords) {
             const bw = (typeof brokerWords === 'string' && brokerWords)
@@ -95,6 +117,12 @@
             if (code === APPLY_GATE_RESTART) {
                 return 'applying needs a restart to take effect, and '
                     + restartWords;
+            }
+            if (remote && code === APPLY_GATE_UNKNOWN_STATE) {
+                // The local sentence says 'here', which on a remote
+                // row would point at the wrong machine.
+                return 'no update check has established a target '
+                    + 'commit on ' + bw + ' yet -- run a check first';
             }
             if (code === APPLY_GATE_DISABLED) {
                 const source = (applyPolicy
@@ -105,7 +133,7 @@
                     return remote
                         ? ('applying updates is switched off on ' + bw
                             + ' — its own "Allow this broker to update '
-                            + 'itself" row below switches it on')
+                            + 'itself" row above switches it on')
                         : APPLY_GATE_ROW_WORDS;
                 }
                 return remote
@@ -253,8 +281,16 @@
             const upd = (f && f.upd && typeof f.upd === 'object')
                 ? f.upd : null;
             const target = applyTargetSha(f && f.check);
+            // livePath is the MANUAL-NOTE fact (A5), wider than live:
+            // a row mid-apply ('waiting') or freshly proven restarted
+            // ('done', stale-behind until its recheck lands) is USING
+            // its one-click path, so the by-hand note must not name
+            // it. A settled failure is not a path -- unless the facts
+            // still offer the button, which the final branch adds.
             const out = { show: !!op || behind, busy: busy,
                           live: false, gate: null, targetSha: target,
+                          livePath: !!(op && (op.phase === 'waiting'
+                              || op.phase === 'done')),
                           words: null };
             if (!out.show) return out;
             if (!upd) {
@@ -281,8 +317,13 @@
                 (f && f.coarseState) || 'unknown', target,
                 upd.apply_enabled === true, !!rst.available);
             if (out.gate !== null) {
+                // The restart words come from #183's local-control
+                // table, so their unquoted 'this broker' prose is
+                // rewritten to name THIS row's broker -- the quoted
+                // consent-row label survives verbatim (swapDeixis).
                 const rw = rst.known === true
-                    ? restartReasonWords(rst.reason, rst.retryAfterS)
+                    ? swapDeixis(restartReasonWords(rst.reason,
+                        rst.retryAfterS), 'that broker')
                     : 'that broker has not reported a restart '
                         + 'capability yet';
                 const ap = (upd.policy
@@ -293,6 +334,7 @@
                 return out;
             }
             out.live = !busy;
+            out.livePath = true;
             return out;
         }
 
@@ -326,9 +368,11 @@
                     : { guaranteed: 0, at_risk: 0, unknown: 0 },
                 restart: {
                     ref: 'that broker',
+                    // 'not the broker serving this page' is knowable
+                    // from here; 'another machine' is not -- two
+                    // brokers legitimately share a box.
                     intro: 'This updates and restarts ' + name
-                        + ' — a broker on another machine, not the '
-                        + 'one serving this page.'
+                        + ' — not the broker serving this page.'
                         + (known ? (' The session counts below are '
                             + 'what that broker reports about '
                             + 'itself.') : ''),
@@ -633,6 +677,20 @@
             function opFor(hostId) {
                 return applyOps.get(hostId) || null;
             }
+            // A confirm-time refusal ("that broker changed while the
+            // confirmation was open") lands in the SAME per-host op
+            // surface the flow itself reports through, so it can never
+            // be shadowed by an earlier settled op -- and never
+            // shadows a LIVE one: while an apply is 'waiting', that
+            // op is the truth and the note is dropped.
+            function noteRefusal(hostId, lines) {
+                const cur = applyOps.get(hostId);
+                if (cur && cur.phase === 'waiting') return false;
+                applyOps.set(hostId,
+                    { phase: 'failed', note: lines });
+                deps.renderAll();
+                return true;
+            }
             function brokerName(hostId) {
                 return hostId === deps.localHostId
                     ? 'this broker' : 'that broker';
@@ -723,6 +781,18 @@
                         deps.modCatalogCache.delete(hostId);
                         deps.renderAll();
                         await deps.recheckHost(hostId);
+                        // Locally the deploy strip completes this
+                        // story; a remote row has no strip, so the
+                        // note itself must stop claiming a check is
+                        // still running once it has finished. The
+                        // settle guard drops this if a newer op took
+                        // the row meanwhile.
+                        if (hostId !== deps.localHostId) {
+                            settle(hostId, op, 'done', [bn
+                                + ' restarted and was re-checked — '
+                                + 'its row shows the build it came '
+                                + 'back on.']);
+                        }
                     }
                     return;
                 } else {
@@ -812,5 +882,6 @@
 
             return { performApply: performApply,
                      pollBootId: pollBootId,
-                     opFor: opFor };
+                     opFor: opFor,
+                     noteRefusal: noteRefusal };
         }

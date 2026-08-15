@@ -136,7 +136,8 @@ _REQUIRED = (
     # and its refusal-note map ride update.js's sliced opt-in range, the
     # commitRemoteSelfUpdate pattern.
     "function remoteApplyRowModel", "function remoteApplyConfirmModel",
-    "const applyConfirmOps", "async function commitRemoteApply",
+    "function noteRefusal", "function swapDeixis",
+    "async function commitRemoteApply",
     # atom A5: the manual-pull how-to note is now residual -- it renders
     # only for the brokers that are behind and have no live path, and
     # names them. Pure over update.js's own per-row verdict assembly;
@@ -319,7 +320,7 @@ function reset() {
     POLICY = {}; policyCalls.length = 0; policyBodies.length = 0;
     infoCalls.length = 0;
     checkCalls.length = 0; consentSent = false;
-    policyOps.clear(); lastWrite.clear(); applyConfirmOps.clear();
+    policyOps.clear(); lastWrite.clear();
 }
 // policyOps is keyed hostId + '|' + kind since A5; every case here is about
 // the checking switch, so the reads go through this.
@@ -1690,6 +1691,14 @@ CASES.remote_apply_refusal_words = async () => {
     out.forbiddenJunkError = applyRefusalOutcome(403,
         { ok: false, error: 42 });
     out.forbiddenNullBody = applyRefusalOutcome(403, null);
+    // The deixis rewriter itself: unquoted 'this broker' prose swaps,
+    // the LITERAL consent-row label survives verbatim, and the local
+    // default is a byte-identical no-op.
+    out.deixisSwap = swapDeixis(RESTART_REASONS['restart-disabled'],
+        'that broker');
+    out.deixisLocal = swapDeixis(RESTART_REASONS['cooldown'],
+        'this broker');
+    out.deixisRaw = RESTART_REASONS['cooldown'];
     return out;
 };
 
@@ -1697,22 +1706,27 @@ CASES.remote_apply_refusal_words = async () => {
 CASES.remote_apply_commit_guard = async () => {
     const out = {};
     const sent = [];
+    const notes = [];
+    // The refusal note goes through the FLOW's own surface since the
+    // A4 remediation (a settled earlier op could shadow a side map);
+    // the stub records what commitRemoteApply hands it.
     globalThis.applyFlow = {
         performApply: async (id, sha) => { sent.push([id, sha]); },
         opFor: () => null,
+        noteRefusal: (id, lines) => { notes.push([id, lines]); return true; },
     };
     fleet(['local', 'peer']);
     const url = 'https://peer.example:4445';
     // clean pass-through: the captured sha rides unchanged
     out.ok = { r: await commitRemoteApply('peer', url, 'peer', HEX40('b')),
                sent: sent.slice(),
-               op: applyConfirmOps.get('peer') || null };
+               notes: notes.slice() };
     // the url moved while the confirmation was open
     HOSTS = HOSTS.map((h) => (h.id === 'peer'
         ? Object.assign({}, h, { url: 'https://ELSEWHERE.example' }) : h));
     await commitRemoteApply('peer', url, 'peer', HEX40('b'));
     out.moved = { sent: sent.slice(),
-                  op: applyConfirmOps.get('peer') || null };
+                  notes: notes.slice() };
     // relabelled
     fleet(['local', 'peer']);
     HOSTS = HOSTS.map((h) => (h.id === 'peer'
@@ -1723,7 +1737,7 @@ CASES.remote_apply_commit_guard = async () => {
     fleet(['local']);
     await commitRemoteApply('peer', url, 'peer', HEX40('b'));
     out.vanished = { sent: sent.slice(),
-                     op: applyConfirmOps.get('peer') || null };
+                     notes: notes.slice() };
     delete globalThis.applyFlow;
     return out;
 };
@@ -2977,11 +2991,13 @@ def test_the_how_to_note_is_wired_to_the_same_gates_as_the_buttons(harness):
                      src.index("// ---- detail window")]
     # Both exits carry a verdict: the early "nothing to show" return and
     # the row's own final return -- never a bare `return;` that would
-    # silently read as "not behind". The final exit ORs in m.busy on
-    # purpose: a row mid-apply IS using its live path, so the manual
-    # note must not flash for a broker whose own row says "Applying...".
-    # (The early exit cannot be busy -- no op means m.busy is false.)
-    assert remote_seg.count("return m.live || m.busy;") == 1
+    # silently read as "not behind". The final exit returns m.livePath,
+    # the model's own manual-note fact: a row mid-apply ('waiting') or
+    # freshly proven restarted ('done', stale-behind until its recheck
+    # lands) IS using its one-click path, so the note must not flash
+    # for a broker whose own row says "Applying..." or "restarted".
+    # (The early exit cannot carry an op -- no op means both false.)
+    assert remote_seg.count("return m.livePath;") == 1
     assert "if (!m.show) return m.live;" in remote_seg
     assert "btn.disabled = !m.live;" in remote_seg
     window_seg = src[src.index("function renderWindow(win)"):
@@ -2990,6 +3006,11 @@ def test_the_how_to_note_is_wired_to_the_same_gates_as_the_buttons(harness):
     loop_seg = window_seg[window_seg.index("for (const r of rows)"):]
     assert "let live = localLive;" in loop_seg
     assert "live = renderRemoteApplyRow(body, r);" in loop_seg
+    # The verdict assembly itself -- the one link between the row's own
+    # gate result and the note's input that only these bytes carry.
+    assert "verdicts.push({ label: r.label," in loop_seg
+    assert "behind: r.ps === 'behind', live: live });" in loop_seg
+    assert "const verdicts = [];" in window_seg
     assert window_seg.count("manualPullNote(verdicts)") == 1
     assert "if (howTo) addNote(body, howTo.text, howTo.cls);" in window_seg
     # The old blanket sentence, and its rendering-whenever-any-row-is-
@@ -3454,13 +3475,26 @@ def test_remote_apply_row_binds_each_brokers_own_facts(harness):
     assert "applying updates is switched off on that broker" in y["words"]
     assert '"Allow this broker to update itself"' in y["words"], (
         "the consent row's LABEL stays quoted verbatim")
+    assert "row above switches it on" in y["words"], (
+        "the consent row renders ABOVE this row in the loop")
+    # livePath, the manual-note fact: a live button is a path, a dead
+    # gate is not.
+    assert x["livePath"] is True and y["livePath"] is False
     # An active op keeps its row while ps flips off 'behind'...
     ok = r["opKeepsRow"]
     assert ok["show"] is True and ok["busy"] is True and ok["live"] is False
+    # ...and counts as a live path while it runs; its gate words (the
+    # check state went 'unknown' mid-flip) name THAT broker, never
+    # 'here'.
+    assert ok["livePath"] is True
+    assert "on that broker yet" in ok["words"]
+    assert "here" not in ok["words"]
     # ...but a quiet current host renders nothing at all.
     assert r["hiddenWhenQuiet"]["show"] is False
     assert r["waiting"]["live"] is False and r["waiting"]["busy"] is True
+    assert r["waiting"]["livePath"] is True
     assert r["settled"]["live"] is True and r["settled"]["busy"] is False
+    assert r["settled"]["livePath"] is True
 
 
 def test_remote_apply_row_words_come_from_that_brokers_own_gates(harness):
@@ -3479,6 +3513,11 @@ def test_remote_apply_row_words_come_from_that_brokers_own_gates(harness):
     assert "applying needs a restart to take effect" in rg["words"]
     assert "clears by itself" in rg["words"], (
         "that broker's own cooldown words did not flow through")
+    # E6's deixis rule: #183 wrote the cooldown sentence for the LOCAL
+    # control ('this broker came back up...'); on a remote row it must
+    # name the row's broker instead -- swapDeixis in the model.
+    assert "that broker came back up" in rg["words"]
+    assert "this broker" not in rg["words"]
     ru = r["restartUnknown"]
     assert ru["live"] is False
     assert "has not reported a restart capability" in ru["words"]
@@ -3612,12 +3651,24 @@ def test_apply_refusals_name_the_broker_they_describe(harness):
         "could not reach this broker to ask for the update.")
     assert r["transportRemote"]["lines"][0] == (
         "could not reach that broker to ask for the update.")
-    assert "switched off on this broker" in r["gateLocal"]["lines"][0]
+    # The local sentences are pinned by FULL equality: byte-identical
+    # to the pre-A4 wording is the claim, so a substring cannot carry it.
+    assert r["gateLocal"]["lines"][0] == (
+        "applying updates is switched off on this broker — the \"Allow "
+        "this broker to update itself\" row switches it on when it is "
+        "writable; a config key naming it overrides the row.")
+    assert r["busyLocal"]["lines"][0] == (
+        "this broker already has an update or restart under way -- try "
+        "again once it finishes.")
     assert "switched off on that broker" in r["gateRemote"]["lines"][0]
     assert '"Allow this broker to update itself"' in \
         r["gateRemote"]["lines"][0], "the row LABEL stays verbatim"
-    assert r["busyLocal"]["lines"][0].startswith("this broker already has")
     assert r["busyRemote"]["lines"][0].startswith("that broker already has")
+    # The deixis rewriter: prose swaps, the quoted LABEL survives, and
+    # the local default is a no-op (byte-identical output).
+    assert '"Allow this broker to update itself"' in r["deixisSwap"]
+    assert "switched off on that broker" in r["deixisSwap"]
+    assert r["deixisLocal"] == r["deixisRaw"]
 
 
 def test_a_403_forbidden_origin_names_the_real_cause(harness):
@@ -3647,11 +3698,11 @@ def test_a_remote_apply_commit_re_verifies_the_machine_it_named(harness):
     r = run(harness, "remote_apply_commit_guard")
     assert r["ok"]["r"] is True
     assert r["ok"]["sent"] == [["peer", "b" * 40]]
-    assert r["ok"]["op"] is None
+    assert r["ok"]["notes"] == []
     assert r["moved"]["sent"] == [["peer", "b" * 40]], (
         "a moved url still reached performApply")
-    assert r["moved"]["op"]["phase"] == "failed"
-    assert "nothing was sent" in r["moved"]["op"]["note"][0]
+    assert r["moved"]["notes"][-1][0] == "peer"
+    assert "nothing was sent" in r["moved"]["notes"][-1][1][0]
     assert r["relabelled"]["sent"] == [["peer", "b" * 40]]
     assert r["vanished"]["sent"] == [["peer", "b" * 40]]
-    assert "nothing was sent" in r["vanished"]["op"]["note"][0]
+    assert "nothing was sent" in r["vanished"]["notes"][-1][1][0]
