@@ -614,15 +614,18 @@
                 }});
             }
             // Persisted docs only: × Close keeps them, Delete is the one path that
-            // discards them. Ephemeral windows (file manager, task manager, control
-            // panel, help) have nothing saved — Close already fully tears them down
-            // — so a "Delete" there would be a misleading no-op.
-            if (win.type === 'app'
-                && win.appKind !== 'task-manager'
-                && win.appKind !== 'control-panel'
-                && win.appKind !== 'help'
-                && win.appKind !== 'file-manager') {
-                const what = win.appKind === 'text-editor' ? 'file' : 'note';
+            // discards them. Everything else (file manager, task manager, control
+            // panel, help, and any other app-window kind — mod-registered or core)
+            // has nothing a "Delete" would meaningfully discard, so Close already
+            // fully tears it down. #186: rather than a denylist of the kinds known
+            // at the time this guard was written, a kind opts IN by setting
+            // deleteLabel on its registerWindowKind spec (54_js_app_windows_store.js)
+            // — its value ('note'/'file'/...) is what the item calls the thing it
+            // deletes. A kind that never sets it (including one a mod adds after
+            // today) gets no Delete item at all.
+            const _deleteKind = win.type === 'app' ? lookupWindowKind(win.appKind) : null;
+            if (_deleteKind && _deleteKind.deleteLabel) {
+                const what = _deleteKind.deleteLabel;
                 items.push({ sep: true });
                 items.push({
                     label: 'Delete ' + what,

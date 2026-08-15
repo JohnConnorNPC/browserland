@@ -655,6 +655,9 @@
                             activeTab: win.activeTab || 0,
                         };
                     },
+                    // #186: opts into the window context menu's "Delete note" item
+                    // (78_js_keybindings.js reads this off the registry entry).
+                    deleteLabel: 'note',
                     menu: {
                         label: 'Scratchpad',
                         iconKey: 'scratchpad',   // #119 SVG notepad in the (+) menu

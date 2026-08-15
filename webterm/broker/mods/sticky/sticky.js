@@ -191,6 +191,9 @@
                         rec.content = content;
                         return true;
                     },
+                    // #186: opts into the window context menu's "Delete note" item
+                    // (78_js_keybindings.js reads this off the registry entry).
+                    deleteLabel: 'note',
                     menu: {
                         label: 'Sticky note',
                         iconKey: 'sticky',   // #119: SVG yellow note in the (+) menu

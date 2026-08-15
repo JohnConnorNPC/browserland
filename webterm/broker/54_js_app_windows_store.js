@@ -173,9 +173,16 @@
         // restoreAppWindows (restore), closeWindow (retain-vs-delete) and the (+)
         // launch menu. Each entry:
         //   { appKind, factory(appData)->win, serialize(win)->record|null,
-        //     restore?(record), retainOnClose?(record)->bool, menu? }
+        //     restore?(record), retainOnClose?(record)->bool, menu?, deleteLabel? }
         //   menu = { label, launch(), iconKey?, iconGlyph?,
         //            closedItems?()->[menuItem] }
+        //   deleteLabel (#186): opt-in string ('note'/'file'/...) naming what a
+        //   window's context-menu "Delete <deleteLabel>" item discards. Its mere
+        //   presence is the opt-in — only scratchpad/sticky-note/text-editor set
+        //   it. Every other kind (task-manager, control-panel, help, file-
+        //   manager — persisted but not a discardable document — and any mod
+        //   window) leaves it unset and gets NO Delete item; 78_js_keybindings.js
+        //   reads this property instead of denylisting appKind values by name.
         // iconKey names a hardcoded APP_ICON_SVG entry (65) — a CLOSED table, so
         // only the shipped keys resolve; iconGlyph (#170) is a mod's alternative,
         // a short text/emoji glyph rendered with textContent. Both are passed to
@@ -248,6 +255,11 @@
                 throw new Error('registerWindowKind[' + appKind
                     + ']: retainOnClose requires serialize');
             }
+            if (spec.deleteLabel != null
+                && (typeof spec.deleteLabel !== 'string' || !spec.deleteLabel)) {
+                throw new Error('registerWindowKind[' + appKind
+                    + ']: deleteLabel must be a non-empty string');
+            }
             const reg = _windowKindRegistry();
             if (reg.has(appKind)) {
                 throw ModConflictError('registerWindowKind: duplicate appKind "'
@@ -260,6 +272,7 @@
                 restore: spec.restore || null,
                 retainOnClose: spec.retainOnClose || null,
                 menu: (spec.menu && typeof spec.menu === 'object') ? spec.menu : null,
+                deleteLabel: spec.deleteLabel || null,
             };
             reg.set(appKind, entry);
             return entry;

@@ -2207,6 +2207,9 @@
                     appKind: 'text-editor',
                     factory: function (d) { return openNoteOrEditorWindow(d); },
                     serialize: serializeAppWindow,
+                    // #186: opts into the window context menu's "Delete file" item
+                    // (78_js_keybindings.js reads this off the registry entry).
+                    deleteLabel: 'file',
                     menu: {
                         label: 'Text editor',
                         iconKey: 'editor',   // #119: SVG pencil in the (+) menu

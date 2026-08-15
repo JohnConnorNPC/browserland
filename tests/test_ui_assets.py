@@ -3501,6 +3501,44 @@ def test_window_kind_sites_use_registry():
     assert "windowKindMenuList()" in s76
 
 
+def test_delete_menu_item_is_registry_opt_in_not_denylist():
+    # #186: the window context menu's "Delete note"/"Delete file" item used to be
+    # gated by a denylist of four appKind values (task-manager/control-panel/
+    # help/file-manager) — any kind added later inherited the item by default.
+    # It is now an opt-in property (deleteLabel) on the registerWindowKind spec.
+    keys = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    for gone in ("win.appKind !== 'task-manager'",
+                 "win.appKind !== 'control-panel'",
+                 "win.appKind !== 'help'",
+                 "win.appKind !== 'file-manager'"):
+        assert gone not in keys, f"old denylist clause survived: {gone!r}"
+    assert "lookupWindowKind(win.appKind)" in keys
+    assert "_deleteKind.deleteLabel" in keys
+
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "deleteLabel: spec.deleteLabel || null," in s54
+
+    # Exactly the three persisted-doc kinds opt in.
+    scratch = (BROKER_DIR / "mods/scratchpad/scratchpad.js").read_text(encoding="utf-8")
+    sticky = (BROKER_DIR / "mods/sticky/sticky.js").read_text(encoding="utf-8")
+    editor = (BROKER_DIR / "mods/editor/editor.js").read_text(encoding="utf-8")
+    assert "deleteLabel: 'note'," in scratch
+    assert "deleteLabel: 'note'," in sticky
+    assert "deleteLabel: 'file'," in editor
+
+    # No other registered kind opts in — a Delete item would be a misleading
+    # no-op on a window with nothing persisted (or, for file-manager, nothing
+    # a "delete" would meaningfully discard).
+    for rel in ("mods/update/update.js", "mods/clipboard/clipboard.js",
+                "mods/help/help.js", "mods/recorder/recorder.js",
+                "mods/aistatus/aistatus.js", "mods/task-manager/task-manager.js",
+                "mods/file-manager/file-manager.js"):
+        src = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert "deleteLabel" not in src, f"{rel} must not opt into Delete"
+    assert "deleteLabel: 'control-panel'" not in s54
+    assert "appKind: 'control-panel'" in s54   # still the one core built-in
+
+
 # --------------------------------------------------------------------------- #
 # app-icon system (#119)
 # --------------------------------------------------------------------------- #
