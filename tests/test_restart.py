@@ -791,7 +791,6 @@ def test_the_reason_codes_are_all_distinct():
     codes = [app_mod.REASON_RESTART_DISABLED,
              app_mod.REASON_RESTART_IN_PROGRESS,
              app_mod.REASON_RESTART_COOLDOWN,
-             app_mod.REASON_ORIGIN_FORBIDDEN,
              app_mod.REASON_RESTART_ERROR,
              supervise.REASON_NO_SUPERVISOR,
              supervise.REASON_PPID_MISMATCH,
@@ -1072,12 +1071,17 @@ def _restartable(tmp_path, monkeypatch, **cfg):
 
 def test_restart_401s_unauthenticated(tmp_path, monkeypatch):
     """The shared gate, first and always — and the live-router walk in
-    test_auth_mandatory asserts exactly this for every non-public route."""
+    test_auth_mandatory asserts exactly this for every non-public route.
+
+    Sent with a FOREIGN Origin on purpose: since #205 dropped the origin
+    gate, the token is the whole admission story, and a caller without one
+    gets 401 whatever its Origin says."""
     drains = _spy_drain(monkeypatch)
     restarts = _spy_restart(monkeypatch)
     app = _restartable(tmp_path, monkeypatch)
     # RAW client on purpose: no token.
-    _, r = app.test_client.post("/restart", json={})
+    _, r = app.test_client.post("/restart", json={},
+                                headers={"Origin": "https://elsewhere.example"})
     assert r.status == 401
     assert r.json["error"] == "auth_required"
     assert drains == [] and restarts == [], \
@@ -1190,33 +1194,37 @@ def test_a_202_carries_the_operation_id_the_claim_minted(tmp_path,
     assert op == app.ctx.restart_operation_id
 
 
-def test_a_cross_origin_post_is_refused_before_anything_happens(tmp_path,
-                                                                monkeypatch):
-    """_cors_headers answers ACAO:* unconditionally, so the BROWSER will not
-    stop a page on any origin from POSTing here. For a route that bounces the
-    machine, the token cannot be the only gate."""
+def test_a_foreign_origin_post_reaches_the_operator_gate(tmp_path,
+                                                         monkeypatch):
+    """#205: the origin gate is GONE, and this pins the new admission. A POST
+    with a valid token and a foreign Origin is never 403 forbidden_origin —
+    it walks straight to the NEXT gate, proved here with the operator gate
+    off: the answer is the gate's own 503, for every Origin the old check
+    used to refuse ("null" included)."""
     drains = _spy_drain(monkeypatch)
     restarts = _spy_restart(monkeypatch)
-    app = _restartable(tmp_path, monkeypatch)
-    for origin in ("http://evil.example", "https://evil.example:8443", "null"):
+    app = _make_app(tmp_path, monkeypatch)       # gate off (the default)
+    _capability(app, supervise.MECHANISM_SUPERVISOR)
+    for origin in ("http://evil.example", "https://evil.example:8443",
+                   "https://elsewhere.example", "null"):
         _, r = authed(app).post("/restart", json={},
                                 headers={"Origin": origin})
-        assert r.status == 403, f"{origin} answered {r.status}"
-        assert r.json["error"] == "forbidden_origin"
-        assert r.json["reason_code"] == app_mod.REASON_ORIGIN_FORBIDDEN
-    assert drains == [] and restarts == [], \
-        "a cross-origin request reached the drain"
+        assert r.status == 503, f"{origin} answered {r.status}: {r.json}"
+        assert r.json["error"] == "restart_disabled"
+        assert r.json["reason_code"] == app_mod.REASON_RESTART_DISABLED
+    assert drains == [] and restarts == [], "a gated restart drained anyway"
     assert app.ctx.lifecycle == app_mod.LIFECYCLE_RUNNING
 
 
-def test_the_broker_s_own_page_is_not_cross_origin(tmp_path, monkeypatch):
-    """...and the check must not refuse the UI it exists to serve. Hosts, not
-    full origins: this broker terminates no TLS, so its view of the scheme and
-    port is the proxy's, not the browser's."""
+def test_a_foreign_origin_post_with_the_gate_open_restarts(tmp_path,
+                                                           monkeypatch):
+    """The door IS the feature (#205): a fleet operator's desktop is a page
+    on ANOTHER origin, and with a valid token and the operator gate on it
+    must run the whole route — no origin layer anywhere on the path."""
     restarts = _spy_restart(monkeypatch)
     app = _restartable(tmp_path, monkeypatch)
     _, r = authed(app).post("/restart", json={},
-                            headers={"Origin": "https://127.0.0.1:8445"})
+                            headers={"Origin": "https://elsewhere.example"})
     assert r.status == 202, r.json
     assert len(restarts) == 1
 

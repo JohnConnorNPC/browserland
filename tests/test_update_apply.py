@@ -1149,11 +1149,16 @@ def _spy_restart(monkeypatch, result=None):
 
 def test_apply_401s_unauthenticated(tmp_path, monkeypatch):
     """The shared gate, first and always; test_auth_mandatory's live-router
-    walk pins the same thing for this route by enumeration."""
+    walk pins the same thing for this route by enumeration.
+
+    Sent with a FOREIGN Origin on purpose: since #205 dropped the origin
+    gate, the token is the whole admission story, and a caller without one
+    gets 401 whatever its Origin says."""
     performs = _patch_perform(monkeypatch, explode=True)
     app = _apply_app(tmp_path, monkeypatch)
     # RAW client on purpose: no token.
-    _, r = app.test_client.post("/update/apply", json={"target_sha": TARGET})
+    _, r = app.test_client.post("/update/apply", json={"target_sha": TARGET},
+                                headers={"Origin": "https://elsewhere.example"})
     assert r.status == 401
     assert r.json["error"] == "auth_required"
     assert performs == []
@@ -1185,19 +1190,39 @@ def test_apply_503s_when_the_gate_is_off(tmp_path, monkeypatch):
     assert app.ctx.update_apply_claim is None
 
 
-def test_a_cross_origin_apply_is_refused(tmp_path, monkeypatch):
-    """Same rationale as POST /restart: _cors_headers answers ACAO:* to
-    everyone, so for a route that replaces the running code the token cannot
-    be the only gate."""
+def test_a_foreign_origin_apply_reaches_the_operator_gate(tmp_path,
+                                                          monkeypatch):
+    """#205 dropped the origin gate (same reversal as POST /restart), and
+    this pins the new admission: a POST with a valid token and a foreign
+    Origin is never 403 forbidden_origin — it walks straight to the NEXT
+    gate, proved here with the operator gate off: the answer is the gate's
+    own 503, for every Origin the old check used to refuse ("null"
+    included)."""
     performs = _patch_perform(monkeypatch, explode=True)
-    app = _apply_app(tmp_path, monkeypatch)
+    app = _apply_app(tmp_path, monkeypatch, apply_enabled=False)
     for origin in ("http://evil.example", "https://evil.example:8443",
-                   "null"):
+                   "https://elsewhere.example", "null"):
         _, r = authed(app).post("/update/apply",
                                 json={"target_sha": TARGET},
                                 headers={"Origin": origin})
-        assert r.status == 403, f"{origin} answered {r.status}"
-        assert r.json["error"] == "forbidden_origin"
+        assert r.status == 503, f"{origin} answered {r.status}: {r.json}"
+        assert r.json["error"] == "update_apply_disabled"
+    assert performs == []
+    assert app.ctx.update_apply_claim is None
+
+
+def test_a_foreign_origin_apply_with_the_gate_open_is_admitted(tmp_path,
+                                                               monkeypatch):
+    """...and with the gate ON there is still no origin layer anywhere on the
+    path: a foreign-Origin POST with a valid token proceeds to body
+    validation — the cheapest gate past the operator's — instead of any
+    403."""
+    performs = _patch_perform(monkeypatch, explode=True)
+    app = _apply_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/update/apply", json={},
+                            headers={"Origin": "https://elsewhere.example"})
+    assert r.status == 400, r.json
+    assert r.json["error"] == "bad_target_sha"
     assert performs == []
 
 

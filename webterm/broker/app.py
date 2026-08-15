@@ -1435,8 +1435,10 @@ REASON_RESTART_IN_PROGRESS = "restart-in-progress"    # one is already under way
 #: arithmetic). Unlike every reason above it clears BY ITSELF, which is why it
 #: is the one reason /info pairs with ``retry_after_s``.
 REASON_RESTART_COOLDOWN = "cooldown"
-#: POST /restart only: the caller is a page on some other origin.
-REASON_ORIGIN_FORBIDDEN = "cross-origin-forbidden"
+#: There is no origin-refusal reason here any more: the cross-origin gate on
+#: POST /restart and POST /update/apply was dropped for #205 (the rationale
+#: lives on the /restart route). Old brokers still emit "cross-origin-forbidden"
+#: over the wire, so the CLIENT keeps rendering it; the server just never will.
 #: POST /restart only, and it should be unreachable: the machinery itself blew
 #: up. Distinct from every reason above so a client renders "something went
 #: wrong here" rather than a confident explanation that is not the truth.
@@ -1671,52 +1673,6 @@ def _log_orphaned_apply(task) -> None:
     if exc is not None:
         LOGGER.error("the update apply failed after its request had gone: %r",
                      exc)
-
-
-def _origin_permitted(request) -> bool:
-    """May a page on THIS request's Origin ask for something destructive?
-
-    ``_cors_headers`` answers every response — including 401s — with
-    ``Access-Control-Allow-Origin: *``, deliberately and unconditionally: a
-    tokenless network-reachable broker still has to answer the UI's cross-origin
-    probe. The consequence is that the BROWSER will not stop a page on any
-    origin from POSTing here; for every other route the token in the URL is the
-    whole gate, and that is accepted because those routes are recoverable. A
-    process bounce is not, so this route adds the check the CORS policy cannot.
-
-    Permitted:
-
-      * no ``Origin`` header at all — curl, the MCP, a launcher script, an
-        operator's own tooling. Browsers send Origin on EVERY POST (same-origin
-        included, per Fetch), so absence is not a browser request slipping
-        through; it is a non-browser caller, which is the same caller that could
-        just run ``systemctl restart``.
-      * an Origin whose HOST is the host this request was addressed to.
-
-    Everything else is refused, ``null`` (a sandboxed iframe, a file:// page)
-    included.
-
-    HOSTS, not full origins, and that is measured rather than lazy: this broker
-    terminates no TLS — ``tailscale serve`` fronts it — so ``request.scheme``
-    and the port it sees are the PROXY's, not the browser's. A scheme- and
-    port-exact comparison would refuse our own UI on every https deployment we
-    ship, i.e. it would break the feature everywhere it matters while looking
-    stricter."""
-    try:
-        origin = (request.headers.get("Origin") or "").strip()
-        if not origin:
-            return True
-        host = (urllib.parse.urlsplit(origin).hostname or "").lower()
-        if not host:
-            return False                      # "null", or not an origin at all
-        # server_name is the Host header's hostname WITHOUT the port, which also
-        # keeps a bracketed IPv6 literal in one piece.
-        mine = (request.server_name or "").lower()
-        return bool(mine) and host == mine
-    except Exception:  # noqa: BLE001 -- an unparseable anything refuses, never
-        # 500s. The safe direction for a destructive route is "no".
-        LOGGER.debug("origin check failed; refusing", exc_info=True)
-        return False
 
 
 def _lifecycle(app) -> str:
@@ -6832,8 +6788,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     #     /launch and get a shell on this box, which dwarfs switching a version
     #     check on. An origin check only filters honest callers.
     #
-    # POST /restart keeps its origin check, and the difference is deliberate: it
-    # is not recoverable in the moment, and no fleet use case needs it remote.
+    # POST /restart and POST /update/apply kept their origin checks a while
+    # longer, on the theory that a non-recoverable action was different in kind.
+    # #205 (the fleet Update button) revisited that theory and both routes
+    # dropped the gate too — the full rationale, including the pivot scenario we
+    # deliberately accept, lives on POST /restart below.
     #
     # REFUSED WHILE QUIESCING, and the lifecycle is re-read after the lock. The
     # drain snapshots its critical-task set once; a request that passed the
@@ -6985,23 +6944,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The refusals are graded on purpose, because they mean different things to
     # whoever clicked:
     #   401  no token                     -- the shared gate, first, always.
-    #   403  a page on another origin     -- see _origin_permitted.
     #   503  the operator gate is off     -- an ABSENT capability, exactly like
     #        /update/check's disabled shape; not "you are not allowed".
     #   409  nothing will relaunch us, or one is already under way -- a state
     #        conflict, and the body names WHICH via reason_code.
+    #
+    # NOT origin-gated (#205) -- and it briefly WAS, exactly like POST
+    # /update/policy briefly was, on the theory that a non-recoverable action
+    # needed more than token auth while _cors_headers answers ACAO:* to every
+    # response, 401s included (a tokenless network-reachable broker still has
+    # to answer the UI's cross-origin probe, so the BROWSER will never stop a
+    # page on any origin from POSTing here). Revisited for #205, the fleet
+    # Update button, and dropped -- here and on POST /update/apply -- because
+    # BOTH halves of the theory failed the same way /update/policy's did:
+    #
+    #   * The door IS the feature. An operator administers a fleet from ONE
+    #     desktop, and the broker they most need to update or bounce is
+    #     precisely the one they have no local session on -- origin-gating
+    #     made that the single case the UI could not perform.
+    #   * The gate protected nothing real. Auth here is an EXPLICIT token --
+    #     query param or Authorization header, never a cookie -- so there is
+    #     no ambient credential for a page on another origin to ride; a
+    #     caller without the token gets 401 whatever its Origin says.
+    #   * The one scenario the gate DID cover -- an attacker who has LEAKED
+    #     the token but lacks network reach, using a victim's browser on the
+    #     tailnet as a pivot -- is accepted, deliberately: that same pivot
+    #     already reaches POST /launch (a shell on this box), which never had
+    #     an origin gate, and this broker's token is a single full-capability
+    #     credential by design. An origin check on two routes while /launch
+    #     stands open only ever filtered honest callers.
+    #
+    # Two residual notes worth keeping from the old gate's reasoning: the
+    # token also rides query strings, so treat proxy and access logs as
+    # token-bearing (a hazard that predates this change and is orthogonal to
+    # it); and repeat-bounce DoS with a leaked token is bounded by the
+    # post-boot restart cooldown (#183, R6) below.
     async def _restart_post(request: Request):
         err = _gated_auth_error(request, "/restart")
         if err is not None:
             return err
-        # Origin BEFORE the gate and the capability: a refused caller learns
-        # nothing about this broker's deployment policy, and nothing below runs.
-        if not _origin_permitted(request):
-            LOGGER.warning("refused a cross-origin restart from origin %r (%s)",
-                           request.headers.get("Origin"), request.ip)
-            return sanic_json({"ok": False, "error": "forbidden_origin",
-                               "reason_code": REASON_ORIGIN_FORBIDDEN},
-                              status=403)
         status = restart_status(app)
         if not status["configured"]:
             return sanic_json({"ok": False, "error": "restart_disabled",
@@ -7114,10 +7095,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # The ONE route that mutates the checkout, and it mirrors existing
     # discipline rather than inventing any:
     #
-    #   * token first, then the SAME strict Origin check as POST /restart —
-    #     this replaces the running code, _cors_headers answers ACAO:* to
-    #     everyone, so for a non-recoverable action the token cannot be the
-    #     only gate.
+    #   * token first, and NO origin gate (#205). It launched with the SAME
+    #     strict Origin check as POST /restart — this replaces the running
+    #     code, so the theory went that under ACAO:* the token could not be
+    #     the only gate. The reversal rationale lives on /restart above and
+    #     applies here whole: the fleet operator's desktop is a foreign
+    #     origin (the door is the feature), the token is explicit — never a
+    #     cookie — so a foreign page has nothing ambient to ride, and the
+    #     leaked-token browser-pivot the gate excluded already has POST
+    #     /launch.
     #   * the operator gate (update_apply_enabled, config key or stored
     #     sidecar grant) answers 503 like /update/check's disabled shape, and
     #     is RE-READ inside update_lock for the same revoke-TOCTOU reason the
@@ -7145,15 +7131,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # no-store on every answer: each one describes a moment (a claim, a
         # refusal set, a merge outcome) that a shared cache must never replay.
         no_store = {"Cache-Control": "no-store"}
-        # Origin BEFORE the gate, exactly like /restart: a refused caller
-        # learns nothing about this broker's deployment policy.
-        if not _origin_permitted(request):
-            LOGGER.warning("refused a cross-origin update apply from origin "
-                           "%r (%s)", request.headers.get("Origin"),
-                           request.ip)
-            return sanic_json({"ok": False, "error": "forbidden_origin",
-                               "reason_code": REASON_ORIGIN_FORBIDDEN},
-                              status=403, headers=no_store)
         if not app.ctx.update_apply_enabled:
             # 503 like /update/check's disabled shape: an ABSENT capability,
             # not an unauthorized caller. Re-read inside the lock below.
