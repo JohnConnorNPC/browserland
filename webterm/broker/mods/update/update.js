@@ -785,10 +785,18 @@
 
                 function start() {
                     stop();
-                    timer = setInterval(pollTick, POLL_MS);
+                    // Feature-detected: a runtime-installed copy of this mod
+                    // can run against an older core with no ctx.visibility.
+                    // Either way `timer` holds a {stop}-shaped handle.
+                    timer = ctx.visibility
+                        ? ctx.visibility.pausableInterval(pollTick, POLL_MS)
+                        : (function () {
+                            const id = setInterval(pollTick, POLL_MS);
+                            return { stop: function () { clearInterval(id); } };
+                        })();
                 }
                 function stop() {
-                    if (timer) { clearInterval(timer); timer = null; }
+                    if (timer) { timer.stop(); timer = null; }
                 }
 
                 // ---- opting THIS broker in (#182) --------------------------
