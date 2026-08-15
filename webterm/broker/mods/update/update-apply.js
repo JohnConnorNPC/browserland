@@ -381,3 +381,223 @@
             return 'it did not re-ask GitHub, so this is the answer it '
                 + 'already had' + soon;
         }
+
+        // ---- the apply flow itself (#182 Part 2, atom A3) ------------------
+        //
+        // POST /update/apply plus the boot-id wait that proves the restart
+        // behind it, HOST-PARAMETERIZED: everything update.js's init(ctx)
+        // closure used to hard-pin to the LOCAL broker is handed in through
+        // one `deps` object built once by init, so the same machinery can
+        // drive an apply against any EXPLICITLY named host -- and so
+        // test_update_fleet.py's node harness can drive it with every
+        // dependency stubbed. Not pure like the helpers above (it holds the
+        // per-host op state and awaits fetches), but DOM-free and
+        // closure-free for the same reason they are: nothing here may reach
+        // for update.js's own names.
+        //
+        // deps, one object, built once:
+        //   localHostId       the id whose wording says 'this broker'
+        //   updHost(id)       id -> live host object, resolved FRESH -- the
+        //                     broker being asked is expected to disappear
+        //                     and come back mid-wait
+        //   hostFingerprint(id)  which MACHINE the id points at right now
+        //   hostFetch(host, path, opts)
+        //   renderAll()
+        //   modCatalogCache   the shared /info capability cache (Map)
+        //   recheckHost(id)   re-check that host after a proven restart
+        //   isDead()          the mod's unload flag -- one flag, read per
+        //                     iteration, stops EVERY host's op at once
+        //   sleep(ms) / now() / waitTimeoutMs / pollMs
+        //
+        // Op state is a Map keyed by host id inside the factory: N hosts
+        // can be busy independently, the busy-guard is per host, and a
+        // finished op only lands its verdict while it is still the op its
+        // Map entry holds -- a stale continuation never clobbers a newer
+        // op for the same host.
+        function makeApplyFlow(deps) {
+            const applyOps = new Map();
+            // What a row renders from: { phase, note } or null. note is
+            // always an array of lines, exactly as the local-only flow
+            // kept it.
+            function opFor(hostId) {
+                return applyOps.get(hostId) || null;
+            }
+            function brokerName(hostId) {
+                return hostId === deps.localHostId
+                    ? 'this broker' : 'that broker';
+            }
+            function noHostWords(hostId) {
+                return hostId === deps.localHostId
+                    ? 'the local broker is no longer configured'
+                    : 'that broker is no longer configured';
+            }
+            // Every phase write after the op is installed goes through
+            // here so it can refuse to land on an entry that no longer
+            // holds THIS op.
+            function settle(hostId, op, phase, note) {
+                if (applyOps.get(hostId) !== op) return false;
+                op.phase = phase;
+                op.note = note;
+                deps.renderAll();
+                return true;
+            }
+
+            // Polls that host's /info until the boot id differs from
+            // `beforeBootId`. A transport failure here is THE expected
+            // shape of this loop, not a fault -- the broker being asked is
+            // mid-stop or mid-relaunch and simply not there to answer --
+            // so a rejected fetch, a !ok status and an unreadable body all
+            // just continue until the bounded deadline runs out. `fp` pins
+            // the MACHINE: null skips the check (the #183 restart flow,
+            // which predates it, keeps its exact old behavior); anything
+            // else is compared against a fresh hostFingerprint every
+            // iteration, because a host id is reusable and an id
+            // re-pointed mid-wait must end the wait rather than let a
+            // different machine's boot id answer for the one that was
+            // asked. isDead is a parameter, not a dep: the restart flow
+            // shares this loop under its own dead flag.
+            async function pollBootId(hostId, beforeBootId, fp, isDead) {
+                const deadline = deps.now() + deps.waitTimeoutMs;
+                while (deps.now() < deadline) {
+                    await deps.sleep(deps.pollMs);
+                    if (isDead()) return 'dead';
+                    const host = deps.updHost(hostId);
+                    if (!host) return 'no-host';
+                    if (fp !== null
+                            && deps.hostFingerprint(hostId) !== fp) {
+                        return 'host-moved';
+                    }
+                    let r;
+                    try {
+                        r = await deps.hostFetch(host, '/info',
+                            { cache: 'no-store', timeoutMs: 4000 });
+                    } catch (_) { continue; }
+                    if (!r.ok) continue;
+                    let j = null;
+                    try { j = await r.json(); } catch (_) { continue; }
+                    const bootId = j && j.restart
+                        && typeof j.restart.bootId === 'string'
+                        && j.restart.bootId;
+                    if (!bootId) continue;
+                    if (bootId !== beforeBootId) return 'changed';
+                }
+                return 'timeout';
+            }
+
+            async function waitForApplyBootId(hostId, op, beforeBootId,
+                                              fp) {
+                const bn = brokerName(hostId);
+                settle(hostId, op, 'waiting',
+                    ['applying — ' + bn + ' is restarting itself…']);
+                const res = await pollBootId(hostId, beforeBootId, fp,
+                    deps.isDead);
+                if (deps.isDead() || res === 'dead') return;
+                if (res === 'no-host') {
+                    settle(hostId, op, 'failed', [noHostWords(hostId)]);
+                } else if (res === 'host-moved') {
+                    // Indeterminate on purpose: the update was sent to the
+                    // machine the fingerprint named, and whatever machine
+                    // answers under this id now is a different one. Never
+                    // a success, and never a poll of the new machine under
+                    // the old op.
+                    settle(hostId, op, 'failed', ['this host entry now '
+                        + 'points at a different machine than the one '
+                        + 'the update was sent to — what happened to '
+                        + 'that update cannot be told from here.']);
+                } else if (res === 'changed') {
+                    // A restart is PROVEN, not that it hit the target --
+                    // deployStrip reads that off the recheck below.
+                    if (settle(hostId, op, 'done', [bn + ' restarted — '
+                            + 'checking what build it came up on…'])) {
+                        deps.modCatalogCache.delete(hostId);
+                        deps.renderAll();
+                        await deps.recheckHost(hostId);
+                    }
+                    return;
+                } else {
+                    settle(hostId, op, 'timeout', [bn + ' did not come '
+                        + 'back within '
+                        + Math.round(deps.waitTimeoutMs / 1000)
+                        + 's — this window cannot tell whether it is '
+                        + 'still starting.']);
+                }
+            }
+
+            // The ONLY caller of POST /update/apply -- no timer, no poll.
+            // Takes a host ID, never a host object, and REQUIRES one: a
+            // null/undefined/absent id returns before any fetch, because a
+            // null host reaching hostFetch would silently aim the apply at
+            // the SERVING origin -- the wrong-machine bug this signature
+            // exists to prevent (the same rule setPolicy follows).
+            async function performApply(hostId, targetSha) {
+                if (typeof hostId !== 'string' || !hostId) return;
+                const cur = applyOps.get(hostId);
+                // Per-host busy-guard: host X mid-apply never blocks --
+                // and never reads as busy for -- host Y.
+                if (cur && cur.phase === 'waiting') return;
+                const host = deps.updHost(hostId);
+                if (!host) {
+                    applyOps.set(hostId, { phase: 'failed',
+                        note: [noHostWords(hostId)] });
+                    deps.renderAll();
+                    return;
+                }
+                // Which MACHINE the id names right now, captured with the
+                // POST and re-checked on every poll iteration after it.
+                const fp = deps.hostFingerprint(hostId);
+                const op = { phase: 'waiting',
+                    note: ['sending the update request…'] };
+                applyOps.set(hostId, op);
+                deps.renderAll();
+                let resp = null;
+                try {
+                    resp = await deps.hostFetch(host, '/update/apply', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ target_sha: targetSha }),
+                        timeoutMs: 30000,
+                    });
+                } catch (e) {
+                    // A rejected POST is NOT the expected mid-restart
+                    // connection death -- that grace applies only AFTER a
+                    // 202, once the broker has committed to stopping.
+                    settle(hostId, op, 'failed',
+                        applyRefusalOutcome(null, null).lines);
+                    return;
+                }
+                let body = null;
+                try { body = await resp.json(); } catch (_) {}
+                if (resp.status === 202 && body && body.ok === true) {
+                    if (typeof body.bootId === 'string' && body.bootId) {
+                        // The 202's bootId IS the poll baseline.
+                        await waitForApplyBootId(hostId, op, body.bootId,
+                            fp);
+                        return;
+                    }
+                    // Accepted -- the broker may already be merging or
+                    // restarting -- but with nothing to confirm it by.
+                    // NOT a refusal (it was accepted) and never assumed
+                    // to have failed: a naive retry here could start a
+                    // SECOND apply on top of one already under way.
+                    settle(hostId, op, 'failed', ['the broker accepted '
+                        + 'the update but did not report a boot id to '
+                        + 'confirm it by -- it may already be applying; '
+                        + 'check before trying again']);
+                    return;
+                }
+                const outcome = applyRefusalOutcome(resp.status, body);
+                const lines = outcome ? outcome.lines.slice()
+                    : ['the broker answered, but not in a shape this '
+                        + 'page recognises.'];
+                if (outcome && outcome.kind === 'incomplete'
+                        && outcome.reasonCode) {
+                    lines.push('Why the restart could not be armed: '
+                        + restartReasonWords(outcome.reasonCode));
+                }
+                settle(hostId, op, 'failed', lines);
+            }
+
+            return { performApply: performApply,
+                     pollBootId: pollBootId,
+                     opFor: opFor };
+        }

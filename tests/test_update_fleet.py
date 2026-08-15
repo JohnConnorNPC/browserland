@@ -124,6 +124,12 @@ _REQUIRED = (
     "function policyCheckSource",
     "function selfUpdateRowNeeded", "function selfUpdateModelFor",
     "async function commitRemoteSelfUpdate",
+    # #182 Part 2 (A3): the apply flow itself -- POST /update/apply plus the
+    # boot-id wait -- moved out of update.js's closure into update-apply.js
+    # as a dependency-injected factory, host-parameterized. Read whole with
+    # the companion; update.js's init only builds the deps object.
+    "function makeApplyFlow", "async function performApply",
+    "async function pollBootId", "async function waitForApplyBootId",
 )
 
 
@@ -1509,6 +1515,235 @@ CASES.self_update_remote = async () => {
     return out;
 };
 
+// --- atom A3: the host-parameterized apply flow ----------------------------
+// makeApplyFlow is driven here with every dependency stubbed: the fetch
+// records every request WITH the host it was aimed at (and hard-fails on a
+// null one, like the page-level stub above), sleep resolves immediately and
+// advances a fake clock a quarter of the deadline per poll, so a full
+// 90s-shaped wait runs in microtasks as exactly 4 /info polls. What runs is
+// the SHIPPED flow -- POST target, poll target, per-host op state, the
+// mid-restart transport grace -- not a copy of it.
+const applyEnv = () => {
+    const env = {
+        hosts: {
+            local: { id: 'local', url: '' },
+            x: { id: 'x', url: 'https://x.example:4445' },
+            y: { id: 'y', url: 'https://y.example:4445' },
+        },
+        calls: [],           // 'id METHOD path', one entry per wire trip
+        rejected: 0,         // how many of them the stub rejected
+        rechecked: [],
+        cache: new Map([['local', 'rec-local'], ['x', 'rec-x'],
+                        ['y', 'rec-y']]),
+        clock: 0,
+        dead: false,
+        resp: {},            // hostId -> array of specs; the last is sticky
+    };
+    env.flow = makeApplyFlow({
+        localHostId: 'local',
+        updHost: (id) => env.hosts[id] || null,
+        hostFingerprint: (id) => (env.hosts[id]
+            ? String(env.hosts[id].url || '') : null),
+        hostFetch: async (host, path, opts) => {
+            if (!host) throw new Error('hostFetch got a null host');
+            env.calls.push(host.id + ' ' + ((opts && opts.method) || 'GET')
+                + ' ' + path);
+            const q = env.resp[host.id];
+            const spec = Array.isArray(q)
+                ? (q.length > 1 ? q.shift() : q[0]) : q;
+            if (typeof spec === 'function') return spec();
+            if (!spec || spec === 'reject') {
+                env.rejected += 1;
+                throw new TypeError('Failed to fetch');
+            }
+            return { status: spec.status,
+                     ok: spec.status >= 200 && spec.status < 300,
+                     json: async () => spec.body };
+        },
+        renderAll: () => {},
+        modCatalogCache: env.cache,
+        recheckHost: async (id) => { env.rechecked.push(id); },
+        isDead: () => env.dead,
+        sleep: async () => { env.clock += 250; },
+        now: () => env.clock,
+        waitTimeoutMs: 1000,
+        pollMs: 250,
+    });
+    env.infoPolls = (id) => env.calls.filter(
+        (c) => c === id + ' GET /info').length;
+    return env;
+};
+const A202 = (bootId) => ({ status: 202,
+    body: bootId === undefined ? { ok: true, operation_id: 'op-1' }
+        : { ok: true, bootId: bootId, operation_id: 'op-1' } });
+const INFO_BOOT = (bootId) => ({ status: 200,
+    body: { restart: { bootId: bootId } } });
+
+CASES.apply_explicit_target = async () => {
+    const out = {};
+    // (a) an apply against host x POSTs to x, polls x's /info and, on the
+    // proven restart, invalidates x's catalog entry and rechecks x -- and
+    // nobody else's anything.
+    let env = applyEnv();
+    env.resp.x = [A202('boot-1'), INFO_BOOT('boot-1'), INFO_BOOT('boot-2')];
+    await env.flow.performApply('x', HEX40('b'));
+    out.success = { calls: env.calls.slice(),
+                    op: env.flow.opFor('x'),
+                    opY: env.flow.opFor('y'),
+                    opLocal: env.flow.opFor('local'),
+                    cache: Array.from(env.cache.keys()).sort(),
+                    rechecked: env.rechecked.slice() };
+
+    // (b) a null/undefined/absent host id returns BEFORE any fetch -- the
+    // injected fetch (which throws on a null host) is never reached.
+    env = applyEnv();
+    await env.flow.performApply(null, HEX40('b'));
+    await env.flow.performApply(undefined, HEX40('b'));
+    await env.flow.performApply('', HEX40('b'));
+    out.nullHost = { calls: env.calls.slice(),
+                     ops: [env.flow.opFor(null) || null,
+                           env.flow.opFor(undefined) || null,
+                           env.flow.opFor('') || null] };
+
+    // (c) an id nobody holds: refused before any fetch, with the
+    // no-longer-configured words, never a request to the serving origin.
+    env = applyEnv();
+    await env.flow.performApply('ghost', HEX40('b'));
+    out.ghost = { calls: env.calls.slice(), op: env.flow.opFor('ghost') };
+    return out;
+};
+
+CASES.apply_per_host_ops = async () => {
+    // Host x parks mid-poll on a gated /info; host y's WHOLE apply runs to
+    // completion through x's busy window; then x's gate resolves. One flow
+    // instance, one Map, two independent ops.
+    const env = applyEnv();
+    let openGate = null;
+    const gate = new Promise((res) => { openGate = res; });
+    env.resp.x = [A202('boot-x1'), () => gate];
+    env.resp.y = [A202('boot-y1'), INFO_BOOT('boot-y2')];
+    const px = env.flow.performApply('x', HEX40('b'));
+    // Everything is microtask-driven (the stub sleep never sets a timer),
+    // so spinning the microtask queue walks x to its parked /info.
+    let spins = 0;
+    while (env.infoPolls('x') === 0 && spins++ < 10000) {
+        await Promise.resolve();
+    }
+    const during = { xOp: (env.flow.opFor('x') || {}).phase,
+                     yOp: env.flow.opFor('y') };
+    await env.flow.performApply('y', HEX40('b'));
+    const afterY = { xOp: (env.flow.opFor('x') || {}).phase,
+                     yOp: env.flow.opFor('y'),
+                     cache: Array.from(env.cache.keys()).sort(),
+                     rechecked: env.rechecked.slice() };
+    // x itself IS busy-guarded: a second apply for x spends nothing.
+    const callsBefore = env.calls.length;
+    await env.flow.performApply('x', HEX40('b'));
+    const guarded = env.calls.length === callsBefore;
+    openGate({ status: 200, ok: true,
+               json: async () => ({ restart: { bootId: 'boot-x2' } }) });
+    await px;
+    return { during: during, afterY: afterY, guarded: guarded,
+             xFinal: env.flow.opFor('x'), yFinal: env.flow.opFor('y'),
+             calls: env.calls.slice(), rechecked: env.rechecked.slice(),
+             cache: Array.from(env.cache.keys()).sort() };
+};
+
+CASES.apply_poll_transport_grace = async () => {
+    const out = {};
+    // (a) the connection dies mid-restart -- rejected fetches -- then the
+    // broker comes back on a new boot id: polling continued through the
+    // deaths and the verdict is the proven restart, never 'failed'.
+    let env = applyEnv();
+    env.resp.x = [A202('boot-1'), 'reject', 'reject', INFO_BOOT('boot-2')];
+    await env.flow.performApply('x', HEX40('b'));
+    out.recovers = { phase: env.flow.opFor('x').phase,
+                     rejected: env.rejected,
+                     infoPolls: env.infoPolls('x') };
+
+    // (b) it never comes back: every poll dies, and the verdict at the
+    // deadline is the honest timeout.
+    env = applyEnv();
+    env.resp.x = [A202('boot-1'), 'reject'];
+    await env.flow.performApply('x', HEX40('b'));
+    out.allDead = { phase: env.flow.opFor('x').phase,
+                    note: env.flow.opFor('x').note,
+                    rejected: env.rejected,
+                    infoPolls: env.infoPolls('x') };
+
+    // (c) a !ok answer mid-restart gets the same grace as a rejection.
+    env = applyEnv();
+    env.resp.x = [A202('boot-1'), { status: 500, body: {} }, 'reject',
+                  INFO_BOOT('boot-2')];
+    await env.flow.performApply('x', HEX40('b'));
+    out.badStatus = { phase: env.flow.opFor('x').phase,
+                      infoPolls: env.infoPolls('x') };
+
+    // (d) the old process still answering with the OLD boot id proves
+    // nothing -- polling continues to the deadline.
+    env = applyEnv();
+    env.resp.x = [A202('boot-1'), INFO_BOOT('boot-1')];
+    await env.flow.performApply('x', HEX40('b'));
+    out.sameBoot = { phase: env.flow.opFor('x').phase,
+                     infoPolls: env.infoPolls('x') };
+
+    // (e) the POST itself dying is NOT the mid-restart grace: nothing was
+    // accepted, so it is reported plainly and no poll follows.
+    env = applyEnv();
+    env.resp.x = ['reject'];
+    await env.flow.performApply('x', HEX40('b'));
+    out.postDied = { phase: env.flow.opFor('x').phase,
+                     note: env.flow.opFor('x').note,
+                     infoPolls: env.infoPolls('x') };
+    return out;
+};
+
+CASES.apply_host_identity = async () => {
+    const out = {};
+    // (a) the id is re-pointed at a different machine between the POST and
+    // the first poll: the wait ends indeterminate -- never a success, and
+    // never a poll of the machine that inherited the id.
+    let env = applyEnv();
+    env.resp.x = [A202('boot-1'), INFO_BOOT('boot-2')];
+    const px = env.flow.performApply('x', HEX40('b'));
+    env.hosts.x = { id: 'x', url: 'https://SOMEONE-ELSE.example:4445' };
+    await px;
+    out.moved = { phase: env.flow.opFor('x').phase,
+                  note: env.flow.opFor('x').note,
+                  infoPolls: env.infoPolls('x'),
+                  rechecked: env.rechecked.slice(),
+                  cacheHasX: env.cache.has('x') };
+
+    // (b) the host is removed outright mid-wait.
+    env = applyEnv();
+    env.resp.x = [A202('boot-1'), INFO_BOOT('boot-2')];
+    const pg = env.flow.performApply('x', HEX40('b'));
+    delete env.hosts.x;
+    await pg;
+    out.gone = { phase: env.flow.opFor('x').phase,
+                 note: env.flow.opFor('x').note };
+
+    // (c) unload mid-wait: the dead flag stops the op without claiming any
+    // verdict, even though a changed boot id was there for the taking.
+    env = applyEnv();
+    env.resp.x = [A202('boot-1'), INFO_BOOT('boot-2')];
+    const pd = env.flow.performApply('x', HEX40('b'));
+    env.dead = true;
+    await pd;
+    out.dead = { phase: env.flow.opFor('x').phase,
+                 infoPolls: env.infoPolls('x'),
+                 rechecked: env.rechecked.slice(),
+                 cacheHasX: env.cache.has('x') };
+
+    // (d) a null fingerprint skips the pin -- the #183 restart flow's
+    // exact old shape, shared through the same loop.
+    env = applyEnv();
+    env.resp.x = [INFO_BOOT('boot-2')];
+    env.hosts.x = { id: 'x', url: 'https://MOVED-MEANWHILE.example:4445' };
+    out.nullFp = await env.flow.pollBootId('x', 'boot-1', null, () => false);
+    return out;
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.error('no such case: ' + want); process.exit(2); }
 Promise.resolve(CASES[want]()).then((r) => {
@@ -2463,7 +2698,8 @@ def test_every_apply_refusal_shape_is_rendered_distinctly(harness):
 
 
 def test_the_update_button_is_local_only_and_beside_restart(harness):
-    """apply never touches a remote host: renderApplyRow reads only the
+    """The visible Update button stays local-only (A3 host-parameterized
+    the MACHINERY, not this row): renderApplyRow reads only the
     LOCAL_HOST_ID facts, and is rendered once, above the per-broker loop --
     never inside it, where a peer row would pick it up."""
     src = MOD_JS.read_text(encoding="utf-8")
@@ -2492,25 +2728,32 @@ def test_only_a_confirmed_click_can_post_and_the_previewed_sha_is_exact(
         harness):
     """The confirm dialog's values are captured once, at click time, from
     the SAME paint that disabled/enabled the button, and performApply is
-    reachable from nowhere else."""
+    reachable from nowhere else. A3 moved the flow into update-apply.js's
+    makeApplyFlow; update.js keeps exactly ONE call site, and it names its
+    target host explicitly -- never a null that hostFetch would silently
+    aim at the serving origin."""
     src = MOD_JS.read_text(encoding="utf-8")
-    assert src.count("performApply(") == 2, (
-        "exactly one definition and one call site")
-    assert "return performApply(target);" in src
+    assert src.count("performApply(") == 1, (
+        "exactly one call site; the definition lives in update-apply.js")
+    assert "return applyFlow.performApply(" in src
+    assert "LOCAL_HOST_ID, target);" in src
     assert "if (!res || !res.value) return;" in src
-    perform_seg = src[src.index("async function performApply"):
-                      src.index("function applyConfirmBody")]
+    apply_src = MOD_APPLY_JS.read_text(encoding="utf-8")
+    perform_seg = apply_src[apply_src.index("async function performApply"):
+                            apply_src.index("return { performApply")]
     # The previewed sha is used exactly as given -- never re-derived from
     # live state inside the POST path itself.
     assert "checkStateFor(" not in perform_seg
     assert "applyTargetSha(" not in perform_seg
     assert "body: JSON.stringify({ target_sha: targetSha })" in perform_seg
+    # An absent host id returns before ANY fetch can be aimed anywhere.
+    assert "if (typeof hostId !== 'string' || !hostId) return;" in perform_seg
     # No timer or poll tick reaches it.
     poll_seg = src[src.index("async function poll(hostId, opts)"):
                    src.index("function pollTick(opts)")]
     assert "performApply" not in poll_seg
-    assert "setInterval" not in src[src.index("async function performApply"):
-                                    src.index("// ---- detail window")]
+    assert "setInterval" not in apply_src[
+        apply_src.index("function makeApplyFlow"):]
 
 
 def test_apply_confirm_shows_range_count_compare_and_session_cost(harness):
@@ -2531,18 +2774,24 @@ def test_202_never_renders_success_here_and_hands_off_to_the_boot_watch(
     """The 202 is accepted-and-stopping, not done; only a proven boot id
     change may say so, and even that hands off to a recheck rather than
     declaring victory itself (#182 Part 2, A29 owns the real verdict)."""
-    src = MOD_JS.read_text(encoding="utf-8")
-    perform_seg = src[src.index("async function performApply"):
-                      src.index("function applyConfirmBody")]
-    assert "phase: 'done'" not in perform_seg, (
+    apply_src = MOD_APPLY_JS.read_text(encoding="utf-8")
+    perform_seg = apply_src[apply_src.index("async function performApply"):
+                            apply_src.index("return { performApply")]
+    assert "'done'" not in perform_seg, (
         "the 202 handler itself must never claim success")
-    assert "await waitForApplyBootId(body.bootId);" in perform_seg
-    wait_seg = src[src.index("async function waitForApplyBootId"):
-                  src.index("// The ONLY caller of POST /update/apply")]
-    assert "phase: 'done'" in wait_seg
-    assert "recheck()" in wait_seg, (
+    assert "await waitForApplyBootId(hostId, op, body.bootId," in perform_seg
+    wait_seg = apply_src[
+        apply_src.index("async function waitForApplyBootId"):
+        apply_src.index("// The ONLY caller of POST /update/apply")]
+    assert "'done'" in wait_seg
+    assert "deps.recheckHost(hostId)" in wait_seg, (
         "a proven restart must still hand off to a recheck, never assume "
         "the target was reached")
+    # ...and update.js's deps wiring keeps the LOCAL success path on the
+    # fleet-wide recheck() it always ran, while any other host gets a
+    # targeted refresh poll of itself.
+    src = MOD_JS.read_text(encoding="utf-8")
+    assert "? recheck() : poll(hid, { refresh: true });" in src
 
 
 # ---- atom A7: restart-disabled points at the row too -----------------------
@@ -2795,3 +3044,101 @@ def test_the_row_surfaces_config_owners_and_standing_grants(harness):
     assert r["busyOn"]["disabled"] is True
     assert r["busyOff"]["labelWords"] == "Stopping…"
     assert r["failedOp"]["note"] == "locked words"
+
+
+# ---- atom A3: the apply flow targets an EXPLICIT host ----------------------
+
+def test_apply_flow_posts_and_polls_the_explicit_target(harness):
+    """Every wire trip the flow makes names the host it was given: the POST
+    goes to that host, the boot-id poll asks that host, and success
+    invalidates THAT host's catalog entry and rechecks it -- nobody else's.
+    A null/absent host id never reaches the injected fetch at all (which,
+    like the real hostFetch, would otherwise silently hit the serving
+    origin)."""
+    r = run(harness, "apply_explicit_target")
+    s = r["success"]
+    assert s["calls"][0] == "x POST /update/apply"
+    assert "x GET /info" in s["calls"]
+    assert all(c.startswith("x ") for c in s["calls"]), s["calls"]
+    assert s["op"]["phase"] == "done"
+    # Nothing about the other hosts moved: no op, no cache invalidation.
+    assert s["opY"] is None and s["opLocal"] is None
+    assert s["cache"] == ["local", "y"]
+    assert s["rechecked"] == ["x"]
+    # null / undefined / '' are rejected BEFORE any fetch.
+    assert r["nullHost"]["calls"] == []
+    assert r["nullHost"]["ops"] == [None, None, None]
+    # An id nobody holds is a named failure, still with zero fetches.
+    assert r["ghost"]["calls"] == []
+    assert r["ghost"]["op"]["phase"] == "failed"
+    assert "no longer configured" in r["ghost"]["op"]["note"][0]
+
+
+def test_apply_op_state_is_keyed_per_host(harness):
+    """Host x mid-apply never marks host y busy: y's whole apply runs to
+    completion through x's wait, each op lands on its own host's entry, and
+    only x itself is busy-guarded against a second x apply."""
+    r = run(harness, "apply_per_host_ops")
+    assert r["during"]["xOp"] == "waiting"
+    assert r["during"]["yOp"] is None, "x's op marked y busy"
+    assert r["afterY"]["yOp"]["phase"] == "done"
+    assert r["afterY"]["xOp"] == "waiting", "y's completion touched x's op"
+    assert r["afterY"]["cache"] == ["local", "x"]
+    assert r["afterY"]["rechecked"] == ["y"]
+    assert r["guarded"] is True, "a second x apply escaped the busy-guard"
+    assert r["xFinal"]["phase"] == "done"
+    assert r["yFinal"]["phase"] == "done"
+    assert r["rechecked"] == ["y", "x"]
+    assert r["cache"] == ["local"]
+    assert all(c.split(" ")[0] in ("x", "y") for c in r["calls"]), r["calls"]
+
+
+def test_apply_poll_survives_transport_errors_until_the_deadline(harness):
+    """E4: the broker being polled is mid-restart, so rejected fetches (and
+    !ok answers) are THE expected shape of the wait -- polling continues to
+    the bounded deadline, and a mid-restart connection death never becomes
+    a 'failed' verdict."""
+    r = run(harness, "apply_poll_transport_grace")
+    rec = r["recovers"]
+    assert rec["phase"] == "done", "a transport death mid-poll read as final"
+    assert rec["rejected"] == 2 and rec["infoPolls"] == 3
+    dead = r["allDead"]
+    assert dead["phase"] == "timeout", (
+        "a broker that never came back must time out honestly, not 'fail'")
+    assert dead["infoPolls"] == 4, "polling stopped before the deadline"
+    assert "cannot tell whether it is still starting" in dead["note"][0]
+    assert r["badStatus"]["phase"] == "done"
+    assert r["badStatus"]["infoPolls"] == 3
+    # The old process still answering with the OLD boot id proves nothing.
+    assert r["sameBoot"]["phase"] == "timeout"
+    assert r["sameBoot"]["infoPolls"] == 4
+    # ...but the POST itself dying is NOT the mid-restart grace: nothing
+    # was accepted yet, so it is reported plainly and no poll follows.
+    post = r["postDied"]
+    assert post["phase"] == "failed"
+    assert post["infoPolls"] == 0
+    assert "could not reach this broker" in post["note"][0]
+
+
+def test_apply_wait_is_pinned_to_the_machine_it_asked(harness):
+    """The fingerprint captured with the POST is re-checked every poll
+    iteration: an id re-pointed at a different machine (or removed) ends
+    the op indeterminate -- never a success, never a poll of the machine
+    that inherited the id -- and the unload flag stops an op without
+    claiming any verdict."""
+    r = run(harness, "apply_host_identity")
+    moved = r["moved"]
+    assert moved["phase"] == "failed"
+    assert "different machine" in moved["note"][0]
+    assert moved["infoPolls"] == 0, "polled the machine that inherited the id"
+    assert moved["rechecked"] == [] and moved["cacheHasX"] is True
+    gone = r["gone"]
+    assert gone["phase"] == "failed"
+    assert "no longer configured" in gone["note"][0]
+    dead = r["dead"]
+    assert dead["phase"] == "waiting", "unload invented a verdict"
+    assert dead["infoPolls"] == 0
+    assert dead["rechecked"] == [] and dead["cacheHasX"] is True
+    # A null fingerprint skips the pin: the #183 restart flow's exact old
+    # shape, shared through the same loop.
+    assert r["nullFp"] == "changed"

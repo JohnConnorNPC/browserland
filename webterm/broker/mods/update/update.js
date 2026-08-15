@@ -1276,19 +1276,22 @@
                 const RESTART_WAIT_TIMEOUT_MS = 90 * 1000;
                 const RESTART_POLL_MS = 2000;
 
-                // The polling loop lives in pollUntilNewBootId (#182 Part 2,
-                // atom A30 -- shared with waitForApplyBootId, since an apply
-                // ends in this same wait): resolves the host fresh every
-                // iteration, exactly as this loop always did, since the very
-                // broker being asked is expected to disappear and come back
-                // mid-wait. A transport failure there is THE expected shape
-                // of this loop, not a fault -- the broker is mid-stop or
-                // mid-relaunch and simply not there to answer.
+                // The polling loop lives in applyFlow.pollBootId (#182
+                // Part 2, A30/A3 -- an apply ends in this same wait, so
+                // update-apply.js's makeApplyFlow carries it): resolves
+                // the host fresh every iteration, exactly as this loop
+                // always did, since the very broker being asked is
+                // expected to disappear and come back mid-wait. A
+                // transport failure there is THE expected shape of this
+                // loop, not a fault -- the broker is mid-stop or
+                // mid-relaunch and simply not there to answer. The null
+                // fingerprint keeps this restart flow exactly as it was:
+                // it predates A3's machine pin.
                 async function waitForNewBootId(beforeBootId) {
                     restartOp = { phase: 'waiting', note: 'restarting…' };
                     renderAll();
-                    const res = await pollUntilNewBootId(beforeBootId,
-                        () => restartOpDead);
+                    const res = await applyFlow.pollBootId(LOCAL_HOST_ID,
+                        beforeBootId, null, () => restartOpDead);
                     if (restartOpDead || res === 'dead') return;
                     if (res === 'no-host') {
                         restartOp = { phase: 'failed',
@@ -1785,132 +1788,44 @@
                     body.appendChild(row);
                 }
 
-                // ---- update APPLY (#182 Part 2, atom A30): LOCAL ONLY,
-                // like the restart control -- host/state resolved fresh at
-                // every step. note is always an array of lines.
-                let applyOp = null;
+                // ---- update APPLY (#182 Part 2, atom A30; host-
+                // parameterized in A3): the flow itself -- POST
+                // /update/apply plus the boot-id wait that follows it --
+                // is makeApplyFlow in mods/update/update-apply.js,
+                // dependency-injected so it can target any EXPLICIT host
+                // and so the node harness can execute it. This block only
+                // builds its deps object, once; op state lives per host
+                // inside the factory, so N targets can be busy
+                // independently.
                 let applyOpDead = false;
+                const applyFlow = makeApplyFlow({
+                    localHostId: LOCAL_HOST_ID,
+                    updHost: updHost,
+                    hostFingerprint: hostFingerprint,
+                    hostFetch: hostFetch,
+                    renderAll: renderAll,
+                    modCatalogCache: modCatalogCache,
+                    // Success for the LOCAL broker keeps its fleet-wide
+                    // recheck(), exactly as before A3; any other host
+                    // gets a targeted refresh poll of itself instead.
+                    recheckHost: function (hid) {
+                        return (hid === LOCAL_HOST_ID)
+                            ? recheck() : poll(hid, { refresh: true });
+                    },
+                    // ONE unload flag stops every host's op at once --
+                    // ctx.onUnload below flips it, as it always did.
+                    isDead: function () { return applyOpDead; },
+                    sleep: restartSleep,
+                    now: function () { return Date.now(); },
+                    waitTimeoutMs: RESTART_WAIT_TIMEOUT_MS,
+                    pollMs: RESTART_POLL_MS,
+                });
 
                 function mkEl(tag, cls, text) {
                     const e = document.createElement(tag);
                     if (cls) e.className = cls;
                     if (text !== undefined) e.textContent = text;
                     return e;
-                }
-
-                // Shared with waitForNewBootId above (#183, refactored to
-                // call this too): polls /info until the boot id changes,
-                // timing out the same bounded way either caller already did.
-                async function pollUntilNewBootId(beforeBootId, isDead) {
-                    const deadline = Date.now() + RESTART_WAIT_TIMEOUT_MS;
-                    while (Date.now() < deadline) {
-                        await restartSleep(RESTART_POLL_MS);
-                        if (isDead()) return 'dead';
-                        const host = updHost(LOCAL_HOST_ID);
-                        if (!host) return 'no-host';
-                        let r;
-                        try {
-                            r = await hostFetch(host, '/info',
-                                { cache: 'no-store', timeoutMs: 4000 });
-                        } catch (_) { continue; }
-                        if (!r.ok) continue;
-                        let j = null;
-                        try { j = await r.json(); } catch (_) { continue; }
-                        const bootId = j && j.restart
-                            && typeof j.restart.bootId === 'string'
-                            && j.restart.bootId;
-                        if (!bootId) continue;
-                        if (bootId !== beforeBootId) return 'changed';
-                    }
-                    return 'timeout';
-                }
-
-                async function waitForApplyBootId(beforeBootId) {
-                    applyOp = { phase: 'waiting',
-                        note: ['applying — this broker is restarting itself…'] };
-                    renderAll();
-                    const res = await pollUntilNewBootId(beforeBootId,
-                        () => applyOpDead);
-                    if (applyOpDead || res === 'dead') return;
-                    if (res === 'no-host') {
-                        applyOp = { phase: 'failed',
-                            note: ['the local broker is no longer configured'] };
-                    } else if (res === 'changed') {
-                        // A restart is PROVEN, not that it hit the target --
-                        // deployStrip reads that off recheck() below.
-                        applyOp = { phase: 'done', note: ['this broker '
-                            + 'restarted — checking what build it came up on…'] };
-                        modCatalogCache.delete(LOCAL_HOST_ID);
-                        renderAll();
-                        await recheck();
-                        return;
-                    } else {
-                        applyOp = { phase: 'timeout', note: ['this broker '
-                            + 'did not come back within '
-                            + Math.round(RESTART_WAIT_TIMEOUT_MS / 1000)
-                            + 's — this window cannot tell whether it is '
-                            + 'still starting.'] };
-                    }
-                    renderAll();
-                }
-
-                // The ONLY caller of POST /update/apply -- no timer, no poll.
-                async function performApply(targetSha) {
-                    if (applyOp && applyOp.phase === 'waiting') return;
-                    const host = updHost(LOCAL_HOST_ID);
-                    if (!host) {
-                        applyOp = { phase: 'failed',
-                            note: ['the local broker is no longer configured'] };
-                        renderAll();
-                        return;
-                    }
-                    applyOp = { phase: 'waiting',
-                        note: ['sending the update request…'] };
-                    renderAll();
-                    let resp = null;
-                    try {
-                        resp = await hostFetch(host, '/update/apply', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ target_sha: targetSha }),
-                            timeoutMs: 30000,
-                        });
-                    } catch (e) {
-                        applyOp = { phase: 'failed',
-                            note: applyRefusalOutcome(null, null).lines };
-                        renderAll();
-                        return;
-                    }
-                    let body = null;
-                    try { body = await resp.json(); } catch (_) {}
-                    if (resp.status === 202 && body && body.ok === true) {
-                        if (typeof body.bootId === 'string' && body.bootId) {
-                            await waitForApplyBootId(body.bootId);
-                            return;
-                        }
-                        // Accepted -- the broker may already be merging or
-                        // restarting -- but with nothing to confirm it by.
-                        // NOT a refusal (it was accepted) and never assumed
-                        // to have failed: a naive retry here could start a
-                        // SECOND apply on top of one already under way.
-                        applyOp = { phase: 'failed', note: ['the broker '
-                            + 'accepted the update but did not report a '
-                            + 'boot id to confirm it by -- it may already '
-                            + 'be applying; check before trying again'] };
-                        renderAll();
-                        return;
-                    }
-                    const outcome = applyRefusalOutcome(resp.status, body);
-                    const lines = outcome ? outcome.lines.slice()
-                        : ['the broker answered, but not in a shape this '
-                            + 'page recognises.'];
-                    if (outcome && outcome.kind === 'incomplete'
-                            && outcome.reasonCode) {
-                        lines.push('Why the restart could not be armed: '
-                            + restartReasonWords(outcome.reasonCode));
-                    }
-                    applyOp = { phase: 'failed', note: lines };
-                    renderAll();
                 }
 
                 // Commit range/count/compare link, then the SAME live-
@@ -1951,6 +1866,9 @@
                     const st = checkStateFor(LOCAL_HOST_ID);
                     const upd = updateCapFor(LOCAL_HOST_ID);
                     const info = restartInfo();
+                    // This row is the LOCAL broker's; the flow keys op
+                    // state per host, so read this host's and no other's.
+                    const applyOp = applyFlow.opFor(LOCAL_HOST_ID);
                     const chk = st.check;
                     const target = applyTargetSha(chk);
                     const code = applyGateFromFacts(state(st), target,
@@ -1988,7 +1906,8 @@
                             ],
                         }).then((res) => {
                             if (!res || !res.value) return;
-                            return performApply(target);
+                            return applyFlow.performApply(
+                                LOCAL_HOST_ID, target);
                         }).catch(() => {});
                     });
                     row.appendChild(btn);
