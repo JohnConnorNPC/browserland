@@ -7171,9 +7171,23 @@ def test_admin_detection_is_info_based_and_old_brokers_keep_todays_wire():
     # identical to today.
     gate = _frag_fn(_packages_src(), "async function adminGatedFetch(")
     assert "if (!_adminRequiredFor(adminInfo, route))" in gate
-    assert "return { res: await hostFetch(host, route, opts)," in gate
+    assert "const res0 = await hostFetch(host, route, opts);" in gate
     assert gate.index("if (!_adminRequiredFor(adminInfo, route))") \
         < gate.index("_adminTokenPrompt")
+    # ...and the broker's OWN 403 admin_required is honoured as detection even
+    # when the cached /info predates the operator enabling the realm: that
+    # answer proves the realm exists now AND that nothing was written, so the
+    # flow continues into the prompt instead of dead-ending on a refusal the
+    # operator can only clear by guessing that a reload is needed.
+    assert "if (!(await _adminRefused(res0))) {" in gate
+    # A credential-bearing request never follows a redirect.
+    post = _frag_fn(_packages_src(), "function _adminPost(")
+    assert "o.redirect = 'error';" in post
+    # A held credential is keyed by broker IDENTITY (id + url), never by the
+    # id alone -- ids survive a re-point by design, so an id-only key would
+    # hand a re-pointed host the token learned for the old machine.
+    key = _frag_fn(_packages_src(), "function _adminKey(")
+    assert "host.id + '|' + String(host.url || '')" in key
 
 
 def test_admin_token_is_closure_held_and_never_persisted():
@@ -7205,8 +7219,12 @@ def test_admin_403_clears_the_held_token_and_reprompts_exactly_once():
     assert gate.count("_adminTokenPrompt(host, act, false)") == 1
     assert gate.count("_adminTokenPrompt(host, act, true)") == 1
     # A refused held token is cleared before the re-prompt, and cleared again
-    # when the second attempt is also refused.
-    assert gate.count("delete held[key];") == 2
+    # when the second attempt is also refused -- by COMPARE-and-delete, so a
+    # late refusal carrying an already-replaced token cannot evict the
+    # credential the operator just typed for a concurrent act.
+    assert gate.count("_adminForget(key, tok);") == 2
+    forget = _frag_fn(_packages_src(), "function _adminForget(")
+    assert "if (held[key] === tok) delete held[key];" in forget
     # Honest sentinels: cancelled = nothing sent; refused = a 403 landed.
     assert "return { res: null, aborted: 'cancelled' };" in gate
     assert gate.count("aborted: 'refused' }") == 2

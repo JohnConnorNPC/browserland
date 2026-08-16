@@ -607,6 +607,11 @@
                                 'X-Webterm-Admin': adminToken,
                             },
                             body: JSON.stringify({ set: set }),
+                            // A credential never follows a redirect: fetch
+                            // keeps custom headers across a 30x, so a bounce
+                            // could carry this token somewhere the operator
+                            // never named.
+                            redirect: 'error',
                         });
                     } catch (_) { return { ok: false, error: 'unreachable' }; }
                     if (!r.ok) {
@@ -644,11 +649,25 @@
                         body: function (c) {
                             c.appendChild(el('div', 'app-dialog-msg',
                                 'An admin token is required for mod policy '
-                                + 'changes on: ' + cap(names.join(', '), 200)
-                                + '. The page password is not enough for '
-                                + 'this — those brokers gate administration '
-                                + 'behind a separate credential (admin_token '
-                                + 'in their broker_config.json).'));
+                                + 'changes on the ' + names.length + ' broker'
+                                + (names.length === 1 ? '' : 's')
+                                + ' listed below. The page password is not '
+                                + 'enough for this — those brokers gate '
+                                + 'administration behind a separate '
+                                + 'credential (admin_token in their '
+                                + 'broker_config.json).'));
+                            // EVERY recipient, never truncated: what you type
+                            // here is sent to each of these brokers, so a
+                            // name that scrolled off the end of a summary
+                            // line would be a broker receiving a credential
+                            // you were never shown. A broker earns a place on
+                            // this list by claiming, in its own /info, that
+                            // it requires one.
+                            const who = el('ul', 'app-dialog-list');
+                            for (const n of names) {
+                                who.appendChild(el('li', null, String(n)));
+                            }
+                            c.appendChild(who);
                             const row = el('div', 'set-row app-dialog-field');
                             row.appendChild(el('label', null, 'Admin token'));
                             input = document.createElement('input');
@@ -749,6 +768,15 @@
                             // An enforcing target's refusal is an AUTH outcome,
                             // named as such -- never dressed as a network
                             // failure (#191).
+                            //
+                            // And retract the recorded attempt: unlike a
+                            // dropped connection, this answer PROVES nothing
+                            // was written (the gate refuses before the broker
+                            // reads a body or takes the lock). Leaving it in
+                            // `wrote` would offer an Undo for a write that
+                            // never happened, which could later stamp stale
+                            // prior pins over somebody else's real change.
+                            out.wrote = {};
                             out.ok = false;
                             out.parts.push('mod policy refused — that broker '
                                 + 'requires its admin token ('

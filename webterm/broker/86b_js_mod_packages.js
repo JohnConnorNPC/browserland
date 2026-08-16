@@ -1258,7 +1258,28 @@
             const headers = new Headers(o.headers || undefined);
             headers.set('X-Webterm-Admin', tok);
             o.headers = headers;
+            // A credential-bearing request never follows a redirect: fetch
+            // keeps custom headers across a same-origin 30x, so a broker
+            // (or anything answering for it) could bounce this to a path —
+            // or after a preflight, an origin — the operator never named.
+            // An admin act must land where it was aimed or fail loudly.
+            o.redirect = 'error';
             return hostFetch(host, route, o);
+        }
+        // The identity a held credential belongs to. NOT the host id alone:
+        // ids are stable across URL edits BY DESIGN (so per-host prefs
+        // survive a re-point), which is exactly why an id is the wrong key
+        // for a secret — re-pointing `peer` at another machine would hand
+        // that machine the token learned for the old one. Same lesson as
+        // the update mod's host fingerprint.
+        function _adminKey(host) {
+            if (!host || !host.id) return 'local|';
+            return host.id + '|' + String(host.url || '');
+        }
+        // Drop a held credential only if it is still the one that failed.
+        function _adminForget(key, tok) {
+            const held = _adminHeld();
+            if (held[key] === tok) delete held[key];
         }
         // One admin-aware POST to a gated route. Resolves {res, aborted}:
         //   aborted null        — `res` is the wire answer; handle as always
@@ -1275,11 +1296,21 @@
         async function adminGatedFetch(host, route, opts, adminInfo, act) {
             if (!_adminRequiredFor(adminInfo, route)) {
                 // Old / non-enforcing broker: today's wire, byte for byte.
-                return { res: await hostFetch(host, route, opts),
-                         aborted: null };
+                const res0 = await hostFetch(host, route, opts);
+                // ...unless it answers admin_required anyway. The `admin`
+                // key this page cached predates an operator turning the
+                // realm ON, and the broker's own 403 is proof both that the
+                // realm exists NOW and that nothing was written (the gate
+                // refuses before the body is read). Treat the answer as the
+                // detection it is and continue into the prompt, rather than
+                // handing back a refusal the operator cannot act on until
+                // they think to reload.
+                if (!(await _adminRefused(res0))) {
+                    return { res: res0, aborted: null };
+                }
             }
             const held = _adminHeld();
-            const key = (host && host.id) ? host.id : 'local';
+            const key = _adminKey(host);
             let tok = held[key];
             if (!tok) {
                 tok = await _adminTokenPrompt(host, act, false);
@@ -1289,13 +1320,17 @@
             let res = await _adminPost(host, route, opts, tok);
             if (!(await _adminRefused(res))) return { res: res, aborted: null };
             // The held token is wrong or stale. Clear it, ask ONCE more.
-            delete held[key];
+            // Compare-and-delete: two acts can be in flight with the same
+            // stale token, and a late refusal must not evict the REPLACEMENT
+            // the operator typed for the earlier one -- that would prompt
+            // again for a credential the page already has, forever.
+            _adminForget(key, tok);
             tok = await _adminTokenPrompt(host, act, true);
             if (!tok) return { res: res, aborted: 'refused' };
             held[key] = tok;
             res = await _adminPost(host, route, opts, tok);
             if (await _adminRefused(res)) {
-                delete held[key];
+                _adminForget(key, tok);
                 return { res: res, aborted: 'refused' };
             }
             return { res: res, aborted: null };

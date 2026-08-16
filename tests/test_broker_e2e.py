@@ -496,11 +496,12 @@ def test_cors_preflight(broker_proc):
         assert headers.get("Access-Control-Allow-Origin") == "*"
         assert (headers.get("Access-Control-Allow-Methods")
                 == "GET, POST, PUT, OPTIONS")
-        # #191: the blanket Allow-Headers grew the admin header (built in the
-        # one shared middleware spot, so every route's preflight carries it —
-        # inert on non-admin routes, same convention as the blanket Methods).
+        # #191: this broker has no admin_token, so its preflight is
+        # byte-identical to the build before the admin class existed. The
+        # enforcing shape (with X-Webterm-Admin) is pinned in
+        # tests/test_admin_gate.py.
         assert (headers.get("Access-Control-Allow-Headers")
-                == "Authorization, Content-Type, X-Webterm-Admin")
+                == "Authorization, Content-Type")
         assert headers.get("Access-Control-Max-Age") == "86400"
 
 

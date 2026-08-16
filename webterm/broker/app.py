@@ -3851,6 +3851,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 "error: admin_token equals the page auth_token -- the two "
                 "credential classes must be distinct, or every page holding "
                 "the token is an administrator")
+        # Header-safe, or the GUI can never satisfy the realm it just booted
+        # into: a browser cannot put a control character (or a non-Latin-1
+        # codepoint) in a Fetch header at all, and it trims surrounding
+        # whitespace -- so such a value would refuse every admin act with no
+        # way to comply. Whitespace-only fails the same way while also being
+        # the emptiest 16 characters available.
+        if _admin_cfg != _admin_cfg.strip() or not _admin_cfg.strip():
+            raise SystemExit(
+                "error: admin_token has leading/trailing whitespace (or is "
+                "whitespace only) -- browsers trim header values, so the GUI "
+                "could never send this token back")
+        if any(ord(c) < 0x21 or ord(c) > 0x7E for c in _admin_cfg):
+            raise SystemExit(
+                "error: admin_token must be printable ASCII without spaces "
+                "-- a browser cannot place other characters in the "
+                f"{ADMIN_HEADER} header, so the GUI could never satisfy the "
+                "gate")
         app.ctx.admin_token = _admin_cfg
         LOGGER.info(
             "admin credential class enabled: the %s header is required on %s "
@@ -4134,8 +4151,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # header to a non-enforcing broker is inert, but an enforcing one
             # whose preflight forgot to list it would 403 every cross-origin
             # admin write in the browser before the request ever left.
-            response.headers["Access-Control-Allow-Headers"] = \
+            # #191: the admin header is advertised ONLY by a broker that
+            # actually has the realm. An unconfigured broker stays
+            # byte-identical to the build before this class existed (its
+            # single trace is the boot warning), and no client ever sends
+            # the header to a broker whose /info did not advertise `admin`,
+            # so a conditional list costs nothing and keeps the
+            # absent-config invariant literally true.
+            response.headers["Access-Control-Allow-Headers"] = (
                 "Authorization, Content-Type, " + ADMIN_HEADER
+                if app.ctx.admin_token is not None
+                else "Authorization, Content-Type")
             response.headers["Access-Control-Max-Age"] = "86400"
             # Chrome Private Network Access: a public-site page fetching a
             # private-network broker must see this echoed on the preflight.
@@ -4454,8 +4480,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         admin = app.ctx.admin_token
         if admin is None:
             return None
+        # KEYS as well as values: `?<the-token>=1` carries the secret in the
+        # URL exactly as `?admin=<the-token>` does, and a URL is logged by
+        # proxies, kept in history, and sent as a Referer. Either shape is
+        # refused outright even when a correct header rides along -- the
+        # transport rule is about where the secret HAS BEEN, not about
+        # whether this particular request could have been authorized.
         for _key, val in request.query_args:
-            if auth.token_matches(val, admin):
+            if (auth.token_matches(val, admin)
+                    or auth.token_matches(_key, admin)):
                 LOGGER.warning("rejected admin token in query string on %s "
                                "from %s (header-only transport)",
                                label, request.ip)

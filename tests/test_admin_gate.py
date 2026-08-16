@@ -299,17 +299,22 @@ def test_admin_route_preflight_allows_the_admin_header(tmp_path, monkeypatch,
                                                         route):
     """The OPTIONS preflight for an ADMIN_ROUTES path lists ADMIN_HEADER in
     Access-Control-Allow-Headers -- otherwise a cross-origin admin write dies
-    in preflight before the browser ever sends the POST. Checked on BOTH an
-    enforcing and a non-enforcing broker: the Allow-Headers list is
-    unconditional, so a stray header from an old client sent to a
-    non-enforcing broker is inert, not a preflight failure."""
-    for app in (_admin_app(tmp_path, monkeypatch),
-               _make_app(tmp_path, monkeypatch)):
-        _, r = app.test_client.options(route)
-        assert r.status == 204
-        allow = [h.strip() for h in
-                r.headers.get("Access-Control-Allow-Headers", "").split(",")]
-        assert ADMIN_HEADER in allow
+    in preflight before the browser ever sends the POST. ONLY on an enforcing
+    broker: a broker with no admin_token has no realm to advertise, and its
+    preflight must stay byte-identical to the build before this class existed
+    (the absent-config invariant; the plain shape is pinned in
+    tests/test_broker_e2e.py::test_cors_preflight). No client sends the header
+    to a broker whose /info never advertised `admin`, so the narrower list
+    costs nothing."""
+    _, r = _admin_app(tmp_path, monkeypatch).test_client.options(route)
+    assert r.status == 204
+    allow = [h.strip() for h in
+            r.headers.get("Access-Control-Allow-Headers", "").split(",")]
+    assert ADMIN_HEADER in allow
+    _, r2 = _make_app(tmp_path, monkeypatch).test_client.options(route)
+    assert r2.status == 204
+    assert (r2.headers.get("Access-Control-Allow-Headers")
+            == "Authorization, Content-Type")
 
 
 def test_a_cross_origin_admin_write_survives_preflight_and_lands(tmp_path,

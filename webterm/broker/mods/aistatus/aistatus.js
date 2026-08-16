@@ -254,15 +254,39 @@
                     statusEl.textContent = 'asking this broker…';
                     let refusal = '';
                     try {
-                        const r = await hostFetch(localHost(),
-                            '/update/policy', {
-                                method: 'POST',
-                                headers:
-                                    { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(
-                                    { status_fetch_enabled: true }),
-                                timeoutMs: 15000,
-                            });
+                        const opts = {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(
+                                { status_fetch_enabled: true }),
+                            timeoutMs: 15000,
+                        };
+                        // #191: /update/policy is admin-gated on a broker
+                        // that configured the class, so this write rides the
+                        // page's shared admin flow when it exists (prompt,
+                        // held token, one honest retry). Feature-detected:
+                        // on a build without the helper — or a broker that
+                        // never advertised the class — this is the same
+                        // plain write it always was.
+                        let r;
+                        if (typeof adminGatedFetch === 'function') {
+                            const info = (typeof localInfo === 'function')
+                                ? await localInfo() : null;
+                            const g = await adminGatedFetch(localHost(),
+                                '/update/policy', opts,
+                                info && info.admin,
+                                'switch status checks on');
+                            if (g.aborted === 'cancelled') {
+                                grantBusy = false;
+                                btn.disabled = false;
+                                statusEl.textContent = '';
+                                return;
+                            }
+                            r = g.res;
+                        } else {
+                            r = await hostFetch(localHost(),
+                                '/update/policy', opts);
+                        }
                         let j = null;
                         try { j = await r.json(); } catch (_) {}
                         if (r.ok && j && j.ok) {
