@@ -112,9 +112,10 @@ def test_gate_off_refuses_on_a_warm_cache_too(tmp_path, monkeypatch):
     _, r = authed(app).get("/status/fetch?provider=anthropic")
     assert r.status == 200
     assert calls == ["anthropic"]            # the cache is now warm
-    # The revoke lands live. Flipped directly on ctx: the enforcement contract
-    # is that the route reads app.ctx per request; the consent-write wire for
-    # this key is the follow-up atom.
+    # The revoke lands live. Flipped directly on ctx ON PURPOSE even though
+    # the consent wire exists now (#189 A6): this pins the ROUTE's per-request
+    # ctx read independent of how the flip arrives. The wire's own
+    # convergence is pinned in the view-and-wire section below.
     app.ctx.status_fetch_enabled = False
     _, r = authed(app).get("/status/fetch?provider=anthropic")
     assert r.status == 503
@@ -316,3 +317,53 @@ def test_preflight_is_not_gated(tmp_path, monkeypatch):
     _, r = authed(app).options("/status/fetch")
     assert r.status == 204
     assert r.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+# ---- the view and the wire (#189, atom A6) ----------------------------------
+
+def test_info_publishes_the_gate_view_with_source(tmp_path, monkeypatch):
+    """The feature-detect contract: `update.policy.status_fetch` exists ONLY
+    on a build that gates the route, so a client reads its absence as "old
+    build, the route works ungated" and never probes (#157). Same _gate_view
+    shape as the three update gates it sits beside."""
+    _patch_fetch(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/info")
+    assert r.json["update"]["policy"]["status_fetch"] == {
+        "enabled": False, "source": "default", "mutable": True}
+    # A present config key owns the gate and says so: immutable in the view,
+    # whichever direction it points.
+    pinned = _make_app(tmp_path / "b", monkeypatch, status_fetch_enabled=True)
+    _, r = authed(pinned).get("/info")
+    assert r.json["update"]["policy"]["status_fetch"] == {
+        "enabled": True, "source": "config", "mutable": False}
+
+
+def test_a_policy_grant_converges_the_route_with_no_restart(tmp_path,
+                                                            monkeypatch):
+    """End to end on one process: 503, grant via POST /update/policy with the
+    direction NAMED, and the very next /status/fetch dials out -- then the
+    NAMED revoke refuses the next request even on the now-warm cache."""
+    calls = _patch_fetch(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/status/fetch?provider=anthropic")
+    assert r.status == 503
+    assert calls == []
+
+    _, w = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": True})
+    assert w.status == 200, w.json
+    assert w.json["update"]["policy"]["status_fetch"] == {
+        "enabled": True, "source": "stored", "mutable": True}
+
+    _, r = authed(app).get("/status/fetch?provider=anthropic")
+    assert r.status == 200
+    assert calls == ["anthropic"]
+
+    _, w = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": False})
+    assert w.status == 200
+    _, r = authed(app).get("/status/fetch?provider=anthropic")
+    assert r.status == 503
+    assert r.json["error"] == "status_fetch_disabled"
+    assert calls == ["anthropic"], "the revoked route still dialed out"

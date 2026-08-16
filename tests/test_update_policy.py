@@ -21,10 +21,12 @@ design and would otherwise be a comment nobody checks:
   one already queued on the single-flight lock -- otherwise the grant is
   withdrawn and then honoured anyway.
 * **A subset write must not erase its siblings.** The route accepts any
-  subset of the three recognized keys and merges over what is on disk,
+  subset of the four recognized keys and merges over what is on disk,
   re-read under its own lock, so granting one gate never clobbers a stored
   grant for another -- and never copies a config-owned value into the
-  sidecar.
+  sidecar. Since #189 the fourth key is ``status_fetch_enabled``, riding the
+  same seam: its direction is always NAMED in the body, never derived from
+  absence.
 
 No network anywhere: every test that could reach GitHub patches ``run_check``
 with a fake that raises if it is called at all.
@@ -433,7 +435,9 @@ def test_an_old_sidecar_never_escalates_into_apply_or_restart(tmp_path,
     assert r.json["update"]["policy"] == {
         "check": {"enabled": True, "source": "stored", "mutable": True},
         "apply": {"enabled": False, "source": "default", "mutable": True},
-        "restart": {"enabled": False, "source": "default", "mutable": True}}
+        "restart": {"enabled": False, "source": "default", "mutable": True},
+        "status_fetch": {"enabled": False, "source": "default",
+                         "mutable": True}}
 
 
 def test_a_present_but_malformed_key_corrupts_the_whole_sidecar(tmp_path,
@@ -896,3 +900,117 @@ def test_a_policy_revoke_beats_an_apply_already_queued_on_the_lock(
         assert revoked.json()["error"] == "update_apply_disabled"
     assert app.ctx.update_apply_claim is None, \
         "a refused admission must release the claim"
+
+
+# ---- the fourth key (#189): status_fetch_enabled on the same wire -----------
+#
+# GET /status/fetch's operator gate rides the SAME consent seam as the three
+# update gates: same sidecar, same route, same per-key layering. What these
+# tests pin is the write surface the enforcement atom deliberately left open:
+# the key is writable with its direction NAMED in the body (absence means
+# "leave it alone", never a direction to infer -- #187's lesson), a config pin
+# locks it with the byte-same 409 shape its siblings answer, a malformed value
+# gets its own bad_%s code, and a subset write no longer erases a stored
+# status grant -- the fail-closed state loss the three-key write surface used
+# to accept. Enforcement on the route itself stays in test_status_fetch_gate.
+
+
+def test_the_status_key_grants_and_revokes_live(tmp_path, monkeypatch):
+    """Direction NAMED both ways, converging on ctx in-request: the write's
+    response already reflects the flip, and no restart sits in between."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    assert app.ctx.status_fetch_enabled is False
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": True})
+    assert r.status == 200, r.json
+    assert r.json["update"]["policy"]["status_fetch"] == {
+        "enabled": True, "source": "stored", "mutable": True}
+    assert app.ctx.status_fetch_enabled is True
+    assert app.ctx.status_fetch_source == "stored"
+    # The loader demands check_enabled be present, so the write synthesizes
+    # False -- never a value nobody clicked (the no-minting rule).
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": False, "status_fetch_enabled": True}
+    # The revoke is a NAMED False, and it lands just as live.
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": False})
+    assert r.status == 200
+    assert app.ctx.status_fetch_enabled is False
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": False, "status_fetch_enabled": False}
+
+
+def test_a_stored_status_grant_outlives_the_process(tmp_path, monkeypatch):
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": True})
+    assert r.status == 200
+    fresh = _make_app(tmp_path, monkeypatch)
+    assert fresh.ctx.status_fetch_enabled is True
+    assert fresh.ctx.status_fetch_source == "stored"
+
+
+def test_a_config_pinned_status_gate_answers_policy_locked(tmp_path,
+                                                           monkeypatch):
+    """Byte-consistent with its siblings' refusal: 409 policy_locked naming
+    the key, nothing moved -- and ownership answers even for the very value
+    the gate already has."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch, status_fetch_enabled=False)
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": True})
+    assert r.status == 409, r.json
+    assert r.json["error"] == "policy_locked"
+    assert r.json["source"] == "config"
+    assert r.json["locked"] == ["status_fetch_enabled"]
+    assert app.ctx.status_fetch_enabled is False
+    assert not _sidecar(app).exists()
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": False})
+    assert r.status == 409
+    assert r.json["locked"] == ["status_fetch_enabled"]
+
+
+def test_only_a_real_bool_is_accepted_for_the_status_key(tmp_path,
+                                                         monkeypatch):
+    """Its own bad_%s code, last in the fixed validation order."""
+    _no_network(monkeypatch)
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).post("/update/policy",
+                            json={"status_fetch_enabled": "true"})
+    assert (r.status, r.json["error"]) == (400, "bad_status_fetch_enabled")
+    # Mixed offenders still answer the FIRST in the fixed order, so the new
+    # key sits at the END: a malformed sibling ahead of it answers.
+    _, r = authed(app).post("/update/policy",
+                            json={"restart_enabled": 1,
+                                  "status_fetch_enabled": "x"})
+    assert (r.status, r.json["error"]) == (400, "bad_restart_enabled")
+    assert app.ctx.status_fetch_enabled is False
+    assert not _sidecar(app).exists()
+
+
+def test_a_subset_write_no_longer_erases_a_stored_status_grant(
+        tmp_path, monkeypatch):
+    """THE state-loss fix this atom exists for. Before the write surface grew
+    the fourth key, any policy write rewrote the sidecar WITHOUT a stored
+    status_fetch_enabled -- and did not re-resolve the ctx, so the file and
+    the live gate silently disagreed until the next boot."""
+    _no_network(monkeypatch)
+    path = tmp_path / "webterm_update_policy.json"
+    path.write_text(json.dumps({"check_enabled": False,
+                                "status_fetch_enabled": True}),
+                    encoding="utf-8")
+    app = _make_app(tmp_path, monkeypatch)
+    assert app.ctx.status_fetch_enabled is True
+    assert app.ctx.status_fetch_source == "stored"
+    _, r = authed(app).post("/update/policy", json={"apply_enabled": True})
+    assert r.status == 200, r.json
+    stored = json.loads(_sidecar(app).read_text(encoding="utf-8"))
+    assert stored == {"check_enabled": False, "apply_enabled": True,
+                      "status_fetch_enabled": True}
+    # The gate an ABSENT key left alone is exactly where it was: absence is
+    # "leave it", never a direction (#187).
+    assert app.ctx.status_fetch_enabled is True
+    assert app.ctx.status_fetch_source == "stored"

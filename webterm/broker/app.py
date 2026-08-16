@@ -426,15 +426,16 @@ _UPDATE_POLICY_STORED = "stored"
 _UPDATE_POLICY_DEFAULT = "default"
 _UPDATE_POLICY_CORRUPT = "corrupt"
 
-#: The three recognized sidecar/wire keys, in the ONE fixed order every
+#: The four recognized sidecar/wire keys, in the ONE fixed order every
 #: consumer uses: POST /update/policy's validation order (first offender
 #: answers), its 409 ``locked`` list, and the on-disk key layout.
-#: This tuple is the WRITE surface. The loader below additionally recognizes
-#: ``status_fetch_enabled`` (#189) as a stored gate; until the policy write
-#: route grows that key, a policy write rewrites the file without it -- the
-#: same fail-closed state loss the loader's docstring already accepts from an
-#: old build, never an escalation.
-_UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled")
+#: This tuple is the WRITE surface, and it now matches the loader's read
+#: surface exactly: ``status_fetch_enabled`` (#189) rides the same consent
+#: seam as the three update gates, so a policy write re-merges a stored
+#: status grant instead of rewriting the file without it (the fail-closed
+#: state loss the previous build accepted is fixed, not merely tolerated).
+_UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled",
+                       "status_fetch_enabled")
 
 
 def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
@@ -535,12 +536,15 @@ def update_policy_view(app) -> Dict[str, Any]:
         # /update/apply: that route dropped its own origin gate (#205), so a
         # remote UI may now be offered an Update button that will not 403.
         "remote_applyable": True,
-        # The three-key view. The five flat fields above describe the CHECK
+        # The four-key view. The five flat fields above describe the CHECK
         # (they predate apply/restart joining the sidecar and older clients
         # read them), so they stay exactly as they are; `policy` is where a
-        # current client reads all three gates uniformly. `mutable` per gate
+        # current client reads all four gates uniformly. `mutable` per gate
         # means the same thing the flat one does: a present config key owns
-        # the gate, so no write can move it.
+        # the gate, so no write can move it. `status_fetch` (#189) is the
+        # feature-detect key for the gated /status/fetch route: a build whose
+        # /info lacks it is an OLD build that serves the route ungated, so a
+        # client must read absence as "the route works", never probe (#157).
         "policy": {
             "check": _gate_view(app.ctx.update_check_enabled,
                                 app.ctx.update_policy_source),
@@ -548,6 +552,8 @@ def update_policy_view(app) -> Dict[str, Any]:
                                 app.ctx.update_apply_source),
             "restart": _gate_view(app.ctx.restart_enabled,
                                   app.ctx.restart_source),
+            "status_fetch": _gate_view(app.ctx.status_fetch_enabled,
+                                       app.ctx.status_fetch_source),
         },
     }
 
@@ -566,7 +572,9 @@ RPC_TIMEOUT = 10.0
 # (here, #112) and GET /update/check (the version check, #182 -- see _update_check
 # and broker/update.py). Both are operator-gated SERVER-SIDE and off until opted
 # in: status_fetch_enabled (#189) and update_check_enabled (#182) respectively --
-# gates this process holds in its own state, because a mod shipping
+# gates this process holds in its own state (each a config key, or a stored
+# sidecar grant written by POST /update/policy; default false; published with
+# its source on GET /info), because a mod shipping
 # default-OFF governs only what the browser draws, not whether this process
 # dials out (#182's lesson, on the record for exactly this route). A third
 # egress path is POST /update/apply, which spawns a git subprocess to fetch from
@@ -6820,14 +6828,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # ---- update policy write (POST /update/policy, #182) ------------------
     # The GUI's way to grant -- or revoke -- what this broker may do to
     # itself: CHECK for updates (check_enabled), APPLY one (apply_enabled),
-    # RESTART the process (restart_enabled). One route for all three gates,
+    # RESTART the process (restart_enabled), dial the allowlisted STATUS
+    # hosts (status_fetch_enabled, #189). One route for all four gates,
     # and a body may carry any SUBSET of the keys: the ones it does not
     # mention are preserved exactly as the sidecar has them, so two operators
-    # flipping different gates cannot erase each other's grants. Opting in no
+    # flipping different gates cannot erase each other's grants. A gate's
+    # direction is always NAMED in the body -- an absent key means "leave it
+    # alone", never a direction to infer (#187's lesson: deriving direction
+    # from absence once read a grant as a revoke). Opting in no
     # longer means editing a JSON file and bouncing the process, and the flip
     # is LIVE in both directions: every consumer (_update_check, the apply
-    # route's two gate reads, restart_status) reads app.ctx per request, so
-    # the very next call sees the new verdict.
+    # route's two gate reads, restart_status, _status_fetch/_status_one)
+    # reads app.ctx per request, so the very next call sees the new verdict.
     #
     # REVOCATION IS PROSPECTIVE, and that is the whole contract. A revoke
     # gates ADMISSION: an apply already queued on update_lock re-reads
@@ -6907,7 +6919,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # gate for the value it already has is still asking the wrong owner.
         sources = {"check_enabled": app.ctx.update_policy_source,
                    "apply_enabled": app.ctx.update_apply_source,
-                   "restart_enabled": app.ctx.restart_source}
+                   "restart_enabled": app.ctx.restart_source,
+                   "status_fetch_enabled": app.ctx.status_fetch_source}
         locked = [key for key in changes
                   if sources[key] == _UPDATE_POLICY_CONFIG]
         if locked:
@@ -6972,14 +6985,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # in between leaves the sidecar ahead of memory, and the next boot
             # reads the sidecar and converges on what the client was told
             # landed. The reverse order would answer "enabled", then come back
-            # from a restart disabled. All six fields re-resolve through the
+            # from a restart disabled. All eight fields re-resolve through the
             # SAME per-key layering boot uses -- so a config-owned sibling
             # keeps its config verdict -- and are assigned back to back with
             # no await between them, so no request can observe a half-updated
             # policy.
             before = (app.ctx.update_check_enabled,
                       app.ctx.update_apply_enabled,
-                      app.ctx.restart_enabled)
+                      app.ctx.restart_enabled,
+                      app.ctx.status_fetch_enabled)
             app.ctx.update_check_enabled, app.ctx.update_policy_source = \
                 _resolve_update_gate(config, "update_check_enabled",
                                      merged, "check_enabled", False)
@@ -6989,12 +7003,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             app.ctx.restart_enabled, app.ctx.restart_source = \
                 _resolve_update_gate(config, "restart_enabled",
                                      merged, "restart_enabled", False)
+            app.ctx.status_fetch_enabled, app.ctx.status_fetch_source = \
+                _resolve_update_gate(config, "status_fetch_enabled",
+                                     merged, "status_fetch_enabled", False)
             after = (app.ctx.update_check_enabled,
                      app.ctx.update_apply_enabled,
-                     app.ctx.restart_enabled)
+                     app.ctx.restart_enabled,
+                     app.ctx.status_fetch_enabled)
             moved = ["%s %s" % (label, "enabled" if now else "disabled")
                      for label, was, now in zip(
-                         ("update checking", "update apply", "restart"),
+                         ("update checking", "update apply", "restart",
+                          "status fetch"),
                          before, after) if was != now]
             LOGGER.info("update policy via /update/policy: %s (%s)",
                         "; ".join(moved)
