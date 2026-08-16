@@ -932,6 +932,12 @@
                     // been re-pointed at a different machine meanwhile, the
                     // answer belongs to a broker that is no longer in this row.
                     const fp = hostFingerprint(hid);
+                    // The update view the screen was drawn from, captured
+                    // before the response lands in lastWrite —
+                    // restartGateMoved compares the broker's post-write
+                    // answer against this to decide whether the cached
+                    // /info restart facts just went stale (#188 item 1).
+                    const updBefore = updateCapFor(hid);
                     mark('busy', (opts && opts.busyNote)
                         || (wantOn ? 'switching checking on…'
                             : 'switching checking off…'));
@@ -984,6 +990,28 @@
                         return false;
                     }
                     policyOps.delete(opKey);
+                    // #188 item 1: a write that moved the restart gate
+                    // leaves /info's `restart` block — the facts the
+                    // Restart button and its reason words render from,
+                    // which this response does NOT carry — stale until
+                    // something re-reads /info (~a poll cycle). Re-read
+                    // it NOW, for this host only, through the same shared
+                    // fetcher every other read uses: one GET, never a
+                    // POST, and capabilityFor's read-supersedes-write
+                    // retirement keeps lastWrite's discipline intact (the
+                    // write committed before this read began, so the
+                    // fresh /info can only be newer). The id is
+                    // re-resolved per the rule above; the fingerprint
+                    // check just proved it still names the machine that
+                    // answered.
+                    if (restartGateMoved(changes, updBefore,
+                                         body && body.update)) {
+                        const fresh = updHost(hid);
+                        if (fresh) {
+                            try { await capabilityFor(fresh, true); }
+                            catch (_) {}
+                        }
+                    }
                     if (!opts || opts.poll !== false) {
                         await poll(hid, {});
                     }

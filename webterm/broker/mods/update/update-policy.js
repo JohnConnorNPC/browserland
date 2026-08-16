@@ -686,3 +686,53 @@
                     || null,
             };
         }
+
+        // ---- did THIS write move the restart gate? (#188 item 1,
+        // atom A3) ------------------------------------------------------
+        // The Restart button and its reason words render from /info's
+        // `restart` block (restartInfoFor above), which a POST
+        // /update/policy response does NOT carry — so a write that moves
+        // the restart gate leaves those facts stale until something
+        // re-reads /info (observed live at ~90s; "Check now" healed it).
+        // This is the predicate that decides whether setPolicy owes a
+        // targeted /info re-read of the one broker it just wrote to.
+        //
+        // Fires ONLY when the write BODY names restart_enabled — the
+        // named-direction rule (#187's lesson): a body that omits the
+        // key did not ask to move this gate, and absence is never read
+        // as a direction — AND the gate actually moved: the broker's
+        // post-write view (`afterUpd`, the whole-broker update view the
+        // response carries) disagrees with the pre-write view the screen
+        // was drawn from (`beforeUpd`). A write that named the key but
+        // landed on the value already shown moved nothing and spends
+        // nothing.
+        //
+        // Fail toward freshness on unreadable shapes: an AFTER the
+        // response did not carry falls back to the direction the write
+        // named (a write that succeeded put the gate where it asked),
+        // and a BEFORE this page cannot read means the screen was drawn
+        // from something unverifiable, so a restart-naming write reads
+        // as moved. One extra GET /info against a broker we just wrote
+        // to is display-only machinery; a stale disabled button wearing
+        // switched-off words under a row that says self-updating is ON
+        // is the bug.
+        function restartGateMoved(changes, beforeUpd, afterUpd) {
+            if (!changes || typeof changes !== 'object'
+                    || typeof changes.restart_enabled !== 'boolean') {
+                return false;
+            }
+            const gate = function (upd) {
+                const pol = (upd && typeof upd === 'object')
+                    ? upd.policy : null;
+                const g = (pol && typeof pol === 'object')
+                    ? pol.restart : null;
+                return (g && typeof g === 'object'
+                        && typeof g.enabled === 'boolean')
+                    ? g.enabled : null;
+            };
+            const after = gate(afterUpd);
+            const now = (after === null)
+                ? changes.restart_enabled : after;
+            const before = gate(beforeUpd);
+            return before === null || before !== now;
+        }

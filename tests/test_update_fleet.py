@@ -272,6 +272,17 @@ globalThis.hostFetch = async (host, path, opts) => {
         policyBodies.push(sent);
         const spec = POLICY[host.id];
         if (!spec || spec === 'throw') throw new TypeError('Failed to fetch');
+        // #188 item 1 (A3): the real broker COMMITS a policy write before
+        // answering, so any /info read that starts after the response
+        // carries the post-write view. A static INFO map would instead
+        // hand the targeted re-read the PRE-write record -- a lie no real
+        // server tells -- so a 2xx answer writes its view through.
+        if (spec.status >= 200 && spec.status < 300
+                && spec.body && spec.body.update
+                && INFO[host.id] && typeof INFO[host.id] === 'object') {
+            INFO[host.id] = Object.assign({}, INFO[host.id],
+                                          { update: spec.body.update });
+        }
         return {
             status: spec.status,
             ok: spec.status >= 200 && spec.status < 300,
@@ -1525,6 +1536,86 @@ CASES.self_update_remote = async () => {
     out.meanwhileOn = { ok: await commitRemoteSelfUpdate('peer', url,
                                                          'peer'),
                         calls: policyCalls.slice() };
+    return out;
+};
+
+// --- #188 item 1 (atom A3): restart-gate staleness repair ------------------
+// The pure predicate (restartGateMoved, update-policy.js) deciding whether a
+// policy write owes a targeted /info re-read, and the setPolicy wiring that
+// spends it: one GET, the written host only, never on a write that left the
+// restart gate where it stood, never on a refusal.
+CASES.restart_gate_moved = async () => {
+    const out = {};
+    const V = (restartOn) => SVIEW(SGATE(true, 'stored'),
+                                   SGATE(restartOn, 'stored')).update;
+    // The predicate proper. Direction must be NAMED in the write body --
+    // absence is never read as a direction (#187's lesson).
+    out.movedOn = restartGateMoved({ restart_enabled: true },
+                                   V(false), V(true));
+    out.movedOff = restartGateMoved({ restart_enabled: false },
+                                    V(true), V(false));
+    out.namedButStill = restartGateMoved({ restart_enabled: true },
+                                         V(true), V(true));
+    out.unnamed = restartGateMoved({ apply_enabled: true },
+                                   V(false), V(true));
+    out.emptyChanges = restartGateMoved({}, V(false), V(true));
+    out.nullChanges = restartGateMoved(null, V(false), V(true));
+    out.stringDirection = restartGateMoved({ restart_enabled: 'true' },
+                                           V(false), V(true));
+    // AFTER missing (response carried no update view): fall back to the
+    // direction the write named.
+    out.noAfterMoved = restartGateMoved({ restart_enabled: true },
+                                        V(false), null);
+    out.noAfterStill = restartGateMoved({ restart_enabled: true },
+                                        V(true), null);
+    // BEFORE unreadable: fail toward freshness.
+    out.noBefore = restartGateMoved({ restart_enabled: true },
+                                    null, V(true));
+    out.junkBefore = restartGateMoved({ restart_enabled: true },
+                                      'nope', V(true));
+
+    // The wiring, over the shipped setPolicy.
+    const prime = async (pol, policyAnswer) => {
+        reset();
+        fleet(['local']);
+        INFO = { local: INFO_MODERN(true, { policy: pol }) };
+        CHECK = { local: OK200({ state: 'current' }) };
+        POLICY = { local: policyAnswer };
+        await pollTick();
+        policyCalls.length = 0; policyBodies.length = 0;
+        infoCalls.length = 0;
+    };
+    const click = async () => {
+        const m = selfUpdateModelFor('local');
+        const grant = !m.on;
+        return setPolicy('local', policyChangesFor(m.postKeys, grant),
+            { kind: 'self', want: grant,
+              busyNote: selfUpdateBusyNote(grant) });
+    };
+    // Grant flips restart_enabled: exactly one /info re-read, this host,
+    // and the row model repaints from the POST-write facts.
+    await prime(SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(true, 'stored'),
+                          SGATE(true, 'stored')).update } });
+    out.grantOk = await click();
+    out.grantRereads = infoCalls.slice();
+    out.grantAfterOn = selfUpdateModelFor('local').on;
+    // Apply-only write (restart config-owned): the body never names
+    // restart_enabled, so no re-read is spent.
+    await prime(SPOL(SGATE(false, 'stored'), SCONF(true)),
+        { status: 200, body: { ok: true,
+            update: SVIEW(SGATE(true, 'stored'), SCONF(true)).update } });
+    out.applyOnlyOk = await click();
+    out.applyOnlyRereads = infoCalls.slice();
+    // A refusal commits nothing: no re-read.
+    await prime(SPOL(SGATE(false, 'default'), SGATE(false, 'default')),
+        { status: 409, body: { ok: false, error: 'policy_locked',
+            source: 'config', locked: ['restart_enabled'],
+            update: SVIEW(SGATE(false, 'default'),
+                          SCONF(false)).update } });
+    out.lockedOk = await click();
+    out.lockedRereads = infoCalls.slice();
     return out;
 };
 
@@ -3706,3 +3797,61 @@ def test_a_remote_apply_commit_re_verifies_the_machine_it_named(harness):
     assert r["relabelled"]["sent"] == [["peer", "b" * 40]]
     assert r["vanished"]["sent"] == [["peer", "b" * 40]]
     assert "nothing was sent" in r["vanished"]["notes"][-1][1][0]
+
+
+# ---- #188 item 1 (atom A3): restart facts refresh on a gate-moving write --
+
+
+def test_a_write_that_moves_the_restart_gate_refreshes_that_hosts_facts(
+        harness):
+    """The Restart button renders from /info's restart block, which a
+    policy-write response does NOT carry -- so a write that moved the
+    restart gate spends exactly one targeted /info re-read on the host
+    it wrote to, and only then. Direction must be NAMED in the body
+    (absence is never a direction), a write that landed on the value
+    already shown spends nothing, and a refusal spends nothing."""
+    r = run(harness, "restart_gate_moved")
+    # The pure predicate (update-policy.js).
+    assert r["movedOn"] is True
+    assert r["movedOff"] is True
+    assert r["namedButStill"] is False, (
+        "a write that left the gate where it stood owes no re-read")
+    assert r["unnamed"] is False, (
+        "a body that never named restart_enabled did not ask to move it")
+    assert r["emptyChanges"] is False
+    assert r["nullChanges"] is False
+    assert r["stringDirection"] is False, (
+        "a non-boolean direction is not a named direction")
+    # AFTER missing: fall back to the direction the write named.
+    assert r["noAfterMoved"] is True
+    assert r["noAfterStill"] is False
+    # BEFORE unreadable: fail toward freshness.
+    assert r["noBefore"] is True
+    assert r["junkBefore"] is True
+    # The wiring, over the shipped setPolicy: one GET, that host only.
+    assert r["grantOk"] is True
+    assert r["grantRereads"] == ["local"]
+    assert r["grantAfterOn"] is True, (
+        "the row must repaint from the post-write facts, not the "
+        "pre-write cache")
+    assert r["applyOnlyOk"] is True
+    assert r["applyOnlyRereads"] == []
+    assert r["lockedOk"] is False
+    assert r["lockedRereads"] == []
+
+
+def test_the_restart_refresh_wiring_is_pinned():
+    """setPolicy captures the pre-write view BEFORE the response can
+    land in lastWrite, asks the pure predicate, and spends the re-read
+    through the shared fetcher (a GET, never a POST) on a re-resolved
+    host."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("async function setPolicy"):
+              src.index("async function setChecking")]
+    assert "const updBefore = updateCapFor(hid);" in seg
+    assert "restartGateMoved(changes, updBefore," in seg
+    assert "body && body.update)" in seg
+    assert "const fresh = updHost(hid);" in seg
+    assert "await capabilityFor(fresh, true);" in seg
+    policy = MOD_POLICY_JS.read_text(encoding="utf-8")
+    assert "function restartGateMoved(changes, beforeUpd, afterUpd)" in policy
