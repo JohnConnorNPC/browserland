@@ -347,6 +347,8 @@ function reset() {
     infoCalls.length = 0;
     checkCalls.length = 0; consentSent = false;
     policyOps.clear(); lastWrite.clear();
+    lastWriteSent.clear();
+    for (const k of Object.keys(policyInfoWrote)) delete policyInfoWrote[k];
 }
 // policyOps is keyed hostId + '|' + kind since A5; every case here is about
 // the checking switch, so the reads go through this.
@@ -1685,6 +1687,45 @@ CASES.last_write_ordering = async () => {
     out.p3 = await setChecking('local', false, {});
     const later = updateCapFor('local');
     out.laterCheckOff = !!(later && later.policy.check.enabled === false);
+    return out;
+};
+
+// --- #188 remediation (CP1 critic finding 1): a FAILED re-read must not ----
+// retire the write's view. The real fetchModCatalog never throws -- on
+// transport failure it caches an 'unreachable' record OVER the good one --
+// so the A3 re-read's failure shape is a failure RECORD, and letting it
+// retire lastWrite would replace committed knowledge with ignorance seconds
+// after a successful POST.
+CASES.failed_reread_keeps_the_write = async () => {
+    const out = {};
+    const PGATE = (c, a, r) => ({ check: SGATE(c, 'stored'),
+                                  apply: SGATE(a, 'stored'),
+                                  restart: SGATE(r, 'stored') });
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(true, { policy: PGATE(true, true, true) }) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    await pollTick();
+    policyCalls.length = 0; policyBodies.length = 0; infoCalls.length = 0;
+    // The revoke write succeeds; the targeted re-read it triggers lands the
+    // failure record (mock: an absent INFO entry caches INFO_DOWN).
+    const vOff = INFO_MODERN(true,
+        { policy: PGATE(true, false, false) }).update;
+    POLICY = { local: { status: 200, body: { ok: true, update: vOff } } };
+    INFO = {};
+    out.ok = await setPolicy('local',
+        { apply_enabled: false, restart_enabled: false },
+        { kind: 'self', want: false, busyNote: 'x' });
+    out.rereadTried = infoCalls.slice();
+    const after = updateCapFor('local');
+    out.notNull = after !== null;
+    out.viewIsTheWrites = !!(after && after.policy
+        && after.policy.check.enabled === true
+        && after.policy.restart.enabled === false);
+    // An ANSWERED read still retires exactly as before.
+    INFO = { local: INFO_MODERN(true, { policy: PGATE(true, false, false) }) };
+    await capabilityFor(hostById('local'), true);
+    out.retiredOnAnswer = !lastWrite.has('local');
     return out;
 };
 
@@ -3958,3 +3999,28 @@ def test_the_write_ordering_wiring_is_pinned():
     assert "const writeSent = ++opSeq;" in seg
     assert "writeSent > hw.sent" in seg
     assert "seq: ++opSeq" in seg, "read-retirement must stay landing-stamped"
+
+
+def test_a_failed_reread_never_retires_the_writes_view(harness):
+    """CP1 critic remediation: the A3 re-read's failure shape is an
+    'unreachable' record cached OVER the good one (fetchModCatalog never
+    throws) -- only a read the broker ANSWERED may retire lastWrite, so a
+    transient /info failure seconds after a successful POST keeps every
+    row on the write's authoritative view instead of painting ignorance."""
+    r = run(harness, "failed_reread_keeps_the_write")
+    assert r["ok"] is True
+    assert r["rereadTried"] == ["local"], "the re-read must still be spent"
+    assert r["notNull"] is True, (
+        "a failed re-read retired the write and left NO update view")
+    assert r["viewIsTheWrites"] is True
+    assert r["retiredOnAnswer"] is True, (
+        "an answered read must keep retiring exactly as before")
+
+
+def test_the_answered_read_retirement_guard_is_pinned():
+    src = MOD_JS.read_text(encoding="utf-8")
+    seg = src[src.index("async function capabilityFor"):
+              src.index("async function poll")]
+    assert "const spoke = fetched && rec" in seg
+    assert "rec.state === 'ok' || rec.state === 'headless'" in seg
+    assert "if (spoke && lw && readSeq > lw.seq)" in seg

@@ -478,9 +478,25 @@
                         // and report a live broker as unreachable. A duplicate
                         // /info costs one request; a wrong verdict is the bug
                         // this whole mod is written around.
-                        try { await fetchModCatalog(host); } catch (_) {}
+                        let fetched = false;
+                        try { await fetchModCatalog(host); fetched = true; }
+                        catch (_) {}
+                        // Only a read the broker ANSWERED may retire a write:
+                        // a transport failure caches an 'unreachable' record
+                        // over the good one (fetchModCatalog never throws in
+                        // the shipped build), and letting that failure delete
+                        // the write's authoritative view would replace
+                        // committed knowledge with ignorance seconds after a
+                        // successful POST — a worse lie than the staleness
+                        // the #188 re-read exists to fix.
+                        const rec = modCatalogCache.get(host.id);
+                        const spoke = fetched && rec
+                            && (rec.state === 'ok' || rec.state === 'headless'
+                                || rec.state === 'unsupported');
                         const lw = lastWrite.get(host.id);
-                        if (lw && readSeq > lw.seq) lastWrite.delete(host.id);
+                        if (spoke && lw && readSeq > lw.seq) {
+                            lastWrite.delete(host.id);
+                        }
                     }
                     return capabilityFrom(effectiveRecord(host.id));
                 }
