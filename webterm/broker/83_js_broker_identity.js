@@ -357,6 +357,16 @@
                     : host.label + ' — ' + host.url;
                 name.title = name.textContent;
                 row.appendChild(name);
+                // #190: a host added after page load sits outside the CSP this
+                // page was served with — once the policy enforces, connecting
+                // needs a reload. Display-only; predicate + wording live in
+                // 56_js_hosts.js (the load-time snapshot).
+                if (hostAddedAfterLoad(host.id)) {
+                    const added = document.createElement('span');
+                    added.className = 'host-added-note';
+                    added.textContent = HOST_ADDED_NOTE;
+                    row.appendChild(added);
+                }
                 // #107: badge the START (+) default host (mirrors the profiles
                 // editor's `set-profile-badge`). Shown for the local row too.
                 if (host.id === curId) {

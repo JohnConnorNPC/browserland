@@ -37,6 +37,25 @@
             for (const h of getHosts()) { if (h.id === id) return h; }
             return null;
         }
+        // #190: a host added after this page's boot can't be reached until
+        // reload. The CSP is per-document — a loaded page keeps the
+        // connect-src it was served with, and adding a host mid-session only
+        // lands it in the broker's NEXT response — so the raw symptom is a
+        // fetch() TypeError that reads exactly like the host being down.
+        // prefs._hosts never rides /state (52_js_state_sync.js's _stateBlob
+        // deliberately excludes it — hosts are per-browser), so the add flow
+        // in this fragment's orbit is the only way a host record can arrive;
+        // a one-time snapshot of every id already present when this fragment
+        // first ran (i.e. already in localStorage at load) covers it.
+        // Display-only: hostAddedAfterLoad() is a predicate for whichever
+        // layer renders a host row to show HOST_ADDED_NOTE next to a
+        // matching one — it never gates a connection attempt, and the
+        // connection may in fact still work until the CSP starts enforcing.
+        const _hostIdsAtLoad = new Set(getHosts().map(h => h.id));
+        const HOST_ADDED_NOTE = 'added — reload to connect';
+        function hostAddedAfterLoad(id) {
+            return typeof id === 'string' && id !== '' && !_hostIdsAtLoad.has(id);
+        }
         // #107: the host the START (+) button targets. Empty / 'local' / a removed
         // id all fall back to the local broker, so a deleted host never bricks
         // START. Resolution is deferred here (not in normalizeSettings) — same

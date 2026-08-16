@@ -125,6 +125,24 @@ def test_default_launch_host_wired_into_page():
         assert sentinel in INDEX_HTML, f"missing #107 sentinel: {sentinel!r}"
 
 
+def test_host_added_after_load_note_wired_into_page():
+    # #190 (client half): the CSP is per-document, so a host added mid-session
+    # is unreachable from this document until reload -- the raw symptom is a
+    # fetch() TypeError indistinguishable from network-down. 56_js_hosts.js
+    # snapshots the host ids present at load and exposes a predicate + the
+    # note string for a row-render layer to show; lock the served-page
+    # symbols since no JS test runner exists (pytest only).
+    for sentinel in (
+        "const _hostIdsAtLoad",             # #190 one-time boot snapshot (56)
+        "function hostAddedAfterLoad",      # #190 predicate (56)
+        "const HOST_ADDED_NOTE",            # #190 the affordance's note text (56)
+        "added — reload to connect",   # #190 the pinned wording itself
+        "hostAddedAfterLoad(host.id)",      # #190 the row render consumes it (83)
+        "host-added-note",                  # #190 the rendered span's class (83)
+    ):
+        assert sentinel in INDEX_HTML, f"missing #190 sentinel: {sentinel!r}"
+
+
 def test_label_order_editor_wired_into_page():
     # #123: the configurable taskbar/title label order. No JS test runner exists
     # (pytest only), so lock the served-page symbols: the shell the editor mounts
