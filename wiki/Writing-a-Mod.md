@@ -871,10 +871,10 @@ reason is a support ticket: `too_large` · `bad_json` · `bad_mod_id` ·
 `bad_file_name` · `reserved_file_name` · `too_many_files` · `file_too_large` ·
 `total_too_large` · `bad_encoding` · `bad_scripts` · `bad_styles` ·
 `bad_requires` · `bad_manifest_field` · `unknown_manifest_key` ·
-`css_external_reference` · `too_many_mods` (409) · `write_failed` (500).
+`css_external_reference` · `undeclared_capability` · `too_many_mods` (409) ·
+`write_failed` (500).
 `modinstall.ERROR_STATUS` is the authoritative map; a client must tolerate a
-code it has not seen. (`undeclared_capability`, below, is a real refusal but
-is not in that map yet — it answers the table's 400 default.)
+code it has not seen.
 
 **The `permissions` capability lint (#193).** Unlike `tiers` (§5), which is a
 self-reported claim nothing checks, `permissions` is a **closed vocabulary**
