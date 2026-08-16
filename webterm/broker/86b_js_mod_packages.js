@@ -1145,6 +1145,162 @@
             });
         }
 
+        // ---- admin credential class (#191) ----------------------------------
+        // When a broker sets `admin_token`, its /info carries
+        // `admin: {required: true, routes: [...]}` and every route on that
+        // list refuses the page token alone with 403 admin_required. The
+        // credential travels ONLY in the X-Webterm-Admin header — never a
+        // URL, never Authorization (that slot already carries the page token
+        // on remote wires; two credential classes must not share one slot).
+        //
+        // Detection is FEATURE-BASED off /info data the page already holds
+        // (localInfo()'s memo for the serving broker, modCatalogCache for a
+        // Control Panel peer) — never a probe: probing the POST IS the write.
+        // An /info with no `admin` key is an old or non-enforcing build and
+        // gets today's wire, byte for byte: no prompt, no header.
+        //
+        // The token is CLOSURE-HELD for this page session and nowhere else:
+        // not localStorage (same-origin-readable by every mod), not the
+        // prefs settings blob (it SYNCS, #153), not the /state blob, not a
+        // URL.
+        // A reload forgets it; that is the design. What this cannot do — the
+        // issue is explicit — is hide the prompt from a hostile mod already
+        // live in this page; it ends the STANDING capability, nothing more.
+        function _adminHeld() {
+            if (!_adminHeld._m) _adminHeld._m = Object.create(null);
+            return _adminHeld._m;
+        }
+        // Does `adminInfo` (an /info `admin` value, or null) gate `route`?
+        // No admin key, or required !== true -> no. A routes list narrows
+        // enforcement to its members; a build that omits the list is read as
+        // enforcing everywhere — fail toward one needless prompt, never
+        // toward a header-less write that can only 403.
+        function _adminRequiredFor(adminInfo, route) {
+            if (!adminInfo || typeof adminInfo !== 'object') return false;
+            if (adminInfo.required !== true) return false;
+            if (Array.isArray(adminInfo.routes)) {
+                return adminInfo.routes.indexOf(route) !== -1;
+            }
+            return true;
+        }
+        // The serving broker's /info `admin` value (or null). Rides the
+        // memoized boot fetch — this never issues a request of its own.
+        async function _localAdminInfo() {
+            const j = await localInfo();
+            return (j && j.admin && typeof j.admin === 'object')
+                ? j.admin : null;
+        }
+        // The ONE styled admin-token prompt — built on openDialog, so it
+        // matches every other dialog here. Resolves the typed token, or null on
+        // cancel/Escape/backdrop/empty. `refused` selects the honest
+        // re-prompt wording after a 403 admin_required on a held token.
+        function _adminTokenPrompt(host, act, refused) {
+            let input = null;
+            const label = (host && (host.label || host.url)) || 'this broker';
+            return openDialog({
+                title: 'Admin token required',
+                body: function (c) {
+                    const p = document.createElement('div');
+                    p.className = 'app-dialog-msg';
+                    p.textContent = refused
+                        ? (label + ' refused the admin token this page was '
+                            + 'holding — it is wrong or stale. Enter it again '
+                            + 'to ' + act + ', or cancel.')
+                        : (label + ' requires its admin token to ' + act
+                            + '. The page password is not enough for this — '
+                            + 'that broker gates administration behind a '
+                            + 'separate credential (admin_token in its '
+                            + 'broker_config.json).');
+                    c.appendChild(p);
+                    const row = document.createElement('div');
+                    row.className = 'set-row app-dialog-field';
+                    input = document.createElement('input');
+                    // type=password: the value must never be readable off a
+                    // shared or streamed screen.
+                    input.type = 'password';
+                    input.autocomplete = 'off';
+                    row.appendChild(input);
+                    c.appendChild(row);
+                    const keep = document.createElement('div');
+                    keep.className = 'set-hint';
+                    keep.textContent = 'Held in this page until you reload — '
+                        + 'never saved to this browser, never synced.';
+                    c.appendChild(keep);
+                    // openDialog focuses its own field inputs or the primary
+                    // button; this input is body-built, so focus it once the
+                    // dialog is actually in the DOM.
+                    setTimeout(function () {
+                        try { input.focus(); } catch (_) {}
+                    }, 0);
+                },
+                buttons: [
+                    { label: 'Continue', value: true, primary: true },
+                    { label: 'Cancel', value: false },
+                ],
+            }).then(function (r) {
+                if (!r || !r.value || !input) return null;
+                return (typeof input.value === 'string' && input.value)
+                    ? input.value : null;
+            });
+        }
+        // A 403 whose body says admin_required — the ONLY answer that means
+        // "the admin credential was absent or wrong". A 401 stays the
+        // page-token realm (the login overlay's business) and must never
+        // open this prompt. clone() so the caller can still read the body.
+        async function _adminRefused(res) {
+            if (!res || res.status !== 403) return false;
+            let j = null;
+            try { j = await res.clone().json(); } catch (_) { return false; }
+            return !!(j && j.error === 'admin_required');
+        }
+        function _adminPost(host, route, opts, tok) {
+            const o = Object.assign({}, opts || {});
+            const headers = new Headers(o.headers || undefined);
+            headers.set('X-Webterm-Admin', tok);
+            o.headers = headers;
+            return hostFetch(host, route, o);
+        }
+        // One admin-aware POST to a gated route. Resolves {res, aborted}:
+        //   aborted null        — `res` is the wire answer; handle as always
+        //   aborted 'cancelled' — the operator declined the prompt; NOTHING
+        //                         was sent
+        //   aborted 'refused'   — sent and answered 403 admin_required (after
+        //                         the one re-prompt, or the re-prompt was
+        //                         declined); `res` is that 403. An admin
+        //                         refusal happens before the broker reads a
+        //                         body or takes a lock, so nothing was
+        //                         written.
+        // Rejects only where hostFetch itself rejects, so every caller's
+        // existing outcome-unknown path keeps its meaning.
+        async function adminGatedFetch(host, route, opts, adminInfo, act) {
+            if (!_adminRequiredFor(adminInfo, route)) {
+                // Old / non-enforcing broker: today's wire, byte for byte.
+                return { res: await hostFetch(host, route, opts),
+                         aborted: null };
+            }
+            const held = _adminHeld();
+            const key = (host && host.id) ? host.id : 'local';
+            let tok = held[key];
+            if (!tok) {
+                tok = await _adminTokenPrompt(host, act, false);
+                if (!tok) return { res: null, aborted: 'cancelled' };
+                held[key] = tok;
+            }
+            let res = await _adminPost(host, route, opts, tok);
+            if (!(await _adminRefused(res))) return { res: res, aborted: null };
+            // The held token is wrong or stale. Clear it, ask ONCE more.
+            delete held[key];
+            tok = await _adminTokenPrompt(host, act, true);
+            if (!tok) return { res: res, aborted: 'refused' };
+            held[key] = tok;
+            res = await _adminPost(host, route, opts, tok);
+            if (await _adminRefused(res)) {
+                delete held[key];
+                return { res: res, aborted: 'refused' };
+            }
+            return { res: res, aborted: null };
+        }
+
         // ---- uninstall ------------------------------------------------------
         function _modUninstallDialog(id) {
             if (_modOpBusy(id)) return;
@@ -1218,11 +1374,31 @@
         async function _modUninstallPost(id, purge) {
             let r = null;
             try {
-                r = await hostFetch(localHost(), '/mods/uninstall', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: id, purge: purge }),
-                });
+                // #191: when this broker enforces the admin class, the write
+                // rides adminGatedFetch (prompt + X-Webterm-Admin header);
+                // when it does not, that call IS today's hostFetch.
+                const gated = await adminGatedFetch(localHost(),
+                    '/mods/uninstall', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: id, purge: purge }),
+                    }, await _localAdminInfo(), 'uninstall ' + id);
+                if (gated.aborted === 'cancelled') {
+                    _modOpResult('Uninstall cancelled',
+                        ['this broker requires its admin token for an '
+                         + 'uninstall, and none was entered — nothing was '
+                         + 'sent. ' + id + ' is still installed.'], false);
+                    return;
+                }
+                if (gated.aborted === 'refused') {
+                    _modOpResult('Uninstall refused',
+                        ['this broker requires its admin token and did not '
+                         + 'accept the one entered. An admin refusal happens '
+                         + 'before anything is read or written — ' + id
+                         + ' is still installed.'], false);
+                    return;
+                }
+                r = gated.res;
             } catch (e) {
                 // The POST may have LANDED and only its answer been lost. This
                 // client is not entitled to say what happened.
@@ -1912,11 +2088,31 @@
             }
             let r = null;
             try {
-                r = await hostFetch(localHost(), '/mods/install', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: body,
-                });
+                // #191: same admin gate as the uninstall — feature-detected
+                // off the memoized /info, byte-identical wire when this
+                // broker does not enforce the admin class.
+                const gated = await adminGatedFetch(localHost(),
+                    '/mods/install', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: body,
+                    }, await _localAdminInfo(), 'install a mod');
+                if (gated.aborted === 'cancelled') {
+                    _modOpResult('Install cancelled',
+                        ['this broker requires its admin token for an '
+                         + 'install, and none was entered — nothing was '
+                         + 'sent.'], false);
+                    return;
+                }
+                if (gated.aborted === 'refused') {
+                    _modOpResult('Install refused',
+                        ['this broker requires its admin token and did not '
+                         + 'accept the one entered. An admin refusal happens '
+                         + 'before the package is read — nothing was '
+                         + 'written.'], false);
+                    return;
+                }
+                r = gated.res;
             } catch (_) {
                 _modOpResult('Install outcome unknown',
                     _modUnknownOutcomeLines('install'), true);

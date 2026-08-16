@@ -3066,10 +3066,16 @@ def test_mod_sync_mod_packaged_and_manifest_agrees():
     assert "clientId: CLIENT_ID" in src
     # 2. A pin write goes through core's BATCH path (one POST /mods/policy per
     #    broker, under that broker's own lock), shared with #157's per-host pin
-    #    editor rather than a second way to set the same field.
+    #    editor rather than a second way to set the same field. #191 carved the
+    #    ONE deliberate exception: an enforcing target's write must carry
+    #    X-Webterm-Admin, which the shared helper cannot, so mod-sync owns an
+    #    admin variant of the same wire -- exactly one occurrence of the route
+    #    string, inside that variant (pinned further in
+    #    test_mod_sync_admin_class_detect_prompt_header_outcome), and every
+    #    non-admin write still rides saveModPins.
     assert "saveModPins(" in code
-    assert "'/mods/policy'" not in code, \
-        "mod-sync must not POST /mods/policy itself -- it shares saveModPins"
+    assert code.count("'/mods/policy'") == 1, \
+        "mod-sync POSTs /mods/policy itself ONLY in its #191 admin variant"
     # A peer's catalog is read through the SHARED fetcher, so this mod and the
     # #157 pane can never disagree about what a broker serves.
     assert "await fetchModCatalog(host)" in code
@@ -7053,3 +7059,138 @@ def test_launch_host_items_and_launch_profile_respect_hidden_hosts():
     assert "hostMenuState(pollStateFor" in prof
     assert "fresh.hidden" in prof
     assert "openInfoModal" in prof
+
+
+# --------------------------------------------------------------------------- #
+# admin credential class -- the core GUI prompt flows (#191)
+# --------------------------------------------------------------------------- #
+
+def _cp_src():
+    return (BROKER_DIR / "81_js_control_panel.js").read_text(encoding="utf-8")
+
+
+def _admin_block():
+    """The whole #191 machinery in 86b: its section header up to the uninstall
+    section that follows it. The never-persist assertions run over this slice
+    so a storage call ANYWHERE in the new code path fails, not just inside one
+    pinned function."""
+    src = _packages_src()
+    return src[src.index("// ---- admin credential class (#191)"):
+               src.index("// ---- uninstall ---")]
+
+
+def test_admin_machinery_present_and_served():
+    block = _admin_block()
+    for sym in ("function _adminHeld(", "function _adminRequiredFor(",
+                "async function _localAdminInfo(",
+                "function _adminTokenPrompt(", "async function _adminRefused(",
+                "function _adminPost(", "async function adminGatedFetch("):
+        assert sym in block, f"missing #191 symbol: {sym!r}"
+    # The credential travels ONLY in the dedicated header -- never
+    # Authorization (the page token's slot) and never a URL.
+    assert "headers.set('X-Webterm-Admin', tok);" in block
+    # And it all reaches the served page.
+    assert "async function adminGatedFetch(" in INDEX_HTML
+    assert "X-Webterm-Admin" in INDEX_HTML
+
+
+def test_admin_detection_is_info_based_and_old_brokers_keep_todays_wire():
+    # Feature-detect off the /info `admin` key the page already holds -- an
+    # absent key or required !== true is "page-token wire", full stop.
+    det = _frag_fn(_packages_src(), "function _adminRequiredFor(")
+    assert "if (adminInfo.required !== true) return false;" in det
+    assert "adminInfo.routes.indexOf(route) !== -1" in det
+    # The local read rides localInfo()'s memoized boot fetch: no new request,
+    # so detection can never become a probe.
+    loc = _frag_fn(_packages_src(), "async function _localAdminInfo(")
+    assert "await localInfo()" in loc and "hostFetch" not in loc
+    # Non-enforcing branch: the detect comes FIRST and returns the caller's
+    # opts through plain hostFetch untouched -- no prompt, no header, byte
+    # identical to today.
+    gate = _frag_fn(_packages_src(), "async function adminGatedFetch(")
+    assert "if (!_adminRequiredFor(adminInfo, route))" in gate
+    assert "return { res: await hostFetch(host, route, opts)," in gate
+    assert gate.index("if (!_adminRequiredFor(adminInfo, route))") \
+        < gate.index("_adminTokenPrompt")
+
+
+def test_admin_token_is_closure_held_and_never_persisted():
+    block = _admin_block()
+    # The session hold is a function-object memo inside the page's one closure
+    # scope -- forgotten on reload by construction.
+    assert "_adminHeld._m = Object.create(null);" in block
+    # No storage API, no pref, no synced blob, no URL may see the credential.
+    # Call-shaped pins (the comments name localStorage as the thing NOT used).
+    for banned in ("localStorage.", "localStorage[", "sessionStorage",
+                   "savePrefs(", "prefs._", "getSettings(", "putHostState",
+                   "document.cookie", "history.replaceState", "_stateBlob",
+                   "serverStore", "URLSearchParams", "console.log("):
+        assert banned not in block, \
+            f"#191 admin machinery must never touch {banned!r}"
+    # The prompt input is a password field: the value must not be readable off
+    # a shared or streamed screen.
+    prompt = _frag_fn(_packages_src(), "function _adminTokenPrompt(")
+    assert "input.type = 'password';" in prompt
+    assert "input.autocomplete = 'off';" in prompt
+    # Honest lifecycle words in the dialog itself.
+    assert "'Held in this page until you reload — '" in prompt
+    assert "+ 'never saved to this browser, never synced.'" in prompt
+
+
+def test_admin_403_clears_the_held_token_and_reprompts_exactly_once():
+    gate = _frag_fn(_packages_src(), "async function adminGatedFetch(")
+    # First prompt (no held token), then the ONE refused re-prompt.
+    assert gate.count("_adminTokenPrompt(host, act, false)") == 1
+    assert gate.count("_adminTokenPrompt(host, act, true)") == 1
+    # A refused held token is cleared before the re-prompt, and cleared again
+    # when the second attempt is also refused.
+    assert gate.count("delete held[key];") == 2
+    # Honest sentinels: cancelled = nothing sent; refused = a 403 landed.
+    assert "return { res: null, aborted: 'cancelled' };" in gate
+    assert gate.count("aborted: 'refused' }") == 2
+    # Only a 403 whose body says admin_required means "wrong/missing admin
+    # credential". A 401 stays the page-token realm and never opens the
+    # prompt; clone() keeps the body readable for the caller.
+    ref = _frag_fn(_packages_src(), "async function _adminRefused(")
+    assert "if (!res || res.status !== 403) return false;" in ref
+    assert "j.error === 'admin_required'" in ref
+    assert "res.clone().json()" in ref
+
+
+def test_admin_gate_wired_at_every_core_gated_route_post():
+    pkg = _packages_src()
+    # The Mods pane's uninstall and install both ride the gate against the
+    # SERVING broker, with honest per-outcome words.
+    un = _frag_fn(pkg, "async function _modUninstallPost(")
+    assert "adminGatedFetch(localHost()," in un
+    assert "'/mods/uninstall'" in un and "await _localAdminInfo()" in un
+    assert "gated.aborted === 'cancelled'" in un
+    assert "gated.aborted === 'refused'" in un
+    inst = _frag_fn(pkg, "async function _modInstallRun(")
+    assert "adminGatedFetch(localHost()," in inst
+    assert "'/mods/install'" in inst and "await _localAdminInfo()" in inst
+    assert "'install a mod'" in inst
+    # The Control Panel's per-host pin editor: detection off the /info this
+    # section already fetched (modCatalogCache), never a probe; the quiet
+    # fan-out path (mod-sync's bulk apply) keeps today's header-less wire
+    # until its own #191 migration.
+    cp = _cp_src()
+    pins = _frag_fn(cp, "async function saveModPins(host, set, opts) {")
+    assert "r = await hostFetch(host, '/mods/policy', wire);" in pins
+    assert "adminGatedFetch(host, '/mods/policy'," in pins
+    assert "modCatalogCache.get(host.id)" in pins
+    assert "error: 'admin_cancelled'" in pins
+    assert "error: 'admin_required'" in pins
+    assert pins.index("if (quiet)") < pins.index("adminGatedFetch")
+    # The catalog fetch captures the peer's `admin` key beside update/restart,
+    # e1ca8e6-style: a missing key reads as "old build", never as a refusal.
+    cat = _frag_fn(cp, "async function fetchModCatalog(host) {")
+    assert "rec.admin = (j.admin && typeof j.admin === 'object')" in cat
+    assert "admin: null" in cat
+    # No core fragment touches /mods/rescan today (grep-verified at #191
+    # time); if a rescan control appears it must take the same gate, so its
+    # mere mention here should send its author to adminGatedFetch.
+    for frag in sorted(BROKER_DIR.glob("[58]*_js_*.js")):
+        src = frag.read_text(encoding="utf-8")
+        assert "/mods/rescan" not in src, \
+            f"{frag.name} touches /mods/rescan -- route it through adminGatedFetch"

@@ -715,7 +715,7 @@
         // below: a render must never re-fetch after a failed fetch, or a sleeping
         // broker turns the section into a hot retry loop. Re-selecting the tab is
         // the retry, and it is a deliberate one.
-        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart}
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart, admin}
         const modCatalogFetching = new Set();   // hostIds with an in-flight GET
         // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
         // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
@@ -734,7 +734,8 @@
         }
         async function fetchModCatalog(host) {
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
-                          policy: {}, update: null, restart: null };
+                          policy: {}, update: null, restart: null,
+                          admin: null };
             try {
                 const r = await hostFetch(host, '/info', { cache: 'no-store' });
                 if (r.status === 401 || r.status === 403) {
@@ -761,6 +762,13 @@
                         // key as "no capability reported" rather than as "no".
                         rec.restart = (j.restart && typeof j.restart === 'object')
                             ? j.restart : null;
+                        // #191: whether that broker gates its admin routes
+                        // behind the admin credential class, and which
+                        // routes. Published only by a build that enforces it,
+                        // so a missing key reads as "page-token wire"
+                        // (today's), never as a refusal.
+                        rec.admin = (j.admin && typeof j.admin === 'object')
+                            ? j.admin : null;
                     } else {
                         // A pre-#157 broker answers /info fine and simply lacks the
                         // keys. This is WHY the catalog rides /info: a brand-new
@@ -846,11 +854,44 @@
             }
             let r;
             try {
-                r = await hostFetch(host, '/mods/policy', {
+                const wire = {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ set: set }),
-                });
+                };
+                if (quiet) {
+                    // #191: the fan-out path (mod-sync's bulk apply) keeps
+                    // today's wire — no admin header, no prompt; a prompt
+                    // storm mid-fan-out is exactly what quiet exists to
+                    // prevent. An enforcing target answers 403 admin_required
+                    // and the caller reports it per target like any other
+                    // refusal; migrating that path to the per-push prompt is
+                    // #191's mod-sync half, not this one.
+                    r = await hostFetch(host, '/mods/policy', wire);
+                } else {
+                    // #191: feature-detected off the /info this section
+                    // already fetched into modCatalogCache (the pin rows only
+                    // exist after that fetch painted them) — never a probe.
+                    const cat = modCatalogCache.get(host.id);
+                    const gated = await adminGatedFetch(host, '/mods/policy',
+                        wire, (cat && cat.admin) || null,
+                        'change its mod policy');
+                    if (gated.aborted === 'cancelled') {
+                        showNotice('the mod policy on '
+                            + (host.label || host.url) + ' was not changed — '
+                            + 'that broker requires its admin token, and none '
+                            + 'was entered');
+                        return { ok: false, error: 'admin_cancelled' };
+                    }
+                    if (gated.aborted === 'refused') {
+                        showNotice('could not change the mod policy on '
+                            + (host.label || host.url) + ' — that broker did '
+                            + 'not accept the admin token, so nothing was '
+                            + 'written');
+                        return { ok: false, error: 'admin_required' };
+                    }
+                    r = gated.res;
+                }
             } catch (e) {
                 if (!quiet) {
                     showNotice('could not reach ' + (host.label || host.url)
