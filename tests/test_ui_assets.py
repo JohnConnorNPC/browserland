@@ -1380,10 +1380,16 @@ def test_ctx_extender_registry_is_the_seam_in_the_loader():
     # fragment declared its own the later declaration would win and the earlier
     # fragment's ctx members would silently vanish.
     loader = _loader_src()
+    ctx_ext = _ctx_ext_src()
+    # The registry itself moved to 86c (where every ctx extension lives); the
+    # loader keeps only the CALL, so makeCtx stays the one place a ctx is built.
     for sym in ("const _ctxExtenders = [];",
                 "function _registerCtxExtender(fn) {",
                 "function _applyCtxExtenders(ctx, rec) {"):
-        assert sym in loader, f"missing #194 registry symbol: {sym!r}"
+        assert sym in ctx_ext, f"missing #194 registry symbol: {sym!r}"
+        assert sym not in loader, (
+            f"{sym!r} is back in the loader -- it belongs in 86c, and the "
+            f"loader has no room for it")
     # makeCtx builds the v1 object, applies the registry to THAT object, and
     # returns it -- the apply must precede the return, or an extender's members
     # would never reach the mod.
@@ -1392,7 +1398,8 @@ def test_ctx_extender_registry_is_the_seam_in_the_loader():
     assert body.index("_applyCtxExtenders(ctx, rec);") < body.index("return ctx;")
     # An extender is handed (ctx, rec) -- arguments, not closure: a companion
     # fragment shares the one <script> scope but NOT makeCtx's per-mod locals.
-    assert "fn(ctx, rec);" in _frag_fn(loader, "function _applyCtxExtenders(ctx, rec) {")
+    assert "fn(ctx, rec);" in _frag_fn(
+        ctx_ext, "function _applyCtxExtenders(ctx, rec) {")
     # Additive: a new ctx family does not move the contract version (a bump
     # would refuse every mod that pins v1).
     assert "ctxVersion: 1," in loader
@@ -1440,7 +1447,7 @@ def _ctx_registry_source():
     """The shipped ctx-extender registry range, verbatim. Declaration-only (an
     array + two functions), which is what makes it runnable outside a browser;
     the markers keep the range honest."""
-    src = _loader_src()
+    src = _ctx_ext_src()
     start = src.index(_CTX_EXT_SLICE_START)
     end = src.index(_CTX_EXT_SLICE_END)
     assert start < end, "slice markers out of order"

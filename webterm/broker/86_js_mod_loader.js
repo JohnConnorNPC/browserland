@@ -211,72 +211,12 @@
             for (const fn of fns) { try { fn(); } catch (_) {} }
         }
 
-        // ---- ctx-extender registry (#194) -----------------------------------
-        // The seam a LATER ctx surface is added through: its own ordered
-        // fragment (86c_js_mod_ctx_ext.js and successors) declares a NAMED
-        // function and registers it at top level —
-        //
-        //     function _ctxWindowsFactory(ctx, rec) { ctx.windows.createAppWindow = …; }
-        //     _registerCtxExtender(_ctxWindowsFactory);
-        //
-        // — and makeCtx applies every registered extender to the ctx object it
-        // is building. That is what lets this fragment stop growing: it sits at
-        // the #68 2500-line cap, so new surface CANNOT land here, and a registry
-        // means each extension fragment owns its own members. One shared
-        // extension function could not compose — the moment a second fragment
-        // declared its own, the later declaration would win and the earlier
-        // fragment's members would silently vanish.
-        //
-        // Four properties the extension fragments are entitled to rely on:
-        //   - ORDER. Extenders run in registration order, which is _ORDERED
-        //     (fragment) order: every fragment's top-level code runs in that
-        //     order inside the one <script>, so a later fragment sees what an
-        //     earlier one put on the ctx.
-        //   - PER-EXTENDER ISOLATION. A throwing extender is logged like every
-        //     other per-mod failure and its siblings still run; ctx construction
-        //     is never abandoned, so one broken surface cannot cost a mod its
-        //     init (let alone every mod theirs).
-        //   - IDENTITY-IDEMPOTENT. Registering the SAME function twice runs it
-        //     once. Guarded at BOTH edges — the registrar refuses a repeat, and
-        //     the apply loop skips any entry that is not its own first
-        //     occurrence — so a fragment that pushes onto the array by hand
-        //     cannot decorate a ctx twice either.
-        //   - ARGUMENTS, NOT CLOSURE. An extender receives (ctx, rec) and
-        //     nothing else: a companion fragment shares this scope but NOT
-        //     makeCtx's per-mod locals, so everything it needs arrives as an
-        //     argument (the mods/update/update-apply.js pattern).
-        //
-        // A fragment-level `const` is safe here, unlike the hoisted functions
-        // the header's TDZ note warns about: nothing that runs BEFORE this
-        // fragment registers or applies an extender — the pushes come from LATER
-        // fragments' top level and the apply first runs at loadMods() time.
-        const _ctxExtenders = [];
-        // Register one ctx extender. Returns true when it was added, false for a
-        // non-function or a duplicate (by function IDENTITY), so a double-loaded
-        // fragment is a no-op rather than a doubly-applied surface.
-        function _registerCtxExtender(fn) {
-            if (typeof fn !== 'function') return false;
-            if (_ctxExtenders.indexOf(fn) !== -1) return false;
-            _ctxExtenders.push(fn);
-            return true;
-        }
-        // Apply the registry to one ctx under construction. Returns the SAME
-        // object it was handed (extenders decorate in place; a returned value is
-        // ignored, so an extender cannot swap the ctx out from under makeCtx).
-        function _applyCtxExtenders(ctx, rec) {
-            for (let i = 0; i < _ctxExtenders.length; i++) {
-                const fn = _ctxExtenders[i];
-                if (_ctxExtenders.indexOf(fn) !== i) continue;   // dup: run once
-                try { fn(ctx, rec); }
-                catch (e) {
-                    console.error('[mods] ctx extender failed ("'
-                        + (fn.name || 'anonymous') + '") for "'
-                        + (ctx && ctx.id) + '":', e);
-                }
-            }
-            return ctx;
-        }
-        // ---- end ctx-extender registry --------------------------------------
+        // ---- ctx-extender registry (#194) -> 86c_js_mod_ctx_ext.js ---
+        // `_registerCtxExtender` / `_applyCtxExtenders` / the
+        // `_ctxExtenders` array moved to that companion, where every
+        // other ctx-extension lives. One concatenated script, so
+        // makeCtx below still calls them; they are declared by the
+        // time it runs (loadMods()), not at splice time.
 
         // Build the per-mod ctx (contract v1). Organizational scoping only — see
         // the trust note above. `rec` is the active-mod record initMod created.

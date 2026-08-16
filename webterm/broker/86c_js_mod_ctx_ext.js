@@ -2,8 +2,9 @@
         // Where NEW per-mod ctx surface lands. 86_js_mod_loader.js is at the
         // #68 2500-line per-fragment cap (_MAX_LINES, ui.py), and the rule for
         // that cap has always been "split, never trim" — 86a (#168) and 86b
-        // (#163) are the precedent. So the loader keeps ctx v1 and the
-        // EXTENDER REGISTRY; every family added after it is declared here (or
+        // (#163) are the precedent. So the loader keeps ctx v1, the
+        // EXTENDER REGISTRY lives HERE, and every family added after it is
+        // declared here (or
         // in a later 86*-ordered fragment) and registered into that registry.
         //
         // How to add one:
@@ -14,8 +15,8 @@
         //     }
         //     _registerCtxExtender(_ctx<Family>);
         //
-        // The three rules that make that safe, all enforced by the registry in
-        // 86_js_mod_loader.js (see the "ctx-extender registry" block there):
+        // The three rules that make that safe, all enforced by the registry
+        // block immediately below:
         //
         //  1. ARGUMENTS, NOT CLOSURE. Assembly concatenates every fragment into
         //     ONE <script>, so a top-level function declared here is callable
@@ -45,6 +46,89 @@
         // #194/#195/#196/#198 land beside it in this same fragment, and each
         // registers its own capability entry so the map below stays a true
         // inventory of what this build hands a mod.
+
+        // ---- ctx-extender registry (#194) -----------------------------------
+        // The seam a LATER ctx surface is added through: its own ordered
+        // fragment (86c_js_mod_ctx_ext.js and successors) declares a NAMED
+        // function and registers it at top level —
+        //
+        //     function _ctxWindowsFactory(ctx, rec) { ctx.windows.createAppWindow = …; }
+        //     _registerCtxExtender(_ctxWindowsFactory);
+        //
+        // — and makeCtx applies every registered extender to the ctx object it
+        // is building. That is what lets this fragment stop growing: it sits at
+        // the #68 2500-line cap, so new surface CANNOT land here, and a registry
+        // means each extension fragment owns its own members. One shared
+        // extension function could not compose — the moment a second fragment
+        // declared its own, the later declaration would win and the earlier
+        // fragment's members would silently vanish.
+        //
+        // Four properties the extension fragments are entitled to rely on:
+        //   - ORDER. Extenders run in registration order, which is _ORDERED
+        //     (fragment) order: every fragment's top-level code runs in that
+        //     order inside the one <script>, so a later fragment sees what an
+        //     earlier one put on the ctx.
+        //   - PER-EXTENDER ISOLATION. A throwing extender is logged like every
+        //     other per-mod failure and its siblings still run; ctx construction
+        //     is never abandoned, so one broken surface cannot cost a mod its
+        //     init (let alone every mod theirs).
+        //   - IDENTITY-IDEMPOTENT. Registering the SAME function twice runs it
+        //     once. Guarded at BOTH edges — the registrar refuses a repeat, and
+        //     the apply loop skips any entry that is not its own first
+        //     occurrence — so a fragment that pushes onto the array by hand
+        //     cannot decorate a ctx twice either.
+        //   - ARGUMENTS, NOT CLOSURE. An extender receives (ctx, rec) and
+        //     nothing else: a companion fragment shares this scope but NOT
+        //     makeCtx's per-mod locals, so everything it needs arrives as an
+        //     argument (the mods/update/update-apply.js pattern).
+        //
+        // A fragment-level `const` is safe here, unlike the hoisted functions
+        // the header's TDZ note warns about: nothing that runs BEFORE this
+        // fragment registers or applies an extender — the pushes come from LATER
+        // fragments' top level and the apply first runs at loadMods() time.
+        const _ctxExtenders = [];
+        // Register one ctx extender. Returns true when it was added, false for a
+        // non-function or a duplicate (by function IDENTITY), so a double-loaded
+        // fragment is a no-op rather than a doubly-applied surface.
+        function _registerCtxExtender(fn) {
+            if (typeof fn !== 'function') return false;
+            if (_ctxExtenders.indexOf(fn) !== -1) return false;
+            _ctxExtenders.push(fn);
+            return true;
+        }
+        // Apply the registry to one ctx under construction. Returns the SAME
+        // object it was handed (extenders decorate in place; a returned value is
+        // ignored, so an extender cannot swap the ctx out from under makeCtx).
+        function _applyCtxExtenders(ctx, rec) {
+            // SNAPSHOT, never the live array: an extender that registers during
+            // the pass would otherwise extend the loop it is running in -- one
+            // that appends a fresh function identity every call never
+            // terminates, and ctx construction hanging takes the desktop with
+            // it. A registration made mid-pass simply applies from the next
+            // mod onwards, which is also the only order anyone can reason about.
+            const list = _ctxExtenders.slice();
+            for (let i = 0; i < list.length; i++) {
+                const fn = list[i];
+                if (list.indexOf(fn) !== i) continue;            // dup: run once
+                try { fn(ctx, rec); }
+                catch (e) {
+                    // The report must not become the second failure: `fn.name`
+                    // and `ctx.id` are attacker-adjacent reads (a proxy, a
+                    // throwing getter), and a throw HERE would escape the loop
+                    // and cost every remaining extender.
+                    try {
+                        console.error('[mods] ctx extender failed ("'
+                            + (fn.name || 'anonymous') + '") for "'
+                            + (ctx && ctx.id) + '":', e);
+                    } catch (_) {
+                        try { console.error('[mods] ctx extender failed'); }
+                        catch (__) { /* console itself is gone; keep going */ }
+                    }
+                }
+            }
+            return ctx;
+        }
+        // ---- end ctx-extender registry --------------------------------------
 
         // ---- ctx.capabilities + the `needs` gate (#197) ---------------------
         // Two halves of one question a mod cannot otherwise ask: WHAT DOES THIS
