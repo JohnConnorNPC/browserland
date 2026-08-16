@@ -292,6 +292,67 @@ def test_the_admin_value_never_appears_in_any_log_line(tmp_path, monkeypatch,
                for rec in caplog.records)
 
 
+# ---- cross-origin preflight (#191) ------------------------------------------
+
+@pytest.mark.parametrize("route", ["/mods/policy", "/update/policy"])
+def test_admin_route_preflight_allows_the_admin_header(tmp_path, monkeypatch,
+                                                        route):
+    """The OPTIONS preflight for an ADMIN_ROUTES path lists ADMIN_HEADER in
+    Access-Control-Allow-Headers -- otherwise a cross-origin admin write dies
+    in preflight before the browser ever sends the POST. Checked on BOTH an
+    enforcing and a non-enforcing broker: the Allow-Headers list is
+    unconditional, so a stray header from an old client sent to a
+    non-enforcing broker is inert, not a preflight failure."""
+    for app in (_admin_app(tmp_path, monkeypatch),
+               _make_app(tmp_path, monkeypatch)):
+        _, r = app.test_client.options(route)
+        assert r.status == 204
+        allow = [h.strip() for h in
+                r.headers.get("Access-Control-Allow-Headers", "").split(",")]
+        assert ADMIN_HEADER in allow
+
+
+def test_a_cross_origin_admin_write_survives_preflight_and_lands(tmp_path,
+                                                                  monkeypatch):
+    """The full sequence a browser performs for a cross-origin POST carrying a
+    non-simple header: OPTIONS preflight (must allow the header, and must NOT
+    require any auth of its own -- it carries no credentials), then the real
+    POST with the page token + the admin header, which must land."""
+    app = _admin_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, preflight = app.test_client.options(
+        "/mods/policy",
+        headers={"Origin": "https://elsewhere.example",
+                 "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": ADMIN_HEADER})
+    assert preflight.status == 204
+    allow = [h.strip() for h in
+            preflight.headers.get("Access-Control-Allow-Headers", "").split(",")]
+    assert ADMIN_HEADER in allow
+    _, r = client.post("/mods/policy", json=SET_GIT,
+                       headers={"Origin": "https://elsewhere.example", **AHDR})
+    assert r.status == 200 and r.json["policy"] == {"git": True}
+
+
+def test_a_cross_origin_write_with_a_wrong_admin_header_403s_not_blocked_by_preflight(
+        tmp_path, monkeypatch):
+    """The preflight never blocks the request -- a WRONG admin header still
+    reaches the route and is refused there (403 admin_required), the same
+    ladder position as the same-origin case."""
+    app = _admin_app(tmp_path, monkeypatch)
+    client = authed(app)
+    _, preflight = app.test_client.options(
+        "/mods/policy",
+        headers={"Origin": "https://elsewhere.example",
+                 "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": ADMIN_HEADER})
+    assert preflight.status == 204
+    _, r = client.post("/mods/policy", json=SET_GIT,
+                       headers={"Origin": "https://elsewhere.example",
+                                ADMIN_HEADER: "wrong-" + "x" * 16})
+    assert r.status == 403 and r.json["error"] == "admin_required"
+
+
 def test_the_query_refusal_log_is_value_free(tmp_path, monkeypatch, caplog):
     """The query-string refusal path, scanned separately: the TEST harness
     (httpx / sanic_testing) echoes the URL the test itself poisoned at INFO,

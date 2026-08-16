@@ -23,7 +23,8 @@ from pathlib import Path
 import pytest
 
 from .auth_helpers import TEST_TOKEN, authed
-from webterm.broker.app import _load_or_create_broker_id, create_app
+from webterm.broker.app import (ADMIN_HEADER, ADMIN_ROUTES,
+                                _load_or_create_broker_id, create_app)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -219,3 +220,47 @@ def test_info_options_preflight_cors(tmp_path, monkeypatch):
     assert response.headers.get("Access-Control-Allow-Origin") == "*"
     assert response.headers.get("Access-Control-Allow-Methods") == \
         "GET, POST, PUT, OPTIONS"
+
+
+def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
+    # #191: a cross-origin admin write (X-Webterm-Admin) must survive its own
+    # preflight. Allowed UNCONDITIONALLY -- checked here on a broker with no
+    # admin_token configured at all, since gating the Allow-Headers on config
+    # would make preflight behavior config-dependent for zero security gain.
+    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    assert app.ctx.admin_token is None
+    _, response = authed(app).options("/info")
+    assert response.status == 204
+    allow = [h.strip() for h in
+            response.headers.get("Access-Control-Allow-Headers", "").split(",")]
+    assert ADMIN_HEADER in allow
+
+
+# ---- /info admin-class advertisement (#191) --------------------------------
+
+def test_info_admin_absent_when_not_configured(tmp_path, monkeypatch):
+    # Feature-detect by ABSENCE (#157 contract): a non-enforcing broker's
+    # /info carries no "admin" key at all, not admin:{required:false}.
+    app = _make_app(tmp_path, monkeypatch, token=None)
+    assert app.ctx.admin_token is None
+    _, response = authed(app).get("/info")
+    assert response.status == 200
+    assert "admin" not in response.json
+
+
+def test_info_admin_advertised_when_configured(tmp_path, monkeypatch):
+    # Published ONLY by a build that actually enforces the class
+    # (app.ctx.admin_token set) -- e1ca8e6-style capability reporting. The
+    # routes list rides the exact ADMIN_ROUTES tuple 4debe39 enforces
+    # against, never a second hand-written list.
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "auth_token": TEST_TOKEN,
+           "admin_token": "admin-secret-0123456789abcdef"}
+    app = create_app(cfg, name=f"webterm-info-test-{_app_seq}")
+    _, response = authed(app).get("/info")
+    assert response.status == 200
+    assert response.json["admin"] == {"required": True,
+                                      "routes": list(ADMIN_ROUTES)}

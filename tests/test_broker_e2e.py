@@ -496,8 +496,11 @@ def test_cors_preflight(broker_proc):
         assert headers.get("Access-Control-Allow-Origin") == "*"
         assert (headers.get("Access-Control-Allow-Methods")
                 == "GET, POST, PUT, OPTIONS")
+        # #191: the blanket Allow-Headers grew the admin header (built in the
+        # one shared middleware spot, so every route's preflight carries it —
+        # inert on non-admin routes, same convention as the blanket Methods).
         assert (headers.get("Access-Control-Allow-Headers")
-                == "Authorization, Content-Type")
+                == "Authorization, Content-Type, X-Webterm-Admin")
         assert headers.get("Access-Control-Max-Age") == "86400"
 
 

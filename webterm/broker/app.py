@@ -4127,8 +4127,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
                 "GET, POST, PUT, OPTIONS"
+            # ADMIN_HEADER is allowed unconditionally, whether or not this
+            # broker actually enforces the admin class (#191): gating the
+            # Allow-Headers on admin_token would make preflight behavior
+            # config-dependent for zero security gain -- a client sending the
+            # header to a non-enforcing broker is inert, but an enforcing one
+            # whose preflight forgot to list it would 403 every cross-origin
+            # admin write in the browser before the request ever left.
             response.headers["Access-Control-Allow-Headers"] = \
-                "Authorization, Content-Type"
+                "Authorization, Content-Type, " + ADMIN_HEADER
             response.headers["Access-Control-Max-Age"] = "86400"
             # Chrome Private Network Access: a public-site page fetching a
             # private-network broker must see this echoed on the preflight.
@@ -6618,23 +6625,34 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # out of a shared cache (tailscale serve, a corporate MITM) could show a
         # restart-in-progress broker as available, or a stale bootId as proof
         # that a restart nobody performed did happen.
-        return sanic_json({"ok": True, "broker_id": app.ctx.broker_id,
-                           "version": app.ctx.version,
-                           "mods_enabled": app.ctx.mods_enabled,
-                           "serve_ui": app.ctx.serve_ui,
-                           "mods": app.ctx.mod_catalog,
-                           "mod_policy": dict(app.ctx.mod_policy),
-                           # `source` + `mutable` exist so a client can say WHY
-                           # checking is off, and whether asking would help. A
-                           # bare check_enabled:false sent the UI's only honest
-                           # message to "an operator edits the config", which is
-                           # now wrong in three of the four cases: `stored` and
-                           # `default` are the GUI's to change, `corrupt` needs
-                           # a broken FILE fixed, and only `config` is really
-                           # somebody else's decision to go and edit.
-                           "update": update_policy_view(app),
-                           "restart": restart_status(app)},
-                          headers={"Cache-Control": "no-store"})
+        body = {"ok": True, "broker_id": app.ctx.broker_id,
+                "version": app.ctx.version,
+                "mods_enabled": app.ctx.mods_enabled,
+                "serve_ui": app.ctx.serve_ui,
+                "mods": app.ctx.mod_catalog,
+                "mod_policy": dict(app.ctx.mod_policy),
+                # `source` + `mutable` exist so a client can say WHY
+                # checking is off, and whether asking would help. A
+                # bare check_enabled:false sent the UI's only honest
+                # message to "an operator edits the config", which is
+                # now wrong in three of the four cases: `stored` and
+                # `default` are the GUI's to change, `corrupt` needs
+                # a broken FILE fixed, and only `config` is really
+                # somebody else's decision to go and edit.
+                "update": update_policy_view(app),
+                "restart": restart_status(app)}
+        # #191: the admin-class advertisement. e1ca8e6-style capability
+        # reporting -- published ONLY by a build that actually enforces the
+        # class (app.ctx.admin_token set), so an old/non-enforcing peer never
+        # shows up as "requires admin" and a client can feature-detect on the
+        # key's PRESENCE rather than probing a POST (a probe IS the write).
+        # `routes` rides the exact ADMIN_ROUTES tuple 4debe39 enforces against
+        # -- never a second hand-written list, so advertisement and
+        # enforcement cannot drift apart (the e1ca8e6 bug class this exists
+        # to prevent).
+        if app.ctx.admin_token is not None:
+            body["admin"] = {"required": True, "routes": list(ADMIN_ROUTES)}
+        return sanic_json(body, headers={"Cache-Control": "no-store"})
 
     # ---- mod policy write (/mods/policy, #157) ----------------------------
     # The ONLY writer of the pins GET /info reports. Token-gated like every
