@@ -2024,7 +2024,8 @@ async def request_restart(app, *, timeout: float = RESTART_DRAIN_TIMEOUT,
 
 def _load_modstore(path: Path) -> Dict[str, Any]:
     """Read+self-heal the /mod-store blob (#124): a dict of
-    ``modId -> {rev, value, revisions:[{rev, value, ts}]}`` (newest-first ring).
+    ``modId -> {rev, value, revisions:[{rev, value, ts}]}`` (newest-first ring),
+    plus the optional sticky ``noHistory`` flag (#192).
 
     Self-healing mirrors _load_state: every field is coerced so a hand-edited or
     truncated file can never break startup. Malformed mod ids / records are
@@ -2033,7 +2034,18 @@ def _load_modstore(path: Path) -> Dict[str, Any]:
     depth. ``rev`` is persisted (like /state) so a restart preserves optimistic
     ordering. Returns ``{}`` on any read/parse error (a corrupt file degrades to
     an empty store rather than blocking boot — the same accepted degraded state
-    /state has)."""
+    /state has).
+
+    ``noHistory`` is what makes the flag SURVIVE A RESTART, and it is read
+    TRUTHY rather than strictly ``is True`` on purpose: this loader fails
+    CLOSED. Junk in that field means "somebody wrote something here", and the
+    conservative reading of an unparseable flag on a record that may hold
+    credentials is "keep not archiving". For the same reason a flagged record
+    loads with its ring DROPPED even if the file pairs the two (a hand-edited
+    or pre-#192 sidecar): a flagged record must never serve history, so the
+    ring is not merely ignored, it is not carried into memory where the next
+    write could re-persist it. The key is written back only when the flag is
+    set, so an unflagged record's on-disk shape is byte-identical to before."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -2073,11 +2085,17 @@ def _load_modstore(path: Path) -> Dict[str, Any]:
         # display-only stamp and is never trusted for ordering/trimming.
         revisions.sort(key=lambda e: e["rev"], reverse=True)
         del revisions[MODSTORE_MAX_REVISIONS:]
-        store[mod_id] = {
+        no_history = bool(rec.get("noHistory"))
+        if no_history:
+            revisions = []
+        healed: Dict[str, Any] = {
             "rev": rev,
             "value": rec.get("value") if "value" in rec else None,
             "revisions": revisions,
         }
+        if no_history:
+            healed["noHistory"] = True
+        store[mod_id] = healed
     return store
 
 
@@ -6673,7 +6691,19 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # a broken FILE fixed, and only `config` is really
                 # somebody else's decision to go and edit.
                 "update": update_policy_view(app),
-                "restart": restart_status(app)}
+                "restart": restart_status(app),
+                # #192: the PRE-write capability gate for /mod-store's sticky
+                # no-history flag, and it has to be pre-write because the flag
+                # FAILS OPEN on an old peer: a broker that predates it ignores
+                # the unknown PUT body key and keeps archiving, so the very
+                # PUT that would discover this has already filed the previous
+                # plaintext into that broker's ring — the write meant to stop
+                # the archiving WOULD BE the leak. Published (like `admin`
+                # above and `remote_writable` in update_policy_view) only by a
+                # build that actually implements it, so a client feature-
+                # detects on PRESENCE and reads absence as "old build, still
+                # archiving" rather than probing with a write.
+                "modstore": {"noHistory": True}}
         # #191: the admin-class advertisement. e1ca8e6-style capability
         # reporting -- published ONLY by a build that actually enforces the
         # class (app.ctx.admin_token set), so an old/non-enforcing peer never
@@ -8053,6 +8083,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # and the SAME single-active-client lease as /state. GET is ungated by the
     # lease (a non-active/reactivating browser can always READ); PUT is lease-
     # gated (409 not_active) so a background tab can't clobber the active one.
+    #
+    # #192: a record can opt OUT of the ring entirely and stickily, with
+    # `noHistory` on the PUT — for the records whose values are credentials,
+    # where the ring is a 50-deep archive of previously-published secrets. The
+    # ring stays the default because it is scratchpad's History feature; this
+    # is per-record policy, never a global switch. See the PUT below for the
+    # three states of the body key, the one-way un-flag rule, and why setting
+    # the flag on an unchanged value must not dedupe away.
     def _modstore_bad_id(mod_id: str):
         """Validate the <modId> path segment; a bad id -> 400 (else None)."""
         if not _MODSTORE_ID_RE.fullmatch(mod_id or ""):
@@ -8086,11 +8124,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return sanic_json({"ok": False, "error": "no_such_rev"}, status=404)
         # Default: current value + revision METADATA only (rev + ts, no bodies —
         # the ring can be large; History fetches a body on demand via ?rev=).
+        # `noHistory` (#192) is ALWAYS present here, true or false: it is the
+        # backstop behind the /info capability gate, and a client can only read
+        # "this broker is still archiving" from the key's ABSENCE if a build
+        # that implements the flag never omits it. Deliberately not added to
+        # the ?rev= branches above — those answer about ONE revision, and a
+        # flagged record has none but its current one.
         return sanic_json({
             "rev": rec["rev"],
             "value": rec["value"],
             "revisions": [{"rev": e["rev"], "ts": e["ts"]}
                           for e in rec["revisions"]],
+            "noHistory": bool(rec.get("noHistory")),
         })
 
     async def _modstore_put(request: Request, modId: str):
@@ -8127,6 +8172,22 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if not isinstance(purge, bool):
             return sanic_json({"ok": False, "error": "bad_purgeRevisions"},
                               status=400)
+        # #192: the sticky per-record "never archive this record" flag, for the
+        # values that are credentials (host-registry publishes broker tokens
+        # through this store, and every ordinary republish used to file the
+        # previous token-bearing value into the 50-deep ring). Strict bool like
+        # purgeRevisions above.
+        #
+        # ABSENT is a THIRD state, not a synonym for false: an absent key means
+        # "leave this record's flag exactly as it is". That is what stickiness
+        # IS — the failure mode being closed here is the write that simply
+        # forgets the option (a rebase retry, a different code path, an older
+        # mod build) silently resuming the archiving. So `None` below is never
+        # collapsed into `False`.
+        no_history = body.get("noHistory", None)
+        if no_history is not None and not isinstance(no_history, bool):
+            return sanic_json({"ok": False, "error": "bad_noHistory"},
+                              status=400)
         client_id = str(body.get("clientId") or "").strip()
         # Lock the whole lease-check / read-rev / compare / dedupe / write / bump
         # (identical reasoning to /state: the write awaits, so two PUTs could
@@ -8150,6 +8211,25 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     "ok": False, "error": "conflict",
                     "rev": rec["rev"], "value": rec["value"],
                 }, status=409)
+            flagged = bool(rec.get("noHistory"))
+            # #192: un-flagging is ONE-WAY and EXPLICIT. Re-enabling archiving
+            # on a record that has been carrying credentials must never be a
+            # side effect of a write that merely passed noHistory:false, so it
+            # takes noHistory:false AND purgeRevisions:true in the SAME body —
+            # the ring history resumes into is then provably empty of whatever
+            # the flag was protecting. Refused only when this really is a
+            # transition (a redundant noHistory:false on an already-unflagged
+            # record is accepted, so a client that always passes the option
+            # through keeps working). 400, not 409, deliberately: a 409 from
+            # this route means "rebase and retry" to every client that talks
+            # to it, and retrying this body would just be refused again.
+            if flagged and no_history is False and not purge:
+                return sanic_json({"ok": False, "error": "noHistory_locked",
+                                   "rev": rec["rev"], "noHistory": True},
+                                  status=400)
+            # The record's flag AFTER this write: sticky unless explicitly and
+            # legally turned off above.
+            keep_flag = flagged if no_history is None else no_history
             # No-op dedupe: an idle debounced autosave that resends the
             # current value must NOT bump rev or push a revision (else the
             # ring churns on every keystroke pause). Accept it as a success at
@@ -8161,15 +8241,31 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # place. The ONLY true no-op is a purge with nothing left to
             # clear: value unchanged AND the ring already empty (e.g. a
             # first-write dedupe on the empty seed).
-            if value == rec["value"] and not (purge and rec["revisions"]):
-                return sanic_json({"ok": True, "rev": rec["rev"]})
+            #
+            # #192 widens "observable" by exactly two cases, and this is the
+            # bug the flag exists to avoid rather than a tidy generalization:
+            # (1) a flagged record clears the ring for the same reason a purge
+            #     does, so `clearing` covers both — setting the flag on an
+            #     UNCHANGED value with a ring present is a REAL write, not a
+            #     dedupe. Getting this wrong means the write meant to stop the
+            #     archiving leaves the accumulated plaintext readable.
+            # (2) the flag itself flipping is state a client can SEE (the echo
+            #     below, and every later write's ring behavior), so a
+            #     flag-only change lands as a new rev even with an empty ring.
+            clearing = bool((purge or keep_flag) and rec["revisions"])
+            if value == rec["value"] and not clearing and keep_flag == flagged:
+                return sanic_json({"ok": True, "rev": rec["rev"],
+                                   "noHistory": keep_flag})
             # Push the OUTGOING (soon-to-be-prior) value onto the newest-first
             # ring, then trim. Skip the empty seed: a brand-new mod id has no
             # real prior value (rev 0 / None), so don't record a meaningless
             # {rev:0} entry — the ring starts once there's genuine history. A
             # purge writes the ring EMPTY instead (drop the outgoing prior
             # too), so the new value lands with no recoverable history.
-            if purge:
+            # A flagged record does the same thing on EVERY write, which is the
+            # whole difference between #192 and the per-write purge (#65): a
+            # per-write-only flag re-leaks on the first write that forgets it.
+            if purge or keep_flag:
                 revisions = []
             else:
                 revisions = list(rec["revisions"])
@@ -8180,6 +8276,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     del revisions[MODSTORE_MAX_REVISIONS:]
             new_rec = {"rev": rec["rev"] + 1, "value": value,
                        "revisions": revisions}
+            # Persisted only when set, so an unflagged record's on-disk bytes
+            # are exactly what a pre-#192 broker wrote (and an un-flag really
+            # does return the record to that shape, rather than leaving a
+            # noHistory:false marker behind).
+            if keep_flag:
+                new_rec["noHistory"] = True
             new_store = dict(app.ctx.modstore)
             new_store[modId] = new_rec
             try:
@@ -8190,7 +8292,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=500)
             app.ctx.modstore = new_store
-            return sanic_json({"ok": True, "rev": new_rec["rev"]})
+            return sanic_json({"ok": True, "rev": new_rec["rev"],
+                               "noHistory": keep_flag})
 
         return await _shielded_region(app.ctx.modstore_lock, _locked_write)
 
