@@ -272,6 +272,41 @@ def test_control_lease(broker_proc):
     asyncio.run(scenario())
 
 
+def test_state_lease_refusal_body_bytes(broker_proc):
+    """#191 refactor: ``_lease_refusal`` must produce a /state PUT 409
+    not_active body byte-identical to the pre-extraction inline check (ok,
+    error, rev, settings, layout — in that key order). Re-derives the
+    expected bytes through the app's own sanic response encoder (rather than
+    a hand-written literal) so this pins actual wire bytes — including key
+    order, which a dict `==` comparison would let drift silently."""
+    from sanic.response import json as _sanic_json
+    _, port, base = broker_proc
+
+    async def scenario():
+        ctrl, st = await _claim_lease(port, "SB")
+        assert st["active"] is True and st["activeClientId"] == "SB"
+        try:
+            auth = {"Authorization": f"Bearer {TOKEN}",
+                    "Content-Type": "application/json"}
+            _, current = _http("GET", f"{base}/state?token={TOKEN}")
+            status, _headers, raw = _request(
+                "PUT", f"{base}/state",
+                body=json.dumps({"baseRev": current["rev"], "settings": {},
+                                 "layout": {}, "clientId": "OTHER"}).encode(),
+                headers=auth)
+            assert status == 409
+            expected = _sanic_json({
+                "ok": False, "error": "not_active",
+                "rev": current["rev"], "settings": current["settings"],
+                "layout": current["layout"],
+            }, status=409).body
+            assert raw == expected
+        finally:
+            await ctrl.close()
+
+    asyncio.run(scenario())
+
+
 def test_fake_producer_relay(broker_proc):
     _, port, base = broker_proc
 
@@ -1000,6 +1035,46 @@ def test_mod_store_lease_not_active(broker_proc):
             # GET is ungated by the lease — a non-active browser still reads.
             status, payload = _http("GET", f"{base}/mod-store/{mod}?token={TOKEN}")
             assert status == 200 and payload["value"] == {"v": 1}
+        finally:
+            await ctrl.close()
+
+    asyncio.run(scenario())
+
+
+def test_mod_store_lease_refusal_body_bytes(broker_proc):
+    """#191 refactor: the same ``_lease_refusal`` helper's /mod-store PUT 409
+    not_active body must stay byte-identical to the pre-extraction inline
+    check (ok, error, rev, value — in that key order) — the two routes' 409
+    bodies differ in shape (rev/settings/layout vs rev/value), so this pins
+    them independently of the /state pin above."""
+    from sanic.response import json as _sanic_json
+    _, port, base = broker_proc
+
+    async def scenario():
+        ctrl, st = await _claim_lease(port, "MSB")
+        assert st["active"] is True and st["activeClientId"] == "MSB"
+        try:
+            auth = {"Authorization": f"Bearer {TOKEN}",
+                    "Content-Type": "application/json"}
+            mod = "e2e-lease-bytes"
+            # Seed a value at rev 1 so the refusal has a non-default rev/value
+            # to inline (a fresh-id refusal would trivially read rev:0,
+            # value:None either way).
+            status, payload = _http(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 0, "value": {"v": 1},
+                                 "clientId": "MSB"}).encode(), headers=auth)
+            assert status == 200 and payload["rev"] == 1
+            status, _headers, raw = _request(
+                "PUT", f"{base}/mod-store/{mod}",
+                body=json.dumps({"baseRev": 1, "value": {"v": 2},
+                                 "clientId": "OTHER"}).encode(), headers=auth)
+            assert status == 409
+            expected = _sanic_json({
+                "ok": False, "error": "not_active",
+                "rev": 1, "value": {"v": 1},
+            }, status=409).body
+            assert raw == expected
         finally:
             await ctrl.close()
 

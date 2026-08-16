@@ -1750,6 +1750,25 @@ def _refuse_if_quiescing(app, what: str):
                       status=503)
 
 
+def _lease_refusal(app, client_id: str, payload):
+    """Single-active-client lease guard shared by the /state and /mod-store
+    PUT handlers (#191 refactor — no behavior change): a non-active browser
+    is refused with 409 ``not_active``, live state inlined so the loser can
+    resync in one round trip instead of a follow-up GET. Callers run this
+    INSIDE their write lock (see the /state PUT lease comment for why) and
+    pass ``payload`` as a zero-arg callable building the body's route-specific
+    extra fields (rev/settings/layout for /state, rev/value for /mod-store) —
+    called only on refusal, so a non-refusing call never pays for a read that
+    goes unused. Returns the 409 response, or None when the caller may
+    proceed."""
+    active = app.ctx.active_client_id
+    if active is not None and client_id != active:
+        body = {"ok": False, "error": "not_active"}
+        body.update(payload())
+        return sanic_json(body, status=409)
+    return None
+
+
 def resume_from_quiesce(app) -> None:
     """Put a broker that quiesced but is NOT going to restart back to work.
 
@@ -7935,14 +7954,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # live state so the loser resyncs in one round trip. A None lease
             # (broker just restarted, nobody has claimed yet) does NOT block —
             # and GET /state stays ungated so a reactivating tab can read.
-            active = app.ctx.active_client_id
-            if active is not None and client_id != active:
+            def _state_lease_payload():
                 s = app.ctx.state
-                return sanic_json({
-                    "ok": False, "error": "not_active",
-                    "rev": s["rev"], "settings": s["settings"],
-                    "layout": s["layout"],
-                }, status=409)
+                return {"rev": s["rev"], "settings": s["settings"],
+                        "layout": s["layout"]}
+            err = _lease_refusal(app, client_id, _state_lease_payload)
+            if err is not None:
+                return err
             current = app.ctx.state
             if base_rev != current["rev"]:
                 # Conflict — inline the live state so the client rebases
@@ -8069,12 +8087,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             existed = modId in app.ctx.modstore
             rec = app.ctx.modstore.get(modId) \
                 or {"rev": 0, "value": None, "revisions": []}
-            active = app.ctx.active_client_id
-            if active is not None and client_id != active:
-                return sanic_json({
-                    "ok": False, "error": "not_active",
-                    "rev": rec["rev"], "value": rec["value"],
-                }, status=409)
+            err = _lease_refusal(
+                app, client_id,
+                lambda: {"rev": rec["rev"], "value": rec["value"]})
+            if err is not None:
+                return err
             if base_rev != rec["rev"]:
                 # Conflict — inline the live value so the client rebases in
                 # one round trip (no follow-up GET), matching /state.
