@@ -4,6 +4,7 @@
   "ctxVersion": 1,
   "title": "Sync mods",
   "description": "Copy this broker's mod setup to the other brokers you have configured, all of them or a selected few, instead of repeating the same choices on every machine. Push writes each target's own mod policy (the pins issue #157 added, which are not lease-gated and so can be set on a broker somebody else is using) plus the mod-owned settings in its shared state, and pins only what that broker's defaults would otherwise get wrong. Pull is the mirror: it makes this browser match a broker you pick. Every target is previewed before anything is written and reported separately afterwards, so a broker that is offline, older, missing a mod or held by another browser is named rather than silently skipped.",
+  "permissions": ["egress", "remote-admin"],
   "entry": "mod-sync.js",
   "styles": ["mod-sync.css"],
   "author": "JohnConnorNPC",

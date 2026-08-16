@@ -4,6 +4,7 @@
   "ctxVersion": 1,
   "title": "Background pattern",
   "description": "Desktop background-pattern Control Panel select + the theme-var-aware #desktop painter (extracted from core, #76).",
+  "permissions": [],
   "entry": "pattern.js",
   "author": "JohnConnorNPC"
 }

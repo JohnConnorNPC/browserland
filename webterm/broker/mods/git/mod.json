@@ -5,6 +5,7 @@
   "defaultEnabled": false,
   "title": "Git status",
   "description": "Per-terminal git branch + dirty badge + status popover, on every terminal's title bar (extracted from core, #116). Rides ctx.windows.onTerminalCreate + ctx.session.git. Ships disabled by default.",
+  "permissions": ["session"],
   "entry": "git.js",
   "styles": ["git.css"],
   "author": "JohnConnorNPC",

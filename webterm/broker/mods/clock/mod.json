@@ -4,6 +4,7 @@
   "ctxVersion": 1,
   "title": "Clock",
   "description": "Taskbar date & time chip (extracted F057; the reference Browserland mod).",
+  "permissions": [],
   "entry": "clock.js",
   "author": "JohnConnorNPC",
   "help": { "slug": "clock", "label": "Clock", "order": 2050, "icon": "🕐" }

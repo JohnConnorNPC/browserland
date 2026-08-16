@@ -4,6 +4,7 @@
   "ctxVersion": 1,
   "title": "Mouse mode chip",
   "description": "An ambient 🖱 chip in a terminal's title bar, shown for exactly as long as a full-screen app owns the mouse (lazygit/btop/mc), with the escape gesture in its tooltip — Shift-drag to select, Option-drag on macOS, Shift+scroll for scrollback. Rides ctx.windows.onTerminalCreate and samples xterm's mouseTrackingMode; no click action, no settings.",
+  "permissions": [],
   "entry": "mousemode.js",
   "styles": ["mousemode.css"],
   "author": "JohnConnorNPC",

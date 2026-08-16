@@ -6914,6 +6914,96 @@ def test_portable_mod_lint_actually_detects_a_violation():
                                  for s in stmts), f"lint missed {bad!r}"
 
 
+# --------------------------------------------------------------------------- #
+# shipped-mods capability declarations (#193's manifest `permissions`)
+# --------------------------------------------------------------------------- #
+
+def _undeclared_shipped_capabilities(mods_root):
+    """Every shipped-mod capability violation under ``mods_root``, as
+    ``{mod dir name: (permission, file, line, evidence)}``.
+
+    The install-time lint's OWN public, file-shaped functions
+    (``modinstall.capability_uses`` / ``first_undeclared_capability``, #193)
+    run over every ``mods/<id>/mod.json`` + every ``.js`` its directory ships
+    -- not just the manifest's ``entry`` script, since several shipped mods
+    (editor/, update/) split helpers into extra ``.js`` files that still run
+    in the assembled page. A manifest with no ``permissions`` key reads as
+    ``[]`` here (a positive claim to use nothing), because a SHIPPED mod
+    never gets modinstall's "written before the lint existed" grandfather --
+    every shipped mod ships today, in this change. This is the mirror of
+    ``validate_package``'s own lint call, never a second scanner."""
+    from webterm.broker import modinstall
+    offenders = {}
+    for manifest_path in sorted(Path(mods_root).glob("*/mod.json")):
+        mod_dir = manifest_path.parent
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+        declared = meta.get("permissions", [])
+        assert isinstance(declared, list), \
+            f"{mod_dir.name}: mod.json permissions must be a list"
+        files = {p.name: p.read_text(encoding="utf-8")
+                 for p in sorted(mod_dir.glob("*.js"))}
+        offender = modinstall.first_undeclared_capability(files, declared)
+        if offender is not None:
+            offenders[mod_dir.name] = offender
+    return offenders
+
+
+def test_shipped_mods_permissions_are_truthful():
+    # Every shipped mod's mod.json `permissions` must cover everything its
+    # source actually uses -- the sweep the issue asks for, run over the REAL
+    # mods/** tree. mod-sync in particular used to carry no `permissions` at
+    # all while pushing another broker's mod policy over hostFetch (#193);
+    # its corrected declaration (["egress", "remote-admin"]) is proven here
+    # exactly like every other mod's, not asserted by name.
+    offenders = _undeclared_shipped_capabilities(BROKER_DIR / "mods")
+    assert not offenders, (
+        f"shipped mod(s) use a capability their mod.json `permissions` "
+        f"omits: {offenders}. Add the missing permission(s), or fix the "
+        f"source if the use was accidental.")
+
+
+def test_shipped_mods_permissions_sweep_detects_a_seeded_false_declaration(
+        tmp_path):
+    # Proof the sweep above has teeth: a fixture mod whose mod.json
+    # UNDER-declares what its source uses -- exactly the regression shape
+    # this exists to catch (someone adds a ctx.file call and forgets the
+    # manifest) -- must turn _undeclared_shipped_capabilities RED. Run
+    # against a synthetic mods_root so this proves the SWEEP's own wiring
+    # (directory walk, absent-permissions-as-[], multi-.js-file handling),
+    # not just the underlying modinstall functions (already proven in
+    # tests/test_mod_install.py).
+    md = tmp_path / "x-seeded"
+    md.mkdir()
+    js = ("function init(ctx) { ctx.file.read('x'); }\n"
+          "registerMod({ id: 'x-seeded', init: init });\n")
+    (md / "x-seeded.js").write_text(js, encoding="utf-8")
+
+    def write_manifest(permissions):
+        (md / "mod.json").write_text(json.dumps(
+            {"id": "x-seeded", "entry": "x-seeded.js",
+             "permissions": permissions}) + "\n", encoding="utf-8")
+
+    # The false declaration: claims nothing, uses `file`. Caught, and the
+    # offender names the very capability and file the real check would.
+    write_manifest([])
+    offenders = _undeclared_shipped_capabilities(tmp_path)
+    assert "x-seeded" in offenders, "the sweep missed a seeded violation"
+    permission, name, line, evidence = offenders["x-seeded"]
+    assert permission == "file"
+    assert name == "x-seeded.js"
+
+    # The honest twin passes -- so the sweep is not simply refusing every
+    # fixture mod regardless of its declaration.
+    write_manifest(["file"])
+    assert _undeclared_shipped_capabilities(tmp_path) == {}
+
+    # An absent `permissions` key is the same as declaring nothing (no
+    # shipped-mod grandfather), so it is caught too.
+    (md / "mod.json").write_text(json.dumps(
+        {"id": "x-seeded", "entry": "x-seeded.js"}) + "\n", encoding="utf-8")
+    assert "x-seeded" in _undeclared_shipped_capabilities(tmp_path)
+
+
 def test_only_a_click_marks_a_mod_enable_as_consent():
     # #182: a mod may take a real-world action on being ENABLED that it must not
     # take on merely being INITIALIZED. ctx.enabledByUser is what tells those
