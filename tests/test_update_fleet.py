@@ -260,6 +260,11 @@ globalThis.fetchModCatalog = async (host) => {
 let POLICY = {};
 const policyCalls = [];
 const policyBodies = [];
+// #188 item 2 (A4): the mock's own send counter. Calls reach this stub in
+// SEND order whatever their `gate` later does to landing order -- exactly
+// the order the real broker commits them in.
+let policySendSeq = 0;
+const policyInfoWrote = {};   // hostId -> highest sendIdx written through
 
 globalThis.hostFetch = async (host, path, opts) => {
     // A null host would silently hit the SERVING origin — the exact lie the
@@ -270,16 +275,26 @@ globalThis.hostFetch = async (host, path, opts) => {
         policyCalls.push({ id: host.id, method: (opts && opts.method) || 'GET',
                            want: sent.check_enabled });
         policyBodies.push(sent);
-        const spec = POLICY[host.id];
+        let spec = POLICY[host.id];
+        // #188 item 2 (A4): a case may queue one answer per successive
+        // write (consumed in SEND order) and gate any of them, so the
+        // test controls which response LANDS first.
+        if (spec && spec.queue) spec = spec.queue.shift();
         if (!spec || spec === 'throw') throw new TypeError('Failed to fetch');
+        const sendIdx = ++policySendSeq;
+        if (spec.gate) await spec.gate;
         // #188 item 1 (A3): the real broker COMMITS a policy write before
         // answering, so any /info read that starts after the response
         // carries the post-write view. A static INFO map would instead
         // hand the targeted re-read the PRE-write record -- a lie no real
         // server tells -- so a 2xx answer writes its view through.
+        // SEND-ordered (A4): commits happen in arrival order, and /info
+        // reflects the LATEST commit however the responses came back.
         if (spec.status >= 200 && spec.status < 300
                 && spec.body && spec.body.update
-                && INFO[host.id] && typeof INFO[host.id] === 'object') {
+                && INFO[host.id] && typeof INFO[host.id] === 'object'
+                && sendIdx > (policyInfoWrote[host.id] || 0)) {
+            policyInfoWrote[host.id] = sendIdx;
             INFO[host.id] = Object.assign({}, INFO[host.id],
                                           { update: spec.body.update });
         }
@@ -1616,6 +1631,60 @@ CASES.restart_gate_moved = async () => {
                           SCONF(false)).update } });
     out.lockedOk = await click();
     out.lockedRereads = infoCalls.slice();
+    return out;
+};
+
+// --- #188 item 2 (atom A4): write-vs-write ordering ------------------------
+// Two concurrent policy writes to ONE host (the check row and the self row --
+// disjoint bodies, but every response carries the whole-broker update view)
+// whose responses invert across separate connections: the OLDER view landing
+// last must not repaint every row until the next read.
+CASES.last_write_ordering = async () => {
+    const out = {};
+    const PGATE = (c, a, r) => ({ check: SGATE(c, 'stored'),
+                                  apply: SGATE(a, 'stored'),
+                                  restart: SGATE(r, 'stored') });
+    // Commit order on the broker is SEND order: W1 (check on) commits
+    // first, W2 (the self grant) second -- so v2 is the newest truth.
+    const v1 = INFO_MODERN(true, { policy: PGATE(true, false, false) }).update;
+    const v2 = INFO_MODERN(true, { policy: PGATE(true, true, true) }).update;
+    reset();
+    fleet(['local']);
+    INFO = { local: INFO_MODERN(true, { policy: PGATE(false, false, false) }) };
+    CHECK = { local: OK200({ state: 'current' }) };
+    await pollTick();
+    policyCalls.length = 0; policyBodies.length = 0; infoCalls.length = 0;
+    // W1 is SENT first but its response is gated to land LAST. W1 never
+    // names restart_enabled, so no A3 re-read can heal what it breaks --
+    // this case fails on the old unconditional lastWrite.set.
+    let releaseW1;
+    const gateW1 = new Promise((res) => { releaseW1 = res; });
+    POLICY = { local: { queue: [
+        { status: 200, gate: gateW1, body: { ok: true, update: v1 } },
+        { status: 200, body: { ok: true, update: v2 } },
+    ] } };
+    const p1 = setChecking('local', true, {});
+    const p2 = setPolicy('local',
+        { apply_enabled: true, restart_enabled: true },
+        { kind: 'self', want: true, busyNote: 'x' });
+    out.p2 = await p2;
+    releaseW1();
+    out.p1 = await p1;
+    const after = updateCapFor('local');
+    out.afterCheckOn = !!(after && after.policy.check.enabled);
+    out.afterRestartOn = !!(after && after.policy.restart.enabled);
+    out.selfRowOn = selfUpdateModelFor('local').on;
+    // Read-retirement stands: a refresh read serves the shared record.
+    await capabilityFor(hostById('local'), true);
+    out.retired = !lastWrite.has('local');
+    // The ordering memory never blocks a genuinely NEWER write.
+    const v3 = INFO_MODERN(true, { policy: PGATE(false, true, true) }).update;
+    POLICY = { local: { queue: [
+        { status: 200, body: { ok: true, update: v3 } },
+    ] } };
+    out.p3 = await setChecking('local', false, {});
+    const later = updateCapFor('local');
+    out.laterCheckOff = !!(later && later.policy.check.enabled === false);
     return out;
 };
 
@@ -3855,3 +3924,37 @@ def test_the_restart_refresh_wiring_is_pinned():
     assert "await capabilityFor(fresh, true);" in seg
     policy = MOD_POLICY_JS.read_text(encoding="utf-8")
     assert "function restartGateMoved(changes, beforeUpd, afterUpd)" in policy
+
+
+# ---- #188 item 2 (atom A4): write-vs-write ordering -----------------------
+
+
+def test_an_older_writes_answer_landing_last_cannot_repaint_the_rows(harness):
+    """Check row + self row race to one broker; the responses invert
+    across connections. The older whole-broker view landing LAST must be
+    discarded -- every row keeps rendering the newest-sent write's view
+    -- while read-retirement and genuinely newer writes stay untouched."""
+    r = run(harness, "last_write_ordering")
+    assert r["p1"] is True and r["p2"] is True
+    assert r["afterCheckOn"] is True
+    assert r["afterRestartOn"] is True, (
+        "the stale check-write view landing last clobbered the newer "
+        "self-grant view")
+    assert r["selfRowOn"] is True
+    assert r["retired"] is True
+    assert r["p3"] is True
+    assert r["laterCheckOff"] is True, (
+        "the ordering memory blocked a genuinely newer write")
+
+
+def test_the_write_ordering_wiring_is_pinned():
+    """`sent` is stamped when the REQUEST leaves; the install is guarded
+    on a per-host high-water mark that survives read-retirement; and the
+    retirement stamp itself stays LANDING-ordered."""
+    src = MOD_JS.read_text(encoding="utf-8")
+    assert "const lastWriteSent = new Map();" in src
+    seg = src[src.index("async function setPolicy"):
+              src.index("async function setChecking")]
+    assert "const writeSent = ++opSeq;" in seg
+    assert "writeSent > hw.sent" in seg
+    assert "seq: ++opSeq" in seg, "read-retirement must stay landing-stamped"

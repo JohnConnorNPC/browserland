@@ -721,6 +721,9 @@
                     for (const id of Array.from(lastWrite.keys())) {
                         if (!ids.has(id)) lastWrite.delete(id);
                     }
+                    for (const id of Array.from(lastWriteSent.keys())) {
+                        if (!ids.has(id)) lastWriteSent.delete(id);
+                    }
                 }
                 // The deliberate retry. The capability probe caches its outcome
                 // — including its failures — precisely so a tick can never
@@ -815,6 +818,14 @@
                 // definition and leaves the write standing.
                 let opSeq = 0;
                 const lastWrite = new Map();   // hostId -> {update, seq, fp}
+                // #188 item 2: WRITE-vs-write ordering memory, per host. The
+                // high-water `sent` stamp of every view that ever installed,
+                // kept OUTSIDE lastWrite because a read legitimately retires
+                // the entry (capabilityFor) — and with it, if it lived there,
+                // the only proof that a still-in-flight older write's answer
+                // is stale. Survives retirement on purpose; dies with the
+                // host (prune below) or a re-pointed fingerprint.
+                const lastWriteSent = new Map(); // hostId -> {sent, fp}
 
                 // What a broker last told /info about its own update capability,
                 // or null if it has not answered yet or runs a build too old to
@@ -938,6 +949,13 @@
                     // answer against this to decide whether the cached
                     // /info restart facts just went stale (#188 item 1).
                     const updBefore = updateCapFor(hid);
+                    // #188 item 2: stamped when the REQUEST leaves, not when
+                    // its answer lands — two concurrent writes to one host
+                    // (check row + self row) commit on the broker in send
+                    // order, so send order is the only client-side stand-in
+                    // for "whose whole-broker view is newer" when their
+                    // responses invert across separate connections.
+                    const writeSent = ++opSeq;
                     mark('busy', (opts && opts.busyNote)
                         || (wantOn ? 'switching checking on…'
                             : 'switching checking off…'));
@@ -982,8 +1000,22 @@
                     // from the stale cache the click was drawn against.
                     if (body && body.update
                             && typeof body.update === 'object') {
-                        lastWrite.set(hid, { update: body.update,
-                                             seq: ++opSeq, fp: fp });
+                        // #188 item 2: install only while no LATER-sent
+                        // write's view has already installed for this host —
+                        // an older write's answer landing last is a stale
+                        // whole-broker view and must not repaint every row
+                        // until the next read. `seq` stays LANDING-stamped:
+                        // read-retirement (capabilityFor) compares against
+                        // when answers arrived, and a send-time seq there
+                        // would let a read that began mid-flight retire a
+                        // write whose answer it never saw.
+                        const hw = lastWriteSent.get(hid);
+                        if (!hw || hw.fp !== fp || writeSent > hw.sent) {
+                            lastWriteSent.set(hid, { sent: writeSent,
+                                                     fp: fp });
+                            lastWrite.set(hid, { update: body.update,
+                                                 seq: ++opSeq, fp: fp });
+                        }
                     }
                     if (!out.ok) {
                         mark(out.phase, out.note);
