@@ -40,6 +40,14 @@ The same risk runs in the other direction when you read *another* broker's list,
 
 Two other things are never taken from another broker's list. A **loopback** address (`localhost`, `127.x`) means the machine that published it, so importing it here would point a host at *your* broker carrying somebody else's password — those rows are dropped and counted. And a **hidden** host arrives visible, because hidden takes a host out of the list you can see while this browser carries on talking to it.
 
+### The broker's password history
+
+A broker keeps a short revision history of what is stored in it, so every republish used to file the copy it replaced — passwords and all — where anyone who can read the registry could read it back out. Publishing now tells the broker to keep **no history** for the registry: the stored value is replaced with nothing archived behind it, and whatever history had already piled up is cleared by that same write. The instruction sticks to the registry, so a later publish can't quietly start a new history.
+
+Older brokers don't understand that instruction, and they *ignore* it rather than refuse it — so it is checked **before** anything is sent. A broker that doesn't advertise it is refused **for that broker only**: no password is sent there, every other broker in the same publish is written as usual, and you are offered a per-broker **Publish passwords anyway** override that spells out what it costs. If a broker takes the write but doesn't confirm it dropped its history, that broker is reported as **still archiving** by name, rather than being folded into "published to 3 brokers".
+
+Two things this does not do. It cannot reach copies that already left that broker — older backups and snapshots of its files still hold whatever they held — and dropping a history never recalls a password somebody has already read. Rotating the token remains the only real revocation.
+
 ## Encryption
 
 The broker stores the registry as plain JSON in a file next to its state file, plus a short revision history. **Broker registry encryption** encrypts that value *in this browser* before it is published, so the broker only ever receives ciphertext. It is set in **Control Panel → Browser → Broker registry encryption**, under the **Encrypt before publishing** setting, which offers three modes:
@@ -65,12 +73,12 @@ Browsers only expose the crypto this uses on a **secure context** — `https://`
 ### Other things worth knowing
 
 - **Publishing to every broker** encrypts once and writes the same ciphertext everywhere, so all of those brokers share one passphrase.
-- **The revision history is cleared** on every encrypted publish. Otherwise the plaintext copy you just replaced would still be sitting in the history of the store you had stopped trusting.
+- **The revision history is cleared** on every publish, encrypted or not. Otherwise the plaintext copy you just replaced would still be sitting in the history of the store you had stopped trusting.
 - A wrong passphrase is reported as a wrong passphrase and changes nothing locally — you can simply try again. (It can also mean the stored copy was modified; the two are the same failure and cannot be told apart.)
 - **Older versions of Browserland** don't know about encryption. In *passwords only* mode they still read the list and import the labels and addresses, just without the passwords — the same as a list published without **Include passwords**. In *whole list* mode they report the registry as empty.
 
 ## Forget passwords
 
-**Forget passwords** removes every token from this broker's registry, including its saved revision history, so a token can't be read back from an older stored version. It does **not** revoke access: a browser that already pulled a token keeps it, and the broker's token stays valid until you rotate it. If a token was exposed, change it on that broker (`python -m webterm.broker --print-token` shows the current one). If the broker is an older version that can't clear its history, you are told so you can rotate the token instead.
+**Forget passwords** removes every token from this broker's registry, including its saved revision history, so a token can't be read back from an older stored version — and it leaves the registry set to keep no further history. It does **not** revoke access: a browser that already pulled a token keeps it, and the broker's token stays valid until you rotate it. If a token was exposed, change it on that broker (`python -m webterm.broker --print-token` shows the current one). If the broker is an older version that can't clear its history, you are told so you can rotate the token instead.
 
 It works **without the passphrase** — that is the whole point of an emergency purge. Because an encrypted block is opaque, it is assumed to contain passwords and is removed whole. On a *passwords only* registry that leaves the readable list intact; on a *whole list* registry the list is inside the encrypted block, so removing the passwords means removing the list, and the confirmation says so before you agree to it.

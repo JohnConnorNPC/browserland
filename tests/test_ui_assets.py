@@ -2790,6 +2790,60 @@ def test_host_registry_mod_packaged_and_manifest_agrees():
     assert ".innerHTML" not in src
     _assert_host_registry_encryption(src)
     _assert_host_registry_pull_sources(src)
+    _assert_host_registry_no_history(src)
+
+
+def _assert_host_registry_no_history(src):
+    # #192: the modstore revision ring used to archive every token this mod
+    # published. The migration is (a) the sticky noHistory flag on EVERY publish
+    # path, (b) a PRE-WRITE per-host /info capability gate with a named
+    # override, and (c) a per-host "still archiving" backstop. These are the
+    # structural facts; the server half is tested in
+    # tests/test_modstore_nohistory.py.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    # (a) Every publish path flags the record. publishTo builds ONE opts object
+    # and both set() calls share it, so the 409 rebase retry cannot re-PUT
+    # without the flag (a retry that drops it silently resumes archiving).
+    assert "opts.noHistory = true;" in code
+    assert code.count("ctx.serverStore.set(value, rev, opts)") == 1
+    assert code.count("ctx.serverStore.set(value, res.rev, opts)") == 1
+    assert "purgeRevisions: true } : { host: hid }" in code
+    # Forget keeps its per-write purge (the half an old broker still honours)
+    # AND flags the record so the NEXT write cannot start a fresh ring.
+    assert "{ purgeRevisions: true, noHistory: true }" in code
+    # (b) The gate reads /info BEFORE any password-bearing PUT: the flag fails
+    # open on an old broker, so the discovering PUT would itself be the leak.
+    # ABSENCE of the key is the old-build signal, never an error (#157).
+    assert "function infoAdvertisesNoHistory(" in code
+    assert "info.modstore" in code and "m.noHistory === true" in code
+    assert "hostFetch(host, '/info'" in code
+    assert "function checkNoHistory(" in code
+    # …resolved per host, and never through hostFetch(null, …), which would
+    # silently probe THIS page's own broker instead (#174).
+    assert "(hid === 'local') ? localHost() : hostById(hid)" in code
+    assert "why: 'host not found'" in code
+    # Gated on a password-bearing publish only, and the refused hosts are
+    # dropped from the write list — the others still go out.
+    assert "const carried = valueHasPlainTokens(value);" in code
+    assert "let writeTo = targets;" in code
+    assert "for (const hid of writeTo)" in code
+    assert "publishTo(hid, out, !!plan.seal)" in code
+    # The override is NAMED, per host, and never silent: a dialog with the
+    # archiving consequence spelled out, defaulting to skip.
+    assert "function pickArchivingOverride(" in code
+    assert "files it into a revision history on " in src
+    assert "Publish passwords anyway" in src
+    assert "Skip these brokers" in src
+    assert "if (!res || res.value !== 'anyway') return out;" in code
+    # (c) The response-echo backstop, PER HOST — a broker that ignored the flag
+    # does not echo it, and that host says so on its own row rather than being
+    # averaged into the success count.
+    assert "archiving: ok && res.noHistory !== true" in code
+    assert "results.filter(r => r.ok && r.archiving)" in code
+    assert "function archivingList(" in code
+    assert "still archiving." in src
+    assert "Still archiving" in src
 
 
 def _assert_host_registry_pull_sources(src):

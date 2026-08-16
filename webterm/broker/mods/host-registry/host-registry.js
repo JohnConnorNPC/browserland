@@ -19,6 +19,18 @@
         //              republishes without tokens + purgeRevisions, clearing the
         //              server history — it does NOT revoke a token already pulled;
         //              rotate the broker token for real revocation)
+        //   no-history - #192. The modstore keeps a 50-deep revision ring, so every
+        //              republish used to file the value it replaced — tokens and
+        //              all — into a history readable back whole. EVERY publish now
+        //              sets the sticky `noHistory` flag (no ring push, and the
+        //              existing ring is cleared), which is gated PER HOST on that
+        //              broker's /info advertising `modstore.noHistory`: an older
+        //              broker ignores the unknown key and keeps archiving, so a
+        //              password-bearing publish there is REFUSED with NO PUT sent
+        //              unless the operator overrides that host by name. A response
+        //              that does not echo the flag reports as still archiving, per
+        //              host. Older disk copies are not reachable from here —
+        //              rotation is still the only real revocation.
         //   encrypt   - #175. The value the broker stores can be encrypted IN THIS
         //              BROWSER first (WebCrypto, passphrase-derived), so the
         //              modstore JSON on disk holds ciphertext. Three modes, and
@@ -892,6 +904,13 @@
                 // bodies, so this browser cannot tell whether the ring holds a
                 // token; clearing it is the only honest answer. Nothing in this
                 // mod reads the ring.
+                //
+                // #192: `noHistory` rides EVERY publish — the sticky, per-record
+                // "never push a revision, and clear the ring now" flag. `purge`
+                // above is per-WRITE, so the first write that forgets it re-leaks;
+                // the flag is what survives the next write, this mod's next
+                // version, and a broker restart. Both set() calls below share ONE
+                // opts object precisely so the 409 rebase cannot re-PUT without it.
                 async function publishTo(hid, value, purge) {
                     const host = (hid === 'local') ? localHost() : hostById(hid);
                     const name = (host && host.id === 'local')
@@ -901,13 +920,150 @@
                     const rev = (got && typeof got.rev === 'number') ? got.rev : 0;
                     const opts = purge
                         ? { host: hid, purgeRevisions: true } : { host: hid };
+                    opts.noHistory = true;
                     let res = await ctx.serverStore.set(value, rev, opts);
                     if (res && res.status === 409 && res.error === 'conflict'
                             && typeof res.rev === 'number') {
+                        // The SAME opts — noHistory included. A retry that rebuilt
+                        // them without the flag would land the rebased value on an
+                        // unflagged record and quietly resume archiving: the exact
+                        // bug the flag exists to close, in the one code path most
+                        // likely to drop it.
                         res = await ctx.serverStore.set(value, res.rev, opts);
                     }
-                    return { hid: hid, name: name, ok: !!(res && res.ok),
-                             error: res && res.error };
+                    const ok = !!(res && res.ok);
+                    return { hid: hid, name: name, ok: ok,
+                             error: res && res.error,
+                             // The backstop BEHIND the /info gate, and per host: a
+                             // broker that ignored the flag (an old build, or one
+                             // downgraded since the gate ran) simply does not echo
+                             // it, so that host reads as still archiving on its own
+                             // row. Never folded into a fleet-wide "ok".
+                             archiving: ok && res.noHistory !== true };
+                }
+                // #192: the PRE-WRITE capability gate, asked of ONE host. The flag
+                // FAILS OPEN on a broker that predates it — unknown PUT body keys
+                // are ignored — so the very PUT that would discover the problem has
+                // already filed the previous plaintext into that broker's ring: the
+                // write meant to stop the archiving would BE the leak. The question
+                // is therefore asked of /info first, and a host that cannot answer
+                // yes gets no PUT at all.
+                //
+                // ABSENCE is the old-build signal, never an error (#157): a broker
+                // predating this answers /info normally and simply lacks the key.
+                function infoAdvertisesNoHistory(info) {
+                    const m = (info && typeof info === 'object'
+                              && !Array.isArray(info)) ? info.modstore : null;
+                    return !!(m && typeof m === 'object' && !Array.isArray(m)
+                              && m.noHistory === true);
+                }
+                async function readNoHistoryCap(host) {
+                    // Unreachable / refused / unparseable is ALSO a no, and each
+                    // says which: this browser did not LEARN that the flag is
+                    // honoured there, and guessing yes is the leak.
+                    let r = null;
+                    try {
+                        r = await hostFetch(host, '/info', { cache: 'no-store' });
+                    } catch (_) {
+                        return { capable: false, why: 'could not be reached' };
+                    }
+                    if (!r.ok) {
+                        return { capable: false, why: r.status === 401
+                            ? 'refused our password — set it on the Browser tab'
+                            : 'answered HTTP ' + r.status };
+                    }
+                    let j = null;
+                    try { j = await r.json(); } catch (_) {
+                        return { capable: false,
+                                 why: 'answered, but not with its /info' };
+                    }
+                    return infoAdvertisesNoHistory(j)
+                        ? { capable: true, why: '' }
+                        : { capable: false, why: 'older version — it keeps a '
+                            + 'password history and cannot be told to stop' };
+                }
+                // -> {hid, name, capable, why}. Never rejects, and NEVER falls back
+                // to this page's own origin: hostFetch(null, …) silently hits the
+                // SAME broker (#174), which would report one host's capability as
+                // another's, so an id that no longer resolves is a refusal rather
+                // than a probe. hostFetch deadlines the CONNECT only, so the body
+                // read carries probeSource's end-to-end deadline as well.
+                async function checkNoHistory(hid) {
+                    const host = (hid === 'local') ? localHost() : hostById(hid);
+                    const name = host ? srcLabel(host) : String(hid);
+                    if (!host) {
+                        return { hid: hid, name: name, capable: false,
+                                 why: 'host not found' };
+                    }
+                    const res = await withDeadline(readNoHistoryCap(host), PROBE_MS,
+                        { capable: false, why: 'took too long to answer' });
+                    const capable = res.capable === true;
+                    return { hid: hid, name: name, capable: capable,
+                             why: capable
+                                 ? '' : (res.why || 'could not be reached') };
+                }
+                // Per-host lines for a notice. Every machine is named with its own
+                // outcome — a refusal and a write are facts about different
+                // brokers and are never averaged into one number.
+                function archivingList(recs) {
+                    return recs.map(r => r.name + (r.why ? ' (' + r.why + ')' : ''))
+                        .join('; ');
+                }
+                // The NAMED override. Skipping is the default and the safe path;
+                // publishing anyway is an explicit per-host choice, made with the
+                // consequence written out, for THIS publish only — never a
+                // remembered preference, and never a silent fallback. Returns the
+                // set of host ids to write to anyway (empty on cancel/Escape).
+                async function pickArchivingOverride(lacking) {
+                    const refs = [];
+                    const res = await openDialog({
+                        title: 'These brokers still archive passwords',
+                        body: function (c) {
+                            const intro = document.createElement('div');
+                            intro.className = 'app-dialog-msg';
+                            intro.textContent = 'Publishing a password to these '
+                                + 'brokers files it into a revision history on '
+                                + 'their disk — along with the copy this publish '
+                                + 'replaces — which anyone who can read that '
+                                + 'registry can read back. They are too old to be '
+                                + 'told to stop keeping one, so nothing has been '
+                                + 'sent to them.';
+                            c.appendChild(intro);
+                            const list = document.createElement('div');
+                            list.className = 'hostreg-list';
+                            for (const rec of lacking) {
+                                const r = mkRowCheck('', false);
+                                r.row.classList.add('hostreg-danger');
+                                r.span.textContent = rec.name;
+                                const w = document.createElement('span');
+                                w.className = 'hostreg-locked';
+                                w.textContent = ' — ' + rec.why;
+                                r.span.appendChild(w);
+                                list.appendChild(r.row);
+                                refs.push({ hid: rec.hid, cb: r.cb });
+                            }
+                            c.appendChild(list);
+                            const tail = document.createElement('div');
+                            tail.className = 'app-dialog-msg';
+                            tail.textContent = 'Tick a broker to publish the '
+                                + 'passwords into its history anyway. The other '
+                                + 'brokers in this publish are written either way, '
+                                + 'and clearing a history later cannot recall a '
+                                + 'password somebody has already read — rotate it.';
+                            c.appendChild(tail);
+                        },
+                        buttons: [
+                            { label: 'Publish passwords anyway', value: 'anyway',
+                              primary: true, danger: true },
+                            { label: 'Skip these brokers', value: false },
+                        ],
+                    });
+                    const out = new Set();
+                    if (!res || res.value !== 'anyway') return out;
+                    for (const ref of refs) {
+                        if (ref.cb.checked) out.add(ref.hid);
+                    }
+                    return out;
                 }
                 async function doPublish(selected, includeTokens, localUrl, toAll) {
                     const value = buildValue(selected, includeTokens, localUrl);
@@ -927,6 +1083,47 @@
                             { sticky: true, type: 'error' });
                         return;
                     }
+                    // Targets: the local broker always; every configured broker if
+                    // "publish to all" was ticked. Each broker is an INDEPENDENT
+                    // store, so results are reported per broker (never a blanket
+                    // success when some failed).
+                    const targets = toAll ? getHosts().map(h => h.id) : ['local'];
+                    // #192: the pre-write gate. Only a PASSWORD-BEARING publish is
+                    // gated — a token-free list holds no credential to archive, and
+                    // refusing one would break ordinary publishing to an older
+                    // broker for nothing. It runs BEFORE the passphrase prompt and
+                    // before sealing, so a publish that will send nothing never
+                    // asks for a passphrase, and the ciphertext (which IS the
+                    // password, at rest) is never built for a broker that would
+                    // file it. Per host throughout: a refusal removes exactly that
+                    // host from the write list and leaves the others alone.
+                    const carried = valueHasPlainTokens(value);
+                    const refused = [];
+                    let writeTo = targets;
+                    if (carried) {
+                        if (targets.length > 1) {
+                            showNotice('Checking ' + targets.length
+                                + ' brokers…');
+                        }
+                        const caps = await Promise.all(
+                            targets.map(hid => checkNoHistory(hid)));
+                        const lacking = caps.filter(c => !c.capable);
+                        if (lacking.length) {
+                            const allow = await pickArchivingOverride(lacking);
+                            for (const c of lacking) {
+                                if (!allow.has(c.hid)) refused.push(c);
+                            }
+                            const skip = new Set(refused.map(c => c.hid));
+                            writeTo = targets.filter(hid => !skip.has(hid));
+                        }
+                        if (!writeTo.length) {
+                            showNotice('Nothing was published: no password was '
+                                + 'sent to a broker that would archive it. '
+                                + 'Refused: ' + archivingList(refused) + '.',
+                                { sticky: true, type: 'error' });
+                            return;
+                        }
+                    }
                     let out = value;
                     if (plan.seal) {
                         const pass = await requirePassphrase();
@@ -944,15 +1141,11 @@
                             return;
                         }
                     }
-                    // Targets: the local broker always; every configured broker if
-                    // "publish to all" was ticked. Each broker is an INDEPENDENT
-                    // store, so results are reported per broker (never a blanket
-                    // success when some failed). The value — ciphertext included —
-                    // is built ONCE, so every broker gets the same bytes under one
-                    // passphrase rather than a per-broker re-derive.
-                    const targets = toAll ? getHosts().map(h => h.id) : ['local'];
+                    // The value — ciphertext included — is built ONCE, so every
+                    // broker gets the same bytes under one passphrase rather than a
+                    // per-broker re-derive.
                     const results = [];
-                    for (const hid of targets) {
+                    for (const hid of writeTo) {
                         results.push(await publishTo(hid, out, !!plan.seal));
                     }
                     // Don't nudge yourself: the one-time discovery notice keys off
@@ -964,14 +1157,37 @@
                     }
                     const oks = results.filter(r => r.ok);
                     const fails = results.filter(r => !r.ok);
+                    // #192: two different facts about two different sets of
+                    // machines, and neither is ever averaged into the count above.
+                    // `refused` was never written to; `stillArchiving` was written
+                    // to and did not confirm it dropped its history. Both name the
+                    // brokers they are about.
+                    const stillArchiving = results.filter(r => r.ok && r.archiving);
+                    const extra =
+                        (refused.length
+                            ? ' No password was sent to: ' + archivingList(refused)
+                              + ' — still archiving.'
+                            : '')
+                        + (stillArchiving.length
+                            ? ' Still archiving — did not confirm it dropped its '
+                              + 'stored history: '
+                              + archivingList(stillArchiving) + '.'
+                              + (carried
+                                  ? ' Rotate the passwords this list carried for '
+                                    + 'them.' : '')
+                            : '');
+                    const problem = !!(fails.length || refused.length
+                                       || stillArchiving.length);
                     const how = plan.seal === 'all' ? ', encrypted (whole list)'
                         : plan.seal === 'tokens' ? ', passwords encrypted'
                         : (includeTokens ? ', including passwords' : '');
                     if (!fails.length) {
                         showNotice('Published to ' + oks.length + ' broker'
-                            + (oks.length === 1 ? '' : 's') + how + '.',
-                            (includeTokens && !plan.seal)
-                                ? { sticky: true } : undefined);
+                            + (oks.length === 1 ? '' : 's') + how + '.' + extra,
+                            (problem || (includeTokens && !plan.seal))
+                                ? { sticky: true,
+                                    type: problem ? 'error' : undefined }
+                                : undefined);
                     } else {
                         const why = (f) => f.error === 'not_active'
                             ? 'another browser is active there'
@@ -981,7 +1197,8 @@
                             : (f.error || 'failed');
                         showNotice('Published to ' + oks.length + ' of '
                             + results.length + ' brokers. Failed: '
-                            + fails.map(f => f.name + ' (' + why(f) + ')').join('; '),
+                            + fails.map(f => f.name + ' (' + why(f) + ')').join('; ')
+                            + '.' + extra,
                             { sticky: true, type: 'error' });
                     }
                 }
@@ -1055,13 +1272,20 @@
                     const stripped = stripTokens(got.value);
                     // purgeRevisions clears the ring so a token that scrolled into
                     // history is gone too. A fresh nonce makes the write non-deduped.
+                    // #192 adds the sticky flag beside it — same write, same
+                    // meaning, but it also stops the NEXT write from starting a
+                    // fresh ring. purgeRevisions stays: it is the older wire (#65),
+                    // so it is the half an old broker still honours, and this is the
+                    // emergency path, which is no place to drop a working clear.
+                    // Nothing else here changes — Forget still needs no passphrase,
+                    // still refuses to rebase, and still verifies by re-reading.
                     // NO conflict rebase here, unlike publish: the confirmation the
                     // user gave was about the value that was read above, and a
                     // registry that changed under them may have changed CLASS
                     // (a 'tokens' envelope replaced by a whole-list one), turning
                     // "remove the passwords" into "remove everything". Re-run it.
                     const res = await ctx.serverStore.set(stripped, rev,
-                        { purgeRevisions: true });
+                        { purgeRevisions: true, noHistory: true });
                     if (!res || !res.ok) {
                         showNotice('Could not forget passwords: '
                             + (res && res.error === 'not_active'
