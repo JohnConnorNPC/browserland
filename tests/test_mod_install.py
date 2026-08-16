@@ -2609,3 +2609,60 @@ def test_undeclared_capability_is_a_registered_refusal_code():
     # the table's default, so registering it changes no status.
     assert modinstall.ERROR_STATUS["undeclared_capability"] == 400
     assert modinstall.ValidationError("undeclared_capability").status == 400
+
+
+# ---- the scanner must never go BLIND (#193, checkpoint-6 adversarial pass) --
+# Both reviewers found the same class independently: a shape that makes
+# `blank_js_literals` erase real code, so the lint reports a clean package for
+# a file it never read. Under-reporting is the one failure this lint must not
+# have -- over-reporting only costs a needless declaration, since declaring
+# more than you use is allowed.
+
+def test_a_template_substitution_is_code_and_stays_visible():
+    """`${ ... }` inside a template literal is EVALUATED, so blanking it the
+    way the surrounding text is blanked hides a real capability use."""
+    src = ("const x = `${ctx.file.read('secret')}`;\n"
+           "const y = `${fetch(url)}`;\n")
+    uses = {p for p, *_ in modinstall.capability_uses("t.js", src)}
+    assert uses == {"file", "egress"}
+
+
+def test_a_nested_template_does_not_blank_the_rest_of_the_file():
+    """The most common HTML-building idiom in JS. A backtick inside a `${}`
+    used to close the literal early; the real closing backtick then opened a
+    phantom string that blanked everything after it -- so the two capability
+    uses below were invisible."""
+    src = ("const html = `<ul>${items.map(i => `<li>${i}</li>`).join('')}</ul>`;\n"
+           "ctx.file.read('/etc/passwd').then(send);\n"
+           "hostFetch('https://evil.example/x');\n")
+    uses = {p for p, *_ in modinstall.capability_uses("t.js", src)}
+    assert "file" in uses and "egress" in uses
+
+
+def test_a_division_is_not_read_as_a_regex_that_eats_the_file():
+    """`/` after `+ - * % }` can just as easily be division. Guessing "regex"
+    there costs the whole rest of the file when no closing slash follows;
+    guessing "division" at worst scans a real regex body as code."""
+    for src in ("let a = x++ / rate;\nfetch(endpoint);\n",
+                "let b = (p % q) / r;\nctx.session.list();\n",
+                "let c = f() / 2;\nctx.clipboard.write(v);\n"):
+        uses = {p for p, *_ in modinstall.capability_uses("t.js", src)}
+        assert uses, f"the scan went blind after the division in: {src!r}"
+
+
+def test_an_unterminated_regex_opener_cannot_blank_to_eof():
+    """A regex literal cannot span a line, so an opener with no partner on its
+    own line was never a regex -- decided BEFORE anything is blanked."""
+    src = "if (a</b) {\n}\nctx.file.read('x');\n"
+    uses = {p for p, *_ in modinstall.capability_uses("t.js", src)}
+    assert "file" in uses
+
+
+def test_the_honest_negatives_still_hold_after_the_blindness_fixes():
+    """The fixes must not turn the scanner into one that flags prose: a
+    mention in a comment, in a plain string, or inside a real regex body is
+    still not a use."""
+    for src in ("// prose mentioning ctx.file and fetch(\nconst z = 1;\n",
+                "const s = 'ctx.file';\n",
+                "const re = /ctx\.file/;\nconst t = 2;\n"):
+        assert modinstall.capability_uses("t.js", src) == [], src
