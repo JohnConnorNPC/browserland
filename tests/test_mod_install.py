@@ -2371,3 +2371,132 @@ def test_the_disk_scanner_refuses_a_new_undeclared_package(tmp_path,
     assert again.ctx.mods_index["skipped"] == {"x-notes":
                                                "undeclared_capability"}
     assert "x-notes2" in again.ctx.mods_index["mods"]
+
+
+# --------------------------------------------------------------------------- #
+# grandfathering (#193)
+#
+# The lint asks an INSTALL-time question, at the one moment the answer is a
+# decision somebody is making. `validate_package` serves both doors, so without
+# a rule the check would also be asked of every generation ALREADY installed and
+# already serving -- at every rescan and, worse, at every boot, since the index
+# is thrown away and rebuilt from mods_dir. A mod that was fine yesterday would
+# land in `skipped` after an upgrade and go dark. That is an outage, not a check,
+# and it is worth more than the lint is.
+#
+# So: what this store already installed keeps serving; a NEW arrival is linted,
+# on both doors. `_carries_install_attestation` is the whole of the distinction,
+# and it is read off DISK (`.gen.json` as the commit wrote it) because the
+# restart is the half that matters.
+# --------------------------------------------------------------------------- #
+
+def _install_pre_lint(tmp_path, mod_id="x-notes", js=USES_JS):
+    """Install through the COMMIT PATH with the lint off -- i.e. what running
+    the pre-lint broker was.
+
+    Not ``plant``/``plant_raw``: those hand-populate, and hand population is
+    precisely what stays linted. The bytes on disk here are the ones
+    ``commit_generation`` writes (canonical ``mod.json`` with no ``permissions``
+    key, ``.gen.json`` with the per-file digests, ``CURRENT``)."""
+    canonical, records = modinstall.validate_package(
+        manifest(mod_id=mod_id), {f"{mod_id}.js": js}, lint_permissions=False)
+    assert "permissions" not in canonical, "the pre-lint A/B is 'key absent'"
+    gen = modinstall.compute_gen(canonical, records)
+    modinstall.commit_generation(tmp_path / "mods", mod_id, canonical, records,
+                                 gen)
+    return gen
+
+
+def _serves(app, mod_id, gen):
+    """Is the mod actually SERVING? The index entry is not the property -- the
+    asset route answering its bytes is."""
+    _, r = app.test_client.get(f"/mods/{mod_id}/{gen}/{mod_id}.js")
+    return r.status == 200 and b"hostFetch" in (r.body or b"")
+
+
+def test_a_pre_lint_generation_survives_a_rescan_and_a_restart(tmp_path,
+                                                               monkeypatch):
+    gen = _install_pre_lint(tmp_path)
+
+    # RESTART. create_app scans mods_dir synchronously and builds the index from
+    # what it reads, so a fresh app IS the boot path -- the one an upgrade puts
+    # a pre-lint store through, and the one an in-process rescan cannot stand in
+    # for (memory of the old index is exactly what a restart does not have).
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {}
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    assert _serves(app, "x-notes", gen)
+
+    # In-process rescan: same scan, and it also sweeps -- a grandfathered mod
+    # must not be swept out from under itself either.
+    _, r = authed(app).post("/mods/rescan", json={})
+    assert r.status == 200
+    assert r.json["skipped"] == {}
+    assert [m["id"] for m in r.json["mods"]] == ["x-notes"]
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    assert _serves(app, "x-notes", gen)
+
+    # RESTART AGAIN, after the rescan, because the sweep touches the store.
+    again = make_app(tmp_path, monkeypatch)
+    assert again.ctx.mods_index["skipped"] == {}
+    assert again.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    assert _serves(again, "x-notes", gen)
+
+    # The mechanism, stated: the commit's own sidecar is what says "this store
+    # installed this generation", and hand population does not write one.
+    gdir = tmp_path / "mods" / "x-notes" / gen
+    assert modinstall._carries_install_attestation(gdir, ["x-notes.js"])
+    meta = json.loads((gdir / modinstall.GEN_META_NAME).read_text("utf-8"))
+    assert set(meta["files"]) == {"x-notes.js"}
+
+
+def test_grandfathering_covers_what_is_installed_and_never_a_new_arrival(
+        tmp_path, monkeypatch):
+    gen = _install_pre_lint(tmp_path)
+    root = tmp_path / "mods"
+
+    # A NEW package appearing in mods_dir, undeclared, planted exactly as A21's
+    # disk-door test plants one. Grandfathering must not reach it: it is not
+    # something this store installed, it is something that showed up.
+    canonical, records = modinstall.validate_package(
+        manifest(mod_id="x-new"), {"x-new.js": USES_JS},
+        lint_permissions=False)
+    arrived = modinstall.compute_gen(canonical, records)
+    plant_raw(root, "x-new", canonical,
+              {name: rec["data"] for name, rec in records.items()},
+              gen=arrived)
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {"x-new": "undeclared_capability"}
+    assert "x-new" not in app.ctx.mods_index["mods"]
+    # ... and the grandfathered one beside it is unaffected: one store, two
+    # answers, decided per generation.
+    assert _serves(app, "x-notes", gen)
+    assert not modinstall._carries_install_attestation(root / "x-new" / arrived,
+                                                       ["x-new.js"])
+
+    # REINSTALLING over a grandfathered id is a NEW install decision, so the
+    # declaration is required -- the exemption is for what is already stored,
+    # never a licence to keep pushing undeclared bytes at the id.
+    _, refused = authed(app).post("/mods/install", json={
+        "manifest": manifest(), "files": {"x-notes.js": USES_JS},
+        "replace": True})
+    assert refused.status == 400
+    assert refused.json["error"] == "undeclared_capability"
+    # The refusal is in-memory, so the grandfathered generation is untouched and
+    # still serving.
+    assert app.ctx.mods_index["mods"]["x-notes"]["gen"] == gen
+    assert _serves(app, "x-notes", gen)
+    # The declared twin replaces it, and a restart serves THAT.
+    _, ok = authed(app).post("/mods/install", json={
+        "manifest": manifest(permissions=["egress", "file"]),
+        "files": {"x-notes.js": USES_JS}, "replace": True})
+    assert ok.status == 200, ok.json
+    restarted = make_app(tmp_path, monkeypatch)
+    assert restarted.ctx.mods_index["mods"]["x-notes"]["gen"] == ok.json["gen"]
+    assert _serves(restarted, "x-notes", ok.json["gen"])
+    # The RETAINED predecessor is the grandfathered generation, and it is still
+    # served after that restart -- a page that started booting against it is not
+    # handed a 404 by the lint. It reaches _read_generation by the other path
+    # (_load_retained_generation), which drops a refusal SILENTLY, so a
+    # grandfathering rule that missed it would fail invisibly.
+    assert _serves(restarted, "x-notes", gen)

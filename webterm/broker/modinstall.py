@@ -910,8 +910,9 @@ def validate_package(manifest: Any, files: Any,
     ``lint_permissions`` is the ONE seam for that door's one legitimate
     exception -- a generation installed before the lint existed, which must keep
     serving across a rescan and a restart (a restart that silently drops a
-    working mod is not a lint, it is an outage). Nothing passes ``False`` yet;
-    the grandfathering rule that will is deliberately not built here."""
+    working mod is not a lint, it is an outage). The scanner is what passes
+    ``False``, for an already-installed generation and never for a new arrival;
+    ``_carries_install_attestation`` is the whole of that rule."""
     if not isinstance(files, dict):
         raise ValidationError("bad_json", "files must be an object")
     if len(files) > MAX_FILES:
@@ -1159,7 +1160,13 @@ def _read_generation(gen_path: Path, root_real: str
     if manifest_raw is None:
         raise ValidationError("bad_json",
                               f"{gen_path}/{MANIFEST_NAME} unreadable")
-    manifest, records = validate_package(manifest_raw, files)
+    # #193: a generation THIS STORE ALREADY INSTALLED is grandfathered past the
+    # capability lint; a NEW arrival is not. Every other rule still applies to
+    # both, and the bytes are pinned by the content-address check right below --
+    # only the lint has an install-time-only question to ask.
+    installed = _carries_install_attestation(gen_path, list(files))
+    manifest, records = validate_package(manifest_raw, files,
+                                         lint_permissions=not installed)
     computed = compute_gen(manifest, records)
     if computed != gen_path.name:
         raise ValidationError(
@@ -1168,6 +1175,57 @@ def _read_generation(gen_path: Path, root_real: str
             f"(they hash to {computed[:12]}) -- install through POST "
             f"/mods/install rather than writing mods_dir by hand")
     return manifest, records, _read_installed_at(gen_path)
+
+
+def _carries_install_attestation(gen_path: Path,
+                                 names: Sequence[str]) -> bool:
+    """Was this generation put here by an install, rather than just arriving?
+
+    THE GRANDFATHERING KEY (#193). The capability lint asks an INSTALL-time
+    question -- "may it do this here" -- at the one moment the answer is a
+    decision somebody is making. Asking it again of a generation that is already
+    installed and already serving turns every restart into a re-litigation, and
+    the mod that loses goes dark: an upgrade that silently drops a working mod is
+    an outage, not a check. So the lint gates NEW install/replace validations
+    (both doors: the wire and a package appearing in ``mods_dir``), and a
+    generation this store already holds keeps serving.
+
+    ``.gen.json`` naming this very directory and listing exactly the files in it
+    is what ``_generation_payload`` writes at commit time, and it is the ONLY
+    thing that writes it. That makes it the on-disk answer to "was this already
+    installed here" -- and it has to be on-disk, because the index is thrown away
+    and rebuilt from ``mods_dir`` at every boot, so an in-memory "did I already
+    have this" would grandfather across a rescan and lose the mod at the next
+    restart, which is the half that matters.
+
+    NOT A TRUST BOUNDARY, exactly as the scan around it is not (see the module
+    docstring): whoever can write ``mods_dir`` can write this sidecar -- and can
+    far more easily write the one-line ``permissions`` declaration that satisfies
+    the lint outright. What this separates is an already-serving generation from
+    a new arrival, which is a question about history, not about an adversary.
+
+    A store RESTORED FROM BACKUP, or copied to another broker, brings its
+    sidecars and stays grandfathered. Deliberate, and the same call
+    ``_read_installed_at`` already makes about the install stamp: a restore that
+    silently drops the mods it restored is the outage this rule exists to
+    prevent.
+
+    ``names`` is what the scan CAPTURED (ignored junk excluded, ``mod.json`` and
+    ``.gen.json`` excluded), which is exactly the key set the sidecar records."""
+    meta = _read_json_capped(gen_path / GEN_META_NAME)
+    if not isinstance(meta, dict) or meta.get("gen") != gen_path.name:
+        return False
+    hashes = meta.get("files")
+    if not isinstance(hashes, dict) or not names:
+        return False
+    # A digest per captured file and no others. `plant`-style hand population
+    # writes no such map; an install always does. The per-file digests are
+    # SHAPE-checked only -- what pins the bytes is the content-address check on
+    # the directory name, which runs on every generation either way and is fatal.
+    if set(hashes) != set(names):
+        return False
+    return all(isinstance(digest, str) and GEN_RE.fullmatch(digest)
+               for digest in hashes.values())
 
 
 def _read_installed_at(gen_path: Path) -> int:
