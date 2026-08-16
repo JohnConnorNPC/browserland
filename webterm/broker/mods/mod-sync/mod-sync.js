@@ -270,6 +270,9 @@
                     const plan = { hostId: host.id, name: label(host), state: '',
                                    why: '', modRows: [], setRows: [], setObj: {},
                                    priorPolicy: {}, pinsBlocked: '', extra: 0,
+                                   // #191: does this target enforce the admin
+                                   // credential class on POST /mods/policy?
+                                   adminRequired: false,
                                    // Recorded so a Retry repeats THIS operation
                                    // rather than silently downgrading a locking
                                    // push to a minimal one.
@@ -292,6 +295,10 @@
                         return plan;
                     }
                     plan.priorPolicy = Object.assign({}, rec.policy);
+                    // #191: decided per target, from the /info-derived record
+                    // fetchModCatalog just refreshed, before anything is
+                    // written -- see adminEnforcing for the rules.
+                    plan.adminRequired = adminEnforcing(rec);
                     // A peer's catalog is UNTRUSTED input. Keep one sanitized array
                     // and use it everywhere, including for modPolicyImplied — handed
                     // the raw array, a single null/!object element throws on `m.id`
@@ -539,6 +546,142 @@
                     return 'error';
                 }
 
+                // ---- admin credential class (#191) ---------------------------
+                // A broker with an `admin_token` configured 403s admin_required
+                // on POST /mods/policy unless the write carries X-Webterm-Admin.
+                // Everything in this section is that migration, and nothing
+                // else changes: the settings half rides /state, which is not
+                // admin-gated.
+                //
+                // Detection is per TARGET and from its /info ONLY, riding the
+                // `admin` key fetchModCatalog already carries in the shared
+                // catalog record (beside update/restart): an enforcing build
+                // publishes it, an old or non-enforcing build simply lacks it,
+                // and absence is the old-build signal, never an error (#157's
+                // rule: a new key is invisible to old peers). NEVER a probe
+                // POST -- the probe IS the write. The routes-aware predicate
+                // is shared with the mods pane (_adminRequiredFor, 86b) so
+                // the two cannot disagree about a peer; guarded like _pin
+                // because it is newer than ctxVersion 1, degrading to bare
+                // key-presence. A record from a build whose fetcher does not
+                // carry `admin` degrades to "not enforcing" -- the safe
+                // direction: the token is then simply not sent, and an
+                // enforcing broker's 403 still renders as an admin refusal.
+                const POLICY_ROUTE = '/mods/policy';
+                function adminEnforcing(rec) {
+                    const info = (rec && rec.admin
+                        && typeof rec.admin === 'object') ? rec.admin : null;
+                    if (!info) return false;
+                    try {
+                        if (typeof _adminRequiredFor === 'function') {
+                            return !!_adminRequiredFor(info, POLICY_ROUTE);
+                        }
+                    } catch (_) { return false; }
+                    return true;
+                }
+                // The ONE deliberate second writer of POST /mods/policy: the
+                // shared saveModPins cannot carry a header, and the admin
+                // credential travels ONLY in X-Webterm-Admin -- never
+                // Authorization (the page token already rides that on every
+                // hostFetch wire; two credential classes must not share one
+                // slot) and never the query string. Wire-identical to
+                // saveModPins otherwise: same {set} body, same PATCH semantics,
+                // same repaint of the shared catalog cache from the
+                // authoritative reply. Called ONLY for a target that advertised
+                // `admin` AND with a token in hand for this push; every other
+                // write -- every old-build target included -- still goes
+                // through saveModPins, so that wire stays byte-identical.
+                async function saveModPinsAdmin(host, set, adminToken) {
+                    if (!host) return { ok: false, error: 'no_host' };
+                    const ids = Object.keys(set || {});
+                    if (!ids.length) return { ok: true };
+                    if (ids.length > MAX_MOD_POLICY_KEYS) {
+                        return { ok: false, error: 'too_many' };
+                    }
+                    let r;
+                    try {
+                        r = await hostFetch(host, POLICY_ROUTE, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-Webterm-Admin': adminToken,
+                            },
+                            body: JSON.stringify({ set: set }),
+                        });
+                    } catch (_) { return { ok: false, error: 'unreachable' }; }
+                    if (!r.ok) {
+                        let e = null;
+                        try { e = await r.json(); } catch (_) { e = null; }
+                        return { ok: false, error: (e && e.error)
+                            ? e.error : ('HTTP ' + r.status) };
+                    }
+                    let j = null;
+                    try { j = await r.json(); } catch (_) { j = null; }
+                    const rec = modCatalogCache.get(host.id);
+                    if (rec && j && j.ok) {
+                        rec.policy = sanitizeModPolicy(j.policy);
+                    }
+                    return { ok: true };
+                }
+                // ONE prompt per push, covering every enforcing target in it,
+                // and the token lives in the caller's locals for that push
+                // alone: prefs SYNC across browsers (#153) and localStorage is
+                // same-origin-readable by every mod, so the page has no safe
+                // standing store for an admin credential -- the per-push
+                // prompt is the only sanctioned shape (#191). Deliberate v1
+                // shape for a fleet whose brokers hold DIFFERENT admin tokens:
+                // the one entered token goes to every enforcing target, the
+                // mismatched ones 403 and render as admin-refused, and the
+                // user re-runs the push per fleet segment -- no per-target
+                // prompt matrix. Returns the entered string ('' pushes on
+                // without the token; enforcing targets then refuse their
+                // policy half and say so), or null on cancel, which aborts
+                // the whole operation.
+                async function promptAdminToken(names) {
+                    let input = null;
+                    const res = await openDialog({
+                        title: 'Admin token required',
+                        body: function (c) {
+                            c.appendChild(el('div', 'app-dialog-msg',
+                                'An admin token is required for mod policy '
+                                + 'changes on: ' + cap(names.join(', '), 200)
+                                + '. The page password is not enough for '
+                                + 'this — those brokers gate administration '
+                                + 'behind a separate credential (admin_token '
+                                + 'in their broker_config.json).'));
+                            const row = el('div', 'set-row app-dialog-field');
+                            row.appendChild(el('label', null, 'Admin token'));
+                            input = document.createElement('input');
+                            input.type = 'password';
+                            input.autocomplete = 'off';
+                            row.appendChild(input);
+                            c.appendChild(row);
+                            c.appendChild(el('div', 'set-hint',
+                                'Asked once per push, used only for it, never '
+                                + 'stored, and never sent to a broker that '
+                                + 'does not require it. The one token goes '
+                                + 'to every broker listed; one holding a '
+                                + 'different token refuses its policy '
+                                + 'changes in its result row. Leaving it '
+                                + 'empty pushes anyway, and those brokers '
+                                + 'refuse their policy half.'));
+                            // openDialog only auto-focuses its own `fields`;
+                            // this input is body-built (a password box, which
+                            // fields cannot make), so take focus right after
+                            // the dialog's own focus pass runs.
+                            setTimeout(function () {
+                                try { input.focus(); } catch (_) {}
+                            }, 0);
+                        },
+                        buttons: [
+                            { label: 'Continue', value: 'go', primary: true },
+                            { label: 'Cancel', value: false },
+                        ],
+                    });
+                    if (!res || res.value !== 'go') return null;
+                    return input ? input.value : '';
+                }
+
                 // ---- push ----------------------------------------------------
                 // Settings first, then pins, and the row reports the two halves
                 // separately. Order matters less than it looks: a pin only takes
@@ -547,7 +690,7 @@
                 // A refused settings write does NOT cancel the pins — the lease is
                 // exactly what makes a busy broker's /state unwritable, and that is
                 // the broker an operator most needs to administer.
-                async function pushTo(plan) {
+                async function pushTo(plan, adminToken) {
                     const host = hostById(plan.hostId);
                     // Re-resolved at write time, never captured: hostFetch(null, …)
                     // silently resolves against OUR OWN origin with no token, so a
@@ -556,9 +699,12 @@
                         return { name: plan.name, ok: false,
                                  detail: 'no longer configured' };
                     }
+                    // adminRequired (a boolean, never the token) rides the
+                    // result so Retry/Undo know to ask again (#191).
                     const out = { name: label(host), hostId: host.id, ok: true,
                                   parts: [], priorPolicy: plan.priorPolicy,
-                                  wrote: {}, lockAll: !!plan.lockAll };
+                                  wrote: {}, lockAll: !!plan.lockAll,
+                                  adminRequired: !!plan.adminRequired };
                     const writes = plan.setRows.filter((r) => r.action === 'write');
                     if (writes.length) {
                         const res = await writeSettings(host, writes);
@@ -584,13 +730,31 @@
                         // peer, and "restore the pins it had before" is the right
                         // action either way — a no-op when the write never landed.
                         out.wrote = Object.assign({}, plan.setObj);
-                        const res = await saveModPins(host, plan.setObj,
-                            { quiet: true });
+                        // #191: the admin variant fires ONLY when this target
+                        // advertised the admin class AND a token was entered
+                        // for this push; every other write -- every old-build
+                        // target included -- rides the shared saveModPins.
+                        const useAdmin = !!(plan.adminRequired && adminToken);
+                        const res = useAdmin
+                            ? await saveModPinsAdmin(host, plan.setObj,
+                                adminToken)
+                            : await saveModPins(host, plan.setObj,
+                                { quiet: true });
                         if (res && res.ok) {
                             const pins = ids.filter((i) => plan.setObj[i] !== null);
                             const clears = ids.length - pins.length;
                             out.parts.push(pins.length + ' pinned'
                                 + (clears ? ', ' + clears + ' unpinned' : ''));
+                        } else if (res && res.error === 'admin_required') {
+                            // An enforcing target's refusal is an AUTH outcome,
+                            // named as such -- never dressed as a network
+                            // failure (#191).
+                            out.ok = false;
+                            out.parts.push('mod policy refused — that broker '
+                                + 'requires its admin token ('
+                                + (useAdmin
+                                    ? 'the one entered was not accepted'
+                                    : 'none was entered') + ')');
                         } else {
                             out.ok = false;
                             out.parts.push('mod policy could not be changed'
@@ -626,14 +790,32 @@
                         showNotice('nothing to undo on ' + label(host) + '.');
                         return;
                     }
-                    const res = await saveModPins(host, set, { quiet: true });
-                    showNotice(res && res.ok
-                        ? ('Restored the mod pins ' + label(host) + ' had before '
-                            + 'the push. Its browsers pick that up on their next '
-                            + 'page load.')
-                        : ('Could not restore the pins on ' + label(host) + '.'),
-                        (res && res.ok) ? undefined
-                            : { sticky: true, type: 'error' });
+                    // #191: undoing a push that needed the admin credential
+                    // needs it again -- the token was held only for that push,
+                    // so ask again rather than silently 403ing.
+                    let tok = '';
+                    if (result.adminRequired) {
+                        const t = await promptAdminToken([label(host)]);
+                        if (t === null) return;
+                        tok = t;
+                    }
+                    const res = (result.adminRequired && tok)
+                        ? await saveModPinsAdmin(host, set, tok)
+                        : await saveModPins(host, set, { quiet: true });
+                    if (res && res.ok) {
+                        showNotice('Restored the mod pins ' + label(host)
+                            + ' had before the push. Its browsers pick that up '
+                            + 'on their next page load.');
+                    } else if (res && res.error === 'admin_required') {
+                        showNotice('Could not restore the pins on '
+                            + label(host) + ' — it requires its admin token '
+                            + (tok ? 'and did not accept the one entered.'
+                                : 'and none was entered.'),
+                            { sticky: true, type: 'error' });
+                    } else {
+                        showNotice('Could not restore the pins on '
+                            + label(host) + '.', { sticky: true, type: 'error' });
+                    }
                 }
 
                 // ---- adopt ---------------------------------------------------
@@ -961,8 +1143,23 @@
                         showNotice('Nothing selected to push.');
                         return;
                     }
+                    // #191: ONE prompt per push, and only when some selected
+                    // target both advertised the admin class AND is getting a
+                    // policy write (the settings half rides /state, which is
+                    // not admin-gated). Cancelling the prompt cancels the
+                    // whole push; deselecting the enforcing brokers instead
+                    // pushes without it.
+                    let adminToken = '';
+                    const enforcing = go.filter((p) => p.adminRequired
+                        && Object.keys(p.setObj).length);
+                    if (enforcing.length) {
+                        const t = await promptAdminToken(
+                            enforcing.map((p) => p.name));
+                        if (t === null) return;
+                        adminToken = t;
+                    }
                     const out = [];
-                    for (const p of go) out.push(await pushTo(p));
+                    for (const p of go) out.push(await pushTo(p, adminToken));
                     results = out;
                     renderResults();
                     const bad = out.filter((r) => !r.ok).length;
@@ -1146,28 +1343,39 @@
                                 // target default already agrees is an explicit CLEAR,
                                 // so a "retry" of a locking push would quietly undo
                                 // the locks it had just asked for.
-                                planFor(h, !!r.lockAll).then(function (p) {
+                                planFor(h, !!r.lockAll).then(async function (p) {
                                     if (p.state !== 'ok') {
                                         showNotice(p.name + ' — ' + p.why,
                                             { sticky: true, type: 'error' });
                                         return;
                                     }
-                                    return pushTo(p).then(function (out) {
-                                        // Undo must still reach back to how that
-                                        // broker looked before the FIRST push in
-                                        // this row: keep the earliest prior value
-                                        // for every id (a later Object.assign
-                                        // argument wins, so the older map goes
-                                        // last), and undo the union of what both
-                                        // attempts wrote.
-                                        out.priorPolicy = Object.assign({},
-                                            out.priorPolicy, r.priorPolicy);
-                                        out.wrote = Object.assign({},
-                                            r.wrote, out.wrote);
-                                        results = results.map(
-                                            (x) => (x.hostId === r.hostId) ? out : x);
-                                        renderResults();
-                                    });
+                                    // #191: a Retry is a push of its own, so an
+                                    // enforcing target with policy writes asks
+                                    // again -- the original push's token was
+                                    // deliberately kept nowhere to reuse.
+                                    let tok = '';
+                                    if (p.adminRequired
+                                            && Object.keys(p.setObj).length) {
+                                        const t = await promptAdminToken(
+                                            [p.name]);
+                                        if (t === null) return;
+                                        tok = t;
+                                    }
+                                    const out = await pushTo(p, tok);
+                                    // Undo must still reach back to how that
+                                    // broker looked before the FIRST push in
+                                    // this row: keep the earliest prior value
+                                    // for every id (a later Object.assign
+                                    // argument wins, so the older map goes
+                                    // last), and undo the union of what both
+                                    // attempts wrote.
+                                    out.priorPolicy = Object.assign({},
+                                        out.priorPolicy, r.priorPolicy);
+                                    out.wrote = Object.assign({},
+                                        r.wrote, out.wrote);
+                                    results = results.map(
+                                        (x) => (x.hostId === r.hostId) ? out : x);
+                                    renderResults();
                                 }).catch(function () {
                                     showNotice('retry failed.',
                                         { type: 'error' });

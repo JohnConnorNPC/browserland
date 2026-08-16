@@ -39,6 +39,12 @@ Each case gets its own row rather than a generic failure:
 - **Another browser is the active view there** — its shared settings are only accepted from its active browser, so the settings half is refused. The pins are still written: unlike settings, a broker's mod policy can be changed while somebody else is using it.
 - **Unreachable**, or **refused our password**.
 
+### Brokers that require an admin token
+
+A broker can be configured (`admin_token` in its broker config) to require a separate **admin token** for mod policy changes, on top of the ordinary page password. Push notices this from each broker's own capability report — an older broker predates the whole mechanism and is pushed to exactly as it always was — and asks for the admin token **once per push**, covering every broker in it that requires one.
+
+The token is used for that push only: it is never stored anywhere, and it is never sent to a broker that does not require it. One prompt also means one token — if your brokers use *different* admin tokens, the ones it doesn't match refuse their policy changes and say so in their result rows, distinctly from a broker that was merely unreachable, and you push again for those. Mod settings are not admin-gated, so the settings half of a push still applies either way. **Retry** and **Undo pins** against such a broker ask again, for the same reason the token isn't kept.
+
 ## Adopt
 
 **Adopt from a broker…** makes this browser match a broker you pick. It reads what that broker hands every browser that loads it — its pins, or the shipped default of each mod where it has no pin — plus its mod settings, shows you the diff, and applies it here.

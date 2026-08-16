@@ -3190,6 +3190,68 @@ def test_mod_sync_never_adopts_a_mod_this_build_does_not_have():
     assert "note: 'not installed on that broker'" in plan_for
 
 
+def test_mod_sync_admin_class_detect_prompt_header_outcome():
+    # #191: a peer with `admin_token` configured 403s admin_required on the
+    # POST /mods/policy push wire. mod-sync (a) DETECTS that per target from
+    # the peer's /info alone -- the `admin` key fetchModCatalog carries in the
+    # shared catalog record; absence is the old/non-enforcing-build signal,
+    # never an error, and NEVER a probe POST (the probe IS the write);
+    # (b) prompts ONCE per push for the admin token; (c) sends it as
+    # X-Webterm-Admin on the policy writes to enforcing targets only, while
+    # every other target keeps today's wire byte for byte; (d) renders an
+    # admin refusal as an AUTH outcome distinct from a network failure.
+    src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    # (a) detection rides the /info-derived catalog record and the pane's
+    # routes-aware predicate (guarded, like _pin: newer than ctxVersion 1),
+    # and issues NO request of its own -- no fetch, no method, no probe.
+    assert "const POLICY_ROUTE = '/mods/policy';" in code
+    assert code.count("'/mods/policy'") == 1  # the const is the only literal
+    detect = code[code.index("function adminEnforcing(rec)"):
+                  code.index("async function saveModPinsAdmin(")]
+    assert "rec.admin" in detect
+    assert "typeof _adminRequiredFor === 'function'" in detect
+    assert "_adminRequiredFor(info, POLICY_ROUTE)" in detect
+    assert "if (!info) return false;" in detect     # absent key = today's wire
+    assert "hostFetch" not in detect and "method" not in detect
+    assert "plan.adminRequired = adminEnforcing(rec);" in code
+    # (b) ONE prompt per push, only when an enforcing target is actually
+    # getting a policy write (the settings half rides /state, which is not
+    # admin-gated); a password-type input so the token is never readable off
+    # a shared or streamed screen; Retry and Undo are pushes of their own and
+    # ask again.
+    assert "async function promptAdminToken(" in code
+    assert "input.type = 'password';" in code
+    assert "input.autocomplete = 'off';" in code
+    assert "&& Object.keys(p.setObj).length" in code
+    assert code.count("await promptAdminToken(") == 3  # push, retry, undo
+    # (c) the header rides ONLY the admin variant, and that variant fires only
+    # for a target that advertised `admin` AND with a token entered for this
+    # push -- every other write (old builds included) still goes through the
+    # shared saveModPins, wire byte-identical to before #191.
+    assert code.count("'X-Webterm-Admin'") == 1
+    admin_writer = code[code.index("async function saveModPinsAdmin("):
+                        code.index("async function promptAdminToken(")]
+    assert "'X-Webterm-Admin'" in admin_writer
+    assert "hostFetch(host, POLICY_ROUTE, {" in admin_writer
+    assert "plan.adminRequired && adminToken" in code
+    assert "saveModPins(host, plan.setObj," in code   # the non-admin path stays
+    # (d) an admin refusal is NAMED, never dressed as a network failure, and
+    # both wordings are honest about whether a token was even entered.
+    assert "=== 'admin_required'" in code
+    assert "requires its admin token" in code
+    # The token is held for the push alone: never parked on a plan or result
+    # object (those outlive the push in the results pane), never in the mods
+    # pane's until-reload hold, and never in any page-readable store.
+    assert ".adminToken" not in code
+    assert "_adminHeld" not in code
+    assert "localStorage" not in code
+    # Ships in the served page.
+    assert "promptAdminToken" in INDEX_HTML
+
+
 # --------------------------------------------------------------------------- #
 # workspaces mod (#148)
 # --------------------------------------------------------------------------- #
