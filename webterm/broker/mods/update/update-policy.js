@@ -275,6 +275,20 @@
                              + 'change from its own desktop — update it, '
                              + 'and this switch will work from here' };
             }
+            if (status === 403 && code === 'admin_required') {
+                // Also NOT the page password (#191). That broker runs an
+                // admin credential class: this route takes a second,
+                // separate credential its operator configured, and the
+                // page token — however good — is not it. Same reasoning as
+                // forbidden_origin above: naming this "refused our
+                // password" sends someone to re-enter one that is
+                // perfectly fine, and hides the actual requirement.
+                return { ok: false, phase: 'failed',
+                         note: 'that broker requires its admin token for '
+                             + 'this — the page password is not enough '
+                             + 'there (admin_token in its '
+                             + 'broker_config.json)' };
+            }
             if (status === 401 || status === 403) {
                 return { ok: false, phase: 'failed',
                          note: 'that broker refused our password' };

@@ -65,15 +65,18 @@ def test_broker_id_self_heals_corrupt_file(tmp_path):
 _app_seq = 0
 
 
-def _make_app(tmp_path, monkeypatch, token=None):
+def _make_app(tmp_path, monkeypatch, token=None, admin_token=None):
     """Build a broker app with state_path in tmp_path (identity file lands there,
     not the repo) and a UNIQUE Sanic name. Env token would override config, so
-    clear it and set auth_token explicitly when a token is wanted."""
+    clear it and set auth_token explicitly when a token is wanted.
+    `admin_token` (#191) opts the app into the admin credential class."""
     global _app_seq
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     cfg = {"state_path": str(tmp_path / "webterm_state.json")}
     cfg["auth_token"] = token or TEST_TOKEN
+    if admin_token is not None:
+        cfg["admin_token"] = admin_token
     return create_app(cfg, name=f"webterm-info-test-{_app_seq}")
 
 
@@ -224,16 +227,24 @@ def test_info_options_preflight_cors(tmp_path, monkeypatch):
 
 def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
     # #191: a cross-origin admin write (X-Webterm-Admin) must survive its own
-    # preflight. Allowed UNCONDITIONALLY -- checked here on a broker with no
-    # admin_token configured at all, since gating the Allow-Headers on config
-    # would make preflight behavior config-dependent for zero security gain.
-    app = _make_app(tmp_path, monkeypatch, token="sekrit")
-    assert app.ctx.admin_token is None
+    # preflight -- on a broker that HAS the realm. A broker with no
+    # admin_token has nothing to advertise and stays byte-identical to the
+    # build before this class existed (the absent-config invariant), so the
+    # two shapes are pinned separately here.
+    app = _make_app(tmp_path, monkeypatch, token="sekrit",
+                    admin_token="preflight-admin-token-0123")
+    assert app.ctx.admin_token is not None
     _, response = authed(app).options("/info")
     assert response.status == 204
     allow = [h.strip() for h in
             response.headers.get("Access-Control-Allow-Headers", "").split(",")]
     assert ADMIN_HEADER in allow
+    plain = _make_app(tmp_path, monkeypatch, token="sekrit")
+    assert plain.ctx.admin_token is None
+    _, r2 = authed(plain).options("/info")
+    assert r2.status == 204
+    assert (r2.headers.get("Access-Control-Allow-Headers")
+            == "Authorization, Content-Type")
 
 
 # ---- /info admin-class advertisement (#191) --------------------------------

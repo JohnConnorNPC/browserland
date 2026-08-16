@@ -1077,6 +1077,15 @@ CASES.consent_three_gates = async () => {
         error: 'policy_locked', source: 'config',
         locked: ['apply_enabled', 'restart_enabled'] },
         ['check_enabled', 'apply_enabled', 'restart_enabled']).note;
+    // #191: an admin-class refusal is NOT a bad page password. It gets its
+    // own sentence for exactly the reason forbidden_origin does — the
+    // password in hand is fine, and a second credential is the actual
+    // requirement. A plain 403/401 keeps the old words.
+    out.adminRequired = policyWriteOutcome(403,
+        { ok: false, error: 'admin_required' }, ['check_enabled']);
+    out.plainForbidden = policyWriteOutcome(403,
+        { ok: false }, ['check_enabled']).note;
+    out.unauthorized = policyWriteOutcome(401, null, ['check_enabled']).note;
     return out;
 };
 
@@ -2844,6 +2853,19 @@ def test_consent_degrades_to_the_keys_the_config_does_not_own(harness):
     assert '"restart_enabled"' in out["lockedNote"]
     assert '"update_check_enabled"' not in out["lockedNote"], (
         "a key the broker did not name as locked must not be blamed")
+    # #191: the admin-class refusal names the SECOND credential, never the
+    # page password — sending an operator to re-enter a password that is
+    # perfectly good is the exact mistake the forbidden_origin branch above
+    # exists to prevent, and an admin_required 403 is the same shape of lie.
+    admin = out["adminRequired"]
+    assert admin["ok"] is False and admin["phase"] == "failed"
+    assert "admin token" in admin["note"]
+    assert "admin_token" in admin["note"], "name the config key that fixes it"
+    assert "password" not in admin["note"] or \
+        "password is not enough" in admin["note"]
+    # A 403 with no admin_required code, and a 401, keep the old words.
+    assert out["plainForbidden"] == "that broker refused our password"
+    assert out["unauthorized"] == "that broker refused our password"
 
 
 def test_a_consent_grant_never_reads_as_switching_checking_off(harness):
