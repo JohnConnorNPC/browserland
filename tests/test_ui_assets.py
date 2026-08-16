@@ -7903,6 +7903,25 @@ def _ctx_family_keys():
                       re.M)
 
 
+def _ctx_families_added_by_extenders():
+    """Top-level families an EXTENDER puts on the ctx: `ctx.<name> = ...` in a
+    ctx-extension fragment.
+
+    Found by the checkpoint-7 review: the seed gate below parsed only makeCtx's
+    literal, and no future family will ever land there -- the cap forbids it,
+    so every family after v1 arrives through an extender in 86c (or a later
+    86*-ordered fragment). The gate therefore could not see the very families
+    it claimed to police. `ctx.<a>.<b> = ...` is deliberately NOT a family: it
+    decorates an existing one."""
+    found = set()
+    for frag in sorted(BROKER_DIR.glob("86[c-z]_js_*.js")):
+        src = frag.read_text(encoding="utf-8")
+        for name in re.findall(r"^\s*ctx\.([A-Za-z_$][\w$]*)\s*=(?!=)",
+                               src, re.M):
+            found.add(name)
+    return found
+
+
 def test_capability_seed_is_the_real_ctx_surface_minus_metadata():
     # #197: the map's whole value is that it is TRUE. Its seed is therefore the
     # ctx literal's own top-level members, minus `id`/`ctxVersion`, which are
@@ -7920,6 +7939,18 @@ def test_capability_seed_is_the_real_ctx_surface_minus_metadata():
     # ...and every seeded name is a bare member name, never a dotted path: the
     # map is per FAMILY, and paths are what `needs` resolves.
     assert not [n for n in seeded if "." in n]
+    # THE HALF THAT ACTUALLY BINDS THE FUTURE. Every family after v1 arrives
+    # through an extender, not through the literal above, so scan the
+    # extension fragments too: a `ctx.<family> = ...` with no capability entry
+    # would leave `ctx.capabilities` lying by omission -- a mod would be told
+    # it lacks a surface it demonstrably has, and #197's whole promise is that
+    # the map is a true inventory.
+    from_extenders = _ctx_families_added_by_extenders()
+    unregistered = sorted(from_extenders - seeded)
+    assert not unregistered, (
+        f"ctx families added by an extender with no capability entry: "
+        f"{unregistered}. Add each to the seed list in "
+        f"86c_js_mod_ctx_ext.js, or the map claims they do not exist.")
 
 
 def test_the_needs_gate_call_sites_in_the_loader_are_guarded():
@@ -8137,6 +8168,39 @@ CASES.paths = function () {
 };
 
 // One mod's map cannot reach the next mod's, and a mod cannot edit its own.
+CASES.capabilities_shape = function () {
+    // Two properties changed AFTER #197's criteria were graded, in the CP7
+    // review: the accessor is non-enumerable, and a map built while the
+    // extender pass is still running is answered but never cached.
+    let spreadSaw = null, keysSaw = null, early = null, late = null, same = null;
+    // An extender that reads `capabilities` MID-PASS: it must get a truthful
+    // map, and must not freeze the mod's map before later families land.
+    function _peeker(ctx) { early = ctx.capabilities; }
+    _registerCtxExtender(_peeker);
+    function _lateFamily(ctx) { ctx.lateAdded = { ok: 1 }; }
+    _registerCtxExtender(_lateFamily);
+    _registerModCapability('lateAdded', 1);
+    const m = register(decl('shape', null, { init: function (ctx) {
+        spreadSaw = Object.prototype.hasOwnProperty.call({ ...ctx },
+                                                         'capabilities');
+        keysSaw = Object.keys(ctx).indexOf('capabilities') !== -1;
+        late = ctx.capabilities;
+        same = ctx.capabilities === late;      // now it caches
+    } }));
+    ENABLED.add('shape');
+    initMod(m);
+    return {
+        // non-enumerable: an existing spread of ctx is byte-identical to before
+        spreadSaw: spreadSaw, keysSaw: keysSaw,
+        // the mid-pass read did NOT cache a partial map: init() sees the family
+        // registered after the peeker ran
+        earlyHadLate: !!(early && early.lateAdded),
+        lateHasLate: !!(late && late.lateAdded),
+        cachedAfterInit: same,
+        frozenLate: Object.isFrozen(late),
+    };
+};
+
 CASES.frozen = function () {
     let first = null, second = null, mutated = null, threw = 0;
     const a = register(decl('a', null, { init: function (ctx) {
@@ -8463,3 +8527,30 @@ def test_a_throwing_failure_report_does_not_cost_the_remaining_extenders(
     assert r["threw"] is False, "the report's own throw reached makeCtx's caller"
     assert r["log"] == ["bad", "after"], "the sibling after the thrower was skipped"
     assert r["siblingRan"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_ctx_capabilities_is_non_enumerable_and_never_caches_a_partial_map(
+        needs_harness):
+    """Both properties were added in the checkpoint-7 review and shipped
+    untested until now.
+
+    A READ is what freezes the map, and an enumerable accessor gets read by
+    things that are not asking -- `{...ctx}`, `Object.assign`, a JSON
+    round-trip, a dev-tools expansion. If any of those happened DURING the
+    extender pass, the mod would be handed a map missing every family
+    registered after that moment, and told for the rest of the page's life
+    that it lacks a member it demonstrably has. Non-enumerable also keeps
+    every pre-existing spread of `ctx` byte-identical to before the key
+    existed."""
+    r = _run_needs(needs_harness, "capabilities_shape")
+    assert r["spreadSaw"] is False, "{...ctx} now carries (and freezes) the map"
+    assert r["keysSaw"] is False, "Object.keys(ctx) exposes the accessor"
+    # A mid-pass read is answered truthfully but not cached...
+    assert r["earlyHadLate"] is False, (
+        "the peeker read before the late family registered -- it cannot have "
+        "seen it")
+    # ...so init(), which runs after the pass, sees the complete inventory.
+    assert r["lateHasLate"] is True, (
+        "a partial map was cached mid-pass and the mod inherited it")
+    assert r["cachedAfterInit"] is True and r["frozenLate"] is True
