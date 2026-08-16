@@ -6693,91 +6693,16 @@ def test_theme_subscriber_state_is_tdz_proof():
 # the portable-mod contract (#163 / design 4, lint from design 12)
 # --------------------------------------------------------------------------- #
 
-#: The heuristic for "is this ``/`` a division or the start of a regex
-#: literal?" -- the last significant character before it. Standard, and good
-#: enough for a LINT (this is not a parser and does not claim to be).
-_JS_REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>") | {""}
-#: ... and after these KEYWORDS. Without them ``return /}/`` reads as a
-#: division, the regex body is scanned as code, its ``}`` corrupts the bracket
-#: depth and its closing ``/`` starts a phantom regex that blanks the rest of
-#: the file -- i.e. the lint silently stops seeing anything after it.
-_JS_REGEX_KEYWORDS = ("return", "typeof", "case", "in", "of", "new", "delete",
-                      "void", "instanceof", "do", "else", "yield", "await",
-                      "throw")
-#: Matched against a BOUNDED window ending at the ``/`` (never the whole prefix,
-#: which would make the scan quadratic).
-_JS_KEYWORD_BEFORE = re.compile(
-    r"(?:^|[^\w$])(?:" + "|".join(_JS_REGEX_KEYWORDS) + r")\s*$")
-
-
+#: Comments, string/template bodies and regex literals blanked, in ONE place:
+#: the broker's own ``modinstall.blank_js_literals``, which the install-time
+#: capability lint (#193) runs on every package it validates. This lint used to
+#: own the scanner; it now shares it, because two hand-rolled JS scanners means
+#: two sets of blind spots and only one of them ever gets the bug report. Its
+#: regex-vs-division heuristic, the keyword list that keeps ``return /}/`` from
+#: blanking the rest of a file, and the "not a parser" caveat all live there.
 def _js_blank_literals(src):
-    """``src`` with comments, string/template bodies and regex literals blanked.
-
-    Structure (brackets, semicolons, identifiers) survives; anything that could
-    make a ``//`` or a brace inside a string look like code does not. Newlines
-    are preserved so an offset still maps back to a line."""
-    out, i, n, prev = [], 0, len(src), ""
-    while i < n:
-        ch, two = src[i], src[i:i + 2]
-        if two == "//":
-            while i < n and src[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-        if two == "/*":
-            while i < n and src[i:i + 2] != "*/":
-                out.append("\n" if src[i] == "\n" else " ")
-                i += 1
-            out.append("  ")
-            i += 2
-            continue
-        if ch in "'\"`":
-            out.append(ch)
-            i += 1
-            while i < n and src[i] != ch:
-                if src[i] == "\\":
-                    out.append("  ")
-                    i += 2
-                    continue
-                out.append("\n" if src[i] == "\n" else " ")
-                i += 1
-            out.append(ch)
-            i += 1
-            prev = ch
-            continue
-        if ch == "/" and (prev in _JS_REGEX_PREV
-                          or _JS_KEYWORD_BEFORE.search(src[max(0, i - 24):i])):
-            out.append(" ")
-            i += 1
-            in_class = False
-            while i < n:
-                c = src[i]
-                if c == "\\":
-                    out.append("  ")
-                    i += 2
-                    continue
-                if c == "[":
-                    in_class = True
-                elif c == "]":
-                    in_class = False
-                elif c == "/" and not in_class:
-                    break
-                out.append(" ")
-                i += 1
-            out.append(" ")
-            i += 1
-            while i < n and src[i].isalpha():        # flags
-                out.append(" ")
-                i += 1
-            prev = "/"
-            continue
-        out.append(ch)
-        if not ch.isspace():
-            prev = ch
-        elif ch == "\n":
-            prev = "\n"
-        i += 1
-    return "".join(out)
+    from webterm.broker import modinstall
+    return modinstall.blank_js_literals(src)
 
 
 #: A top-level statement's SKELETON begins with one of these iff it is a

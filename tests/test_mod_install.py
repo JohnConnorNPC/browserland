@@ -2134,3 +2134,240 @@ def test_the_install_api_answers_its_preflights(tmp_path, monkeypatch):
         _, r = authed(app).options(path)
         assert r.status == 204, path
         assert r.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+# --------------------------------------------------------------------------- #
+# the install-time capability lint (#193)
+#
+# `tiers` is declared-and-never-checked, which is worse than nothing: a label
+# the platform never verifies invites the reviewer to trust it. `permissions` is
+# the same shape of claim CHECKED against the source text, at the one moment the
+# check can be real -- the install, which IS the trust event. It is not
+# containment (top-level code runs on load whatever the manifest says, #163) and
+# not a runtime gate (ctx covers a minority of what a mod actually reaches); it
+# catches the drift between what a manifest claims and what its source does.
+# --------------------------------------------------------------------------- #
+
+#: Two capabilities, on two lines, so "the FIRST offender" has something to be
+#: first of. Line 3 is egress, line 4 is file.
+USES_JS = ("registerMod({ id: 'x-notes',\n"
+           "  init(ctx) {\n"
+           "    hostFetch(null, '/info');\n"
+           "    const box = ctx.file;\n"
+           "  } });\n")
+
+#: Every capability string in the vocabulary, and not one of them a USE: a
+#: line comment, a block comment, a string body and a regex literal. This is
+#: the false-positive half of the lint's contract -- an author who has to
+#: delete their comments to get past a check has learned to stop commenting.
+QUIET_JS = ("// ctx.file, ctx.session and hostFetch( are what this does NOT do\n"
+            "/* and not /mods/policy either */\n"
+            "const NOTE = 'ctx.clipboard is a string here, never a call';\n"
+            "const RE = /ctx\\.file/;\n"
+            "registerMod({ id: 'x-notes', note: NOTE, re: RE });\n")
+
+
+def _assert_the_capability_lint_sees_what_it_claims():
+    """The lint's own proof, as a PLAIN-ASSERT helper.
+
+    Callable from a test that has seeded a blind scanner, which is the point:
+    a source-text lint that silently stops seeing anything reads as "every
+    package is clean", and that is worse than having no lint at all. So the
+    detection is a fixture the blindness test can point at, not a body of
+    assertions that only ever runs in the healthy case."""
+    # The masked output is pinned LITERALLY. Asserting on whatever the scanner
+    # produced would make the tests as blind as the scanner, which is the trap
+    # a shared implementation invites.
+    src = "a('b'); // c\nd; /* e */ f;\nconst r = /x\\//g; s;\n"
+    assert modinstall.blank_js_literals(src) == \
+        "a(' ');     \nd;         f;\nconst r =       ; s;\n"
+    assert modinstall.blank_js_literals(src, keep_strings=True) == \
+        "a('b');     \nd;         f;\nconst r =       ; s;\n"
+    # LENGTH IS THE CONTRACT: an offset into the masked text is only a line
+    # number in the source because blanking never changes a length. Collapse a
+    # comment to one space (what the CSS stripper does) and every refusal after
+    # it names the wrong line.
+    for mode in (False, True):
+        assert len(modinstall.blank_js_literals(src, mode)) == len(src)
+    # A `//` comment ends at ANY ECMAScript line terminator. On a CR-separated
+    # file, stopping at "\n" alone lets one comment swallow the whole source:
+    # the browser runs line two, the scanner reports a clean package.
+    cr = 'registerMod({ id: "x" });\r// hidden\rctx.file;\r\n'
+    assert modinstall.capability_uses("a.js", cr) == [("file", 3, "ctx.file")]
+    # It sees both uses, on their own lines, in line order.
+    assert modinstall.capability_uses("x-notes.js", USES_JS) == [
+        ("egress", 3, "hostFetch("), ("file", 4, "ctx.file")]
+    # It sees NONE of the mentions in comments, strings or regex literals.
+    assert modinstall.capability_uses("x-notes.js", QUIET_JS) == []
+    # First offender, and only the FIRST: declaring egress moves the answer on
+    # to the next one rather than clearing it.
+    assert modinstall.first_undeclared_capability({"x-notes.js": USES_JS},
+                                                  []) == \
+        ("egress", "x-notes.js", 3, "hostFetch(")
+    assert modinstall.first_undeclared_capability({"x-notes.js": USES_JS},
+                                                  ["egress"]) == \
+        ("file", "x-notes.js", 4, "ctx.file")
+    assert modinstall.first_undeclared_capability(
+        {"x-notes.js": USES_JS}, ["egress", "file"]) is None
+
+
+def test_the_capability_lint_sees_uses_and_ignores_mentions():
+    _assert_the_capability_lint_sees_what_it_claims()
+    # A stylesheet has no capabilities: `ctx.file` in a CSS comment is not a use
+    # of anything (external references are a separate, stricter rule).
+    assert modinstall.capability_uses("x-notes.css",
+                                      "/* ctx.file */\n.a { color: red; }\n") \
+        == []
+    # An admin route is evidence WHEREVER it is written, string bodies
+    # included -- that is where a mod administering another broker names it.
+    admin = ("registerMod({ id: 'x-a',\n"
+             "  init(ctx) {\n"
+             "    fetch('/mods/policy', { method: 'POST' });\n"
+             "  } });\n")
+    assert modinstall.capability_uses("a.js", admin) == [
+        ("egress", 3, "fetch("), ("remote-admin", 3, "/mods/policy")]
+
+
+def test_the_capability_lint_goes_red_when_its_scanner_goes_blind(monkeypatch):
+    # THE LINT'S OWN PROOF (the portable-mod lint's precedent): a hand-rolled
+    # source scanner that stops seeing is indistinguishable from a tree with
+    # nothing to find, so the detection has to be able to FAIL on demand.
+    _assert_the_capability_lint_sees_what_it_claims()
+    real = modinstall.blank_js_literals
+    blind = {
+        # sees nothing at all -- every package reads as clean
+        "empty": lambda src, keep_strings=False: "",
+        # no comment stripping at all: the naive scanner this feature exists
+        # not to be, which fires on a capability merely NAMED in a comment
+        "no-comment-stripping": lambda src, keep_strings=False: src,
+        # stops after the first line -- the "phantom regex blanked the rest of
+        # the file" failure, which hides every use below where it went wrong
+        "truncating": lambda src, keep_strings=False: src.split("\n", 1)[0],
+        # blanks correctly but does not preserve LENGTH -- collapsing a comment
+        # to one space (what the CSS stripper does) is exactly this bug, and it
+        # turns every reported line number into a lie
+        "offsets-drift": lambda src, keep_strings=False: real(
+            src, keep_strings).replace("  ", ""),
+    }
+    for label, scanner in blind.items():
+        monkeypatch.setattr(modinstall, "blank_js_literals", scanner)
+        try:
+            _assert_the_capability_lint_sees_what_it_claims()
+        except AssertionError:
+            continue
+        raise AssertionError(f"a {label!r} scanner passes the lint's own "
+                             f"proof, so the proof proves nothing")
+    monkeypatch.undo()
+    _assert_the_capability_lint_sees_what_it_claims()
+
+
+def test_an_undeclared_capability_is_refused_naming_file_and_line():
+    with pytest.raises(modinstall.ValidationError) as exc:
+        modinstall.validate_package(manifest(), files(js=USES_JS))
+    assert exc.value.code == "undeclared_capability"
+    # Named, not merely counted: the operator gets the file, the line and the
+    # word to put in the manifest.
+    assert "x-notes.js:3" in exc.value.detail
+    assert "hostFetch(" in exc.value.detail and '"egress"' in exc.value.detail
+    # The declared TWIN -- identical bytes -- validates.
+    canonical, _ = modinstall.validate_package(
+        manifest(permissions=["egress", "file"]), files(js=USES_JS))
+    assert canonical["permissions"] == ["egress", "file"]
+    # Comments and strings are never uses, so this needs no declaration at all.
+    modinstall.validate_package(manifest(), files(js=QUIET_JS))
+
+
+def test_permissions_are_a_closed_vocabulary_deduped_and_sorted():
+    # A permission the broker cannot CHECK is a label, and this key exists
+    # because labels nobody checks are worse than nothing.
+    for bad in (["fyle"], ["file", "root"], ["FILE"], [7], ["file", None],
+                "file", {"file": True}, list(modinstall.PERMISSIONS) + ["x"]):
+        with pytest.raises(modinstall.ValidationError) as exc:
+            modinstall.validate_package(manifest(permissions=bad), files())
+        assert exc.value.code == "bad_manifest_field", bad
+    canonical, _ = modinstall.validate_package(
+        manifest(permissions=["session", "file", "file"]), files())
+    assert canonical["permissions"] == ["file", "session"]
+    # Over-declaring is allowed: the lint refuses undeclared USE, and a
+    # declaration nobody exercises is review's problem, not an install error.
+    canonical, _ = modinstall.validate_package(
+        manifest(permissions=["file"]), files())
+    assert canonical["permissions"] == ["file"]
+
+
+def test_an_absent_permissions_key_stays_absent_from_the_canonical_manifest():
+    # The A/B that grandfathering will key off: ABSENT means "written before the
+    # lint", `[]` means "claims to use nothing". Defaulting the absent case to
+    # `[]` would erase that distinction AND change the canonical bytes of every
+    # already-installed manifest -- i.e. every stored generation would fail its
+    # own content-address check on the next scan.
+    canonical, records = modinstall.validate_package(manifest(), files())
+    # Pinned as a WHOLE dict, not just "permissions not in it": the manifest is
+    # hashed into `gen`, and ANY new key -- however it got there -- rewrites
+    # every pre-existing generation id.
+    assert canonical == {"id": "x-notes", "version": "1.0.0", "ctxVersion": 1,
+                         "title": "Notes", "description": "a note pad",
+                         "scripts": ["x-notes.js"], "styles": [],
+                         "requires": [], "tiers": [], "help": {}}
+    empty, empty_records = modinstall.validate_package(
+        manifest(permissions=[]), files())
+    assert empty["permissions"] == []
+    assert modinstall.compute_gen(canonical, records) != \
+        modinstall.compute_gen(empty, empty_records)
+
+
+def test_an_undeclared_capability_is_refused_over_the_wire_writing_nothing(
+        tmp_path, monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    body = payload()
+    body["files"]["x-notes.js"] = USES_JS
+    _, r = authed(app).post("/mods/install", json=body)
+    assert r.status == 400, r.json
+    assert r.json["error"] == "undeclared_capability"
+    assert "x-notes.js:3" in r.json["detail"]
+    # The validator runs entirely in memory, so the store is untouched by
+    # construction -- no directory, no index entry, nothing to sweep.
+    assert not (tmp_path / "mods" / "x-notes").exists()
+    assert app.ctx.mods_index["mods"] == {}
+    _, listed = authed(app).get("/mods/installed")
+    assert listed.json["mods"] == [] and listed.json["skipped"] == {}
+
+    # The declared twin installs, and the BROKER-WRITTEN mod.json carries the
+    # declaration the lint checked -- which is what review is later shown.
+    body["manifest"] = manifest(styles=["x-notes.css"],
+                                permissions=["egress", "file"])
+    _, ok = authed(app).post("/mods/install", json=body)
+    assert ok.status == 200, ok.json
+    written = json.loads(
+        (tmp_path / "mods" / "x-notes" / ok.json["gen"] /
+         modinstall.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert written["permissions"] == ["egress", "file"]
+
+
+def test_the_disk_scanner_refuses_a_new_undeclared_package(tmp_path,
+                                                           monkeypatch):
+    # The wire is not the only door. A package hand-dropped into mods_dir faces
+    # the same rule set, because it goes through the same validate_package --
+    # otherwise the check is one `copy` away from being optional.
+    root = tmp_path / "mods"
+    man = manifest()
+    raw = files(js=USES_JS)
+    canonical, records = modinstall.validate_package(man, raw,
+                                                     lint_permissions=False)
+    plant_raw(root, "x-notes", canonical,
+              {name: rec["data"] for name, rec in records.items()},
+              gen=modinstall.compute_gen(canonical, records))
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {"x-notes": "undeclared_capability"}
+    assert "x-notes" not in app.ctx.mods_index["mods"]
+    # ... and its declared twin, planted the same way, is adopted.
+    declared, drecords = modinstall.validate_package(
+        manifest(mod_id="x-notes2", permissions=["egress", "file"]),
+        {"x-notes2.js": USES_JS})
+    plant_raw(root, "x-notes2", declared,
+              {name: rec["data"] for name, rec in drecords.items()},
+              gen=modinstall.compute_gen(declared, drecords))
+    again = make_app(tmp_path, monkeypatch)
+    assert again.ctx.mods_index["skipped"] == {"x-notes":
+                                               "undeclared_capability"}
+    assert "x-notes2" in again.ctx.mods_index["mods"]

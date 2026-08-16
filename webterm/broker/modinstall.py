@@ -405,6 +405,254 @@ def _reject_css_external_references(name: str, text: str) -> None:
                 f"external origin")
 
 
+# ---- JS source scanning: comments, strings and regex literals --------------
+
+#: A ``/`` directly after one of these characters starts a REGEX LITERAL, not a
+#: division.
+_JS_REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>") | {""}
+#: ... and after these KEYWORDS. Without them ``return /}/`` reads as a
+#: division, the regex body is scanned as code, its ``}`` corrupts the bracket
+#: depth and its closing ``/`` starts a phantom regex that blanks the rest of
+#: the file -- i.e. the scan silently stops seeing anything after it.
+_JS_REGEX_KEYWORDS = ("return", "typeof", "case", "in", "of", "new", "delete",
+                      "void", "instanceof", "do", "else", "yield", "await",
+                      "throw")
+#: Matched against a BOUNDED window ending at the ``/`` (never the whole prefix,
+#: which would make the scan quadratic).
+_JS_KEYWORD_BEFORE = re.compile(
+    r"(?:^|[^\w$])(?:" + "|".join(_JS_REGEX_KEYWORDS) + r")\s*$")
+#: What ends a ``//`` comment: ECMAScript's four line terminators (LF, CR,
+#: U+2028, U+2029), exactly the four ``count_lines`` counts. Spelled with
+#: ``chr`` rather than written literally, because a raw U+2028 in a source file
+#: is a line break to half the tools that will ever open it.
+_JS_LINE_TERMINATORS = "\n\r" + chr(0x2028) + chr(0x2029)
+
+
+def blank_js_literals(src: str, keep_strings: bool = False) -> str:
+    """``src`` with comments, string/template bodies and regex literals blanked.
+
+    Structure (brackets, semicolons, identifiers) survives; anything that could
+    make a ``//`` or a brace inside a string look like code does not. Newlines
+    are preserved and every blanked character costs exactly one character, so an
+    offset into the RESULT still maps back to a line in the input.
+
+    ``keep_strings`` keeps string and template BODIES verbatim (comments and
+    regex literals are blanked as ever). That is the mode a rule about literal
+    text -- a route string a mod posts to -- needs, since blanking the bodies is
+    exactly what hides it. Comment awareness is the point either way: a rule
+    that fires on a mention inside a ``//`` line is a rule authors learn to work
+    around by deleting comments.
+
+    ONE linear pass, hand-written for the same reason ``_strip_css_comments``
+    is: this runs on the event loop against attacker-chosen text.
+
+    NOT A PARSER, stated rather than discovered. It knows nothing of ASI,
+    of a division that looks like a regex after an identifier-ish token, or of
+    anything built at runtime. It is a source-text scanner, and every rule built
+    on it inherits that limit."""
+    out, i, n, prev = [], 0, len(src), ""
+    while i < n:
+        ch, two = src[i], src[i:i + 2]
+        if two == "//":
+            # Ends at any ECMAScript LINE TERMINATOR, not at ``\n`` alone --
+            # the same reason ``count_lines`` counts all four. A source whose
+            # lines end in CR (or U+2028) would otherwise have its FIRST line
+            # comment swallow the whole file: the browser runs line two, the
+            # scanner sees a comment to EOF and reports a clean package.
+            while i < n and src[i] not in _JS_LINE_TERMINATORS:
+                out.append(" ")
+                i += 1
+            continue
+        if two == "/*":
+            while i < n and src[i:i + 2] != "*/":
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            out.append("  ")
+            i += 2
+            continue
+        if ch in "'\"`":
+            out.append(ch)
+            i += 1
+            while i < n and src[i] != ch:
+                if src[i] == "\\":
+                    out.append(src[i:i + 2] if keep_strings else "  ")
+                    i += 2
+                    continue
+                if keep_strings:
+                    out.append(src[i])
+                else:
+                    out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+            out.append(ch)
+            i += 1
+            prev = ch
+            continue
+        if ch == "/" and (prev in _JS_REGEX_PREV
+                          or _JS_KEYWORD_BEFORE.search(src[max(0, i - 24):i])):
+            out.append(" ")
+            i += 1
+            in_class = False
+            while i < n:
+                c = src[i]
+                if c == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                if c == "[":
+                    in_class = True
+                elif c == "]":
+                    in_class = False
+                elif c == "/" and not in_class:
+                    break
+                out.append(" ")
+                i += 1
+            out.append(" ")
+            i += 1
+            while i < n and src[i].isalpha():        # flags
+                out.append(" ")
+                i += 1
+            prev = "/"
+            continue
+        out.append(ch)
+        if not ch.isspace():
+            prev = ch
+        elif ch == "\n":
+            prev = "\n"
+        i += 1
+    return "".join(out)
+
+
+# ---- the capability lint (#193) --------------------------------------------
+
+#: The `permissions` vocabulary. Every entry is a REVIEW capability the broker
+#: can actually CHECK against source text -- that is the whole selection rule.
+#: "talks to the internet" is not in here because nothing server-side can check
+#: it (browser-side egress is #190's CSP); `egress` is, because the CALL is
+#: syntactic. Extend this and the patterns below (`_CAPABILITY_CODE_PATTERNS`,
+#: or `_admin_route_re` for a literal) TOGETHER, never one alone: a vocabulary
+#: entry with no pattern is a label the platform never checks, which is the
+#: exact failure `tiers` already is.
+PERMISSIONS: Tuple[str, ...] = ("clipboard", "egress", "file", "remote-admin",
+                                "session")
+MAX_PERMISSIONS = len(PERMISSIONS)
+
+#: Patterns matched against CODE (comments, string bodies and regex literals
+#: blanked), so a capability named in a comment or quoted in a string is not a
+#: use. ``ctx.file`` reaches the operator-granted file surface, ``fetch(`` /
+#: ``hostFetch(`` is egress. Whitespace around the dot is tolerated because
+#: ``ctx . file`` is the same program.
+_CAPABILITY_CODE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    ("clipboard", re.compile(r"\bctx\s*\.\s*clipboard\b")),
+    ("egress", re.compile(r"\b(?:hostFetch|fetch)\s*\(")),
+    ("file", re.compile(r"\bctx\s*\.\s*file\b")),
+    ("session", re.compile(r"\bctx\s*\.\s*session\b")),
+)
+
+#: Patterns matched against code AND string bodies (comments still blanked),
+#: because the evidence for these IS a literal: a mod administering another
+#: broker names the route in a string. Built lazily from ``app.ADMIN_ROUTES``
+#: so the two cannot drift -- a new admin route is remote-admin the day it is
+#: added, without a second list remembering to say so.
+_ADMIN_ROUTE_RE: Optional["re.Pattern[str]"] = None
+
+
+def _admin_route_re() -> "re.Pattern[str]":
+    global _ADMIN_ROUTE_RE
+    if _ADMIN_ROUTE_RE is None:
+        from .app import ADMIN_ROUTES
+        _ADMIN_ROUTE_RE = re.compile(
+            "|".join(re.escape(route)
+                     for route in sorted(ADMIN_ROUTES, key=len, reverse=True)))
+    return _ADMIN_ROUTE_RE
+
+
+def capability_uses(name: str, text: str) -> List[Tuple[str, int, str]]:
+    """Every capability ``text`` uses, as ``(permission, line, evidence)``.
+
+    Sorted by position, one entry per capability (the FIRST use of each is the
+    only one a refusal ever needs to name). ``.js`` only -- a stylesheet has no
+    capabilities, and its external-reference rule is a separate one.
+
+    Deliberately syntactic and deliberately shallow: it sees a direct
+    ``ctx.file``, not ``const f = ctx['fi' + 'le']``, not a capability reached
+    through another mod. It catches honest drift between what a manifest claims
+    and what its source does; the ADVERSARY answers are review and signing. It
+    is not containment and must never be described as any."""
+    if not name.casefold().endswith(".js") or not isinstance(text, str):
+        return []
+    passes: List[Tuple[str, Sequence[Tuple[str, Any]]]] = [
+        (blank_js_literals(text), _CAPABILITY_CODE_PATTERNS)]
+    # The string-preserving pass is a SECOND walk of the whole file, so it only
+    # runs when the raw text mentions an admin route at all. Sound, because
+    # blanking only ever overwrites a character with a space: a space-free
+    # literal that matches the blanked text matches the raw text at the same
+    # offsets too. (The same shortcut is NOT available to the code patterns,
+    # which tolerate whitespace -- ``ctx./*x*/file`` matches only once blanked.)
+    if _admin_route_re().search(text):
+        passes.append((blank_js_literals(text, keep_strings=True),
+                       (("remote-admin", _admin_route_re()),)))
+    found: Dict[str, Tuple[int, str]] = {}
+    for scanned, patterns in passes:
+        for permission, pattern in patterns:
+            hit = pattern.search(scanned)
+            if hit is not None:
+                found[permission] = (hit.start(), hit.group(0).strip())
+    # ``count_lines``, not ``count("\n")``: a source whose lines end in CR is
+    # one line to a naive count, and every refusal in it would name line 1.
+    # Ordered by POSITION first (the permission name only breaks a tie), so
+    # "the first offender" means first in the file rather than first in an
+    # iteration order nobody chose.
+    out = [(permission, count_lines(text[:start]) + 1, start, evidence)
+           for permission, (start, evidence) in found.items()]
+    out.sort(key=lambda row: (row[2], row[0]))
+    return [(permission, line, evidence)
+            for permission, line, _start, evidence in out]
+
+
+def first_undeclared_capability(files: Dict[str, Any],
+                                declared: Sequence[str]
+                                ) -> Optional[Tuple[str, str, int, str]]:
+    """The FIRST ``(permission, file, line, evidence)`` used but not declared.
+
+    First-offender discipline, the same as the policy validation order: files in
+    the order the validator hashes them (sorted), matches in line order. One
+    named offender is actionable; a list of twelve is a wall of text nobody
+    reads to the end of."""
+    granted = set(declared)
+    for name in sorted(files):
+        for permission, line, evidence in capability_uses(name,
+                                                          files.get(name)):
+            if permission not in granted:
+                return permission, name, line, evidence
+    return None
+
+
+def _reject_undeclared_capabilities(manifest: Dict[str, Any],
+                                    files: Dict[str, Any]) -> None:
+    """Refuse a package whose source uses a capability its manifest omits.
+
+    The one place enforcement can be real is the install, because the install IS
+    the trust event: the operator is deciding to run this code, and the manifest
+    is what they are shown while deciding. A runtime gate on ``ctx`` would be
+    theatre -- ``ctx`` covers a minority of what a mod actually reaches -- so
+    this checks the DECLARATION against the source text, at the moment the
+    decision is made, and never claims to be more.
+
+    The refusal code is not in ``ERROR_STATUS`` yet: that table is drift-tested
+    against the Mods pane's per-code wording, so the code and its sentence have
+    to land in the same change. Until then it answers the table's 400 default,
+    which is the status it wants anyway."""
+    offender = first_undeclared_capability(files,
+                                           manifest.get("permissions") or [])
+    if offender is None:
+        return
+    permission, name, line, evidence = offender
+    raise ValidationError(
+        "undeclared_capability",
+        f"{name}:{line} uses {evidence!r}, which needs "
+        f"permissions: [\"{permission}\"] in the manifest")
+
+
 # ---- per-file byte rules ---------------------------------------------------
 
 def count_lines(text: str) -> int:
@@ -454,7 +702,7 @@ def _file_bytes(name: str, text: Any) -> bytes:
 #: silently ships without its stylesheet.
 MANIFEST_KEYS = {"id", "version", "ctxVersion", "title", "description",
                  "scripts", "styles", "requires", "tiers", "help",
-                 "defaultEnabled"}
+                 "defaultEnabled", "permissions"}
 HELP_KEYS = {"label", "icon", "order", "slug"}
 
 
@@ -554,6 +802,34 @@ def _canonical_manifest(meta: Any, files: Dict[str, Any]) -> Dict[str, Any]:
             raise ValidationError("bad_manifest_field", f"bad tier {tier!r}")
         tiers.append(tier)
 
+    #: `permissions` is ABSENT-vs-PRESENT, never defaulted. Absent means a
+    #: manifest written before the lint existed (#193) and is the ONLY thing
+    #: that can distinguish one; `[]` is a positive claim to use nothing.
+    #: Defaulting it to `[]` here would erase that distinction, change the
+    #: canonical bytes of every already-installed manifest, and so change every
+    #: `gen` -- which would make each stored generation fail its own
+    #: content-address check on the next scan.
+    permissions: Optional[List[str]] = None
+    if "permissions" in meta:
+        raw = meta.get("permissions")
+        if not isinstance(raw, list) or len(raw) > MAX_PERMISSIONS:
+            raise ValidationError(
+                "bad_manifest_field",
+                f"permissions must be a list of <= {MAX_PERMISSIONS} names "
+                f"from: {', '.join(PERMISSIONS)}")
+        permissions = []
+        for entry in raw:
+            if not isinstance(entry, str) or entry not in PERMISSIONS:
+                raise ValidationError(
+                    "bad_manifest_field",
+                    f"unknown permission {entry!r} (known: "
+                    f"{', '.join(PERMISSIONS)}) -- a permission the broker "
+                    f"cannot CHECK is a label, and this manifest key exists "
+                    f"because labels nobody checks are worse than nothing")
+            if entry not in permissions:
+                permissions.append(entry)
+        permissions.sort()
+
     help_raw = meta.get("help", {})
     if not isinstance(help_raw, dict):
         raise ValidationError("bad_manifest_field", "help must be an object")
@@ -597,6 +873,8 @@ def _canonical_manifest(meta: Any, files: Dict[str, Any]) -> Dict[str, Any]:
            "requires": requires,
            "tiers": tiers,
            "help": help_block}
+    if permissions is not None:
+        out["permissions"] = permissions
     # ONE encodability check over the whole result, because every string in it
     # has to survive both the generation hash and the mod.json write. JSON can
     # carry a LONE SURROGATE ("\ud800"), Python happily holds it as a str, and
@@ -612,8 +890,9 @@ def _canonical_manifest(meta: Any, files: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def validate_package(manifest: Any, files: Any) -> Tuple[Dict[str, Any],
-                                                         Dict[str, Dict]]:
+def validate_package(manifest: Any, files: Any,
+                     lint_permissions: bool = True
+                     ) -> Tuple[Dict[str, Any], Dict[str, Dict]]:
     """Validate one mod package ENTIRELY IN MEMORY.
 
     Returns ``(canonical_manifest, records)`` where each record is
@@ -624,7 +903,15 @@ def validate_package(manifest: Any, files: Any) -> Tuple[Dict[str, Any],
 
     The SAME function validates an install payload and a directory the scanner
     read off disk -- there is exactly one rule set, so a hand-populated mod can
-    never be served under weaker rules than an installed one."""
+    never be served under weaker rules than an installed one. That is why the
+    capability lint (#193) needs no second home to cover the disk door: a
+    package dropped into ``mods_dir`` by hand faces the check the wire faces.
+
+    ``lint_permissions`` is the ONE seam for that door's one legitimate
+    exception -- a generation installed before the lint existed, which must keep
+    serving across a rescan and a restart (a restart that silently drops a
+    working mod is not a lint, it is an outage). Nothing passes ``False`` yet;
+    the grandfathering rule that will is deliberately not built here."""
     if not isinstance(files, dict):
         raise ValidationError("bad_json", "files must be an object")
     if len(files) > MAX_FILES:
@@ -652,7 +939,10 @@ def validate_package(manifest: Any, files: Any) -> Tuple[Dict[str, Any],
             "sha256": digest.hex(),
             "integrity": "sha256-" + base64.b64encode(digest).decode("ascii"),
         }
-    return _canonical_manifest(manifest, files), records
+    canonical = _canonical_manifest(manifest, files)
+    if lint_permissions:
+        _reject_undeclared_capabilities(canonical, files)
+    return canonical, records
 
 
 def compute_gen(manifest: Dict[str, Any],
