@@ -199,9 +199,11 @@ def test_two_brokers_with_different_registries_differ(tmp_path, monkeypatch):
 
 def test_state_put_changing_hosts_shows_in_the_next_response(tmp_path,
                                                              monkeypatch):
-    """The registry funnels through the /state locked write; the NEXT response
-    reflects it (an already-loaded document keeps its boot-time policy — the
-    header is per-document, same semantics as installed mods)."""
+    """A ``_hosts`` registry landing via the /state locked write shows in the
+    NEXT response (an already-loaded document keeps its boot-time policy —
+    per-document, same semantics as installed mods). NOTE: no shipped client
+    writes that key today (hosts are per-browser; OD8 owns the choice of a
+    production source) — this pins the accepted wire, not a live flow."""
     app = _make_app(tmp_path, monkeypatch)
     assert "box-a" not in _get(app, host="dev:1").headers[REPORT_ONLY]
     client = authed(app)

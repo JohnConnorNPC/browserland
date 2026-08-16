@@ -2115,10 +2115,16 @@ def _script_src_value(inline_hash: Optional[str] = None) -> str:
 
 
 # ---- dynamic connect-src hosts fragment (#190) ----------------------------
-# The broker derives, from the registered hosts in the /state settings blob
-# (``settings._hosts``, the synced registry the hosts UI writes), the list of
-# origins a page served by THIS broker may dial: each host's http/https origin
-# plus its WebSocket twin (http -> ws, https -> wss). The twin lives HERE, in
+# The broker derives, from a ``settings._hosts`` list in the /state settings
+# blob, the list of origins a page served by THIS broker may dial: each
+# host's http/https origin plus its WebSocket twin (http -> ws, https ->
+# wss). CAVEAT (OD8): no shipped client writes that key today — the hosts UI
+# keeps ``prefs._hosts`` per-browser and savePrefsLocal never PUTs /state
+# (83_js_broker_identity.js) — so in production this fragment is EMPTY until
+# the owner picks the server-side source of truth for the allowlist (a
+# report-on-add wire, the host-registry mod-store list, a config key, …).
+# The machinery is built against the accepted /state shape so that choice
+# can land without reworking this file. The twin lives HERE, in
 # the cached fragment, because it is a pure function of the stored URL; only
 # the SERVING origin's ws/wss pair depends on the request Host header and is
 # therefore the header assembler's per-response job, together with the header
@@ -4013,10 +4019,16 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #190 staged rollout: the FULL policy (default-src, dynamic
         # connect-src, form-action/base-uri/frame-src) ships Report-Only on
         # every response the enforced header covers, so the soak gathers
-        # violation evidence while nothing can break. The flip, once the
-        # soak is clean: make _assemble_full_csp the enforced value above
-        # and delete this line + the legacy app.ctx.csp. Pure string concat
-        # — the Host-derived twins are the only per-response piece.
+        # violation evidence while nothing can break. The flip needs TWO
+        # things, not one: (1) a clean soak (done 2026-08-16, zero app
+        # violations over the full sweep), and (2) the OD8 decision — the
+        # production hosts fragment is EMPTY today (no client writes
+        # settings._hosts; hosts are per-browser), so enforcing now would
+        # cut every real remote broker out of connect-src and break
+        # multi-broker pages. Once BOTH hold: make _assemble_full_csp the
+        # enforced value above and delete this line + the legacy
+        # app.ctx.csp. Pure string concat — the Host-derived twins are the
+        # only per-response piece.
         response.headers["Content-Security-Policy-Report-Only"] = \
             _assemble_full_csp(app, request.headers.get("host"))
         if request.method == "OPTIONS":
@@ -7818,9 +7830,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 }, status=409)
             new_state = {"rev": current["rev"] + 1,
                          "settings": settings, "layout": layout}
-            # #190: the registered-host registry rides this blob, and this
-            # locked write is the single funnel every registry edit goes
-            # through (hosts UI, host-registry apply, #174 pull). Recompute
+            # #190: IF a ``_hosts`` registry ever rides this blob (no shipped
+            # client writes it today — see the OD8 caveat on the fragment
+            # block above), this locked write is its single funnel. Recompute
             # the cached connect-src hosts fragment only when _hosts actually
             # changed — synchronous, no awaits — and compute it BEFORE the
             # disk write so a compute failure can never leave a landed state
