@@ -97,6 +97,8 @@ def test_default_is_off_and_makes_zero_upstream_calls_cold(tmp_path,
     _, r = authed(app).get("/status/fetch")
     assert r.status == 503
     assert r.json == {"ok": False, "error": "status_fetch_disabled"}
+    # A cached 503 would hide the next-poll recovery a grant promises.
+    assert r.headers.get("Cache-Control") == "no-store"
     assert calls == [], "a disabled broker made an upstream status call"
     # The refusal sits before the cache: nothing was fetched, nothing stored.
     assert app.ctx.status_cache == {}
@@ -199,7 +201,11 @@ def test_config_true_opens_the_gate(tmp_path, monkeypatch):
     assert r.status == 200
     assert r.json["ok"] is True
     assert [p["id"] for p in r.json["providers"]] == list(STATUS_ALLOWLIST)
-    assert calls == list(STATUS_ALLOWLIST)
+    # The response order above is deterministic (gather order); the CALLS run
+    # on executor threads, so their order is not -- compare as a multiset.
+    assert sorted(calls) == sorted(STATUS_ALLOWLIST)
+    # Live-policy answers must never outlive the policy in an HTTP cache.
+    assert r.headers.get("Cache-Control") == "no-store"
 
 
 def test_a_stored_sidecar_grant_opens_the_gate(tmp_path, monkeypatch):

@@ -6610,9 +6610,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # broker, which is a different thing from the caller being
         # unauthorized. The client renders it as "status checks disabled
         # here", never as "all providers down".
+        # Every answer this route gives is a live read of operator policy, so
+        # none of them may outlive the policy in an HTTP cache: a cached 200
+        # would replay provider data past a revoke, and a cached 503 would
+        # hide the very next-poll recovery the client promises after a grant.
+        _ns = {"Cache-Control": "no-store"}
         if not app.ctx.status_fetch_enabled:
             return sanic_json({"ok": False, "error": "status_fetch_disabled"},
-                              status=503)
+                              status=503, headers=_ns)
         # Collect non-empty, comma-split tokens across any ?provider= params.
         provided = request.args.getlist("provider")
         tokens = [s.strip() for chunk in provided
@@ -6627,7 +6632,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     ids.append(t)
             if not ids:                                  # named some, matched none
                 return sanic_json({"ok": False, "error": "no_valid_provider"},
-                                  status=400)
+                                  status=400, headers=_ns)
         results = await asyncio.gather(*[_status_one(pid) for pid in ids])
         if any(r is None for r in results):
             # Revoked while the per-provider workers were queued. Same body as
@@ -6635,9 +6640,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # broker is not opted in -- learned one moment later. Partial
             # results are deliberately withheld: they predate the revoke.
             return sanic_json({"ok": False, "error": "status_fetch_disabled"},
-                              status=503)
+                              status=503, headers=_ns)
         return sanic_json({"ok": True, "fetchedAt": int(time.time()),
-                           "providers": list(results)})
+                           "providers": list(results)}, headers=_ns)
 
     # ---- update check (/update/check, #182) -------------------------------
     # The broker's second and last egress. Same token gate as /info, PLUS the
