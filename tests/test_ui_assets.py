@@ -4122,6 +4122,12 @@ def test_server_store_capability_present():
     # cross-broker read makes that body untrusted input.
     assert "Object.assign({}, j, { status: r.status })" in loader
     assert "Object.assign({ status: r.status }, r.json)" not in loader
+    # #192: set()'s opts.noHistory is a strict tri-state passthrough — an
+    # explicit true/false rides the PUT body verbatim, but omitted/null must
+    # stay OFF the wire (a retry/rebase that drops the key must never
+    # un-stick a flagged record, which is the whole point of stickiness).
+    assert "if (opts && typeof opts.noHistory === 'boolean') {" in loader
+    assert "body.noHistory = opts.noHistory;" in loader
     # ctxVersion is unchanged — ctx.serverStore is additive.
     assert "ctxVersion: 1" in loader
     # And it all reaches the served page.

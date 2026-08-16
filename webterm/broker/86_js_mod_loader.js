@@ -439,12 +439,21 @@
                     // 400/413/500 {ok:false, error}. opts.purgeRevisions (#65) adds
                     // the strict-bool "write value AND forget history" flag — the
                     // only way to un-publish a value that scrolled into the ring.
+                    // opts.noHistory (#192) is a strict tri-state passthrough: an
+                    // explicit true/false rides the body verbatim (stickiness is a
+                    // SERVER decision — un-flagging also needs purgeRevisions:true
+                    // in the same call, or the server leaves the record flagged);
+                    // omitted/null is left OFF the wire so a caller that forgets
+                    // the option can never accidentally un-stick a flagged record.
                     set: function (value, baseRev, opts) {
                         const body = {
                             baseRev: baseRev, value: value, clientId: CLIENT_ID,
                         };
                         if (opts && opts.purgeRevisions === true) {
                             body.purgeRevisions = true;
+                        }
+                        if (opts && typeof opts.noHistory === 'boolean') {
+                            body.noHistory = opts.noHistory;
                         }
                         return _modStoreApi('PUT', modId, body, '', opts)
                             .then(r => _withStatus(r));
