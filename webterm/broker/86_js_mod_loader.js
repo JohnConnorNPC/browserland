@@ -206,11 +206,78 @@
             for (const fn of fns) { try { fn(); } catch (_) {} }
         }
 
+        // ---- ctx-extender registry (#194) -----------------------------------
+        // The seam a LATER ctx surface is added through: its own ordered
+        // fragment (86c_js_mod_ctx_ext.js and successors) declares a NAMED
+        // function and registers it at top level —
+        //
+        //     function _ctxWindowsFactory(ctx, rec) { ctx.windows.createAppWindow = …; }
+        //     _registerCtxExtender(_ctxWindowsFactory);
+        //
+        // — and makeCtx applies every registered extender to the ctx object it
+        // is building. That is what lets this fragment stop growing: it sits at
+        // the #68 2500-line cap, so new surface CANNOT land here, and a registry
+        // means each extension fragment owns its own members. One shared
+        // extension function could not compose — the moment a second fragment
+        // declared its own, the later declaration would win and the earlier
+        // fragment's members would silently vanish.
+        //
+        // Four properties the extension fragments are entitled to rely on:
+        //   - ORDER. Extenders run in registration order, which is _ORDERED
+        //     (fragment) order: every fragment's top-level code runs in that
+        //     order inside the one <script>, so a later fragment sees what an
+        //     earlier one put on the ctx.
+        //   - PER-EXTENDER ISOLATION. A throwing extender is logged like every
+        //     other per-mod failure and its siblings still run; ctx construction
+        //     is never abandoned, so one broken surface cannot cost a mod its
+        //     init (let alone every mod theirs).
+        //   - IDENTITY-IDEMPOTENT. Registering the SAME function twice runs it
+        //     once. Guarded at BOTH edges — the registrar refuses a repeat, and
+        //     the apply loop skips any entry that is not its own first
+        //     occurrence — so a fragment that pushes onto the array by hand
+        //     cannot decorate a ctx twice either.
+        //   - ARGUMENTS, NOT CLOSURE. An extender receives (ctx, rec) and
+        //     nothing else: a companion fragment shares this scope but NOT
+        //     makeCtx's per-mod locals, so everything it needs arrives as an
+        //     argument (the mods/update/update-apply.js pattern).
+        //
+        // A fragment-level `const` is safe here, unlike the hoisted functions
+        // the header's TDZ note warns about: nothing that runs BEFORE this
+        // fragment registers or applies an extender — the pushes come from LATER
+        // fragments' top level and the apply first runs at loadMods() time.
+        const _ctxExtenders = [];
+        // Register one ctx extender. Returns true when it was added, false for a
+        // non-function or a duplicate (by function IDENTITY), so a double-loaded
+        // fragment is a no-op rather than a doubly-applied surface.
+        function _registerCtxExtender(fn) {
+            if (typeof fn !== 'function') return false;
+            if (_ctxExtenders.indexOf(fn) !== -1) return false;
+            _ctxExtenders.push(fn);
+            return true;
+        }
+        // Apply the registry to one ctx under construction. Returns the SAME
+        // object it was handed (extenders decorate in place; a returned value is
+        // ignored, so an extender cannot swap the ctx out from under makeCtx).
+        function _applyCtxExtenders(ctx, rec) {
+            for (let i = 0; i < _ctxExtenders.length; i++) {
+                const fn = _ctxExtenders[i];
+                if (_ctxExtenders.indexOf(fn) !== i) continue;   // dup: run once
+                try { fn(ctx, rec); }
+                catch (e) {
+                    console.error('[mods] ctx extender failed ("'
+                        + (fn.name || 'anonymous') + '") for "'
+                        + (ctx && ctx.id) + '":', e);
+                }
+            }
+            return ctx;
+        }
+        // ---- end ctx-extender registry --------------------------------------
+
         // Build the per-mod ctx (contract v1). Organizational scoping only — see
         // the trust note above. `rec` is the active-mod record initMod created.
         function makeCtx(modId, rec) {
             const ns = 'webterm:mod:' + modId + ':';
-            return {
+            const ctx = {
                 id: modId,
                 ctxVersion: window.__mods.ctxVersion,
                 visibility: makeModVisibilityApi(rec),
@@ -766,6 +833,11 @@
                     return _modRegisterWindowKind(rec, spec);
                 },
             };
+            // #194: every surface an extension fragment registered, applied to
+            // THIS ctx in registration order, each isolated. Last, so an
+            // extender is handed the finished v1 ctx and may build on it.
+            _applyCtxExtenders(ctx, rec);
+            return ctx;
         }
 
         function _modAddStatusItem(rec, node) {
@@ -1488,97 +1560,11 @@
             return { id: spec.id || null, section: section };
         }
 
-        // ---- Help-card contribution (#78 / S5) ------------------------------
-        // ctx.registerHelpCards sanitizes mod-supplied cards to the SAME typed
-        // block/span schema the wiki corpus uses, so a contributed card can only
-        // ever be rendered as text nodes (the help renderer is textContent-only)
-        // — never raw HTML. Unknown block/span types degrade to the nearest safe
-        // type; every value is coerced to String. The sanitized entries live on
-        // window.__mods.helpCards (the Help mod merges them with the core
-        // corpus) and are removed on the contributing mod's teardown.
-        const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1, pre: 1 };
-        const _HELP_SPAN_TYPES = { text: 1, strong: 1, code: 1, kbd: 1 };
-        function _sanitizeHelpSpan(sp) {
-            if (!sp || typeof sp !== 'object') return null;
-            const t = _HELP_SPAN_TYPES[sp.t] ? sp.t : 'text';
-            return { t: t, v: sp.v == null ? '' : String(sp.v) };
-        }
-        function _sanitizeHelpBlock(blk) {
-            if (!blk || typeof blk !== 'object') return null;
-            const t = _HELP_BLOCK_TYPES[blk.t] ? blk.t : 'p';
-            const spans = [];
-            const raw = Array.isArray(blk.spans) ? blk.spans : [];
-            for (let i = 0; i < raw.length; i++) {
-                const s = _sanitizeHelpSpan(raw[i]);
-                if (s) spans.push(s);
-            }
-            return { t: t, spans: spans };
-        }
-        function _sanitizeHelpBlocks(body) {
-            const out = [];
-            const raw = Array.isArray(body) ? body : [];
-            for (let i = 0; i < raw.length; i++) {
-                const b = _sanitizeHelpBlock(raw[i]);
-                if (b) out.push(b);
-            }
-            return out;
-        }
-        // One card -> a normalized Help entry, or null when it lacks a title (the
-        // minimum to render). `search` defaults to the title/section/keys + all
-        // sanitized body text, lower-cased, so a contributed card is discoverable
-        // by its body even when the mod omits an explicit search string.
-        function _sanitizeHelpCard(card, modId) {
-            if (!card || typeof card !== 'object') return null;
-            const title = card.title == null ? '' : String(card.title);
-            if (!title) return null;
-            const slug = card.slug == null ? ('mod-' + modId) : String(card.slug);
-            const section = card.section == null ? (slug || modId) : String(card.section);
-            const keys = card.keys == null ? '' : String(card.keys);
-            const bodyFrags = _sanitizeHelpBlocks(
-                card.body != null ? card.body : card.bodyFrags);
-            let search = card.search == null ? '' : String(card.search);
-            if (!search) {
-                const parts = [title, section, keys];
-                for (const b of bodyFrags) for (const s of b.spans) parts.push(s.v);
-                search = parts.join(' ');
-            }
-            return { modId: modId, slug: slug, section: section, title: title,
-                     bodyFrags: bodyFrags, keys: keys, search: search.toLowerCase() };
-        }
-        // Re-render the live Help window (if any) so newly (un)registered cards
-        // appear without a reopen. findHelpWindow/refreshHelpCorpus are hoisted
-        // from the help mod; typeof-guarded so an absent/disabled help mod is a
-        // clean no-op.
-        function _refreshHelpIfOpen() {
-            try {
-                if (typeof findHelpWindow === 'function'
-                    && typeof refreshHelpCorpus === 'function') {
-                    const w = findHelpWindow();
-                    if (w) refreshHelpCorpus(w);
-                }
-            } catch (_) {}
-        }
-        function _modRegisterHelpCards(rec, cards) {
-            if (!Array.isArray(window.__mods.helpCards)) window.__mods.helpCards = [];
-            const list = Array.isArray(cards) ? cards : [cards];
-            const added = [];
-            for (let i = 0; i < list.length; i++) {
-                const norm = _sanitizeHelpCard(list[i], rec.id);
-                if (norm) { window.__mods.helpCards.push(norm); added.push(norm); }
-            }
-            // Forget exactly these entries on teardown (the DOM is re-rendered by
-            // _refreshHelpIfOpen), then refresh the open Help window.
-            rec.unloads.push(function () {
-                const reg = window.__mods.helpCards || [];
-                for (const e of added) {
-                    const idx = reg.indexOf(e);
-                    if (idx !== -1) reg.splice(idx, 1);
-                }
-                _refreshHelpIfOpen();
-            });
-            _refreshHelpIfOpen();
-            return added.length;
-        }
+        // (#78/S5's help-card sanitizer + ctx.registerHelpCards registry —
+        // _HELP_BLOCK_TYPES/_HELP_SPAN_TYPES, _sanitizeHelp*, _refreshHelpIfOpen
+        // and _modRegisterHelpCards — moved VERBATIM to
+        // 86d_js_mod_help_cards.js (#194) so this fragment stays under the
+        // 2500-line cap. Same <script>, same scope, ordered after 86c.)
 
         // ---- window-kind contribution (#80 / S7) ----------------------------
         // ctx.registerWindowKind hands a mod the SAME core registry the six built-

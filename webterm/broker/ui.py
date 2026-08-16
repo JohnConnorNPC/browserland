@@ -179,6 +179,20 @@ _ORDERED = [
     # path and the union status model. Split out for the same 2500-line cap
     # reason 86a was; same <script>, same scope, after it.
     "86b_js_mod_packages.js",
+    # #194: NEW per-mod ctx surface. The loader owns ctx v1 and the extender
+    # REGISTRY (_ctxExtenders / _registerCtxExtender / _applyCtxExtenders);
+    # every family added after it is declared here and registered into that
+    # registry, because 86 is at the 2500-line cap and the rule is split, never
+    # trim. Extenders run in THIS list's order, so a fragment ordered later sees
+    # what an earlier one put on the ctx. Same <script>, same scope, and it must
+    # stay BEFORE the mod-script splice: a mod's init reads the finished ctx.
+    "86c_js_mod_ctx_ext.js",
+    # #194: #78/S5's help-card sanitizer + the ctx.registerHelpCards registry,
+    # moved VERBATIM out of 86 to get back under the cap (the same split 86a and
+    # 86b are). Declarations only -- makeCtx / setModEnabled / _applyPolicyLive
+    # (86) and _lateRegister (86b) call into them at runtime, which the one
+    # shared <script> scope makes work in either direction.
+    "86d_js_mod_help_cards.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

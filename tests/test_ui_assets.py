@@ -18,12 +18,23 @@ gate; it is deliberately NOT asserted here so ordinary UI edits stay free.
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path, PurePosixPath
+
+import pytest
 
 from webterm.broker import ui
 from webterm.broker.ui import INDEX_HTML
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
+
+# #194: the ctx-extender registry is BEHAVIOUR (ordering, per-extender
+# isolation, identity-idempotence), and a source assertion cannot prove any of
+# it. So those tests execute the shipped range in node, the way
+# tests/test_host_registry_crypto.py executes the host-registry crypto -- and
+# skip when node is absent, so the suite still runs on a box without it.
+NODE = shutil.which("node")
 
 
 def _declared_mod_css():
@@ -1325,6 +1336,321 @@ def test_mod_loader_fragments_present_and_ordered():
     assert ui._MOD_SPLICE_BEFORE == "90_js_mod_boot.js"
 
 
+# --------------------------------------------------------------------------- #
+# the ctx-extender registry (#194) -- and the relocation that made room for it
+# --------------------------------------------------------------------------- #
+
+def test_ctx_extension_fragments_are_registered_and_ordered():
+    # #194: new ctx surface may NOT land in 86_js_mod_loader.js -- it sits at the
+    # #68 per-fragment cap, and the rule for that cap is split, never trim (86a
+    # /#168 and 86b/#163 are the precedent). So the loader keeps ctx v1 + the
+    # extender registry, 86c carries the families added after it, and 86d holds
+    # the help-card family moved out to get back under the cap.
+    for frag in ("86c_js_mod_ctx_ext.js", "86d_js_mod_help_cards.js"):
+        assert frag in ui._ORDERED, f"{frag} must be wired into _ORDERED"
+        assert (BROKER_DIR / frag).is_file(), f"{frag} missing on disk"
+    # ...and both actually reach the served page (86c carries no code yet, so
+    # its banner is what proves the splice happened).
+    assert "// ---- ctx extensions (#194) ---" in INDEX_HTML
+    assert "function _modRegisterHelpCards(" in INDEX_HTML
+    at = ui._ORDERED.index
+    # One <script>, in this order: the loader, then its companions, then the mod
+    # scripts. Extenders run in registration order, which IS this order, so the
+    # position of 86c is part of the contract rather than cosmetic -- and every
+    # companion must precede the splice point, since a mod's init reads the
+    # finished ctx.
+    assert at("86_js_mod_loader.js") < at("86a_js_mod_settings_text.js") \
+        < at("86b_js_mod_packages.js") < at("86c_js_mod_ctx_ext.js") \
+        < at("86d_js_mod_help_cards.js") < at(ui._MOD_SPLICE_BEFORE)
+    # The whole point: the loader is back under the cap and so is every
+    # companion. (test_no_multi_thousand_line_fragment says this for every
+    # fragment; said here too, because THIS is the constraint the split exists
+    # to satisfy and the one a future edit will bump into first.)
+    for frag in ("86_js_mod_loader.js", "86a_js_mod_settings_text.js",
+                 "86b_js_mod_packages.js", "86c_js_mod_ctx_ext.js",
+                 "86d_js_mod_help_cards.js"):
+        lines = (BROKER_DIR / frag).read_text(encoding="utf-8").count("\n")
+        assert lines <= ui._MAX_LINES, \
+            f"{frag} has {lines} lines (> {ui._MAX_LINES}); split it further"
+
+
+def test_ctx_extender_registry_is_the_seam_in_the_loader():
+    # The registry is an ARRAY plus one apply pass, not a single shared
+    # extension function: with one function, the moment a second extension
+    # fragment declared its own the later declaration would win and the earlier
+    # fragment's ctx members would silently vanish.
+    loader = _loader_src()
+    for sym in ("const _ctxExtenders = [];",
+                "function _registerCtxExtender(fn) {",
+                "function _applyCtxExtenders(ctx, rec) {"):
+        assert sym in loader, f"missing #194 registry symbol: {sym!r}"
+    # makeCtx builds the v1 object, applies the registry to THAT object, and
+    # returns it -- the apply must precede the return, or an extender's members
+    # would never reach the mod.
+    body = _frag_fn(loader, "function makeCtx(modId, rec) {")
+    assert "const ctx = {" in body, "makeCtx must name the object it extends"
+    assert body.index("_applyCtxExtenders(ctx, rec);") < body.index("return ctx;")
+    # An extender is handed (ctx, rec) -- arguments, not closure: a companion
+    # fragment shares the one <script> scope but NOT makeCtx's per-mod locals.
+    assert "fn(ctx, rec);" in _frag_fn(loader, "function _applyCtxExtenders(ctx, rec) {")
+    # Additive: a new ctx family does not move the contract version (a bump
+    # would refuse every mod that pins v1).
+    assert "ctxVersion: 1," in loader
+    # And the seam reaches the served page, once.
+    for sym in ("const _ctxExtenders = [];", "function _registerCtxExtender(fn) {",
+                "_applyCtxExtenders(ctx, rec);"):
+        assert sym in INDEX_HTML, f"#194 registry missing from served page: {sym!r}"
+    # 86c ships as the place extenders are declared and registered, and says so.
+    ext = _ctx_ext_src()
+    assert "_registerCtxExtender(" in ext
+    assert "ctxVersion" in ext, \
+        "the extension fragment must state that new families stay additive"
+
+
+def test_help_card_family_moved_out_of_the_loader_verbatim():
+    # #194's relocation is a PURE move: the declarations left the loader and
+    # landed in 86d unchanged, so the served page is unchanged too. Assert both
+    # halves -- present there, gone from here -- or a copy could satisfy one of
+    # them while the loader kept a stale duplicate (two `const _HELP_BLOCK_TYPES`
+    # in one <script> is a SyntaxError that would blank the whole desktop).
+    loader = _loader_src()
+    cards = _help_cards_src()
+    for sym in ("const _HELP_BLOCK_TYPES", "const _HELP_SPAN_TYPES",
+                "function _sanitizeHelpSpan(", "function _sanitizeHelpBlock(",
+                "function _sanitizeHelpBlocks(", "function _sanitizeHelpCard(",
+                "function _refreshHelpIfOpen(", "function _modRegisterHelpCards("):
+        assert sym in cards, f"{sym!r} did not land in 86d"
+        assert sym not in loader, f"{sym!r} is still declared in the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"{sym!r} must appear exactly once in the served page"
+    # The loader still CALLS into the family (setModEnabled / _applyPolicyLive
+    # nudge an open Help window), which works because it is all one <script> --
+    # the direction of the split does not matter to a hoisted function.
+    assert "_refreshHelpIfOpen();" in loader
+    # ctx.registerHelpCards itself stays on the ctx in the loader, wired to the
+    # relocated implementation.
+    assert "return _modRegisterHelpCards(rec, cards);" in loader
+
+
+_CTX_EXT_SLICE_START = "// ---- ctx-extender registry (#194) ---"
+_CTX_EXT_SLICE_END = "// ---- end ctx-extender registry ---"
+
+
+def _ctx_registry_source():
+    """The shipped ctx-extender registry range, verbatim. Declaration-only (an
+    array + two functions), which is what makes it runnable outside a browser;
+    the markers keep the range honest."""
+    src = _loader_src()
+    start = src.index(_CTX_EXT_SLICE_START)
+    end = src.index(_CTX_EXT_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _ctxExtenders = [];",
+                   "function _registerCtxExtender(fn) {",
+                   "function _applyCtxExtenders(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+_CTX_EXT_HARNESS = r"""
+'use strict';
+// The loader logs a failed extender through console.error, like every other
+// per-mod failure. Capture it rather than letting it reach stderr, so a case
+// can assert the message names the extender that threw.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+__REGISTRY__
+
+// ---- driver -------------------------------------------------------------
+const log = [];
+function mk(name, opts) {
+    const fn = function (ctx, rec) {
+        log.push(name);
+        if (opts && opts.throws) throw new Error('boom from ' + name);
+        ctx[name] = true;
+        if (rec && rec.seen) rec.seen.push(name);
+    };
+    // A NAMED function is the convention the registry documents (its error
+    // message reports fn.name), so the fixtures are named too.
+    Object.defineProperty(fn, 'name', { value: name });
+    return fn;
+}
+function rec() { return { id: 'fixture', unloads: [], seen: [] }; }
+
+const CASES = {};
+
+// Extenders run in registration order == fragment order.
+CASES.order = function () {
+    const added = [_registerCtxExtender(mk('alpha')),
+                   _registerCtxExtender(mk('beta')),
+                   _registerCtxExtender(mk('gamma'))];
+    const ctx = { id: 'fixture' };
+    const r = rec();
+    const out = _applyCtxExtenders(ctx, r);
+    return { log: log, added: added, keys: Object.keys(ctx),
+             same: out === ctx, recSeen: r.seen, count: _ctxExtenders.length };
+};
+
+// One throwing extender takes neither its siblings nor ctx construction down,
+// and does not poison the registry for the NEXT mod.
+CASES.throwing_extender = function () {
+    _registerCtxExtender(mk('alpha'));
+    _registerCtxExtender(mk('bad', { throws: true }));
+    _registerCtxExtender(mk('gamma'));
+    const ctx = { id: 'first' };
+    let threw = false;
+    try { _applyCtxExtenders(ctx, rec()); } catch (_) { threw = true; }
+    const second = { id: 'second' };
+    _applyCtxExtenders(second, rec());
+    return { log: log, threw: threw, keys: Object.keys(ctx),
+             secondKeys: Object.keys(second), errors: errors };
+};
+
+// Registering the SAME function twice runs it once...
+CASES.duplicate_registration = function () {
+    const a = mk('alpha');
+    const added = [_registerCtxExtender(a), _registerCtxExtender(a)];
+    _registerCtxExtender(mk('beta'));
+    const ctx = { id: 'fixture' };
+    _applyCtxExtenders(ctx, rec());
+    return { log: log, added: added, count: _ctxExtenders.length };
+};
+
+// ...and so does pushing it onto the array by hand, twice (the apply loop
+// keeps only each function's FIRST occurrence, so order is the first one).
+CASES.duplicate_raw_push = function () {
+    const a = mk('alpha');
+    _ctxExtenders.push(a);
+    _ctxExtenders.push(mk('beta'));
+    _ctxExtenders.push(a);
+    const ctx = { id: 'fixture' };
+    _applyCtxExtenders(ctx, rec());
+    return { log: log, count: _ctxExtenders.length };
+};
+
+// A non-function is refused at registration, so it can never be called.
+CASES.rejects_non_functions = function () {
+    const added = [_registerCtxExtender(null), _registerCtxExtender(undefined),
+                   _registerCtxExtender({}), _registerCtxExtender('nope'),
+                   _registerCtxExtender(42)];
+    const ctx = { id: 'fixture' };
+    _applyCtxExtenders(ctx, rec());
+    return { added: added, count: _ctxExtenders.length, keys: Object.keys(ctx) };
+};
+
+// With nothing registered, ctx construction is untouched -- the feature costs
+// an empty loop until a fragment opts in.
+CASES.empty_registry = function () {
+    const ctx = { id: 'fixture' };
+    const out = _applyCtxExtenders(ctx, rec());
+    return { log: log, keys: Object.keys(ctx), same: out === ctx,
+             count: _ctxExtenders.length, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const r = CASES[want]();
+if (!('errors' in r)) r.errors = errors;
+process.stdout.write(JSON.stringify(r) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def ctx_ext_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("ctxext") / "harness.js"
+    path.write_text(_CTX_EXT_HARNESS.replace("__REGISTRY__",
+                                             _ctx_registry_source()),
+                    encoding="utf-8")
+    return path
+
+
+def _run_ctx_ext(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_ctx_extenders_run_in_registration_order(ctx_ext_harness):
+    r = _run_ctx_ext(ctx_ext_harness, "order")
+    assert r["log"] == ["alpha", "beta", "gamma"], \
+        "registration order is _ORDERED order -- a later fragment must see " \
+        "what an earlier one put on the ctx"
+    assert r["added"] == [True, True, True]
+    assert r["count"] == 3
+    # Each extender decorated the object makeCtx is building, in place, and the
+    # apply hands that SAME object back (an extender cannot swap the ctx out).
+    assert r["keys"] == ["id", "alpha", "beta", "gamma"]
+    assert r["same"] is True
+    # ...and each was handed the per-mod record as its second argument, which is
+    # how a companion fragment reaches rec.unloads without seeing makeCtx's
+    # locals.
+    assert r["recSeen"] == ["alpha", "beta", "gamma"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_ctx_extender_does_not_take_its_siblings_down(ctx_ext_harness):
+    r = _run_ctx_ext(ctx_ext_harness, "throwing_extender")
+    # Every extender ran on the first ctx; the throw did not abort the pass.
+    assert r["log"][:3] == ["alpha", "bad", "gamma"]
+    assert r["threw"] is False, "a bad extender must never reach makeCtx's caller"
+    # The failed one contributed nothing; its siblings still did.
+    assert r["keys"] == ["id", "alpha", "gamma"]
+    # ...and the registry is not poisoned: the NEXT mod's ctx gets the same
+    # treatment rather than being skipped.
+    assert r["log"] == ["alpha", "bad", "gamma", "alpha", "bad", "gamma"]
+    assert r["secondKeys"] == ["id", "alpha", "gamma"]
+    # Logged the way every other per-mod failure is, naming the extender.
+    assert len(r["errors"]) == 2
+    assert "[mods] ctx extender failed" in r["errors"][0]
+    assert "bad" in r["errors"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_registering_the_same_ctx_extender_twice_is_idempotent(ctx_ext_harness):
+    r = _run_ctx_ext(ctx_ext_harness, "duplicate_registration")
+    assert r["added"] == [True, False], "a repeat registration must be refused"
+    assert r["count"] == 2
+    assert r["log"] == ["alpha", "beta"], "the same function must run once"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_duplicate_raw_push_still_runs_the_extender_once(ctx_ext_harness):
+    # The array is reachable, so identity-idempotence is enforced at the apply
+    # loop as well as at the registrar -- a fragment that pushes by hand cannot
+    # decorate a ctx twice.
+    r = _run_ctx_ext(ctx_ext_harness, "duplicate_raw_push")
+    assert r["count"] == 3, "the raw pushes really did land on the array"
+    assert r["log"] == ["alpha", "beta"], \
+        "only each function's FIRST occurrence runs, so order is unchanged too"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_ctx_extender_registry_refuses_non_functions(ctx_ext_harness):
+    r = _run_ctx_ext(ctx_ext_harness, "rejects_non_functions")
+    assert r["added"] == [False] * 5
+    assert r["count"] == 0
+    assert r["keys"] == ["id"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_empty_ctx_extender_registry_leaves_ctx_untouched(ctx_ext_harness):
+    # Today's shipped state: 86c registers nothing yet, so ctx v1 is exactly
+    # what it was before the seam existed.
+    r = _run_ctx_ext(ctx_ext_harness, "empty_registry")
+    assert r["count"] == 0
+    assert r["log"] == []
+    assert r["keys"] == ["id"]
+    assert r["same"] is True
+    assert r["errors"] == []
+
+
 def test_mod_scripts_exist_on_disk_and_match_mods_dir():
     # _MODS drift guard: the declared mod scripts exist, and every *.js under
     # mods/ is declared (no orphan mod script silently absent from the page).
@@ -2169,9 +2495,11 @@ def test_the_retired_help_corpus_is_invalidated_not_blanked():
     auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
     assert auth.index("notifyModsHostAuth(host.id)") < auth.index(
         "notifyHelpHostAuth(host.id)")
-    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    # #194: the help-card family moved verbatim into its own fragment (86 hit
+    # the 2500-line cap); it is the same one <script>, so the call chain above
+    # is unchanged.
     assert "_refreshHelpIfOpen();" in _frag_fn(
-        loader, "function _modRegisterHelpCards(")
+        _help_cards_src(), "function _modRegisterHelpCards(")
 
 
 def test_help_mod_packaged_and_manifest_agrees():
@@ -3989,9 +4317,13 @@ def test_mod_contributed_help_blocks_admit_pre():
     # sanitizer rewrites it to 'p' would hand mods a block type that silently
     # renders as a nowrap <code> run-on line -- the exact regression the wiki
     # corpus side was restructured to avoid.
-    src = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
-    assert "const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1, pre: 1 };" in src
-    assert "block = { t:'p'|'bullet'|'sub'|'pre', spans:[span] }" in src
+    # #194 moved the sanitizer into 86d; the CONTRACT it must agree with is the
+    # ctx.registerHelpCards doc comment, which stayed with makeCtx in 86. That
+    # split is exactly why this test is worth keeping: the whitelist and the
+    # published schema now live in two files.
+    assert "const _HELP_BLOCK_TYPES = { p: 1, bullet: 1, sub: 1, pre: 1 };" \
+        in _help_cards_src()
+    assert "block = { t:'p'|'bullet'|'sub'|'pre', spans:[span] }" in _loader_src()
 
 
 def test_chip_icons_use_registry():
@@ -6205,8 +6537,11 @@ def test_mod_sections_take_a_closed_applet_id_from_their_existing_mount():
                        applets.index("const CP_MOD_BADGE_GLYPH")]
     assert "CP_APPLET_INDEX[hint]" in resolver and "CP_DEFAULT_APPLET" in resolver
     # registerSettingsPane forwards the hint verbatim instead of flattening it.
+    # (#194 moved the help-card family out of the loader, so this slice now ends
+    # at the section that follows _modRegisterPane rather than at the sanitizer's
+    # block-type table.)
     pane = loader[loader.index("function _modRegisterPane"):
-                  loader.index("_HELP_BLOCK_TYPES")]
+                  loader.index("function _modRegisterWindowKind")]
     assert "mount: browserMount ? 'browser' : spec.mount" in pane
     # A mod placed inside a CORE applet stays attributable (#163: an installed
     # mod is not first-party code). The badge is the SAME {svg}|{text} trust
@@ -6566,6 +6901,19 @@ def _packages_src():
     return (BROKER_DIR / "86b_js_mod_packages.js").read_text(encoding="utf-8")
 
 
+def _ctx_ext_src():
+    # #194's ctx-extension fragment: where a NEW ctx family is declared and
+    # pushed into the loader's extender registry, because 86 is at the cap.
+    return (BROKER_DIR / "86c_js_mod_ctx_ext.js").read_text(encoding="utf-8")
+
+
+def _help_cards_src():
+    # #78/S5's help-card sanitizer + ctx.registerHelpCards registry. Moved out
+    # of the loader VERBATIM by #194 for the same 2500-line cap reason 86a and
+    # 86b were split out; same <script>, same scope.
+    return (BROKER_DIR / "86d_js_mod_help_cards.js").read_text(encoding="utf-8")
+
+
 def _frag_fn(src, sig):
     """The body of a top-level function, by its 8-space-indented signature.
     Every declaration in these fragments sits at that indent and closes on a
@@ -6915,7 +7263,10 @@ def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
 #: to break any of these couplings is a separate decision.
 _MOD_CROSS_FRAGMENT_CALL_INS = {
     ("applyPattern", "pattern", "mod:theme/theme.js"),
-    ("findHelpWindow", "help", "core:86_js_mod_loader.js"),
+    # #194 moved the help-card family out of the loader, verbatim, to get 86
+    # back under the fragment cap -- so these two edges now sit in 86d. The
+    # coupling itself is unchanged: same code, same one <script>.
+    ("findHelpWindow", "help", "core:86d_js_mod_help_cards.js"),
     ("loadCodeMirror", "editor", "mod:scratchpad/scratchpad.js"),
     # (#177 retired agent-docs, which took two edges with it: `editorFile`
     # (editor) reached in from mods/agent-docs/, and `openAgentDocsWindow`
@@ -6923,7 +7274,7 @@ _MOD_CROSS_FRAGMENT_CALL_INS = {
     # as a `typeof` guard, which owns no shipped name, so it is not an edge.)
     ("openNoteOrEditorWindow", "editor", "core:54_js_app_windows_store.js"),
     ("openNoteOrEditorWindow", "editor", "mod:sticky/sticky.js"),
-    ("refreshHelpCorpus", "help", "core:86_js_mod_loader.js"),
+    ("refreshHelpCorpus", "help", "core:86d_js_mod_help_cards.js"),
     ("toggleHelpWindow", "help", "core:78_js_keybindings.js"),
 }
 
