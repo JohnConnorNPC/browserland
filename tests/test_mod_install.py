@@ -1637,10 +1637,14 @@ def test_installed_detail_stays_off_info(tmp_path, monkeypatch):
     authed(app).post("/mods/install", json=payload())
     _, info = authed(app).get("/info")
     row = [m for m in info.json["mods"] if m["id"] == "x-notes"][0]
+    # `permissions` (#193) is the one addition, and it rides /info deliberately:
+    # it is REVIEW data the Mods pane shows beside the tiers, not administrative
+    # detail. Everything /info still withholds -- per-file sizes and hashes,
+    # installed_at, what was skipped -- stays on the token-gated route.
     assert set(row) == {"id", "title", "description", "version",
                         "default_enabled", "requires", "source", "gen",
                         "scripts", "styles", "integrity", "error",
-                        "missing_requires"}
+                        "missing_requires", "permissions"}
 
 
 # --------------------------------------------------------------------------- #
@@ -2500,3 +2504,100 @@ def test_grandfathering_covers_what_is_installed_and_never_a_new_arrival(
     # (_load_retained_generation), which drops a refusal SILENTLY, so a
     # grandfathering rule that missed it would fail invisibly.
     assert _serves(restarted, "x-notes", gen)
+
+
+# --------------------------------------------------------------------------- #
+# `permissions` on the wire (#193): what the Mods pane is entitled to say
+#
+# The pane shows what each mod is PERMITTED to do beside the tiers it merely
+# claims, and its whole obligation is to never report a check it did not get.
+# That obligation is decided HERE, in the shape of the row, not in the JS: the
+# rendering has exactly three inputs and they must be three distinguishable
+# wire values.
+#
+#   a list        the declaration. `[]` is a POSITIVE claim to use nothing.
+#   null          the key is present and empty of content: this broker checks,
+#                 and this generation predates the check (grandfathered).
+#   NO KEY        an older broker, which cannot answer at all (#157). The pane
+#                 renders this as "unchecked" -- never as a pass -- and the
+#                 only reason it can tell it apart from the two above is that
+#                 this build emits the key UNCONDITIONALLY.
+# --------------------------------------------------------------------------- #
+
+def _info_rows(app):
+    _, info = authed(app).get("/info")
+    assert info.status == 200
+    return {m["id"]: m for m in info.json["mods"]}
+
+
+def test_info_reports_permissions_for_shipped_and_installed_mods(tmp_path,
+                                                                 monkeypatch):
+    app = make_app(tmp_path, monkeypatch)
+    rows = _info_rows(app)
+    shipped = [r for r in rows.values() if r["source"] == "shipped"]
+    assert shipped, "no shipped rows to check"
+    # The key is on EVERY row of this build, declared or not -- that is the
+    # signal a client reads, and a build that emitted it only when it had
+    # something to say would be indistinguishable from one that predates it.
+    for row in shipped:
+        assert "permissions" in row, f"{row['id']}: no permissions key"
+        assert isinstance(row["permissions"], list), row["id"]
+    # Both shipped shapes are real, not hypothetical: mod-sync administers other
+    # brokers (the case that motivated the whole feature) and clock declares the
+    # empty list, which is a claim, not a silence.
+    assert rows["mod-sync"]["permissions"] == ["egress", "remote-admin"]
+    assert rows["clock"]["permissions"] == []
+
+    # An installed mod reports the declaration the lint checked its source
+    # against -- the manifest the broker wrote itself, not anything registerMod
+    # said, which deliberately carries no copy of it at all.
+    _, r = authed(app).post("/mods/install", json={
+        "manifest": manifest(permissions=["egress", "file"]),
+        "files": {"x-notes.js": USES_JS}})
+    assert r.status == 200, r.json
+    _, quiet = authed(app).post("/mods/install", json={
+        "manifest": manifest(mod_id="x-quiet", permissions=[]),
+        "files": {"x-quiet.js": "registerMod({ id: 'x-quiet' });\n"}})
+    assert quiet.status == 200, quiet.json
+    rows = _info_rows(app)
+    assert rows["x-notes"]["permissions"] == ["egress", "file"]
+    # The positive empty claim survives the round trip as `[]`, NOT as null:
+    # collapsing it would put "we cannot tell" where an author said "nothing".
+    assert rows["x-quiet"]["permissions"] == []
+
+
+def test_a_grandfathered_generation_reports_a_present_but_null_permissions(
+        tmp_path, monkeypatch):
+    # The A/B the pane's "undeclared (pre-lint)" wording rests on. The stored
+    # manifest has NO `permissions` key (that is what _install_pre_lint asserts
+    # of the bytes it commits), and the catalog row must turn that into a
+    # PRESENT key with a null value -- present because this broker does check,
+    # null because this generation has nothing to show for it.
+    gen = _install_pre_lint(tmp_path)
+    app = make_app(tmp_path, monkeypatch)
+    assert app.ctx.mods_index["skipped"] == {}
+    rows = _info_rows(app)
+    assert "permissions" in rows["x-notes"]
+    assert rows["x-notes"]["permissions"] is None
+    # ... and it is still the grandfathered generation that is serving, i.e.
+    # this is the row for a mod that is live, not one that was skipped.
+    assert rows["x-notes"]["gen"] == gen
+    assert _serves(app, "x-notes", gen)
+
+    # Re-installing it WITH a declaration flips the same row to a list, so the
+    # release-note instruction ("re-declare on next update") has a visible
+    # effect in the pane rather than being an article of faith.
+    _, ok = authed(app).post("/mods/install", json={
+        "manifest": manifest(permissions=["egress", "file"]),
+        "files": {"x-notes.js": USES_JS}, "replace": True})
+    assert ok.status == 200, ok.json
+    assert _info_rows(app)["x-notes"]["permissions"] == ["egress", "file"]
+
+
+def test_undeclared_capability_is_a_registered_refusal_code():
+    # A21 left it out of the table on purpose: ERROR_STATUS is drift-tested
+    # against the Mods pane's per-code wording in both directions, so the code
+    # and its sentence had to land together. 400 is what it already answered via
+    # the table's default, so registering it changes no status.
+    assert modinstall.ERROR_STATUS["undeclared_capability"] == 400
+    assert modinstall.ValidationError("undeclared_capability").status == 400

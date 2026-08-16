@@ -5750,6 +5750,85 @@ def test_every_install_error_code_maps_to_a_sentence():
         _packages_src(), "function _modFailLines(")
 
 
+def test_the_install_preview_accepts_every_key_the_broker_accepts():
+    # _modManifestKeys drives a WARNING that says "this broker does not accept
+    # and will refuse" the keys it does not list -- so a key missing from it is
+    # not cosmetic, it tells an operator their CORRECT manifest is doomed. The
+    # drift runs both ways: a key listed here that the broker refuses is the
+    # same lie in the other direction.
+    from webterm.broker import modinstall
+    keys = _frag_fn(_packages_src(), "function _modManifestKeys(")
+    listed = set(re.findall(r"'([A-Za-z]+)'", keys))
+    assert listed == set(modinstall.MANIFEST_KEYS), (
+        f"install preview key list drift: only-JS={sorted(listed - set(modinstall.MANIFEST_KEYS))} "
+        f"only-broker={sorted(set(modinstall.MANIFEST_KEYS) - listed)}")
+
+
+def test_the_mods_pane_shows_permissions_and_never_claims_an_unmade_check():
+    # #193: the pane shows what a mod is PERMITTED to do beside the tiers it
+    # merely claims. Four wire answers, and the whole obligation is that the
+    # pane never turns "this broker cannot tell me" into a pass.
+    pkgs = _packages_src()
+    view = _frag_fn(pkgs, "function _modPermissionsView(")
+    # PRESENCE OF THE KEY, never truthiness. `null` (a grandfathered generation
+    # on a broker that DOES check) and absent (#157: a broker that predates the
+    # check entirely) are different facts, and `if (!catRow.permissions)` would
+    # collapse them -- along with `[]`, which is a third, positive one.
+    assert "!('permissions' in catRow)" in view
+    assert "!catRow.permissions" not in view
+    assert "state: 'unchecked'" in view
+    assert "Array.isArray(raw)" in view
+    assert "state: 'undeclared'" in view
+    assert "names.length ? 'declared' : 'none'" in view
+    # A row with no catalog entry at all -- an older/headless broker, an /info
+    # that 401'd -- is the same "cannot tell you", not an empty declaration.
+    assert view.index("!catRow") < view.index("state: 'unchecked'")
+
+    words = _frag_fn(pkgs, "function _modPermissionsText(")
+    assert "if (state === 'undeclared') return 'undeclared (pre-lint)';" in words
+    assert "if (state === 'none') return 'declares none';" in words
+    # The FALLBACK is 'unchecked': an unrecognised state degrades to "we do not
+    # know", never to a pass. It is the last statement in the function, so a
+    # later branch cannot quietly become the default.
+    assert [ln.strip() for ln in words.strip().splitlines() if ln.strip()][-1] \
+        == "return 'unchecked';"
+    # "none" is the word for an explicit [], and only for that. An ABSENT
+    # declaration is never described as one -- that is the false positive claim
+    # this whole issue exists to stop.
+    assert "'none'" not in _modPermissionsBranch(words, "undeclared")
+
+    # And nothing in the display claims a verification. Absence is unchecked.
+    display = words + _frag_fn(pkgs, "function _modPermissionsTitle(")
+    for banned in ("verified", "verify", "safe", "trusted"):
+        assert banned not in display.lower(), \
+            f"the permissions display claims {banned!r}; it is entitled to none"
+
+    # The row carries it, and takes it from the CATALOG ROW only: registerMod
+    # deliberately ships no copy of `permissions`, because a runtime copy
+    # nothing guarantees to match the reviewed manifest is worse than none.
+    row = _frag_fn(pkgs, "function _modStatusRow(")
+    assert "permissions: _modPermissionsView(catRow)" in row
+    assert "_modPermissionsView(decl" not in pkgs
+    assert "decl.permissions" not in pkgs
+
+    # ... and the pane RENDERS it, for shipped and installed rows alike -- the
+    # chips are built unconditionally, beside the tiers, with no source test.
+    rebuild = _frag_nested_fn(pkgs, "function _rebuildRows(")
+    assert "s.permissions.state" in rebuild
+    assert "_modPermissionsText(" in rebuild
+    assert "row.appendChild(perms);" in rebuild
+    assert "perms.dataset.permState = s.permissions.state;" in rebuild
+    assert rebuild.index("row.appendChild(tiers);") \
+        < rebuild.index("row.appendChild(perms);")
+    assert "s.source" not in rebuild[rebuild.index("const perms ="):
+                                     rebuild.index("row.appendChild(perms);")]
+
+
+def _modPermissionsBranch(words, state):
+    """The one line of _modPermissionsText that answers ``state``."""
+    return next(ln for ln in words.splitlines() if f"'{state}'" in ln)
+
+
 def test_per_mod_enable_is_loader_private_not_state_schema():
     # The per-mod enable is deliberately PER-BROWSER (localStorage), NOT a synced
     # /state settings field: it must not have leaked a new key into the backend

@@ -583,8 +583,10 @@
 
         // ---- "Mods" Control Panel pane (#86 / S13) --------------------------
         // CORE loader UI (NOT a toggleable mod) listing every registered mod with
-        // an enable checkbox + its declared trust tiers + live status (active /
-        // off / failed). Built on the S1 pane scaffold (_modRegisterPane) through a
+        // an enable checkbox + its declared trust tiers + the `permissions` it
+        // declares (#193 — the half the broker actually CHECKS, unlike the tiers
+        // beside them) + live status (active / off / failed).
+        // Built on the S1 pane scaffold (_modRegisterPane) through a
         // STATIC loader-owned rec whose teardown never runs — the pane is permanent
         // core chrome, so it never appears in registered/active and can't disable
         // itself. Idempotent: a second loadMods() can't double-mount it. Mounted
@@ -691,6 +693,30 @@
                         tiers.appendChild(b);
                     }
                     row.appendChild(tiers);
+                    // #193: what this mod is PERMITTED to do, beside the tiers
+                    // it merely claims. Rendered for shipped and installed rows
+                    // alike, and never as a pass the pane did not get — see
+                    // _modPermissionsView for why an absent key is 'unchecked'.
+                    const perms = document.createElement('div');
+                    perms.className = 'set-mod-tiers set-mod-perms';
+                    perms.dataset.permState = s.permissions.state;
+                    perms.title = _modPermissionsTitle(s.permissions.state);
+                    if (s.permissions.state === 'declared') {
+                        for (const p of s.permissions.names) {
+                            const b = document.createElement('span');
+                            b.className = 'set-mod-tier set-mod-perm';
+                            b.textContent = p;
+                            perms.appendChild(b);
+                        }
+                    } else {
+                        const b = document.createElement('span');
+                        b.className = 'set-mod-tier set-mod-tier-none '
+                            + 'set-mod-perm';
+                        b.textContent = _modPermissionsText(
+                            s.permissions.state);
+                        perms.appendChild(b);
+                    }
+                    row.appendChild(perms);
                     // #163 (S5): Uninstall, on INSTALLED rows only. A shipped
                     // mod is in the page's own bundle and cannot be removed by
                     // any broker call, so offering the control there would be a
@@ -768,6 +794,7 @@
         // Row shape (S5 renders this; it must not have to re-derive it):
         //   id, title, version, source: 'shipped'|'installed', gen|null,
         //   state, label, requires[], missing[], missingRequires[], tiers[],
+        //   permissions: {state, names[]} (#193 — see _modPermissionsView),
         //   registered, active, enabled, pin: true|false|null, toggleable
         //
         // state is one of:
@@ -912,6 +939,12 @@
                 missing: missing,
                 missingRequires: missingRequires,
                 tiers: decl ? (decl.tiers || []).slice() : [],
+                // #193: from the CATALOG ROW only — never from the
+                // registration. registerMod deliberately does not carry
+                // `permissions`: a runtime copy nothing guarantees to match the
+                // manifest the broker linted would be worse than no copy, since
+                // it is the one an operator would read while deciding.
+                permissions: _modPermissionsView(catRow),
                 registered: !!decl,
                 active: active,
                 enabled: enabled,
@@ -921,6 +954,79 @@
                 // so the checkbox must not pretend otherwise.
                 toggleable: !!decl && pin === null,
             };
+        }
+
+        // ---- the `permissions` display (#193) -------------------------------
+        // What a catalog row says about `permissions`, as ONE of four display
+        // states. The PRESENCE OF THE KEY is the whole protocol, and that is
+        // #157's rule applied literally: a new key is invisible to an old
+        // broker, so a row with no `permissions` key at all means "this broker
+        // cannot tell you" — never an error, and above all never a pass. A
+        // client that read that absence as "declares nothing" would convert an
+        // absent answer into a positive claim about the mod, which is the exact
+        // shape of the bug #157 exists to prevent.
+        //
+        //   unchecked   no catalog row, or a row with no `permissions` key —
+        //               an older broker, a headless one, an /info that 401'd.
+        //               NOTHING was checked and the pane says exactly that.
+        //   undeclared  the key is present and NOT a list (null on the wire):
+        //               this broker does check, and THIS generation was
+        //               installed before it started — grandfathered, still
+        //               serving, still undeclared.
+        //   none        an explicit []: the manifest's positive claim to use
+        //               none of them. Deliberately NOT the same rendering as
+        //               `undeclared` — collapsing the two would put a claim
+        //               nobody made into the mod's mouth.
+        //   declared    a non-empty list, which for an installed mod this
+        //               broker checked against the package's own source at
+        //               install time.
+        function _modPermissionsView(catRow) {
+            if (!catRow || !('permissions' in catRow)) {
+                return { state: 'unchecked', names: [] };
+            }
+            const raw = catRow.permissions;
+            if (!Array.isArray(raw)) return { state: 'undeclared', names: [] };
+            const names = [];
+            for (const p of raw.slice(0, 16)) {
+                const one = _modClamp(p, 32);
+                if (one && names.indexOf(one) === -1) names.push(one);
+            }
+            return { state: names.length ? 'declared' : 'none', names: names };
+        }
+
+        // The word each non-list state shows in place of the chips. Three
+        // different facts, so three different words: "unchecked" is about this
+        // BROKER, "undeclared (pre-lint)" is about this GENERATION, and
+        // "declares none" is about this MANIFEST. None of them is the word
+        // "verified", because none of them is one.
+        function _modPermissionsText(state) {
+            if (state === 'undeclared') return 'undeclared (pre-lint)';
+            if (state === 'none') return 'declares none';
+            return 'unchecked';
+        }
+
+        function _modPermissionsTitle(state) {
+            if (state === 'declared') {
+                return 'capabilities this mod declares in its manifest. For an '
+                    + 'installed mod this broker checked the declaration '
+                    + 'against the package’s own source before storing it — a '
+                    + 'source-text lint, not a sandbox, and not containment.';
+            }
+            if (state === 'undeclared') {
+                return 'this mod was installed before this broker checked '
+                    + 'permissions, so its manifest carries no declaration at '
+                    + 'all. That is not the same as declaring none: nothing '
+                    + 'here has been checked. Reinstalling it under today’s '
+                    + 'rules requires the declaration.';
+            }
+            if (state === 'none') {
+                return 'this mod’s manifest positively declares that it uses '
+                    + 'none of the reviewable capabilities, and this broker '
+                    + 'checked that claim against its source.';
+            }
+            return 'this broker reported no permissions information at all, so '
+                + 'nothing here was checked — an older build does not know '
+                + 'about this declaration. Unknown, not clean.';
         }
 
         // ---- provenance + install/uninstall UI (#163 / S5, design §9) -------
@@ -1045,6 +1151,14 @@
                 css_external_reference: 'a stylesheet loads from another origin '
                     + '(@import, or an absolute url()). Installed CSS must be '
                     + 'self-contained — data: and relative URLs are fine.',
+                undeclared_capability: 'this mod’s own source uses a capability '
+                    + 'its manifest never declares in `permissions`. The file '
+                    + 'and line quoted below is the FIRST one found, not the '
+                    + 'only one: add the permission (or drop the use) and send '
+                    + 'it again. The check is a source-text lint over the '
+                    + 'package, not a sandbox — it catches a declaration that '
+                    + 'drifted from the code, and is no substitute for reading '
+                    + 'the code.',
                 too_many_mods: 'this broker already holds as many installed '
                     + 'mods as it accepts.',
                 write_failed: 'this broker could not write to its mod store.',
@@ -1063,6 +1177,11 @@
         // validation code does prove it — write_failed and an unrecognised code
         // do not, and claiming otherwise would be the install half of the
         // purge-reported-as-success bug.
+        //
+        // `undeclared_capability` (#193) belongs in this list for exactly that
+        // reason and no other: the capability lint runs inside validation,
+        // BEFORE anything is stored, so a package refused by it left nothing
+        // behind — no directory, no generation, no index entry.
         function _modRefusalProvesNoWrite(code) {
             return [
                 'too_large', 'bad_json', 'bad_mod_id', 'bad_generation',
@@ -1070,7 +1189,8 @@
                 'reserved_file_name', 'too_many_files', 'file_too_large',
                 'total_too_large', 'bad_encoding', 'bad_scripts', 'bad_styles',
                 'bad_requires', 'bad_manifest_field', 'unknown_manifest_key',
-                'css_external_reference', 'too_many_mods',
+                'css_external_reference', 'undeclared_capability',
+                'too_many_mods',
             ].indexOf(code) !== -1;
         }
 
@@ -1516,10 +1636,14 @@
             return { entries: 2000, files: 32, readBytes: 2 * 1024 * 1024,
                      manifestBytes: 64 * 1024, warnings: 12 };
         }
+        // Mirrors modinstall.MANIFEST_KEYS, and a drift test pins the two
+        // together. It drives a WARNING ("this broker will refuse these keys"),
+        // so a key missing here is not cosmetic: it tells the operator their
+        // correct manifest will be rejected. `permissions` (#193) is accepted.
         function _modManifestKeys() {
             return ['id', 'version', 'ctxVersion', 'title', 'description',
                     'scripts', 'styles', 'requires', 'tiers', 'help',
-                    'defaultEnabled'];
+                    'defaultEnabled', 'permissions'];
         }
         function _modAllowedPickName(name) {
             return /\.(?:js|css|md)$/i.test(name || '');

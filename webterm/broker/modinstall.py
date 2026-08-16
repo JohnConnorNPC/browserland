@@ -166,6 +166,7 @@ ERROR_STATUS: Dict[str, int] = {
     "bad_manifest_field": 400,
     "unknown_manifest_key": 400,
     "css_external_reference": 400,
+    "undeclared_capability": 400,   # source uses what `permissions` omits (#193)
     "too_many_mods": 409,
     "write_failed": 500,
 }
@@ -638,10 +639,14 @@ def _reject_undeclared_capabilities(manifest: Dict[str, Any],
     this checks the DECLARATION against the source text, at the moment the
     decision is made, and never claims to be more.
 
-    The refusal code is not in ``ERROR_STATUS`` yet: that table is drift-tested
-    against the Mods pane's per-code wording, so the code and its sentence have
-    to land in the same change. Until then it answers the table's 400 default,
-    which is the status it wants anyway."""
+    ``undeclared_capability`` is registered in ``ERROR_STATUS`` as a 400, and it
+    landed there together with the Mods pane's sentence for it: that table is
+    drift-tested BOTH ways against the pane (``_modErrorText``'s wording and
+    ``_modRefusalProvesNoWrite``'s list), so a code without a sentence is two
+    red tests rather than one silent gap. It is a validation refusal like every
+    other one here -- raised from ``validate_package``, which runs entirely in
+    memory before a single byte is written -- so the pane is entitled to say
+    NOTHING WAS WRITTEN, and does."""
     offender = first_undeclared_capability(files,
                                            manifest.get("permissions") or [])
     if offender is None:

@@ -3445,6 +3445,61 @@ async def _vendor_codemirror_asset(request: Request, name: str):
     return await _vendor_asset(request, f"{vendor.CODEMIRROR}/{name}")
 
 
+def _manifest_permissions(meta: Dict[str, Any]) -> Optional[List[str]]:
+    """A manifest's ``permissions`` as a catalog row reports it: a list or None.
+
+    ABSENT-VS-PRESENT, never defaulted -- the distinction
+    ``modinstall._canonical_manifest`` deliberately refuses to erase (#193).
+    On the wire the KEY IS ALWAYS EMITTED by this build, and its value says
+    which of two very different things is true:
+
+    * a list -- what the manifest declares, and for an installed mod what the
+      install-time lint checked its source against. ``[]`` is a positive claim
+      to use nothing, and is not the same answer as no declaration at all.
+    * ``null`` -- this broker checks, but THIS generation predates the check and
+      was grandfathered in (``modinstall._carries_install_attestation``).
+
+    A broker that predates all of this emits NO KEY AT ALL, and that absence is
+    the only thing a client may render as "unchecked" -- #157's rule applied
+    literally: a new key is invisible to an old peer, so its absence means "this
+    broker cannot tell you", never a pass. Which is exactly why the key is
+    emitted unconditionally here: making it conditional on having something to
+    say would make a new broker indistinguishable from an old one."""
+    if "permissions" not in meta:
+        return None
+    raw = meta.get("permissions")
+    if not isinstance(raw, list):
+        # Only reachable for a SHIPPED manifest, which is parsed best-effort
+        # (ui._manifest); an installed one was typed by the validator. A
+        # malformed declaration is not a declaration, so it reads as undeclared
+        # rather than as an empty -- i.e. positive -- claim.
+        return None
+    return [p for p in raw if isinstance(p, str) and p]
+
+
+def _shipped_mod_permissions() -> Dict[str, Optional[List[str]]]:
+    """``permissions`` per SHIPPED mod id, from the tree ``ui.mod_catalog()``
+    walks.
+
+    Read alongside the catalog rather than added to them, so ``ui.mod_catalog``
+    keeps its shape and its own tests. The id fallback mirrors that function
+    exactly -- the manifest's ``id``, else the directory name, which is the id
+    by convention -- because the two maps are joined on it. Called ONCE, from
+    the ``serve_ui`` block: the shipped tree cannot change while the process
+    runs, and importing ``.ui`` at all is what a headless broker must not do
+    (#87)."""
+    from .ui import _DIR, _MODS, _manifest, _mod_dirs   # deferred (#87)
+
+    out: Dict[str, Optional[List[str]]] = {}
+    for mod_dir in _mod_dirs(_MODS):
+        meta = _manifest(mod_dir, _DIR)
+        mid = meta.get("id")
+        if not isinstance(mid, str) or not mid:
+            mid = mod_dir.rsplit("/", 1)[-1]
+        out[mid] = _manifest_permissions(meta)
+    return out
+
+
 def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
     """Publish an installed-mod index, the catalog derived from it and the Help
     corpus derived from it, as ONE visible step (#163).
@@ -3477,8 +3532,17 @@ def _swap_mods_index(app: Sanic, index: Dict[str, Any]) -> None:
     from .help_corpus import merge_installed_sections   # deferred (#87), as .ui
 
     shipped = app.ctx.shipped_mod_catalog
-    catalog = list(shipped) + modinstall.catalog(
-        index, [row["id"] for row in shipped])
+    # #193: every installed row carries `permissions`, taken from the STORED
+    # manifest -- the one artifact the lint and the Mods pane both read. Added
+    # here rather than inside modinstall.catalog() so that builder's rows stay
+    # what they are; the value is None for a generation installed before the
+    # lint, which the pane renders as undeclared-not-none.
+    records = index.get("mods", {})
+    installed = [
+        dict(row, permissions=_manifest_permissions(
+            records.get(row["id"], {}).get("manifest", {})))
+        for row in modinstall.catalog(index, [row["id"] for row in shipped])]
+    catalog = list(shipped) + installed
     corpus = merge_installed_sections(app.ctx.help_corpus_base, index)
     app.ctx.mods_index = index
     app.ctx.mod_catalog = catalog
@@ -8862,7 +8926,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #157: the served mod list, captured HERE for the same reason as the
         # page — /mods is registered unconditionally (a headless broker is still
         # a host tab), so the handler must never be the thing that imports .ui.
-        app.ctx.shipped_mod_catalog = mod_catalog()
+        # #193: plus each shipped mod's declared `permissions`, joined on id
+        # from the same mod.json tree. The key is present on every row of this
+        # build even when a manifest declares nothing, because its ABSENCE is
+        # what tells a client it is talking to a broker that cannot answer.
+        _shipped_perms = _shipped_mod_permissions()
+        app.ctx.shipped_mod_catalog = [
+            dict(row, permissions=_shipped_perms.get(row["id"]))
+            for row in mod_catalog()]
         # The wiki + shipped-mod Help corpus. It is the BASE the swap below
         # layers installed help onto, so it must be in place BEFORE the first
         # _swap_mods_index -- which is also what publishes app.ctx.help_corpus.
