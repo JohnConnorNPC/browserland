@@ -1550,6 +1550,50 @@ CASES.rejects_non_functions = function () {
 
 // With nothing registered, ctx construction is untouched -- the feature costs
 // an empty loop until a fragment opts in.
+CASES.registers_during_the_pass = function () {
+    // An extender that registers ANOTHER extender mid-pass must not extend the
+    // loop it is running in. Before the snapshot, appending a fresh identity
+    // every call never terminated -- ctx construction hanging takes the
+    // desktop with it.
+    const log = [];
+    let n = 0;
+    function greedy(ctx) {
+        log.push('greedy');
+        // a NEW identity every time: the un-snapshotted loop would run forever
+        _registerCtxExtender(function later() { n += 1; log.push('later' + n); });
+    }
+    _registerCtxExtender(greedy);
+    const ctx = { id: 'm1' };
+    _applyCtxExtenders(ctx, { unloads: [] });
+    const firstPass = log.slice();
+    // The registration DOES take effect for the next mod.
+    const ctx2 = { id: 'm2' };
+    _applyCtxExtenders(ctx2, { unloads: [] });
+    return { firstPass: firstPass, secondPass: log.slice(firstPass.length),
+             terminated: true };
+};
+
+CASES.throwing_report_surface = function () {
+    // The failure REPORT must not become the second failure: fn.name and
+    // ctx.id are attacker-adjacent reads. A throwing getter there used to
+    // escape the loop and cost every remaining extender.
+    const log = [];
+    const bad = function () { log.push('bad'); throw new Error('boom'); };
+    Object.defineProperty(bad, 'name', {
+        get: function () { throw new Error('name explodes'); },
+    });
+    _registerCtxExtender(bad);
+    _registerCtxExtender(function after(ctx) { log.push('after'); ctx.after = 1; });
+    const ctx = {};
+    Object.defineProperty(ctx, 'id', {
+        get: function () { throw new Error('id explodes'); },
+        enumerable: true,
+    });
+    let threw = false;
+    try { _applyCtxExtenders(ctx, { unloads: [] }); } catch (_) { threw = true; }
+    return { log: log, threw: threw, siblingRan: ctx.after === 1 };
+};
+
 CASES.empty_registry = function () {
     const ctx = { id: 'fixture' };
     const out = _applyCtxExtenders(ctx, rec());
@@ -8387,3 +8431,35 @@ def test_a_loader_without_the_companion_still_loads_a_needs_mod(needs_harness):
     assert r["state"] == "active" and r["label"] == "active"
     assert r["rowNeeds"] == [] and r["rowUnmet"] == []
     assert r["errors"] == []
+
+
+# ---- the registry survives its own adversaries (#194, CP7 review) ----------
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_registering_during_the_pass_cannot_extend_the_running_loop(
+        ctx_ext_harness):
+    """Found by the checkpoint-7 adversarial pass: the loop iterated the LIVE
+    array, so an extender appending a fresh function identity every call never
+    terminated -- and ctx construction hanging takes the desktop with it. The
+    pass now runs over a snapshot; a mid-pass registration applies from the
+    NEXT mod on, which is also the only order anyone can reason about."""
+    r = _run_ctx_ext(ctx_ext_harness, "registers_during_the_pass")
+    assert r["terminated"] is True
+    assert r["firstPass"] == ["greedy"], (
+        "the extender registered mid-pass must not run in that same pass")
+    assert r["secondPass"] == ["greedy", "later1"], (
+        "...but it must take effect for the next mod")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_failure_report_does_not_cost_the_remaining_extenders(
+        ctx_ext_harness):
+    """The catch block reads `fn.name` and `ctx.id` to say what failed. Both
+    are attacker-adjacent (a proxy, a throwing getter), and a throw THERE
+    escaped the loop -- so one bad extender could silently cost every extender
+    after it, which is the failure the isolation guarantee exists to prevent."""
+    r = _run_ctx_ext(ctx_ext_harness, "throwing_report_surface")
+    assert r["threw"] is False, "the report's own throw reached makeCtx's caller"
+    assert r["log"] == ["bad", "after"], "the sibling after the thrower was skipped"
+    assert r["siblingRan"] is True

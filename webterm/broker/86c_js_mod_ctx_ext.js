@@ -2,10 +2,10 @@
         // Where NEW per-mod ctx surface lands. 86_js_mod_loader.js is at the
         // #68 2500-line per-fragment cap (_MAX_LINES, ui.py), and the rule for
         // that cap has always been "split, never trim" — 86a (#168) and 86b
-        // (#163) are the precedent. So the loader keeps ctx v1, the
-        // EXTENDER REGISTRY lives HERE, and every family added after it is
-        // declared here (or
-        // in a later 86*-ordered fragment) and registered into that registry.
+        // (#163) are the precedent. So the loader keeps ctx v1 and one CALL to
+        // the extender registry; the registry itself lives HERE, and every
+        // family added after v1 is declared here (or in a later 86*-ordered
+        // fragment) and registered into it.
         //
         // How to add one:
         //
@@ -99,6 +99,11 @@
         // Apply the registry to one ctx under construction. Returns the SAME
         // object it was handed (extenders decorate in place; a returned value is
         // ignored, so an extender cannot swap the ctx out from under makeCtx).
+        //: True only while `_applyCtxExtenders` is mid-pass. `ctx.capabilities`
+        //: reads it so a map built by an extender (or by a stray spread) during
+        //: the pass is answered truthfully but never CACHED -- the ctx is not
+        //: finished yet, and a cached partial map would lie for the page's life.
+        let _ctxExtendersApplying = false;
         function _applyCtxExtenders(ctx, rec) {
             // SNAPSHOT, never the live array: an extender that registers during
             // the pass would otherwise extend the loop it is running in -- one
@@ -107,24 +112,31 @@
             // it. A registration made mid-pass simply applies from the next
             // mod onwards, which is also the only order anyone can reason about.
             const list = _ctxExtenders.slice();
-            for (let i = 0; i < list.length; i++) {
-                const fn = list[i];
-                if (list.indexOf(fn) !== i) continue;            // dup: run once
-                try { fn(ctx, rec); }
-                catch (e) {
-                    // The report must not become the second failure: `fn.name`
-                    // and `ctx.id` are attacker-adjacent reads (a proxy, a
-                    // throwing getter), and a throw HERE would escape the loop
-                    // and cost every remaining extender.
+            const wasApplying = _ctxExtendersApplying;
+            _ctxExtendersApplying = true;
+            try {
+                for (let i = 0; i < list.length; i++) {
+                    const fn = list[i];
+                    if (list.indexOf(fn) !== i) continue;        // dup: run once
                     try {
-                        console.error('[mods] ctx extender failed ("'
-                            + (fn.name || 'anonymous') + '") for "'
-                            + (ctx && ctx.id) + '":', e);
-                    } catch (_) {
-                        try { console.error('[mods] ctx extender failed'); }
-                        catch (__) { /* console itself is gone; keep going */ }
+                        fn(ctx, rec);
+                    } catch (e) {
+                        // The report must not become the second failure:
+                        // `fn.name` and `ctx.id` are attacker-adjacent reads (a
+                        // proxy, a throwing getter), and a throw HERE would
+                        // escape the loop and cost every remaining extender.
+                        try {
+                            console.error('[mods] ctx extender failed ("'
+                                + (fn.name || 'anonymous') + '") for "'
+                                + (ctx && ctx.id) + '":', e);
+                        } catch (_) {
+                            try { console.error('[mods] ctx extender failed'); }
+                            catch (__) { /* console is gone; keep going */ }
+                        }
                     }
                 }
+            } finally {
+                _ctxExtendersApplying = wasApplying;
             }
             return ctx;
         }
@@ -243,9 +255,17 @@
                 if (typeof cur !== 'object' && typeof cur !== 'function') {
                     return false;                       // a string has no members
                 }
-                if (!Object.prototype.hasOwnProperty.call(cur, parts[i])) {
-                    return false;
-                }
+                // `hasOwnProperty` itself can throw: an intermediate family
+                // that is a Proxy (or a revoked one) runs a trap here. An
+                // unmet need must stay a STRUCTURED refusal the pane can word,
+                // never a generic init failure -- so anything that throws
+                // while being asked reads as absent, exactly like a throwing
+                // accessor below.
+                let own = false;
+                try {
+                    own = Object.prototype.hasOwnProperty.call(cur, parts[i]);
+                } catch (_) { return false; }
+                if (!own) return false;
                 try { cur = cur[parts[i]]; } catch (_) { return false; }
             }
             return cur !== null && cur !== undefined;
@@ -270,10 +290,27 @@
         function _ctxCapabilities(ctx) {
             let map = null;
             Object.defineProperty(ctx, 'capabilities', {
-                enumerable: true,
+                // NOT enumerable. A read is what freezes the map, and an
+                // enumerable accessor is read by things that are not asking:
+                // `{...ctx}`, `Object.assign({}, ctx)`, a JSON round-trip, a
+                // dev-tools expansion. Any of those happening DURING the
+                // extender pass would cache a map missing every family
+                // registered after it -- and the mod would then be told, for
+                // the rest of the page's life, that it lacks a member it
+                // demonstrably has. Non-enumerable also keeps every existing
+                // spread of `ctx` byte-identical to before this key existed.
+                enumerable: false,
                 configurable: false,
                 get: function () {
-                    if (!map) map = _modCapabilityMap(ctx);
+                    // Never cache a map built while the pass is still running:
+                    // whoever asked that early gets a truthful snapshot, and
+                    // the FIRST read after the ctx is finished is the one that
+                    // sticks. `init()` -- the only intended reader -- always
+                    // runs after.
+                    if (map) return map;
+                    const built = _modCapabilityMap(ctx);
+                    if (_ctxExtendersApplying) return built;
+                    map = built;
                     return map;
                 },
             });
