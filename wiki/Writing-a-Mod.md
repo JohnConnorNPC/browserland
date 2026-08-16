@@ -143,6 +143,7 @@ Every field at once — no real manifest uses all of them:
   "defaultEnabled": false,          // optional; absent == true
   "requires": ["editor"],           // optional; ids of mods that must be ACTIVE
   "styles": ["notes.css"],          // optional; bare filenames in this mod's dir
+  "permissions": ["file"],          // closed vocabulary; checked only via the install door — see §10.5
   "help": {                         // optional; only meaningful with a help.md
     "slug": "notes", "label": "Notes", "order": 2100, "icon": "📓"
   },
@@ -177,6 +178,13 @@ Field by field:
   (2500) lines. Any failure is logged and the stylesheet is silently dropped
   from the page — the strict version of the same check lives in
   `tests/test_ui_assets.py` and fails CI.
+- **`permissions`** — a closed-vocabulary declaration of which `ctx` capability
+  families this package's source actually uses. Every shipped `mod.json`
+  carries one today, but only the **installed**-mod door
+  (`modinstall.validate_package`, run by both `POST /mods/install` and the
+  `mods_dir` scanner) actually checks it against the source text — a shipped
+  manifest's copy is read by nothing. The full rules — the vocabulary, the
+  refusal, the absent-vs-`[]` distinction — are in §10.5.
 - **`help`** — `slug` / `label` / `order` / `icon` for the in-app Help section
   (§9). All optional; slug defaults to the mod id, label to `title`, order to a
   computed value after the wiki pages.
@@ -797,6 +805,7 @@ POST /mods/install          // browser auth token; NOT lease-gated
                 "title": "Notes", "description": "…",
                 "scripts": ["notes.js"], "styles": ["notes.css"],
                 "requires": ["editor"], "tiers": ["settings"],
+                "permissions": ["file"],
                 "help": { "label": "Notes", "icon": "📓", "order": 2100 } },
   "files": { "notes.js": "…", "notes.css": "…", "help.md": "…" },
   "replace": false }
@@ -835,6 +844,8 @@ Differences from a shipped manifest, all enforced:
   an installed package's scripts are fetched and executed on every page load
   whatever its enabled state — being off only means `init()` is not called, and
   its stylesheets are live either way.
+- `permissions` is checked against the source text, not merely displayed — the
+  install-time capability lint (#193), covered on its own below.
 - Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` with a `.js`/`.css`/`.md`
   suffix, must avoid `?`, `#`, `%` and `:` (an NTFS alternate data stream:
   `base.css:payload.js` passes a naive bare-name test), must not be a Windows
@@ -862,7 +873,53 @@ reason is a support ticket: `too_large` · `bad_json` · `bad_mod_id` ·
 `bad_requires` · `bad_manifest_field` · `unknown_manifest_key` ·
 `css_external_reference` · `too_many_mods` (409) · `write_failed` (500).
 `modinstall.ERROR_STATUS` is the authoritative map; a client must tolerate a
-code it has not seen.
+code it has not seen. (`undeclared_capability`, below, is a real refusal but
+is not in that map yet — it answers the table's 400 default.)
+
+**The `permissions` capability lint (#193).** Unlike `tiers` (§5), which is a
+self-reported claim nothing checks, `permissions` is a **closed vocabulary**
+(`modinstall.PERMISSIONS`), and `validate_package` scans every `.js` file the
+package ships for direct, syntactic use of the capability each name covers:
+
+| permission | what it covers |
+|---|---|
+| `clipboard` | `ctx.clipboard` |
+| `egress` | `fetch(` or `hostFetch(` |
+| `file` | `ctx.file` |
+| `remote-admin` | one of the broker's admin route strings, named literally — at the time of writing `/mods/install`, `/mods/uninstall`, `/mods/rescan`, `/mods/policy`, `/update/policy` (built from `app.ADMIN_ROUTES`, so a new admin route becomes `remote-admin` automatically, with no second list to keep in sync) |
+| `session` | `ctx.session` |
+
+A capability the source uses but `permissions` did not declare is refused with
+`undeclared_capability`, naming the **first** offender by file (sorted) then
+by position within it — e.g. `notes.js:12 uses 'ctx.file', which needs permissions: ["file"] in the manifest` as the response's `detail` text. **Declaring
+more than you use is fine**; only a used-but-undeclared capability is refused.
+
+**Absent and `[]` are not the same declaration.** No `permissions` key at all
+means "written before this lint existed" — an already-installed generation
+from before #193 is grandfathered past the check (see `/mods/rescan` below)
+and keeps serving. `permissions: []` is a **positive claim** — "this package's
+source reaches none of the five" — and is checked exactly like any other
+declaration. A new package should always declare truthfully, writing `[]`
+when it genuinely uses none of the five; there is no reason for a *new*
+manifest to omit the key.
+
+A mention inside a **comment** never counts, for any permission — the scanner
+blanks `//` and `/* */` comments (and regex literals) before it looks for
+anything, the same `blank_js_literals` machinery the portable-mod lint (§10.2)
+uses. For `clipboard` / `egress` / `file` / `session`, a mention inside a
+**string literal** doesn't count either — those four are matched against
+source with string bodies blanked too, so `"call ctx.file to persist"` trips
+nothing. `remote-admin` is the one exception: its evidence *is* a literal — a
+mod naming `/mods/policy` inside a `fetch()` call — so that one check alone
+keeps string bodies intact and blanks only comments and regex literals. A
+route named in an actual string is a real use; the same text sitting in a
+`//` comment still is not.
+
+The rule runs on **both doors**: the same `validate_package` call underlies
+`POST /mods/install` and the `mods_dir` scanner (`POST /mods/rescan` and
+every boot), so a package dropped by hand faces exactly the check the wire
+does — see the grandfathering note under `/mods/rescan` below for the one
+carve-out (an already-installed generation).
 
 **Generations.** A mod's assets live at `<mods_dir>/<id>/<gen>/`, where `gen` is
 a sha256 over the canonical manifest bytes plus the sorted `(name, sha256)`
@@ -888,10 +945,17 @@ with full authority. Keep that directory as protected as the broker's own
 configuration. What the scanner does owe is coherence: it refuses
 symlinks and reparse points, refuses anything whose realpath leaves `mods_dir`,
 refuses a non-`x-` directory, and validates every byte it captured under exactly
-the same rules an install obeys. The destructive sweep refuses to run at all in
-a directory without the `.browserland-mods` marker file. Unpacking an archive
-into a live `mods_dir` is not the recommended path; use the API, or stop the
-broker first.
+the same rules an install obeys — **including the `permissions` lint above**, so
+a hand-dropped package cannot dodge it by skipping `POST /mods/install`
+entirely. The one exception is a generation this store **already installed**
+(its own `.gen.json` names this directory and lists exactly the files in it):
+that generation is grandfathered past the lint, so it keeps serving — across a
+rescan and a restart — even with `permissions` absent, rather than going dark
+retroactively the day the check shipped. Replacing or reinstalling it, through
+either door, requires the declaration like any new package. The destructive
+sweep refuses to run at all in a directory without the `.browserland-mods`
+marker file. Unpacking an archive into a live `mods_dir` is not the recommended
+path; use the API, or stop the broker first.
 
 ### 10.6 Status vocabulary
 
