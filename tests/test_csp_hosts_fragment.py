@@ -174,8 +174,10 @@ def test_boot_computes_the_cache_from_the_persisted_state(tmp_path,
     app = _make_app(tmp_path, monkeypatch)
     assert csp_hosts_fragment(app) == \
         "https://fleet.example:8445 wss://fleet.example:8445"
-    # THIS atom changes no served header: the CSP stays script-src +
-    # frame-ancestors only until the header assembly lands.
+    # The ENFORCED header stays script-src + frame-ancestors only until the
+    # Report-Only soak flips it — the full policy (with connect-src) ships
+    # ONLY as Content-Security-Policy-Report-Only, pinned in
+    # test_csp_policy.py. This pin is the byte-identity half.
     assert "connect-src" not in app.ctx.csp
     assert "fleet.example" not in app.ctx.csp
 

@@ -2102,9 +2102,16 @@ def _csp_header(inline_hash: Optional[str] = None) -> str:
     ``inline_hash`` authorizes our own bundle; without it (headless, which
     serves no page and no inline script) the directive simply lists the
     origins."""
-    script_src = " ".join(
+    return (f"script-src {_script_src_value(inline_hash)}; "
+            "frame-ancestors 'none'")
+
+
+def _script_src_value(inline_hash: Optional[str] = None) -> str:
+    """The ``script-src`` source list — ONE helper shared by the enforced
+    header and the full #190 policy below, so the two can never drift
+    byte-wise and the eventual flip changes no bytes of the script policy."""
+    return " ".join(
         ([f"'{inline_hash}'"] if inline_hash else []) + list(_SCRIPT_ORIGINS))
-    return f"script-src {script_src}; frame-ancestors 'none'"
 
 
 # ---- dynamic connect-src hosts fragment (#190) ----------------------------
@@ -2265,6 +2272,128 @@ def csp_hosts_fragment(app: Sanic) -> str:
     """The seam the CSP header assembly reads: the cached registered-hosts
     connect-src fragment (possibly ""), never recomputed per request."""
     return getattr(app.ctx, "csp_hosts_fragment", "")
+
+
+# ---- the FULL #190 policy (served Report-Only until the soak flips it) ----
+# default-src 'self' plus enumerated carve-outs, assembled per response
+# because connect-src's tail varies: the registered-hosts fragment above is
+# cached, and the serving origin's own ws/wss twins follow the request Host
+# header. The ENFORCED header (app.ctx.csp) stays byte-identical while the
+# Report-Only soak gathers evidence; the flip is one small change at the
+# response-middleware callsite — make _assemble_full_csp the enforced value,
+# drop the Report-Only line, retire the legacy _csp_header/app.ctx.csp pair.
+
+
+def _csp_full_policy_parts(
+        inline_hash: Optional[str] = None) -> Tuple[str, str]:
+    """The full policy's static (prefix, suffix) around connect-src's dynamic
+    sources, precomputed once at create_app so the per-response work in
+    _assemble_full_csp is a couple of string joins — no parsing, no I/O.
+
+    Every carve-out beyond 'self' is verified in the tree (grep evidence
+    below); everything NOT carved out falls back to ``default-src 'self'``:
+
+    * ``script-src`` — the SAME source list as the enforced header, via
+      _script_src_value, so the two headers cannot drift.
+    * ``style-src 'unsafe-inline'`` — the app's entire stylesheet is ONE
+      inline <style> element (00_head.html opens it, 40_body.html closes it),
+      40_body.html carries a style="display:none" attribute, and mod chips
+      write element.style.cssText (grep cssText: mods/clock, mods/aistatus,
+      mods/update, mods/recorder).
+    * ``img-src data:`` — the favicon is a data:image/png URI (00_head.html)
+      and the vendored CodeMirror view module paints .cm-highlightTab with a
+      url('data:image/svg+xml,...') background (grep data:image).
+    * ``blob:`` is deliberately ABSENT everywhere: the only blob: URLs in the
+      tree are <a download href> exports (grep createObjectURL:
+      mods/file-manager, mods/recorder), and no CSP fetch directive governs a
+      download. If the Report-Only soak disagrees, the flip adds exactly the
+      directive the violation reports name — sweep evidence, not guesswork.
+    * ``frame-src 'self'`` explicitly, not via fallback: #179/#180 must widen
+      it deliberately, never inherit whatever default-src happens to say.
+    * ``form-action 'self'`` / ``base-uri 'self'`` close the form-submission
+      and <base>-hijack channels that would otherwise walk around
+      connect-src entirely (#190).
+    * ``frame-ancestors 'none'`` — today's enforced value, kept verbatim.
+    """
+    return (
+        "default-src 'self'; "
+        f"script-src {_script_src_value(inline_hash)}; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'",
+        "; frame-src 'self'; form-action 'self'; base-uri 'self'; "
+        "frame-ancestors 'none'",
+    )
+
+
+def _csp_self_twins(app: Sanic, host_header: Optional[str]) -> str:
+    """The SERVING origin's ``ws://… wss://…`` pair for connect-src, derived
+    from the request Host header — the one piece of the policy that varies
+    per response ('self' covers the http(s) origin; the ws twins are explicit
+    because 'self'-matches-ws is CSP3 with an uneven support history). BOTH
+    schemes: the broker terminates no TLS, so it cannot know the
+    browser-facing scheme behind a proxy, and a twin the page can't use is
+    inert.
+
+    The Host value lands in a header we emit, so it is HARDENED with the same
+    grammar as the registry fragment: parsed (urlsplit lowercases the host
+    and unbrackets IPv6, exactly as _csp_origin_pair sees them), then held to
+    the fragment's hostname/IPv6 shapes. A Host that fails gets the twins
+    OMITTED — logged once per process, never a broken or smuggled-into
+    header. A single-slot cache keeps the steady state (every request behind
+    one Host) to a string compare."""
+    raw = (host_header or "").strip()
+    cached = getattr(app.ctx, "csp_self_twins_cache", None)
+    if cached is not None and cached[0] == raw:
+        return cached[1]
+    host = ""
+    port = None
+    if (raw and len(raw) <= MAX_CSP_HOST_URL_CHARS
+            and not any(ord(ch) <= 0x20 or ord(ch) == 0x7F or ch == "\\"
+                        for ch in raw)):
+        try:
+            parts = urllib.parse.urlsplit("//" + raw)
+            # A Host header is host[:port] and NOTHING else — userinfo, a
+            # path, query or fragment mean a forged/broken value.
+            if (parts.username is None and parts.password is None
+                    and not parts.path and not parts.query
+                    and not parts.fragment):
+                host = parts.hostname or ""
+                port = parts.port    # raises ValueError on a junk/oob port
+        except ValueError:
+            host = ""
+        if ":" in host:                                 # IPv6 literal
+            host = f"[{host}]" if _CSP_IPV6_RE.fullmatch(host) else ""
+        elif host and not _CSP_HOSTNAME_RE.fullmatch(host):
+            host = ""
+    if host:
+        suffix = "" if port is None else f":{port}"
+        twins = f"ws://{host}{suffix} wss://{host}{suffix}"
+    else:
+        twins = ""
+        if not getattr(app.ctx, "csp_bad_host_logged", True):
+            # Once per process: this fires per RESPONSE, and a hostile client
+            # could otherwise mint a log line per request. Never the value —
+            # the whole point is that it doesn't belong in our output.
+            app.ctx.csp_bad_host_logged = True
+            LOGGER.warning("csp: request Host header failed validation; "
+                           "self ws/wss twins omitted from the policy")
+    app.ctx.csp_self_twins_cache = (raw, twins)
+    return twins
+
+
+def _assemble_full_csp(app: Sanic, host_header: Optional[str]) -> str:
+    """The full #190 policy for ONE response: the precomputed static parts
+    around ``connect-src 'self'`` + the cached registered-hosts fragment +
+    the serving origin's Host-derived ws/wss twins. Pure string work — the
+    reason the concat can live in the response middleware."""
+    prefix, suffix = app.ctx.csp_full_parts
+    frag = csp_hosts_fragment(app)
+    twins = _csp_self_twins(app, host_header)
+    extra = " ".join(s for s in (frag, twins) if s)
+    if extra:
+        return f"{prefix} {extra}{suffix}"
+    return prefix + suffix
 
 
 def _open_url(config: Optional[Dict[str, Any]], port: int, token: str) -> str:
@@ -3649,6 +3778,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # Baseline CSP. Replaced below with the hash-bearing variant when serve_ui
     # is on; headless serves no inline script, so the origin list is enough.
     app.ctx.csp = _csp_header()
+    # #190 staged rollout: the FULL policy's static parts (hash-bearing
+    # replacement below, same as csp), assembled per response around the
+    # dynamic connect-src sources and served Report-Only until the soak
+    # flips it at the middleware callsite. Plus the two per-app slots
+    # _csp_self_twins uses: its single-slot Host cache and its one-shot
+    # bad-Host log guard.
+    app.ctx.csp_full_parts = _csp_full_policy_parts()
+    app.ctx.csp_self_twins_cache = None
+    app.ctx.csp_bad_host_logged = False
     # Terminal session recordings (#140): durable user data, so the default
     # lives BESIDE the state store (not the temp dir an OS cleaner may wipe).
     # Config "recordings_dir" overrides. Created lazily on first save.
@@ -3872,6 +4010,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # frame-ancestors for the rest.
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = app.ctx.csp
+        # #190 staged rollout: the FULL policy (default-src, dynamic
+        # connect-src, form-action/base-uri/frame-src) ships Report-Only on
+        # every response the enforced header covers, so the soak gathers
+        # violation evidence while nothing can break. The flip, once the
+        # soak is clean: make _assemble_full_csp the enforced value above
+        # and delete this line + the legacy app.ctx.csp. Pure string concat
+        # — the Host-derived twins are the only per-response piece.
+        response.headers["Content-Security-Policy-Report-Only"] = \
+            _assemble_full_csp(app, request.headers.get("host"))
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
@@ -8417,8 +8564,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     len(app.ctx.mods_index["skipped"]))
         # #143: authorize OUR bundle by hash so script-src needs no
         # 'unsafe-inline'. Computed from the assembled page, here rather than at
-        # module scope so a headless broker still never imports .ui (#87).
-        app.ctx.csp = _csp_header(inline_script_hash(INDEX_HTML))
+        # module scope so a headless broker still never imports .ui (#87). The
+        # #190 Report-Only policy carries the SAME hash via the shared
+        # _script_src_value, so its script-src cannot drift from the enforced
+        # one.
+        _page_hash = inline_script_hash(INDEX_HTML)
+        app.ctx.csp = _csp_header(_page_hash)
+        app.ctx.csp_full_parts = _csp_full_policy_parts(_page_hash)
         # Vendored xterm, read eagerly for the same loud-at-startup reason the
         # UI is assembled here (#87 keeps both out of a headless broker).
         app.ctx.vendor = vendor.load()
