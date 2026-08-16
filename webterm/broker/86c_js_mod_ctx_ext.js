@@ -414,14 +414,16 @@
         // and `singleton` (clipboard's CLIP_WIN_ID open-or-focus hack, which is
         // re-derived by every windowed mod).
         //
+        // THE RESTORE SEAM is wired at the end of this section. `spec.restoring`
+        // is accepted here and does exactly one thing — suppress the create-time
+        // focus, like openAppWindow's opts.restoring — so a restore that lands
+        // before the user is looking does not steal focus; and
+        // registerWindowKind's restore hook is HANDED this same API, so a
+        // restored window is built by the core-owned path a fresh one is. The
+        // dedupe below is what makes that safe: an id that is live is ADOPTED,
+        // never double-built (#167).
+        //
         // What is NOT here, deliberately, and where it goes:
-        //   - THE RESTORE SEAM. `spec.restoring` is accepted and does exactly
-        //     one thing today — suppress the create-time focus, like
-        //     openAppWindow's opts.restoring — so a restore that lands before
-        //     the user is looking does not steal focus. Handing
-        //     registerWindowKind's restore factory this API is its own change.
-        //     The dedupe below is already restore-safe: an id that is live is
-        //     ADOPTED, never double-built (#167).
         //   - THE STAGED TAKE-DOWN / closeAll(). The owned-window registry they
         //     need is `rec.appWindows` — deliberately on the RECORD, not in
         //     this closure, so the loader's take-down pass can reach it without
@@ -791,9 +793,149 @@
             };
             fam.list = function () { return _listModAppWindows(rec); };
         }
+
+        // ---- the restore seam: a restore hook receives the factory (#194) ----
+        // registerWindowKind's `restore` is the one window-building path a mod
+        // may not be able to reach its ctx from. Core calls it DIRECTLY —
+        //
+        //     win = (kind && kind.restore ? kind.restore : openAppWindow)(
+        //         rec, { restoring: true });     // 84_js_active_view_lifecycle
+        //
+        // — so a hook that is a HOISTED top-level builder (openNoteOrEditor
+        // Window's shape, deliberately reachable with its mod disabled) has no
+        // ctx in scope and has to stash one on a function property to reach
+        // per-mod surface. `editorFile.cap` (mods/editor/editor.js) is exactly
+        // that hack, and every mod that needs it re-derives it. So the hook is
+        // handed the per-mod window API as a THIRD argument, which is purely
+        // additive to core's two-argument call:
+        //
+        //     restore: function (record, opts, api) {
+        //         const h = api.createAppWindow({ kind: 'scratchpad', … });
+        //         return h.win;          // core wants a window RECORD…
+        //     }                          // …though a handle is unwrapped too
+        //
+        // Two spec defaults come with it, and both are overridable:
+        //   id         defaults to the RECORD's id. A restore that built at
+        //              some other id would orphan the record it was handed AND
+        //              step around the id dedupe, so the next pass would build
+        //              a SECOND window rather than adopt this one.
+        //   restoring  defaults to the flag core passed (true — restoreApp
+        //              Windows is the one automatic caller), so a restored
+        //              window is not REVEALED: no un-minimize, and no re-home
+        //              to whichever workspace the page happened to boot on
+        //              (#152). Exactly what openAppWindow's opts.restoring
+        //              suppresses, and no more — a float still takes front
+        //              through finishWindowPlacement's bringToFront, as every
+        //              window built by any factory always has.
+        //
+        // WHY THE DEFAULTS, AND NOT A "RUN ONCE" GATE. Restore and the mod
+        // loader are independent async chains: boot restores a mod-owned kind
+        // before it is registered, core's unknown-kind fallback returns null,
+        // and the record is re-attempted once the loader settles (#167's
+        // restoreAppWindowsAfterMods). A lease-loss rebuild runs the whole pass
+        // again, and a mod's own init-time catch-up pass (mods/sticky) can
+        // restore the same window from the other side. None of that can be
+        // gated on `_booted` — bootActiveView sets it BEFORE its state await —
+        // so "restore runs at most once" is not a property anything here may
+        // assume. Adopting is: with the two defaults above, _createModAppWindow
+        // ADOPTS the live window (by id, or for a singleton by kind at ANY id,
+        // which is what a reload needs — the stored record's id and the mod's
+        // own singleton id need not agree) and builds nothing.
+
+        // The API one restore invocation is handed. Frozen, and built per call:
+        // the defaults are baked in from the record + opts core actually passed,
+        // so nothing about them can be stale.
+        function _modRestoreApi(rec, record, opts) {
+            const rid = (record && record.id != null && String(record.id))
+                ? String(record.id) : '';
+            // Absent/odd opts reads as a restore: this hook has exactly one core
+            // call site and it always is one, so the SAFE default is the one
+            // that does not reveal-and-re-home a window nobody asked for.
+            const restoring = (opts && opts.restoring !== undefined)
+                ? !!opts.restoring : true;
+            return Object.freeze({
+                createAppWindow: function (spec) {
+                    return _createModAppWindow(
+                        rec, _modRestoreSpec(spec, rid, restoring));
+                },
+                list: function () { return _listModAppWindows(rec); },
+            });
+        }
+        // The spec, plus the restore defaults, WITHOUT touching the mod's own
+        // object: a hook that reuses one literal across restores would
+        // otherwise have the FIRST record's id written into it permanently.
+        //
+        // Object.create(spec), not Object.assign({}, spec): the defaults become
+        // own properties of a child object and everything else is READ THROUGH
+        // the prototype chain, so a field that is inherited, non-enumerable or
+        // an accessor still reads to the factory exactly as it did before this
+        // wrapper existed. A flattening copy would silently drop those and turn
+        // a spec that worked into one that does not. A non-object passes
+        // through untouched, so the factory's own "spec must be an object"
+        // refusal is what the mod sees.
+        function _modRestoreSpec(spec, rid, restoring) {
+            if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+                return spec;
+            }
+            const out = Object.create(spec);
+            if (!(out.id != null && String(out.id)) && rid) out.id = rid;
+            if (out.restoring === undefined) out.restoring = restoring;
+            return out;
+        }
+        // A hook may return the HANDLE it just built; core wants the window
+        // record. Unwrapped by IDENTITY against this mod's own registry, so a
+        // hook returning anything else — a core-built record, null — keeps
+        // returning exactly that.
+        function _modRestoreResult(rec, v) {
+            if (!v || typeof v !== 'object') return v;
+            const owned = rec && rec.appWindows;
+            if (owned && typeof owned.get === 'function'
+                    && owned.get(v.id) === v) {
+                return v.win || null;
+            }
+            return v;
+        }
+        // spec -> spec, with `restore` wrapped to receive the API. A spec with
+        // no restore hook — every kind shipped today — comes back by IDENTITY:
+        // the wrapper must be invisible to the mods that do not use it, and
+        // core's validator must stay the thing that refuses a malformed spec
+        // (including a non-function `restore`, which is passed through to it).
+        function _modKindRestoreSpec(rec, spec) {
+            if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+                return spec;
+            }
+            if (typeof spec.restore !== 'function') return spec;
+            const restore = spec.restore;
+            // Object.create for the same reason _modRestoreSpec uses it: every
+            // other field core's validator reads — appKind, factory, serialize,
+            // menu, the rest — must read exactly as it would have, so the
+            // wrapper shadows `restore` on a CHILD and inherits the rest
+            // rather than flattening a copy.
+            const wrapped = Object.create(spec);
+            wrapped.restore = function (record, opts) {
+                return _modRestoreResult(rec, restore.call(
+                    this, record, opts, _modRestoreApi(rec, record, opts)));
+            };
+            return wrapped;
+        }
+        // The extender: ctx.registerWindowKind wrapped IN PLACE, the same way
+        // the factory decorates ctx.windows. Its own extender rather than a
+        // line inside _ctxWindowsFactory, because the registry's per-extender
+        // isolation is worth having between them: a mod that only opens windows
+        // keeps its factory if this one ever throws, and a mod that only
+        // registers kinds keeps its restore if the factory extender does.
+        function _ctxWindowKindRestore(ctx, rec) {
+            const reg = ctx.registerWindowKind;
+            // Nothing to wrap on a ctx without #80's registration surface.
+            if (typeof reg !== 'function') return;
+            ctx.registerWindowKind = function (spec) {
+                return reg.call(ctx, _modKindRestoreSpec(rec, spec));
+            };
+        }
         // Guarded like #197's registration: a page assembled without the
         // registry must not throw here.
         if (typeof _registerCtxExtender === 'function') {
             _registerCtxExtender(_ctxWindowsFactory);
+            _registerCtxExtender(_ctxWindowKindRestore);
         }
         // ---- end ctx.windows.createAppWindow --------------------------------

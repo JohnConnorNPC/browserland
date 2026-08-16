@@ -8579,9 +8579,63 @@ def _winfac_source():
                    "function _ownModAppWindow(rec, win, bodyEl, toolbarEl) {",
                    "function _listModAppWindows(rec) {",
                    "function _createModAppWindow(rec, spec) {",
-                   "function _ctxWindowsFactory(ctx, rec) {"):
+                   "function _ctxWindowsFactory(ctx, rec) {",
+                   # A29: the restore seam rides the same slice, so the node
+                   # harness drives the SHIPPED wrapper and not a copy of it.
+                   "function _modRestoreApi(rec, record, opts) {",
+                   "function _modRestoreSpec(spec, rid, restoring) {",
+                   "function _modRestoreResult(rec, v) {",
+                   "function _modKindRestoreSpec(rec, spec) {",
+                   "function _ctxWindowKindRestore(ctx, rec) {"):
         assert needed in body, f"{needed} missing from the sliced range"
     return body
+
+
+def _window_kind_registry_source():
+    """54's window-kind registry range, verbatim: registerWindowKind /
+    deleteWindowKind / lookupWindowKind plus openAppWindow + buildAppWindow.
+    The restore path is only worth testing against the REAL registry -- a
+    stubbed one would not reproduce the unknown-kind null that #167's retry
+    keys on."""
+    src = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    start = src.index("        function _windowKindRegistry() {")
+    end = src.index(
+        "        // One-time migration: pre-multi-host builds keyed per-session")
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("function registerWindowKind(spec) {",
+                   "function deleteWindowKind(appKind, entry) {",
+                   "function lookupWindowKind(appKind) {",
+                   "function registerBuiltinWindowKinds() {",
+                   "function openAppWindow(appData, opts) {",
+                   "function buildAppWindow(appData) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _restore_lifecycle_source():
+    """84's restore half, verbatim: the #167 bookkeeping (the deferred set and
+    the retry latches) plus restoreAppWindows / _restoreOneAppWindow /
+    restoreAppWindowsAfterMods. Sliced rather than re-typed because the whole
+    point of the A29 cases is that they drive the path a RELOAD drives --
+    including the boot drain and the retry's delete-before-build."""
+    src = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(
+        encoding="utf-8")
+    head = src[src.index(
+        "        // #167: the records THIS view generation's restore had to skip"
+    ):src.index("        function startSlowPoll() {")]
+    body = src[src.index(
+        "        // Re-create persisted client-only app windows"
+    ):src.index("        // Restore-on-refresh: seed the terminals")]
+    for needed in ("let _deferredRestore = null;",
+                   "let _restoreRetrying = false;",
+                   "let _restoreRetryAgain = false;"):
+        assert needed in head, f"{needed} missing from the sliced range"
+    for needed in ("function restoreAppWindows() {",
+                   "function _restoreOneAppWindow(appId, deferred) {",
+                   "function restoreAppWindowsAfterMods() {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return head + body
 
 
 def test_the_app_window_factory_lands_in_the_extension_fragment():
@@ -8665,8 +8719,9 @@ def test_the_factory_reuses_core_and_adds_no_core_entry_point():
 
 
 def test_the_factory_documents_the_seams_it_deliberately_left():
-    # #194 ships the create path; the restore seam, the staged take-down /
-    # closeAll and onAppWindowCreate are separate changes. Each one has a trap
+    # #194 ships the create path (and, since A29, the restore seam just below
+    # it); the staged take-down / closeAll and onAppWindowCreate are separate
+    # changes. Each one has a trap
     # that is invisible from the call site, so the fragment must NAME them --
     # in particular the LIFO ordering that makes an onUnload-registered close
     # pass wrong, which is the trap task-manager's comment block documents.
@@ -8896,14 +8951,53 @@ __REGISTRY__
 
 __FACTORY__
 
+// ---- the core restore path (A29), shipped source ------------------------
+// The persisted store a reload reads, and the two lifecycle flags 84 gates on.
+const appStore = {};
+let _viewEpoch = 1;
+let _deactivated = false;
+let _stateReady = true;
+// A duplicate appKind throws this; core throws it WITHOUT `new`.
+function ModConflictError(msg) {
+    const e = new Error(msg);
+    e.name = 'ModConflictError';
+    return e;
+}
+// The note/editor default buildAppWindow falls back to. A mod-owned kind must
+// never reach it -- that fallback would rewrite the record as a sticky note.
+const fellBack = [];
+function openNoteOrEditorWindow(appData) {
+    fellBack.push(String(appData.id));
+    return null;
+}
+
+__KINDS__
+
+__RESTORE__
+
 // ---- driver -------------------------------------------------------------
+// The loader's ctx.registerWindowKind half (86 is not sliced into this
+// harness): register through core, and drop exactly THIS registration on
+// teardown. Mirrors _modRegisterWindowKind line for line; the assertion that
+// it still does lives beside the cases.
+function _modRegisterWindowKind(rec, spec) {
+    const entry = registerWindowKind(spec);
+    rec.unloads.push(function () {
+        deleteWindowKind(entry.appKind, entry);
+    });
+    return entry;
+}
 // One ctx per mod, built the way makeCtx builds it: the v1 literal, then the
 // extenders. `windows.onTerminalCreate` is here because #194 must DECORATE
-// that family, not replace it.
+// that family, not replace it; `registerWindowKind` because A29's extender
+// WRAPS that v1 member in place.
 function modCtx(id) {
     const rec = { id: id, version: '1.0.0', unloads: [] };
     const ctx = { id: id, ctxVersion: 1,
-                  windows: { onTerminalCreate: function () {} } };
+                  windows: { onTerminalCreate: function () {} },
+                  registerWindowKind: function (spec) {
+                      return _modRegisterWindowKind(rec, spec);
+                  } };
     _applyCtxExtenders(ctx, rec);
     return { ctx: ctx, rec: rec };
 }
@@ -9243,6 +9337,186 @@ CASES.refuses_a_malformed_spec = function () {
     return { msgs: msgs, windows: windows.size, chips: chipIds().length };
 };
 
+// E29, the whole case: a RELOAD with a persisted factory-kind window. Driven
+// the way the app drives it -- boot restores before the loader settles, the
+// record is deferred (#167), the mod registers its kind, the retry runs -- and
+// then every other way the pass runs again. Exactly ONE window, every time.
+CASES.restore_reload_builds_once = function () {
+    appStore['app:notes:legacy'] = {
+        id: 'app:notes:legacy', appKind: 'scratchpad', open: true,
+        geom: { left: 12, top: 34, width: 420, height: 260 },
+        color: '#7788ff', text: 'restored text' };
+    // 1. BOOT. loadMods has not settled, so the kind is unregistered: core's
+    //    unknown-kind fallback returns null (never the note/editor default) and
+    //    the record is remembered for the retry.
+    restoreAppWindows();
+    const afterBoot = { windows: windows.size, chips: chipIds().length,
+                        deferred: Array.from(_deferredRestore.ids),
+                        fellBack: fellBack.slice() };
+    // 2. THE MOD LOADS. Its restore hook is a hoisted-builder shape: it uses
+    //    ONLY the arguments it is handed -- no ctx in scope, no `.cap` stash.
+    const m = modCtx('scratchpad');
+    const saw = [];
+    let built = 0;
+    const entry = m.ctx.registerWindowKind({
+        appKind: 'scratchpad',
+        factory: function () { throw new Error('the LAUNCH factory ran'); },
+        serialize: function (win) {
+            return { id: win.id, appKind: 'scratchpad' };
+        },
+        restore: function (record, opts, api) {
+            saw.push({ id: record.id, restoring: !!(opts && opts.restoring),
+                       create: typeof (api && api.createAppWindow),
+                       list: typeof (api && api.list),
+                       frozen: !!api && Object.isFrozen(api),
+                       keys: api ? Object.keys(api).sort() : null });
+            const h = api.createAppWindow({
+                kind: 'scratchpad', title: 'Scratchpad', sid: 'notes',
+                geom: record.geom, color: record.color,
+                body: function (el) { built += 1; el.textContent = record.text; },
+            });
+            return h.win;
+        },
+    });
+    // 3. THE #167 RETRY, then a second drain (a mid-session mod enable) and a
+    //    whole second generation (a lease-loss rebuild). None may build twice.
+    restoreAppWindowsAfterMods();
+    const afterRetry = { windows: windows.size, chips: chipIds(),
+                         built: built };
+    restoreAppWindowsAfterMods();
+    restoreAppWindows();
+    const win = windows.get('app:notes:legacy');
+    return { afterBoot: afterBoot, saw: saw, built: built,
+             afterRetry: afterRetry, windows: windows.size,
+             ids: Array.from(windows.keys()), chips: chipIds(),
+             reveals: reveals, desktopKids: desktop.children.length,
+             sessions: Array.from(sessions.keys()),
+             wrapped: entry.restore !== undefined,
+             list: m.ctx.windows.list().map(function (h) { return h.id; }),
+             body: win ? win.body.textContent : null,
+             geom: win ? win.geom : null, color: win ? win.color : null,
+             appKind: win ? win.appKind : null };
+};
+
+// The two defaults the seam supplies. A hook that names NEITHER an id nor
+// `restoring` still lands on the record's own id -- which is what makes the id
+// dedupe hold on the retry -- and still does not steal focus.
+CASES.restore_defaults_the_record_id = function () {
+    appStore['app:notes:7'] = { id: 'app:notes:7', appKind: 'scratchpad',
+                                open: true };
+    const m = modCtx('scratchpad');
+    let built = 0;
+    const specSeen = [];
+    m.ctx.registerWindowKind({
+        appKind: 'scratchpad',
+        factory: function () { return null; },
+        serialize: function (win) { return { id: win.id }; },
+        restore: function (record, opts, api) {
+            const spec = { kind: 'scratchpad',
+                           body: function () { built += 1; } };
+            const h = api.createAppWindow(spec);
+            // the mod's OWN literal must come back untouched: a reused one
+            // would otherwise carry the first record's id forever
+            specSeen.push(Object.keys(spec).sort().join(','));
+            return h;              // a HANDLE: core gets the record anyway
+        },
+    });
+    restoreAppWindows();                    // the kind is registered already
+    const first = { windows: windows.size, ids: Array.from(windows.keys()) };
+    restoreAppWindows();                    // a lease-loss rebuild
+    const direct = lookupWindowKind('scratchpad').restore(
+        appStore['app:notes:7'], { restoring: true });
+    return { first: first, built: built, windows: windows.size,
+             ids: Array.from(windows.keys()), chips: chipIds(),
+             specSeen: specSeen, reveals: reveals,
+             unwrapped: direct === windows.get('app:notes:7'),
+             list: m.ctx.windows.list().map(function (h) { return h.id; }) };
+};
+
+// A SINGLETON restored at a different id: the store's record predates the
+// mod's stable id (or the mod's init already opened the window from the other
+// side of the race). Adopt the live one; never build a second.
+CASES.singleton_restore_adopts_across_ids = function () {
+    appStore['app:clip:legacy'] = { id: 'app:clip:legacy', appKind: 'clipboard',
+                                    open: true };
+    const m = modCtx('clipboard');
+    let built = 0;
+    // init's own open-or-focus pass wins the race: the window exists at the
+    // mod's stable id, NOT at the id the store carries.
+    const own = m.ctx.windows.createAppWindow({
+        kind: 'clipboard', singleton: true, title: 'Clipboard',
+        body: function () { built += 1; } });
+    m.ctx.registerWindowKind({
+        appKind: 'clipboard',
+        factory: function () { return null; },
+        serialize: function (win) { return { id: win.id }; },
+        restore: function (record, opts, api) {
+            return api.createAppWindow({
+                kind: 'clipboard', singleton: true, title: 'Clipboard',
+                body: function () { built += 1; } }).win;
+        },
+    });
+    restoreAppWindows();
+    restoreAppWindowsAfterMods();
+    return { built: built, windows: windows.size, ownId: own.id,
+             ids: Array.from(windows.keys()), chips: chipIds(),
+             reveals: reveals, desktopKids: desktop.children.length,
+             list: m.ctx.windows.list().map(function (h) { return h.id; }) };
+};
+
+// Both defaults are defaults: a hook that names its own id and asks not to be
+// treated as a restore gets exactly that.
+CASES.restore_defaults_are_overridable = function () {
+    appStore['app:x:1'] = { id: 'app:x:1', appKind: 'kx', open: true };
+    const m = modCtx('kx');
+    m.ctx.registerWindowKind({
+        appKind: 'kx',
+        factory: function () { return null; },
+        serialize: function (win) { return { id: win.id }; },
+        restore: function (record, opts, api) {
+            return api.createAppWindow({ kind: 'kx', id: 'app:x:chosen',
+                                         restoring: false }).win;
+        },
+    });
+    restoreAppWindows();
+    return { ids: Array.from(windows.keys()), reveals: reveals,
+             windows: windows.size };
+};
+
+// The wrapper is INVISIBLE to a kind that declares no restore -- which is all
+// nine shipped mods. Same entry fields, the same duplicate/validation refusals
+// from core, the same teardown.
+CASES.kind_registration_is_transparent = function () {
+    const m = modCtx('plain');
+    const spec = { appKind: 'plain', factory: function () { return null; },
+                   serialize: function () { return null; },
+                   menu: { label: 'Plain', launch: function () {} },
+                   deleteLabel: 'thing' };
+    const entry = m.ctx.registerWindowKind(spec);
+    let dupe = null;
+    try {
+        m.ctx.registerWindowKind({ appKind: 'plain',
+                                   factory: function () { return null; } });
+    } catch (e) { dupe = e.name + ': ' + String(e.message); }
+    const bad = [];
+    [undefined, {}, { appKind: 'x' },
+     { appKind: 'y', factory: function () { return null; }, restore: 7 }]
+        .forEach(function (s) {
+            try { m.ctx.registerWindowKind(s); bad.push(null); }
+            catch (e) { bad.push(String(e.message)); }
+        });
+    return { sameFactory: entry.factory === spec.factory,
+             sameSerialize: entry.serialize === spec.serialize,
+             sameMenu: entry.menu === spec.menu,
+             deleteLabel: entry.deleteLabel, restore: entry.restore,
+             dupe: dupe, bad: bad,
+             registered: lookupWindowKind('plain') === entry,
+             torn: (function () {
+                 m.rec.unloads.forEach(function (fn) { fn(); });
+                 return lookupWindowKind('plain') === undefined;
+             })() };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -9257,7 +9531,9 @@ def winfac_harness(tmp_path_factory):
     path.write_text(
         _WINFAC_HARNESS
         .replace("__REGISTRY__", _ctx_registry_source())
-        .replace("__FACTORY__", _winfac_source()),
+        .replace("__FACTORY__", _winfac_source())
+        .replace("__KINDS__", _window_kind_registry_source())
+        .replace("__RESTORE__", _restore_lifecycle_source()),
         encoding="utf-8")
     return path
 
@@ -9507,3 +9783,180 @@ def test_a_malformed_create_spec_is_refused_loudly(winfac_harness):
     assert r["msgs"][0].startswith("createAppWindow: spec must be an object")
     assert "non-empty string kind" in r["msgs"][-1]
     assert r["windows"] == 0 and r["chips"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# the restore seam: registerWindowKind's restore hook gets the factory (#194)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_restore_hook_is_handed_the_factory():
+    # A29. The hook is the ONE window-building path a mod may not be able to
+    # reach its ctx from -- core calls it directly, and a hoisted builder (the
+    # editor's shape) has no ctx in scope, which is what `editorFile.cap`
+    # exists to work around. So it arrives as an argument.
+    ext = _ctx_ext_src()
+    loader = _loader_src()
+    for sym in ("function _modRestoreApi(rec, record, opts) {",
+                "function _modRestoreSpec(spec, rid, restoring) {",
+                "function _modRestoreResult(rec, v) {",
+                "function _modKindRestoreSpec(rec, spec) {",
+                "function _ctxWindowKindRestore(ctx, rec) {"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A29 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through the extender registry, under the same guard the
+    # factory's registration uses (a page assembled without #194's registry
+    # must not throw at load).
+    assert "_registerCtxExtender(_ctxWindowKindRestore);" in ext
+    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
+        < ext.rindex("_registerCtxExtender(_ctxWindowKindRestore);")
+    # Its own extender, not a line inside _ctxWindowsFactory: the registry's
+    # per-extender isolation is worth having between the two surfaces.
+    assert "_registerCtxExtender(_ctxWindowsFactory);" in ext
+    assert "_ctxWindowKindRestore" not in _frag_fn(
+        ext, "function _ctxWindowsFactory(ctx, rec) {")
+    # The v1 member is WRAPPED in place, and the wrapper delegates -- replacing
+    # it outright would drop the loader's teardown wiring.
+    body = _frag_fn(ext, "function _ctxWindowKindRestore(ctx, rec) {")
+    assert "const reg = ctx.registerWindowKind;" in body
+    assert "if (typeof reg !== 'function') return;" in body
+    assert "ctx.registerWindowKind = function (spec) {" in body
+    assert "return reg.call(ctx, _modKindRestoreSpec(rec, spec));" in body
+    # The API itself: the factory, frozen, per invocation.
+    api = _frag_fn(ext, "function _modRestoreApi(rec, record, opts) {")
+    assert "return Object.freeze({" in api
+    assert "createAppWindow: function (spec) {" in api
+    assert "_modRestoreSpec(spec, rid, restoring)" in api
+    # A spec with no restore hook comes back BY IDENTITY: all nine shipped mods
+    # register kinds without one and must be untouched by this.
+    wrap = _frag_fn(ext, "function _modKindRestoreSpec(rec, spec) {")
+    assert "if (typeof spec.restore !== 'function') return spec;" in wrap
+    # A CHILD object, never a flattening copy and never the mod's own object: a
+    # spec field that is inherited, non-enumerable or an accessor must read to
+    # core's validator (and to the factory) exactly as it did before the
+    # wrapper existed -- Object.assign would silently drop all three.
+    assert "Object.create(spec)" in wrap
+    assert "Object.assign" not in wrap
+    assert "Object.create(spec)" in _frag_fn(
+        ext, "function _modRestoreSpec(spec, rid, restoring) {")
+
+
+def test_the_restore_seam_is_additive_to_cores_two_argument_call():
+    # The whole seam rides the REGISTRATION, so core's call site is untouched:
+    # a third argument is invisible to a hook that declares two, and 84 keeps
+    # passing exactly what it passed before.
+    life = (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(
+        encoding="utf-8")
+    assert "win = (kind && kind.restore ? kind.restore : openAppWindow)(" in life
+    assert "rec, { restoring: true });" in life
+    # ...and 54 still validates/stores `restore` itself -- the wrapper hands it
+    # a function, it does not become one.
+    store = (BROKER_DIR / "54_js_app_windows_store.js").read_text(
+        encoding="utf-8")
+    assert "restore: spec.restore || null," in store
+    # The loader's half is unchanged too: one call, and the teardown that drops
+    # exactly this registration. The node harness mirrors these two lines.
+    reg = _frag_fn(_loader_src(), "function _modRegisterWindowKind(rec, spec) {")
+    assert "const entry = registerWindowKind(spec);" in reg
+    assert "deleteWindowKind(entry.appKind, entry);" in reg
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_reload_restores_a_factory_kind_window_exactly_once(winfac_harness):
+    # E29, driven the way a reload drives it: 84's real restoreAppWindows, its
+    # real #167 deferred set and retry, and 54's real kind registry.
+    r = _run_winfac(winfac_harness, "restore_reload_builds_once")
+    assert r["errors"] == []
+    # 1. Boot, before the loader settled: nothing built, the record remembered,
+    #    and NOT coerced into a note by the unknown-kind fallback.
+    assert r["afterBoot"]["windows"] == 0 and r["afterBoot"]["chips"] == 0
+    assert r["afterBoot"]["deferred"] == ["app:notes:legacy"]
+    assert r["afterBoot"]["fellBack"] == []
+    # 2. The hook received the factory -- frozen, and nothing else.
+    assert r["saw"], "the retry never called the restore hook"
+    assert r["saw"][0] == {"id": "app:notes:legacy", "restoring": True,
+                           "create": "function", "list": "function",
+                           "frozen": True,
+                           "keys": ["createAppWindow", "list"]}
+    # 3. ONE window, one chip, one session -- after the retry AND after every
+    #    later pass (a second drain, a whole second generation).
+    assert r["afterRetry"]["windows"] == 1 and r["afterRetry"]["built"] == 1
+    assert len(r["saw"]) > 1, "the later passes never re-ran the hook at all"
+    assert r["built"] == 1, "the #167 retry built the window a SECOND time"
+    assert r["windows"] == 1 and r["ids"] == ["app:notes:legacy"]
+    assert r["chips"] == ["app:notes:legacy"]
+    assert r["sessions"] == ["app:notes:legacy"]
+    assert r["desktopKids"] == 1 and r["list"] == ["app:notes:legacy"]
+    # ...built by the core-owned scaffold, from the record's own fields.
+    assert r["appKind"] == "scratchpad" and r["body"] == "restored text"
+    assert r["color"] == "#7788ff"
+    assert r["geom"] == {"left": 12, "top": 34, "width": 420, "height": 260}
+    # A restore is nobody asking for this window now, so it is never REVEALED
+    # (no un-minimize, no re-home to the workspace the page booted on) -- the
+    # same suppression openAppWindow's opts.restoring performs.
+    assert r["reveals"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_restore_lands_on_the_records_own_id_by_default(winfac_harness):
+    # The default that makes the dedupe HOLD: a hook that names no id would
+    # otherwise mint a fresh one per pass, so the next restore would build a
+    # second window and orphan the record it was handed.
+    r = _run_winfac(winfac_harness, "restore_defaults_the_record_id")
+    assert r["errors"] == []
+    assert r["first"]["ids"] == ["app:notes:7"]
+    assert r["built"] == 1, "a second pass rebuilt the body: a second window"
+    assert r["windows"] == 1 and r["ids"] == ["app:notes:7"]
+    assert r["chips"] == ["app:notes:7"] and r["list"] == ["app:notes:7"]
+    assert r["reveals"] == []
+    # The mod's own spec literal was copied, never mutated -- a reused literal
+    # must not carry the first record's id forever.
+    assert r["specSeen"] == ["body,kind"] * len(r["specSeen"])
+    # A hook may return the handle; core is handed the window RECORD.
+    assert r["unwrapped"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_singleton_restored_at_another_id_adopts(winfac_harness):
+    # The singleton half of the dedupe, on the restore path: the store's record
+    # and the mod's stable id need not agree, and whichever side of the race
+    # wins, the desktop ends up with ONE window.
+    r = _run_winfac(winfac_harness, "singleton_restore_adopts_across_ids")
+    assert r["errors"] == []
+    assert r["built"] == 1, "the restore built a second window beside the first"
+    assert r["windows"] == 1 and r["ownId"] == "app:clipboard"
+    assert r["ids"] == ["app:clipboard"] and r["chips"] == ["app:clipboard"]
+    assert r["list"] == ["app:clipboard"] and r["desktopKids"] == 1
+    # Only the mod's own open-or-focus reveal; the restore adopted silently.
+    assert r["reveals"] == ["app:clipboard"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_restore_defaults_are_only_defaults(winfac_harness):
+    r = _run_winfac(winfac_harness, "restore_defaults_are_overridable")
+    assert r["errors"] == []
+    assert r["windows"] == 1 and r["ids"] == ["app:x:chosen"]
+    assert r["reveals"] == ["app:x:chosen"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_registering_a_kind_without_a_restore_is_untouched(winfac_harness):
+    # All nine shipped mods register kinds with no restore hook. The wrapper
+    # must be invisible to them: same entry, same refusals, same teardown.
+    r = _run_winfac(winfac_harness, "kind_registration_is_transparent")
+    assert r["errors"] == []
+    assert r["sameFactory"] is True and r["sameSerialize"] is True
+    assert r["sameMenu"] is True and r["deleteLabel"] == "thing"
+    assert r["restore"] is None, "a kind with no hook must not gain one"
+    assert r["registered"] is True
+    # Core still owns every refusal, including a non-function restore.
+    assert r["dupe"] and r["dupe"].startswith("ModConflictError: ")
+    assert "duplicate appKind" in r["dupe"]
+    assert r["bad"][0] == "registerWindowKind: spec must be an object"
+    assert "non-empty string appKind" in r["bad"][1]
+    assert "factory(appData) must be a function" in r["bad"][2]
+    assert "restore must be a function" in r["bad"][3]
+    # ...and the mod's teardown still drops exactly this registration.
+    assert r["torn"] is True
