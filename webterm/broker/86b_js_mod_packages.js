@@ -1013,16 +1013,30 @@
                     + 'source-text lint, not a sandbox, and not containment.';
             }
             if (state === 'undeclared') {
-                return 'this mod was installed before this broker checked '
-                    + 'permissions, so its manifest carries no declaration at '
-                    + 'all. That is not the same as declaring none: nothing '
-                    + 'here has been checked. Reinstalling it under today’s '
-                    + 'rules requires the declaration.';
+                // States the FACT (no declaration), not an inference about
+                // when the package was written. The key is optional, so a
+                // manifest can omit it today as easily as it could before the
+                // lint existed, and the pane cannot tell those apart — saying
+                // "installed before this broker checked permissions" would be
+                // a guess presented as history.
+                return 'this mod’s manifest carries no `permissions` '
+                    + 'declaration at all — usually because it predates the '
+                    + 'check, since the key is optional. That is not the same '
+                    + 'as declaring none: there is no claim here to have '
+                    + 'checked anything against. Ask its author for one.';
             }
             if (state === 'none') {
+                // Deliberately NOT "and this broker checked that claim":
+                // only an INSTALLED package passes through the install-time
+                // lint. A shipped mod's declaration is read straight off the
+                // repo copy, and the only thing that checks it is the test
+                // suite — which is not this broker. Nine shipped mods land in
+                // this branch, so the sentence has to be true of them too.
                 return 'this mod’s manifest positively declares that it uses '
-                    + 'none of the reviewable capabilities, and this broker '
-                    + 'checked that claim against its source.';
+                    + 'none of the reviewable capabilities. For an installed '
+                    + 'mod this broker checked that claim against the '
+                    + 'package’s own source before storing it; a shipped mod '
+                    + 'is stating it, and the repo’s own tests hold it to it.';
             }
             return 'this broker reported no permissions information at all, so '
                 + 'nothing here was checked — an older build does not know '

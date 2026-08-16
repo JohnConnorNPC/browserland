@@ -7039,6 +7039,33 @@ def test_shipped_mods_permissions_are_truthful():
         f"shipped mod(s) use a capability their mod.json `permissions` "
         f"omits: {offenders}. Add the missing permission(s), or fix the "
         f"source if the use was accidental.")
+    # ...and every shipped mod must actually CARRY the key, with names from
+    # the vocabulary. The sweep above reads an absent key as `[]`, so without
+    # this loop deleting the line from a zero-capability manifest stayed green
+    # -- while the wire emitted `permissions: null` and the pane rendered that
+    # shipped mod as "undeclared (pre-lint)", a sentence that is nonsense for
+    # a mod living in this repo. Absence is the PRE-LINT signal; nothing that
+    # ships here is pre-lint.
+    from webterm.broker import modinstall
+    missing, unknown = [], []
+    for manifest in sorted((BROKER_DIR / "mods").glob("*/mod.json")):
+        meta = json.loads(manifest.read_text(encoding="utf-8"))
+        if "permissions" not in meta:
+            missing.append(manifest.parent.name)
+            continue
+        declared = meta["permissions"]
+        if not isinstance(declared, list):
+            unknown.append(f"{manifest.parent.name}: not a list")
+            continue
+        for entry in declared:
+            if entry not in modinstall.PERMISSIONS:
+                unknown.append(f"{manifest.parent.name}: {entry!r}")
+    assert not missing, (
+        f"shipped mod(s) with no `permissions` key: {missing}. A shipped mod "
+        f"is never pre-lint -- declare [] to say it uses none.")
+    assert not unknown, (
+        f"shipped mod(s) declaring a name outside the vocabulary "
+        f"{sorted(modinstall.PERMISSIONS)}: {unknown}")
 
 
 def test_shipped_mods_permissions_sweep_detects_a_seeded_false_declaration(

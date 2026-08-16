@@ -410,7 +410,16 @@ def _reject_css_external_references(name: str, text: str) -> None:
 
 #: A ``/`` directly after one of these characters starts a REGEX LITERAL, not a
 #: division.
-_JS_REGEX_PREV = set("(,=:[!&|?{};+-*%~^<>") | {""}
+#:
+#: Deliberately EXCLUDES the arithmetic tokens ``+ - * % }`` even though a regex
+#: can legally follow them. Every one of them can also precede a DIVISION
+#: (``x++ / rate``, ``}`` closing a block or an object), and guessing "regex"
+#: there costs far more than guessing "division": a phantom regex with no
+#: closing slash blanks the source through EOF, so the scan reports a clean
+#: package for a file it never read. Guessing "division" at worst scans a real
+#: regex body as code, which can only ADD a finding. Under-reporting is the
+#: only failure this lint must not have.
+_JS_REGEX_PREV = set("(,=:[!&|?{;~^<>") | {""}
 #: ... and after these KEYWORDS. Without them ``return /}/`` reads as a
 #: division, the regex body is scanned as code, its ``}`` corrupts the bracket
 #: depth and its closing ``/`` starts a phantom regex that blanks the rest of
@@ -472,6 +481,7 @@ def blank_js_literals(src: str, keep_strings: bool = False) -> str:
             i += 2
             continue
         if ch in "'\"`":
+            tmpl = ch == "`"
             out.append(ch)
             i += 1
             while i < n and src[i] != ch:
@@ -479,17 +489,65 @@ def blank_js_literals(src: str, keep_strings: bool = False) -> str:
                     out.append(src[i:i + 2] if keep_strings else "  ")
                     i += 2
                     continue
+                # `${ ... }` inside a template literal is CODE, not text: it is
+                # evaluated. Blanking it the way the surrounding text is blanked
+                # is a hole big enough to drive a capability through --
+                # `` `${ctx.file.read(p)}` `` reads a file while the scan sees
+                # an empty string. So the substitution is copied through
+                # VERBATIM (brace-depth tracked), and only the literal chunks
+                # around it are blanked. Anything nested in there is then
+                # scanned as ordinary code, which can over-report and can never
+                # under-report -- the bias this whole scanner is built on.
+                if tmpl and src[i:i + 2] == "${":
+                    depth = 0
+                    while i < n:
+                        c = src[i]
+                        out.append(c)
+                        if c == "{":
+                            depth += 1
+                        elif c == "}":
+                            depth -= 1
+                            if depth == 0:
+                                i += 1
+                                break
+                        i += 1
+                    continue
                 if keep_strings:
                     out.append(src[i])
                 else:
                     out.append("\n" if src[i] == "\n" else " ")
                 i += 1
-            out.append(ch)
-            i += 1
+            if i < n:
+                out.append(ch)
+                i += 1
             prev = ch
             continue
         if ch == "/" and (prev in _JS_REGEX_PREV
                           or _JS_KEYWORD_BEFORE.search(src[max(0, i - 24):i])):
+            # A regex literal cannot contain an unescaped line terminator, so
+            # one that does not close on its own line was never a regex. Decide
+            # that BEFORE blanking anything: the alternative is the failure this
+            # scanner exists to avoid -- an opener with no partner blanking
+            # every remaining line, which reads downstream as "nothing here".
+            probe, in_cls, closed = i + 1, False, False
+            while probe < n and src[probe] not in _JS_LINE_TERMINATORS:
+                p = src[probe]
+                if p == "\\":
+                    probe += 2
+                    continue
+                if p == "[":
+                    in_cls = True
+                elif p == "]":
+                    in_cls = False
+                elif p == "/" and not in_cls:
+                    closed = True
+                    break
+                probe += 1
+            if not closed:
+                out.append(ch)
+                prev = ch
+                i += 1
+                continue
             out.append(" ")
             i += 1
             in_class = False
@@ -948,6 +1006,17 @@ def validate_package(manifest: Any, files: Any,
     canonical = _canonical_manifest(manifest, files)
     if lint_permissions:
         _reject_undeclared_capabilities(canonical, files)
+    # An absent `permissions` key is NOT rewritten here, in either door.
+    # Two things forbid it, both learned the hard way: the canonical manifest
+    # is hashed into `gen`, so injecting a key would change the id of a
+    # disk-planted package whose directory name its author already computed
+    # (the content-address check would fail instead -- the right requirement
+    # reported as the wrong error); and REQUIRING the key would refuse every
+    # package written before this vocabulary existed, which is a breaking
+    # change to the install API that #193 never asked for. The cost is that a
+    # package can still arrive today with no declaration: the lint runs on it
+    # either way, and it is the DISPLAY's job not to guess when it was
+    # written -- see the pane's `undeclared` wording.
     return canonical, records
 
 

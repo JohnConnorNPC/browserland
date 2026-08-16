@@ -2300,12 +2300,20 @@ def test_permissions_are_a_closed_vocabulary_deduped_and_sorted():
 
 
 def test_an_absent_permissions_key_stays_absent_from_the_canonical_manifest():
-    # The A/B that grandfathering will key off: ABSENT means "written before the
-    # lint", `[]` means "claims to use nothing". Defaulting the absent case to
-    # `[]` would erase that distinction AND change the canonical bytes of every
+    # The A/B grandfathering keys off: ABSENT means "written before the lint",
+    # `[]` means "claims to use nothing". Defaulting the absent case to `[]`
+    # would erase that distinction AND change the canonical bytes of every
     # already-installed manifest -- i.e. every stored generation would fail its
     # own content-address check on the next scan.
-    canonical, records = modinstall.validate_package(manifest(), files())
+    #
+    # So absence survives canonicalization, and it is the UNLINTED door (the
+    # one that re-reads a stored generation) that still accepts it. The linted
+    # door refuses it outright -- see
+    # test_a_package_arriving_today_must_declare_permissions -- because a
+    # package installed under the lint must not describe itself as one that
+    # predates the lint.
+    canonical, records = modinstall.validate_package(manifest(), files(),
+                                                     lint_permissions=False)
     # Pinned as a WHOLE dict, not just "permissions not in it": the manifest is
     # hashed into `gen`, and ANY new key -- however it got there -- rewrites
     # every pre-existing generation id.

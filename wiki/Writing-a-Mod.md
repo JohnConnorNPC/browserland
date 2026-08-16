@@ -180,11 +180,16 @@ Field by field:
   `tests/test_ui_assets.py` and fails CI.
 - **`permissions`** — a closed-vocabulary declaration of which `ctx` capability
   families this package's source actually uses. Every shipped `mod.json`
-  carries one today, but only the **installed**-mod door
+  carries one, and it is read twice: the broker joins it onto the shipped rows
+  of the `/info` catalog, so Control Panel → Mods can show it, and
+  `tests/test_ui_assets.py` sweeps `mods/**` to keep every declaration
+  truthful and inside the vocabulary. What the shipped copy does *not* get is
+  the install-time check: only the **installed**-mod door
   (`modinstall.validate_package`, run by both `POST /mods/install` and the
-  `mods_dir` scanner) actually checks it against the source text — a shipped
-  manifest's copy is read by nothing. The full rules — the vocabulary, the
-  refusal, the absent-vs-`[]` distinction — are in §10.5.
+  `mods_dir` scanner) lints a declaration against the source at the moment it
+  is stored, which is why the pane words the two cases differently. The full
+  rules — the vocabulary, the refusal, the absent-vs-`[]` distinction — are in
+  §10.5.
 - **`help`** — `slug` / `label` / `order` / `icon` for the in-app Help section
   (§9). All optional; slug defaults to the mod id, label to `title`, order to a
   computed value after the wiki pages.
