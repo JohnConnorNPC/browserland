@@ -437,6 +437,31 @@ _UPDATE_POLICY_CORRUPT = "corrupt"
 _UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled",
                        "status_fetch_enabled")
 
+# #191: the ADMIN CREDENTIAL CLASS -- an optional second token for the broker's
+# most dangerous writes, the ones that reconfigure the mod platform or the
+# update/status consent gates. The page token is a STANDING capability every
+# page and every running mod holds; with it alone gating these routes, one
+# installed mod can install the next. When `admin_token` is configured these
+# routes additionally require it; when it is absent the wire is byte-identical
+# to before, plus one loud boot line naming the exposure.
+#
+# The credential travels ONLY in the dedicated header below -- never
+# `Authorization` (the page token may already ride it on remote hostFetch
+# wires; two credential classes must not share one slot) and never the query
+# string (`?token=` is already a credential the Referrer-Policy has to
+# babysit; a second one is refused outright, see _admin_auth_error).
+ADMIN_HEADER = "X-Webterm-Admin"
+
+#: Boot refuses a configured admin_token shorter than this: an admin
+#: credential weak enough to guess is worse than an honestly absent one.
+ADMIN_TOKEN_MIN_CHARS = 16
+
+#: The exact routes the admin class gates, the seam /info's advertisement
+#: (#191's capability report) reads from. Rescan is deliberately included:
+#: adopting disk contents is install by another door.
+ADMIN_ROUTES = ("/mods/install", "/mods/uninstall", "/mods/rescan",
+                "/mods/policy", "/update/policy")
+
 
 def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
     """``(stored gates, corrupt)`` from ``webterm_update_policy.json``.
@@ -3776,6 +3801,54 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          / "webterm_identity.json").exists())
     app.ctx.auth_token, app.ctx.auth_token_source = auth.resolve_or_mint_token(
         config, app.ctx.auth_state_path)
+    # ---- admin credential class (#191) -----------------------------------
+    # Config-only on purpose: no env fallback, no sidecar, no mint. The whole
+    # point of the class is that this value never rides anything the page
+    # realm can read, and a minted-and-printed admin token would be one more
+    # secret in a log. Validation REFUSES to boot rather than degrading: a
+    # present-but-unusable admin_token means the operator believes these
+    # routes are gated, and running with the gate silently off is the one
+    # outcome worse than not starting. Compared against the RESOLVED page
+    # token (whatever its source), because equal values collapse the two
+    # credential classes back into one.
+    if "admin_token" in config:
+        _admin_cfg = config.get("admin_token")
+        if not isinstance(_admin_cfg, str):
+            raise SystemExit(
+                "error: admin_token must be a string -- remove the key to run "
+                "without the admin credential class")
+        if not _admin_cfg:
+            raise SystemExit(
+                "error: admin_token is empty -- an empty admin credential "
+                "gates nothing; set a value of at least "
+                f"{ADMIN_TOKEN_MIN_CHARS} characters or remove the key")
+        if len(_admin_cfg) < ADMIN_TOKEN_MIN_CHARS:
+            raise SystemExit(
+                f"error: admin_token is too short ({len(_admin_cfg)} chars, "
+                f"minimum {ADMIN_TOKEN_MIN_CHARS}) -- a guessable admin "
+                "credential is worse than none")
+        if _admin_cfg == app.ctx.auth_token:
+            raise SystemExit(
+                "error: admin_token equals the page auth_token -- the two "
+                "credential classes must be distinct, or every page holding "
+                "the token is an administrator")
+        app.ctx.admin_token = _admin_cfg
+        LOGGER.info(
+            "admin credential class enabled: the %s header is required on %s "
+            "(in addition to the page token)",
+            ADMIN_HEADER, ", ".join(ADMIN_ROUTES))
+    else:
+        app.ctx.admin_token = None
+        # The ONE loud line for the unconfigured case. Behavior is otherwise
+        # byte-identical to a build without the class (pinned by
+        # tests/test_admin_gate.py), so this line is the only trace.
+        LOGGER.warning(
+            "admin credential class NOT configured: the page token alone can "
+            "install/uninstall/rescan mods and rewrite mod/update policy on "
+            "this broker (any page or mod holding it is an administrator). "
+            "Set admin_token in broker_config.json (min %d chars, distinct "
+            "from auth_token) to require the %s header on: %s",
+            ADMIN_TOKEN_MIN_CHARS, ADMIN_HEADER, ", ".join(ADMIN_ROUTES))
     # Count of /browserland upgrades refused for a missing token, so the warning
     # can rate-limit itself and, at the threshold, explain the symptom once
     # (agents from a previous tokenless broker retry forever). Old-code agents
@@ -4329,6 +4402,43 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                            label, request.ip)
             return sanic_json({"ok": False, "error": "auth_required"},
                               status=401)
+        return None
+
+    # ---- admin credential gate (#191) -------------------------------------
+    # Layered AFTER _gated_auth_error on exactly ADMIN_ROUTES, so the ladder
+    # is: 401 auth_required (no/bad page token -- the existing realm, which
+    # outranks everything) -> 403 admin_required (admin configured, header
+    # absent/wrong: authenticated, not authorized) -> the route's own gates.
+    # Every caller returns BEFORE parsing a body or taking a lock, so a
+    # refusal writes nothing by construction.
+    #
+    # The credential is read from the X-Webterm-Admin header ONLY. A request
+    # that carries the admin token in its query string is refused outright --
+    # even when its header is ALSO correct -- because a token in a URL is a
+    # credential in every access log and Referer downstream; accepting it once
+    # would teach a client the transport works (see the ADMIN_HEADER comment
+    # at module scope for why not Authorization either).
+    #
+    # With no admin_token configured this returns None before touching the
+    # request at all: today's wire, byte for byte, is the contract.
+    # Log lines name the route and the peer, NEVER the header or query value
+    # (same discipline as _gated_auth_error / auth.py's "never log request
+    # URLs" rule).
+    def _admin_auth_error(request: Request, label: str):
+        admin = app.ctx.admin_token
+        if admin is None:
+            return None
+        for _key, val in request.query_args:
+            if auth.token_matches(val, admin):
+                LOGGER.warning("rejected admin token in query string on %s "
+                               "from %s (header-only transport)",
+                               label, request.ip)
+                return sanic_json({"ok": False, "error": "admin_token_in_url"},
+                                  status=400)
+        if not auth.token_matches(request.headers.get(ADMIN_HEADER), admin):
+            LOGGER.warning("rejected non-admin %s from %s", label, request.ip)
+            return sanic_json({"ok": False, "error": "admin_required"},
+                              status=403)
         return None
 
     def _file_auth_error(request: Request):
@@ -6524,6 +6634,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         err = _gated_auth_error(request, "/mods/policy")
         if err is not None:
             return err
+        err = _admin_auth_error(request, "/mods/policy")
+        if err is not None:
+            return err
         body = _json_object_body(request)
         if body is None:
             return sanic_json({"ok": False, "error": "bad_json"}, status=400)
@@ -6616,6 +6729,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _mods_install_post(request: Request):
         err = _gated_auth_error(request, "/mods/install")
+        if err is not None:
+            return err
+        err = _admin_auth_error(request, "/mods/install")
         if err is not None:
             return err
         body, err = _mod_body(request, modinstall.MAX_BODY_BYTES)
@@ -6724,6 +6840,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _mods_uninstall_post(request: Request):
         err = _gated_auth_error(request, "/mods/uninstall")
+        if err is not None:
+            return err
+        err = _admin_auth_error(request, "/mods/uninstall")
         if err is not None:
             return err
         body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
@@ -6847,6 +6966,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
     async def _mods_rescan_post(request: Request):
         err = _gated_auth_error(request, "/mods/rescan")
+        if err is not None:
+            return err
+        err = _admin_auth_error(request, "/mods/rescan")
         if err is not None:
             return err
         _body, err = _mod_body(request, modinstall.MAX_SMALL_BODY_BYTES)
@@ -7210,6 +7332,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # says it cannot protect, since loop teardown cancels directly.
     async def _update_policy_post(request: Request):
         err = _gated_auth_error(request, "/update/policy")
+        if err is not None:
+            return err
+        err = _admin_auth_error(request, "/update/policy")
         if err is not None:
             return err
         busy = _refuse_if_quiescing(app, "update policy write")
