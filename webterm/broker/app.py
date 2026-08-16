@@ -2107,6 +2107,166 @@ def _csp_header(inline_hash: Optional[str] = None) -> str:
     return f"script-src {script_src}; frame-ancestors 'none'"
 
 
+# ---- dynamic connect-src hosts fragment (#190) ----------------------------
+# The broker derives, from the registered hosts in the /state settings blob
+# (``settings._hosts``, the synced registry the hosts UI writes), the list of
+# origins a page served by THIS broker may dial: each host's http/https origin
+# plus its WebSocket twin (http -> ws, https -> wss). The twin lives HERE, in
+# the cached fragment, because it is a pure function of the stored URL; only
+# the SERVING origin's ws/wss pair depends on the request Host header and is
+# therefore the header assembler's per-response job, together with the header
+# itself. This block is fragment machinery only — the served CSP header is
+# untouched until the header change lands.
+#
+# HARDENED, NOT TRUSTED: ``_hosts`` is page-token-writable, so every stored
+# URL goes through a real parser (never string surgery), http/https only, a
+# strict hostname shape, dedup by origin, and two caps (source count + total
+# fragment size). A malformed or over-cap entry is SKIPPED with a log line —
+# never emitted, where it could break parsing for the whole policy or smuggle
+# a source — and never a crash.
+
+#: Registry entries considered at all. Entries past this index are over-cap:
+#: skipped with one log line, never parsed — which also bounds the number of
+#: per-entry malformed-URL log lines a hostile registry can generate.
+MAX_CSP_HOSTS = 64
+#: Total size of the joined fragment. An entry whose origin+twin would push
+#: the fragment past this is skipped with a log line; response headers have
+#: real-world size limits and one registry must never approach them.
+MAX_CSP_HOSTS_FRAGMENT_CHARS = 4096
+#: One stored URL. Bounds the parse/regex work a single hostile entry can
+#: cost inside the state lock (the /state body cap alone still admits one
+#: 2 MiB string). A real broker URL is tens of characters.
+MAX_CSP_HOST_URL_CHARS = 1024
+
+#: CSP3 ``host-part`` shape (host-char = ALPHA / DIGIT / "-", dot-joined
+#: labels): what a hostname may contribute to the header. Anything outside —
+#: '_', empty/leading/trailing-dot labels, '*', non-ASCII/IDN (register the
+#: punycode form) — is skipped: a grammar-invalid source is at best ignored
+#: by the browser, and CSP source lists are delimiter-structured text.
+#: Covers IPv4 literals too (digit labels).
+_CSP_HOSTNAME_RE = re.compile(r"\A[a-z0-9-]+(?:\.[a-z0-9-]+)*\Z")
+#: Bracketless IPv6 literal as ``urlsplit().hostname`` returns it. No zone id
+#: (``%eth0``): it is meaningless cross-host and ``%`` has no place in a
+#: header. (Bracketed IPv6 is narrower than CSP3's written grammar but the
+#: engines accept it, and a LAN IPv6 broker needs its ws twin.)
+_CSP_IPV6_RE = re.compile(r"\A[0-9a-f:.]+\Z")
+
+
+def _csp_origin_pair(entry: Any, idx: int) -> Optional[Tuple[str, str]]:
+    """One registry entry -> ``(origin, ws_twin)``, or None (logged) if it is
+    not a well-formed http/https URL. The origin is REBUILT from parsed parts,
+    never sliced out of the raw string, and a default port is dropped so
+    ``http://a:80`` and ``http://a`` dedupe to one origin.
+
+    The skip lines identify the entry by its ``id`` (or list position), NEVER
+    by the URL value: an entry also carries a token, and a stored URL can
+    itself embed userinfo credentials that truncation would not reliably
+    redact."""
+    def _skip(reason: str) -> None:
+        ident = (entry.get("id") if isinstance(entry, dict) else None) \
+            or f"#{idx}"
+        LOGGER.warning("csp hosts fragment: skipping host entry %.32s: %s",
+                       str(ident), reason)
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+        _skip("no url")
+        return None
+    raw = entry["url"].strip()
+    if len(raw) > MAX_CSP_HOST_URL_CHARS:
+        _skip("over-long url")
+        return None
+    # Pre-reject controls, whitespace and backslashes: urlsplit is not a
+    # validator — it silently STRIPS \r \n \t anywhere in the string, and a
+    # "strict parse" must not accept what a browser would refuse to dial.
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F or ch == "\\" for ch in raw):
+        _skip("disallowed characters in url")
+        return None
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        scheme = parts.scheme
+        host = parts.hostname or ""
+        port = parts.port           # raises ValueError on a junk/oob port
+    except ValueError:
+        _skip("malformed url")
+        return None
+    if scheme not in ("http", "https") or not host:
+        _skip("not an http(s) url")
+        return None
+    if parts.username is not None or parts.password is not None:
+        _skip("userinfo in url")    # an origin never carries credentials
+        return None
+    if ":" in host:                                     # IPv6 literal
+        if not _CSP_IPV6_RE.fullmatch(host):
+            _skip("bad host")
+            return None
+        host = f"[{host}]"
+    elif not _CSP_HOSTNAME_RE.fullmatch(host):
+        _skip("bad host")
+        return None
+    default_port = 443 if scheme == "https" else 80
+    suffix = "" if port is None or port == default_port else f":{port}"
+    ws = "wss" if scheme == "https" else "ws"
+    return (f"{scheme}://{host}{suffix}", f"{ws}://{host}{suffix}")
+
+
+def _compute_csp_hosts_fragment(hosts: Any) -> str:
+    """The space-joined connect-src sources for the registered hosts: pure,
+    hardened per the block comment above. Empty string when ``_hosts`` is
+    absent/empty — the header assembler then emits ``connect-src 'self'`` plus
+    the serving origin's own ws/wss twins only."""
+    if hosts is None or hosts == []:
+        return ""
+    if not isinstance(hosts, list):
+        LOGGER.warning("csp hosts fragment: _hosts is not a list; ignoring")
+        return ""
+    over = len(hosts) - MAX_CSP_HOSTS
+    if over > 0:
+        LOGGER.warning(
+            "csp hosts fragment: %d host entries over the %d cap skipped",
+            over, MAX_CSP_HOSTS)
+        hosts = hosts[:MAX_CSP_HOSTS]
+    pieces: List[str] = []
+    seen: set = set()
+    length = 0                      # len(" ".join(pieces)) tracked as we go
+    size_skipped = 0
+    for idx, entry in enumerate(hosts):
+        pair = _csp_origin_pair(entry, idx)
+        if pair is None:
+            continue
+        origin, twin = pair
+        if origin in seen:          # twin is a function of origin: one key
+            continue
+        needed = len(origin) + len(twin) + (2 if pieces else 1)
+        if length + needed > MAX_CSP_HOSTS_FRAGMENT_CHARS:
+            size_skipped += 1
+            continue
+        seen.add(origin)
+        pieces.extend((origin, twin))
+        length += needed
+    if size_skipped:
+        LOGGER.warning(
+            "csp hosts fragment: %d host origins skipped over the %d-char "
+            "fragment cap", size_skipped, MAX_CSP_HOSTS_FRAGMENT_CHARS)
+    return " ".join(pieces)
+
+
+def _refresh_csp_hosts_fragment(app: Sanic) -> None:
+    """Seed the CACHED fragment from the live /state settings at boot (after
+    the state load). The only other writer is the /state locked write, which
+    — when a PUT changed ``_hosts`` — computes via _compute_csp_hosts_fragment
+    BEFORE its disk write and commits the result beside ctx.state, so no
+    request ever pays for a recompute it didn't cause and a landed state is
+    never paired with a stale cache."""
+    app.ctx.csp_hosts_fragment = _compute_csp_hosts_fragment(
+        app.ctx.state["settings"].get("_hosts"))
+
+
+def csp_hosts_fragment(app: Sanic) -> str:
+    """The seam the CSP header assembly reads: the cached registered-hosts
+    connect-src fragment (possibly ""), never recomputed per request."""
+    return getattr(app.ctx, "csp_hosts_fragment", "")
+
+
 def _open_url(config: Optional[Dict[str, Any]], port: int, token: str) -> str:
     """The ready-to-open desktop URL, token included. A wildcard bind has no
     single address, so show loopback — the operator substitutes their own."""
@@ -3458,6 +3618,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.state_lock = asyncio.Lock()
     LOGGER.info("UI state store: %s (rev %s)",
                 app.ctx.state_path, app.ctx.state["rev"])
+    # The registered-hosts connect-src fragment (#190): computed once from the
+    # just-loaded settings, then recomputed only inside the /state locked
+    # write when a PUT changes _hosts. Read via csp_hosts_fragment().
+    _refresh_csp_hosts_fragment(app)
     # ---- browser auth token (#142) ---------------------------------------
     # MANDATORY on every surface and every interface — there is no loopback
     # exemption and no opt-out. Resolved here, after state_path (the sidecar is
@@ -7507,6 +7671,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 }, status=409)
             new_state = {"rev": current["rev"] + 1,
                          "settings": settings, "layout": layout}
+            # #190: the registered-host registry rides this blob, and this
+            # locked write is the single funnel every registry edit goes
+            # through (hosts UI, host-registry apply, #174 pull). Recompute
+            # the cached connect-src hosts fragment only when _hosts actually
+            # changed — synchronous, no awaits — and compute it BEFORE the
+            # disk write so a compute failure can never leave a landed state
+            # paired with a stale cache; committed beside ctx.state below.
+            new_fragment = None
+            if current["settings"].get("_hosts") != settings.get("_hosts"):
+                new_fragment = _compute_csp_hosts_fragment(
+                    settings.get("_hosts"))
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, _write_state_atomic, app.ctx.state_path, new_state)
@@ -7514,6 +7689,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=500)
             app.ctx.state = new_state
+            if new_fragment is not None:
+                app.ctx.csp_hosts_fragment = new_fragment
             return sanic_json({"ok": True, "rev": new_state["rev"]})
 
         return await _shielded_region(app.ctx.state_lock, _locked_write)
