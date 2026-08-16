@@ -364,3 +364,436 @@
             return { ok: false, reason: 'needs', needs: unmet };
         }
         // ---- end ctx.capabilities + needs gate ------------------------------
+
+        // ---- ctx.windows.createAppWindow + ctx.windows.list() (#194) --------
+        // Nine shipped mods hand-build the SAME ~30-field app-window scaffold:
+        // a `win` literal pushed straight into the core `windows` Map (64), a
+        // synthetic kind:'app' session, a hand-appended taskbar chip (75), the
+        // #taskbar-empty removal, and a teardown that iterates core state to
+        // find its own windows. It is the largest core-coupling surface in the
+        // codebase: a change to the record shape breaks all nine at once, and
+        // breaks them SILENTLY, because a hand-mirrored literal does not fail
+        // loudly. So core owns the scaffold and a mod supplies only what is
+        // specific to ITS window:
+        //
+        //     const h = ctx.windows.createAppWindow({
+        //         kind: 'clipboard',         // the appKind (required)
+        //         title: 'Clipboard',
+        //         sid: 'clip',               // chip/badge short id
+        //         singleton: true,           // open-or-FOCUS, never a second
+        //         toolbar: function (el, win) { … },   // optional
+        //         body: function (el, win, h) { … },
+        //     });
+        //     ctx.windows.list();            // THIS mod's live windows, frozen
+        //
+        // MIGRATING A KIND: registerWindowKind's `factory` must keep returning a
+        // WINDOW RECORD — openAppWindow hands that value straight back to its
+        // callers, and its own dedupe branch returns one — so a factory built on
+        // this returns `h.win`, never the handle. (Routing a launch through
+        // openAppWindow then costs a second revealAndFocusWindow, since this
+        // factory does its own; both are idempotent, and a mod whose launcher
+        // calls createAppWindow directly needs its own.)
+        //
+        // Core-owned from here on, exactly as the copies did it by hand: the
+        // chrome (buildAppChrome + wireAppChrome + the eight resize handles,
+        // 73), the desktop insertion, the window record, the synthetic session
+        // + taskbar chip, the id (newAppId, 54) and the placement tail
+        // (finishWindowPlacement, 62a). Every one of those is an EXISTING core
+        // function — this factory adds no new core entry point, it just stops
+        // nine mods from re-deriving the call order.
+        //
+        // The spec fields are the union of what the nine copies genuinely VARY,
+        // not an invented API: kind/id/title/sid/badge/appClass/bodyClass
+        // (clipboard '#clip'/.app-clip/.clip-body vs task-manager '#tm'/.app-tm
+        // /.tm-body vs scratchpad '#notes' vs recorder '#rec'), geom + color +
+        // locked (all three read `appData` the same way), `resizable:false`
+        // (recorder playback appends NO handles — the recording dictates the
+        // size), `toolbar` (the .app-toolbar div clipboard/task-manager/
+        // scratchpad each build), `onClose` (wireAppChrome's third argument;
+        // the editor passes requestCloseAppWindow so a dirty buffer can flush)
+        // and `singleton` (clipboard's CLIP_WIN_ID open-or-focus hack, which is
+        // re-derived by every windowed mod).
+        //
+        // What is NOT here, deliberately, and where it goes:
+        //   - THE RESTORE SEAM. `spec.restoring` is accepted and does exactly
+        //     one thing today — suppress the create-time focus, like
+        //     openAppWindow's opts.restoring — so a restore that lands before
+        //     the user is looking does not steal focus. Handing
+        //     registerWindowKind's restore factory this API is its own change.
+        //     The dedupe below is already restore-safe: an id that is live is
+        //     ADOPTED, never double-built (#167).
+        //   - THE STAGED TAKE-DOWN / closeAll(). The owned-window registry they
+        //     need is `rec.appWindows` — deliberately on the RECORD, not in
+        //     this closure, so the loader's take-down pass can reach it without
+        //     seeing this fragment's locals (the arguments-not-closure rule).
+        //     Whoever writes it: NEVER model that close pass as an onUnload
+        //     entry. It would be the OLDEST entry in the LIFO chain and would
+        //     run AFTER the mod's own disposers deregistered its kinds, which
+        //     is exactly the junk-record ordering task-manager's comment block
+        //     documents (a later saveAppWindow falls back to the shared
+        //     serializer). Close while every kind is still registered.
+        //   - onAppWindowCreate(). Its fire point is the marked line at the end
+        //     of _createModAppWindow; its REPLAY set is NOT this registry but
+        //     "live windows whose appKind is one of this mod's REGISTERED
+        //     kinds", which includes core's unknown-kind restore records this
+        //     factory never built (sticky's hand-written catch-up pass).
+        //
+        // Additive, feature-detected: ctxVersion stays 1, and `windows` is
+        // already a v1 capability family (#116's onTerminalCreate lives there),
+        // so this DECORATES ctx.windows in place — replacing it would delete a
+        // sibling's member. No new _registerModCapability entry is registered
+        // for the same reason: the map is per FAMILY and `windows` is already
+        // in the seed, so the capability drift gate stays satisfied. A mod tests
+        // `typeof ctx.windows.createAppWindow === 'function'` or declares
+        // `needs: ['windows.createAppWindow']` — #197 resolves dotted paths
+        // against the live ctx, which is the finer-grained answer anyway.
+
+        // THIS mod's factory-built app windows: id -> handle, insertion
+        // ordered. On the per-mod record (see above), so the take-down pass and
+        // closeAll can reach it; a fresh record per init means a disable/enable
+        // cycle starts empty, which is what keeps list() honest afterwards.
+        function _modAppWindows(rec) {
+            if (!rec || typeof rec !== 'object') return new Map();
+            if (!rec.appWindows) rec.appWindows = new Map();
+            return rec.appWindows;
+        }
+        // Is this handle's window still a live member of the core windows Map?
+        // Windows die three ways — closeWindow (73), the lease-loss
+        // teardownView (84) and a mod closing one by hand — and the first two
+        // drain win.cleanups, which is where the prune below rides. This is the
+        // belt-and-braces read on top of it, so list() can never report a ghost
+        // (and an id REUSED by a later window never resurrects a stale handle).
+        function _modAppWindowLive(h) {
+            return !!(h && h.win && !h.win.disposed
+                      && windows.get(h.win.id) === h.win);
+        }
+        // The synthetic kind:'app' session + its taskbar chip — the half every
+        // one of the nine copies re-typed. kind:'app' is what keeps the
+        // /sessions poll reaper off a window with no PTY behind it and what
+        // lets formatTitle render the chip; the querySelector guard is the
+        // copies' own (a chip for this id may already exist after a rebuild).
+        function _modAppWindowChip(win, sid, title) {
+            const id = win.id;
+            const sess = { key: id, sid: sid, id: id, title: title,
+                           stale: false, kind: 'app', hostId: 'app' };
+            sessions.set(id, sess);
+            const host = document.getElementById('taskbar-items');
+            if (host && !host.querySelector('.taskbar-item[data-session-id="'
+                    + cssEscape(id) + '"]')) {
+                host.appendChild(buildTaskbarItem(sess));
+            }
+            updateTaskbarColor(id);
+            updateTaskbarLabel(id);
+            const empty = document.getElementById('taskbar-empty');
+            if (empty) empty.remove();
+            return sess;
+        }
+        // Register `win` as one of THIS mod's factory windows and return its
+        // handle. Also the ADOPTION path: a record core built for this id
+        // before the mod loaded (#167's unknown-kind fallback) becomes ours on
+        // the next create, so a restored window is focused rather than
+        // double-built. Idempotent by (id, win) identity.
+        //
+        // The handle IS the contract; `h.win` is the escape hatch the #71 trust
+        // model permits, not the API. Each member exists because a scaffold
+        // does it by hand today:
+        //   isOpen()        every async callback guards on win.disposed
+        //   focus()         the (+) menu / tray chip open-or-focus path
+        //   close()         unload closes its own windows
+        //   setTitle()      editor's rename + re-home (title text + win.name +
+        //                   the session title + updateTaskbarLabel: miss one
+        //                   and the chip and the title bar disagree)
+        //   setColor()      the title-bar color picker (--accent + dark-accent
+        //                   + updateTaskbarColor, same three)
+        //   save()          persisted kinds call saveAppWindow on every change
+        //   addTitleBarItem() editor inserts its color swatch BEFORE min — the
+        //                   placement rule mods get wrong; same word as #116's
+        //                   onTerminalCreate
+        //   onDispose()     win.cleanups.push, spelled the way onTerminalCreate
+        //                   already spells it
+        //
+        // EVERY member is gated on `_modAppWindowLive(h)`, never on the bare id
+        // and never on win.disposed alone. A handle outlives its window — a mod
+        // keeps one in a closure — and a fixed id is REUSED (app:clip is the
+        // same string for the window's next life), so `closeWindow(this.id)` on
+        // a stale handle would close the window that replaced it. The gate
+        // compares the RECORD, so a stale handle is inert instead of lethal.
+        function _ownModAppWindow(rec, win, bodyEl, toolbarEl) {
+            const owned = _modAppWindows(rec);
+            const id = win.id;
+            const already = owned.get(id);
+            if (already && already.win === win) return already;
+            const h = {
+                id: id,
+                win: win,
+                dom: win.dom,
+                body: bodyEl || win.body || null,
+                toolbar: toolbarEl || null,
+                isOpen: function () { return _modAppWindowLive(h); },
+                focus: function () {
+                    return _modAppWindowLive(h)
+                        ? revealAndFocusWindow(id) : null;
+                },
+                close: function () { if (_modAppWindowLive(h)) closeWindow(id); },
+                setTitle: function (t) {
+                    const s = String(t == null ? '' : t);
+                    if (!_modAppWindowLive(h)) return s;
+                    win.name = s;
+                    if (win.titleText) win.titleText.textContent = s;
+                    const sess = sessions.get(id);
+                    if (sess) sess.title = s;
+                    updateTaskbarLabel(id);
+                    return s;
+                },
+                setColor: function (c) {
+                    const col = normalizeHex(c);
+                    if (!_modAppWindowLive(h)) return col;
+                    win.color = col;
+                    win.dom.style.setProperty('--accent', col);
+                    win.dom.classList.toggle('dark-accent', isDarkAccent(col));
+                    updateTaskbarColor(id);
+                    return col;
+                },
+                // Never persist a dead window: saveAppWindow would write a
+                // record for something already torn down.
+                save: function () { if (_modAppWindowLive(h)) saveAppWindow(win); },
+                addTitleBarItem: function (node) {
+                    if (!node || !_modAppWindowLive(h)) return null;
+                    const bar = win.dom && win.dom.querySelector('.title-bar');
+                    if (!bar) return null;
+                    bar.insertBefore(node, bar.querySelector('.btn-min'));
+                    return node;
+                },
+                // Refused once the window is dead rather than retained:
+                // closeWindow drains `cleanups` and then EMPTIES it, so a
+                // disposer pushed after (or during) that drain would be held
+                // forever and never run. A caller that needs it now can see
+                // isOpen() === false and run it itself.
+                onDispose: function (fn) {
+                    if (typeof fn !== 'function') return false;
+                    if (!_modAppWindowLive(h)) return false;
+                    win.cleanups.push(fn);
+                    return true;
+                },
+            };
+            // Frozen: a mod may not repoint `h.win` (the next list() would
+            // then prune a live window as a ghost) or swap a method for a
+            // no-op. The window RECORD behind it stays the documented escape
+            // hatch — this freezes the handle, not the desktop.
+            Object.freeze(h);
+            owned.set(id, h);
+            // Prune on every teardown path at once: closeWindow (73) and the
+            // active-view rebuild (84) both drain win.cleanups. Guarded by
+            // identity so a later window at the same id is not evicted.
+            win.cleanups.push(function () {
+                if (owned.get(id) === h) owned.delete(id);
+            });
+            return h;
+        }
+        // THIS mod's live windows, newest last, as a FROZEN fresh array: a mod
+        // that mutates what it got back changes neither core state nor the next
+        // call. Dead entries are pruned on the way past, so a list() after a
+        // lease-loss rebuild is empty rather than a wall of ghosts.
+        function _listModAppWindows(rec) {
+            const owned = _modAppWindows(rec);
+            const out = [];
+            for (const pair of Array.from(owned.entries())) {
+                if (_modAppWindowLive(pair[1])) out.push(pair[1]);
+                else owned.delete(pair[0]);
+            }
+            return Object.freeze(out);
+        }
+        // The factory. Build order is the copies' own, and it is load-bearing:
+        // chrome, then the mod's containers, then the desktop insertion, then
+        // the record + windows.set, then wireAppChrome, then the chip, THEN the
+        // mod's own content, and only then the resize handles (they are
+        // absolute overlays and must stay the LAST children) and the placement
+        // tail. The mod's body() therefore runs against a window that is
+        // already in the document and already in the windows Map — it has a
+        // layout box (what CodeMirror needs) and a record to hang state on,
+        // though not necessarily its FINAL box: finishWindowPlacement may still
+        // tile it, and a tiled window is measured again on the relayout.
+        function _createModAppWindow(rec, spec) {
+            if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+                throw new Error('createAppWindow: spec must be an object');
+            }
+            const kind = spec.kind;
+            if (typeof kind !== 'string' || !kind) {
+                throw new Error(
+                    'createAppWindow: a non-empty string kind is required');
+            }
+            const singleton = spec.singleton === true;
+            // A STABLE id is what makes `singleton` survive a reload — the
+            // clipboard's hand-rolled CLIP_WIN_ID is literally 'app:clip' — and
+            // an explicit id keeps a migrating mod's existing window keys (and
+            // the stored geometry hanging off them) unchanged.
+            const id = (spec.id != null && String(spec.id))
+                ? String(spec.id)
+                : (singleton ? ('app:' + kind) : newAppId(kind));
+
+            // ---- open-or-focus, the dedupe every windowed mod re-derives ----
+            // A singleton dedupes on KIND, over the LIVE core windows and not
+            // just the ones this mod already owns: core's unknown-kind fallback
+            // restores records for a mod-owned kind before the mod loads
+            // (#167), under whatever id the stored record carried — which need
+            // not be the id asked for here. Scanning only our own registry
+            // would leave that one on screen and build a second beside it,
+            // which is the one thing `singleton` promises cannot happen.
+            // Everything else dedupes on ID, because a second record at one id
+            // would strand the first in the windows Map. Both arms mirror
+            // openAppWindow's tail exactly: focus what is already there unless
+            // the caller is a restore, which is nobody asking for this window
+            // now.
+            if (singleton) {
+                for (const w of Array.from(windows.values())) {
+                    if (!w || w.disposed || w.type !== 'app') continue;
+                    if (w.appKind !== kind) continue;
+                    const h = _ownModAppWindow(rec, w, w.body, null);
+                    if (!spec.restoring) revealAndFocusWindow(w.id);
+                    return h;
+                }
+            }
+            const open = windows.get(id);
+            if (open && open.disposed) {
+                // A TOMBSTONE, not a window: closeWindow marks the record
+                // disposed and drains win.cleanups before it deletes the Map
+                // entry, so the only way to see one is a re-entrant create from
+                // inside a teardown (an onDispose that reopens). Building here
+                // would put a fresh record at an id the unwinding close is
+                // about to delete — Map entry, chip and session ripped out from
+                // under a live window, leaving an untracked orphan on the
+                // desktop. Refuse; reopen from a timer, after the close.
+                throw new Error('createAppWindow: window id "' + id
+                    + '" is being torn down; reopen it after its close returns');
+            }
+            if (open) {
+                // Two kinds sharing one id is a programming error, and building
+                // over it would strand a live window: refuse loudly rather than
+                // corrupt the desktop.
+                if (open.appKind !== kind) {
+                    throw new Error('createAppWindow: window id "' + id
+                        + '" is already open as kind "' + open.appKind + '"');
+                }
+                const h = _ownModAppWindow(rec, open, open.body, null);
+                if (!spec.restoring) revealAndFocusWindow(id);
+                return h;
+            }
+
+            // ---- the scaffold ----------------------------------------------
+            const title = (typeof spec.title === 'string' && spec.title)
+                ? spec.title : kind;
+            const sid = (typeof spec.sid === 'string' && spec.sid)
+                ? spec.sid : kind;
+            const appClass = (typeof spec.appClass === 'string' && spec.appClass)
+                ? spec.appClass : ('app-' + kind);
+            const badge = (typeof spec.badge === 'string' && spec.badge)
+                ? spec.badge : ('#' + sid);
+            // appDefaultGeom only special-cases 'sticky-note', so passing the
+            // appKind is byte-identical to the copies' appDefaultGeom(
+            // 'text-editor') for every one of them AND right for a note.
+            const geom = clampGeom(spec.geom || appDefaultGeom(kind));
+            const color = normalizeHex(spec.color || defaultColor(id));
+            const locked = spec.locked !== undefined ? !!spec.locked : true;
+
+            const chrome = buildAppChrome({
+                id: id, appClass: appClass, badge: badge, geom: geom,
+                color: color, locked: locked, title: title,
+            });
+            const dom = chrome.dom;
+            // The .app-toolbar strip clipboard/task-manager/scratchpad each
+            // build by hand, above the body. A window that wants one BELOW its
+            // body (recorder playback's transport bar) appends it to win.dom
+            // from body() — anything added there still lands before the resize
+            // handles, which go on last.
+            let toolbarEl = null;
+            if (spec.toolbar) {
+                toolbarEl = document.createElement('div');
+                toolbarEl.className = 'app-toolbar ' + appClass + '-toolbar';
+                dom.appendChild(toolbarEl);
+            }
+            const bodyEl = document.createElement('div');
+            bodyEl.className =
+                (typeof spec.bodyClass === 'string' && spec.bodyClass)
+                    ? spec.bodyClass : (appClass + '-body');
+            dom.appendChild(bodyEl);
+
+            const desktop = document.getElementById('desktop');
+            desktop.appendChild(dom);
+            desktop.classList.remove('empty');
+
+            // The record. ONE copy of the ~30 fields, here, instead of nine
+            // hand-mirrored literals; a mod's own per-window state goes on
+            // `win` from body(), exactly as it does today.
+            const win = {
+                id: id, sid: sid, hostId: 'app',
+                type: 'app', appKind: kind,
+                dom: dom, body: bodyEl, titleText: chrome.titleText,
+                term: null, fitAddon: null,
+                ws: null, wsOpen: false, termReady: false,
+                minimized: false, disposed: false,
+                geom: geom, name: title, color: color,
+                resizeTimer: null, lastSentDims: null,
+                staleSession: false, authFailed: false,
+                reattachAttempts: 0, reattachAt: 0, lastOpenAt: 0,
+                missingPolls: 0,
+                cleanups: [],
+                tiled: false,
+                floatGeom: spec.floatGeom
+                    ? Object.assign({}, spec.floatGeom) : null,
+                locked: locked,
+                dirty: false,
+            };
+            windows.set(id, win);
+            // Raise / minimize / close / drag / 8-way resize / WM context menu.
+            // spec.onClose replaces the × action (the editor's dirty-buffer
+            // prompt is requestCloseAppWindow); undefined keeps closeWindow.
+            wireAppChrome(win, chrome,
+                (typeof spec.onClose === 'function') ? spec.onClose : undefined);
+            _modAppWindowChip(win, sid, title);
+
+            const h = _ownModAppWindow(rec, win, bodyEl, toolbarEl);
+            // The mod's own content, last, against a window that is already in
+            // the windows Map, already in the document and already chipped — so
+            // it has a layout box to read and a record to hang state on. (Not
+            // its FINAL box: finishWindowPlacement may still tile it, and a
+            // tiled window is measured again on the relayout.) A throwing
+            // builder propagates: it is the mod's code on the mod's stack, and
+            // the window is left built-but-empty exactly as a throw mid-
+            // scaffold leaves one today — visible, closable, not a phantom.
+            if (typeof spec.toolbar === 'function') spec.toolbar(toolbarEl, win, h);
+            if (typeof spec.body === 'function') spec.body(bodyEl, win, h);
+            // A builder is allowed to close the window it was handed (a load
+            // that fails, a lease that was lost mid-build). Stop here if it
+            // did: handles, placement and focus against a torn-down record are
+            // at best wasted and at worst resurrect a chip for a dead window.
+            if (!_modAppWindowLive(h)) return h;
+            // AFTER body(): the eight handles are absolute-positioned overlays
+            // whose hit zones must sit on top, i.e. be the last children.
+            if (spec.resizable !== false) addResizeHandles(dom);
+            finishWindowPlacement(win);
+            // A window built NOW for someone who asked for it NOW belongs on
+            // the workspace they are looking at (#152) — the same tail
+            // openAppWindow runs after a factory returns. A restore is the one
+            // caller that is not a person asking.
+            if (!spec.restoring) revealAndFocusWindow(id);
+            // SEAM (#194 / A31): onAppWindowCreate fires HERE, once, for a
+            // window that is fully built, placed and focused. Its replay set is
+            // registered-kind based, not this registry — see the header.
+            return h;
+        }
+        // The extender. Decorates the EXISTING v1 `windows` family in place:
+        // assigning a fresh object would delete #116's onTerminalCreate.
+        function _ctxWindowsFactory(ctx, rec) {
+            const fam = (ctx.windows && typeof ctx.windows === 'object')
+                ? ctx.windows : (ctx.windows = {});
+            fam.createAppWindow = function (spec) {
+                return _createModAppWindow(rec, spec);
+            };
+            fam.list = function () { return _listModAppWindows(rec); };
+        }
+        // Guarded like #197's registration: a page assembled without the
+        // registry must not throw here.
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxWindowsFactory);
+        }
+        // ---- end ctx.windows.createAppWindow --------------------------------

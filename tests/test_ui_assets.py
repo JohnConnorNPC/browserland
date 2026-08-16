@@ -8554,3 +8554,956 @@ def test_ctx_capabilities_is_non_enumerable_and_never_caches_a_partial_map(
     assert r["lateHasLate"] is True, (
         "a partial map was cached mid-pass and the mod inherited it")
     assert r["cachedAfterInit"] is True and r["frozenLate"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the core-owned app-window factory: ctx.windows.createAppWindow + list() (#194)
+# --------------------------------------------------------------------------- #
+
+_WINFAC_SLICE_START = "// ---- ctx.windows.createAppWindow + ctx.windows.list() (#194) ---"
+_WINFAC_SLICE_END = "// ---- end ctx.windows.createAppWindow ---"
+
+
+def _winfac_source():
+    """#194's factory range in 86c, verbatim. Declarations plus the one guarded
+    _registerCtxExtender call, which is what lets the node harness below run
+    the SHIPPED scaffold rather than a copy of it."""
+    src = _ctx_ext_src()
+    start = src.index(_WINFAC_SLICE_START)
+    end = src.index(_WINFAC_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("function _modAppWindows(rec) {",
+                   "function _modAppWindowLive(h) {",
+                   "function _modAppWindowChip(win, sid, title) {",
+                   "function _ownModAppWindow(rec, win, bodyEl, toolbarEl) {",
+                   "function _listModAppWindows(rec) {",
+                   "function _createModAppWindow(rec, spec) {",
+                   "function _ctxWindowsFactory(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_the_app_window_factory_lands_in_the_extension_fragment():
+    # #194: the factory is NEW ctx surface, so it lands in 86c -- the loader is
+    # at the #68 2500-line cap and the rule there is split, never trim.
+    loader = _loader_src()
+    ext = _ctx_ext_src()
+    for sym in ("function _createModAppWindow(rec, spec) {",
+                "function _ownModAppWindow(rec, win, bodyEl, toolbarEl) {",
+                "function _listModAppWindows(rec) {",
+                "function _modAppWindowChip(win, sid, title) {",
+                "const fam = (ctx.windows && typeof ctx.windows === 'object')"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#194 factory symbol missing/duplicated in the served page: {sym!r}"
+    # The extender itself is DECLARED once (the registry's own how-to comment
+    # names it a second time -- it predicted this exact function).
+    assert ext.count("function _ctxWindowsFactory(ctx, rec) {") == 2
+    assert "function _ctxWindowsFactory(ctx, rec) {" not in loader
+    # Registered through the extender registry, guarded exactly like #197's is
+    # (a page assembled without the registry must not throw at load).
+    assert "_registerCtxExtender(_ctxWindowsFactory);" in ext
+    # rindex on both: the registry's how-to comment quotes this registration
+    # verbatim near the top of the fragment, so the FIRST hit is prose.
+    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
+        < ext.rindex("_registerCtxExtender(_ctxWindowsFactory);")
+    # Additive: the family is DECORATED, never replaced. Assigning a fresh
+    # object to ctx.windows would silently delete #116's onTerminalCreate --
+    # the exact failure the registry's "each fragment owns its own members"
+    # rule exists to prevent, one level down.
+    body = _frag_fn(ext, "function _ctxWindowsFactory(ctx, rec) {")
+    assert "fam.createAppWindow = function (spec) {" in body
+    assert "fam.list = function () { return _listModAppWindows(rec); };" in body
+    assert ": (ctx.windows = {});" in body, \
+        "ctx.windows must be created only when it is ABSENT"
+    assert "ctxVersion" not in body
+    assert "ctxVersion: 1," in loader
+
+
+def test_the_factory_family_is_covered_by_a_capability_entry():
+    # The CP7 drift gate: a ctx family an extender adds with no capability
+    # entry makes ctx.capabilities lie by omission. `windows` is a v1 family
+    # already (#116's onTerminalCreate), and #194 DECORATES it, so the entry
+    # that covers the factory is the seeded one -- there is deliberately no
+    # second registration (_registerModCapability refuses a re-level anyway).
+    ext = _ctx_ext_src()
+    seed = ext[ext.index("for (const _cap of ["):]
+    seed = seed[:seed.index("]")]
+    assert "'windows'" in seed
+    assert _ctx_families_added_by_extenders() <= set(
+        re.findall(r"'([^']+)'", seed))
+    assert ext.count("_registerModCapability('windows'") == 0, \
+        "a duplicate capability registration is refused; drop it"
+    # A mod asks for the MEMBER, which #197 resolves as a dotted path against
+    # the live ctx -- finer-grained than the per-family map, and the reason no
+    # new family entry is needed.
+    assert "needs: ['windows.createAppWindow']" in ext
+
+
+def test_the_factory_reuses_core_and_adds_no_core_entry_point():
+    # The whole point of #194: everything the scaffold needs is ALREADY core-
+    # owned, so the factory is a call ORDER, not new core machinery. If this
+    # list ever has to grow a brand-new core function, that is the moment to
+    # ask whether the record shape moved.
+    body = _winfac_source()
+    for call in ("buildAppChrome({", "addResizeHandles(dom);",
+                 "wireAppChrome(win, chrome,", "finishWindowPlacement(win);",
+                 "revealAndFocusWindow(id);", "buildTaskbarItem(sess)",
+                 "updateTaskbarColor(id);", "updateTaskbarLabel(id);",
+                 "newAppId(kind)", "clampGeom(spec.geom || appDefaultGeom(kind))",
+                 "normalizeHex(spec.color || defaultColor(id))",
+                 "windows.set(id, win);", "sessions.set(id, sess);",
+                 "saveAppWindow(win)", "closeWindow(id);"):
+        assert call in body, f"the factory stopped using core's {call!r}"
+    # ...and the eight resize handles stay the LAST children: they are absolute
+    # overlays whose hit zones must sit on top of whatever body() appended.
+    _order_in(body, "if (typeof spec.body === 'function')",
+              "if (spec.resizable !== false) addResizeHandles(dom);",
+              "finishWindowPlacement(win);")
+
+
+def test_the_factory_documents_the_seams_it_deliberately_left():
+    # #194 ships the create path; the restore seam, the staged take-down /
+    # closeAll and onAppWindowCreate are separate changes. Each one has a trap
+    # that is invisible from the call site, so the fragment must NAME them --
+    # in particular the LIFO ordering that makes an onUnload-registered close
+    # pass wrong, which is the trap task-manager's comment block documents.
+    ext = _ctx_ext_src()
+    head = ext[ext.index(_WINFAC_SLICE_START):]
+    assert "rec.appWindows" in head, \
+        "the owned-window registry must live on the RECORD for the take-down"
+    assert "NEVER model that close pass as an onUnload" in head
+    assert "onAppWindowCreate" in head
+    assert "SEAM (#194 / A31): onAppWindowCreate fires HERE" in head
+    assert "spec.restoring" in head
+
+
+_WINFAC_HARNESS = r"""
+'use strict';
+// ---- a DOM small enough to read, big enough for the shipped scaffold ------
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+function El(tag) {
+    const self = this;
+    this.tagName = tag;
+    this.children = [];
+    this.parentNode = null;
+    this.dataset = {};
+    this.textContent = '';
+    this.title = '';
+    this.classes = new Set();
+    this.styles = {};
+    this.detached = false;
+    this.style = { setProperty: function (k, v) { self.styles[k] = v; } };
+    this.classList = {
+        add: function (c) { self.classes.add(c); },
+        remove: function (c) { self.classes.delete(c); },
+        contains: function (c) { return self.classes.has(c); },
+        toggle: function (c, on) {
+            if (on === undefined) on = !self.classes.has(c);
+            if (on) self.classes.add(c); else self.classes.delete(c);
+            return on;
+        },
+    };
+}
+Object.defineProperty(El.prototype, 'className', {
+    get: function () { return Array.from(this.classes).join(' '); },
+    set: function (v) {
+        this.classes = new Set(String(v).split(/\s+/).filter(Boolean));
+    },
+});
+El.prototype.appendChild = function (kid) {
+    if (kid.parentNode) kid.parentNode.removeChild(kid);
+    kid.parentNode = this;
+    this.children.push(kid);
+    return kid;
+};
+El.prototype.insertBefore = function (kid, ref) {
+    if (kid.parentNode) kid.parentNode.removeChild(kid);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.removeChild = function (kid) {
+    const i = this.children.indexOf(kid);
+    if (i !== -1) this.children.splice(i, 1);
+    kid.parentNode = null;
+    return kid;
+};
+El.prototype.remove = function () {
+    if (this.parentNode) this.parentNode.removeChild(this);
+    this.detached = true;
+};
+El.prototype.addEventListener = function () {};
+El.prototype.removeEventListener = function () {};
+El.prototype.querySelectorAll = function (sel) {
+    const m = /^\.([\w-]+)(?:\[data-session-id="(.*)"\])?$/.exec(sel);
+    const out = [];
+    if (!m) return out;
+    (function walk(node) {
+        for (const kid of node.children) {
+            if (kid.classes.has(m[1])
+                && (m[2] === undefined || kid.dataset.sessionId === m[2])) {
+                out.push(kid);
+            }
+            walk(kid);
+        }
+    })(this);
+    return out;
+};
+El.prototype.querySelector = function (sel) {
+    return this.querySelectorAll(sel)[0] || null;
+};
+El.prototype.classNames = function () { return this.className; };
+
+const page = new El('body');
+const byId = new Map();
+function mount(id, parent) {
+    const el = new El('div');
+    el.id = id;
+    byId.set(id, el);
+    (parent || page).appendChild(el);
+    return el;
+}
+const desktop = mount('desktop');
+desktop.classList.add('empty');
+const taskbar = mount('taskbar');
+const taskbarItems = mount('taskbar-items', taskbar);
+mount('taskbar-empty', taskbarItems).textContent = 'no sessions';
+const document = {
+    createElement: function (t) { return new El(t); },
+    getElementById: function (id) {
+        const el = byId.get(id);
+        return (el && !el.detached) ? el : null;
+    },
+    querySelector: function (sel) { return page.querySelector(sel); },
+};
+
+// ---- the core surface the shipped scaffold calls, and nothing else --------
+const windows = new Map();
+const sessions = new Map();
+const calls = [];
+const reveals = [];
+const saves = [];
+let appSeq = 0;
+function cssEscape(s) { return String(s); }
+function newAppId(kind) { appSeq += 1; return 'app:' + kind + ':' + appSeq; }
+function defaultColor() { return '#4AA3FF'; }
+function normalizeHex(c) { return String(c == null ? '#4AA3FF' : c).toLowerCase(); }
+function isDarkAccent() { return false; }
+function clampGeom(g) {
+    return { left: g.left, top: g.top, width: g.width, height: g.height };
+}
+function appDefaultGeom(kind) {
+    calls.push('appDefaultGeom:' + kind);
+    const note = kind === 'sticky-note';
+    return { left: 40, top: 30, width: note ? 300 : 600,
+             height: note ? 240 : 440 };
+}
+function buildTaskbarItem(s) {
+    calls.push('buildTaskbarItem:' + s.key);
+    const el = new El('div');
+    el.className = 'taskbar-item';
+    el.dataset.sessionId = String(s.key);
+    el.textContent = s.title || '';
+    return el;
+}
+function updateTaskbarColor(id) { calls.push('updateTaskbarColor:' + id); }
+function updateTaskbarLabel(id) {
+    calls.push('updateTaskbarLabel:' + id);
+    const el = taskbarItems.querySelector(
+        '.taskbar-item[data-session-id="' + id + '"]');
+    const sess = sessions.get(id);
+    if (el && sess) el.textContent = sess.title || '';
+}
+function buildAppChrome(spec) {
+    calls.push('buildAppChrome:' + spec.id);
+    const dom = new El('div');
+    dom.className = 'term-window app-window ' + spec.appClass;
+    dom.dataset.sessionId = spec.id;
+    dom.style.setProperty('--accent', spec.color);
+    if (spec.locked) dom.classList.add('scroll-locked');
+    const titleBar = new El('div');
+    titleBar.className = 'title-bar';
+    const idBadge = new El('span');
+    idBadge.className = 'ti-id-badge';
+    idBadge.textContent = spec.badge;
+    const titleText = new El('span');
+    titleText.className = 'title-text';
+    titleText.textContent = spec.title;
+    const minBtn = new El('button');
+    minBtn.className = 'tb-btn btn-min';
+    const closeBtn = new El('button');
+    closeBtn.className = 'tb-btn btn-close';
+    titleBar.appendChild(idBadge);
+    titleBar.appendChild(titleText);
+    titleBar.appendChild(minBtn);
+    titleBar.appendChild(closeBtn);
+    dom.appendChild(titleBar);
+    return { dom: dom, titleBar: titleBar, idBadge: idBadge,
+             titleText: titleText, minBtn: minBtn, closeBtn: closeBtn };
+}
+function addResizeHandles(dom) {
+    calls.push('addResizeHandles:' + dom.dataset.sessionId);
+    for (const dir of ['n','s','e','w','nw','ne','sw','se']) {
+        const h = new El('div');
+        h.className = 'rh rh-' + dir;
+        h.dataset.dir = dir;
+        dom.appendChild(h);
+    }
+}
+function wireAppChrome(win, chrome, onClose) {
+    calls.push('wireAppChrome:' + win.id);
+    win._closeAction = onClose || null;
+}
+function finishWindowPlacement(win) {
+    calls.push('finishWindowPlacement:' + win.id);
+    return win;
+}
+function revealAndFocusWindow(id) {
+    reveals.push(id);
+    const win = windows.get(id);
+    if (!win || win.disposed) return null;
+    win.minimized = false;
+    return win;
+}
+function saveAppWindow(win) { saves.push(win.id); }
+// closeWindow's app-window half, reduced to the teardown the factory's prune
+// actually rides: disposed, the cleanups drain, the chip + session removal.
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    saveAppWindow(win);
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    win.dom.remove();
+    windows.delete(id);
+    const item = taskbarItems.querySelector(
+        '.taskbar-item[data-session-id="' + id + '"]');
+    if (item) item.remove();
+    sessions.delete(id);
+    if (windows.size === 0) desktop.classList.add('empty');
+}
+
+__REGISTRY__
+
+__FACTORY__
+
+// ---- driver -------------------------------------------------------------
+// One ctx per mod, built the way makeCtx builds it: the v1 literal, then the
+// extenders. `windows.onTerminalCreate` is here because #194 must DECORATE
+// that family, not replace it.
+function modCtx(id) {
+    const rec = { id: id, version: '1.0.0', unloads: [] };
+    const ctx = { id: id, ctxVersion: 1,
+                  windows: { onTerminalCreate: function () {} } };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+function chipIds() {
+    return taskbarItems.querySelectorAll('.taskbar-item').map(function (el) {
+        return el.dataset.sessionId;
+    });
+}
+function domClasses(win) {
+    return win.dom.children.map(function (el) { return el.className; });
+}
+
+const CASES = {};
+
+// E28, half one: a factory window puts its chip in #taskbar-items and clears
+// #taskbar-empty -- the five things every one of the nine copies did by hand.
+CASES.chip_and_scaffold = function () {
+    const m = modCtx('clipboard');
+    const bodySaw = [];
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'clipboard', title: 'Clipboard', sid: 'clip', singleton: true,
+        toolbar: function (el) { el.textContent = 'Clear history'; },
+        body: function (el, win, handle) {
+            bodySaw.push({ inMap: windows.get(win.id) === win,
+                           onDesktop: win.dom.parentNode === desktop,
+                           chip: chipIds().length,
+                           handleIsMine: handle === undefined ? null : true,
+                           handles: domClasses(win).filter(function (c) {
+                               return c.indexOf('rh ') === 0; }).length });
+            el.textContent = 'no clipboard history yet';
+        },
+    });
+    const win = windows.get(h.id);
+    const sess = sessions.get(h.id);
+    return {
+        id: h.id, chips: chipIds(),
+        emptyGone: document.getElementById('taskbar-empty') === null,
+        desktopEmpty: desktop.classList.contains('empty'),
+        desktopKids: desktop.children.length,
+        win: { type: win.type, appKind: win.appKind, hostId: win.hostId,
+               sid: win.sid, name: win.name, locked: win.locked,
+               color: win.color, geom: win.geom, tiled: win.tiled,
+               dirty: win.dirty, disposed: win.disposed,
+               minimized: win.minimized, ws: win.ws, term: win.term,
+               fieldCount: Object.keys(win).length },
+        sess: sess,
+        handleKeys: Object.keys(h).sort(),
+        sameBody: h.body === win.body,
+        bodyClass: h.body.className, bodyText: h.body.textContent,
+        toolbarClass: h.toolbar.className, toolbarText: h.toolbar.textContent,
+        badge: win.dom.querySelector('.ti-id-badge').textContent,
+        titleText: win.titleText.textContent,
+        appClass: win.dom.className,
+        domOrder: domClasses(win),
+        bodySaw: bodySaw,
+        calls: calls, reveals: reveals,
+        keptSibling: typeof m.ctx.windows.onTerminalCreate === 'function',
+        ctxVersion: m.ctx.ctxVersion,
+        list: m.ctx.windows.list().length,
+    };
+};
+
+// E28, half two: `singleton` re-open FOCUSES rather than duplicating -- the
+// clipboard's CLIP_WIN_ID hack, formalized.
+CASES.singleton_focuses = function () {
+    const m = modCtx('clipboard');
+    let built = 0;
+    const spec = { kind: 'clipboard', title: 'Clipboard', sid: 'clip',
+                   singleton: true, body: function () { built += 1; } };
+    const a = m.ctx.windows.createAppWindow(spec);
+    const b = m.ctx.windows.createAppWindow(spec);
+    // ...even when the second call names a DIFFERENT id: a singleton dedupes
+    // on kind, which is the promise the flag makes.
+    const c = m.ctx.windows.createAppWindow(
+        { kind: 'clipboard', id: 'app:somewhere-else', singleton: true,
+          body: function () { built += 1; } });
+    return { built: built, same: a === b && b === c, id: a.id,
+             windows: windows.size, chips: chipIds(),
+             list: m.ctx.windows.list().length, reveals: reveals,
+             desktopKids: desktop.children.length };
+};
+
+// Without the flag, two launches are two windows (the editor/sticky case).
+CASES.not_singleton_stacks = function () {
+    const m = modCtx('editorish');
+    const a = m.ctx.windows.createAppWindow({ kind: 'text-editor' });
+    const b = m.ctx.windows.createAppWindow({ kind: 'text-editor' });
+    return { ids: [a.id, b.id], windows: windows.size, chips: chipIds(),
+             list: m.ctx.windows.list().map(function (h) { return h.id; }) };
+};
+
+// E28, half three: list() is THIS mod's windows, and read-only.
+CASES.list_is_scoped_and_read_only = function () {
+    const a = modCtx('mod-a');
+    const b = modCtx('mod-b');
+    const a1 = a.ctx.windows.createAppWindow({ kind: 'a-one' });
+    const a2 = a.ctx.windows.createAppWindow({ kind: 'a-two' });
+    const b1 = b.ctx.windows.createAppWindow({ kind: 'b-one' });
+    const first = a.ctx.windows.list();
+    let threw = 0;
+    try { first.push(b1); } catch (_) { threw += 1; }
+    try { first.pop(); } catch (_) { threw += 1; }
+    try { first[0] = b1; } catch (_) { threw += 1; }
+    // ...and the handles in it: repointing h.win would make the NEXT list()
+    // prune a live window as a ghost, and swapping a method for a no-op would
+    // silently disarm a take-down.
+    let handleThrew = 0;
+    try { first[0].win = b1.win; } catch (_) { handleThrew += 1; }
+    try { first[0].close = function () {}; } catch (_) { handleThrew += 1; }
+    try { first[0].extra = 1; } catch (_) { handleThrew += 1; }
+    const second = a.ctx.windows.list();
+    return {
+        a: first.map(function (h) { return h.id; }),
+        b: b.ctx.windows.list().map(function (h) { return h.id; }),
+        expectedA: [a1.id, a2.id], expectedB: [b1.id],
+        frozen: Object.isFrozen(first), threw: threw,
+        frozenHandle: Object.isFrozen(first[0]), handleThrew: handleThrew,
+        handleIntact: first[0].win === a1.win,
+        afterMutation: second.map(function (h) { return h.id; }),
+        freshArray: first !== second,
+        sameHandles: first[0] === second[0],
+        // ...and neither list leaked into the other mod's registry.
+        aOwns: Array.from(a.rec.appWindows.keys()),
+        bOwns: Array.from(b.rec.appWindows.keys()),
+    };
+};
+
+// A closed window leaves the list, the taskbar and the owned registry.
+CASES.close_prunes_everything = function () {
+    const m = modCtx('clipboard');
+    const disposed = [];
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'clipboard', singleton: true,
+        body: function (el, win, handle) {
+            handle.onDispose(function () { disposed.push('body'); });
+        },
+    });
+    const before = m.ctx.windows.list().length;
+    const openBefore = h.isOpen();
+    h.close();
+    return { before: before, openBefore: openBefore, openAfter: h.isOpen(),
+             after: m.ctx.windows.list().length, disposed: disposed,
+             chips: chipIds(), owned: Array.from(m.rec.appWindows.keys()),
+             sessions: sessions.size, windows: windows.size,
+             desktopEmpty: desktop.classList.contains('empty'),
+             saved: saves,
+             // a re-open after a close builds a FRESH window, not a ghost
+             reopened: m.ctx.windows.createAppWindow({ kind: 'clipboard',
+                                                       singleton: true }).id };
+};
+
+// The #167 restore case: core's unknown-kind fallback built a record for this
+// id before the mod loaded. A create must ADOPT it, never build a second
+// window over the top of it -- that would strand the live one in the Map.
+CASES.adopts_an_existing_record = function () {
+    const m = modCtx('scratchpad');
+    const first = m.ctx.windows.createAppWindow({ kind: 'scratchpad',
+                                                  id: 'app:scratch' });
+    const other = modCtx('scratchpad');       // a re-enable: a fresh record
+    const adopted = other.ctx.windows.createAppWindow({ kind: 'scratchpad',
+                                                        id: 'app:scratch' });
+    // #167's post-loader retry runs the restore path a second time: it must
+    // neither double-build NOR steal focus.
+    const reRestored = other.ctx.windows.createAppWindow(
+        { kind: 'scratchpad', id: 'app:scratch', restoring: true });
+    let clash = null;
+    try {
+        other.ctx.windows.createAppWindow({ kind: 'other-kind',
+                                            id: 'app:scratch' });
+    } catch (e) { clash = String(e.message); }
+    return { sameWindow: adopted.win === first.win, windows: windows.size,
+             chips: chipIds(), adoptedList: other.ctx.windows.list().length,
+             clash: clash, reveals: reveals,
+             reRestoredSame: reRestored === adopted };
+};
+
+// The handle IS the contract: the three-part title/color updates a scaffold
+// gets wrong one part at a time, and the escape hatches.
+CASES.handle_methods = function () {
+    const m = modCtx('task-manager');
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'task-manager', title: 'Task manager', sid: 'tm',
+        appClass: 'app-tm', bodyClass: 'tm-body', badge: '#tm',
+    });
+    h.setTitle('Task manager (3 sessions)');
+    h.setColor('#FF8800');
+    h.save();
+    const swatch = document.createElement('button');
+    swatch.className = 'tb-swatch';
+    h.addTitleBarItem(swatch);
+    const bar = h.win.dom.querySelector('.title-bar');
+    return {
+        name: h.win.name, titleText: h.win.titleText.textContent,
+        sessTitle: sessions.get(h.id).title,
+        chipText: taskbarItems.querySelector(
+            '.taskbar-item[data-session-id="' + h.id + '"]').textContent,
+        color: h.win.color, accent: h.win.dom.styles['--accent'],
+        saved: saves.slice(),
+        titleBar: bar.children.map(function (el) { return el.className; }),
+        focus: h.focus() === h.win, reveals: reveals,
+        badge: bar.querySelector('.ti-id-badge').textContent,
+        bodyClass: h.body.className,
+        // a dead window is never re-persisted or re-titled
+        deadSave: (function () {
+            h.close();
+            const n = saves.length;
+            h.save(); h.setTitle('zombie');
+            return { extra: saves.length - n, name: h.win.name };
+        })(),
+    };
+};
+
+// recorder playback appends NO resize handles: the recording dictates the
+// window size, which is the whole point of same-size playback.
+CASES.resizable_false = function () {
+    const m = modCtx('recorder');
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'recplayer', title: 'Playback', sid: 'rec', resizable: false,
+        geom: { left: 10, top: 20, width: 800, height: 600 },
+        color: '#123456', locked: true, restoring: true,
+    });
+    return { handles: domClasses(h.win).filter(function (c) {
+                 return c.indexOf('rh ') === 0; }).length,
+             geom: h.win.geom, color: h.win.color, reveals: reveals,
+             calls: calls.filter(function (c) {
+                 return c.indexOf('appDefaultGeom') === 0; }) };
+};
+
+// A handle outlives its window, and a fixed id is REUSED by the window's next
+// life ('app:clip' is the same string every time). A stale handle must be
+// inert, not lethal.
+CASES.stale_handle_is_inert = function () {
+    const m = modCtx('clipboard');
+    const spec = { kind: 'clipboard', title: 'Clipboard', singleton: true };
+    const stale = m.ctx.windows.createAppWindow(spec);
+    stale.close();
+    const live = m.ctx.windows.createAppWindow(spec);
+    const revealsBefore = reveals.length;
+    const savesBefore = saves.length;
+    stale.close();                       // must NOT close the replacement
+    stale.focus();
+    stale.setTitle('hijacked');
+    stale.setColor('#000000');
+    stale.save();
+    const swatch = document.createElement('button');
+    swatch.className = 'tb-hijack';
+    return {
+        sameId: stale.id === live.id, differentHandle: stale !== live,
+        staleOpen: stale.isOpen(), liveOpen: live.isOpen(),
+        windows: windows.size, chips: chipIds(),
+        title: live.win.name, color: live.win.color,
+        titleBar: live.win.dom.querySelector('.title-bar').children.map(
+            function (el) { return el.className; }),
+        added: stale.addTitleBarItem(swatch),
+        disposer: stale.onDispose(function () {}),
+        reveals: reveals.length - revealsBefore,
+        saves: saves.length - savesBefore,
+        list: m.ctx.windows.list().length,
+    };
+};
+
+// Re-entrant create from INSIDE a teardown: closeWindow marks the record
+// disposed and drains cleanups BEFORE deleting the Map entry, so a build here
+// would be deleted out from under itself and left on the desktop untracked.
+CASES.reentrant_create_is_refused = function () {
+    const m = modCtx('clipboard');
+    let msg = null;
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'clipboard', singleton: true,
+        body: function (el, win, handle) {
+            handle.onDispose(function () {
+                try {
+                    m.ctx.windows.createAppWindow({ kind: 'clipboard',
+                                                    singleton: true });
+                } catch (e) { msg = String(e.message); }
+            });
+        },
+    });
+    h.close();
+    return { msg: msg, windows: windows.size, chips: chipIds(),
+             desktopKids: desktop.children.length,
+             list: m.ctx.windows.list().length };
+};
+
+// #167 for real: core's unknown-kind fallback restored a record for this kind,
+// at the id the STORE carried, before the mod loaded. A singleton create must
+// adopt that window, not build a second one beside it.
+CASES.singleton_adopts_a_core_built_window = function () {
+    const chrome = buildAppChrome({ id: 'app:scratch:legacy',
+                                    appClass: 'app-scratch', badge: '#notes',
+                                    geom: { left: 0, top: 0, width: 400,
+                                            height: 300 },
+                                    color: '#4aa3ff', locked: true,
+                                    title: 'Scratchpad' });
+    const stray = { id: 'app:scratch:legacy', sid: 'notes', hostId: 'app',
+                    type: 'app', appKind: 'scratchpad', dom: chrome.dom,
+                    body: chrome.dom, titleText: chrome.titleText,
+                    disposed: false, minimized: false, cleanups: [],
+                    geom: { left: 0, top: 0, width: 400, height: 300 },
+                    name: 'Scratchpad', color: '#4aa3ff' };
+    windows.set(stray.id, stray);
+    desktop.appendChild(chrome.dom);
+    const m = modCtx('scratchpad');
+    const h = m.ctx.windows.createAppWindow({ kind: 'scratchpad',
+                                              singleton: true });
+    return { adopted: h.win === stray, id: h.id, windows: windows.size,
+             list: m.ctx.windows.list().map(function (x) { return x.id; }),
+             desktopKids: desktop.children.length, reveals: reveals };
+};
+
+// A builder may close the window it was handed (a load that failed, a lease
+// lost mid-build). Everything after it must stop rather than resurrect it.
+CASES.body_closes_its_own_window = function () {
+    const m = modCtx('recorder');
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'recorder-lib',
+        body: function (el, win, handle) { handle.close(); },
+    });
+    return { open: h.isOpen(), windows: windows.size, chips: chipIds(),
+             tail: calls.filter(function (c) {
+                 return c.indexOf('addResizeHandles') === 0
+                     || c.indexOf('finishWindowPlacement') === 0; }),
+             reveals: reveals, list: m.ctx.windows.list().length,
+             desktopKids: desktop.children.length };
+};
+
+// A malformed spec is a programming error, refused loudly rather than half
+// built -- the same posture registerWindowKind takes.
+CASES.refuses_a_malformed_spec = function () {
+    const m = modCtx('bad');
+    const msgs = [];
+    [undefined, null, 'clipboard', [], {}, { kind: '' }, { kind: 7 }]
+        .forEach(function (spec) {
+            try { m.ctx.windows.createAppWindow(spec); msgs.push(null); }
+            catch (e) { msgs.push(String(e.message)); }
+        });
+    return { msgs: msgs, windows: windows.size, chips: chipIds().length };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def winfac_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("winfac") / "harness.js"
+    path.write_text(
+        _WINFAC_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__FACTORY__", _winfac_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_winfac(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_factory_window_gets_the_whole_core_scaffold(winfac_harness):
+    # E28, half one. The five things every one of the nine copies did by hand:
+    # the chrome, the desktop insertion, the record in the windows Map, the
+    # synthetic kind:'app' session + its chip, and the #taskbar-empty removal.
+    r = _run_winfac(winfac_harness, "chip_and_scaffold")
+    assert r["errors"] == []
+    assert r["id"] == "app:clipboard", "a singleton's id must be STABLE"
+    assert r["chips"] == ["app:clipboard"], "no chip in #taskbar-items"
+    assert r["emptyGone"] is True, "#taskbar-empty survived a window opening"
+    assert r["desktopEmpty"] is False and r["desktopKids"] == 1
+    # The record core now owns, instead of nine hand-mirrored literals.
+    assert r["win"]["type"] == "app" and r["win"]["appKind"] == "clipboard"
+    assert r["win"]["hostId"] == "app" and r["win"]["sid"] == "clip"
+    assert r["win"]["name"] == "Clipboard" and r["win"]["locked"] is True
+    assert r["win"]["disposed"] is False and r["win"]["minimized"] is False
+    assert r["win"]["ws"] is None and r["win"]["term"] is None
+    assert r["win"]["geom"] == {"left": 40, "top": 30,
+                                "width": 600, "height": 440}
+    assert r["win"]["fieldCount"] >= 28, "the ~30-field scaffold got thinner"
+    # ...and the synthetic session that keeps the /sessions poll reaper off it.
+    assert r["sess"] == {"key": "app:clipboard", "sid": "clip",
+                         "id": "app:clipboard", "title": "Clipboard",
+                         "stale": False, "kind": "app", "hostId": "app"}
+    # The handle is the contract; h.win is the escape hatch, not the API.
+    assert r["handleKeys"] == sorted([
+        "id", "win", "dom", "body", "toolbar", "isOpen", "focus", "close",
+        "setTitle", "setColor", "save", "addTitleBarItem", "onDispose"])
+    assert r["sameBody"] is True
+    assert r["bodyClass"] == "app-clipboard-body"
+    assert r["bodyText"] == "no clipboard history yet"
+    assert r["toolbarClass"] == "app-toolbar app-clipboard-toolbar"
+    assert r["toolbarText"] == "Clear history"
+    assert r["badge"] == "#clip" and r["titleText"] == "Clipboard"
+    assert "app-clipboard" in r["appClass"]
+    # Order is load-bearing: the toolbar and body precede the eight resize
+    # handles, which are absolute overlays and must be the LAST children.
+    assert r["domOrder"][:3] == ["title-bar", "app-toolbar app-clipboard-toolbar",
+                                "app-clipboard-body"]
+    assert [c for c in r["domOrder"] if c.startswith("rh ")] == [
+        "rh rh-" + d for d in ("n", "s", "e", "w", "nw", "ne", "sw", "se")]
+    # body() runs against a window that is already in the Map, already on the
+    # desktop and already chipped -- so it can measure -- and BEFORE the
+    # handles land, so anything it appends stays underneath them.
+    assert r["bodySaw"] == [{"inMap": True, "onDesktop": True, "chip": 1,
+                             "handleIsMine": True, "handles": 0}]
+    assert r["calls"] == [
+        "appDefaultGeom:clipboard", "buildAppChrome:app:clipboard",
+        "wireAppChrome:app:clipboard", "buildTaskbarItem:app:clipboard",
+        "updateTaskbarColor:app:clipboard", "updateTaskbarLabel:app:clipboard",
+        "addResizeHandles:app:clipboard",
+        "finishWindowPlacement:app:clipboard"]
+    # A window built for someone who asked for it NOW is revealed on the
+    # workspace they are looking at (#152), the tail openAppWindow runs too.
+    assert r["reveals"] == ["app:clipboard"]
+    # Additive: the family was decorated, not replaced.
+    assert r["keptSibling"] is True and r["ctxVersion"] == 1
+    assert r["list"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_singleton_reopen_focuses_instead_of_duplicating(winfac_harness):
+    # E28, half two -- and the hack this replaces: clipboard's CLIP_WIN_ID,
+    # re-derived by every windowed mod, is now one flag.
+    r = _run_winfac(winfac_harness, "singleton_focuses")
+    assert r["built"] == 1, "a re-open rebuilt the body: that is a second window"
+    assert r["same"] is True, "the SAME handle must come back"
+    assert r["windows"] == 1 and r["chips"] == ["app:clipboard"]
+    assert r["desktopKids"] == 1 and r["list"] == 1
+    # ...and the re-open FOCUSED it (un-minimizing, re-homing it to this
+    # workspace) rather than silently doing nothing.
+    assert r["reveals"] == ["app:clipboard"] * 3
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_without_the_flag_two_launches_are_two_windows(winfac_harness):
+    r = _run_winfac(winfac_harness, "not_singleton_stacks")
+    assert r["ids"][0] != r["ids"][1], "a minted id must be unique per launch"
+    assert r["windows"] == 2 and len(r["chips"]) == 2
+    assert r["list"] == r["ids"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_list_returns_only_this_mods_windows_and_is_read_only(winfac_harness):
+    # E28, half three. Scoped because the registry hangs off the PER-MOD
+    # record, so no mod can enumerate (or close) another's windows through it.
+    r = _run_winfac(winfac_harness, "list_is_scoped_and_read_only")
+    assert r["a"] == r["expectedA"] and r["b"] == r["expectedB"]
+    assert r["aOwns"] == r["expectedA"] and r["bOwns"] == r["expectedB"]
+    # Read-only twice over: the array is frozen (three mutations refused under
+    # strict mode) AND it is a fresh array, so even a silent mutation could not
+    # reach the next call.
+    assert r["frozen"] is True and r["threw"] == 3
+    assert r["afterMutation"] == r["expectedA"]
+    assert r["freshArray"] is True and r["sameHandles"] is True
+    # The handles inside it are frozen too: repointing h.win would make the
+    # next list() prune a live window as a ghost.
+    assert r["frozenHandle"] is True and r["handleThrew"] == 3
+    assert r["handleIntact"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_stale_handle_cannot_act_on_the_window_that_replaced_it(
+        winfac_harness):
+    # A handle outlives its window and a fixed id is REUSED, so every member
+    # gates on the RECORD (windows.get(id) === win), never on the id alone.
+    # Gating on win.disposed would not be enough either: the stale record is
+    # disposed, but closeWindow(id) does not care whose id it was.
+    r = _run_winfac(winfac_harness, "stale_handle_is_inert")
+    assert r["sameId"] is True and r["differentHandle"] is True
+    assert r["staleOpen"] is False and r["liveOpen"] is True
+    assert r["windows"] == 1 and r["chips"] == ["app:clipboard"], \
+        "a stale handle's close() killed the window that replaced it"
+    assert r["title"] == "Clipboard" and r["color"] == "#4aa3ff"
+    assert r["titleBar"] == ["ti-id-badge", "title-text", "tb-btn btn-min",
+                             "tb-btn btn-close"]
+    assert r["added"] is None and r["disposer"] is False, \
+        "a disposer pushed onto a drained cleanups array can never run"
+    assert r["reveals"] == 0 and r["saves"] == 0
+    assert r["list"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_creating_a_window_from_inside_its_own_teardown_is_refused(
+        winfac_harness):
+    # closeWindow marks the record disposed and drains win.cleanups BEFORE it
+    # deletes the Map entry, the chip and the session. A create that saw that
+    # tombstone as "free" would build a replacement the unwinding close then
+    # deletes -- leaving an untracked window on the desktop.
+    r = _run_winfac(winfac_harness, "reentrant_create_is_refused")
+    assert r["msg"] and "is being torn down" in r["msg"]
+    assert r["windows"] == 0 and r["chips"] == []
+    assert r["desktopKids"] == 0, "an orphaned window was left on the desktop"
+    assert r["list"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_singleton_adopts_a_window_core_restored_at_another_id(
+        winfac_harness):
+    # #167: core's unknown-kind fallback restores records for a mod-owned kind
+    # before the mod loads, under whatever id the STORE carried. Scanning only
+    # this mod's own registry would leave that window on screen and build a
+    # second one beside it -- the one thing `singleton` promises cannot happen.
+    r = _run_winfac(winfac_harness, "singleton_adopts_a_core_built_window")
+    assert r["adopted"] is True, "a second window of a singleton kind was built"
+    assert r["id"] == "app:scratch:legacy", \
+        "adoption must keep the restored record's id, not mint a new one"
+    assert r["windows"] == 1 and r["desktopKids"] == 1
+    assert r["list"] == ["app:scratch:legacy"]
+    assert r["reveals"] == ["app:scratch:legacy"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_builder_may_close_the_window_it_was_handed(winfac_harness):
+    r = _run_winfac(winfac_harness, "body_closes_its_own_window")
+    assert r["open"] is False
+    assert r["windows"] == 0 and r["chips"] == [] and r["desktopKids"] == 0
+    assert r["tail"] == [], \
+        "handles/placement ran against a window that was already torn down"
+    assert r["reveals"] == [] and r["list"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_closing_a_factory_window_prunes_every_trace_of_it(winfac_harness):
+    r = _run_winfac(winfac_harness, "close_prunes_everything")
+    assert r["before"] == 1 and r["openBefore"] is True
+    assert r["after"] == 0 and r["openAfter"] is False
+    assert r["disposed"] == ["body"], "onDispose rides win.cleanups"
+    assert r["owned"] == [], "the per-mod registry kept a ghost"
+    assert r["chips"] == [] and r["sessions"] == 0 and r["windows"] == 0
+    assert r["desktopEmpty"] is True
+    assert r["saved"] == ["app:clipboard"], "closeWindow's save must still run"
+    # A re-open after a close is a genuinely fresh window at the same stable id
+    # -- the prune must not leave a handle that reveals a dead record.
+    assert r["reopened"] == "app:clipboard"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_window_core_already_built_is_adopted_not_double_built(winfac_harness):
+    # #167: core's unknown-kind fallback builds records for a mod-owned kind
+    # whose mod has not loaded yet, and a lease-loss rebuild re-runs restore.
+    # Building a second record over a live one would strand the first in the
+    # windows Map -- the bug a hand-rolled scaffold cannot see coming.
+    r = _run_winfac(winfac_harness, "adopts_an_existing_record")
+    assert r["sameWindow"] is True and r["windows"] == 1
+    assert r["chips"] == ["app:scratch"]
+    assert r["adoptedList"] == 1, "an adopted window must join list()"
+    # Two creates, two focuses -- and the third, a RESTORE, is silent: it must
+    # not yank the desktop to a window nobody asked for.
+    assert r["reveals"] == ["app:scratch", "app:scratch"]
+    assert r["reRestoredSame"] is True
+    # Two KINDS at one id is a different story: refuse loudly.
+    assert r["clash"] and "already open as kind" in r["clash"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_handle_methods_do_the_whole_job_each_time(winfac_harness):
+    # Each of these is a place a hand-rolled scaffold updates two of the three
+    # things that have to move together and leaves the chip disagreeing with
+    # the title bar.
+    r = _run_winfac(winfac_harness, "handle_methods")
+    assert r["name"] == "Task manager (3 sessions)"
+    assert r["titleText"] == r["name"] and r["sessTitle"] == r["name"]
+    assert r["chipText"] == r["name"]
+    assert r["color"] == "#ff8800" and r["accent"] == "#ff8800"
+    assert r["saved"] == ["app:task-manager:1"]
+    assert r["badge"] == "#tm" and r["bodyClass"] == "tm-body"
+    # addTitleBarItem inserts BEFORE the min button -- the established idiom.
+    assert r["titleBar"] == ["ti-id-badge", "title-text", "tb-swatch",
+                            "tb-btn btn-min", "tb-btn btn-close"]
+    assert r["focus"] is True
+    # A dead window is never re-persisted (that would write a record for
+    # something already torn down) or re-titled.
+    assert r["deadSave"]["extra"] == 0
+    assert r["deadSave"]["name"] == r["name"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_window_can_opt_out_of_the_resize_handles(winfac_harness):
+    r = _run_winfac(winfac_harness, "resizable_false")
+    assert r["handles"] == 0
+    assert r["geom"] == {"left": 10, "top": 20, "width": 800, "height": 600}
+    assert r["calls"] == [], "an explicit geom must not consult appDefaultGeom"
+    assert r["color"] == "#123456"
+    # `restoring` suppresses the create-time focus: a restore is the one caller
+    # that is not a person asking for this window now.
+    assert r["reveals"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_malformed_create_spec_is_refused_loudly(winfac_harness):
+    r = _run_winfac(winfac_harness, "refuses_a_malformed_spec")
+    assert all(m for m in r["msgs"]), f"a bad spec was accepted: {r['msgs']}"
+    assert r["msgs"][0].startswith("createAppWindow: spec must be an object")
+    assert "non-empty string kind" in r["msgs"][-1]
+    assert r["windows"] == 0 and r["chips"] == 0
