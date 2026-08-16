@@ -1797,6 +1797,32 @@ def test_aistatus_chip_bands_use_the_status_vars():
             f"aistatus.js still hardcodes {literal}")
 
 
+def test_aistatus_renders_broker_gate_as_disabled_not_provider_down():
+    # #189: /status/fetch grew an operator gate that answers 503
+    # {"ok": false, "error": "status_fetch_disabled"} when the broker was
+    # never opted in. The client must recognize that exact code on the
+    # response it already makes (zero new requests) and render it as the
+    # BROKER'S choice -- never as a provider outage, and never by probing
+    # a route ahead of time.
+    src = (BROKER_DIR / "mods" / "aistatus" / "aistatus.js").read_text(
+        encoding="utf-8")
+    assert "status_fetch_disabled" in src, \
+        "aistatus.js must recognize the status_fetch_disabled gate code"
+    assert "r.status === 503" in src, \
+        "aistatus.js must branch on the 503 the gate answers with"
+    assert "switched off on this" in src, \
+        "aistatus.js should name the broker as the one that switched checks off"
+    # The poll loop must keep running while disabled -- an operator grant
+    # heals the very next tick, no reload. poll() itself must never stop
+    # the timer on the disabled branch (only ctx.onUnload's teardown does).
+    assert "if (lastDisabled)" in src
+    poll_fn = src[src.index("async function poll()"):
+                  src.index("// ---- app window")]
+    assert "stop(" not in poll_fn, (
+        "poll() must not stop the timer when the broker gate is closed -- "
+        "the poll loop has to keep ticking so a grant heals it")
+
+
 # --------------------------------------------------------------------------- #
 # pattern mod (#76 / S3)
 # --------------------------------------------------------------------------- #

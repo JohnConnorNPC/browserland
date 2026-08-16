@@ -52,11 +52,29 @@
                     red:   { border: '#a66',    fg: 'var(--danger)' },
                     grey:  { border: 'var(--bg-3)', fg: 'var(--fg-dim)' },
                 };
+                // #189: the broker's own /status/fetch gate is closed. This is
+                // an ANSWER, not a fetch failure and not a provider outage --
+                // mirrors the update mod's "not-opted-in" wording (see
+                // mods/update/update.js) so the two gated routes read the same
+                // way to an operator. Named after the broker, since the broker
+                // is the one that decided.
+                const DISABLED_TEXT = 'status checks are switched off on this '
+                    + 'broker. That is this broker\'s operator\'s choice, not a '
+                    + 'fault here and not a provider problem -- it is switched '
+                    + 'on from that broker\'s own desktop, or by an operator '
+                    + 'setting "status_fetch_enabled" in its config.';
 
                 // ---- live state (NOT persisted — a live monitor) ----
                 let lastData = null;      // [{id,label,indicator,description,incidents,components,error?}]
                 let lastCheckedAt = 0;    // epoch ms of the last completed poll
                 let lastError = null;     // string when the whole poll failed
+                // #189: true when the BROKER answered with its own gate closed
+                // (503 status_fetch_disabled), never set for a network/parse
+                // failure. Kept apart from lastError on purpose -- the two must
+                // render differently, "disabled on this broker" vs "provider
+                // down" -- and the poll loop below keeps ticking either way, so
+                // an operator grant heals this on the very next tick, no reload.
+                let lastDisabled = false;
                 let timer = null;
                 let inFlight = false;
                 const openWins = new Set();   // live aistatus windows to re-render/close
@@ -162,6 +180,7 @@
                 function chipTitle() {
                     const en = enabledProviders();
                     if (!en.length) return 'AI status — no providers selected';
+                    if (lastDisabled) return 'AI status — ' + DISABLED_TEXT;
                     const lines = ['AI provider status:'];
                     for (const p of en) {
                         const row = providerRow(p.id);
@@ -186,6 +205,7 @@
                     const en = enabledProviders();
                     let txt;
                     if (!en.length) txt = 'AI —';
+                    else if (lastDisabled) txt = 'AI off';
                     else if (!lastData) txt = 'AI …';
                     else {
                         const issues = en.filter(function (p) {
@@ -225,6 +245,7 @@
                     if (!en.length) {              // nothing selected: clear + grey
                         lastData = [];
                         lastError = null;
+                        lastDisabled = false;
                         lastCheckedAt = Date.now();
                         renderAll();
                         return;
@@ -241,17 +262,38 @@
                         const r = await hostFetch(localHost(),
                             '/status/fetch?provider=' + csv,
                             { timeoutMs: 10000 });
-                        if (!r.ok) throw new Error('HTTP ' + r.status);
-                        const j = await r.json();
-                        if (!j || !j.ok || !Array.isArray(j.providers)) {
-                            throw new Error('bad_response');
+                        // #189: the broker's own gate, not a provider or network
+                        // failure -- this broker was reached and it answered.
+                        // Detected off the response it already made (no extra
+                        // request): a 503 carrying this exact error code. An
+                        // older broker that predates the gate never sends this
+                        // code (it has no 503 branch on this route at all), so
+                        // it falls straight through to the ordinary paths below,
+                        // byte-identical to today.
+                        let gateBody = null;
+                        if (r.status === 503) {
+                            try { gateBody = await r.json(); } catch (_) {}
                         }
-                        lastData = j.providers;
-                        lastError = null;
-                        lastCheckedAt = j.fetchedAt
-                            ? j.fetchedAt * 1000 : Date.now();
+                        if (gateBody && gateBody.error === 'status_fetch_disabled') {
+                            lastDisabled = true;
+                            lastData = null;
+                            lastError = null;
+                            lastCheckedAt = Date.now();
+                        } else {
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            const j = await r.json();
+                            if (!j || !j.ok || !Array.isArray(j.providers)) {
+                                throw new Error('bad_response');
+                            }
+                            lastDisabled = false;
+                            lastData = j.providers;
+                            lastError = null;
+                            lastCheckedAt = j.fetchedAt
+                                ? j.fetchedAt * 1000 : Date.now();
+                        }
                     } catch (e) {
                         // Degrade to grey — never block the UI on a failed tick.
+                        lastDisabled = false;
                         lastError = String((e && e.message) || e);
                         lastData = null;
                         lastCheckedAt = Date.now();
@@ -360,7 +402,9 @@
                 function renderWindow(win) {
                     if (!win || win.disposed) return;
                     if (win.checkedEl) {
-                        if (lastCheckedAt) {
+                        if (lastDisabled) {
+                            win.checkedEl.textContent = 'disabled here';
+                        } else if (lastCheckedAt) {
                             let t = '';
                             try {
                                 t = new Date(lastCheckedAt).toLocaleTimeString();
@@ -380,6 +424,18 @@
                         note.className = 'app-ais-note';
                         note.textContent = 'No providers selected — enable some in '
                             + 'the Control Panel (AI status settings).';
+                        body.appendChild(note);
+                        return;
+                    }
+                    if (lastDisabled) {
+                        // #189: the broker said no, honestly — never rendered as
+                        // four dead providers. providerRow()/lastData stay null
+                        // here on purpose so this branch cannot fall through into
+                        // the per-provider loop below.
+                        const note = document.createElement('div');
+                        note.className = 'app-ais-note';
+                        note.textContent = DISABLED_TEXT.charAt(0).toUpperCase()
+                            + DISABLED_TEXT.slice(1);
                         body.appendChild(note);
                         return;
                     }
