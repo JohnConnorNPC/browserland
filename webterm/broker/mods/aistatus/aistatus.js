@@ -239,6 +239,57 @@
                 }
                 function restart() { if (timer) start(); }
 
+                // #189: the GUI grant the disabled note promises. One
+                // named-direction write (#187's rule: the body SAYS true,
+                // never implies it) to the serving broker's own consent
+                // seam. Success re-polls NOW — no reload, no waiting out
+                // the tick — and every refusal is shown as itself: a 409
+                // policy_locked names the operator's file as the decider,
+                // and nothing here is ever rendered as a provider fault.
+                let grantBusy = false;
+                async function grantStatusChecks(btn, statusEl) {
+                    if (grantBusy) return;
+                    grantBusy = true;
+                    btn.disabled = true;
+                    statusEl.textContent = 'asking this broker…';
+                    let refusal = '';
+                    try {
+                        const r = await hostFetch(localHost(),
+                            '/update/policy', {
+                                method: 'POST',
+                                headers:
+                                    { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(
+                                    { status_fetch_enabled: true }),
+                                timeoutMs: 15000,
+                            });
+                        let j = null;
+                        try { j = await r.json(); } catch (_) {}
+                        if (r.ok && j && j.ok) {
+                            refusal = '';
+                        } else if (r.status === 409 && j
+                                && j.error === 'policy_locked') {
+                            refusal = 'this broker’s config names '
+                                + '"status_fetch_enabled", so that file '
+                                + 'decides — edit it and restart the '
+                                + 'broker.';
+                        } else {
+                            refusal = 'the broker did not accept the write'
+                                + (j && j.error
+                                    ? ' (' + j.error + ')' : '') + '.';
+                        }
+                    } catch (_) {
+                        refusal = 'could not reach this broker to ask.';
+                    }
+                    grantBusy = false;
+                    if (!refusal) {
+                        await poll();
+                    } else {
+                        btn.disabled = false;
+                        statusEl.textContent = refusal;
+                    }
+                }
+
                 async function poll() {
                     if (inFlight) return;
                     const en = enabledProviders();
@@ -437,6 +488,24 @@
                         note.textContent = DISABLED_TEXT.charAt(0).toUpperCase()
                             + DISABLED_TEXT.slice(1);
                         body.appendChild(note);
+                        // The switch that sentence promises (#189's GUI grant
+                        // path): one named-direction write to this broker's
+                        // own consent seam, right here where the refusal is.
+                        const row = document.createElement('div');
+                        row.className = 'app-ais-note';
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.textContent =
+                            'Switch on status checks on this broker';
+                        const st = document.createElement('span');
+                        st.className = 'app-ais-grant-note';
+                        st.style.marginLeft = '8px';
+                        btn.addEventListener('click', function () {
+                            grantStatusChecks(btn, st);
+                        });
+                        row.appendChild(btn);
+                        row.appendChild(st);
+                        body.appendChild(row);
                         return;
                     }
                     for (const p of en) {

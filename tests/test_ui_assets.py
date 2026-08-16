@@ -1821,6 +1821,22 @@ def test_aistatus_renders_broker_gate_as_disabled_not_provider_down():
     assert "stop(" not in poll_fn, (
         "poll() must not stop the timer when the broker gate is closed -- "
         "the poll loop has to keep ticking so a grant heals it")
+    # #189's GUI grant path: the disabled note carries the switch it
+    # promises -- one NAMED-direction write to the serving broker's own
+    # consent seam, success re-polls immediately, and a config-pinned key
+    # renders the operator's file as the decider (409 policy_locked).
+    assert "Switch on status checks on this broker" in src
+    grant_fn = src[src.index("async function grantStatusChecks"):
+                   src.index("async function poll()")]
+    assert "JSON.stringify(" in grant_fn and \
+        "{ status_fetch_enabled: true }" in grant_fn, \
+        "the grant write must NAME its direction (#187's rule)"
+    assert "policy_locked" in grant_fn
+    assert '"status_fetch_enabled", so that file ' in grant_fn
+    assert "await poll();" in grant_fn, \
+        "a successful grant must repaint immediately, not wait out the tick"
+    assert "hostFetch(localHost()" in grant_fn, \
+        "the write goes to the SERVING broker, explicitly"
 
 
 # --------------------------------------------------------------------------- #
