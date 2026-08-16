@@ -173,6 +173,11 @@
                 requires: Array.isArray(decl.requires)
                     ? decl.requires.filter(function (t) { return typeof t === 'string' && t; })
                     : [],
+                // #197: declared ctx-SURFACE needs, normalized by the companion
+                // that owns the gate (86c). Absent companion => no gate, which
+                // is what an older loader does with the field too (#157).
+                needs: (typeof _modNeedsDecl === 'function')
+                    ? _modNeedsDecl(decl) : [],
                 init: decl.init,
             };
             reg.push(entry);
@@ -1946,6 +1951,12 @@
                 // remote operator's mod pin cause a broker to make outbound
                 // requests. A click is consent. An init is not.
                 ctx.enabledByUser = !!(opts && opts.byUser);
+                // #197: the `needs` gate, on the FINISHED ctx init would get. A
+                // surface this build lacks refuses the mod here, rolled back
+                // like any other refusal (86c; absent companion => no gate).
+                const refused = (typeof _modNeedsGate === 'function')
+                    ? _modNeedsGate(id, decl, ctx, rec) : null;
+                if (refused) return refused;
                 decl.init(ctx);
             } catch (e) {
                 console.error('[mods] init failed for "' + id

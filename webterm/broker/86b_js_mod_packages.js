@@ -794,6 +794,7 @@
         // Row shape (S5 renders this; it must not have to re-derive it):
         //   id, title, version, source: 'shipped'|'installed', gen|null,
         //   state, label, requires[], missing[], missingRequires[], tiers[],
+        //   needs[], unmetNeeds[] (#197),
         //   permissions: {state, names[]} (#193 — see _modPermissionsView),
         //   registered, active, enabled, pin: true|false|null, toggleable
         //
@@ -803,7 +804,9 @@
         //   blocked           enabled but a declared `requires` is not active;
         //                     the label distinguishes a dep that is registered
         //                     but off from one that never loaded / is not
-        //                     installed here
+        //                     installed here. #197: also the state for a
+        //                     declared `needs` — ctx SURFACE, not a mod id —
+        //                     this build does not offer, under its own label
         //   cycle             in a dependency cycle
         //   blocked-by-cycle  depends into one
         //   failed            deps satisfied, init() threw
@@ -856,6 +859,12 @@
                 : (((catRow && catRow.requires) || []).filter(
                       function (d) { return typeof d === 'string' && d; }));
             const missingRequires = (_modBag('missingRequires')[id] || []).slice();
+            // #197: what the LAST init attempt found missing on this build's
+            // ctx. Read from what _modNeedsGate stashed (and clears the moment
+            // the mod comes up) rather than re-derived here: the only honest
+            // answer is the one the loader actually refused on, and re-deriving
+            // it would mean building a second per-mod ctx to paint a row.
+            const unmetNeeds = (_modBag('unmetNeeds')[id] || []).slice();
             const enabled = isModEnabled(id);
             const active = mods.active.has(id);
             const pin = _pin(id);
@@ -920,6 +929,16 @@
                         }
                         return dep + ' (not loaded)';
                     }).join(', ');
+                } else if (unmetNeeds.length) {
+                    // #197: a declared `needs` this build's ctx does not offer.
+                    // Checked AFTER the dependency block because initMod checks
+                    // `requires` FIRST (before it ever builds a ctx), so a mod
+                    // with both is reported on the refusal that really
+                    // happened. Named in full: the whole point is that the
+                    // operator sees a reason instead of a mod that says
+                    // "active" and silently does nothing.
+                    state = 'blocked';
+                    label = 'blocked (needs ' + unmetNeeds.join(', ') + ')';
                 } else {
                     state = 'failed';
                     label = 'failed';
@@ -938,6 +957,12 @@
                 requires: requires,
                 missing: missing,
                 missingRequires: missingRequires,
+                // #197: what the mod DECLARED it needs of this build's ctx, and
+                // what the loader found missing. From the registration only —
+                // the catalog carries no copy, because `needs` is a fact about
+                // the LOADER this page is running, which no broker can report.
+                needs: decl ? (decl.needs || []).slice() : [],
+                unmetNeeds: unmetNeeds,
                 tiers: decl ? (decl.tiers || []).slice() : [],
                 // #193: from the CATALOG ROW only — never from the
                 // registration. registerMod deliberately does not carry

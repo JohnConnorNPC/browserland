@@ -7810,3 +7810,573 @@ def test_admin_gate_wired_at_every_core_gated_route_post():
         src = frag.read_text(encoding="utf-8")
         assert "/mods/rescan" not in src, \
             f"{frag.name} touches /mods/rescan -- route it through adminGatedFetch"
+
+
+# --------------------------------------------------------------------------- #
+# ctx.capabilities + declarative `needs` (#197)
+# --------------------------------------------------------------------------- #
+
+_NEEDS_SLICE_START = "// ---- ctx.capabilities + the `needs` gate (#197) ---"
+_NEEDS_SLICE_END = "// ---- end ctx.capabilities + needs gate ---"
+
+
+def _needs_source():
+    """#197's range in 86c, verbatim. Declaration-only apart from the capability
+    seeding loop and the guarded _registerCtxExtender call, which is what lets
+    the node harness below run the SHIPPED code instead of a copy of it."""
+    src = _ctx_ext_src()
+    start = src.index(_NEEDS_SLICE_START)
+    end = src.index(_NEEDS_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _MOD_CTX_CAPABILITIES = Object.create(null);",
+                   "function _registerModCapability(name, level) {",
+                   "function _modCtxHas(obj, path) {",
+                   "function _modCapabilityMap(ctx) {",
+                   "function _ctxCapabilities(ctx) {",
+                   "function _modNeedsDecl(decl) {",
+                   "function _modUnmetNeeds(decl, ctx) {",
+                   "function _modNeedsGate(id, decl, ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _ctx_family_keys():
+    """The TOP-LEVEL members of makeCtx's ctx literal -- the real v1 surface a
+    mod is handed (a nested member sits two indents deeper and is not a
+    family)."""
+    src = _loader_src()
+    start = src.index("            const ctx = {")
+    end = src.index("\n            };\n", start)
+    return re.findall(r"^ {16}('[^']+'|[A-Za-z_$][\w$]*)\s*:", src[start:end],
+                      re.M)
+
+
+def test_capability_seed_is_the_real_ctx_surface_minus_metadata():
+    # #197: the map's whole value is that it is TRUE. Its seed is therefore the
+    # ctx literal's own top-level members, minus `id`/`ctxVersion`, which are
+    # metadata ABOUT the ctx rather than surface a mod can use. This drift gate
+    # is what makes "every later family registers its entry" enforceable: add a
+    # ctx member without a capability entry and this fails.
+    ext = _ctx_ext_src()
+    seed = ext[ext.index("for (const _cap of ["):]
+    seed = seed[:seed.index("]")]
+    seeded = set(re.findall(r"'([^']+)'", seed))
+    families = set(_ctx_family_keys()) - {"id", "ctxVersion"}
+    assert seeded == families, (
+        f"capability seed drifted from makeCtx: "
+        f"missing={sorted(families - seeded)} extra={sorted(seeded - families)}")
+    # ...and every seeded name is a bare member name, never a dotted path: the
+    # map is per FAMILY, and paths are what `needs` resolves.
+    assert not [n for n in seeded if "." in n]
+
+
+def test_the_needs_gate_call_sites_in_the_loader_are_guarded():
+    # #197 lands in 86c (the loader is at the #68 cap); 86 carries only the two
+    # calls INTO it, both `typeof`-guarded -- absence of the companion is no
+    # gate at all, which is exactly what an older loader does with the field
+    # (#157: a new key is invisible to an old build, and never an error).
+    loader = _loader_src()
+    reg = _frag_fn(loader, "function registerMod(decl) {")
+    assert "needs: (typeof _modNeedsDecl === 'function')" in reg
+    assert "? _modNeedsDecl(decl) : []," in reg
+    init = _frag_fn(loader, "function initMod(decl, opts) {")
+    assert "const refused = (typeof _modNeedsGate === 'function')" in init
+    assert "? _modNeedsGate(id, decl, ctx, rec) : null;" in init
+    assert "if (refused) return refused;" in init
+    # The gate reads the ctx init() would ACTUALLY get: after makeCtx, after the
+    # extenders it applies, and after enabledByUser -- and before init runs.
+    _order_in(init,
+              "ctx = makeCtx(id, rec);",
+              "ctx.enabledByUser = !!(opts && opts.byUser);",
+              "const refused = (typeof _modNeedsGate === 'function')",
+              "if (refused) return refused;",
+              "decl.init(ctx);")
+    # `requires` is still checked first, before a slot is claimed or a ctx built.
+    assert init.index("reason: 'requires'") < init.index("ctx = makeCtx(id, rec);")
+    # Additive: `needs` does not move the contract version (a bump would refuse
+    # every mod that pins v1).
+    assert "ctxVersion: 1," in loader
+    # The surface is declared in the companion, not the loader...
+    for sym in ("function _modNeedsGate(", "function _registerModCapability(",
+                "function _modCtxHas("):
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+    # ...and all of it reaches the served page, exactly once.
+    for sym in ("function _modNeedsGate(id, decl, ctx, rec) {",
+                "function _modCtxHas(obj, path) {",
+                "const _MOD_CTX_CAPABILITIES = Object.create(null);",
+                "Object.defineProperty(ctx, 'capabilities', {",
+                "needs: (typeof _modNeedsDecl === 'function')"):
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#197 symbol missing/duplicated in the served page: {sym!r}"
+    # The extender registration is guarded too, for a page assembled without
+    # #194's registry -- a bare call would be a ReferenceError there.
+    ext = _ctx_ext_src()
+    assert "if (typeof _registerCtxExtender === 'function') {" in ext
+    assert ext.index("if (typeof _registerCtxExtender === 'function') {") \
+        < ext.index("_registerCtxExtender(_ctxCapabilities);")
+
+
+def test_the_mods_pane_names_the_unmet_need():
+    # #197: the operator-visible half. Same `blocked` state and the same pane
+    # machinery as a requires-block, one new cause label that NAMES the surface.
+    pkgs = _packages_src()
+    row = _frag_fn(pkgs, "function _modStatusRow(id, catRow, decl) {")
+    assert "const unmetNeeds = (_modBag('unmetNeeds')[id] || []).slice();" in row
+    assert "label = 'blocked (needs ' + unmetNeeds.join(', ') + ')';" in row
+    # After the dependency block, because initMod checks `requires` FIRST (before
+    # it builds a ctx at all) -- the row must name the refusal that happened.
+    assert row.index("label = 'needs: ' + missing.map(") \
+        < row.index("} else if (unmetNeeds.length) {") \
+        < row.index("state = 'failed';")
+    # Both halves on the row: what was declared, and what was missing.
+    assert "needs: decl ? (decl.needs || []).slice() : []," in row
+    assert "unmetNeeds: unmetNeeds," in row
+    # `needs` comes from the REGISTRATION only. A broker cannot report it: it is
+    # a fact about the loader THIS page is running, not about the catalog.
+    assert "catRow.needs" not in pkgs
+    for sym in ("label = 'blocked (needs ' + unmetNeeds.join(', ') + ')';",
+                "const unmetNeeds = (_modBag('unmetNeeds')[id] || []).slice();"):
+        assert sym in INDEX_HTML, f"#197 pane symbol missing from the page: {sym!r}"
+
+
+# #197 is BEHAVIOUR -- a refusal, a rollback, a frozen map, a row label -- so
+# these cases execute the SHIPPED slices in node, the way the #194 registry
+# cases do: the loader's registerMod/initMod, the ctx-extender registry, 86c's
+# whole #197 range and 86b's status row, with only the browser surface they
+# touch stubbed. `makeCtx` is the one deliberate fixture (the real one is 550
+# lines of DOM/fetch closures), reduced to a ctx SHAPE.
+_NEEDS_HARNESS = r"""
+'use strict';
+// ---- the browser surface these shipped slices touch, and nothing else -----
+const infos = [];
+const errors = [];
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = console.error;
+
+const window = { __mods: {
+    ctxVersion: 1,
+    registered: [],
+    active: new Map(),
+    policy: {},
+    catalog: [],
+    packages: Object.create(null),
+    missingRequires: Object.create(null),
+    cycleState: Object.create(null),
+    sorted: false,
+} };
+const ENABLED = new Set();
+function _currentPackageId() { return null; }
+function _lateRegister() {}
+// The shipped isModEnabled minus its localStorage half, so a PIN still wins
+// exactly as it does in the page.
+function isModEnabled(id) {
+    const pin = _pin(id);
+    if (pin !== null) return pin;
+    return ENABLED.has(id);
+}
+
+__LOADER__
+
+__REGISTRY__
+
+__NEEDS__
+
+__PACKAGES__
+
+// makeCtx reduced to a SHAPE. Deliberately NOT every v1 family -- `session`,
+// `serverStore`, `clipboard`, `taskbar` and `desktop` are absent here, which is
+// how a case proves the capability map reports what THIS ctx carries rather
+// than what the registry declares.
+function makeCtx(modId, rec) {
+    const ctx = {
+        id: modId,
+        ctxVersion: window.__mods.ctxVersion,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        storage: { get: function () { return null; } },
+        file: { read: function () {}, write: function () {} },
+        windows: { onTerminalCreate: function () {} },
+        settings: { boolean: function () {} },
+        theme: { get: function () {} },
+        registerWindowKind: function () {},
+    };
+    _applyCtxExtenders(ctx, rec);
+    return ctx;
+}
+
+// ---- driver -------------------------------------------------------------
+const inits = [];
+const teardowns = [];
+const caps = {};
+function decl(id, needs, extra) {
+    const d = {
+        id: id,
+        init: function (ctx) {
+            inits.push(id);
+            caps[id] = ctx.capabilities
+                ? Object.assign({}, ctx.capabilities) : null;
+            ctx.onUnload(function () { teardowns.push(id); });
+            if (extra && extra.init) extra.init(ctx);
+        },
+    };
+    if (needs !== null && needs !== undefined) d.needs = needs;
+    if (extra && extra.requires) d.requires = extra.requires;
+    return d;
+}
+function register(d) {
+    registerMod(d);
+    const reg = window.__mods.registered;
+    return reg[reg.length - 1];
+}
+function active() { return Array.from(window.__mods.active.keys()); }
+function bag() { return Object.keys(window.__mods.unmetNeeds || {}); }
+function row(id) {
+    const entry = window.__mods.registered.find(
+        function (m) { return m.id === id; }) || null;
+    return _modStatusRow(id, null, entry);
+}
+
+const CASES = {};
+
+// An unmet need: not init'd, nothing left claimed, and the row names it.
+CASES.unmet = function () {
+    // a driver extender, to prove the refusal drains rec.unloads too
+    _registerCtxExtender(function _probe(ctx, rec) {
+        rec.unloads.push(function () { teardowns.push('extender'); });
+    });
+    const entry = register(decl('gitish', ['windows.createAppWindow']));
+    ENABLED.add('gitish');
+    const res = initMod(entry);
+    const r = row('gitish');
+    return { res: res, inits: inits, teardowns: teardowns, active: active(),
+             declared: entry.needs, state: r.state, label: r.label,
+             rowNeeds: r.needs, rowUnmet: r.unmetNeeds, enabled: r.enabled,
+             infos: infos };
+};
+
+// A met need -- dotted ones included -- activates normally.
+CASES.met = function () {
+    const entry = register(decl('ok',
+        ['file', 'file.read', 'windows.onTerminalCreate']));
+    ENABLED.add('ok');
+    const res = initMod(entry);
+    const r = row('ok');
+    return { res: res, inits: inits, active: active(), state: r.state,
+             label: r.label, bag: bag(), caps: caps.ok };
+};
+
+// Dotted-path resolution, against the ctx a mod is actually handed.
+CASES.paths = function () {
+    const rec = { id: 'probe', unloads: [] };
+    const ctx = makeCtx('probe', rec);
+    const table = {};
+    ['file', 'file.read', 'windows.onTerminalCreate', 'windows.createAppWindow',
+     'settings.boolean', 'theme.get', 'registerWindowKind', 'session',
+     'toString', 'constructor', 'file.toString', 'file.read.call',
+     '', '.file', 'file.', 'file..read', 'nope.deeper', 'storage.get',
+     'capabilities'].forEach(function (p) { table[p] = _modCtxHas(ctx, p); });
+    return { table: table };
+};
+
+// One mod's map cannot reach the next mod's, and a mod cannot edit its own.
+CASES.frozen = function () {
+    let first = null, second = null, mutated = null, threw = 0;
+    const a = register(decl('a', null, { init: function (ctx) {
+        first = ctx.capabilities;
+        try { ctx.capabilities.file = 99; } catch (e) { threw++; }
+        try { ctx.capabilities.injected = 1; } catch (e) { threw++; }
+        try { ctx.capabilities = { everything: 1 }; } catch (e) { threw++; }
+        mutated = { file: ctx.capabilities.file,
+                    injected: ctx.capabilities.injected === undefined };
+    } }));
+    const b = register(decl('b', null, { init: function (ctx) {
+        second = ctx.capabilities;
+    } }));
+    ENABLED.add('a');
+    ENABLED.add('b');
+    initMod(a);
+    initMod(b);
+    return { firstKeys: Object.keys(first).sort(),
+             secondKeys: Object.keys(second).sort(),
+             frozen: Object.isFrozen(first), same: first === second,
+             file: second.file, injected: second.injected === undefined,
+             session: second.session === undefined, mutated: mutated,
+             threw: threw, inits: inits };
+};
+
+// A family whose extender is registered AFTER this one still lands in the map:
+// it is built on first READ (inside init), not while the extender runs. Plus
+// the registrar's refusals.
+CASES.late_family = function () {
+    const added = [_registerModCapability('extraFamily', 3),
+                   _registerModCapability('file', 2),
+                   _registerModCapability('capabilities', 1),
+                   _registerModCapability('not.an.identifier', 1),
+                   _registerModCapability('', 1),
+                   _registerModCapability(42, 1)];
+    _registerCtxExtender(function _extraFamily(ctx) {
+        ctx.extraFamily = { go: function () {} };
+    });
+    const entry = register(decl('late', ['extraFamily']));
+    ENABLED.add('late');
+    const res = initMod(entry);
+    return { added: added, res: res, caps: caps.late };
+};
+
+// A pin is policy; a need is a fact about this build.
+CASES.pinned = function () {
+    window.__mods.policy = { pinned: true };
+    const entry = register(decl('pinned', ['windows.createAppWindow']));
+    const res = initMod(entry);
+    const r = row('pinned');
+    return { res: res, enabled: r.enabled, pin: r.pin, toggleable: r.toggleable,
+             state: r.state, label: r.label, inits: inits, active: active() };
+};
+
+// initMod checks `requires` before it builds a ctx, so a mod with both is
+// reported on the refusal that really happened.
+CASES.requires_first = function () {
+    const entry = register(decl('dependent', ['windows.createAppWindow'],
+                                { requires: ['absent'] }));
+    ENABLED.add('dependent');
+    const res = initMod(entry);
+    const r = row('dependent');
+    return { res: res, state: r.state, label: r.label, rowUnmet: r.unmetNeeds,
+             bag: bag() };
+};
+
+// A mod that comes up later must not keep reading blocked on stale news.
+CASES.cleared = function () {
+    const entry = register(decl('flip', ['windows.createAppWindow']));
+    ENABLED.add('flip');
+    const before = initMod(entry);
+    const blocked = row('flip');
+    entry.needs = ['file'];             // as a build that offers it would see
+    const after = initMod(entry);
+    const now = row('flip');
+    return { before: before, after: after, blockedState: blocked.state,
+             blockedLabel: blocked.label, state: now.state, label: now.label,
+             bag: bag(), active: active() };
+};
+
+// The OLD-loader harness runs this one: the companion is not on the page, so
+// there is no gate and no capability map -- and a needs-declaring mod must
+// still register and run exactly as it does today.
+CASES.old_loader = function () {
+    const entry = register(decl('legacy', ['impossible.surface']));
+    ENABLED.add('legacy');
+    const res = initMod(entry);
+    const r = row('legacy');
+    return { res: res, declared: entry.needs, inits: inits, active: active(),
+             caps: caps.legacy, state: r.state, label: r.label,
+             rowNeeds: r.needs, rowUnmet: r.unmetNeeds, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+def _needs_harness_text(with_companion=True):
+    loader = _loader_src()
+    pkgs = _packages_src()
+
+    def whole(src, sig):
+        # _frag_fn stops BEFORE the closing brace; a harness needs the whole
+        # declaration back.
+        return _frag_fn(src, sig) + "\n        }\n"
+
+    loader_bits = "\n".join(whole(loader, sig) for sig in (
+        "function ModConflictError(message) {",
+        "function registerMod(decl) {",
+        "function _runUnloads(rec) {",
+        "function _pin(id) {",
+        "function initMod(decl, opts) {"))
+    pkg_bits = "\n".join(whole(pkgs, sig) for sig in (
+        "function _modBag(name) {",
+        "function _modIsRegistered(id) {",
+        "function _modClamp(v, n) {",
+        "function _modPermissionsView(catRow) {",
+        "function _modStatusRow(id, catRow, decl) {"))
+    return (_NEEDS_HARNESS
+            .replace("__LOADER__", loader_bits)
+            .replace("__REGISTRY__", _ctx_registry_source())
+            .replace("__NEEDS__", _needs_source() if with_companion
+                     else "// (the #197 companion is NOT on this page)")
+            .replace("__PACKAGES__", pkg_bits))
+
+
+@pytest.fixture(scope="module")
+def needs_harness(tmp_path_factory):
+    d = tmp_path_factory.mktemp("needs")
+    new = d / "harness.js"
+    new.write_text(_needs_harness_text(True), encoding="utf-8")
+    old = d / "harness_old.js"
+    old.write_text(_needs_harness_text(False), encoding="utf-8")
+    return {"new": new, "old": old}
+
+
+def _run_needs(harness, case, which="new"):
+    proc = subprocess.run([NODE, str(harness[which]), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} ({which}) failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_unmet_need_leaves_the_mod_uninitialised_and_says_why(needs_harness):
+    r = _run_needs(needs_harness, "unmet")
+    # Refused structurally -- never a throw, like every other initMod refusal.
+    assert r["res"] == {"ok": False, "reason": "needs",
+                        "needs": ["windows.createAppWindow"]}
+    assert r["inits"] == [], "init() must not run for an unmet need"
+    assert r["active"] == [], "the slot claimed before ctx construction is released"
+    # The ctx extenders ran (the ctx was built) and their teardowns were drained
+    # exactly once -- the same rollback a failed init gets.
+    assert r["teardowns"] == ["extender"]
+    # registerMod normalized the declaration...
+    assert r["declared"] == ["windows.createAppWindow"]
+    # ...and the pane row is a `blocked` row that NAMES the missing surface.
+    assert r["enabled"] is True
+    assert r["state"] == "blocked"
+    assert r["label"] == "blocked (needs windows.createAppWindow)"
+    assert r["rowNeeds"] == ["windows.createAppWindow"]
+    assert r["rowUnmet"] == ["windows.createAppWindow"]
+    # ...and it is logged, the way an inactive-dependency block is.
+    assert any("gitish" in line and "windows.createAppWindow" in line
+               for line in r["infos"])
+    assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_met_need_activates_normally(needs_harness):
+    r = _run_needs(needs_harness, "met")
+    assert r["res"] == {"ok": True, "id": "ok"}
+    assert r["inits"] == ["ok"]
+    assert r["active"] == ["ok"]
+    assert r["state"] == "active" and r["label"] == "active"
+    assert r["bag"] == [], "nothing is stashed for the pane on the met path"
+    # The mod was handed a capability map naming what this build really has.
+    assert r["caps"]["file"] == 1
+    assert "session" not in r["caps"], \
+        "the map must report the ctx, not the registry's declarations"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_dotted_needs_resolve_against_the_live_ctx(needs_harness):
+    t = _run_needs(needs_harness, "paths")["table"]
+    for met in ("file", "file.read", "windows.onTerminalCreate",
+                "settings.boolean", "theme.get", "registerWindowKind",
+                "storage.get", "capabilities"):
+        assert t[met] is True, f"{met!r} is on this ctx and must resolve"
+    for unmet in ("windows.createAppWindow", "session", "nope.deeper"):
+        assert t[unmet] is False, f"{unmet!r} is absent and must not resolve"
+    # Inherited members are NOT surface: `in` would make every mod "have"
+    # toString, constructor and Function.prototype.call.
+    for inherited in ("toString", "constructor", "file.toString",
+                      "file.read.call"):
+        assert t[inherited] is False, f"{inherited!r} is inherited, not declared"
+    # Malformed paths are unmet, not exceptions.
+    for junk in ("", ".file", "file.", "file..read"):
+        assert t[junk] is False, f"{junk!r} must not resolve"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_each_mod_gets_its_own_frozen_capability_map(needs_harness):
+    r = _run_needs(needs_harness, "frozen")
+    assert r["inits"] == ["a", "b"]
+    assert r["frozen"] is True
+    assert r["same"] is False, "two mods must not share one map object"
+    # The first mod's attempts to edit its map changed nothing -- not even its
+    # own copy (frozen), let alone the next mod's.
+    assert r["mutated"] == {"file": 1, "injected": True}
+    # The harness runs strict, so the refusals THROW; the served page is sloppy,
+    # where the same three writes silently no-op. Isolation is the property that
+    # matters and it holds either way -- this only pins that none of them lands.
+    assert r["threw"] == 3, "a frozen, getter-only property refuses all three"
+    assert r["file"] == 1 and r["injected"] is True
+    assert r["firstKeys"] == r["secondKeys"]
+    # Observed, not promised: this build's ctx has no `session`, so neither map
+    # claims one even though the registry knows the name.
+    assert r["session"] is True
+    assert "session" not in r["firstKeys"]
+    assert "file" in r["firstKeys"] and "windows" in r["firstKeys"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_family_registered_after_this_one_still_reaches_the_map(needs_harness):
+    r = _run_needs(needs_harness, "late_family")
+    # Only the first registration is accepted: a duplicate would silently
+    # re-level somebody else's family, `capabilities` would re-enter the map's
+    # own getter, and the rest are not identifiers.
+    assert r["added"] == [True, False, False, False, False, False]
+    # The extender that installs it was registered AFTER _ctxCapabilities, and
+    # the map is still right, because it is built on first read from init().
+    assert r["res"] == {"ok": True, "id": "late"}
+    assert r["caps"]["extraFamily"] == 3
+    assert r["caps"]["file"] == 1, "the seeded families survive a late one"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_pin_cannot_override_an_unmet_need(needs_harness):
+    r = _run_needs(needs_harness, "pinned")
+    # Pinned ON by this broker -- and still refused, because a pin is policy and
+    # a need is a fact about this build.
+    assert r["pin"] is True and r["enabled"] is True
+    assert r["res"]["reason"] == "needs"
+    assert r["inits"] == [] and r["active"] == []
+    assert r["state"] == "blocked"
+    assert r["label"] == "blocked (needs windows.createAppWindow)"
+    # ...and the checkbox stays locked, exactly as it is for any pinned row.
+    assert r["toggleable"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_inactive_dependency_is_reported_before_an_unmet_need(needs_harness):
+    r = _run_needs(needs_harness, "requires_first")
+    # initMod checks `requires` before it builds a ctx, so the ROW must name
+    # that refusal rather than a need the loader never got as far as testing.
+    assert r["res"]["reason"] == "requires"
+    assert r["state"] == "blocked"
+    assert r["label"] == "needs: absent (not loaded)"
+    assert r["rowUnmet"] == [] and r["bag"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_needs_block_is_cleared_when_the_mod_comes_up(needs_harness):
+    r = _run_needs(needs_harness, "cleared")
+    assert r["before"]["reason"] == "needs"
+    assert r["blockedState"] == "blocked"
+    assert r["blockedLabel"] == "blocked (needs windows.createAppWindow)"
+    # Same mod, needs now met: the pane must not keep painting the old news.
+    assert r["after"] == {"ok": True, "id": "flip"}
+    assert r["state"] == "active" and r["label"] == "active"
+    assert r["bag"] == [] and r["active"] == ["flip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_loader_without_the_companion_still_loads_a_needs_mod(needs_harness):
+    # #157 applied to this feature: a page assembled without 86c has no gate at
+    # all, which is exactly what an OLDER loader does with an unknown decl field
+    # -- registerMod copies fields selectively, so `needs` is simply dropped.
+    # Absence is never an error, and it is never a refusal either.
+    r = _run_needs(needs_harness, "old_loader", which="old")
+    assert r["res"] == {"ok": True, "id": "legacy"}
+    assert r["declared"] == [], "no companion -> the field is dropped, not kept"
+    assert r["inits"] == ["legacy"] and r["active"] == ["legacy"]
+    assert r["caps"] is None, "and there is no ctx.capabilities to read there"
+    assert r["state"] == "active" and r["label"] == "active"
+    assert r["rowNeeds"] == [] and r["rowUnmet"] == []
+    assert r["errors"] == []
