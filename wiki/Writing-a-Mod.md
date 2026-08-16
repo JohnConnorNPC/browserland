@@ -213,7 +213,15 @@ Note what is *not* in `mod.json`: **`tiers`**. It lives only in the
 
 ---
 
-## 5. `tiers` — declared, not enforced
+## 5. `tiers` and `needs` — declared vs. gated
+
+Two similarly-shaped declarations answer two different questions. `tiers` says
+what a mod *claims* to touch, and nothing checks it. `needs` says what ctx
+surface a mod *cannot run without*, and the loader refuses to `init` it if
+that surface is missing. Read them together — they are opposites, not
+variants of the same idea.
+
+### `tiers` — declared, not enforced
 
 ```js
 tiers: ['file', 'window'],
@@ -236,6 +244,55 @@ and it is deliberately imprecise at the edges: `mods/mod-sync/mod-sync.js`
 declares `tiers: ['settings']` while administering *other brokers'* mod pins,
 because the vocabulary has no token for that and inventing one would imply an
 enforcement that does not exist.
+
+### `needs` — a presence gate (#197)
+
+```js
+needs: ['file', 'windows.onTerminalCreate'],
+```
+
+`needs` is an array of ctx-surface names this mod cannot function without — a
+bare member name (`'file'`) or a **dotted path** into one (`'windows.onTerminalCreate'`).
+Unlike `tiers`, it is checked: once `initMod` starts building this mod's `ctx`,
+the loader resolves every entry against that live object — **own** properties
+only at each segment, so a mod never "has" `toString` or `constructor` just
+because the prototype does, and a member that throws on access counts as
+absent too. An unmet entry **blocks init outright**: nothing partially
+initializes, the claimed slot is released, and the Mods pane row reads
+**`blocked (needs windows.onTerminalCreate)`** — naming every unmet entry —
+instead of showing the mod as active while it quietly does nothing, which is
+the failure mode `mods/git/git.js` guards against today with a plain
+`if (!ctx.windows) return;` rather than a declared, pane-visible reason.
+
+That label is a different thing from a `requires`-blocked row's `needs: editor`
+text (§6) even though both use the English word "needs": `requires` names
+other **mod ids** and is checked first, before a `ctx` is even built; `needs`
+names **ctx surface** and is checked once `init` is actually about to run. A
+mod that fails both is reported on the `requires` refusal, since that is the
+one the loader reaches first.
+
+A few things worth being precise about:
+
+- **A pin does not override it.** A pin is policy — should this mod be on;
+  `needs` is a fact about what this build's `ctx` offers. A pinned-on mod with
+  an unmet need still reads `blocked (needs …)`; pinning it cannot conjure the
+  missing surface.
+- **An older loader, or a page built without the ctx-extender registry,
+  silently drops the field.** `needs` is normalized the same way `tiers` and
+  `requires` are, by a companion fragment (`86c_js_mod_ctx_ext.js`) that a
+  given page may not carry; where it is absent, the gate simply never runs and
+  the mod inits exactly as it would have before `needs` existed — absence is
+  never an error (#157). Keep your own `typeof ctx.x` guard as the second line
+  of defence regardless; `needs` makes the degradation *visible*, it does not
+  replace it.
+- **`needs` is not `requires` and not `permissions`.** `requires` cascades
+  through pins and take-downs (§6); `permissions` is an install-time,
+  server-side review lint over source text (§10.5). `needs` is client-side,
+  checked once at init against the live `ctx` — it asks what a mod can *run
+  against here*, not what other mods must be active or what a reviewer
+  permits.
+- **`ctx.capabilities` (§8) is the companion read** — a mod can inspect what a
+  build offers instead of only declaring what it requires.
 
 ---
 
@@ -357,6 +414,20 @@ bumping it.
   version.
 - **`ctx.onUnload(fn)`** — register a teardown. LIFO, each isolated in its own
   `try`. Register it **before** anything that can throw (§11).
+- **`ctx.capabilities`** (#197) — a **frozen**, per-mod map, `{family:
+  <integer version>}`, of the `ctx` surface this build's loader actually hands
+  you — e.g. `{file: 1, serverStore: 1, windows: 1, settings: 1, theme: 1, …}`.
+  It exists so a mod can ask "does this build offer X" directly instead of
+  sniffing loader-private names the way `mod-sync` currently does (`typeof
+  _pin`, `typeof _modTextOk`). Additive on `ctxVersion` 1 like everything else
+  on this page — feature-detect it (`ctx.capabilities &&
+  ctx.capabilities.theme`) before reading it on a build old enough to predate
+  it. The map is built lazily on first read and then frozen: your copy cannot
+  be mutated into lying to you, and mutating it never reaches another mod's
+  copy or the `needs` gate (§5) any mod is checked against. It is **observed,
+  not promised** — a family whose own ctx extender threw during setup is
+  simply absent from the map, exactly as it is absent from `ctx` itself, so
+  the two can never disagree.
 
 ### Storage
 
