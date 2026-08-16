@@ -163,11 +163,18 @@ _app_seq = 0
 def _make_app(tmp_path, monkeypatch, token=None):
     """A broker app with state_path in tmp_path (identity file lands there, not the
     repo) and a UNIQUE Sanic name. Env token would override config, so clear it and
-    set auth_token explicitly when a token is wanted (mirrors test_broker_info)."""
+    set auth_token explicitly when a token is wanted (mirrors test_broker_info).
+
+    status_fetch_enabled is config-pinned ON: this file is about the proxy
+    itself (allowlist, normalization, cache, CORS), so every route test runs
+    with the operator gate open. The gate's own behavior -- default OFF, 503,
+    zero egress, sidecar/config layering -- lives in test_status_fetch_gate.py
+    (#189)."""
     global _app_seq
     _app_seq += 1
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
-    cfg = {"state_path": str(tmp_path / "webterm_state.json")}
+    cfg = {"state_path": str(tmp_path / "webterm_state.json"),
+           "status_fetch_enabled": True}
     cfg["auth_token"] = token or TEST_TOKEN
     return create_app(cfg, name=f"webterm-status-test-{_app_seq}")
 

@@ -429,14 +429,20 @@ _UPDATE_POLICY_CORRUPT = "corrupt"
 #: The three recognized sidecar/wire keys, in the ONE fixed order every
 #: consumer uses: POST /update/policy's validation order (first offender
 #: answers), its 409 ``locked`` list, and the on-disk key layout.
+#: This tuple is the WRITE surface. The loader below additionally recognizes
+#: ``status_fetch_enabled`` (#189) as a stored gate; until the policy write
+#: route grows that key, a policy write rewrites the file without it -- the
+#: same fail-closed state loss the loader's docstring already accepts from an
+#: old build, never an escalation.
 _UPDATE_POLICY_KEYS = ("check_enabled", "apply_enabled", "restart_enabled")
 
 
 def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
     """``(stored gates, corrupt)`` from ``webterm_update_policy.json``.
 
-    ``stored`` is a dict carrying whichever of the three recognized keys --
-    ``check_enabled``, ``apply_enabled``, ``restart_enabled`` -- the file has.
+    ``stored`` is a dict carrying whichever of the four recognized keys --
+    ``check_enabled``, ``apply_enabled``, ``restart_enabled``,
+    ``status_fetch_enabled`` (#189) -- the file has.
     ``(None, False)`` when the file is simply absent -- the ordinary case, and
     the only one that may fall through to a per-gate default. ``(None, True)``
     when it exists but cannot be read as a policy, which the caller turns into
@@ -448,8 +454,8 @@ def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
     asked for. A wrong type here is corruption, not a value to coerce -- and it
     is all-or-nothing: one malformed key condemns the whole file, because a
     half-trustworthy consent file is not one at all. ``check_enabled`` must be
-    present (every writer of this file has always carried it); the other two
-    are optional. Validation spans ONLY the three recognized keys -- an unknown
+    present (every writer of this file has always carried it); the other three
+    are optional. Validation spans ONLY the four recognized keys -- an unknown
     future field must not brick the file on an older build. The converse cost
     is accepted: an OLD broker's policy write rewrites the file with only
     ``check_enabled``, erasing newer stored grants -- fail-closed state loss,
@@ -469,7 +475,7 @@ def _load_update_policy(path: Path) -> Tuple[Optional[Dict[str, bool]], bool]:
                      "gates stay OFF until it is fixed or removed", path)
         return (None, True)
     stored: Dict[str, bool] = {"check_enabled": data["check_enabled"]}
-    for key in ("apply_enabled", "restart_enabled"):
+    for key in ("apply_enabled", "restart_enabled", "status_fetch_enabled"):
         if key not in data:
             continue
         if not isinstance(data[key], bool):
@@ -558,7 +564,11 @@ RPC_TIMEOUT = 10.0
 # ---- AI-provider status proxy (#112) ---------------------------------------
 # The broker makes exactly two outbound HTTP requests via urllib: GET /status/fetch
 # (here, #112) and GET /update/check (the version check, #182 -- see _update_check
-# and broker/update.py). Both are operator-gated and off until opted in. A third
+# and broker/update.py). Both are operator-gated SERVER-SIDE and off until opted
+# in: status_fetch_enabled (#189) and update_check_enabled (#182) respectively --
+# gates this process holds in its own state, because a mod shipping
+# default-OFF governs only what the browser draws, not whether this process
+# dials out (#182's lesson, on the record for exactly this route). A third
 # egress path is POST /update/apply, which spawns a git subprocess to fetch from
 # the pinned upstream GitHub URL (a git fetch, not urllib). It is operator-gated
 # by update_apply_enabled (config key, or a stored sidecar grant; default false)
@@ -3608,7 +3618,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # broker_config (the example configs' _note lines say how) is what
     # keeps a hands-off deployment un-grantable from the GUI -- the sidecar
     # can never outvote a key that is present, however damaged or however
-    # recently written. All six fields are assigned back to back with no
+    # recently written. All eight fields are assigned back to back with no
     # await between them, so no request can observe a half-resolved policy.
     app.ctx.update_check_enabled, app.ctx.update_policy_source = \
         _resolve_update_gate(config, "update_check_enabled",
@@ -3619,12 +3629,24 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     app.ctx.restart_enabled, app.ctx.restart_source = \
         _resolve_update_gate(config, "restart_enabled",
                              _upd_stored, "restart_enabled", _upd_corrupt)
+    # #189: the FOURTH gate on the same consent seam -- whether GET
+    # /status/fetch may dial the allowlisted status hosts. Default off,
+    # exactly like the check: a broker that was never opted in makes no
+    # status egress, ever (the aistatus mod's default-off is UX, not
+    # protection). Resolved here, in the same no-await block, so the hot
+    # path only ever reads app.ctx.
+    app.ctx.status_fetch_enabled, app.ctx.status_fetch_source = \
+        _resolve_update_gate(config, "status_fetch_enabled",
+                             _upd_stored, "status_fetch_enabled", _upd_corrupt)
     LOGGER.info("update checking: %s (decided by: %s)",
                 "on" if app.ctx.update_check_enabled else "off",
                 app.ctx.update_policy_source)
     LOGGER.info("update apply: %s (decided by: %s)",
                 "on" if app.ctx.update_apply_enabled else "off",
                 app.ctx.update_apply_source)
+    LOGGER.info("status fetch: %s (decided by: %s)",
+                "on" if app.ctx.status_fetch_enabled else "off",
+                app.ctx.status_fetch_source)
     LOGGER.info("restart: gate=%s (decided by: %s) mechanism=%s%s boot=%s",
                 "on" if app.ctx.restart_enabled else "off",
                 app.ctx.restart_source,
@@ -6525,15 +6547,33 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                                          app.ctx.mods_dir)})
 
     # ---- AI-provider status proxy (/status/fetch, #112) ------------------
-    # The broker's ONLY outbound HTTP. Gated by the SAME token
-    # policy as /info & /state (browser realm). The client passes ONLY allowlist
+    # The broker's FIRST outbound HTTP. Gated TWICE (#189, cloning #182's
+    # /update/check): by the SAME token policy as /info & /state (browser
+    # realm), and by the operator switch status_fetch_enabled -- a broker that
+    # was never opted in answers 503 and makes no outbound request at all,
+    # warm cache or cold. The client passes ONLY allowlist
     # ids (?provider=a,b — never a URL); unknown ids are dropped, and a request
     # that names providers but validates NONE is a 400 (the SSRF allowlist
     # proof). Absent/empty ?provider => all providers. Results are per-id cached
     # (STATUS_CACHE_TTL) and the upstream fetch itself is https-only + no-redirect
     # + size-capped (see _fetch_status_blocking). Never blocks: a dead provider
     # degrades to an "unknown" row.
-    async def _status_one(pid: str) -> Dict[str, Any]:
+    async def _status_one(pid: str) -> Optional[Dict[str, Any]]:
+        # Re-check THE GATE here, not just at the top of the handler -- the
+        # analogue of /update/check's re-read under update_lock. This
+        # coroutine runs on a later loop turn than the handler's admission
+        # check (asyncio.gather schedules it), and its siblings may hold
+        # executor threads for a slow upstream read, so a revoke that lands
+        # in between must be seen HERE or it would be followed by the very
+        # outbound request it forbade. The check sits BEFORE the cache
+        # lookup on purpose: cache is not consent, and a warm row served
+        # while disabled would misreport this broker's egress posture.
+        # Revocation stays prospective -- a fetch already handed to the
+        # executor completes and is cached; no new one starts. None means
+        # "revoked while queued"; the handler turns it into the same 503 its
+        # own admission check answers.
+        if not app.ctx.status_fetch_enabled:
+            return None
         loop = asyncio.get_running_loop()
         cache = app.ctx.status_cache
         hit = cache.get(pid)
@@ -6543,10 +6583,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         cache[pid] = {"at": loop.time(), "data": data}
         return data
 
+    # Exposed for the same reason as update_check_run above it: the
+    # revoke-while-queued property needs driving under real concurrency, and
+    # the HTTP test client serializes requests, which would pass a test the
+    # missing re-check still fails.
+    app.ctx.status_fetch_one = _status_one
+
     async def _status_fetch(request: Request):
         err = _gated_auth_error(request, "/status/fetch")
         if err is not None:
             return err
+        # The operator gate (#189), directly after auth and before ANYTHING
+        # else -- before the args are even parsed and before any cache row can
+        # be consulted (the cache lives behind _status_one, which this refusal
+        # never reaches). The ladder is 401 (token) -> 503 (gate) -> 400
+        # (request shape), matching /update/check: auth first, capability
+        # second, shape last. 503, not 403: the capability is absent on this
+        # broker, which is a different thing from the caller being
+        # unauthorized. The client renders it as "status checks disabled
+        # here", never as "all providers down".
+        if not app.ctx.status_fetch_enabled:
+            return sanic_json({"ok": False, "error": "status_fetch_disabled"},
+                              status=503)
         # Collect non-empty, comma-split tokens across any ?provider= params.
         provided = request.args.getlist("provider")
         tokens = [s.strip() for chunk in provided
@@ -6563,6 +6621,13 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": "no_valid_provider"},
                                   status=400)
         results = await asyncio.gather(*[_status_one(pid) for pid in ids])
+        if any(r is None for r in results):
+            # Revoked while the per-provider workers were queued. Same body as
+            # the admission check above, because it is the same fact -- this
+            # broker is not opted in -- learned one moment later. Partial
+            # results are deliberately withheld: they predate the revoke.
+            return sanic_json({"ok": False, "error": "status_fetch_disabled"},
+                              status=503)
         return sanic_json({"ok": True, "fetchedAt": int(time.time()),
                            "providers": list(results)})
 
