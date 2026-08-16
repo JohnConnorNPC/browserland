@@ -3526,15 +3526,26 @@ def test_delete_menu_item_is_registry_opt_in_not_denylist():
     assert "deleteLabel: 'note'," in sticky
     assert "deleteLabel: 'file'," in editor
 
-    # No other registered kind opts in — a Delete item would be a misleading
+    # No other kind ANYWHERE opts in — a Delete item would be a misleading
     # no-op on a window with nothing persisted (or, for file-manager, nothing
-    # a "delete" would meaningfully discard).
-    for rel in ("mods/update/update.js", "mods/clipboard/clipboard.js",
-                "mods/help/help.js", "mods/recorder/recorder.js",
-                "mods/aistatus/aistatus.js", "mods/task-manager/task-manager.js",
-                "mods/file-manager/file-manager.js"):
-        src = (BROKER_DIR / rel).read_text(encoding="utf-8")
-        assert "deleteLabel" not in src, f"{rel} must not opt into Delete"
+    # a "delete" would meaningfully discard). Swept over every fragment and
+    # every mod file, not a fixed list, so a kind added later cannot opt in
+    # unnoticed (the inverse of the denylist bug this replaced).
+    allowed = {
+        BROKER_DIR / "mods/scratchpad/scratchpad.js",
+        BROKER_DIR / "mods/sticky/sticky.js",
+        BROKER_DIR / "mods/editor/editor.js",
+        BROKER_DIR / "54_js_app_windows_store.js",   # the registry itself
+        BROKER_DIR / "78_js_keybindings.js",         # the guard that reads it
+    }
+    offenders = []
+    for path in sorted(BROKER_DIR.rglob("*.js")):
+        if "deleteLabel" in path.read_text(encoding="utf-8") \
+                and path not in allowed:
+            offenders.append(str(path.relative_to(BROKER_DIR)))
+    assert offenders == [], (
+        "deleteLabel appears outside the three persisted-doc kinds and the "
+        f"registry/guard: {offenders}")
     assert "deleteLabel: 'control-panel'" not in s54
     assert "appKind: 'control-panel'" in s54   # still the one core built-in
 
