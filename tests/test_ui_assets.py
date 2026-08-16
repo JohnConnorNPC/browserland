@@ -2828,7 +2828,9 @@ def _assert_host_registry_no_history(src):
     assert "const carried = valueHasPlainTokens(value);" in code
     assert "let writeTo = targets;" in code
     assert "for (const hid of writeTo)" in code
-    assert "publishTo(hid, out, !!plan.seal)" in code
+    assert "publishTo(hid, out, !!plan.seal," in code, (
+        "the publish loop must still hand publishTo the seal flag -- and, "
+        "since the verify round, whether capability was already proven")
     # The override is NAMED, per host, and never silent: a dialog with the
     # archiving consequence spelled out, defaulting to skip.
     assert "function pickArchivingOverride(" in code
@@ -2953,7 +2955,9 @@ def _assert_host_registry_encryption(src):
     # The encrypted publish clears the revision ring: without it the plaintext
     # value this write replaces stays in the history of the store we just
     # stopped trusting, and "the broker only stores ciphertext" is false.
-    assert "publishTo(hid, out, !!plan.seal)" in code
+    assert "publishTo(hid, out, !!plan.seal," in code, (
+        "the publish loop must still hand publishTo the seal flag -- and, "
+        "since the verify round, whether capability was already proven")
     assert "purgeRevisions: true } : { host: hid }" in code
     # The load-time discovery notice must never prompt: it runs with no user
     # interaction, and a page-load password prompt is a habit worth not

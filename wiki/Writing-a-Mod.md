@@ -367,6 +367,20 @@ bumping it.
   status is applied *after* the body, so a response body carrying its own
   `status` cannot overwrite the transport's.
 
+  **A mod that stores credentials MUST set `opts.noHistory = true` on every
+  write.** The store keeps a revision ring, so without it the value each write
+  *replaces* — the previous password, in the clear — stays readable through
+  `getRevision(n)` and on the broker's disk. The flag is sticky per record: it
+  suppresses new revisions, clears the ring on the write that sets it, and
+  survives later writes that omit the option (absent means "leave it alone",
+  which is what makes a 409 rebase safe — pass the same `opts` to the retry).
+  Turning it back on is deliberate and one-way: `noHistory:false` is refused
+  unless `purgeRevisions:true` rides the same call. Only a strict boolean
+  reaches the wire, and a broker that predates the flag silently ignores it —
+  check `modstore.noHistory` in that broker's `/info` **before** sending a
+  credential, because the write that would stop the archiving is itself the
+  write that archives.
+
 ### Host I/O
 
 - **`ctx.file`** — `read` / `write` / `list` / `delete` / `upload` / `mkdir` /

@@ -911,12 +911,28 @@
                 // the flag is what survives the next write, this mod's next
                 // version, and a broker restart. Both set() calls below share ONE
                 // opts object precisely so the 409 rebase cannot re-PUT without it.
-                async function publishTo(hid, value, purge) {
+                async function publishTo(hid, value, purge, knownCapable) {
                     const host = (hid === 'local') ? localHost() : hostById(hid);
                     const name = (host && host.id === 'local')
                         ? 'this broker' : (host ? host.label : hid);
                     let got = null;
                     try { got = await ctx.serverStore.get({ host: hid }); } catch (_) {}
+                    // The ring archives the value this write REPLACES, not the one
+                    // it carries. So a token-free publish over a stored password —
+                    // the shape the pre-write gate cannot see, because it reads the
+                    // OUTGOING list — files that password into an old broker's
+                    // history. Asked here, immediately before the PUT, and only
+                    // when there is actually a credential to lose.
+                    const outCarries = valueHasPlainTokens(got && got.value);
+                    if (outCarries && knownCapable !== true) {
+                        const cap = await checkNoHistory(hid);
+                        if (!cap.capable) {
+                            return { hid: hid, name: name, ok: false,
+                                     skipped: true, archiving: false,
+                                     error: 'would_archive',
+                                     why: cap.why };
+                        }
+                    }
                     const rev = (got && typeof got.rev === 'number') ? got.rev : 0;
                     const opts = purge
                         ? { host: hid, purgeRevisions: true } : { host: hid };
@@ -1146,7 +1162,13 @@
                     // per-broker re-derive.
                     const results = [];
                     for (const hid of writeTo) {
-                        results.push(await publishTo(hid, out, !!plan.seal));
+                        // `carried` publishes already proved capability above (or
+                        // the operator overrode it knowingly), so publishTo does
+                        // not re-probe; a token-FREE publish never asked, and
+                        // publishTo asks for itself only if the value it is about
+                        // to replace turns out to hold a password.
+                        results.push(await publishTo(hid, out, !!plan.seal,
+                                                     carried));
                     }
                     // Don't nudge yourself: the one-time discovery notice keys off
                     // the stored nonce, and the browser that just published one
@@ -1156,28 +1178,46 @@
                         try { ctx.storage.set(NOTIFIED_KEY, out.nonce); } catch (_) {}
                     }
                     const oks = results.filter(r => r.ok);
-                    const fails = results.filter(r => !r.ok);
+                    // A host publishTo declined at the last moment (it was about
+                    // to overwrite a stored password on a broker that would file
+                    // it) belongs with the refusals, not with the failures: NOTHING
+                    // was sent to it, and saying "failed" would invite a retry that
+                    // is equally unsafe.
+                    for (const r of results) {
+                        if (r.skipped && r.error === 'would_archive') refused.push(r);
+                    }
+                    const fails = results.filter(r => !r.ok && !r.skipped);
                     // #192: two different facts about two different sets of
                     // machines, and neither is ever averaged into the count above.
                     // `refused` was never written to; `stillArchiving` was written
                     // to and did not confirm it dropped its history. Both name the
                     // brokers they are about.
                     const stillArchiving = results.filter(r => r.ok && r.archiving);
+                    // Did anything a password could be lost to actually happen?
+                    // A publish that carried no password AND replaced none is an
+                    // ordinary list update: an old broker not echoing the flag
+                    // there is the #157 old-build signal, not an incident, and
+                    // dressing it in sticky red would train operators to ignore
+                    // the colour that matters. It is still SAID, plainly, once.
+                    const atRisk = carried
+                        || results.some(r => r.skipped && r.error === 'would_archive');
                     const extra =
                         (refused.length
                             ? ' No password was sent to: ' + archivingList(refused)
                               + ' — still archiving.'
                             : '')
                         + (stillArchiving.length
-                            ? ' Still archiving — did not confirm it dropped its '
-                              + 'stored history: '
+                            ? (atRisk
+                                ? ' Still archiving — did not confirm it dropped '
+                                  + 'its stored history: '
+                                : ' Older brokers that keep a password history: ')
                               + archivingList(stillArchiving) + '.'
                               + (carried
                                   ? ' Rotate the passwords this list carried for '
                                     + 'them.' : '')
                             : '');
                     const problem = !!(fails.length || refused.length
-                                       || stillArchiving.length);
+                                       || (stillArchiving.length && atRisk));
                     const how = plan.seal === 'all' ? ', encrypted (whole list)'
                         : plan.seal === 'tokens' ? ', passwords encrypted'
                         : (includeTokens ? ', including passwords' : '');
@@ -1268,6 +1308,26 @@
                         okLabel: whole ? 'Remove the whole list'
                             : 'Forget passwords', danger: true });
                     if (!ok) return;
+                    // #192 (verify-round): Forget REPLACES a password-bearing
+                    // value, so on a broker that ignores both flags the outgoing
+                    // passwords land in the ring — the removal would be the leak.
+                    // Same question the publish path asks, asked here too, and a
+                    // "no" sends nothing: this is the one act where quietly
+                    // archiving what you asked to destroy is the worst outcome.
+                    if (valueHasPlainTokens(got.value)) {
+                        const cap = await checkNoHistory('local');
+                        if (!cap.capable) {
+                            showNotice('Nothing was sent. This broker '
+                                + (cap.why ? '(' + cap.why + ') ' : '')
+                                + 'cannot be told to stop keeping a password '
+                                + 'history, so removing the passwords would file '
+                                + 'the copy being removed into that history. '
+                                + 'Update this broker, then forget again — and '
+                                + 'rotate these passwords either way.',
+                                { sticky: true, type: 'error' });
+                            return;
+                        }
+                    }
                     const rev = (typeof got.rev === 'number') ? got.rev : 0;
                     const stripped = stripTokens(got.value);
                     // purgeRevisions clears the ring so a token that scrolled into

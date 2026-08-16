@@ -2085,7 +2085,13 @@ def _load_modstore(path: Path) -> Dict[str, Any]:
         # display-only stamp and is never trusted for ordering/trimming.
         revisions.sort(key=lambda e: e["rev"], reverse=True)
         del revisions[MODSTORE_MAX_REVISIONS:]
-        no_history = bool(rec.get("noHistory"))
+        # PRESENCE, not truthiness. A record this broker wrote unflagged omits
+        # the key entirely, so anything present at all -- including a falsey
+        # `false`/`0`/`""`/`null` left by a hand edit or a partial write -- is
+        # read as flagged. Guessing "unflagged" there would resume archiving a
+        # credential on the next write that omits the option, which is the one
+        # mistake this flag exists to make impossible.
+        no_history = "noHistory" in rec
         if no_history:
             revisions = []
         healed: Dict[str, Any] = {

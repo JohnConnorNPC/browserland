@@ -455,15 +455,24 @@ def test_loader_round_trips_the_flag_and_drops_a_paired_ring(tmp_path):
 
 
 def test_loader_reads_a_junk_flag_as_flagged(tmp_path):
-    """Truthy, not strictly `is True`: junk in that field means somebody wrote
-    something there, and the conservative reading for a record that may hold
-    credentials is "keep not archiving"."""
+    """PRESENCE, not truthiness. This broker writes the key ONLY when the flag
+    is on, so an unflagged record omits it entirely — which makes any value
+    sitting there (junk, or even a falsey `false`/`0`/`null` from a hand edit
+    or a torn write) evidence that somebody once turned it on. Reading that as
+    "unflagged" would resume archiving a credential on the next write that
+    omits the option, so the loader keeps not archiving. Only ABSENCE means
+    unflagged; the supported way back is the API's one-way un-flag, which
+    purges in the same breath."""
     path = tmp_path / SIDECAR
     path.write_text(json.dumps({
         "host-registry": {"rev": 1, "value": {"token": NEW_TOKEN},
                           "noHistory": "false", "revisions": []},
-        "clock": {"rev": 1, "value": {}, "noHistory": False, "revisions": []},
+        "falsey": {"rev": 1, "value": {}, "noHistory": False, "revisions": []},
+        "nulled": {"rev": 1, "value": {}, "noHistory": None, "revisions": []},
+        "clock": {"rev": 1, "value": {}, "revisions": []},
     }), encoding="utf-8")
     store = _load_modstore(path)
     assert store["host-registry"]["noHistory"] is True   # normalized to a bool
-    assert "noHistory" not in store["clock"]             # false == unflagged
+    assert store["falsey"]["noHistory"] is True, "a present false is not absent"
+    assert store["nulled"]["noHistory"] is True, "a present null is not absent"
+    assert "noHistory" not in store["clock"]             # absent == unflagged
