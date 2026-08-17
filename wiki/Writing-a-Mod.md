@@ -636,6 +636,160 @@ parse a number out of it.
   text; values are coerced to `String`. Removed on teardown, and an open Help
   window re-renders.
 
+### App windows: `ctx.windows.createAppWindow` (#194)
+
+Nine shipped mods used to hand-build the same ~30-field app-window scaffold: a
+`win` literal pushed straight into the core `windows` Map, a synthetic
+`kind:'app'` session, a hand-appended taskbar chip, and a teardown that
+iterated core state to find its own windows. Core now owns all of that; a mod
+supplies only what is specific to *its* window. `mods/clipboard/clipboard.js`
+is the worked example — it shipped as the reference migration alongside this
+API, and its old scaffold, `CLIP_WIN_ID` hack included, is gone.
+
+```js
+const h = ctx.windows.createAppWindow({
+    kind: 'clipboard',              // required: the appKind
+    id: 'app:clip',                 // optional; see the singleton default below
+    title: 'Clipboard',
+    sid: 'clip', badge: '#clip',    // chip / session short id, taskbar badge
+    appClass: 'app-clip', bodyClass: 'clip-body',
+    singleton: true,                // open-or-focus, deduped on KIND — see below
+    geom: undefined, color: undefined, locked: undefined, floatGeom: undefined,
+    resizable: true,                // false = no resize handles (recorder's playback window)
+    toolbar: function (el, win, h) { /* the .app-toolbar strip, optional */ },
+    body: function (el, win, h) { /* the window's content */ },
+    onClose: function () { /* replaces the × action; default is closeWindow */ },
+});
+```
+
+`kind` is the only required field. Everything else falls back to the same
+defaults the deleted scaffolds computed by hand: `title`/`sid` default to
+`kind`, `badge` to `'#' + sid`, `appClass` to `'app-' + kind`, `bodyClass` to
+`appClass + '-body'`, `geom` to `clampGeom(appDefaultGeom(kind))`, `color` to
+`normalizeHex(defaultColor(id))`, `locked` to `true`, and `id` (absent
+`singleton`) to a fresh `newAppId(kind)`.
+
+Core owns, exactly as every deleted copy did it by hand: the chrome
+(`buildAppChrome` + `wireAppChrome` + the eight resize handles), the desktop
+insertion, the window record itself (the object that lands in the core
+`windows` Map), the synthetic `kind:'app'` session and its taskbar chip
+(`#taskbar-empty` removed once it exists), and the placement tail
+(`finishWindowPlacement`). Your `toolbar`/`body` builders run *after* all of
+that, against a window that already has a layout box and a record to hang
+per-window state on — though not necessarily its *final* box, since
+placement may still tile it.
+
+`createAppWindow` returns a **frozen handle**, not the window record:
+
+| member | does |
+|---|---|
+| `h.win` | the underlying window record — the escape hatch the trust model (§1) permits, not the API itself |
+| `h.dom`, `h.body`, `h.toolbar` | the chrome root, the body element, the toolbar element (`null` if you passed no `toolbar`) |
+| `h.isOpen()` | still a live member of the core `windows` Map |
+| `h.focus()` | reveal-and-focus |
+| `h.close()` | close this window |
+| `h.setTitle(text)` / `h.setColor(hex)` | update title bar, session and taskbar chip together |
+| `h.save()` | `saveAppWindow`, for a persisted kind |
+| `h.addTitleBarItem(node)` | inserted before the minimize button |
+| `h.onDispose(fn)` | `win.cleanups.push`, spelled the way `onTerminalCreate`'s bag spells it |
+
+Every member is gated on the window still being live — a handle you keep
+past its window's death (or past a *later* window reusing the same id) is
+inert, not lethal.
+
+**`singleton: true`** formalizes the open-or-focus hack every windowed mod
+re-derived by hand (clipboard's old `CLIP_WIN_ID`). With it, `id` defaults to
+the stable `'app:' + kind`, and a create call **dedupes on `kind`** over
+every *live* window in the core `windows` Map — not just the windows this
+mod's own registry already knows about, because core's unknown-kind restore
+fallback (#167) may have rebuilt a window of this kind, under some other id,
+before this mod ever loaded. Whichever window it finds is adopted (never
+double-built) and, unless the call is a restore, brought to front. Without
+`singleton`, dedupe is by `id` alone: a second create at a still-open id
+adopts and focuses it; a create at an id mid-close throws (a reopen has to
+wait for the close to finish); a create at an id already open under a
+*different* `kind` throws rather than stranding the live window.
+
+**`ctx.windows.list()`** — this mod's own live windows, oldest first, as a
+fresh frozen array. Dead entries are pruned on the way past, so a `list()`
+after a lease-loss rebuild reads empty instead of a wall of ghosts.
+`mods/clipboard/clipboard.js`'s `renderAll()` is the shipped example: a loop
+over `ctx.windows.list()` replaced a hand-kept `liveWins` set.
+
+**`ctx.windows.closeAll()`** closes every one of this mod's factory-built
+windows and returns how many it closed. It is the *same* pass the loader
+also stages automatically: **a mod's factory windows are closed by core
+before its `onUnload` chain runs, and while its window kinds are still
+registered** — so a migrated mod needs no teardown-ordering care of its own.
+That property is why `registerWindowKind`'s restore/teardown ordering used to
+matter by hand: close a window *after* its kind is deregistered and the close
+reaches `saveAppWindow` with no registry entry for the kind, falls back to
+the shared serializer, and leaves a junk `/state` record for a kind nothing
+can restore. Modeling the close as an `onUnload` entry would make it the
+*oldest* entry in the LIFO chain and therefore run it *last* — after
+`deleteWindowKind`, which rides that same chain — exactly the wrong order.
+So it is never registered as an unload: the loader calls this same close
+pass directly, at the head of teardown, before the first `onUnload` runs and
+before any kind the mod registered is deregistered. This is what let
+`clipboard.js` delete its own `ctx.onUnload` window-closing block entirely.
+Call `closeAll()` yourself when you want a mod's windows gone without
+disabling the mod.
+
+**The restore hook's third argument.** `registerWindowKind`'s `restore` is
+called *directly* by core, outside any mod's `ctx` closure, so it is handed
+the per-mod window API as a third argument:
+
+```js
+restore: function (record, opts, api) {
+    const h = api.createAppWindow({ kind: 'scratchpad', id: record.id, … });
+    return h.win;        // or `return h;` — api unwraps a handle either way
+}
+```
+
+`api` is `{createAppWindow, list}` — the same two members `ctx.windows`
+exposes, scoped to this mod's record. Two defaults ride the call and both are
+overridable in your own spec: `spec.id` defaults to `record.id` (so a restore
+that builds elsewhere does not orphan the record it was handed, or step
+around the id dedupe), and `spec.restoring` defaults to `opts.restoring`
+(core's automatic restore pass always passes `true`) — the same suppression
+`openAppWindow`'s own `restoring` gives: no reveal, no un-minimize, no
+re-home to whatever workspace the page happened to boot on (#152).
+
+**`ctx.windows.onAppWindowCreate(handler)`** fires for app windows whose
+`appKind` is one of **this mod's registered kinds** — every kind it has
+passed to `registerWindowKind`, however the window was actually built,
+*including* a window core rebuilt through its unknown-kind fallback before
+this mod ever registered that kind. It is **not** scoped to "windows this
+mod's factory built." Subscribing **replays** every matching window that
+already exists, then fires for every one built afterwards — exactly once per
+subscription: a replayed window is never re-delivered as a live create, and a
+live create is never re-delivered by a later replay, so a mod needs no
+`WeakSet` of its own to avoid double-decorating. This is sticky's init-time
+catch-up pass (`mods/sticky/sticky.js`) made first-class — whether a mod's
+windows already exist when its `init` runs is a *race* (#167), not an
+ordering, and this hook makes both orders come out identical.
+
+```js
+const off = ctx.windows.onAppWindowCreate(function (info) {
+    // info: {win, id, kind, dom, body, titleBar, replayed, addTitleBarItem, onDispose}
+    addChip(info.id);
+    info.onDispose(function () { removeChip(info.id); });
+});
+```
+
+`off()` also rides `ctx.onUnload` automatically, so a disabled mod stops
+decorating windows even if it never calls the function it was handed.
+
+**THE TRAP.** A `registerWindowKind` factory — `factory(appData)` — must
+**`return h.win`, never the handle**: `openAppWindow` hands a factory's
+return value straight back to its own callers (and its own id-dedupe branch
+returns a window record too), so a factory that returns the handle breaks
+every caller expecting a record. A **restore** hook is the one place a handle
+*is* accepted — `api` unwraps it by identity before core ever sees it, so
+`return h;` and `return h.win;` are both correct there, but a factory only
+has the one right answer. `mods/clipboard/clipboard.js`'s
+`openClipboardWindow` says exactly this at its own `return h.win` line.
+
 ---
 
 ## 9. Help: `help.md` and the regen you must not skip
