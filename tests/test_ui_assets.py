@@ -5749,10 +5749,37 @@ def test_clipboard_mod_packaged_and_manifest_agrees():
     assert src.count(".innerHTML") == 2
     assert "clipBody.innerHTML = ''" in src
     assert "chip.innerHTML = appIconSvg('clipboard')" in src
-    # Teardown closes any live clipboard window WHILE the kind is still registered
-    # (so saveAppWindow early-returns — no junk record), same as the task-manager.
-    assert "closeWindow(w.id)" in src
-    assert "ctx.onUnload(" in src
+    # #194 (A32), the reference migration: the window is built by the CORE
+    # factory, and the hand-rolled scaffold is gone. Every symbol below was in
+    # this file before and must never come back — a copy of it here is a copy
+    # that drifts from the record shape core owns.
+    assert "ctx.windows.createAppWindow(" in src
+    assert "singleton: true" in src, "the CLIP_WIN_ID open-or-focus hack is a flag now"
+    # THE TRAP: openAppWindow hands a registered kind's factory return value
+    # straight back to its callers, and they want a window RECORD.
+    assert "return h.win;" in src
+    for gone in ("buildAppChrome(", "wireAppChrome(", "addResizeHandles(",
+                 "finishWindowPlacement(", "windows.set(", "sessions.set(",
+                 "buildTaskbarItem(", "taskbar-empty"):
+        assert gone not in src, f"clipboard still hand-rolls the scaffold: {gone!r}"
+    # ...including the window bookkeeping: the repaint pass reads THIS mod's
+    # windows off the factory instead of a hand-kept set that could go stale.
+    assert "ctx.windows.list()" in src
+    # The stylesheet matches .app-clip .clip-body, which is NOT what the factory
+    # would default to (app-clip-body), so the class has to be declared.
+    assert "appClass: 'app-clip'" in src and "bodyClass: 'clip-body'" in src
+    # Teardown: nothing of its own any more. The loader stages the factory close
+    # pass at the head of _runUnloads — before the first onUnload entry and while
+    # every kind is still registered, so saveAppWindow early-returns on this
+    # ephemeral kind and no junk record persists. The mod used to have to know
+    # that ordering by hand (register the unload AFTER the kind so LIFO ran it
+    # first); it no longer does.
+    assert "closeWindow(w.id)" not in src
+    assert "ctx.onUnload(" not in src,         "the staged take-down owns this; a mod-side unload would run AFTER it"
+    # ...and it declares the surface it cannot run without, so a build with no
+    # factory shows "blocked (needs windows.createAppWindow)" rather than an
+    # "active" mod whose (+) entry and tray chip are dead buttons.
+    assert "needs: ['windows.createAppWindow']" in src
     # Ships in the served page, AFTER the git mod (appended last in _MODS).
     assert "id: 'clipboard'" in INDEX_HTML
     assert INDEX_HTML.index("id: 'git'") < INDEX_HTML.index("id: 'clipboard'")
@@ -6696,10 +6723,14 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # Every window factory ended with the same two lines; they are now one call,
     # so the workspace stamp can never be forgotten by a new factory that copies
     # the tail. The old form must be gone from every factory.
+    # #194 (A32): clipboard is NOT in this list any more — it has no creation
+    # tail of its own to get wrong. Its window is built by
+    # ctx.windows.createAppWindow, which owns the tail for every mod that
+    # migrates onto it (86c calls finishWindowPlacement once, after body()).
+    # The remaining eight migrate under #204 and drop out of here as they do.
     factories = [
         "81_js_control_panel.js",
         "mods/aistatus/aistatus.js",
-        "mods/clipboard/clipboard.js",
         "mods/editor/editor.js",
         "mods/file-manager/file-manager.js",
         "mods/help/help.js",
