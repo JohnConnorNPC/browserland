@@ -9094,7 +9094,31 @@ function modCtx(id) {
                   } };
     _applyCtxExtenders(ctx, rec);
     window.__mods.active.set(id, rec);
-    return { ctx: ctx, rec: rec };
+    // A fixture mod registers its kinds in init(), the way every real mod
+    // does -- the factory REFUSES a kind this mod never registered (the #194
+    // review's gate against cross-mod adoption and against the junk record a
+    // kindless window persists). Registering on demand keeps each case about
+    // what it is about; `rawCreate` below is the ungated path the gate's own
+    // test uses. The catch covers a re-enable case that reuses a kind while
+    // the previous record still holds it: core refuses the duplicate, and the
+    // fresh record simply claims the kind it is about to build for.
+    const rawCreate = ctx.windows.createAppWindow;
+    ctx.windows.createAppWindow = function (spec) {
+        const k = spec && spec.kind;
+        if (typeof k === 'string' && k) {
+            // Seed the RECORD's kind set directly rather than calling
+            // registerWindowKind: several cases register the same kind for
+            // real later (with a restore hook), and core rightly refuses a
+            // duplicate appKind. The gate reads this set, so seeding it is
+            // exactly "this fixture mod owns the kind" without touching core's
+            // registry -- and the gate's own behaviour is proven separately,
+            // through `rawCreate`.
+            if (!rec.appWindowKinds) rec.appWindowKinds = new Set();
+            rec.appWindowKinds.add(k);
+        }
+        return rawCreate.call(this, spec);
+    };
+    return { ctx: ctx, rec: rec, rawCreate: rawCreate };
 }
 function chipIds() {
     return taskbarItems.querySelectorAll('.taskbar-item').map(function (el) {
@@ -9531,6 +9555,50 @@ CASES.restore_defaults_the_record_id = function () {
 // A SINGLETON restored at a different id: the store's record predates the
 // mod's stable id (or the mod's init already opened the window from the other
 // side of the race). Adopt the live one; never build a second.
+CASES.kind_ownership_gate = function () {
+    // The #194 review's gate, exercised through the UNGATED fixture path
+    // (`rawCreate`) so the harness's own kind-seeding cannot mask it.
+    const owner = modCtx('clipboard');
+    owner.ctx.registerWindowKind({ appKind: 'clipboard',
+                                   factory: function () { return null; } });
+    const live = owner.ctx.windows.createAppWindow({
+        kind: 'clipboard', singleton: true, title: 'Clipboard' });
+
+    const out = { ownerBuilt: !!live.id, thief: null, kindless: null,
+                  duringTeardown: null };
+    // 1. CROSS-MOD ADOPTION: another mod naming clipboard's kind must not be
+    // able to adopt clipboard's live window into its own registry (from where
+    // its closeAll -- or simply its disable -- would close somebody else's
+    // window, and its list() would lie).
+    const thief = modCtx('thief');
+    try {
+        thief.rawCreate.call(null, { kind: 'clipboard', singleton: true });
+        out.thief = 'ALLOWED';
+    } catch (e) { out.thief = String(e.message || e); }
+    out.thiefOwns = thief.rec.appWindows
+        ? Array.from(thief.rec.appWindows.keys()) : [];
+    out.ownerStillOwns = Array.from(owner.rec.appWindows.keys());
+    out.ownerWindowAlive = live.isOpen();
+
+    // 2. A KIND NOBODY REGISTERED: the staged take-down would call
+    // saveAppWindow with no registry entry and persist a record for a kind
+    // nothing can ever restore.
+    try {
+        owner.rawCreate.call(null, { kind: 'never-registered' });
+        out.kindless = 'ALLOWED';
+    } catch (e) { out.kindless = String(e.message || e); }
+
+    // 3. DURING TEARDOWN: _closeModAppWindows walks one snapshot, so a window
+    // opened after it outlives both the pass and the kind deregistration.
+    owner.rec.unloading = true;
+    try {
+        owner.rawCreate.call(null, { kind: 'clipboard' });
+        out.duringTeardown = 'ALLOWED';
+    } catch (e) { out.duringTeardown = String(e.message || e); }
+    owner.rec.unloading = false;
+    return out;
+};
+
 CASES.singleton_restore_adopts_across_ids = function () {
     appStore['app:clip:legacy'] = { id: 'app:clip:legacy', appKind: 'clipboard',
                                     open: true };
@@ -9772,7 +9840,12 @@ CASES.create_hook_replays_and_fires = function () {
                                    factory: function () { return null; } });
     // ...a window of ANOTHER mod's kind, and one of a kind NOBODY registered
     other.ctx.windows.createAppWindow({ kind: 'recorder-lib', id: 'app:rec:1' });
-    m.ctx.windows.createAppWindow({ kind: 'nobodys', id: 'app:nobody:1' });
+    // Built like core's own fallback, NOT through the factory: since the #194
+    // review the factory refuses a kind the mod never registered (it would
+    // otherwise persist a record for a kind nothing can restore), so a window
+    // of a kind nobody owns can only arrive from core. It must still be
+    // invisible to every subscriber -- which is the point of this line.
+    strayAppWindow('app:nobody:1', 'nobodys');
     // ...and one of the mod's OWN kind, built by the factory before it subscribes
     m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:own' });
 
@@ -10708,3 +10781,32 @@ def test_a_non_function_subscriber_is_a_no_op(winfac_harness):
     assert r["errors"] == []
     assert r["offs"] == ["function"] * 5
     assert r["open"] is True and r["unloads"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_factory_only_builds_kinds_this_mod_registered(winfac_harness):
+    """Found by the #194 adversarial pass — two defects, one gate.
+
+    Without it, any mod could say `{kind: 'clipboard', singleton: true}`, have
+    the dedupe adopt clipboard's LIVE window into its own registry, and then
+    close somebody else's window through `closeAll()` or simply by being
+    disabled — while `list()` quietly stopped meaning "this mod's windows".
+    And a kind nobody registered has no registry entry, so the staged
+    take-down's `saveAppWindow` falls through to the shared serializer and
+    persists a record for a kind nothing can ever restore: the junk record
+    A30's ordering exists to prevent, reached through the front door.
+
+    A create during teardown is refused for the third reason in the same
+    family: `_closeModAppWindows` walks one snapshot, so a window opened after
+    it outlives the pass AND its kind's deregistration."""
+    r = _run_winfac(winfac_harness, "kind_ownership_gate")
+    assert r["ownerBuilt"] is True
+    # 1. the thief is refused, owns nothing, and the real window is untouched
+    assert "has not registered the kind" in r["thief"], r["thief"]
+    assert r["thiefOwns"] == []
+    assert r["ownerStillOwns"] == ["app:clipboard"], r["ownerStillOwns"]
+    assert r["ownerWindowAlive"] is True
+    # 2. a kind nobody registered never reaches the store
+    assert "has not registered the kind" in r["kindless"], r["kindless"]
+    # 3. and a mod being torn down opens nothing
+    assert "refused during teardown" in r["duringTeardown"], r["duringTeardown"]

@@ -672,7 +672,17 @@
                 // closeWindow drains the prune above, so this is belt-and-
                 // braces for a window torn down some other way. Identity-
                 // guarded, so a window REBUILT at this id mid-pass survives.
-                if (owned.get(id) === h) owned.delete(id);
+                //
+                // ...and only if the window is actually GONE. If h.close()
+                // threw before core removed the record, the window is still on
+                // screen; forgetting it here would make it untracked as well as
+                // undead — outliving both this pass and its kind's
+                // deregistration, with nothing left that could close it. Left
+                // owned, it is at least still ours, and a later closeAll() (or
+                // the next disable) can try again.
+                if (owned.get(id) === h && !_modAppWindowLive(h)) {
+                    owned.delete(id);
+                }
             }
             return closed;
         }
@@ -696,6 +706,40 @@
             if (typeof kind !== 'string' || !kind) {
                 throw new Error(
                     'createAppWindow: a non-empty string kind is required');
+            }
+            // The kind must be one THIS mod registered. Two separate defects
+            // close here, both found by the #194 review:
+            //   - CROSS-MOD ADOPTION. Without it, any mod could say
+            //     {kind: 'clipboard', singleton: true}, have the dedupe adopt
+            //     clipboard's live window into its OWN rec.appWindows, and
+            //     then close it at will -- through closeAll(), or simply by
+            //     being disabled. `list()` would not be "this mod's windows"
+            //     either. The shared scope means a determined mod can still
+            //     reach core directly (#71); what it may not do is get the
+            //     factory to do it, wearing another mod's ownership.
+            //   - THE JUNK RECORD. A kind nobody registered has no registry
+            //     entry, so the staged take-down's saveAppWindow falls through
+            //     to the shared serializer and persists a record for a kind
+            //     nothing can ever restore -- the exact bug A30's ordering
+            //     exists to prevent, reached through the front door.
+            // Registration order is the mod's own: registerWindowKind runs in
+            // init(), creates come later (a launch, a restore, a click).
+            if (!rec || !rec.appWindowKinds || !rec.appWindowKinds.has(kind)) {
+                throw new Error(
+                    'createAppWindow: this mod has not registered the kind '
+                    + JSON.stringify(kind)
+                    + ' -- call ctx.registerWindowKind first');
+            }
+            // A mod being torn down may not open anything. `_closeModAppWindows`
+            // walks ONE snapshot, so a window opened after it (from a disposer,
+            // or from a later onUnload) would outlive the mod AND its kind
+            // deregistration -- alive on screen, owned by nobody, and about to
+            // persist the junk record. Refused loudly rather than silently
+            // dropped: a teardown that still opens windows is a bug in the mod.
+            if (rec.unloading) {
+                throw new Error(
+                    'createAppWindow: refused during teardown (mod '
+                    + JSON.stringify(rec.id || '?') + ')');
             }
             const singleton = spec.singleton === true;
             // A STABLE id is what makes `singleton` survive a reload — the
@@ -819,6 +863,15 @@
                 dirty: false,
             };
             windows.set(id, win);
+            // OWN IT FIRST. Everything below can throw -- `spec.onClose` may be
+            // a getter, wireAppChrome and the chip touch the DOM -- and a throw
+            // between the map insert and ownership used to leave a window that
+            // is visible, in the windows Map, and in NOBODY's rec.appWindows:
+            // the staged take-down would walk straight past it, and its kind
+            // would deregister out from under it. Ownership is bookkeeping and
+            // cannot itself fail, so it is the one thing that belongs before
+            // the fallible work.
+            const h = _ownModAppWindow(rec, win, bodyEl, toolbarEl);
             // Raise / minimize / close / drag / 8-way resize / WM context menu.
             // spec.onClose replaces the × action (the editor's dirty-buffer
             // prompt is requestCloseAppWindow); undefined keeps closeWindow.
@@ -826,7 +879,6 @@
                 (typeof spec.onClose === 'function') ? spec.onClose : undefined);
             _modAppWindowChip(win, sid, title);
 
-            const h = _ownModAppWindow(rec, win, bodyEl, toolbarEl);
             // The mod's own content, last, against a window that is already in
             // the windows Map, already in the document and already chipped — so
             // it has a layout box to read and a record to hang state on. (Not
@@ -964,8 +1016,21 @@
                 return spec;
             }
             const out = Object.create(spec);
-            if (!(out.id != null && String(out.id)) && rid) out.id = rid;
-            if (out.restoring === undefined) out.restoring = restoring;
+            // defineProperty, not assignment: `spec` may be FROZEN (a mod is
+            // entitled to freeze what it hands us), and a plain `out.id = …`
+            // against a non-writable INHERITED property throws in strict mode
+            // and silently no-ops otherwise -- while an inherited SETTER would
+            // run and mutate the mod's own object. defineProperty always
+            // creates an own property on the child and never calls up the
+            // chain, which is the whole reason the child exists.
+            const own = function (key, value) {
+                Object.defineProperty(out, key, {
+                    value: value, writable: true,
+                    enumerable: true, configurable: true,
+                });
+            };
+            if (!(out.id != null && String(out.id)) && rid) own('id', rid);
+            if (out.restoring === undefined) own('restoring', restoring);
             return out;
         }
         // A hook may return the HANDLE it just built; core wants the window
@@ -998,10 +1063,18 @@
             // wrapper shadows `restore` on a CHILD and inherits the rest
             // rather than flattening a copy.
             const wrapped = Object.create(spec);
-            wrapped.restore = function (record, opts) {
-                return _modRestoreResult(rec, restore.call(
-                    this, record, opts, _modRestoreApi(rec, record, opts)));
-            };
+            // defineProperty for the same reason `_modRestoreSpec` uses it: a
+            // frozen spec makes `wrapped.restore = …` fail against the
+            // non-writable inherited property, which would leave core holding
+            // the ORIGINAL two-argument hook -- the api silently absent, and a
+            // restore that builds nothing.
+            Object.defineProperty(wrapped, 'restore', {
+                value: function (record, opts) {
+                    return _modRestoreResult(rec, restore.call(
+                        this, record, opts, _modRestoreApi(rec, record, opts)));
+                },
+                writable: true, enumerable: true, configurable: true,
+            });
             return wrapped;
         }
         // The extender: ctx.registerWindowKind wrapped IN PLACE, the same way
@@ -1219,6 +1292,12 @@
         // even if it never called the fn it was given.
         function _modOnAppWindowCreate(rec, fn) {
             if (typeof fn !== 'function') return function () {};
+            // A mod being torn down may not subscribe. `_runUnloads` has
+            // already spliced `rec.unloads`, so a disposer pushed now is never
+            // run: the dead mod's handler would stay in the global list for the
+            // life of the page, called for every window of a kind it no longer
+            // owns. Returns the same inert unsubscribe a non-function does.
+            if (rec && rec.unloading) return function () { return false; };
             const sub = { rec: rec, fn: fn, seen: new WeakSet(), dead: false };
             const off = function () {
                 if (sub.dead) return false;
