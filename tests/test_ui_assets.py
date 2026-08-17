@@ -8840,6 +8840,24 @@ Object.defineProperty(El.prototype, 'className', {
         this.classes = new Set(String(v).split(/\s+/).filter(Boolean));
     },
 });
+// Attributes: enough for a mod that labels its own chip (clipboard sets
+// aria/title on the tray item). Kept on the prototype so every stub element
+// has them, the way a real one does.
+El.prototype.setAttribute = function (k, v) {
+    this.attrs = this.attrs || {};
+    this.attrs[String(k)] = String(v);
+    if (k === 'title') this.title = String(v);
+};
+El.prototype.getAttribute = function (k) {
+    return (this.attrs && k in this.attrs) ? this.attrs[String(k)] : null;
+};
+El.prototype.removeAttribute = function (k) {
+    if (this.attrs) delete this.attrs[String(k)];
+};
+El.prototype.addEventListener = El.prototype.addEventListener
+    || function () {};
+El.prototype.removeEventListener = El.prototype.removeEventListener
+    || function () {};
 El.prototype.appendChild = function (kid) {
     if (kid.parentNode) kid.parentNode.removeChild(kid);
     kid.parentNode = this;
@@ -10052,6 +10070,164 @@ process.stdout.write(JSON.stringify(out) + '\n');
 """
 
 
+#: The window-factory harness ends by dispatching argv[2] and exiting on an
+#: unknown case. The clipboard variant appends its OWN cases after it, so that
+#: tail is stripped first -- otherwise every clipboard case exits 2 before its
+#: driver ever runs.
+_WINFAC_DISPATCH = """
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+# The driver that runs the SHIPPED clipboard mod against the shipped factory.
+# Appended after the window-factory harness, so `modCtx`, the core stubs and the
+# staged take-down are all in scope.
+_CLIPBOARD_DRIVER = r"""
+// ---- the real clipboard mod (#194's reference migration) -------------------
+let CLIP_DECL = null;
+function registerMod(decl) { CLIP_DECL = decl; }
+const clipWrites = [];
+// Core globals the shipped clipboard reaches for that the window-factory
+// harness does not need. Stubs, not behaviour: this case is about the FACTORY
+// path, and a missing global would only prove the harness is incomplete.
+function appIconSvg() { return document.createElement('svg'); }
+function svgIcon() { return document.createElement('svg'); }
+function toast() {}
+function showNotice() {}
+
+__CLIPBOARD__
+
+const CLIPCASES = {};
+
+function bootClipboard() {
+    const m = modCtx('clipboard');
+    // the ctx surface clipboard actually reads, beyond what modCtx provides
+    m.ctx.clipboard = {
+        read: function () { return Promise.resolve(''); },
+        write: function (t) { clipWrites.push(t); return Promise.resolve(true); },
+        // The real primitives AUTO-REGISTER their own teardown (that is the
+        // point of ctx: a mod only writes onUnload for what it made itself),
+        // so the stubs do too -- otherwise the disable case would fail on the
+        // harness rather than on the mod.
+        observe: function (fn) {
+            m.__observer = fn;
+            const off = function () { m.__observerOff = true; };
+            m.ctx.onUnload(off);
+            return off;
+        },
+    };
+    m.ctx.taskbar = { addStatusItem: function (el) {
+        m.__chipEl = el;
+        const off = function () { m.__chipOff = true; };
+        m.ctx.onUnload(off);
+        return off;
+    } };
+    m.ctx.settings = { boolean: function () { return { get: function () { return true; },
+                                                       onChange: function () {} }; } };
+    m.ctx.storage = { get: function () { return null; }, set: function () {} };
+    m.ctx.registerKeyActions = function () {};
+    m.ctx.registerWindowMenuItems = function () {};
+    m.ctx.registerDesktopMenuItems = function () {};
+    m.ctx.registerHelpCards = function () {};
+    m.ctx.enabledByUser = true;
+    CLIP_DECL.init(m.ctx);
+    return m;
+}
+
+// It builds a REAL window through the factory, with the core scaffold core owns.
+CLIPCASES.builds_through_the_factory = function () {
+    const m = bootClipboard();
+    const kindEntry = lookupWindowKind('clipboard');
+    const win = openAppWindow({ appKind: 'clipboard', id: 'app:clip' });
+    return {
+        registeredKind: !!kindEntry,
+        // the factory's own record, not a hand-rolled one
+        isRecord: !!(win && win.id && win.type === 'app'),
+        id: win && win.id,
+        appKind: win && win.appKind,
+        sid: win && win.sid,
+        title: win && win.name,
+        cls: win && win.dom && win.dom.className,
+        bodyCls: win && win.body && win.body.className,
+        chips: chipIds(),
+        owned: Array.from(m.rec.appWindows.keys()),
+        listLen: m.ctx.windows.list().length,
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
+// singleton: a second launch focuses the same record rather than duplicating.
+CLIPCASES.singleton_holds = function () {
+    const m = bootClipboard();
+    const a = openAppWindow({ appKind: 'clipboard', id: 'app:clip' });
+    const b = openAppWindow({ appKind: 'clipboard', id: 'app:clip' });
+    return { same: a === b, windows: windows.size, chips: chipIds().length,
+             owned: Array.from(m.rec.appWindows.keys()) };
+};
+
+// disable: the staged pass closes it while the kind is still registered, so
+// nothing junk is persisted.
+CLIPCASES.disable_is_clean = function () {
+    const m = bootClipboard();
+    openAppWindow({ appKind: 'clipboard', id: 'app:clip' });
+    const before = { windows: windows.size, chips: chipIds().length };
+    _runUnloads(m.rec);
+    return {
+        before: before,
+        windows: windows.size, chips: chipIds().length,
+        sessions: sessions.size,
+        store: Object.keys(appStore),
+        kindGone: !lookupWindowKind('clipboard'),
+        observerOff: !!m.__observerOff,
+        chipOff: !!m.__chipOff,
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!CLIPCASES[want]) { console.log('no such clipboard case: ' + want); process.exit(2); }
+    const r = CLIPCASES[want]();
+    process.stdout.write(JSON.stringify(r) + '\n');
+})();
+"""
+
+
+def _clipboard_mod_source():
+    """The shipped clipboard mod, verbatim — the #194 reference migration.
+
+    #194's own argument for shipping a migration with the factory was that a
+    contract must not be decided by fixture tests alone. Until the CP8 review
+    that argument was unmet: every clipboard assertion in this file was a
+    string match, and the mod itself was never executed."""
+    src = (BROKER_DIR / "mods" / "clipboard" / "clipboard.js").read_text(
+        encoding="utf-8")
+    for needed in ("registerMod({", "createAppWindow", "return h.win;"):
+        assert needed in src, f"{needed} missing from the shipped clipboard"
+    return src
+
+
+@pytest.fixture(scope="module")
+def clipboard_harness(tmp_path_factory):
+    """The window-factory harness, plus the real clipboard mod."""
+    path = tmp_path_factory.mktemp("clipmod") / "harness.js"
+    path.write_text(
+        # Everything ABOVE the base harness's own dispatcher: it exits on an
+        # unknown case, so the clipboard driver appended below would never run.
+        (_WINFAC_HARNESS.split("const want = process.argv[2];")[0]
+         .replace("__REGISTRY__", _ctx_registry_source())
+         .replace("__FACTORY__", _winfac_source())
+         .replace("__KINDS__", _window_kind_registry_source())
+         .replace("__RESTORE__", _restore_lifecycle_source())
+         .replace("__TAKEDOWN__", _loader_takedown_source()))
+        + _CLIPBOARD_DRIVER.replace("__CLIPBOARD__", _clipboard_mod_source()),
+        encoding="utf-8")
+    return path
+
+
 @pytest.fixture(scope="module")
 def winfac_harness(tmp_path_factory):
     path = tmp_path_factory.mktemp("winfac") / "harness.js"
@@ -10880,3 +11056,55 @@ def test_the_create_hook_sees_a_window_built_the_old_way(winfac_harness):
     assert r["final"].count("app:note:factory@live") == 1
     # Nor may re-placing a window (a tile/untile) re-deliver it.
     assert r["afterSecondPlacement"] == r["final"]
+
+
+def _run_clip(harness, case):
+    proc = subprocess.run([NODE, str(harness), case], capture_output=True,
+                          text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"clipboard case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_clipboard_mod_runs_on_the_factory(clipboard_harness):
+    """#194 shipped clipboard as its reference migration on the argument that a
+    contract must not be decided by fixture tests alone — and until the CP8
+    review that argument was unmet: every clipboard assertion here was a string
+    match, and the mod itself was never executed. This runs the SHIPPED
+    clipboard against the SHIPPED factory."""
+    r = _run_clip(clipboard_harness, "builds_through_the_factory")
+    assert r["registeredKind"] is True
+    assert r["isRecord"] is True, "the launch must hand back a window RECORD"
+    assert (r["id"], r["appKind"], r["sid"]) == ("app:clip", "clipboard", "clip")
+    assert r["title"] == "Clipboard"
+    assert "app-clip" in r["cls"] and r["bodyCls"] == "clip-body"
+    assert r["chips"] == ["app:clip"]
+    assert r["owned"] == ["app:clip"] and r["listLen"] == 1
+    assert r["desktopEmpty"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_clipboard_keeps_its_singleton_semantics(clipboard_harness):
+    """`singleton: true` replaced its hand-rolled CLIP_WIN_ID open-or-focus."""
+    r = _run_clip(clipboard_harness, "singleton_holds")
+    assert r["same"] is True, "a second launch built a second window"
+    assert r["windows"] == 1 and r["chips"] == 1
+    assert r["owned"] == ["app:clip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_clipboard_disables_without_leaving_a_junk_record(
+        clipboard_harness):
+    """The staged take-down closes its window BEFORE the unload chain and while
+    the kind is still registered, which is what stops core persisting a record
+    for a kind nothing can restore. Clipboard deleted its own teardown block on
+    the strength of that, so this is the test that keeps it honest."""
+    r = _run_clip(clipboard_harness, "disable_is_clean")
+    assert r["before"] == {"windows": 1, "chips": 1}
+    assert r["windows"] == 0 and r["chips"] == 0 and r["sessions"] == 0
+    assert r["store"] == [], f"junk /state record persisted: {r['store']}"
+    assert r["kindGone"] is True
+    assert r["observerOff"] is True and r["chipOff"] is True
+    assert r["desktopEmpty"] is True

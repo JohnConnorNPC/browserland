@@ -662,7 +662,17 @@ const h = ctx.windows.createAppWindow({
 });
 ```
 
-`kind` is the only required field. Everything else falls back to the same
+`kind` is the only required field, and it must be a kind **this mod has already
+registered** with `ctx.registerWindowKind` — register in `init()`, build later
+(on a launch, a restore, a click). Two things ride on that: a mod cannot name
+another mod's kind and have the dedupe hand it that mod's live window (which its
+`closeAll()`, or simply its being disabled, would then close), and a window of a
+kind nobody registered would persist a `/state` record nothing can ever restore.
+A create is also refused outright while the mod is being torn down — the
+take-down below walks one snapshot, so a window opened after it would outlive
+both the pass and its kind. Both refusals throw.
+
+Everything else falls back to the same
 defaults the deleted scaffolds computed by hand: `title`/`sid` default to
 `kind`, `badge` to `'#' + sid`, `appClass` to `'app-' + kind`, `bodyClass` to
 `appClass + '-body'`, `geom` to `clampGeom(appDefaultGeom(kind))`, `color` to
