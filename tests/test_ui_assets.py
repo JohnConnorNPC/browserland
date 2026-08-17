@@ -8987,6 +8987,13 @@ function wireAppChrome(win, chrome, onClose) {
 }
 function finishWindowPlacement(win) {
     calls.push('finishWindowPlacement:' + win.id);
+    // Mirrors the SHIPPED tail (62a): #194's create hook fires from the one
+    // creation tail every factory ends with -- ours and the eight hand-rolled
+    // ones alike -- so a subscriber hears about a window "however it was
+    // actually built". Guarded and isolated exactly as the real one is.
+    if (typeof _fireModAppWindowCreate === 'function') {
+        try { _fireModAppWindowCreate(win); } catch (_) {}
+    }
     return win;
 }
 function revealAndFocusWindow(id) {
@@ -9555,6 +9562,36 @@ CASES.restore_defaults_the_record_id = function () {
 // A SINGLETON restored at a different id: the store's record predates the
 // mod's stable id (or the mod's init already opened the window from the other
 // side of the race). Adopt the live one; never build a second.
+CASES.hook_sees_a_handrolled_window = function () {
+    // The defect both #194 reviewers found: the hook fired only from
+    // ctx.windows.createAppWindow, so it was true of the fixtures and false of
+    // the desktop -- eight of the nine scaffolds are still hand-rolled, and a
+    // migrated sticky would decorate the notes that already existed and
+    // silently miss every one opened afterwards. It now fires from the one
+    // creation tail every factory ends with.
+    const m = modCtx('sticky');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    const before = strayAppWindow('app:note:before', 'sticky-note');
+    const seen = [];
+    m.ctx.windows.onAppWindowCreate(function (info) {
+        seen.push(info.id + (info.replayed ? '@replay' : '@live'));
+    });
+    const atSubscribe = seen.slice();
+    // A window built the OLD way: core's own record + the shared creation
+    // tail, never touching the factory.
+    const hand = strayAppWindow('app:note:handrolled', 'sticky-note');
+    finishWindowPlacement(hand);
+    const afterHandRolled = seen.slice();
+    // ...and one through the factory, to prove no double-delivery.
+    const h = m.ctx.windows.createAppWindow({ kind: 'sticky-note',
+                                              id: 'app:note:factory' });
+    return { atSubscribe: atSubscribe, afterHandRolled: afterHandRolled,
+             final: seen.slice(), factoryId: h.id,
+             // a second placement of the same window must not re-deliver
+             afterSecondPlacement: (finishWindowPlacement(hand), seen.slice()) };
+};
+
 CASES.kind_ownership_gate = function () {
     // The #194 review's gate, exercised through the UNGATED fixture path
     // (`rawCreate`) so the harness's own kind-seeding cannot mask it.
@@ -10615,9 +10652,18 @@ def test_the_create_hook_lands_in_the_extension_fragment():
     assert ": (ctx.windows = {});" in body
     assert "onAppWindowCreate" not in _ctx_families_added_by_extenders()
     # The scope tap: ctx.registerWindowKind is WRAPPED (never replaced), and the
-    # kind it records is the one CORE validated and returned.
-    assert "const entry = reg.call(ctx, spec);" in body
-    assert "_trackModWindowKind(rec, entry);" in body
+    # kind it records is the one CORE validated and returned. It lives in
+    # `_trackModWindowKinds`, which BOTH window extenders call — the ownership
+    # gate reads the set it fills, so the factory must not depend on a sibling
+    # extender having survived (#194 review).
+    tracker = _frag_fn(ext, "function _trackModWindowKinds(ctx, rec) {")
+    assert "const entry = reg.call(ctx, spec);" in tracker
+    assert "_trackModWindowKind(rec, entry);" in tracker
+    assert "rec._kindTrackerInstalled" in tracker, "installing twice must no-op"
+    assert "_trackModWindowKinds(ctx, rec);" in body
+    assert "_trackModWindowKinds(ctx, rec);" in _frag_fn(
+        ext, "function _ctxWindowsFactory(ctx, rec) {"), (
+        "the factory installs its own precondition")
     assert "typeof entry.appKind === 'string'" in _frag_fn(
         ext, "function _trackModWindowKind(rec, entry) {")
 
@@ -10810,3 +10856,27 @@ def test_the_factory_only_builds_kinds_this_mod_registered(winfac_harness):
     assert "has not registered the kind" in r["kindless"], r["kindless"]
     # 3. and a mod being torn down opens nothing
     assert "refused during teardown" in r["duringTeardown"], r["duringTeardown"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_create_hook_sees_a_window_built_the_old_way(winfac_harness):
+    """Both #194 reviewers found the same defect: the hook fired only from
+    `ctx.windows.createAppWindow`, which made it true of the fixtures and false
+    of the desktop — eight of the nine scaffolds are still hand-rolled, and the
+    wiki promised delivery "however the window was actually built". A sticky
+    migrated onto the hook would have decorated the notes that already existed
+    and silently missed every one opened afterwards. It now fires from
+    `finishWindowPlacement`, the one creation tail every factory ends with, and
+    the per-subscription WeakSet keeps delivery exactly-once across both
+    sources."""
+    r = _run_winfac(winfac_harness, "hook_sees_a_handrolled_window")
+    assert r["atSubscribe"] == ["app:note:before@replay"]
+    assert r["afterHandRolled"] == ["app:note:before@replay",
+                                    "app:note:handrolled@live"], (
+        "a window built without the factory never reached the subscriber")
+    assert r["final"] == ["app:note:before@replay", "app:note:handrolled@live",
+                          "app:note:factory@live"]
+    # The factory calls the same tail, so its window must not arrive twice.
+    assert r["final"].count("app:note:factory@live") == 1
+    # Nor may re-placing a window (a tile/untile) re-deliver it.
+    assert r["afterSecondPlacement"] == r["final"]

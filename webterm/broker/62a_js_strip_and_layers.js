@@ -313,6 +313,22 @@
             if (!win || win.disposed) return win;
             if (findKeyInLayout(win.id)) placeWindowTiled(win);
             else { notifyWindowPlaced(win); bringToFront(win.id); }
+            // #194: the one tail EVERY window factory ends with, which is why
+            // ctx.windows.onAppWindowCreate fires from here rather than from
+            // the mod factory alone. A subscriber asked about app windows of
+            // the kinds it registered, "however the window was actually
+            // built" — and the dominant builder is still a mod's own
+            // hand-rolled `factory`, not ours (eight of the nine scaffolds are
+            // unmigrated). Firing only from ctx.windows.createAppWindow made
+            // the hook true of the fixtures and false of the desktop: a
+            // migrated sticky would decorate the notes that already existed
+            // and silently miss every one opened afterwards. Delivery is
+            // exactly-once per subscriber (a per-subscription WeakSet keyed on
+            // the record), so the factory's own fire and this one cannot
+            // double-deliver. Guarded: the companion may be absent.
+            if (typeof _fireModAppWindowCreate === 'function') {
+                try { _fireModAppWindowCreate(win); } catch (_) { /* isolated */ }
+            }
             return win;
         }
         // Open-or-focus for a window that ALREADY exists. Invoking one whose

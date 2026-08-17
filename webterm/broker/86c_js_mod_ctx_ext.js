@@ -920,6 +920,16 @@
         // The extender. Decorates the EXISTING v1 `windows` family in place:
         // assigning a fresh object would delete #116's onTerminalCreate.
         function _ctxWindowsFactory(ctx, rec) {
+            // The kind-ownership gate reads `rec.appWindowKinds`, so THIS
+            // extender installs the tracker that fills it. It used to live in
+            // the onAppWindowCreate extender, which made the factory silently
+            // depend on a sibling: if that one threw, the registry's own
+            // per-extender isolation would leave `createAppWindow` present but
+            // refusing every call -- and `needs: ['windows.createAppWindow']`
+            // would still resolve MET, so a mod would come up "active" with
+            // buttons that throw. An extender must not depend on a sibling for
+            // its own preconditions.
+            _trackModWindowKinds(ctx, rec);
             const fam = (ctx.windows && typeof ctx.windows === 'object')
                 ? ctx.windows : (ctx.windows = {});
             fam.createAppWindow = function (spec) {
@@ -1326,15 +1336,25 @@
         // _ctxWindowKindRestore, for the registry's per-extender isolation: a
         // mod that only opens windows keeps its factory if this one ever
         // throws, and a mod that only registers kinds keeps its restore seam.
-        function _ctxWindowCreateHook(ctx, rec) {
+        // Wrap ctx.registerWindowKind so every kind this mod registers lands in
+        // `rec.appWindowKinds` -- the set the ownership gate and the create
+        // hook's scope both read. Idempotent by a flag on the record: two
+        // extenders call it, and wrapping twice would double-track (harmless)
+        // and double-wrap (not).
+        function _trackModWindowKinds(ctx, rec) {
+            if (!rec || rec._kindTrackerInstalled) return;
             const reg = ctx.registerWindowKind;
-            if (typeof reg === 'function') {
-                ctx.registerWindowKind = function (spec) {
-                    const entry = reg.call(ctx, spec);
-                    _trackModWindowKind(rec, entry);
-                    return entry;
-                };
-            }
+            if (typeof reg !== 'function') return;
+            rec._kindTrackerInstalled = true;
+            if (!rec.appWindowKinds) rec.appWindowKinds = new Set();
+            ctx.registerWindowKind = function (spec) {
+                const entry = reg.call(ctx, spec);
+                _trackModWindowKind(rec, entry);
+                return entry;
+            };
+        }
+        function _ctxWindowCreateHook(ctx, rec) {
+            _trackModWindowKinds(ctx, rec);
             const fam = (ctx.windows && typeof ctx.windows === 'object')
                 ? ctx.windows : (ctx.windows = {});
             fam.onAppWindowCreate = function (fn) {
