@@ -207,6 +207,29 @@
             // mod's own theme callback would run mid-teardown, after resources it
             // registered later have already been released.
             rec.unloading = true;
+            // #194: the STAGED take-down, and the reason it is a CALL here and
+            // never an entry on the list below. A mod's factory-owned app
+            // windows (ctx.windows.createAppWindow) close BEFORE the first
+            // onUnload runs — which is to say WHILE every kind the mod
+            // registered is still registered, since _modRegisterWindowKind's
+            // deleteWindowKind rides that same LIFO chain. Registered as an
+            // unload it would instead be the OLDEST entry and run LAST, after
+            // the kinds were gone: the close would then reach saveAppWindow
+            // with no registry entry, fall back to the shared serializer and
+            // persist a junk /state record for a kind nothing can restore (the
+            // hazard task-manager's teardown comment documents by hand).
+            //
+            // Staged AFTER `unloading` is set, so a disposer that writes a
+            // setting cannot re-enter this doomed mod's still-registered theme
+            // subscriber. Guarded like every other call into 86c, and isolated:
+            // an absent or throwing companion must not cost the mod the
+            // teardown chain this stands in front of.
+            if (typeof _closeModAppWindows === 'function') {
+                try { _closeModAppWindows(rec); } catch (e) {
+                    console.error('[mods] staged window take-down failed for "'
+                        + (rec && rec.id) + '":', e);
+                }
+            }
             const fns = rec.unloads.splice(0).reverse();
             for (const fn of fns) { try { fn(); } catch (_) {} }
         }

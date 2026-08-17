@@ -385,6 +385,8 @@
         //         body: function (el, win, h) { … },
         //     });
         //     ctx.windows.list();            // THIS mod's live windows, frozen
+        //     ctx.windows.closeAll();        // close every one of them (the
+        //                                    // pass a disable stages for you)
         //
         // MIGRATING A KIND: registerWindowKind's `factory` must keep returning a
         // WINDOW RECORD — openAppWindow hands that value straight back to its
@@ -423,17 +425,13 @@
         // dedupe below is what makes that safe: an id that is live is ADOPTED,
         // never double-built (#167).
         //
+        // THE STAGED TAKE-DOWN and closeAll() are the section further down. The
+        // owned-window registry they read is `rec.appWindows` — deliberately on
+        // the RECORD, not in this closure, so the loader's staged pass reaches
+        // it through its arguments without seeing this fragment's locals (the
+        // arguments-not-closure rule).
+        //
         // What is NOT here, deliberately, and where it goes:
-        //   - THE STAGED TAKE-DOWN / closeAll(). The owned-window registry they
-        //     need is `rec.appWindows` — deliberately on the RECORD, not in
-        //     this closure, so the loader's take-down pass can reach it without
-        //     seeing this fragment's locals (the arguments-not-closure rule).
-        //     Whoever writes it: NEVER model that close pass as an onUnload
-        //     entry. It would be the OLDEST entry in the LIFO chain and would
-        //     run AFTER the mod's own disposers deregistered its kinds, which
-        //     is exactly the junk-record ordering task-manager's comment block
-        //     documents (a later saveAppWindow falls back to the shared
-        //     serializer). Close while every kind is still registered.
         //   - onAppWindowCreate(). Its fire point is the marked line at the end
         //     of _createModAppWindow; its REPLAY set is NOT this registry but
         //     "live windows whose appKind is one of this mod's REGISTERED
@@ -605,6 +603,81 @@
             }
             return Object.freeze(out);
         }
+
+        // ---- the staged take-down + ctx.windows.closeAll() (#194) -----------
+        // ONE close pass, TWO entry points. `ctx.windows.closeAll()` is a mod
+        // closing its own windows by hand — the core-windows-Map iteration each
+        // of the nine copies hand-rolls in its unload (mods/aistatus:459-466) —
+        // and the LOADER stages the very same function at the head of
+        // _runUnloads, so a disabled mod's factory windows are already gone
+        // before the first entry of its teardown chain runs.
+        //
+        // WHY THE LOADER STAGES IT, AND THIS FRAGMENT DOES NOT REGISTER IT.
+        // NEVER model that close pass as an onUnload entry. ctx is built before
+        // init() runs, so a cleanup registered while an extender decorates the
+        // ctx would be the OLDEST entry in the LIFO chain — and would therefore
+        // run LAST: after the mod's own disposers, and after the
+        // deleteWindowKind that _modRegisterWindowKind pushes onto that same
+        // chain when the mod registers a kind. Closing a window whose kind is no
+        // longer registered is exactly the junk-record ordering task-manager's
+        // teardown comment documents by hand: closeWindow calls saveAppWindow,
+        // saveAppWindow finds NO registry entry for the appKind, falls back to
+        // the shared serializer, and /state is left holding a record for a kind
+        // nothing can restore (an ephemeral kind's `if (kind && !kind.serialize)
+        // return` never gets the chance to fire). Staged at the head of
+        // _runUnloads the pass runs BEFORE that chain, i.e. while every kind the
+        // mod registered is still registered, which is the whole property.
+        //
+        // closeAll() is the SAME function rather than a re-derivation of it:
+        // two implementations would be two chances to get that ordering wrong,
+        // and the hand-called one is the one nobody re-checks.
+        //
+        // Returns the number of windows it closed, so a caller (and the staged
+        // pass's own tests) can tell "closed nothing" from "did not run".
+        function _closeModAppWindows(rec) {
+            const owned = rec && rec.appWindows;
+            if (!owned || typeof owned.entries !== 'function') return 0;
+            // A SNAPSHOT, newest first. Snapshot because closeWindow drains
+            // win.cleanups, and the prune _ownModAppWindow pushed there deletes
+            // from this very Map — plus a mod's own onDispose may close (or
+            // open) further windows, so the live Map is mutating underneath.
+            // Newest-first because that is the direction every other teardown in
+            // the loader runs: a window opened later is the one more likely to
+            // depend on an earlier one.
+            const list = Array.from(owned.entries()).reverse();
+            let closed = 0;
+            for (let i = 0; i < list.length; i++) {
+                const id = list[i][0];
+                const h = list[i][1];
+                // Already gone, or replaced at this id by a window built during
+                // this very pass: an earlier entry's disposer got there first.
+                if (owned.get(id) !== h) continue;
+                if (!_modAppWindowLive(h)) { owned.delete(id); continue; }
+                // h.close() rather than closeWindow(id) on purpose: the handle's
+                // own _modAppWindowLive gate is what makes a stale entry inert
+                // instead of lethal, and this pass must not be a second way to
+                // close a window that is no longer ours.
+                //
+                // Isolated per window, like win.cleanups and the extender pass:
+                // one window whose teardown throws must not strand this mod's
+                // remaining windows on the desktop — and must not escape into
+                // the unload chain the loader is standing in front of.
+                try { h.close(); closed += 1; }
+                catch (e) {
+                    try {
+                        console.error('[mods] closing app window "' + id
+                            + '" failed for "' + (rec && rec.id) + '":', e);
+                    } catch (_) { /* console is gone; keep closing */ }
+                }
+                // closeWindow drains the prune above, so this is belt-and-
+                // braces for a window torn down some other way. Identity-
+                // guarded, so a window REBUILT at this id mid-pass survives.
+                if (owned.get(id) === h) owned.delete(id);
+            }
+            return closed;
+        }
+        // ---- end staged take-down + closeAll --------------------------------
+
         // The factory. Build order is the copies' own, and it is load-bearing:
         // chrome, then the mod's containers, then the desktop insertion, then
         // the record + windows.set, then wireAppChrome, then the chip, THEN the
@@ -792,6 +865,10 @@
                 return _createModAppWindow(rec, spec);
             };
             fam.list = function () { return _listModAppWindows(rec); };
+            // The SAME pass the loader stages at the head of _runUnloads (see
+            // above): a mod that wants its windows gone without being disabled
+            // gets the ordering-correct close for free.
+            fam.closeAll = function () { return _closeModAppWindows(rec); };
         }
 
         // ---- the restore seam: a restore hook receives the factory (#194) ----

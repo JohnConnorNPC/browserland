@@ -8586,7 +8586,28 @@ def _winfac_source():
                    "function _modRestoreSpec(spec, rid, restoring) {",
                    "function _modRestoreResult(rec, v) {",
                    "function _modKindRestoreSpec(rec, spec) {",
-                   "function _ctxWindowKindRestore(ctx, rec) {"):
+                   "function _ctxWindowKindRestore(ctx, rec) {",
+                   # A30: the staged take-down / closeAll pass rides the same
+                   # slice, so the harness drives the SHIPPED close pass.
+                   "function _closeModAppWindows(rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _loader_takedown_source():
+    """86's teardown half, verbatim: _runUnloads -- which is where #194's staged
+    close pass is CALLED, ahead of the LIFO chain -- and disableMod, the loader's
+    own disable path. Sliced rather than re-typed because the A30 cases exist to
+    assert the shipped ORDER; a hand-copied _runUnloads could not."""
+    src = _loader_src()
+    out = []
+    for sig in ("function _runUnloads(rec) {", "function disableMod(id) {"):
+        out.append(_frag_fn(src, sig) + "\n        }\n")
+    body = "\n".join(out)
+    for needed in ("rec.unloading = true;",
+                   "_closeModAppWindows(rec);",
+                   "rec.unloads.splice(0).reverse()",
+                   "window.__mods.active.delete(id);"):
         assert needed in body, f"{needed} missing from the sliced range"
     return body
 
@@ -8928,7 +8949,22 @@ function revealAndFocusWindow(id) {
     win.minimized = false;
     return win;
 }
-function saveAppWindow(win) { saves.push(win.id); }
+// Core's saveAppWindow (54), reduced to the branch A30 turns on: a REGISTERED
+// kind with no serialize early-returns (nothing persisted -- task-manager and
+// every other ephemeral kind), and anything else falls back to the SHARED
+// serializer. That fallback is where a junk /state record is born when a window
+// is closed after its kind was deregistered, so the harness must reproduce it
+// or the take-down ordering could not be told apart from luck.
+function saveAppWindow(win) {
+    saves.push(win.id);
+    if (!win || win.type !== 'app') return;
+    const kind = lookupWindowKind(win.appKind);
+    if (kind && !kind.serialize) return;
+    appStore[win.id] = (kind && kind.serialize)
+        ? kind.serialize(win)
+        : { id: win.id, appKind: win.appKind, open: true,
+            geom: win.geom, color: win.color };
+}
 // closeWindow's app-window half, reduced to the teardown the factory's prune
 // actually rides: disposed, the cleanups drain, the chip + session removal.
 function closeWindow(id) {
@@ -8987,18 +9023,30 @@ function _modRegisterWindowKind(rec, spec) {
     });
     return entry;
 }
+// The loader's active-mod registry, the one thing disableMod needs from
+// `window`. A30 slices the SHIPPED _runUnloads + disableMod in below it, so the
+// order those cases assert is the order the desktop runs.
+const window = { __mods: { active: new Map() } };
+
+__TAKEDOWN__
+
 // One ctx per mod, built the way makeCtx builds it: the v1 literal, then the
 // extenders. `windows.onTerminalCreate` is here because #194 must DECORATE
 // that family, not replace it; `registerWindowKind` because A29's extender
-// WRAPS that v1 member in place.
+// WRAPS that v1 member in place; `onUnload` because it is makeCtx's own
+// one-liner and the A30 cases need the LIFO chain a real mod builds.
 function modCtx(id) {
     const rec = { id: id, version: '1.0.0', unloads: [] };
     const ctx = { id: id, ctxVersion: 1,
                   windows: { onTerminalCreate: function () {} },
+                  onUnload: function (fn) {
+                      if (typeof fn === 'function') rec.unloads.push(fn);
+                  },
                   registerWindowKind: function (spec) {
                       return _modRegisterWindowKind(rec, spec);
                   } };
     _applyCtxExtenders(ctx, rec);
+    window.__mods.active.set(id, rec);
     return { ctx: ctx, rec: rec };
 }
 function chipIds() {
@@ -9517,6 +9565,132 @@ CASES.kind_registration_is_transparent = function () {
              })() };
 };
 
+// E30, the whole case: the ORDER a disable runs in, driven through the loader's
+// OWN disableMod -> _runUnloads. The mod is task-manager's shape -- an ephemeral
+// window kind, factory windows of that kind, an onUnload chain -- minus the
+// hand-rolled teardown-ordering hack the staged pass exists to delete.
+CASES.staged_takedown_order = function () {
+    const order = [];
+    // WHEN a callback ran, and whether the mod's kind was still registered at
+    // that instant. Those two questions together are E30.
+    function mark(what) {
+        order.push(what + '@' + (lookupWindowKind('tm')
+            ? 'kind-registered' : 'kind-DEREGISTERED'));
+    }
+    const m = modCtx('task-manager');
+    // Registered BEFORE the kind, so LIFO runs it LAST -- after
+    // deleteWindowKind. It is the proof that `kind-registered` above is a real
+    // observation and not a constant: the same probe reads DEREGISTERED here.
+    m.ctx.onUnload(function () { mark('unload-registered-before-the-kind'); });
+    // EPHEMERAL, exactly like the shipped task-manager kind: no serialize, so a
+    // close while it is registered persists NOTHING, and a close after
+    // deleteWindowKind falls through to the shared serializer instead.
+    m.ctx.registerWindowKind({
+        appKind: 'tm', factory: function () { return null; },
+        menu: { label: 'Task manager', launch: function () {} },
+    });
+    const h = m.ctx.windows.createAppWindow({
+        kind: 'tm', title: 'Task manager', sid: 'tm',
+        body: function (el, win, handle) {
+            handle.onDispose(function () { mark('window-closed'); });
+        },
+    });
+    const second = m.ctx.windows.createAppWindow({
+        kind: 'tm', id: 'app:tm:second', title: 'Task manager 2', sid: 'tm',
+        body: function (el, win, handle) {
+            handle.onDispose(function () { mark('window2-closed'); });
+        },
+    });
+    // The mod's own chain, registered AFTER the kind -- task-manager's own
+    // ordering. LIFO runs these newest-first.
+    m.ctx.onUnload(function () { mark('unload-first-registered'); });
+    m.ctx.onUnload(function () { mark('unload-last-registered'); });
+    const openBefore = m.ctx.windows.list().length;
+    const savesBefore = saves.length;
+    const disabled = disableMod('task-manager');
+    return {
+        order: order, openBefore: openBefore, disabled: disabled,
+        active: window.__mods.active.has('task-manager'),
+        kindGone: lookupWindowKind('tm') === undefined,
+        windows: windows.size, chips: chipIds(),
+        desktopKids: desktop.children.length,
+        sessions: Array.from(sessions.keys()),
+        store: Object.keys(appStore),
+        saved: saves.slice(savesBefore),
+        list: m.ctx.windows.list().length,
+        owned: m.rec.appWindows.size,
+        open: h.isOpen(), open2: second.isOpen(),
+        // A second drain is a no-op: nothing left to close, nothing persisted.
+        again: (function () {
+            const n = saves.length;
+            _runUnloads(m.rec);
+            return { saves: saves.length - n, store: Object.keys(appStore) };
+        })(),
+    };
+};
+
+// The seeded violation. The SAME mod torn down the wrong way round -- the close
+// pass modelled as an onUnload entry, which (registered while the ctx is built)
+// is the OLDEST entry and so runs AFTER deleteWindowKind. That is the ordering
+// the fragment warns about, and this case exists so the assertions above cannot
+// pass by luck: the junk record is demonstrably detectable here.
+CASES.unstaged_takedown_writes_junk = function () {
+    const m = modCtx('task-manager');
+    m.ctx.registerWindowKind({
+        appKind: 'tm', factory: function () { return null; },
+    });
+    const h = m.ctx.windows.createAppWindow({ kind: 'tm', sid: 'tm',
+                                              title: 'Task manager' });
+    m.rec.unloads.unshift(function () { _closeModAppWindows(m.rec); });
+    // ...and drain the chain WITHOUT the staged call in front of it.
+    const fns = m.rec.unloads.splice(0).reverse();
+    for (const fn of fns) fn();
+    return { id: h.id, store: Object.keys(appStore),
+             record: appStore[h.id] || null,
+             kindGone: lookupWindowKind('tm') === undefined,
+             windows: windows.size, chips: chipIds() };
+};
+
+// closeAll() is the SAME pass, called by hand by a mod that is still very much
+// alive: it closes this mod's windows and touches nothing else.
+CASES.close_all_is_the_same_pass = function () {
+    const m = modCtx('aistatus');
+    const other = modCtx('recorder');
+    m.ctx.registerWindowKind({ appKind: 'ai',
+                               factory: function () { return null; } });
+    const closed = [];
+    m.ctx.windows.createAppWindow({
+        kind: 'ai', id: 'app:ai:1',
+        body: function (el, win, handle) {
+            handle.onDispose(function () { closed.push('a'); });
+        },
+    });
+    m.ctx.windows.createAppWindow({
+        kind: 'ai', id: 'app:ai:2',
+        body: function (el, win, handle) {
+            handle.onDispose(function () { closed.push('b'); });
+        },
+    });
+    const theirs = other.ctx.windows.createAppWindow({ kind: 'rec' });
+    const n = m.ctx.windows.closeAll();
+    const again = m.ctx.windows.closeAll();
+    return {
+        n: n, again: again, closed: closed,
+        // ...while the mod is still ACTIVE: closeAll is not a teardown.
+        active: window.__mods.active.has('aistatus'),
+        unloading: !!m.rec.unloading, unloads: m.rec.unloads.length,
+        kindGone: lookupWindowKind('ai') === undefined,
+        mine: m.ctx.windows.list().length,
+        theirs: other.ctx.windows.list().map(function (x) { return x.id; }),
+        theirsOpen: theirs.isOpen(),
+        ids: Array.from(windows.keys()), chips: chipIds(),
+        store: Object.keys(appStore),
+        // ...so the mod can open a fresh one straight afterwards.
+        reopened: m.ctx.windows.createAppWindow({ kind: 'ai',
+                                                  id: 'app:ai:1' }).isOpen(),
+    };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -9533,7 +9707,8 @@ def winfac_harness(tmp_path_factory):
         .replace("__REGISTRY__", _ctx_registry_source())
         .replace("__FACTORY__", _winfac_source())
         .replace("__KINDS__", _window_kind_registry_source())
-        .replace("__RESTORE__", _restore_lifecycle_source()),
+        .replace("__RESTORE__", _restore_lifecycle_source())
+        .replace("__TAKEDOWN__", _loader_takedown_source()),
         encoding="utf-8")
     return path
 
@@ -9960,3 +10135,124 @@ def test_registering_a_kind_without_a_restore_is_untouched(winfac_harness):
     assert "restore must be a function" in r["bad"][3]
     # ...and the mod's teardown still drops exactly this registration.
     assert r["torn"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the staged take-down + ctx.windows.closeAll() (#194 / A30)
+# --------------------------------------------------------------------------- #
+
+def test_the_staged_takedown_is_called_not_registered():
+    # A30's whole point, read off the source: the close pass is a CALL at the
+    # head of _runUnloads, ahead of the LIFO chain -- never an entry ON that
+    # chain, where it would be the oldest entry and run after deleteWindowKind.
+    loader = _loader_src()
+    ext = _ctx_ext_src()
+    body = _frag_fn(loader, "function _runUnloads(rec) {")
+    _order_in(body, "rec.unloading = true;",
+              "typeof _closeModAppWindows === 'function'",
+              "_closeModAppWindows(rec);",
+              "rec.unloads.splice(0).reverse()")
+    # Guarded like every other loader call into the companion fragment (a page
+    # assembled without 86c must not throw) AND isolated, because a throw here
+    # would cost the mod the entire teardown chain this stands in front of.
+    assert "try { _closeModAppWindows(rec); } catch (e) {" in body
+    # The implementation lands in 86c, once, and reaches the served page.
+    decl = "function _closeModAppWindows(rec) {"
+    assert decl in ext and decl not in loader
+    assert INDEX_HTML.count(decl) == 1
+    # NEVER an onUnload entry -- statically, at every mention on either side.
+    for name, src in (("86", loader), ("86c", ext)):
+        for line in src.splitlines():
+            if "_closeModAppWindows" not in line or line.lstrip().startswith("//"):
+                continue
+            assert "unloads.push" not in line and "onUnload(" not in line, (
+                f"{name}: the staged pass is registered as a teardown: {line!r}")
+    assert "rec.unloads.push" not in _frag_fn(ext, decl)
+    assert loader.count("_closeModAppWindows(rec)") == 1, \
+        "the staged pass has exactly one call site in the loader"
+
+
+def test_close_all_and_the_staged_pass_are_one_implementation():
+    # Two entry points, one function: a second implementation would be a second
+    # chance to get the ordering wrong, in the copy nobody re-checks.
+    ext = _ctx_ext_src()
+    fam = _frag_fn(ext, "function _ctxWindowsFactory(ctx, rec) {")
+    assert "fam.closeAll = function () { return _closeModAppWindows(rec); };" \
+        in fam
+    # closeAll decorates the existing v1 `windows` family (no new ctx family, so
+    # no new capability entry is owed -- #197 resolves the dotted member).
+    assert "ctx.closeAll" not in ext
+    assert ext.count("function _closeModAppWindows(rec) {") == 1
+    # The fragment still NAMES the trap, where the pass now lives.
+    assert "NEVER model that close pass as an onUnload" in ext
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disable_closes_factory_windows_before_the_first_unload(
+        winfac_harness):
+    # E30, the ORDER -- not the outcome. Driven through the loader's own
+    # disableMod -> _runUnloads (sliced verbatim), with a probe that reports
+    # both WHEN each callback ran and whether the mod's window kind was still
+    # registered at that instant.
+    r = _run_winfac(winfac_harness, "staged_takedown_order")
+    assert r["errors"] == []
+    assert r["openBefore"] == 2 and r["disabled"] is True
+    assert r["order"] == [
+        # 1-2. both factory windows, newest first, BEFORE any onUnload runs and
+        #      while the kind is still registered
+        "window2-closed@kind-registered",
+        "window-closed@kind-registered",
+        # 3-4. then the mod's own chain, newest-registered first
+        "unload-last-registered@kind-registered",
+        "unload-first-registered@kind-registered",
+        # 5.   and the entry registered BEFORE the kind runs after
+        #      deleteWindowKind -- which is the proof the probe above is a real
+        #      observation and not a constant
+        "unload-registered-before-the-kind@kind-DEREGISTERED",
+    ]
+    # The kind is gone, the mod's slot is released, the desktop is clean.
+    assert r["kindGone"] is True and r["active"] is False
+    assert r["windows"] == 0 and r["chips"] == [] and r["sessions"] == []
+    assert r["desktopKids"] == 0
+    assert r["open"] is False and r["open2"] is False
+    assert r["list"] == 0 and r["owned"] == 0
+    # ...and /state holds NO junk record for the kind. Both closes reached
+    # saveAppWindow (that is where the junk would be written), and the
+    # registered-but-ephemeral kind's early return is what stopped it.
+    assert r["saved"] == ["app:tm:second", "app:tm:1"]
+    assert r["store"] == []
+    # A second drain closes nothing and persists nothing.
+    assert r["again"] == {"saves": 0, "store": []}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_junk_record_is_real_when_the_pass_runs_late(winfac_harness):
+    # The seeded violation, so the assertion above cannot pass by luck: model
+    # the close pass as an onUnload entry (the oldest one, LIFO => last) and the
+    # very same mod persists a junk record for a kind nothing can restore.
+    r = _run_winfac(winfac_harness, "unstaged_takedown_writes_junk")
+    assert r["errors"] == []
+    assert r["kindGone"] is True and r["windows"] == 0 and r["chips"] == []
+    assert r["store"] == [r["id"]], (
+        "the late close wrote no junk record -- this case no longer reproduces "
+        "the hazard the staged pass exists to prevent")
+    assert r["record"]["appKind"] == "tm"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_close_all_runs_the_same_pass_without_a_teardown(winfac_harness):
+    r = _run_winfac(winfac_harness, "close_all_is_the_same_pass")
+    assert r["errors"] == []
+    # Every window of THIS mod, newest first, and a count back.
+    assert r["n"] == 2 and r["closed"] == ["b", "a"]
+    assert r["again"] == 0, "a second closeAll must find nothing to close"
+    assert r["mine"] == 0
+    # Not a teardown: the mod stays active, its chain is untouched and its kind
+    # is still registered -- which is also why nothing was persisted.
+    assert r["active"] is True and r["unloading"] is False
+    assert r["unloads"] == 1, "closeAll drained the mod's teardown chain"
+    assert r["kindGone"] is False and r["store"] == []
+    # ...and another mod's windows are none of its business.
+    assert r["theirsOpen"] is True and len(r["theirs"]) == 1
+    assert r["ids"] == r["theirs"] and r["chips"] == r["theirs"]
+    assert r["reopened"] is True
