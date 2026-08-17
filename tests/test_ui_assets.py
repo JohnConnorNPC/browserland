@@ -6989,6 +6989,24 @@ def _ctx_ext_src():
     return (BROKER_DIR / "86c_js_mod_ctx_ext.js").read_text(encoding="utf-8")
 
 
+def _assert_guarded_ctx_registration(ext, call):
+    """Every `_registerCtxExtender(...)` in an extension fragment sits inside a
+    `typeof` guard: a page assembled without #194's registry must not throw at
+    load, and a bare call there would be a ReferenceError.
+
+    Asserted against the NEAREST PRECEDING guard, not the file's last one. The
+    fragment grows one section per issue (#195's bus is the first after #194's
+    own), and each section brings its own guard block -- so a plain
+    `rindex(guard) < rindex(call)` starts reading the NEWEST section's guard for
+    every older registration and fails the moment anything is appended."""
+    i = ext.rindex(call)
+    guard = "if (typeof _registerCtxExtender === 'function') {"
+    j = ext.rindex(guard, 0, i)
+    between = ext[j + len(guard):i]
+    assert "}" not in between, \
+        f"{call!r} is not inside the typeof guard that precedes it"
+
+
 def _help_cards_src():
     # #78/S5's help-card sanitizer + ctx.registerHelpCards registry. Moved out
     # of the loader VERBATIM by #194 for the same 2500-line cap reason 86a and
@@ -7934,6 +7952,24 @@ def _ctx_family_keys():
                       re.M)
 
 
+def _standalone_capability_registrations():
+    """Capability names an extension fragment registers BY HAND, beside the
+    family it ships -- `_registerModCapability('events', 1)` (#195).
+
+    The v1 seed loop below covers makeCtx's own literal and nothing else; a
+    family added after v1 arrives through an extender, so its entry has to be
+    registered from that extender's own fragment ("an entry always ships with
+    the surface it names", per the registry's comment). The seed-drift gate
+    therefore reads BOTH halves: the loop is the v1 inventory, these are the
+    additions. Only string-literal calls count -- the loop's own
+    `_registerModCapability(_cap, 1)` is deliberately not matched here."""
+    names = set()
+    for frag in sorted(BROKER_DIR.glob("86[c-z]_js_*.js")):
+        src = frag.read_text(encoding="utf-8")
+        names |= set(re.findall(r"_registerModCapability\(\s*'([^']+)'", src))
+    return names
+
+
 def _ctx_families_added_by_extenders():
     """Top-level families an EXTENDER puts on the ctx: `ctx.<name> = ...` in a
     ctx-extension fragment.
@@ -7976,12 +8012,20 @@ def test_capability_seed_is_the_real_ctx_surface_minus_metadata():
     # would leave `ctx.capabilities` lying by omission -- a mod would be told
     # it lacks a surface it demonstrably has, and #197's whole promise is that
     # the map is a true inventory.
+    #
+    # A family added AFTER v1 cannot join the seed loop -- the loop must stay
+    # byte-equal to makeCtx's literal, per the assertion above -- so it
+    # registers its own entry beside its extender (#195's `events` is the
+    # first). Both halves count as registered; neither alone does.
+    registered = seeded | _standalone_capability_registrations()
     from_extenders = _ctx_families_added_by_extenders()
-    unregistered = sorted(from_extenders - seeded)
+    unregistered = sorted(from_extenders - registered)
     assert not unregistered, (
         f"ctx families added by an extender with no capability entry: "
-        f"{unregistered}. Add each to the seed list in "
-        f"86c_js_mod_ctx_ext.js, or the map claims they do not exist.")
+        f"{unregistered}. Register each with _registerModCapability(<name>, 1) "
+        f"beside its extender in 86c_js_mod_ctx_ext.js (or add it to the v1 "
+        f"seed list if it really is in makeCtx's literal), or the map claims "
+        f"they do not exist.")
 
 
 def test_the_needs_gate_call_sites_in_the_loader_are_guarded():
@@ -8727,10 +8771,11 @@ def test_the_app_window_factory_lands_in_the_extension_fragment():
     # Registered through the extender registry, guarded exactly like #197's is
     # (a page assembled without the registry must not throw at load).
     assert "_registerCtxExtender(_ctxWindowsFactory);" in ext
-    # rindex on both: the registry's how-to comment quotes this registration
-    # verbatim near the top of the fragment, so the FIRST hit is prose.
-    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
-        < ext.rindex("_registerCtxExtender(_ctxWindowsFactory);")
+    # rindex on the call: the registry's how-to comment quotes this
+    # registration verbatim near the top of the fragment, so the FIRST hit is
+    # prose. Against the NEAREST guard, because a later section (#195's bus)
+    # brings its own guard block after this one.
+    _assert_guarded_ctx_registration(ext, "_registerCtxExtender(_ctxWindowsFactory);")
     # Additive: the family is DECORATED, never replaced. Assigning a fresh
     # object to ctx.windows would silently delete #116's onTerminalCreate --
     # the exact failure the registry's "each fragment owns its own members"
@@ -8754,8 +8799,9 @@ def test_the_factory_family_is_covered_by_a_capability_entry():
     seed = ext[ext.index("for (const _cap of ["):]
     seed = seed[:seed.index("]")]
     assert "'windows'" in seed
-    assert _ctx_families_added_by_extenders() <= set(
-        re.findall(r"'([^']+)'", seed))
+    assert _ctx_families_added_by_extenders() <= (
+        set(re.findall(r"'([^']+)'", seed))
+        | _standalone_capability_registrations())
     assert ext.count("_registerModCapability('windows'") == 0, \
         "a duplicate capability registration is refused; drop it"
     # A mod asks for the MEMBER, which #197 resolves as a dotted path against
@@ -10514,8 +10560,8 @@ def test_the_restore_hook_is_handed_the_factory():
     # factory's registration uses (a page assembled without #194's registry
     # must not throw at load).
     assert "_registerCtxExtender(_ctxWindowKindRestore);" in ext
-    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
-        < ext.rindex("_registerCtxExtender(_ctxWindowKindRestore);")
+    _assert_guarded_ctx_registration(
+        ext, "_registerCtxExtender(_ctxWindowKindRestore);")
     # Its own extender, not a line inside _ctxWindowsFactory: the registry's
     # per-extender isolation is worth having between the two surfaces.
     assert "_registerCtxExtender(_ctxWindowsFactory);" in ext
@@ -10812,8 +10858,8 @@ def test_the_create_hook_lands_in_the_extension_fragment():
     # and the restore seam use (a page assembled without #194's registry must
     # not throw at load).
     assert "_registerCtxExtender(_ctxWindowCreateHook);" in ext
-    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
-        < ext.rindex("_registerCtxExtender(_ctxWindowCreateHook);")
+    _assert_guarded_ctx_registration(
+        ext, "_registerCtxExtender(_ctxWindowCreateHook);")
     # Its OWN extender: the registry's per-extender isolation is worth having
     # between the three, so a mod that only opens windows keeps its factory if
     # the hook ever throws, and vice versa.
@@ -11108,3 +11154,663 @@ def test_the_real_clipboard_disables_without_leaving_a_junk_record(
     assert r["kindGone"] is True
     assert r["observerOff"] is True and r["chipOff"] is True
     assert r["desktopEmpty"] is True
+
+
+# --------------------------------------------------------------------------- #
+# ctx.events -- the core -> mod event bus (#195)
+# --------------------------------------------------------------------------- #
+
+_EVENTS_SLICE_START = "// ---- ctx.events: the core -> mod event bus (#195) ---"
+_EVENTS_SLICE_END = "// ---- end ctx.events ---"
+
+#: #195's event table, verbatim from the issue: name -> (shape, the payload keys
+#: a SUBSCRIBER sees). `gen` is stamped by the bus and never by the emitter, so
+#: it is listed on the two level payloads and on neither edge one.
+_EVENT_TABLE = [
+    ("host:auth", "edge", ["hostId"]),
+    ("host:changed", "edge", ["hostId"]),
+    ("host:removed", "edge", ["hostId"]),
+    ("state:adopted", "level", ["gen"]),
+    ("lease:changed", "level", ["active", "gen"]),
+]
+
+
+def _events_source():
+    """#195's bus range in 86c, verbatim. Declaration-only apart from the two
+    guarded registration calls, which is what lets the node harness below run
+    the SHIPPED bus rather than a copy of it."""
+    src = _ctx_ext_src()
+    start = src.index(_EVENTS_SLICE_START)
+    end = src.index(_EVENTS_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _MOD_EVENT_SHAPES = Object.create(null);",
+                   "function _modEventShape(name) {",
+                   "const _MOD_EVENT_LEVELS = Object.create(null);",
+                   "let _modEventGen = 0;",
+                   "const _modEventSubs = [];",
+                   "const _modEventQueue = [];",
+                   "function _modEventPayload(payload) {",
+                   "function _modEventSameLevel(held, next) {",
+                   "function _modEventMeta(name, shape, gen, replayed) {",
+                   "function _callModEventSub(sub, name, shape, payload, gen,",
+                   "function _replayModEvent(sub) {",
+                   "function _dispatchModEvent(entry) {",
+                   "function _drainModEvents() {",
+                   "function _emitModEvent(name, payload) {",
+                   "function _modEventOn(rec, name, fn) {",
+                   "function _ctxEvents(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _run_unloads_source():
+    """86's LIFO teardown drain, verbatim -- the chain ctx.events.on pushes its
+    unsubscribe onto. Sliced rather than re-typed because "auto-unsubscribe at
+    teardown" is a claim about the SHIPPED drain; a hand-copied one could not
+    make it. Its one call into a companion (#194's staged window take-down) is
+    `typeof` guarded, so it is a no-op in a harness without the factory."""
+    body = _frag_fn(_loader_src(), "function _runUnloads(rec) {") + "\n        }\n"
+    for needed in ("rec.unloading = true;", "rec.unloads.splice(0).reverse()"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_the_events_bus_lands_in_the_extension_fragment():
+    # #195: the bus is NEW ctx surface, so it lands in 86c -- the loader is at
+    # the #68 2500-line cap and the rule there is split, never trim.
+    loader = _loader_src()
+    ext = _ctx_ext_src()
+    for sym in ("function _emitModEvent(name, payload) {",
+                "function _modEventOn(rec, name, fn) {",
+                "function _replayModEvent(sub) {",
+                "function _drainModEvents() {",
+                "function _ctxEvents(ctx, rec) {",
+                "const _MOD_EVENT_SHAPES = Object.create(null);"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#195 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's extender registry, guarded exactly like #197's
+    # and #194's own registrations (a page assembled without the registry must
+    # not throw at load).
+    assert "_registerCtxExtender(_ctxEvents);" in ext
+    _assert_guarded_ctx_registration(ext, "_registerCtxExtender(_ctxEvents);")
+    # Additive: the contract version does not move (a bump would refuse every
+    # mod that pins v1).
+    body = _frag_fn(ext, "function _ctxEvents(ctx, rec) {")
+    assert "ctxVersion" not in body
+    assert "ctxVersion: 1," in loader
+    # ...and the family is DECORATED if something already put one there, so a
+    # later member (#199's emit) cannot be deleted by this extender.
+    assert "const fam = (ctx.events && typeof ctx.events === 'object')" in body
+    assert "ctx.events = fam;" in body
+
+
+def test_the_events_family_registers_its_own_capability_entry():
+    # The CP7 drift gate: a ctx family an extender adds with no capability entry
+    # makes ctx.capabilities lie by omission. `events` is a NEW family (unlike
+    # `windows`, which #194 decorates), so it cannot ride the v1 seed -- that
+    # loop must stay byte-equal to makeCtx's literal -- and registers its own.
+    ext = _ctx_ext_src()
+    assert "_registerModCapability('events', 1);" in ext
+    assert "events" in _standalone_capability_registrations()
+    assert "events" in _ctx_families_added_by_extenders(), \
+        "the gate must be able to SEE the family: keep `ctx.events = ...` at " \
+        "the start of its own line"
+    seed = ext[ext.index("for (const _cap of ["):]
+    seed = seed[:seed.index("]")]
+    assert "'events'" not in seed, \
+        "the v1 seed must stay byte-equal to makeCtx's own literal"
+
+
+def test_the_events_table_is_the_issues_table():
+    # #195 trap 3: event names are a FROZEN contract -- adding one later is
+    # additive, renaming or repurposing one never is. So the table is asserted
+    # name by name, shape by shape, against the issue's own.
+    body = _events_source()
+    for name, shape, _keys in _EVENT_TABLE:
+        decl = f"_MOD_EVENT_SHAPES['{name}'] = '{shape}';"
+        assert decl in body, f"the event table lost {decl!r}"
+    # No sixth event smuggled in, none declared twice, and the order is the
+    # issue's (three host edges, then the two levels).
+    declared = re.findall(r"_MOD_EVENT_SHAPES\['([^']+)'\] = '(edge|level)';",
+                          body)
+    assert declared == [(n, s) for n, s, _k in _EVENT_TABLE]
+    # The table is data, and frozen: a mod sharing this scope (#71) may read it,
+    # but it may not re-shape an event out from under core.
+    assert "Object.freeze(_MOD_EVENT_SHAPES);" in body
+    # Object.create(null) for the _MOD_CTX_CAPABILITIES reason: an inherited
+    # `constructor` must not answer for an event nobody declared.
+    assert "const _MOD_EVENT_SHAPES = Object.create(null);" in body
+    assert "const _MOD_EVENT_LEVELS = Object.create(null);" in body
+
+
+def test_the_events_bus_leaves_its_three_seams_named():
+    # A34 ships the bus ONLY. The three halves that land after it each have a
+    # trap that is invisible from the call site, so the fragment must name them.
+    body = _events_source()
+    # A35: core emits, mods do not, and every core call site is typeof-guarded.
+    assert "if (typeof _emitModEvent === 'function') {" in body, \
+        "the A35 emit seam must show the guarded call shape"
+    assert "_emitModEvent('host:auth', { hostId: id });" in body
+    # A36: invalidate is a different FAMILY, and it must never emit.
+    assert "ctx.hosts.invalidate" in body
+    assert "must never call `_emitModEvent`" in body
+    # A37: a per-window disposer is not an event.
+    assert "info.onModTeardown" in body
+    # ...and the mod-emit question is #199's, not a silent omission.
+    assert "ctx.provide" in body
+    # The rule the CP8 review turned into a standing constraint: an extender
+    # that depends on a SIBLING becomes "present but always refusing" when that
+    # sibling throws. This one depends only on its ARGUMENTS.
+    assert "NO SIBLING DEPENDENCY." in body
+
+
+# #195 is BEHAVIOUR -- exactly-once replay, isolation, a bounded pass -- so these
+# cases execute the SHIPPED slices in node the way the #194/#197 cases do: the
+# ctx-extender registry, #197's capability map (so the new family's registration
+# is proven end to end and not just string-matched), the whole #195 range, and
+# 86's own _runUnloads for the teardown claim. The per-mod record is the one
+# fixture, reduced to the two fields an extender is entitled to read off it.
+_EVENTS_HARNESS = r"""
+'use strict';
+// ---- the surface these shipped slices touch, and nothing else -------------
+const errors = [];
+const warns = [];
+const infos = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = function () {
+    warns.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+__REGISTRY__
+
+__NEEDS__
+
+__EVENTS__
+
+__UNLOADS__
+
+// ---- driver ---------------------------------------------------------------
+// The per-mod record the loader hands an extender: `unloads` is the LIFO
+// teardown chain and `unloading` the mid-teardown flag. Nothing else on it is
+// any of this fragment's business, which is the point of the arguments-not-
+// closure rule.
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = { id: id, ctxVersion: 1 };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+
+const CASES = {};
+
+// E34/1: a pre-adopt and a post-adopt subscriber each get EXACTLY ONE delivery.
+CASES.state_adopted_exactly_once = function () {
+    const early = modCtx('early');
+    const seenEarly = [];
+    early.ctx.events.on('state:adopted', function (p, meta) {
+        seenEarly.push([p.gen, meta.replayed, Object.keys(p)]);
+    });
+    const beforeAdopt = seenEarly.length;
+    // core adopts -- the A35 seam, driven by hand here
+    const adopted = _emitModEvent('state:adopted', {});
+    const afterAdopt = seenEarly.length;
+    const late = modCtx('late');
+    const seenLate = [];
+    late.ctx.events.on('state:adopted', function (p, meta) {
+        seenLate.push([p.gen, meta.replayed, Object.keys(p)]);
+    });
+    // A re-adopt (a lease-loss rebuild runs the whole pass again) changes
+    // nothing, so it is not a transition and nobody is told twice.
+    const readopt = _emitModEvent('state:adopted', {});
+    return { beforeAdopt: beforeAdopt, afterAdopt: afterAdopt,
+             adopted: adopted, readopt: readopt,
+             seenEarly: seenEarly, seenLate: seenLate,
+             gen: _modEventGen, queue: _modEventQueue.length };
+};
+
+// E34/2: edges never replay.
+CASES.edges_never_replay = function () {
+    const a = modCtx('a');
+    const before = [];
+    ['host:auth', 'host:changed', 'host:removed'].forEach(function (n) {
+        a.ctx.events.on(n, function (p, meta) {
+            before.push([n, p.hostId, meta.replayed, Object.keys(p).join(',')]);
+        });
+    });
+    _emitModEvent('host:auth', { hostId: 'h1' });
+    _emitModEvent('host:changed', { hostId: 'h1' });
+    _emitModEvent('host:removed', { hostId: 'h1' });
+    const firstRound = before.slice();
+    // A mod that loads AFTER all three hears nothing until the next one.
+    const late = modCtx('late');
+    const after = [];
+    ['host:auth', 'host:changed', 'host:removed'].forEach(function (n) {
+        late.ctx.events.on(n, function (p) { after.push([n, p.hostId]); });
+    });
+    const atSubscribe = after.slice();
+    _emitModEvent('host:auth', { hostId: 'h2' });
+    return { firstRound: firstRound, atSubscribe: atSubscribe, after: after,
+             stillLive: before.length, retained: Object.keys(_MOD_EVENT_LEVELS) };
+};
+
+// ...and the two level events replay with the state that is live.
+CASES.levels_replay_the_live_state = function () {
+    _emitModEvent('lease:changed', { active: true });
+    _emitModEvent('lease:changed', { active: false });
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('lease:changed', function (p, meta) {
+        seen.push([p.active, p.gen, meta.replayed, meta.shape,
+                   Object.keys(p).sort().join(','), Object.isFrozen(p)]);
+    });
+    const atSubscribe = seen.slice();
+    _emitModEvent('lease:changed', { active: true });
+    // An unchanged level is not a transition: no generation, no delivery.
+    const noop = _emitModEvent('lease:changed', { active: true });
+    return { atSubscribe: atSubscribe, seen: seen, noop: noop,
+             gen: _modEventGen };
+};
+
+// E34/3: auto-unsubscribe on the mod's LIFO teardown chain -- the SHIPPED
+// _runUnloads, not a fixture drain.
+CASES.teardown_unsubscribes = function () {
+    const m = modCtx('m');
+    const seen = [];
+    const off = m.ctx.events.on('host:auth', function (p) { seen.push(p.hostId); });
+    _emitModEvent('host:auth', { hostId: 'h1' });
+    const unloads = m.rec.unloads.length;
+    _runUnloads(m.rec);
+    _emitModEvent('host:auth', { hostId: 'h2' });
+    // The fn the mod was handed stays callable and is now inert.
+    const offAfter = off();
+    // A mod mid-teardown may not subscribe: _runUnloads has already spliced the
+    // chain, so the disposer would never run and the handler would sit in the
+    // global list for the life of the page.
+    const during = modCtx('during');
+    let ranDuringTeardown = false;
+    during.rec.unloads.push(function () {
+        const inert = during.ctx.events.on('host:auth', function () {
+            ranDuringTeardown = true;
+        });
+        during.__inert = (inert() === false);
+    });
+    _runUnloads(during.rec);
+    _emitModEvent('host:auth', { hostId: 'h3' });
+    return { seen: seen, unloads: unloads, offAfter: offAfter,
+             subs: _modEventSubs.length, inert: !!during.__inert,
+             ranDuringTeardown: ranDuringTeardown };
+};
+
+// E34/4: a throwing handler is isolated -- from its siblings AND from the core
+// mutation site that emitted.
+CASES.throwing_handler_is_isolated = function () {
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('host:auth', function () { seen.push('one'); });
+    m.ctx.events.on('host:auth', function () { throw new Error('boom'); });
+    m.ctx.events.on('host:auth', function () { seen.push('three'); });
+    let emitThrew = false;
+    let ok = null;
+    try { ok = _emitModEvent('host:auth', { hostId: 'h1' }); }
+    catch (_) { emitThrew = true; }
+    const firstRound = seen.slice();
+    // ...and a throwing REPLAY cannot break the subscribe that triggered it,
+    // nor the next subscriber's replay.
+    _emitModEvent('lease:changed', { active: true });
+    const l = modCtx('l');
+    let subThrew = false;
+    try {
+        l.ctx.events.on('lease:changed', function () {
+            throw new Error('replay boom');
+        });
+    } catch (_) { subThrew = true; }
+    const after = [];
+    l.ctx.events.on('lease:changed', function (p) { after.push(p.active); });
+    // A broken subscriber is not retried with the same event forever.
+    const second = [];
+    m.ctx.events.on('host:auth', function () { second.push('later'); });
+    _emitModEvent('host:auth', { hostId: 'h2' });
+    return { firstRound: firstRound, seen: seen, emitThrew: emitThrew, ok: ok,
+             subThrew: subThrew, after: after, second: second,
+             errors: errors };
+};
+
+// E34/5: an emit from inside a handler coalesces into the pass in flight and
+// never nests.
+CASES.emit_from_handler_never_nests = function () {
+    const m = modCtx('m');
+    const log = [];
+    let depth = 0;
+    let maxDepth = 0;
+    m.ctx.events.on('host:auth', function (p) {
+        depth += 1; if (depth > maxDepth) maxDepth = depth;
+        log.push('auth:' + p.hostId);
+        _emitModEvent('host:changed', { hostId: p.hostId });
+        // Applied, but not yet delivered: it joined the pass in flight rather
+        // than running a second one on this stack.
+        log.push('auth-returns');
+        depth -= 1;
+    });
+    m.ctx.events.on('host:changed', function (p) {
+        depth += 1; if (depth > maxDepth) maxDepth = depth;
+        log.push('changed:' + p.hostId);
+        depth -= 1;
+    });
+    _emitModEvent('host:auth', { hostId: 'h1' });
+    return { log: log, maxDepth: maxDepth, queue: _modEventQueue.length,
+             draining: _modEventDraining };
+};
+
+// ...and two LEVEL emits inside one pass collapse to the final state.
+CASES.level_emits_coalesce_in_one_pass = function () {
+    const m = modCtx('m');
+    const leases = [];
+    m.ctx.events.on('lease:changed', function (p) {
+        leases.push([p.active, p.gen]);
+    });
+    m.ctx.events.on('host:auth', function () {
+        _emitModEvent('lease:changed', { active: false });
+        _emitModEvent('lease:changed', { active: true });
+    });
+    _emitModEvent('host:auth', { hostId: 'h1' });
+    return { leases: leases, gen: _modEventGen,
+             held: _MOD_EVENT_LEVELS['lease:changed'].payload.active };
+};
+
+// ...and the pass is BOUNDED: two handlers emitting at each other cannot
+// livelock the UI thread.
+CASES.the_pass_is_bounded = function () {
+    const m = modCtx('m');
+    let n = 0;
+    m.ctx.events.on('host:auth', function () {
+        n += 1;
+        _emitModEvent('host:auth', { hostId: 'h' + n });
+    });
+    _emitModEvent('host:auth', { hostId: 'h0' });
+    // The bus is USABLE afterwards: the flag is cleared in a finally and the
+    // queue is drained, so a runaway cannot mute every later event.
+    const seen = [];
+    m.ctx.events.on('host:removed', function (p) { seen.push(p.hostId); });
+    _emitModEvent('host:removed', { hostId: 'later' });
+    return { n: n, cap: _MOD_EVENT_MAX_PASS, queue: _modEventQueue.length,
+             draining: _modEventDraining, warns: warns, seen: seen };
+};
+
+// The nasty exactly-once case: a subscription created from INSIDE a handler,
+// after the emit it wants was applied but before it was delivered.
+CASES.subscribe_from_inside_a_handler = function () {
+    const m = modCtx('m');
+    const outer = [];
+    const inner = [];
+    m.ctx.events.on('lease:changed', function (p, meta) {
+        outer.push([p.active, p.gen, meta.replayed]);
+    });
+    m.ctx.events.on('host:auth', function () {
+        _emitModEvent('lease:changed', { active: true });   // applied, queued
+        m.ctx.events.on('lease:changed', function (p, meta) {
+            inner.push([p.active, p.gen, meta.replayed]);
+        });
+    });
+    _emitModEvent('host:auth', { hostId: 'h1' });
+    return { outer: outer, inner: inner, gen: _modEventGen,
+             queue: _modEventQueue.length };
+};
+
+// The surface itself: one member, a real capability entry, and refusals that
+// are inert rather than fatal.
+CASES.surface_and_refusals = function () {
+    const m = modCtx('m');
+    const unknown = m.ctx.events.on('nope:whatever', function () {});
+    const bad = m.ctx.events.on('host:auth', null);
+    const emitUnknown = _emitModEvent('nope:whatever', { hostId: 'h' });
+    return {
+        keys: Object.keys(m.ctx.events),
+        onIsFn: typeof m.ctx.events.on === 'function',
+        capability: m.ctx.capabilities.events,
+        table: Object.keys(_MOD_EVENT_SHAPES),
+        unknownOff: typeof unknown, unknownRet: unknown(),
+        badOff: typeof bad, badRet: bad(),
+        emitUnknown: emitUnknown,
+        subs: _modEventSubs.length,
+        infos: infos, errors: errors,
+    };
+};
+
+// The emitter's object is COPIED: a core site that reuses one literal cannot
+// mutate what a handler is still reading, and a caller-supplied `gen` is
+// dropped because the bus owns that field.
+CASES.payload_is_copied_and_gen_is_the_buss = function () {
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('host:auth', function (p) { seen.push(p); });
+    const shared = { hostId: 'h1', gen: 999 };
+    _emitModEvent('host:auth', shared);
+    shared.hostId = 'MUTATED';
+    _emitModEvent('host:auth', shared);
+    let writeThrew = false;
+    try { seen[0].hostId = 'nope'; } catch (_) { writeThrew = true; }
+    return { first: seen[0].hostId, second: seen[1].hostId,
+             genOnEdge: [('gen' in seen[0]), ('gen' in seen[1])],
+             writeThrew: writeThrew, frozen: Object.isFrozen(seen[0]) };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def events_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("events") / "harness.js"
+    path.write_text(
+        _EVENTS_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__EVENTS__", _events_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_events(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_state_adopted_reaches_early_and_late_subscribers_exactly_once(
+        events_harness):
+    # E34, clause one -- and #195's trap 5: "never zero, never twice". The
+    # pre-adopt subscriber is help's case (its 20x500 ms _stateReady poll); the
+    # post-adopt one is the same mod loading after the /state adopt won the race.
+    r = _run_events(events_harness, "state_adopted_exactly_once")
+    assert r["errors"] == []
+    assert r["beforeAdopt"] == 0, "a level with no state yet replayed anyway"
+    assert r["afterAdopt"] == 1
+    assert r["adopted"] is True
+    assert r["seenEarly"] == [[1, False, ["gen"]]], \
+        "the pre-adopt subscriber must be told once, at adopt"
+    assert r["seenLate"] == [[1, True, ["gen"]]], \
+        "the post-adopt subscriber must be told once, at subscribe"
+    # A re-adopt is not a transition, so it takes no generation and tells
+    # nobody -- which is what makes A35's emit site idempotent.
+    assert r["readopt"] is False
+    assert r["gen"] == 1
+    assert r["queue"] == 0, "the pass drained before the emit returned"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_edge_events_never_replay(events_harness):
+    # E34, clause two. An edge is a thing that HAPPENED: replaying it to a
+    # subscriber that was not there would be a lie about when it happened, so
+    # nothing about it is retained.
+    r = _run_events(events_harness, "edges_never_replay")
+    assert r["errors"] == []
+    assert r["firstRound"] == [
+        ["host:auth", "h1", False, "hostId"],
+        ["host:changed", "h1", False, "hostId"],
+        ["host:removed", "h1", False, "hostId"]]
+    assert r["atSubscribe"] == [], "an edge event replayed on subscribe"
+    assert r["after"] == [["host:auth", "h2"]]
+    assert r["stillLive"] == 4, "the earlier subscriber stopped being delivered to"
+    assert r["retained"] == [], "an edge event was retained as a level"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_level_events_replay_the_state_that_is_live(events_harness):
+    # The other half of the table: a level is a state that IS, so a late
+    # subscriber gets the CURRENT one (not the first, not every one) exactly
+    # once, with the generation that lets it order the replay against a live
+    # emit.
+    r = _run_events(events_harness, "levels_replay_the_live_state")
+    assert r["errors"] == []
+    assert r["atSubscribe"] == [[False, 2, True, "level", "active,gen", True]], \
+        "the replay must carry the LATEST level, its gen, and be marked replayed"
+    assert r["seen"][1:] == [[True, 3, False, "level", "active,gen", True]]
+    assert r["noop"] is False, "an unchanged level is not a transition"
+    assert r["gen"] == 3, "a no-op level emit must not burn a generation"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_subscription_is_dropped_by_the_mods_teardown(events_harness):
+    # E34, clause three. The unsubscribe rides rec.unloads, so a disabled mod
+    # stops hearing about hosts even if it never called the fn it was given --
+    # the discipline every other ctx primitive follows.
+    r = _run_events(events_harness, "teardown_unsubscribes")
+    assert r["errors"] == []
+    assert r["unloads"] == 1, "on() did not register its own unsubscribe"
+    assert r["seen"] == ["h1"], "a torn-down mod was still delivered to"
+    assert r["offAfter"] is False, "the returned unsubscribe must stay callable"
+    assert r["subs"] == 0
+    # ...and a mod mid-teardown cannot subscribe at all.
+    assert r["inert"] is True and r["ranDuringTeardown"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_handler_starves_neither_its_siblings_nor_the_emitter(
+        events_harness):
+    # E34, clause four -- the teardown-callback policy, one level up. The core
+    # mutation site that emitted must not learn about a mod's bug either.
+    r = _run_events(events_harness, "throwing_handler_is_isolated")
+    assert r["firstRound"] == ["one", "three"], \
+        "a throw starved a sibling handler"
+    assert r["emitThrew"] is False, "a mod's throw reached the core emit site"
+    assert r["ok"] is True
+    assert r["subThrew"] is False, "a throwing REPLAY broke the subscribe"
+    assert r["after"] == [True], "the next subscriber's replay was starved"
+    assert r["second"] == ["later"]
+    # A broken subscriber is not dropped either: the next emit still reaches its
+    # siblings, and it throws again (three errors in all, not two).
+    assert r["seen"] == ["one", "three", "one", "three"]
+    # Logged, once per failure, naming the mod and the event.
+    assert len(r["errors"]) == 3
+    assert all("[mods] events" in e for e in r["errors"])
+    assert any('"m"' in e and '"host:auth"' in e for e in r["errors"])
+    assert any('"l"' in e and '"lease:changed"' in e for e in r["errors"])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_emit_from_inside_a_handler_joins_the_pass_instead_of_nesting(
+        events_harness):
+    # E34, clause five, half one. #195's trap 6: a handler that mutates hosts
+    # from inside host:changed must not recurse -- so the nested emit is
+    # applied, queued, and delivered by the pass ALREADY running.
+    r = _run_events(events_harness, "emit_from_handler_never_nests")
+    assert r["errors"] == []
+    assert r["log"] == ["auth:h1", "auth-returns", "changed:h1"], \
+        "the nested emit ran on the emitting handler's stack"
+    assert r["maxDepth"] == 1, "handlers nested"
+    assert r["queue"] == 0 and r["draining"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_two_level_emits_in_one_pass_deliver_the_final_state_once(
+        events_harness):
+    # ...which is what "coalesces" means for a LEVEL: only the latest state
+    # matters, so a superseded one is replaced in the queue rather than
+    # delivered and immediately contradicted. An EDGE never coalesces (two auth
+    # successes are two facts) -- the case above proves that side.
+    r = _run_events(events_harness, "level_emits_coalesce_in_one_pass")
+    assert r["errors"] == []
+    assert r["leases"] == [[True, 3]], \
+        "a superseded level state was delivered anyway"
+    assert r["held"] is True and r["gen"] == 3
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_pass_is_bounded_and_the_bus_survives_it(events_harness):
+    # E34, clause five, half two, and #169's lesson: two handlers emitting at
+    # each other must not spin the UI thread. Exhausting the bound is a
+    # deliberate abandonment with a loud warning, not a dead page.
+    r = _run_events(events_harness, "the_pass_is_bounded")
+    assert r["n"] == r["cap"], "the drain did not stop at the bound"
+    assert r["queue"] == 0 and r["draining"] is False
+    assert len(r["warns"]) == 1 and "keep emitting" in r["warns"][0]
+    # ...and the bus still works afterwards: the flag is cleared in a finally,
+    # so a runaway cannot silently mute every later event.
+    assert r["seen"] == ["later"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_subscribing_from_inside_a_handler_is_still_exactly_once(
+        events_harness):
+    # The case #195's trap 4 names: replay and the live emit must be mutually
+    # exclusive for one subscription. A subscription born between an emit being
+    # APPLIED and that emit being DELIVERED is the one that catches a bus which
+    # only checks one of the two.
+    r = _run_events(events_harness, "subscribe_from_inside_a_handler")
+    assert r["errors"] == []
+    assert r["inner"] == [[True, 2, True]], \
+        "a subscription born mid-pass was told zero times or twice"
+    assert r["outer"] == [[True, 2, False]]
+    assert r["queue"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_events_surface_is_one_member_and_refuses_inertly(events_harness):
+    # ctx.events carries `on` and nothing else: a mod that could emit
+    # host:removed could lie to every other mod about core state (#199 owns
+    # inter-mod messaging). And a mod written against a NEWER build names an
+    # event this one does not emit -- absence is never an error (#157), so the
+    # subscription is inert and visible rather than a throw out of init().
+    r = _run_events(events_harness, "surface_and_refusals")
+    assert r["keys"] == ["on"] and r["onIsFn"] is True
+    assert r["capability"] == 1, "ctx.capabilities must name the new family"
+    assert r["table"] == ["host:auth", "host:changed", "host:removed",
+                          "state:adopted", "lease:changed"]
+    assert r["unknownOff"] == "function" and r["unknownRet"] is False
+    assert r["badOff"] == "function" and r["badRet"] is False
+    assert r["subs"] == 0, "a refused subscription still joined the list"
+    assert len(r["infos"]) == 1 and "nope:whatever" in r["infos"][0]
+    # An unknown name from CORE is a programming error, and says so.
+    assert r["emitUnknown"] is False
+    assert len(r["errors"]) == 1 and "nope:whatever" in r["errors"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_payload_is_copied_frozen_and_the_bus_owns_gen(events_harness):
+    # A core site that reuses one literal across emits (the obvious A35 shape)
+    # must not be able to mutate what a handler is still reading, and `gen` is
+    # the bus's field -- a shadowed one would break the ordering it exists to
+    # provide.
+    r = _run_events(events_harness, "payload_is_copied_and_gen_is_the_buss")
+    assert r["errors"] == []
+    assert r["first"] == "h1" and r["second"] == "MUTATED"
+    assert r["genOnEdge"] == [False, False], \
+        "an EDGE payload carries ids, not a generation"
+    assert r["frozen"] is True and r["writeThrew"] is True

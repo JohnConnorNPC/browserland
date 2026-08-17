@@ -1371,3 +1371,461 @@
             _registerCtxExtender(_ctxWindowCreateHook);
         }
         // ---- end ctx.windows.createAppWindow --------------------------------
+
+        // ---- ctx.events: the core -> mod event bus (#195) -------------------
+        // Every host-lifecycle and state-lifecycle fact core wants to tell a mod
+        // travels today as an ad-hoc duck-typed protocol: `win._onHostAuth` in
+        // four mods that core invokes BY CONVENTION, `win._hostRemoved` in a
+        // fifth, help polling the core-private `_stateReady` 20x500 ms, and
+        // workspaces reading the core-private `_deactivated`. Nothing registers
+        // those, nothing types them, and core cannot refactor its auth form, its
+        // host list or its boot sequencing without auditing every mod. This is
+        // the one channel that replaces all of it:
+        //
+        //     const off = ctx.events.on('state:adopted', function (payload) {
+        //         …                       // payload: the table's own shape
+        //     });                         // off(): unsubscribe; auto at teardown
+        //
+        // THE EVENT TABLE IS THE CONTRACT (#195's own table, verbatim):
+        //
+        //     name            shape   payload           replay on subscribe
+        //     host:auth       edge    {hostId}          no
+        //     host:changed    edge    {hostId}          no
+        //     host:removed    edge    {hostId}          no
+        //     state:adopted   level   {gen}             YES, once
+        //     lease:changed   level   {active, gen}     YES, once
+        //
+        // EDGE vs LEVEL is the whole design, not a flag. An EDGE event is a
+        // thing that HAPPENED — a subscriber that was not there missed it, and
+        // replaying it later would be a lie about when it happened. A LEVEL
+        // event is a state that IS — so a subscriber arriving late is entitled
+        // to the current one, and gets it exactly once, immediately, from its
+        // own `on()` call. The two level events are precisely the two a mod
+        // polls or reads a core private for today: the replay is what deletes
+        // help's 20-tick timer and workspaces' `_deactivated` read.
+        //
+        // The properties this bus guarantees, each implemented below:
+        //
+        //  1. EXACTLY ONCE, replay XOR live. A pre-adopt subscriber is told at
+        //     adopt; a post-adopt subscriber is told at subscribe. Never zero,
+        //     never twice — including the nasty case, a subscribe that lands
+        //     between an emit being APPLIED and that emit being DELIVERED
+        //     (which happens whenever a handler subscribes from inside another
+        //     handler). Enforced per SUBSCRIPTION by two integers: `since`, the
+        //     generation this subscription was born at, and `gen`, the highest
+        //     generation it has been handed. Per subscription and not globally,
+        //     so two mods each get their own exactly-once and a mod that
+        //     unsubscribes and re-subscribes is told again — which is why no mod
+        //     needs git's belt-and-braces WeakSet.
+        //  2. A MONOTONIC GENERATION. Every emit that actually happens takes the
+        //     next integer, and a LEVEL payload carries it, so a subscriber can
+        //     order a replayed delivery against a live one (a replay of gen 3
+        //     arriving after a live gen 5 is stale, and says so).
+        //  3. FIRE-AFTER-APPLY. Core calls the emit AFTER it has mutated; the
+        //     bus applies its OWN state (the generation, the retained level)
+        //     before it calls anybody. A handler therefore observes finished
+        //     state, never a half-applied one — the property ctx.theme.onChange
+        //     already got right and the reason this copies it rather than
+        //     inventing a channel.
+        //  4. HANDLER ISOLATION. A throwing handler is logged and its siblings
+        //     still run, and the throw never reaches the core mutation site that
+        //     emitted — the teardown-callback policy (_runUnloads), one level up.
+        //  5. AUTO-UNSUBSCRIBE AT TEARDOWN. The unsubscribe is pushed onto the
+        //     mod's LIFO chain (rec.unloads) as well as returned, so a disabled
+        //     mod stops hearing about hosts even if it never called the fn it was
+        //     given — the discipline every other ctx primitive follows.
+        //  6. BOUNDED RE-ENTRANCY COALESCING. An emit from inside a handler
+        //     joins the pass already running instead of starting a nested one,
+        //     and that pass is capped (#169's lesson from the theme notify).
+        //
+        // WHO MAY EMIT. Core, and only core. `ctx.events` carries `on` and
+        // nothing else: a mod that could emit `host:removed` could lie to every
+        // other mod about core state, and inter-mod messaging is a separate
+        // surface with its own naming and its own trust story (#199's
+        // ctx.provide / ctx.consume). Adding `emit` later is additive.
+        //
+        // THREE SEAMS THIS DELIBERATELY LEAVES OPEN:
+        //
+        //   A35 — THE CORE EMIT POINTS. `_emitModEvent(name, payload)` below is
+        //     the only door into the bus, and no core fragment calls it yet.
+        //     The five sites #195 names are auth success, host add/edit/remove,
+        //     the /state adopt and lease gain/loss; each is a one-liner at an
+        //     EXISTING mutation site, placed AFTER the mutation (property 3),
+        //     and `typeof`-guarded exactly like the loader's calls into this
+        //     fragment, so a page assembled without 86c is unguarded-but-alive
+        //     rather than a ReferenceError:
+        //
+        //         if (typeof _emitModEvent === 'function') {
+        //             _emitModEvent('host:auth', { hostId: id });
+        //         }
+        //
+        //   A36 — ctx.hosts.invalidate. Its own FAMILY (`hosts`), its own
+        //     extender and its own capability entry, not a member here. And it
+        //     must never call `_emitModEvent`: invalidation and notification are
+        //     separate acts, so a subscriber that reacts to `host:changed` by
+        //     invalidating cannot recurse.
+        //
+        //   A37 — info.onModTeardown. A per-window disposer in the
+        //     onTerminalCreate info bag, not an event: it is scoped to one
+        //     window and one mod, and the bus is broadcast.
+        //
+        // Additive and feature-detected: ctxVersion stays 1, `events` is a NEW
+        // family so it registers its own capability entry (below), and a mod
+        // tests `if (ctx.events)` / `typeof ctx.events.on === 'function'` or
+        // declares `needs: ['events']`.
+        //
+        // NO SIBLING DEPENDENCY. This extender's only preconditions are its two
+        // arguments — `rec.unloads` for the teardown chain, `rec.unloading` for
+        // the mid-teardown refusal — both of which the LOADER owns and hands
+        // over. Nothing here is installed by another extender, so per-extender
+        // isolation cannot turn a sibling's throw into an `on()` that is present
+        // and always refusing.
+
+        // The table, as data. Object.create(null) for the reason
+        // _MOD_CTX_CAPABILITIES gives: these keys are NAMES off the wire-ish
+        // side of a contract, and an inherited `constructor` must not answer for
+        // an event nobody declared. Frozen because the names are a frozen
+        // contract — adding one later is additive, renaming or repurposing one
+        // never is.
+        const _MOD_EVENT_SHAPES = Object.create(null);
+        _MOD_EVENT_SHAPES['host:auth'] = 'edge';        // {hostId}
+        _MOD_EVENT_SHAPES['host:changed'] = 'edge';     // {hostId}
+        _MOD_EVENT_SHAPES['host:removed'] = 'edge';     // {hostId}
+        _MOD_EVENT_SHAPES['state:adopted'] = 'level';   // {gen}
+        _MOD_EVENT_SHAPES['lease:changed'] = 'level';   // {active, gen}
+        Object.freeze(_MOD_EVENT_SHAPES);
+
+        // 'edge' | 'level' for a known name, '' for everything else. The ONE
+        // place a name is validated, so an unknown name cannot reach the queue,
+        // the level store or a subscription.
+        function _modEventShape(name) {
+            if (typeof name !== 'string' || !name) return '';
+            const shape = _MOD_EVENT_SHAPES[name];
+            return (shape === 'edge' || shape === 'level') ? shape : '';
+        }
+
+        // The retained LEVEL state: name -> {payload, gen}. This is what a late
+        // subscriber replays out of, and the reason a level emit is a state
+        // transition rather than an announcement. Edge events are never stored:
+        // there is nothing to be late FOR.
+        const _MOD_EVENT_LEVELS = Object.create(null);
+        // The monotonic generation. Bumped by an emit that actually happens (a
+        // level emit that changes nothing does not happen — see _emitModEvent),
+        // and stamped into every LEVEL payload.
+        let _modEventGen = 0;
+        // Every live subscription, ACROSS mods, in subscribe order: {rec, name,
+        // fn, since, gen, dead}. A fragment-level const for the reason the
+        // extender registry's is — nothing runs before this fragment, and the
+        // first read is at loadMods() time.
+        const _modEventSubs = [];
+        // Emits applied but not yet delivered. Non-empty only DURING a pass: an
+        // emit from outside one drains synchronously before it returns.
+        const _modEventQueue = [];
+        let _modEventDraining = false;
+        // The bound. A pair of handlers that emit at each other would otherwise
+        // spin the UI thread forever; #169 bounded the theme notify at 4 passes
+        // for the same reason. Generous, because a legitimate cascade (a lease
+        // change that re-adopts state) is a handful of deliveries deep, and
+        // exhausting it is a bug report, not a policy.
+        const _MOD_EVENT_MAX_PASS = 64;
+        // The unsubscribe handed back when there is nothing to unsubscribe: a
+        // bad handler, an unknown event, a mod mid-teardown. Shared and inert,
+        // so a caller can always call what it was given.
+        const _MOD_EVENT_NO_SUB = function () { return false; };
+
+        // One place the bus reports a failure, and it must not become the second
+        // one: `sub.rec.id` is an attacker-adjacent read (a proxy, a throwing
+        // getter), and a throw HERE would escape into the core mutation site the
+        // emit stands in front of.
+        function _logModEventError(what, name, sub, e) {
+            try {
+                console.error('[mods] events ' + what + ' failed for "'
+                    + (sub && sub.rec && sub.rec.id) + '" on "'
+                    + String(name) + '":', e);
+            } catch (_) {
+                try { console.error('[mods] events ' + what + ' failed'); }
+                catch (__) { /* console is gone; keep going */ }
+            }
+        }
+
+        // The caller's payload, COPIED. Three reasons it is never passed
+        // through: an emitter that keeps a reference could mutate what a
+        // handler is still reading, a getter on it would run inside a handler's
+        // stack (and could throw there), and the retained level must be a
+        // snapshot of the state at emit time rather than a live view of it. A
+        // caller-supplied `gen` is dropped — the bus owns that field, and a core
+        // site that shadowed it would break the ordering it exists to provide.
+        function _modEventPayload(payload) {
+            const out = {};
+            if (!payload || typeof payload !== 'object'
+                    || Array.isArray(payload)) {
+                return out;
+            }
+            let keys = [];
+            try { keys = Object.keys(payload); } catch (_) { return out; }
+            for (let i = 0; i < keys.length; i++) {
+                if (keys[i] === 'gen') continue;
+                try { out[keys[i]] = payload[keys[i]]; }
+                catch (_) { /* a throwing getter drops its own field */ }
+            }
+            return out;
+        }
+
+        // Is this level emit a real transition? Shallow Object.is over the own
+        // keys, ignoring `gen` (the retained copy carries one and the incoming
+        // copy does not yet). A level is a STATE: re-announcing an unchanged one
+        // is by definition a no-op, so it takes no generation and wakes nobody.
+        // That is also what makes `state:adopted` idempotent at its call site —
+        // a re-adopt after a lease-loss rebuild cannot deliver a second time to
+        // a subscriber that already has it (#195's "never twice").
+        function _modEventSameLevel(held, next) {
+            if (!held || !next) return false;
+            const a = Object.keys(held).filter(function (k) { return k !== 'gen'; });
+            const b = Object.keys(next).filter(function (k) { return k !== 'gen'; });
+            if (a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) {
+                if (!Object.prototype.hasOwnProperty.call(next, a[i])) return false;
+                if (!Object.is(held[a[i]], next[a[i]])) return false;
+            }
+            return true;
+        }
+
+        // The second argument every handler is passed, frozen and built per
+        // delivery. Purely additive to the table's payload (a one-argument
+        // handler never sees it), and it answers the one question the payload
+        // cannot: was this delivery a REPLAY or a live emit. Same word
+        // onAppWindowCreate's info bag uses.
+        function _modEventMeta(name, shape, gen, replayed) {
+            return Object.freeze({
+                name: name, shape: shape, gen: gen, replayed: !!replayed,
+            });
+        }
+
+        // Hand ONE event to ONE subscription. The exactly-once mark is the two
+        // lines around the call: a generation already delivered to this
+        // subscription is refused, and the new one is recorded BEFORE the
+        // handler runs, so a handler that re-enters — emits, subscribes,
+        // unsubscribes — cannot be fed the same generation from inside its own
+        // delivery. Isolated: a throw is logged and does NOT un-record the
+        // delivery, or a retry would hand a broken subscriber the same event
+        // forever.
+        function _callModEventSub(sub, name, shape, payload, gen, replayed) {
+            if (!sub || sub.dead) return false;
+            // Mid-teardown, exactly as _fireThemeSubs skips one: _runUnloads has
+            // marked the record dead and is draining LIFO, so this subscription
+            // may still be on the list while resources the handler needs are
+            // already released.
+            if (sub.rec && sub.rec.unloading) return false;
+            if (gen <= sub.gen) return false;
+            sub.gen = gen;
+            try {
+                sub.fn(payload, _modEventMeta(name, shape, gen, replayed));
+            } catch (e) {
+                _logModEventError(replayed ? 'replay' : 'handler', name, sub, e);
+            }
+            return true;
+        }
+
+        // The subscribe-time REPLAY, and the whole of it: LEVEL only, at most
+        // one delivery, out of the retained state. An edge event returns false
+        // here and always will — that is the table, and it is the line that
+        // makes `host:auth` safe to subscribe to at any moment.
+        function _replayModEvent(sub) {
+            if (!sub || sub.dead) return false;
+            if (_modEventShape(sub.name) !== 'level') return false;
+            const held = _MOD_EVENT_LEVELS[sub.name];
+            if (!held) return false;                  // the level never happened
+            return _callModEventSub(sub, sub.name, 'level', held.payload,
+                                    held.gen, true);
+        }
+
+        // Deliver one queued emit to every subscription that is entitled to it,
+        // in subscribe order, over a SNAPSHOT — a handler may subscribe,
+        // unsubscribe or tear its own mod down from inside its delivery.
+        //
+        // `since` is the other half of the exactly-once rule and the half that
+        // is easy to miss: a subscription born AFTER this emit was applied has
+        // already been told (a level, through its own replay) or was never
+        // entitled (an edge, which happened before it existed). Comparing
+        // generations rather than remembering a list is what makes that true
+        // for both shapes at once.
+        function _dispatchModEvent(entry) {
+            const list = _modEventSubs.slice();
+            for (let i = 0; i < list.length; i++) {
+                const sub = list[i];
+                if (sub.name !== entry.name) continue;
+                if (_modEventSubs.indexOf(sub) === -1) continue;   // gone mid-fire
+                if (entry.gen <= sub.since) continue;              // born after it
+                _callModEventSub(sub, entry.name, entry.shape, entry.payload,
+                                 entry.gen, false);
+            }
+        }
+
+        // THE ONE PASS. Re-entrancy is handled by the first line: an emit raised
+        // from inside a handler finds a drain already running, returns
+        // immediately, and its queued entry is picked up by the loop below —
+        // it COALESCES into the pass in flight and never starts a nested one.
+        // So the stack depth of a cascade is constant however deep the cascade
+        // is, and the ORDER stays the order things were applied in.
+        //
+        // Bounded for the reason #169 bounded the theme notify: two handlers
+        // emitting at each other must not livelock the UI thread. Exhausting the
+        // bound drops what is left — deliberate abandonment with a loud warning,
+        // rather than a page that never repaints again.
+        function _drainModEvents() {
+            if (_modEventDraining) return 0;
+            _modEventDraining = true;
+            let n = 0;
+            try {
+                while (_modEventQueue.length) {
+                    if (n >= _MOD_EVENT_MAX_PASS) {
+                        const dropped = _modEventQueue.length;
+                        _modEventQueue.length = 0;
+                        try {
+                            console.warn('[mods] events: handlers keep emitting;'
+                                + ' stopped after ' + _MOD_EVENT_MAX_PASS
+                                + ' deliveries and dropped ' + dropped
+                                + ' queued event(s)');
+                        } catch (_) { /* console is gone; the queue is clear */ }
+                        break;
+                    }
+                    n += 1;
+                    _dispatchModEvent(_modEventQueue.shift());
+                }
+            } finally {
+                // Always cleared, even if a dispatch escaped somehow: a stuck
+                // flag would silently mute the bus for the life of the page.
+                _modEventDraining = false;
+            }
+            return n;
+        }
+
+        // CORE'S emit — the A35 seam, and the only door into the bus. Called
+        // from a core mutation site AFTER the mutation (property 3: a handler
+        // must observe the new state, never a half-applied one), `typeof`
+        // guarded there like every other call into this fragment.
+        //
+        // Returns true when the event was applied. false means it was refused —
+        // an unknown name (a programming error, logged) or a level emit that
+        // changed nothing (a no-op by design).
+        //
+        // APPLY, THEN QUEUE, THEN DRAIN, in that order, and the order matters:
+        // the generation is taken and the level retained BEFORE anything is
+        // delivered, so a subscription created from inside a handler replays the
+        // state that is already true instead of a state that is still pending.
+        function _emitModEvent(name, payload) {
+            const shape = _modEventShape(name);
+            if (!shape) {
+                _logModEventError('emit', name, null,
+                    new Error('not an event this build declares'));
+                return false;
+            }
+            const data = _modEventPayload(payload);
+            if (shape === 'level') {
+                const held = _MOD_EVENT_LEVELS[name];
+                if (held && _modEventSameLevel(held.payload, data)) return false;
+            }
+            const gen = _modEventGen + 1;
+            _modEventGen = gen;
+            // Only a LEVEL payload carries `gen` — that is the table. An edge
+            // carries ids, not snapshots; a subscriber that wants the current
+            // state reads it (and the meta bag carries the generation anyway).
+            if (shape === 'level') data.gen = gen;
+            const frozen = Object.freeze(data);
+            if (shape === 'level') {
+                _MOD_EVENT_LEVELS[name] = { payload: frozen, gen: gen };
+            }
+            // COALESCING, for LEVEL events only, and only over entries that have
+            // not started delivery — the drain SHIFTS an entry off before
+            // dispatching it, so what is still in the queue is exactly what
+            // nobody has seen. Two lease changes inside one pass deliver the
+            // final state once instead of both in turn; an EDGE never coalesces,
+            // because two auth successes are two facts and dropping one would be
+            // losing an event, not skipping a superseded state.
+            let queued = false;
+            if (shape === 'level') {
+                for (let i = 0; i < _modEventQueue.length; i++) {
+                    if (_modEventQueue[i].name !== name) continue;
+                    _modEventQueue[i].payload = frozen;
+                    _modEventQueue[i].gen = gen;
+                    queued = true;
+                    break;
+                }
+            }
+            if (!queued) {
+                _modEventQueue.push({ name: name, shape: shape,
+                                      payload: frozen, gen: gen });
+            }
+            _drainModEvents();
+            return true;
+        }
+
+        // ctx.events.on. Returns an unsubscribe fn, which is ALSO pushed onto
+        // the mod's LIFO teardown chain — the discipline #116's onTerminalCreate
+        // and #194's onAppWindowCreate both follow.
+        function _modEventOn(rec, name, fn) {
+            if (typeof fn !== 'function') return _MOD_EVENT_NO_SUB;
+            const shape = _modEventShape(name);
+            if (!shape) {
+                // NOT an error, and deliberately not a throw. A mod written
+                // against a NEWER build names an event this one does not emit;
+                // refusing it inertly is the #157 rule ("absence is never an
+                // error") and keeps that mod running here, exactly as a typo
+                // stays visible in the console.
+                try {
+                    console.info('[mods] events: "' + String(name) + '" is not '
+                        + 'an event this build emits; the subscription is inert');
+                } catch (_) { /* console is gone */ }
+                return _MOD_EVENT_NO_SUB;
+            }
+            // A mod being torn down may not subscribe: _runUnloads has already
+            // spliced rec.unloads, so the disposer below would never run and a
+            // dead mod's handler would sit in the global list for the life of
+            // the page.
+            if (rec && rec.unloading) return _MOD_EVENT_NO_SUB;
+            const sub = {
+                rec: rec, name: name, fn: fn,
+                since: _modEventGen,       // everything applied so far is history
+                gen: 0,                    // ...and nothing has been delivered
+                dead: false,
+            };
+            const off = function () {
+                if (sub.dead) return false;
+                sub.dead = true;
+                const i = _modEventSubs.indexOf(sub);
+                if (i !== -1) _modEventSubs.splice(i, 1);
+                return true;
+            };
+            _modEventSubs.push(sub);
+            // Registered BEFORE the replay runs: a handler that throws, or that
+            // tears its own mod down from inside its very first delivery, must
+            // not be able to leave a subscription behind with nothing left to
+            // drop it.
+            if (rec && Array.isArray(rec.unloads)) rec.unloads.push(off);
+            _replayModEvent(sub);
+            return off;
+        }
+
+        // The extender. `events` is a NEW family, so this ASSIGNS one — but it
+        // decorates an existing object if some later fragment got there first
+        // (#199's ctx.events.emit is the obvious next member), for the same
+        // reason the window extenders never replace ctx.windows: replacing a
+        // family deletes a sibling's members.
+        function _ctxEvents(ctx, rec) {
+            const fam = (ctx.events && typeof ctx.events === 'object')
+                ? ctx.events : {};
+            fam.on = function (name, fn) { return _modEventOn(rec, name, fn); };
+            ctx.events = fam;
+        }
+        // Guarded like every other registration in this fragment: a page
+        // assembled without #194's registry or #197's capability map must not
+        // throw at load. The capability entry is what keeps ctx.capabilities a
+        // TRUE inventory — a family an extender adds with no entry would make
+        // the map lie by omission, and the drift gate refuses one.
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxEvents);
+        }
+        if (typeof _registerModCapability === 'function') {
+            _registerModCapability('events', 1);
+        }
+        // ---- end ctx.events -------------------------------------------------
