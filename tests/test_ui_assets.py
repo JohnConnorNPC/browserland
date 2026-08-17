@@ -8589,7 +8589,17 @@ def _winfac_source():
                    "function _ctxWindowKindRestore(ctx, rec) {",
                    # A30: the staged take-down / closeAll pass rides the same
                    # slice, so the harness drives the SHIPPED close pass.
-                   "function _closeModAppWindows(rec) {"):
+                   "function _closeModAppWindows(rec) {",
+                   # A31: the create hook -- its fire point is inside
+                   # _createModAppWindow, so it could not ride any other slice.
+                   "const _appWindowCreateSubs = [];",
+                   "function _modAppWindowInfo(win, replayed) {",
+                   "function _emitModAppWindowCreate(sub, win, replayed) {",
+                   "function _replayModAppWindowCreate(sub, kind) {",
+                   "function _fireModAppWindowCreate(win) {",
+                   "function _trackModWindowKind(rec, entry) {",
+                   "function _modOnAppWindowCreate(rec, fn) {",
+                   "function _ctxWindowCreateHook(ctx, rec) {"):
         assert needed in body, f"{needed} missing from the sliced range"
     return body
 
@@ -8667,12 +8677,18 @@ def test_the_app_window_factory_lands_in_the_extension_fragment():
     for sym in ("function _createModAppWindow(rec, spec) {",
                 "function _ownModAppWindow(rec, win, bodyEl, toolbarEl) {",
                 "function _listModAppWindows(rec) {",
-                "function _modAppWindowChip(win, sid, title) {",
-                "const fam = (ctx.windows && typeof ctx.windows === 'object')"):
+                "function _modAppWindowChip(win, sid, title) {"):
         assert sym in ext, f"{sym!r} did not land in 86c"
         assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
         assert INDEX_HTML.count(sym) == 1, \
             f"#194 factory symbol missing/duplicated in the served page: {sym!r}"
+    # The decorate-in-place guard is deliberately RE-USED by every extender that
+    # adds to the v1 `windows` family (A31's create hook is the second), so it is
+    # not unique in the page -- but every occurrence must come from 86c, and
+    # none from the loader.
+    guard = "const fam = (ctx.windows && typeof ctx.windows === 'object')"
+    assert ext.count(guard) >= 1 and guard not in loader
+    assert INDEX_HTML.count(guard) == ext.count(guard)
     # The extender itself is DECLARED once (the registry's own how-to comment
     # names it a second time -- it predicted this exact function).
     assert ext.count("function _ctxWindowsFactory(ctx, rec) {") == 2
@@ -8740,19 +8756,19 @@ def test_the_factory_reuses_core_and_adds_no_core_entry_point():
 
 
 def test_the_factory_documents_the_seams_it_deliberately_left():
-    # #194 ships the create path (and, since A29, the restore seam just below
-    # it); the staged take-down / closeAll and onAppWindowCreate are separate
-    # changes. Each one has a trap
-    # that is invisible from the call site, so the fragment must NAME them --
-    # in particular the LIFO ordering that makes an onUnload-registered close
-    # pass wrong, which is the trap task-manager's comment block documents.
+    # #194 ships the create path, the restore seam (A29), the staged take-down
+    # (A30) and the create hook (A31). Each one has a trap that is invisible
+    # from the call site, so the fragment must NAME them -- in particular the
+    # LIFO ordering that makes an onUnload-registered close pass wrong, which is
+    # the trap task-manager's comment block documents.
     ext = _ctx_ext_src()
     head = ext[ext.index(_WINFAC_SLICE_START):]
     assert "rec.appWindows" in head, \
         "the owned-window registry must live on the RECORD for the take-down"
     assert "NEVER model that close pass as an onUnload" in head
     assert "onAppWindowCreate" in head
-    assert "SEAM (#194 / A31): onAppWindowCreate fires HERE" in head
+    # A31 landed: the marked seam is now the CALL, still named at the same spot.
+    assert "#194 / A31: onAppWindowCreate fires HERE" in head
     assert "spec.restoring" in head
 
 
@@ -9691,6 +9707,202 @@ CASES.close_all_is_the_same_pass = function () {
     };
 };
 
+// ---- A31: onAppWindowCreate, fire + replay ------------------------------
+// A window core rebuilt through its unknown-kind fallback before the mod
+// loaded: a record in the windows Map this factory never built. sticky's
+// hand-written catch-up pass exists for exactly this record.
+function strayAppWindow(id, kind) {
+    const geom = { left: 0, top: 0, width: 300, height: 240 };
+    const chrome = buildAppChrome({ id: id, appClass: 'app-' + kind,
+                                    badge: '#' + kind, geom: geom,
+                                    color: '#4aa3ff', locked: true,
+                                    title: 'Restored' });
+    const win = { id: id, sid: kind, hostId: 'app', type: 'app', appKind: kind,
+                  dom: chrome.dom, body: chrome.dom,
+                  titleText: chrome.titleText, disposed: false,
+                  minimized: false, cleanups: [], geom: geom,
+                  name: 'Restored', color: '#4aa3ff' };
+    windows.set(id, win);
+    desktop.appendChild(chrome.dom);
+    return win;
+}
+function tag(info) { return info.id + '@' + (info.replayed ? 'replay' : 'live'); }
+
+// E31, the whole scope: pre-existing windows of a REGISTERED kind replay, a
+// live create fires, core's unknown-kind record counts, another mod's kinds do
+// not, and neither does a kind nobody registered.
+CASES.create_hook_replays_and_fires = function () {
+    const stray = strayAppWindow('app:note:legacy', 'sticky-note');
+    const m = modCtx('sticky');
+    const other = modCtx('recorder');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    other.ctx.registerWindowKind({ appKind: 'recorder-lib',
+                                   factory: function () { return null; } });
+    // ...a window of ANOTHER mod's kind, and one of a kind NOBODY registered
+    other.ctx.windows.createAppWindow({ kind: 'recorder-lib', id: 'app:rec:1' });
+    m.ctx.windows.createAppWindow({ kind: 'nobodys', id: 'app:nobody:1' });
+    // ...and one of the mod's OWN kind, built by the factory before it subscribes
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:own' });
+
+    const seen = [];
+    const off = m.ctx.windows.onAppWindowCreate(function (info) {
+        seen.push(tag(info));
+    });
+    const atSubscribe = seen.slice();
+    // a LIVE create through the factory...
+    const h = m.ctx.windows.createAppWindow({ kind: 'sticky-note',
+                                              id: 'app:note:new' });
+    // ...another mod's window, which is none of this subscription's business...
+    other.ctx.windows.createAppWindow({ kind: 'recorder-lib', id: 'app:rec:2' });
+    // ...and a REBUILD at the same id: a new record, so a new delivery.
+    h.close();
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:new' });
+    // The bag one subscriber is handed, read off a REPLAYED core-built window.
+    let bag = null;
+    m.ctx.windows.onAppWindowCreate(function (info) {
+        if (info.id !== 'app:note:legacy') return;
+        const swatch = document.createElement('button');
+        swatch.className = 'tb-probe';
+        bag = { keys: Object.keys(info).sort(), frozen: Object.isFrozen(info),
+                win: info.win === stray, id: info.id, kind: info.kind,
+                dom: info.dom === stray.dom, body: info.body === stray.body,
+                titleBar: info.titleBar === stray.dom.querySelector('.title-bar'),
+                replayed: info.replayed,
+                added: info.addTitleBarItem(swatch) === swatch,
+                bar: info.titleBar.children.map(function (el) {
+                    return el.className; }),
+                disposer: info.onDispose(function () {}) };
+    });
+    return { atSubscribe: atSubscribe, seen: seen, bag: bag,
+             offIsFn: typeof off === 'function',
+             unloads: m.rec.unloads.length,
+             kinds: Array.from(m.rec.appWindowKinds),
+             windows: windows.size };
+};
+
+// E31's XOR clause, in the shape that actually bites: subscribing from INSIDE
+// body(), when the window being built is already in the windows Map and the
+// create's own fire is still to come. That subscription must get it ONCE, as a
+// replay -- and the subscription that predates the create must get the same
+// window ONCE, as a live emit. Per subscription, not globally.
+CASES.create_hook_replay_xor_live = function () {
+    const m = modCtx('sticky');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    const early = [];
+    m.ctx.windows.onAppWindowCreate(function (info) { early.push(tag(info)); });
+    const inner = [];
+    let atBody = null;
+    m.ctx.windows.createAppWindow({
+        kind: 'sticky-note', id: 'app:note:1',
+        body: function (el, win) {
+            atBody = windows.get(win.id) === win;
+            m.ctx.windows.onAppWindowCreate(function (info) {
+                inner.push(tag(info));
+            });
+        },
+    });
+    // A second window reaches BOTH subscriptions, live, once each.
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:2' });
+    // A third subscription, after everything: both windows replay to it, and
+    // nothing that already went live to its siblings is re-delivered to them.
+    const late = [];
+    m.ctx.windows.onAppWindowCreate(function (info) { late.push(tag(info)); });
+    return { early: early, inner: inner, late: late, atBody: atBody,
+             windows: windows.size, subs: m.rec.unloads.length };
+};
+
+// Subscribe-then-register is as correct as register-then-subscribe: sticky's
+// own init order reaches the hook BEFORE the kind, so the scope the replay ran
+// against was empty. Registering the kind catches that subscription up -- once.
+CASES.create_hook_catches_up_on_a_late_kind = function () {
+    const m = modCtx('sticky');
+    strayAppWindow('app:note:legacy', 'sticky-note');
+    const seen = [];
+    m.ctx.windows.onAppWindowCreate(function (info) { seen.push(tag(info)); });
+    const atSubscribe = seen.slice();
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    const afterRegister = seen.slice();
+    // A second registration, of an unrelated kind, must not re-replay the first.
+    m.ctx.registerWindowKind({ appKind: 'sticky-other',
+                               factory: function () { return null; } });
+    const afterSecond = seen.slice();
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:1' });
+    return { atSubscribe: atSubscribe, afterRegister: afterRegister,
+             afterSecond: afterSecond, seen: seen,
+             kinds: Array.from(m.rec.appWindowKinds) };
+};
+
+// A decorator that throws is a mod bug, not a desktop bug: it must not take the
+// create path, its sibling subscribers, or the rest of the replay down.
+CASES.create_hook_survives_a_throwing_handler = function () {
+    const m = modCtx('sticky');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:0' });
+    m.ctx.windows.onAppWindowCreate(function () {
+        throw new Error('decorator exploded');
+    });
+    const good = [];
+    m.ctx.windows.onAppWindowCreate(function (info) { good.push(tag(info)); });
+    const h = m.ctx.windows.createAppWindow({ kind: 'sticky-note',
+                                              id: 'app:note:1' });
+    return { good: good, open: h.isOpen(), windows: windows.size,
+             chips: chipIds(), list: m.ctx.windows.list().length,
+             errors: errors.slice() };
+};
+
+// The subscription is dropped by the mod's teardown (the LIFO chain), like
+// every other ctx primitive here -- and by hand, idempotently.
+CASES.create_hook_teardown_drops_the_subscription = function () {
+    const m = modCtx('sticky');
+    const other = modCtx('scratchpad');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    other.ctx.registerWindowKind({ appKind: 'scratch',
+                                   factory: function () { return null; } });
+    const mine = [];
+    const theirs = [];
+    m.ctx.windows.onAppWindowCreate(function (info) { mine.push(tag(info)); });
+    const off = other.ctx.windows.onAppWindowCreate(function (info) {
+        theirs.push(tag(info));
+    });
+    m.ctx.windows.createAppWindow({ kind: 'sticky-note', id: 'app:note:1' });
+    other.ctx.windows.createAppWindow({ kind: 'scratch', id: 'app:scratch:1' });
+    const disabled = disableMod('sticky');
+    const afterDisable = mine.slice();
+    // The kind is free again: another mod picks it up and opens one. The
+    // torn-down mod's subscription must be GONE, not merely quiet.
+    other.ctx.registerWindowKind({ appKind: 'sticky-note',
+                                   factory: function () { return null; } });
+    other.ctx.windows.createAppWindow({ kind: 'sticky-note',
+                                        id: 'app:note:2' });
+    const gone = off();
+    const goneAgain = off();
+    other.ctx.windows.createAppWindow({ kind: 'scratch', id: 'app:scratch:2' });
+    return { mine: mine, afterDisable: afterDisable, theirs: theirs,
+             disabled: disabled, gone: gone, goneAgain: goneAgain,
+             errors: errors.slice() };
+};
+
+// A non-function subscriber is a no-op, not a throw: the same posture
+// onTerminalCreate takes, and for the same reason -- a malformed call must not
+// cost the mod its init.
+CASES.create_hook_ignores_a_non_function = function () {
+    const m = modCtx('sticky');
+    m.ctx.registerWindowKind({ appKind: 'sticky-note',
+                               factory: function () { return null; } });
+    const offs = [undefined, null, 'nope', {}, 7].map(function (bad) {
+        return typeof m.ctx.windows.onAppWindowCreate(bad);
+    });
+    const h = m.ctx.windows.createAppWindow({ kind: 'sticky-note',
+                                              id: 'app:note:1' });
+    return { offs: offs, open: h.isOpen(), unloads: m.rec.unloads.length,
+             errors: errors.slice() };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -10256,3 +10468,212 @@ def test_close_all_runs_the_same_pass_without_a_teardown(winfac_harness):
     assert r["theirsOpen"] is True and len(r["theirs"]) == 1
     assert r["ids"] == r["theirs"] and r["chips"] == r["theirs"]
     assert r["reopened"] is True
+
+
+# --------------------------------------------------------------------------- #
+# ctx.windows.onAppWindowCreate: fire + replay (#194 / A31)
+# --------------------------------------------------------------------------- #
+
+def test_the_create_hook_lands_in_the_extension_fragment():
+    # A31 is NEW ctx surface, so it lands in 86c beside the factory whose tail
+    # fires it -- the loader is at the #68 2500-line cap.
+    ext = _ctx_ext_src()
+    loader = _loader_src()
+    for sym in ("const _appWindowCreateSubs = [];",
+                "function _modAppWindowInfo(win, replayed) {",
+                "function _emitModAppWindowCreate(sub, win, replayed) {",
+                "function _replayModAppWindowCreate(sub, kind) {",
+                "function _fireModAppWindowCreate(win) {",
+                "function _trackModWindowKind(rec, entry) {",
+                "function _modOnAppWindowCreate(rec, fn) {",
+                "function _ctxWindowCreateHook(ctx, rec) {"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A31 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through the extender registry, under the SAME guard the factory
+    # and the restore seam use (a page assembled without #194's registry must
+    # not throw at load).
+    assert "_registerCtxExtender(_ctxWindowCreateHook);" in ext
+    assert ext.rindex("if (typeof _registerCtxExtender === 'function') {") \
+        < ext.rindex("_registerCtxExtender(_ctxWindowCreateHook);")
+    # Its OWN extender: the registry's per-extender isolation is worth having
+    # between the three, so a mod that only opens windows keeps its factory if
+    # the hook ever throws, and vice versa.
+    for sig in ("function _ctxWindowsFactory(ctx, rec) {",
+                "function _ctxWindowKindRestore(ctx, rec) {"):
+        assert "_ctxWindowCreateHook" not in _frag_fn(ext, sig)
+    body = _frag_fn(ext, "function _ctxWindowCreateHook(ctx, rec) {")
+    # Additive: the v1 `windows` family is DECORATED (replacing it would delete
+    # #116's onTerminalCreate and A28's factory), so no new capability entry is
+    # owed -- #197 resolves `windows.onAppWindowCreate` as a dotted path.
+    assert "fam.onAppWindowCreate = function (fn) {" in body
+    assert ": (ctx.windows = {});" in body
+    assert "onAppWindowCreate" not in _ctx_families_added_by_extenders()
+    # The scope tap: ctx.registerWindowKind is WRAPPED (never replaced), and the
+    # kind it records is the one CORE validated and returned.
+    assert "const entry = reg.call(ctx, spec);" in body
+    assert "_trackModWindowKind(rec, entry);" in body
+    assert "typeof entry.appKind === 'string'" in _frag_fn(
+        ext, "function _trackModWindowKind(rec, entry) {")
+
+
+def test_the_create_hook_fires_from_the_factory_tail_and_only_there():
+    # The fire point: after the chip, the handles, the placement and the focus,
+    # so a subscriber decorating the window is handed the finished article --
+    # and exactly one call site, because a second would be a second delivery.
+    ext = _ctx_ext_src()
+    fac = _frag_fn(ext, "function _createModAppWindow(rec, spec) {")
+    _order_in(fac, "_modAppWindowChip(win, sid, title);",
+              "if (spec.resizable !== false) addResizeHandles(dom);",
+              "finishWindowPlacement(win);",
+              "_fireModAppWindowCreate(win);")
+    # ...after the create-time focus too, which is the last statement before it.
+    assert fac.rindex("if (!spec.restoring) revealAndFocusWindow(id);") \
+        < fac.index("_fireModAppWindowCreate(win);")
+    assert ext.count("_fireModAppWindowCreate(win);") == 1
+    assert "_fireModAppWindowCreate" not in _loader_src()
+    # The subscription rides the mod's LIFO teardown chain, exactly the way
+    # #116's onTerminalCreate subscription does -- and is registered BEFORE the
+    # replay runs, so a handler that throws cannot strand it.
+    sub = _frag_fn(ext, "function _modOnAppWindowCreate(rec, fn) {")
+    assert "rec.unloads.push(off);" in sub
+    _order_in(sub, "_appWindowCreateSubs.push(sub);", "rec.unloads.push(off);",
+              "_replayModAppWindowCreate(sub, null);")
+    # Exactly-once is PER SUBSCRIPTION and keyed on the window RECORD (an id is
+    # reused; the window that replaces it is a new window), and the mark is set
+    # BEFORE the handler runs so a re-entrant handler cannot be re-fed.
+    assert "seen: new WeakSet()" in sub
+    emit = _frag_fn(ext, "function _emitModAppWindowCreate(sub, win, replayed) {")
+    _order_in(emit, "if (sub.seen.has(win)) return false;",
+              "sub.seen.add(win);", "sub.fn(_modAppWindowInfo(win, replayed));")
+    # A handler that throws is caught at every delivery path, never rethrown.
+    for sig in ("function _emitModAppWindowCreate(sub, win, replayed) {",
+                "function _replayModAppWindowCreate(sub, kind) {",
+                "function _fireModAppWindowCreate(win) {"):
+        assert "_logAppWindowHookError(" in _frag_fn(ext, sig), \
+            f"{sig!r} lets a subscriber's throw escape"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_pre_existing_windows_replay_and_a_live_create_fires(winfac_harness):
+    # E31, four of five clauses in one case.
+    r = _run_winfac(winfac_harness, "create_hook_replays_and_fires")
+    assert r["errors"] == []
+    assert r["offIsFn"] is True
+    # 1. REPLAY, once each, in windows-Map order: the record CORE rebuilt
+    #    through its unknown-kind fallback before the mod loaded (which this
+    #    factory never built -- the case sticky's catch-up pass covers by hand)
+    #    and the one the factory did.
+    assert r["atSubscribe"] == ["app:note:legacy@replay", "app:note:own@replay"]
+    # 2. a LIVE create fires exactly once...
+    # 3. ...another mod's kinds -- and a kind nobody registered -- are excluded
+    #    at every step (app:rec:1, app:rec:2, app:nobody:1 never appear)...
+    # 4. ...and a REBUILD at a reused id is a new record, so a new delivery:
+    #    exactly-once is keyed on the window, never on its id.
+    assert r["seen"] == ["app:note:legacy@replay", "app:note:own@replay",
+                         "app:note:new@live", "app:note:new@live"]
+    assert r["kinds"] == ["sticky-note"]
+    assert r["windows"] == 6, "the excluded windows must still have been built"
+    # The subscription rides the mod's teardown chain: one kind + two hooks.
+    assert r["unloads"] == 3
+    # The bag, read off a REPLAYED core-built window: #116's onTerminalCreate
+    # spelling (win / addTitleBarItem / onDispose) plus the three facts an app
+    # window has and a terminal does not.
+    assert r["bag"]["keys"] == sorted([
+        "win", "id", "kind", "dom", "body", "titleBar", "replayed",
+        "addTitleBarItem", "onDispose"])
+    assert r["bag"]["frozen"] is True and r["bag"]["replayed"] is True
+    assert r["bag"]["win"] is True and r["bag"]["dom"] is True
+    assert r["bag"]["body"] is True and r["bag"]["titleBar"] is True
+    assert r["bag"]["id"] == "app:note:legacy"
+    assert r["bag"]["kind"] == "sticky-note"
+    # addTitleBarItem inserts BEFORE the min button -- the established idiom,
+    # and it resolves the same nodes on a window built long before the
+    # subscriber existed.
+    assert r["bag"]["added"] is True
+    assert r["bag"]["bar"] == ["ti-id-badge", "title-text", "tb-probe",
+                               "tb-btn btn-min", "tb-btn btn-close"]
+    assert r["bag"]["disposer"] is True, "onDispose must ride win.cleanups"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_replayed_window_never_also_arrives_live(winfac_harness):
+    # E31's XOR clause, in the shape that bites: a subscription opened from
+    # INSIDE body() replays the window being built (it is already in the windows
+    # Map) and the create's own fire is still to come. Without the per-
+    # subscription seen-set that window arrives TWICE and the decorator is
+    # applied twice -- the belt-and-braces WeakSet #194 says mods must not need.
+    r = _run_winfac(winfac_harness, "create_hook_replay_xor_live")
+    assert r["errors"] == []
+    assert r["atBody"] is True, "the window must already be in the Map at body()"
+    # PER SUBSCRIPTION, not globally: the same window reaches all three, once
+    # each, and by whichever route was right for that subscription.
+    assert r["early"] == ["app:note:1@live", "app:note:2@live"]
+    assert r["inner"] == ["app:note:1@replay", "app:note:2@live"]
+    assert r["late"] == ["app:note:1@replay", "app:note:2@replay"]
+    assert r["windows"] == 2 and r["subs"] == 4
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_registering_a_kind_after_subscribing_catches_the_hook_up(
+        winfac_harness):
+    # sticky's own init order reaches the hook BEFORE its kind (settings, the
+    # chip pass, then registerWindowKind), so a replay that only ran at
+    # subscribe time would have run against an empty scope and missed exactly
+    # the windows this hook exists to deliver.
+    r = _run_winfac(winfac_harness, "create_hook_catches_up_on_a_late_kind")
+    assert r["errors"] == []
+    assert r["atSubscribe"] == [], "a kind nobody registered yet is not in scope"
+    assert r["afterRegister"] == ["app:note:legacy@replay"]
+    # A later, unrelated registration must not re-replay what it already had.
+    assert r["afterSecond"] == r["afterRegister"]
+    assert r["seen"] == ["app:note:legacy@replay", "app:note:1@live"]
+    assert r["kinds"] == ["sticky-note", "sticky-other"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_subscriber_takes_nothing_down_with_it(winfac_harness):
+    r = _run_winfac(winfac_harness, "create_hook_survives_a_throwing_handler")
+    # The sibling subscriber still gets both deliveries...
+    assert r["good"] == ["app:note:0@replay", "app:note:1@live"]
+    # ...and the create path itself completed: a decorator's bug is not the
+    # desktop's bug.
+    assert r["open"] is True and r["windows"] == 2 and r["list"] == 2
+    assert r["chips"] == ["app:note:0", "app:note:1"]
+    # Logged like every other per-mod failure, naming the mod and the window,
+    # on BOTH delivery paths (the replay and the create-time fire).
+    assert len(r["errors"]) == 2
+    for msg in r["errors"]:
+        assert msg.startswith('[mods] onAppWindowCreate handler failed for '
+                              '"sticky" on window ')
+        assert "decorator exploded" in msg
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_teardown_drops_the_subscription(winfac_harness):
+    # Like every other ctx primitive here: the unsubscribe rides rec.unloads, so
+    # a disabled mod stops decorating windows even if it never called the fn it
+    # was handed.
+    r = _run_winfac(winfac_harness, "create_hook_teardown_drops_the_subscription")
+    assert r["errors"] == []
+    assert r["disabled"] is True
+    assert r["mine"] == ["app:note:1@live"]
+    assert r["mine"] == r["afterDisable"], \
+        "a torn-down mod's subscription was still being delivered to"
+    # The proof it is GONE rather than merely quiet: another mod takes the freed
+    # kind and opens one -- that one reaches the live subscription and nobody
+    # else. And the hand-called unsubscribe is idempotent.
+    assert r["theirs"] == ["app:scratch:1@live", "app:note:2@live"]
+    assert r["gone"] is True and r["goneAgain"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_non_function_subscriber_is_a_no_op(winfac_harness):
+    # onTerminalCreate's posture: a malformed call returns an unsubscribe that
+    # does nothing rather than costing the mod its init -- and leaves no entry
+    # on the teardown chain (the kind's is the only one here).
+    r = _run_winfac(winfac_harness, "create_hook_ignores_a_non_function")
+    assert r["errors"] == []
+    assert r["offs"] == ["function"] * 5
+    assert r["open"] is True and r["unloads"] == 1

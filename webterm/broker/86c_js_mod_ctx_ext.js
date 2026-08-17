@@ -431,12 +431,12 @@
         // it through its arguments without seeing this fragment's locals (the
         // arguments-not-closure rule).
         //
-        // What is NOT here, deliberately, and where it goes:
-        //   - onAppWindowCreate(). Its fire point is the marked line at the end
-        //     of _createModAppWindow; its REPLAY set is NOT this registry but
-        //     "live windows whose appKind is one of this mod's REGISTERED
-        //     kinds", which includes core's unknown-kind restore records this
-        //     factory never built (sticky's hand-written catch-up pass).
+        // THE CREATE HOOK is the last section of this range.
+        // ctx.windows.onAppWindowCreate() fires from the marked line at the end
+        // of _createModAppWindow, but its REPLAY set is NOT this registry: it is
+        // "live windows whose appKind is one of this mod's REGISTERED kinds",
+        // which includes core's unknown-kind restore records this factory never
+        // built (the case sticky's hand-written catch-up pass covers by hand).
         //
         // Additive, feature-detected: ctxVersion stays 1, and `windows` is
         // already a v1 capability family (#116's onTerminalCreate lives there),
@@ -851,9 +851,18 @@
             // openAppWindow runs after a factory returns. A restore is the one
             // caller that is not a person asking.
             if (!spec.restoring) revealAndFocusWindow(id);
-            // SEAM (#194 / A31): onAppWindowCreate fires HERE, once, for a
-            // window that is fully built, placed and focused. Its replay set is
-            // registered-kind based, not this registry — see the header.
+            // #194 / A31: onAppWindowCreate fires HERE, once, for a window that
+            // is fully built, chipped, placed and (unless restoring) focused —
+            // so a subscriber decorating it is handed the finished article, not
+            // a half-assembled one. The fire is guarded end to end (see
+            // _fireModAppWindowCreate): a subscriber that throws costs neither
+            // this create nor its sibling subscribers.
+            //
+            // The early returns ABOVE deliberately do not fire. They ADOPT a
+            // window that was already live, and a live window of a registered
+            // kind is what the subscribe-time REPLAY is for — this point is
+            // "this factory built one", not "this factory returned one".
+            _fireModAppWindowCreate(win);
             return h;
         }
         // The extender. Decorates the EXISTING v1 `windows` family in place:
@@ -1009,10 +1018,257 @@
                 return reg.call(ctx, _modKindRestoreSpec(rec, spec));
             };
         }
+
+        // ---- ctx.windows.onAppWindowCreate: fire + REPLAY (#194) ------------
+        // A mod that DECORATES app windows — sticky's taskbar-chip recipe is
+        // the motivating case — races the windows it wants to decorate.
+        // Whether any of them exist when its init() runs is a RACE, not an
+        // ordering (#167): restoreAppWindows waits on the control-WS lease and
+        // the /state adopt, loadMods on GET /info, and nothing sequences the
+        // two. So sticky hand-writes a catch-up pass over the core windows Map
+        // ("Notes already open when this init runs get their chips NOW",
+        // mods/sticky/sticky.js) and the two halves have to agree by hand.
+        // This makes it first class:
+        //
+        //     const off = ctx.windows.onAppWindowCreate(function (info) {
+        //         addChip(info.id);           // info: {win, id, kind, dom,
+        //         info.onDispose(cleanup);    //  body, titleBar, replayed,
+        //     });                             //  addTitleBarItem, onDispose}
+        //
+        // THE SET IT FIRES FOR is windows whose `appKind` is one of THIS mod's
+        // REGISTERED kinds — deliberately NOT "the windows this mod's factory
+        // built" (rec.appWindows) and never all app windows. A record core
+        // rebuilt through its unknown-kind fallback before the mod loaded is a
+        // window of that kind however it was built, and it counts: that is
+        // exactly the record sticky's pass filters `appKind === 'sticky-note'`
+        // for. Another mod's kinds never do — and appKind ownership is
+        // exclusive, because registerWindowKind refuses a duplicate. Which is
+        // why this extender TAPS ctx.registerWindowKind: "the kinds this mod
+        // registered" is otherwise nobody's bookkeeping.
+        //
+        // EXACTLY ONCE PER SUBSCRIPTION — replay XOR live emit. Each
+        // subscription carries its own `seen` set of window RECORDS, marked
+        // before the handler is called, so:
+        //   - a window replayed at subscribe time never also arrives as a live
+        //     create (the case that bites: subscribing from inside body(), when
+        //     the window being built is already in the windows Map and the
+        //     create's own fire is still to come), and
+        //   - a live create is never re-delivered by a later replay.
+        // PER SUBSCRIPTION, not globally: two subscribers each get their own
+        // exactly-once, and a mod that unsubscribes and re-subscribes gets the
+        // whole set replayed again. So a mod needs no WeakSet of its own to
+        // avoid double-decorating — the trap #194 lists as its own trap 5.
+        // Records, not ids, because an id is REUSED: the window that replaces
+        // 'app:clip' is a new window and is delivered as one.
+
+        // Every live subscription, ACROSS mods, in subscribe order. The fire
+        // point is one mod's create and the subscriber may be another — a kind
+        // belongs to whoever registered it, which need not be whoever opened
+        // the window. A fragment-level const for the reason the extender
+        // registry's is: nothing runs before this fragment, and the first read
+        // is at loadMods() time.
+        const _appWindowCreateSubs = [];
+        // One place the hook reports a failure, and it must not become the
+        // second one: `rec.id`/`win.id` are attacker-adjacent reads (a proxy, a
+        // throwing getter), and a throw HERE would escape into the create path
+        // this stands in front of.
+        function _logAppWindowHookError(what, sub, win, e) {
+            try {
+                console.error('[mods] onAppWindowCreate ' + what
+                    + ' failed for "' + (sub && sub.rec && sub.rec.id)
+                    + '" on window "' + (win && win.id) + '":', e);
+            } catch (_) {
+                try { console.error('[mods] onAppWindowCreate failed'); }
+                catch (__) { /* console is gone; keep going */ }
+            }
+        }
+        // The bag one subscriber is handed, built per delivery and FROZEN. Same
+        // spelling as #116's onTerminalCreate bag (win / addTitleBarItem /
+        // onDispose), plus the three facts an app window has and a terminal
+        // does not: its id, its appKind, and whether this delivery is a REPLAY.
+        // titleBar is derived from win.dom exactly as onTerminalCreate derives
+        // it, so a replayed window — built long before this subscriber existed,
+        // possibly by core — resolves the same nodes a create-time delivery
+        // does. A record with no chrome yields null instead of being skipped:
+        // the set is defined by KIND, and dropping a window because core built
+        // it thinly would re-open the hole this hook exists to close.
+        function _modAppWindowInfo(win, replayed) {
+            const dom = win.dom || null;
+            const titleBar = (dom && typeof dom.querySelector === 'function')
+                ? dom.querySelector('.title-bar') : null;
+            return Object.freeze({
+                win: win,
+                id: win.id,
+                kind: win.appKind,
+                dom: dom,
+                body: win.body || null,
+                titleBar: titleBar,
+                replayed: !!replayed,
+                // BEFORE the min button — left of min/close, the established
+                // idiom onTerminalCreate and the factory handle both spell.
+                addTitleBarItem: function (node) {
+                    if (!node || !titleBar) return null;
+                    titleBar.insertBefore(
+                        node, titleBar.querySelector('.btn-min'));
+                    return node;
+                },
+                // win.cleanups is drained by closeWindow (73) and by the
+                // active-view rebuild (84) — no new teardown plumbing, same as
+                // the handle's onDispose. Refused on a dead window, where the
+                // array has already been drained and emptied.
+                onDispose: function (fn) {
+                    if (typeof fn !== 'function') return false;
+                    if (win.disposed || !Array.isArray(win.cleanups)) return false;
+                    win.cleanups.push(fn);
+                    return true;
+                },
+            });
+        }
+        // Deliver ONE window to ONE subscription, if it belongs to that
+        // subscription and that subscription has not had it. Returns true when
+        // it was delivered — a handler that throws does not un-deliver it, or a
+        // retry loop would hand a broken subscriber the same window forever.
+        function _emitModAppWindowCreate(sub, win, replayed) {
+            if (!sub || sub.dead || !win || typeof win !== 'object') return false;
+            if (win.disposed || win.type !== 'app') return false;
+            const kinds = sub.rec && sub.rec.appWindowKinds;
+            if (!kinds || !kinds.has(win.appKind)) return false;
+            // THE XOR, and it is these two lines. Marked BEFORE the call, so a
+            // handler that re-enters — opens a window, subscribes, registers a
+            // kind — cannot be fed this same window from inside its own
+            // delivery.
+            if (sub.seen.has(win)) return false;
+            sub.seen.add(win);
+            try {
+                sub.fn(_modAppWindowInfo(win, replayed));
+            } catch (e) {
+                _logAppWindowHookError('handler', sub, win, e);
+            }
+            return true;
+        }
+        // Replay the live windows to ONE subscription: every app window in the
+        // core Map, oldest first, filtered to `kind` when one is named (the
+        // late-registration catch-up below) and to the whole subscription scope
+        // when it is not (subscribe time). A SNAPSHOT of the Map, because a
+        // handler may open or close windows while this runs.
+        function _replayModAppWindowCreate(sub, kind) {
+            if (!sub || sub.dead) return 0;
+            const list = Array.from(windows.values());
+            let n = 0;
+            for (let i = 0; i < list.length; i++) {
+                if (sub.dead) break;          // a handler dropped this one
+                const w = list[i];
+                if (kind && (!w || w.appKind !== kind)) continue;
+                try {
+                    if (_emitModAppWindowCreate(sub, w, true)) n += 1;
+                } catch (e) {
+                    _logAppWindowHookError('replay', sub, w, e);
+                }
+            }
+            return n;
+        }
+        // The create-time emit, called from the marked seam at the end of
+        // _createModAppWindow. Every live subscription, in subscribe order,
+        // over a SNAPSHOT: a handler may subscribe or unsubscribe from inside
+        // its own delivery, and one that subscribes here gets this window
+        // through its OWN replay (it is already in the windows Map) rather than
+        // through a loop it joined halfway. Isolated per subscriber, like
+        // win.cleanups and the extender pass — one broken decorator must not
+        // strand the window being created, nor its sibling subscribers.
+        function _fireModAppWindowCreate(win) {
+            const list = _appWindowCreateSubs.slice();
+            for (let i = 0; i < list.length; i++) {
+                try {
+                    _emitModAppWindowCreate(list[i], win, false);
+                } catch (e) {
+                    _logAppWindowHookError('fire', list[i], win, e);
+                }
+            }
+        }
+        // The kinds THIS mod has registered — the hook's whole scope. Tapped
+        // off ctx.registerWindowKind (the only way a mod can register one) and
+        // kept on the RECORD beside rec.appWindows, so a fire reaches it
+        // through its arguments and never through this fragment's locals.
+        // Nothing removes a kind again: a mod cannot deregister one through ctx
+        // (the loader's own deleteWindowKind rides the teardown chain), and
+        // every subscription of a mod that IS torn down is dropped by that same
+        // chain — so a stale set has nobody left to answer.
+        function _trackModWindowKind(rec, entry) {
+            const kind = (entry && typeof entry === 'object'
+                && typeof entry.appKind === 'string' && entry.appKind) || '';
+            if (!kind || !rec || typeof rec !== 'object') return null;
+            if (!rec.appWindowKinds) rec.appWindowKinds = new Set();
+            if (rec.appWindowKinds.has(kind)) return kind;
+            rec.appWindowKinds.add(kind);
+            // CATCH-UP, so subscribe-then-register is as correct as register-
+            // then-subscribe. A mod whose init reaches the hook first (sticky's
+            // order is settings, then the chip pass, then the kind) would
+            // otherwise have replayed against an empty scope and missed every
+            // window that already existed — the very race this hook replaces.
+            // The same per-subscription `seen` set covers it, so a window
+            // already delivered is not delivered twice.
+            const list = _appWindowCreateSubs.slice();
+            for (let i = 0; i < list.length; i++) {
+                if (list[i].rec === rec) _replayModAppWindowCreate(list[i], kind);
+            }
+            return kind;
+        }
+        // Subscribe. Returns an unsubscribe fn, which is ALSO pushed onto the
+        // mod's LIFO teardown chain — the same discipline #116's
+        // onTerminalCreate follows, so a disabled mod stops decorating windows
+        // even if it never called the fn it was given.
+        function _modOnAppWindowCreate(rec, fn) {
+            if (typeof fn !== 'function') return function () {};
+            const sub = { rec: rec, fn: fn, seen: new WeakSet(), dead: false };
+            const off = function () {
+                if (sub.dead) return false;
+                sub.dead = true;
+                const i = _appWindowCreateSubs.indexOf(sub);
+                if (i !== -1) _appWindowCreateSubs.splice(i, 1);
+                return true;
+            };
+            _appWindowCreateSubs.push(sub);
+            // Registered BEFORE the replay runs: a handler that throws, or that
+            // tears its own mod down mid-replay, must not be able to leave a
+            // subscription behind with nothing left to drop it.
+            if (rec && Array.isArray(rec.unloads)) rec.unloads.push(off);
+            _replayModAppWindowCreate(sub, null);
+            return off;
+        }
+        // The extender: two halves of one surface. The hook itself DECORATES
+        // the v1 `windows` family in place (a fresh object would delete #116's
+        // onTerminalCreate and the factory above), and the tap on
+        // ctx.registerWindowKind is what tells the hook which kinds are this
+        // mod's. WRAPPED, never replaced: the member this closes over is
+        // whatever the extenders before it left — A29's restore wrapper, over
+        // the loader's own _modRegisterWindowKind — and that is what registers.
+        //
+        // Its own extender rather than a line inside _ctxWindowsFactory or
+        // _ctxWindowKindRestore, for the registry's per-extender isolation: a
+        // mod that only opens windows keeps its factory if this one ever
+        // throws, and a mod that only registers kinds keeps its restore seam.
+        function _ctxWindowCreateHook(ctx, rec) {
+            const reg = ctx.registerWindowKind;
+            if (typeof reg === 'function') {
+                ctx.registerWindowKind = function (spec) {
+                    const entry = reg.call(ctx, spec);
+                    _trackModWindowKind(rec, entry);
+                    return entry;
+                };
+            }
+            const fam = (ctx.windows && typeof ctx.windows === 'object')
+                ? ctx.windows : (ctx.windows = {});
+            fam.onAppWindowCreate = function (fn) {
+                return _modOnAppWindowCreate(rec, fn);
+            };
+        }
+        // ---- end ctx.windows.onAppWindowCreate ------------------------------
+
         // Guarded like #197's registration: a page assembled without the
         // registry must not throw here.
         if (typeof _registerCtxExtender === 'function') {
             _registerCtxExtender(_ctxWindowsFactory);
             _registerCtxExtender(_ctxWindowKindRestore);
+            _registerCtxExtender(_ctxWindowCreateHook);
         }
         // ---- end ctx.windows.createAppWindow --------------------------------
