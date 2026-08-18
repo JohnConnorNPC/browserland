@@ -104,7 +104,10 @@
         // ctx.file -> {ok:false, aborted:true, error:'cancelled'} (fileApiError,
         // 68 — note it is 'cancelled', NOT 'aborted': the shipped shape wins
         // over the issue's prose); ctx.session -> {status:0, json:{ok:false,
-        // error:<the AbortError>}}, status-carrying as ever. A TimeoutError
+        // error:String(e)}} — the reason STRINGIFIED, not the DOMException
+        // itself (`_modSessionApi`'s catch, 86 — so a caller reads
+        // 'AbortError: mod "<id>" was torn down', which is why the reason
+        // carries a message at all), status-carrying as ever. A TimeoutError
         // stays distinguishable from a cancel, which is why the reason is named
         // rather than left to abort()'s default.
         //

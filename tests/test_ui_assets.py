@@ -7744,6 +7744,84 @@ def test_feature_detected_mods_adopt_pausable_interval():
         "clock.js must feature-detect ctx.visibility"
 
 
+def test_ctx_visibility_is_a_floor_for_shipped_mods_and_the_wiki_scopes_it():
+    # #198: every fallback pinned by the test above is DEAD CODE for a SHIPPED
+    # mod, and that is a fact of the build rather than an opinion -- so it gets
+    # asserted here and stated in wiki/Writing-a-Mod.md, instead of surviving as
+    # five copies of a comment claiming an older core is possible. Three legs,
+    # because the claim has three parts and each fails differently.
+    #
+    # (a) THE BUILD FACT: a shipped mod is served BESIDE ITS OWN LOADER.
+    #     assemble() joins every _MODS path into the SAME string as
+    #     86_js_mod_loader.js and the fragment that defines
+    #     makeModVisibilityApi, and that one string is what the broker serves
+    #     (the sole substitution is the build stamp in 00_head.html, which
+    #     touches no JS). So there is no delivery path by which an in-tree mod
+    #     script meets some other build's loader, and no skew for it to guard
+    #     against. Assert the bytes, not the wording: each mod file must appear
+    #     VERBATIM in the assembled page next to the code that provides
+    #     ctx.visibility.
+    provider = (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(
+        encoding="utf-8")
+    assert provider in INDEX_HTML, \
+        "the fragment defining makeModVisibilityApi is not served verbatim"
+    assert "function makeModVisibilityApi" in INDEX_HTML
+    for rel in ui._MODS:
+        src = (BROKER_DIR / rel).read_text(encoding="utf-8")
+        assert src in INDEX_HTML, \
+            f"{rel} is not served verbatim in the assembled page -- the " \
+            "shipped-beside-its-own-loader argument no longer holds"
+
+    # (b) NOT AN EXTENDER. ctx.visibility is a plain member of the object
+    #     literal makeCtx builds, so a ctx that exists at all carries it: if
+    #     init(ctx) is running, the member is there. A family added by a ctx
+    #     EXTENDER (#194) would not qualify -- _applyCtxExtenders isolates each
+    #     one, so a throwing extender leaves its family simply absent, which is
+    #     a floor with a hole in it. Nothing may assign it after construction
+    #     either, or the floor would depend on that assignment running.
+    loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    body = loader[loader.index("function makeCtx("):]
+    literal = body[body.index("const ctx = {"):body.index("onUnload: function (fn)")]
+    assert "visibility: makeModVisibilityApi(rec)," in literal, \
+        "ctx.visibility must be built INTO makeCtx's object literal"
+    assert "ctx.visibility =" not in INDEX_HTML, \
+        "ctx.visibility must not be assigned after the ctx is constructed"
+
+    # (c) THE SCOPE, AND THE SET, BOTH WAYS. The guarantee is not retroactive
+    #     for an INSTALLED package: it is fetched as its own <script src> by
+    #     whichever broker installed it, and that loader really may predate
+    #     ctx.visibility -- so the wiki has to say shipped-vs-installed, not
+    #     just "it is always there". And the mods it names as still carrying a
+    #     dead fallback must be exactly the ones that do, in both directions:
+    #     a new shipped mod copying the shim fails here, and so does #204's
+    #     migration removing one without updating the page that names it.
+    wiki = (BROKER_DIR.parents[1] / "wiki" / "Writing-a-Mod.md").read_text(
+        encoding="utf-8")
+    for claim in (
+        # the build fact (S7), the floor it licences, and the limit on it
+        "A shipped mod can never meet a loader other than the one it shipped beside.",
+        "**For a shipped mod this is a floor, not a maybe.**",
+        "**The floor stops at the repo.**",
+        # the installed mod's two ways out, named rather than implied
+        "needs: ['visibility']",
+    ):
+        assert claim in wiki, f"the visibility floor no longer states: {claim!r}"
+
+    carriers = {
+        PurePosixPath(rel).parent.name
+        for rel in ui._MODS
+        if re.search(r"ctx\.visibility\s*\?",
+                     (BROKER_DIR / rel).read_text(encoding="utf-8"))
+    }
+    span = re.search(r"still carrying such a fallback(.*?)are a\s+migration",
+                     wiki, re.S)
+    assert span, "the wiki no longer names the shipped mods carrying a dead fallback"
+    named = set(re.findall(r"`mods/([a-z0-9-]+)/`", span.group(1)))
+    assert named == carriers, (
+        "wiki/Writing-a-Mod.md names %s as still carrying a ctx.visibility "
+        "fallback, but the shipped set is %s" % (sorted(named), sorted(carriers)))
+
+
 def test_launch_host_items_and_launch_profile_respect_hidden_hosts():
     s76 = (BROKER_DIR / "76_js_launch_fullscreen.js").read_text(encoding="utf-8")
     body = s76[s76.index("function launchHostItems"):

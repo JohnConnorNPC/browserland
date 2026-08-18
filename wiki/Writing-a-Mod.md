@@ -395,6 +395,18 @@ Consequences you will hit:
 - **A mod's CSS is spliced in regardless of whether the mod is enabled.** It is
   present-but-inert: its selectors match nothing until the mod's JS adds the
   markup. Same posture as the spliced-but-not-initialized JS.
+- **A shipped mod can never meet a loader other than the one it shipped beside.**
+  `ui.assemble()` puts every `_MODS` path into the *same* string as
+  `86_js_mod_loader.js` and its `86*` companions, and that one string is what
+  the broker serves. There is no path by which an in-tree mod script is
+  delivered next to some other build's loader, so for a shipped mod "does this
+  build's `ctx` have X" is settled at the commit rather than at runtime — which
+  is what makes a feature-detect fallback in an in-tree mod dead code for
+  anything already in `ctx` at that commit (see `ctx.visibility`, §8).
+  **An installed package is the opposite case** (§10.2): it is fetched as its
+  own `<script src>` by whichever broker it was installed on, and that broker
+  may be older than the package, so a portable mod keeps its detection or
+  declares `needs` (§5).
 
 Adding a shipped mod is therefore: create `mods/<id>/`, write `mod.json` and
 `<id>.js`, append the script path to `ui._MODS` **after any mod it requires**,
@@ -414,6 +426,29 @@ bumping it.
   version.
 - **`ctx.onUnload(fn)`** — register a teardown. LIFO, each isolated in its own
   `try`. Register it **before** anything that can throw (§11).
+- **`ctx.visibility`** — `pausableInterval(fn, ms)` → a `{stop}` handle, and
+  `onVisibility(fn)` → an unsubscribe. The interval slows to 10× `ms` while the
+  tab is hidden and coalesces the runs it skipped into exactly one catch-up when
+  the tab comes back (including after a bfcache restore, where no tick fired at
+  all). Both fail closed once the mod is tearing down, and both register their
+  own teardown, so neither can outlive a disable.
+
+  **For a shipped mod this is a floor, not a maybe.** It is a plain member of
+  the object `makeCtx` builds — not one an extender adds afterwards — so if your
+  `init(ctx)` is running at all, `ctx.visibility` is on that `ctx`; and per §7
+  an in-tree mod is served beside the very loader that put it there. A
+  `ctx.visibility ? … : setInterval(…)` fallback in a shipped mod is therefore
+  unreachable code. The ones still carrying such a fallback — `mods/aistatus/`,
+  `mods/clock/`, `mods/git/`, `mods/task-manager/` and `mods/update/` — are a
+  migration of their own, not something to copy from.
+
+  **The floor stops at the repo.** An installed package is loaded by whatever
+  broker it was installed on (§7, §10.2), and that loader really may predate
+  `ctx.visibility` — so portable source keeps the feature detect, or declares
+  `needs: ['visibility']` (§5) and blocks visibly instead.
+- **`ctx.signal`** (#198) — one `AbortSignal` per **activation**, aborted at the
+  head of teardown. Pass it explicitly to the calls you want cancelled; it has
+  its own section below.
 - **`ctx.capabilities`** (#197) — a **frozen**, per-mod map, `{family:
   <integer version>}`, of the `ctx` surface this build's loader actually hands
   you — e.g. `{file: 1, serverStore: 1, windows: 1, settings: 1, theme: 1, …}`.
@@ -1290,6 +1325,101 @@ And it is storage, not a boundary: like everything else on this page (§1), the
 records sit in the page's own `localStorage`, where any script on the origin can
 read them. Namespacing keeps mods from *colliding*, not from *looking*.
 
+### Per-activation cancellation: `ctx.signal` (#198)
+
+```js
+ctx.signal                             // an AbortSignal for THIS activation
+
+const res = await ctx.file.read(path, { signal: ctx.signal });
+if (res.aborted) return;               // this resumes AFTER teardown finished —
+statusNode.textContent = res.error;    // check before touching anything of yours
+
+if (!ctx.signal.aborted) {             // `.aborted`, never bare `if (ctx.signal)`
+    const t = setTimeout(poll, 5000);
+    ctx.signal.addEventListener('abort', function () { clearTimeout(t); });
+}
+```
+
+One `AbortSignal` per **activation**, aborted when that activation ends. It
+replaces the dead-flag pattern mods hand-rolled to stop an in-flight loop from
+touching a desktop it no longer belongs to (`mods/update/`'s `restartOpDead` /
+`applyOpDead` are the worked examples, and are still written by hand — the
+migrations are not part of this).
+
+- **Per activation, and freshness is structural.** The controller hangs off the
+  per-mod record `initMod` builds, and it builds a new one every time a mod
+  comes up. A disabled-then-re-enabled mod therefore gets a **new, un-aborted**
+  signal; the old activation's signal stays aborted forever, which is the point
+  — its loops must not come back to life when the mod does.
+- **The abort is the first thing teardown does.** In order: the record is marked
+  as unloading, **then the signal aborts**, then #194's staged close of the
+  mod's factory app windows, then the LIFO `onUnload` chain (which is where
+  #195's per-window `onModTeardown` disposers ride, as an entry on that list).
+  Abort **listeners** fire synchronously, so a listener is told to stop *before*
+  anything starts taking your windows away, and before every `onUnload`. That
+  ordering belongs to listeners and to nothing else — read the next bullet
+  before you assume it covers an `await`.
+- **Cancelling the work is not cancelling the continuation.** The take-down
+  path is entirely synchronous: by the time an aborted `await` resumes — a later
+  microtask — the staged window close and the whole `onUnload` drain have
+  already run to completion. So the line *after* your `await` executes against a
+  torn-down activation, and for `ctx.file` that is worse rather than better,
+  because an abort **resolves** `{ok:false, aborted:true, error:'cancelled'}`
+  instead of throwing: there is no rejection to fall out of, and the naive
+  `statusNode.textContent = res.error` writes into a window that is gone. **A
+  continuation that touches activation-owned state must check first** — the
+  result's `aborted`, or `ctx.signal.aborted` — which is precisely the job
+  `mods/update/`'s `restartOpDead` / `applyOpDead` still do by hand. The signal
+  cancels the request for you; it does not return you to a live mod.
+- **`if (ctx.signal)` is a capability check, not a liveness check.** The ctx is
+  not dismantled at teardown, so `ctx.signal` stays truthy forever — it is the
+  *aborted* signal by then. An async callback that resumes after teardown, sees
+  a truthy `ctx.signal`, arms a `setTimeout` and registers an abort listener to
+  clear it has built a leak: an already-aborted signal never replays its abort
+  event to a listener added afterwards, so that listener never runs and the
+  timer fires against torn-down state. (Core codes to the same fact — `hostFetch`
+  tests `callerSignal.aborted` up front rather than relying on a listener.)
+  Check `ctx.signal.aborted` **before arming anything** on a path that can
+  resume late.
+- **An abort listener is teardown-time mod code.** It runs after the record
+  reads dead, so from inside one a `saveChain` is already dropping batches and a
+  settings write cannot re-enter your own theme subscriber. It is not a place to
+  rescue a last save from — see the pairing rule below.
+- **Explicit pass, never ambient.** The loader injects `ctx.signal` into
+  nothing. `ctx.file` and `ctx.session` forward `opts.signal` only when *you*
+  hand it over, and `hostFetch` **composes** it with that call's deadline
+  instead of replacing it, so a cancel and a timeout stay distinguishable at the
+  result. An ambient signal would silently change every existing call site and
+  abort work a mod deliberately wants to finish.
+- **An aborted call still resolves; it never rejects.** `ctx.file` maps the
+  abort to `{ok:false, aborted:true, error:'cancelled'}` — `'cancelled'`, the
+  word the file family already used for a user pressing Cancel, distinct from
+  its `{ok:false, timedOut:true, …}` deadline. `ctx.session` keeps its
+  status-carrying envelope and resolves `{status:0, json:{ok:false,
+  error:'AbortError: mod "<id>" was torn down'}}` — the stringified reason,
+  named so a console says *which* mod's teardown cancelled the request.
+- **Feature-detect it as a value, not a function.** `if (ctx.signal)`,
+  `ctx.capabilities.signal`, or `needs: ['signal']`; `typeof ctx.signal ===
+  'function'` is the detection that would be wrong, because unlike every family
+  whose members are callable this one *is* the value — which is also why it owns
+  a capability entry rather than being gated as a member of one. A build whose
+  engine has no constructible `AbortController` gets **no `ctx.signal` at all**
+  rather than a placeholder that never aborts, and `ctx.capabilities` reports it
+  absent, so `needs: ['signal']` blocks with a reason instead of running against
+  a signal that quietly does nothing. `ctxVersion` stays `1`.
+
+**The pairing rule: work that is *supposed* to outlive the teardown must not
+carry the signal.** They are two halves of one decision, and reading only the
+first half is how a migration breaks a save. The shipped referent is #196's
+deliberate final `flush()`: `mods/scratchpad/` calls it from a **window-close
+cleanup** precisely so a last edit reaches the server, and neither
+`serverStore.update()` nor `saveChain` takes a `signal` at all — there is no
+option to pass one, and that is deliberate. The failure to avoid is threading
+`ctx.signal` through the writes *you* make on that same close-time path (a final
+`ctx.file.write`, a last `ctx.session` call): a disable would then abort exactly
+the work you added the cleanup for. **If it must survive the teardown, it does
+not take the signal.**
+
 ---
 
 ## 9. Help: `help.md` and the regen you must not skip
@@ -1744,6 +1874,12 @@ registered as an unload disposer saves nothing and resolves
 cannot await a network write, and one that landed anyway would clobber the next
 activation. Put the deliberate final flush somewhere the mod is still alive: a
 window-close cleanup, or an explicit save action (§8).
+
+**`ctx.signal` on a close-time save aborts the save.** The signal exists to kill
+work that must *not* outlive the activation, so threading it through every call
+reflexively is exactly wrong for the one path that is meant to survive — the
+deliberate final flush and the writes around it (§8). If it has to land after
+the teardown starts, it does not take the signal.
 
 **A reducer is re-run, so it must not *do* anything.** `serverStore.update` and
 `saveChain.save` invoke your `fn` once per attempt, and a `409` means another
