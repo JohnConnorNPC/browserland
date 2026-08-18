@@ -1432,6 +1432,210 @@ wherever it is started from.**
 
 ---
 
+### Inter-mod services: `ctx.provide` / `ctx.consume` (#199)
+
+```js
+// the PROVIDER, from its init:
+if (typeof ctx.provide === 'function') {
+    ctx.provide('pattern', { apply: applyPattern });
+}
+
+// the CONSUMER, PER USE — not once at init:
+function apply(name) {
+    applyTheme(name);
+    try {
+        const p = (typeof ctx.consume === 'function')
+            ? ctx.consume('pattern', 'pattern') : null;
+        if (p) p.apply(getSettings().pattern);   // absent/inactive -> undefined
+    } catch (_) {}
+}
+```
+
+One mod publishes a named api; another asks for it by **provider id and name**.
+It replaces the cross-mod call this repo actually had — `mods/pattern/` left
+`applyPattern` at the top level of the one shared `<script>` and `mods/theme/`
+probed `typeof applyPattern === 'function'` before calling it. That probe
+answers exactly one question ("did some fragment declaring that name
+evaluate?") and a top-level `function` outlives the mod that declared it, so it
+reads *true* for a mod switched off ten minutes ago and the call lands in a
+torn-down closure. The pattern/theme pair above is the shipped reference
+migration; the remaining consumers are not migrated yet.
+
+- **`consume` implies no dependency edge.** It returns `undefined` for a
+  provider that is absent, not installed, installed but not loaded this page,
+  disabled, mid-teardown, or that never published that name — never an error.
+  That soft miss is the design, not a gap: an implicit edge would turn a soft
+  probe into a take-down cascade, so disabling `pattern` would take `theme` down
+  with it. **`requires` stays the only way to force ordering and bring-up.**
+  Corollary: if you need the service **at your own `init()`**, declare
+  `requires`; otherwise **consume lazily, per use**, which is what the theme
+  example does and why nothing there has to be revalidated — every call asks the
+  loader's active-mod map afresh.
+- **What you get back is a revocable proxy, one per provider activation.**
+  After the provider tears down every read returns `undefined`, every call
+  no-ops, and there is **exactly one `console.warn`** naming the service, ever
+  (the flag lives on the entry, so a dead proxy hammered in a render loop warns
+  once). A function-shaped member read off a dead proxy returns a **no-op
+  function** rather than `undefined`, so `p.load()` on a dead service does not
+  throw *"p.load is not a function"* inside your code; which keys are
+  function-shaped is snapshotted at `provide` time, string keys only. A function
+  you plucked while it was live (`const apply = p.apply;`) re-checks liveness at
+  **call** time and no-ops too.
+- **Deadness starts at the head of teardown**, not at some disposer's turn in
+  the LIFO drain: the record is marked `unloading` first, and every trap reads
+  that. A synchronous frame already inside the provider still runs to completion
+  — no proxy can unwind a stack — but every further operation through every
+  proxy for that activation is dead, including one issued from the in-flight
+  call's own continuation.
+- **The honest limit: this is teardown-race hygiene, not a security boundary.**
+  Values a consumer already **extracted through** the api are not revoked. A
+  function read off the proxy is (see above), but a **nested object**
+  (`p.config`), a value **returned** by a member, and anything obtained by any
+  other route are the provider's own objects and keep working. Deepening the
+  proxy would not change that — a service can always hand out a live closure —
+  and a mod that can call another mod's api can already do whatever that api
+  does. Per-use `consume` is the recommended pattern precisely because it needs
+  none of this.
+- **A throwing member is isolated**: logged, and you see `undefined`. So a
+  consumer cannot distinguish "member threw" from "provider dead" from "no such
+  member" — all three are `undefined`, which is what a soft seam costs. Only a
+  *synchronous* throw is caught; a rejected promise a member returns is yours to
+  handle.
+- **`provide` is the strict half, and the only one that throws:** a non-empty
+  string name and an object-or-function api are required, and re-providing a
+  name this activation already has live raises the loader's `ModConflictError` —
+  two halves of one mod claiming one name is a programming error, unlike
+  consume's miss. A throw from `init()` is already handled (the mod is rolled
+  back). Calling `provide` from an async continuation that resolved **after**
+  the mod was switched off is *not* an error: it publishes nothing, quietly.
+- **Two mods providing the same name is a non-event**, and a mod consuming
+  itself, or a name it also provides, just works: there is no global service
+  table to collide in — entries live on each activation's own record and
+  `consume` names the provider.
+- **Feature-detect, and expect both or neither.** They install as a pair:
+  `if (ctx.provide)` / `ctx.capabilities.provide` / `needs: ['provide']`, same
+  for `consume`. An engine without `Proxy`/`Reflect`/`WeakMap` gets **neither**
+  member — not a `consume` that would have to hand back the raw api and silently
+  drop revocation — and `ctx.capabilities` reports both absent, so
+  `needs: ['consume']` blocks with a reason. Note that a `needs` declaration
+  **blocks** the mod on a build that lacks the seam, which is why
+  `mods/theme/mod.json` deliberately does *not* declare one: it degrades to "no
+  pattern" instead. `ctxVersion` stays `1`.
+- **Keep the `typeof` guard even with the seam.** The theme example's
+  `try/catch` is not the old `ReferenceError` guard: `ctx.consume` is *absent*
+  on a build without the seam, where calling it is a `TypeError`, and the code
+  around the call is your own. The proxy isolates only throws from **inside**
+  the provider's member.
+
+---
+
+### Named dispatch targets: `ctx.commands` (#199)
+
+```js
+const off = ctx.commands.register('save', {
+    scope: 'window',                  // 'global' (default) | 'window'
+    when: function (where) { return where.win.kind === 'note'; },
+    run: function (args, where) { return save(where.win); },
+});                                   // -> registered as 'scratchpad:save'
+
+const r = await ctx.commands.execute('scratchpad:save', args);
+// {ok:true, value} | {ok:false, reason:'absent'|'inactive'|'blocked'|'error'}
+```
+
+A **named, owned** dispatch target, replacing the duck-typed fields core pokes
+by name — scratchpad's Ctrl+S rides `win._saveToServer`, and help hoists
+functions to the top level on purpose because the mod system could not
+contribute a keybinding target at all. Both fail the same way: a typo'd id, a
+disabled mod's `undefined` field and a real failure are all "nothing happened".
+(Those call sites are not migrated by this; the surface is new.)
+
+**The outcome vocabulary is the point, and it is closed and branchable:**
+
+| `reason` | means |
+| --- | --- |
+| `absent` | nothing ever registered that id **in this page** — a typo, or a mod that is not *installed*. Not fixable by toggling. |
+| `inactive` | the id was registered by a mod that is **not active now** — switched off, mid-teardown, or torn down since. Fixable by toggling that mod on. |
+| `blocked` | the command **declined this invocation**: `when()` said no, or it is window-scoped and no window is focused. |
+| `error` | the command **failed to answer** — `run` threw, its promise rejected, or `when()` threw. |
+
+`execute` **always returns a Promise and that promise never rejects**, because
+its callers are a key dispatcher and a menu click handler: one bad command must
+not take either down. Branch on `reason`; a `blocked`/`error` result also
+carries a `detail` (`'no-window'` / `'when'`) or the `error` object, both
+informational only — `reason` is the part that is closed and stable.
+
+- **`register` takes a LOCAL id and auto-prefixes `'<modId>:'`; `execute` takes
+  the FULL id.** A local id containing `':'` is **refused with a throw**, which
+  is what makes a cross-mod id unrepresentable rather than merely discouraged:
+  mod `b` cannot spell `'a:save'`, and a mod helpfully passing its own
+  `'a:save'` gets a throw at init instead of a live `a:a:save` nothing
+  dispatches. A duplicate within one mod is a `ModConflictError`. `register`
+  returns an unregister function, and also rides the activation's unload chain,
+  so teardown releases it whether you call it or not.
+- **A window-scoped command with no focused window is `blocked`, and neither
+  `run` NOR `when` is called.** It does not run with `win: null`. Handing every
+  window-scoped command a null it must re-check would rebuild, inside every mod,
+  exactly the `if (typeof win._saveToServer === 'function')` guard this exists
+  to delete. `scope` is a **precondition**, and an unmet precondition is
+  `blocked`.
+- **A `global` command gets `{win: null}` even when a window is focused.**
+  `scope` is a contract, not a hint: passing the focused window
+  opportunistically would make a global command quietly window-sensitive, and
+  would make a later `global` → `window` change a no-op that alters nothing
+  until the day nothing is focused. A command that wants the focused window says
+  so.
+- **A throwing `when()` is `error`, not `blocked`, and `run` is not called.** A
+  guard that threw did not say no — it failed to answer, and mapping that onto a
+  deliberate veto hides a broken guard as a normal "not right now" forever.
+  `blocked` is a decision; `error` is a defect.
+- **An async `when()` is resolved, not coerced.** `!!promise` is `true`, so the
+  coerced version would let every async guard allow **everything** (shipped once
+  already, as #168's async-validator bug). It costs the command its synchronous
+  dispatch, though — see the next bullet — and after the guard resolves the
+  activation is re-checked, so a mod torn down while its own guard was pending
+  answers `inactive`.
+- **`run` is called synchronously**, in the caller's tick; only the *result* is
+  wrapped in a Promise. A command dispatched from a click or a keydown may need
+  the user gesture (clipboard writes, fullscreen, `window.open`), so a
+  gesture-gated command wants a **synchronous** `when`.
+- **A disabled mod's command answers `inactive`, not `absent`.** Teardown does
+  not delete the entry; it replaces it with a **tombstone** keeping the id and
+  the owner and dropping the closures. Deleting would collapse "turn that mod
+  on" into "that id does not exist". Mid-teardown counts: a command executed
+  from an abort listener or another disposer already reads `inactive`.
+- **The menu path never calls `when()` at render time** to grey an item out. Two
+  arbiters — a synchronous render-time guard and an asynchronous dispatch-time
+  one — is how a menu shows an item enabled and then does nothing. `execute` is
+  the single arbiter, at click time, so no mod code runs during a menu render.
+- **Feature-detect it:** `if (ctx.commands)`, `ctx.capabilities.commands`,
+  `needs: ['commands']` (or the finer `needs: ['commands.register']`). Without a
+  usable `Map`/`Promise` or a per-activation record there is **no `ctx.commands`
+  at all** rather than a `register` that returns nothing dispatchable.
+  `ctxVersion` stays `1`.
+
+**Keybindings and menu items can name a command instead of carrying a
+callback**, which is the motivating case for replacing `win._saveToServer`:
+
+```js
+ctx.registerKeyActions([
+    { id: 'save', label: 'Save', command: 'scratchpad:save' },
+]);
+ctx.registerWindowMenuItems(function (win) {
+    return [{ label: 'Save', command: 'scratchpad:save', commandArgs: null }];
+});
+```
+
+`commandArgs` (optional) is passed to the command as `args`. The two paths
+differ deliberately when an item declares both forms: a key action with both
+`command:` and `run:` **throws at registration** (inside `init`, where a throw
+is a clean rollback and a clear message), while a **menu item** with both keeps
+its `action` and does not throw — that pass runs at *render* time, where a throw
+would cost the whole context menu. A command menu item defaults to
+`enabled: true`. Both normalizations are identity-preserving: declare no
+`command:` and the very same objects reach core.
+
+---
+
 ## 9. Help: `help.md` and the regen you must not skip
 
 A mod may ship a `help.md` beside its `mod.json`, in the same wiki Markdown the
