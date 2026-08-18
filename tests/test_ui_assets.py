@@ -12067,10 +12067,42 @@ def _host_invalidate_source():
 
 def _host_cache_registrations(frag):
     """Every ``registerHostCache(...)`` STATEMENT in one fragment, verbatim.
-    Multi-line calls count -- the match runs to the first ``);`` that ends a
-    line -- so a long cache name may wrap without falling out of the set."""
+
+    Paren-BALANCED rather than regex-terminated. The obvious pattern -- run to
+    the first ``);`` that ends a line -- silently truncates any registration
+    whose body contains a call of its own, which is not hypothetical: the
+    controlWs clearer's first statement is ``closeControlWs(id);``. A truncated
+    slice is not a failing test, it is a SyntaxError in the harness, so the
+    breakage at least announced itself; a slice that happened to stay
+    syntactically valid would have quietly executed half a clearer.
+    """
     src = (BROKER_DIR / frag).read_text(encoding="utf-8")
-    return re.findall(r"^ +registerHostCache\(.*?\);$", src, re.S | re.M)
+    out = []
+    for m in re.finditer(r"^ +registerHostCache\(", src, re.M):
+        i = src.index("(", m.start())
+        depth, quote, esc = 0, "", False
+        while i < len(src):
+            ch = src[i]
+            if quote:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == quote:
+                    quote = ""
+            elif ch in "'\"`":
+                quote = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        assert depth == 0, f"unbalanced registerHostCache in {frag}"
+        end = src.index(";", i) + 1
+        out.append(src[m.start():end])
+    return out
 
 
 def _host_cache_registrations_source():
@@ -13641,6 +13673,13 @@ const mcpConfigCache = new Map();
 const profilesConfigCache = new Map();
 const closedWs = [];
 function closeControlWs(id) { closedWs.push(id); }
+// The controlWs clearer re-dials the HOME broker after closing it, because the
+// poll loop that re-opens every OTHER host deliberately skips home. Both halves
+// are observable here so the re-dial is asserted, not assumed.
+const openedWs = [];
+function localHost() { return { id: 'local' }; }
+function homeHostId() { return 'local'; }
+function openControlWs(host) { openedWs.push(host && host.id); }
 
 const renders = [];
 let _breakRender = '';
@@ -13695,6 +13734,7 @@ function reset(id) {
     seed(id);
     renders.length = 0;
     closedWs.length = 0;
+    openedWs.length = 0;
     _breakRender = '';
 }
 
@@ -13709,6 +13749,25 @@ CASES.clears_the_eight_and_repaints = function () {
     return { registered: registered, ok: ok, held: held('h1'),
              neighbour: held('h2'), closedWs: closedWs.slice(),
              renders: renders.slice() };
+};
+
+// Invalidating the HOME broker must not retire the single-active lease. Every
+// OTHER host's control socket comes back on the poll loop's next tick; home's
+// is opened once at boot and the loop skips it, so a bare close would be
+// permanent for the page.
+CASES.invalidating_home_redials_its_lease_socket = function () {
+    reset('local');
+    seed('h2');
+    const ok = invalidateHost('local');
+    const homeClosed = closedWs.slice();
+    const homeOpened = openedWs.slice();
+    // ...and a REMOTE host is closed and left to the poll loop, so the re-dial
+    // is specific to home rather than "always reopen whatever we just closed".
+    reset('h2');
+    invalidateHost('h2');
+    return { ok: ok, homeClosed: homeClosed, homeOpened: homeOpened,
+             held: held('local'),
+             remoteClosed: closedWs.slice(), remoteOpened: openedWs.slice() };
 };
 
 // A throwing clearer costs its own cache and nothing else -- not the clearers
@@ -13845,6 +13904,37 @@ def test_invalidate_clears_the_eight_and_runs_the_render_sequence(hosts_harness)
     assert r["neighbour"] == ["hostStateCache", "hostSaveChains",
                              "authPrompted", "hostPolls", "profilesCache",
                              "mcpConfigCache", "profilesConfigCache"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_invalidating_the_home_host_does_not_retire_the_lease_socket(
+        hosts_harness):
+    # The one clearer in the set that is a live SOCKET rather than a cache, and
+    # the one host nothing re-dials. Every OTHER host's control channel comes
+    # back on the poll loop's next tick; the loop skips home ("the HOME control
+    # WS is opened at boot"), boot is long over, and the only other opener is
+    # the auth overlay -- which needs a 401 first. So a bare close would kill
+    # the single-active lease for the life of the page: no further
+    # lease:changed, a takeover by another browser never learned (two live
+    # writers, the exact thing the lease prevents), and a Become-active button
+    # that silently does nothing because sendBecomeActive finds no socket.
+    #
+    # Nothing in core invalidates home today. #195 documents host:changed ->
+    # invalidate as THE pattern, though, and both new edge sites (the hidden
+    # checkbox, the colour swatch) render for the local row -- so a mod
+    # following the manual can reach it.
+    r = _run_hosts(hosts_harness, "invalidating_home_redials_its_lease_socket")
+    assert r["errors"] == []
+    assert r["ok"] is True
+    assert r["held"] == [], "home's caches survived the invalidation"
+    assert r["homeClosed"] == ["local"], "home's stale socket was not closed"
+    assert r["homeOpened"] == ["local"], \
+        "home's lease channel was closed and never re-dialled"
+    # Specific to home, not "always reopen whatever was just closed": a remote
+    # host is closed and left to the poll loop, which is what re-dials it
+    # against the new url.
+    assert r["remoteClosed"] == ["h2"]
+    assert r["remoteOpened"] == [], "a remote host was re-dialled here"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

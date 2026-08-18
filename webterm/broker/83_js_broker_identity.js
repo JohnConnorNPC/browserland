@@ -514,10 +514,11 @@
                     renderHostsList();
                     refreshTaskbar();
                     renderHostStatus();
-                    // #195: same argument as toggleHostHidden (56) — the form
-                    // above emits host:changed for a colour edit, so the
-                    // swatch must too, or the event depends on which control
-                    // the user used. No invalidate: nothing caches `color`.
+                    // #195: same argument as toggleHostHidden (56). This
+                    // swatch is the ONLY writer of host.color — the form above
+                    // is label/url/password and never touches it — so if this
+                    // site stays quiet no mod can ever learn the colour moved.
+                    // No invalidate: nothing caches `color`.
                     if (typeof _emitModEvent === 'function') {
                         _emitModEvent('host:changed', { hostId: host.id });
                     }

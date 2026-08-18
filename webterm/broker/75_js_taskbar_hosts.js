@@ -243,9 +243,24 @@
                 // last-good data would count a window's absence a SECOND time
                 // and close it well inside its intended grace window.
                 st.fresh = true;
-                // Fire-after-apply: the whole success has landed above.
-                if (authRecovered && typeof _emitModEvent === 'function') {
-                    _emitModEvent('host:auth', { hostId: host.id });
+                if (authRecovered) {
+                    // The same re-ask the overlay's success performs (63), for
+                    // the same reason: while this host was refusing us, its
+                    // token-gated answers came back short — the Help corpus
+                    // without the installed mods' sections (#173) and a mod
+                    // policy that fell back to this browser's defaults (#157).
+                    // Both are memoized, so re-asking is the only way they
+                    // heal. Without this, host:auth would mean two DIFFERENT
+                    // things depending on which site emitted it: a subscriber
+                    // told to re-fetch would be handed the same stale memo, and
+                    // the migrated Help mod's refresh would be a no-op.
+                    try { notifyModsHostAuth(host.id); } catch (_) {}
+                    try { notifyHelpHostAuth(host.id); } catch (_) {}
+                    // Fire-after-apply: the whole success, and the re-ask it
+                    // owes, have landed above.
+                    if (typeof _emitModEvent === 'function') {
+                        _emitModEvent('host:auth', { hostId: host.id });
+                    }
                 }
             } catch (e) {
                 st.ok = false;

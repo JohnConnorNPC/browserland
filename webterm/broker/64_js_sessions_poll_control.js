@@ -386,8 +386,29 @@
         // a live SOCKET — a lease channel still dialing the old address has to
         // go, or the host keeps a connection to a broker it no longer is. It is
         // idempotent (a no-op when nothing is open), which is what the registry
-        // asks of a clearer; the poll loop re-opens it against the new url.
-        registerHostCache('controlWs', id => closeControlWs(id));
+        // asks of a clearer.
+        //
+        // A REMOTE host's channel comes back on the poll loop's next tick. The
+        // HOME broker's does NOT: the loop skips it outright (75, "the HOME
+        // control WS is opened at boot"), boot has long since run, and the only
+        // other opener is the auth overlay's submit — which needs a 401 first.
+        // So closing home's here and walking away would retire the
+        // single-active lease for the life of the page: no further
+        // lease:changed, a takeover by another browser never learned (two live
+        // writers, which is the exact thing the lease exists to prevent), and a
+        // "Become active" button that silently does nothing because
+        // sendBecomeActive finds no socket. Nothing in core invalidates the
+        // home host today, but #195 documents `host:changed` -> invalidate as
+        // THE pattern, and both new edge sites (the hidden checkbox, the colour
+        // swatch) render for the local row — so a mod following the manual
+        // could reach it. Re-dial immediately instead; openControlWs is
+        // idempotent against a live socket.
+        registerHostCache('controlWs', id => {
+            closeControlWs(id);
+            if (id === homeHostId()) {
+                try { openControlWs(localHost()); } catch (_) {}
+            }
+        });
 
         function sendBecomeActive(host) {
             host = host || localHost();
