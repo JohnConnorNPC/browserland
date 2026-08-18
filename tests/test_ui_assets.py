@@ -18345,3 +18345,792 @@ def test_the_signal_surface_and_its_refusals_are_inert(signal_harness):
     assert r["noRec"] == {"signal": False, "aborted": False, "aborted2": False}
     # Idempotent: the second drain of the same record dispatches nothing.
     assert r["firstDispatch"] is True and r["secondDispatch"] is False
+
+
+# --------------------------------------------------------------------------- #
+# ctx.provide / ctx.consume -- inter-mod services (#199 / A49)
+# --------------------------------------------------------------------------- #
+
+_SERVICES_SLICE_START = \
+    "// ---- ctx.provide / ctx.consume: inter-mod services (#199)"
+_SERVICES_SLICE_END = "// ---- end ctx.provide / ctx.consume"
+
+
+def _services_src():
+    return (BROKER_DIR / "86g_js_mod_services.js").read_text(encoding="utf-8")
+
+
+def _services_source():
+    """A49's range in 86g, verbatim. Declaration-only apart from the two guarded
+    registration blocks, which is what lets the node cases below run the SHIPPED
+    surface rather than a copy of it."""
+    src = _services_src()
+    a = src.index(_SERVICES_SLICE_START)
+    b = src.index(_SERVICES_SLICE_END, a)
+    body = src[a:b]
+    for sym in ("function _modServiceLive(entry) {",
+                "function _modServiceWarnOnce(entry) {",
+                "function _modServiceThrew(entry, key, e) {",
+                "function _modServiceFnKeys(api) {",
+                "function _modServiceWrap(entry, fn, key) {",
+                "function _modServiceProxy(entry) {",
+                "function _provideModService(rec, name, api) {",
+                "function _consumeModService(modId, name) {",
+                "function _revokeModServices(rec) {",
+                "function _ctxServices(ctx, rec) {"):
+        assert sym in body, f"the services range no longer defines {sym!r}"
+    return body
+
+
+def _mod_conflict_error_source():
+    """The loader's own ModConflictError, verbatim -- the error type a duplicate
+    mod id already raises, and the one a re-provide of a live name reuses.
+    Sliced rather than faked so "the throw is the platform's conflict error" is
+    a claim about the shipped constructor."""
+    body = _frag_fn(_loader_src(), "function ModConflictError(message) {") \
+        + "\n        }\n"
+    assert "e.name = 'ModConflictError';" in body
+    return body
+
+
+def test_ctx_services_land_in_their_own_fragment_and_are_registered():
+    # A49: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap (11 lines spare when
+    # this landed) and the rule for that cap is split, never trim -- so
+    # provide/consume get a NEW ordered fragment rather than a shrunken
+    # neighbour (the same split 86a/86b/86c+86d/86e/86f got).
+    assert "86g_js_mod_services.js" in ui._ORDERED
+    assert (BROKER_DIR / "86g_js_mod_services.js").is_file()
+    at = ui._ORDERED.index
+    # Among the 86* companions and before the mod-script splice, since a mod's
+    # init reads the FINISHED ctx and may provide from it.
+    assert at("86f_js_mod_signal.js") < at("86g_js_mod_services.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    # The split has to actually buy headroom: every fragment involved stays
+    # under the cap.
+    for frag in ("86_js_mod_loader.js", "86c_js_mod_ctx_ext.js",
+                 "86g_js_mod_services.js"):
+        lines = (BROKER_DIR / frag).read_text(encoding="utf-8").count("\n")
+        assert lines <= ui._MAX_LINES, f"{frag} has {lines} lines"
+    ext = _ctx_ext_src()
+    loader = _loader_src()
+    svc = _services_src()
+    for sym in ("function _provideModService(rec, name, api) {",
+                "function _consumeModService(modId, name) {",
+                "function _revokeModServices(rec) {",
+                "function _ctxServices(ctx, rec) {"):
+        assert sym in svc, f"{sym!r} did not land in 86g"
+        assert sym not in ext and sym not in loader, \
+            f"{sym!r} belongs in 86g, not 86c or the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A49 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's registry, typeof-guarded exactly as 86c's own
+    # registrations are (a page assembled without the registry must not throw).
+    _assert_guarded_ctx_registration(svc, "_registerCtxExtender(_ctxServices);")
+    assert ("if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('provide', 1);\n"
+            "            _registerModCapability('consume', 1);\n"
+            "        }") in svc
+    # ctxVersion stays 1: additive, feature-detected surface.
+    assert "ctxVersion" not in _code_only(svc)
+    assert "ctxVersion: 1," in loader
+    # NOT Proxy.revocable, and the target is NOT the api -- the two decisions the
+    # frozen-api and dead-capture cases below prove behaviourally. Pinned here
+    # too because both are the obvious implementation and both are wrong:
+    # revoke() makes every operation THROW (the opposite of the degrade the
+    # contract promises), and a proxy over the api itself cannot return undefined
+    # for a frozen api's own properties without violating a proxy invariant.
+    assert "Proxy.revocable" not in _code_only(svc), \
+        "revoke() makes every operation THROW; deadness here is a flag on the entry"
+    assert "const target = (typeof entry.api === 'function')" in svc
+    assert "new Proxy(target, {" in svc
+
+
+def test_ctx_provide_and_consume_each_owe_a_capability_entry():
+    # The judgement, argued rather than assumed. #197's map is per FAMILY -- a
+    # bare top-level ctx member name -- and `provide` and `consume` are TWO new
+    # top-level members, like #195's `hosts` and #198's `signal` and unlike
+    # A41's saveChain (a member of a family that already has an entry). One
+    # registration would not do: `needs: ['consume']` would then refuse a mod on
+    # a build that demonstrably has it.
+    families = _ctx_families_added_by_extenders()
+    standalone = _standalone_capability_registrations()
+    for name in ("provide", "consume"):
+        assert name in families, \
+            f"the extender must put `{name}` on the ctx as a top-level member"
+        assert name in standalone, f"`{name}` has no capability entry"
+        assert name not in set(_ctx_family_keys()), \
+            f"ctx.{name} is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # They install as a PAIR, which is what makes either entry a sound thing for
+    # a mod to declare: the same guard gates both members.
+    svc = _services_src()
+    assert "ctx.provide = function (name, api) {" in svc
+    assert "ctx.consume = function (modId, name) {" in svc
+    assert svc.index("if (typeof Proxy !== 'function'") \
+        < svc.index("ctx.provide = function (name, api) {")
+
+
+def test_consume_adds_no_dependency_edge_and_no_loader_entry_point():
+    # Decision 1, as a claim about what this fragment does NOT do. `requires` is
+    # still the only ordering force: nothing here reads or writes the dependency
+    # graph, and the loader gained no call into the services registry at all
+    # (the surface is reached only through the ctx a mod already holds). An
+    # implicit edge would turn a soft probe into a take-down cascade.
+    svc = _code_only(_services_src())
+    for forbidden in ("requires", "_topoSort", "initMod(", "setModEnabled",
+                      "disableMod", "cycleState"):
+        assert forbidden not in svc, \
+            f"the services seam must not touch the dependency machinery: {forbidden!r}"
+    loader = _code_only(_loader_src())
+    for sym in ("_provideModService", "_consumeModService", "_revokeModServices",
+                "_ctxServices", "rec.services"):
+        assert sym not in loader, \
+            f"the loader must not grow a second door into services: {sym!r}"
+    # The ONE thing it reads from the loader is the active-mod map -- which is
+    # what makes "inactive provider => undefined" true with no bookkeeping.
+    assert "window.__mods && window.__mods.active" in _services_src()
+
+
+_SERVICES_HARNESS = r"""
+'use strict';
+// The E49 clauses run the SHIPPED slices in node: #194's ctx-extender registry,
+// #197's capability map (so the new entries are proven end to end and not just
+// string-matched), the loader's OWN _runUnloads and ModConflictError, and the
+// whole #199 range. Nothing here re-types the surface under test.
+const warns = [];
+const errors = [];
+console.warn = function () {
+    warns.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+// The loader's active-mod map is the ONLY thing consume looks a provider up in,
+// so the harness maintains it exactly as initMod/disableMod do: set before
+// init, deleted after the drain.
+global.window = { __mods: { active: new Map(), ctxVersion: 1 } };
+
+__CONFLICT__
+__REGISTRY__
+__NEEDS__
+__UNLOADS__
+__SERVICES__
+
+// ---- driver ---------------------------------------------------------------
+// ONE ACTIVATION, the way initMod builds one: a fresh per-activation record
+// ({id, version, unloads}) in window.__mods.active, a fresh ctx, and the
+// extender registry applied to it. `onUnload` is the one fixture, copied from
+// makeCtx's literal (that literal is 550 lines of browser-only desktop wiring;
+// this member is two).
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    window.__mods.active.set(id, rec);
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+// disableMod (86), verbatim in shape: drain, then release the slot.
+function disable(m) {
+    _runUnloads(m.rec);
+    window.__mods.active.delete(m.rec.id);
+}
+// The reference api shape: pattern's, as A51 will publish it.
+function patternApi(log) {
+    return {
+        apply: function (name) { log.push('apply:' + name); return 'applied:' + name; },
+        PATTERNS: { dots: 1, grid: 2 },
+        version: 3,
+    };
+}
+
+// JSON.stringify DROPS an undefined-valued key, and "undefined" is the answer
+// under test in most of these cases -- so every soft miss is coerced to the
+// string 'undefined' and asserted as such. A missing key would otherwise read
+// as a pass.
+function u(v) { return (v === undefined) ? 'undefined' : v; }
+
+const CASES = {};
+
+// E49 clause 1: the round trip, and the surface a consumer actually uses.
+CASES.round_trip = function () {
+    const log = [];
+    const provider = activate('pattern');
+    provider.ctx.provide('pattern', patternApi(log));
+    const consumer = activate('theme');
+    const p = consumer.ctx.consume('pattern', 'pattern');
+    const out = {
+        got: !!p,
+        called: p.apply('dots'),
+        value: p.version,
+        nested: p.PATTERNS,
+        // One proxy per (activation, name): every consumer shares it, and a
+        // per-use consume allocates nothing.
+        sameProxy: p === consumer.ctx.consume('pattern', 'pattern'),
+        sameFromOther: p === activate('other').ctx.consume('pattern', 'pattern'),
+        // A method read twice is the SAME wrapper (identity survives the proxy).
+        sameMember: p.apply === p.apply,
+        // ...and it is NOT the raw function: a plucked method must die with its
+        // provider, which is only possible if the read hands back a wrapper.
+        wrapped: p.apply !== patternApi([]).apply,
+        // Enumeration reaches the api, not the neutral proxy target: reporting
+        // {} for a LIVE service would be a wrong answer, not a degraded one.
+        keys: Object.keys(p),
+        has: ['apply' in p, 'nope' in p],
+        spread: Object.assign({}, p).version,
+        json: JSON.parse(JSON.stringify({ v: p.version, n: p.PATTERNS })),
+        // A mod consuming ITSELF, and a name it also provides: no special case.
+        self: (function () {
+            const s = provider.ctx.consume('pattern', 'pattern');
+            return { got: !!s, same: s === p, called: s.apply('self') };
+        })(),
+        // A callable api gets a callable proxy.
+        callable: (function () {
+            const m = activate('fn-mod');
+            m.ctx.provide('greet', function (who) { return 'hi ' + who; });
+            const g = activate('c2').ctx.consume('fn-mod', 'greet');
+            return { isFn: typeof g === 'function', out: g('you') };
+        })(),
+        log: log,
+        warns: warns, errors: errors,
+    };
+    return out;
+};
+
+// E49 clause 2: teardown revokes, and a capture taken while the provider was
+// live degrades -- undefined reads, no-op calls -- with exactly ONE warn.
+CASES.a_dead_capture_degrades_and_warns_once = function () {
+    const log = [];
+    const provider = activate('pattern');
+    provider.ctx.provide('pattern', patternApi(log));
+    const consumer = activate('theme');
+    const p = consumer.ctx.consume('pattern', 'pattern');
+    const entry = provider.rec.services.get('pattern');
+    const plucked = p.apply;              // captured while ALIVE
+    const alive = { call: p.apply('live'), plucked: plucked('live2') };
+    disable(provider);
+    const dead = {
+        // The whole contract, one touch at a time.
+        call: u(p.apply('dead')),         // no-op, not a TypeError
+        pluckedCall: u(plucked('dead2')), // a plucked METHOD dies too
+        read: u(p.version),
+        nested: u(p.PATTERNS),
+        has: 'apply' in p,
+        keys: Object.keys(p),
+        write: u((function () { p.version = 99; return p.version; })()),
+        del: (function () { delete p.version; return true; })(),
+        // A dead capture must survive being logged/concatenated: a `get` that
+        // returned plain undefined here would raise "Cannot convert object to
+        // primitive value" INSIDE the consumer.
+        str: 'saw ' + p,
+        // ...and a fresh consume is the soft miss the idiom is written for.
+        fresh: u(consumer.ctx.consume('pattern', 'pattern')),
+    };
+    // Hammer it: warn-once is per ENTRY, so a render loop warns once, not once
+    // per frame.
+    for (let i = 0; i < 20; i++) { void p.apply; p.apply(i); void p.version; }
+    // The teardown DISPOSER really ran: the entry is revoked, the registry is
+    // empty and the api reference is dropped (the proxy's own target is the
+    // neutral object, so this is what makes the revocation real for memory).
+    const registry = { revoked: entry.revoked, api: u(entry.api),
+                       size: provider.rec.services.size };
+    return { alive: alive, dead: dead, registry: registry, log: log,
+             warns: warns, warnCount: warns.length, errors: errors };
+};
+
+// E49 clause 3: re-providing a LIVE name from the same mod throws -- and the
+// same name is free again on the next activation.
+CASES.a_reprovide_of_a_live_name_throws = function () {
+    const provider = activate('pattern');
+    provider.ctx.provide('pattern', { a: 1 });
+    let threw = null;
+    try { provider.ctx.provide('pattern', { b: 2 }); }
+    catch (e) { threw = { name: e.name, message: String(e.message) }; }
+    // The first api is intact: a refused re-provide changes nothing.
+    const still = activate('c').ctx.consume('pattern', 'pattern');
+    const out = { threw: threw, kept: still.a, clobbered: u(still.b) };
+    // Bad arguments are the other programming error, and also throw.
+    const bad = [];
+    for (const args of [[''], ['x'], ['x', 5], ['x', null], [null, {}]]) {
+        try { provider.ctx.provide(args[0], args[1]); bad.push(null); }
+        catch (e) { bad.push(e.message.slice(0, 12)); }
+    }
+    out.bad = bad;
+    // A DIFFERENT name from the same mod, and the same name from a different
+    // mod, are both fine.
+    provider.ctx.provide('other', { c: 3 });
+    activate('pattern2').ctx.provide('pattern', { d: 4 });
+    // Re-enable: a new activation, so the name is free again.
+    disable(provider);
+    const again = activate('pattern');
+    let reThrew = false;
+    try { again.ctx.provide('pattern', { e: 5 }); } catch (_) { reThrew = true; }
+    out.reThrew = reThrew;
+    out.afterReenable = activate('c3').ctx.consume('pattern', 'pattern').e;
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// E49 clause 4: consume is a SOFT miss on every path the `typeof applyPattern`
+// probe never had -- and it creates no dependency edge.
+CASES.an_inactive_provider_consumes_to_undefined = function () {
+    const consumer = activate('theme');
+    const before = window.__mods.active.size;
+    const out = {
+        unknown: u(consumer.ctx.consume('nope', 'pattern')),
+        // INSTALLED BUT NOT LOADED (#163: an install applies on the NEXT page
+        // load) -- registered, catalogued, but with no activation record.
+        installedNotLoaded: (function () {
+            window.__mods.registered = [{ id: 'later', init: function () {} }];
+            return u(consumer.ctx.consume('later', 'pattern'));
+        })(),
+        // Active, but providing nothing / providing a different name.
+        activeNoService: (function () {
+            activate('bare');
+            return u(consumer.ctx.consume('bare', 'pattern'));
+        })(),
+        wrongName: (function () {
+            activate('p2').ctx.provide('other', { a: 1 });
+            return u(consumer.ctx.consume('p2', 'pattern'));
+        })(),
+        badArgs: [u(consumer.ctx.consume('', 'x')), u(consumer.ctx.consume('x', '')),
+                  u(consumer.ctx.consume(null, null)), u(consumer.ctx.consume())],
+        // Disabled after providing.
+        disabled: (function () {
+            const m = activate('p3');
+            m.ctx.provide('pattern', { a: 1 });
+            disable(m);
+            return u(consumer.ctx.consume('p3', 'pattern'));
+        })(),
+    };
+    // NO DEPENDENCY EDGE: a miss brought nothing up, took nothing down, and the
+    // consumer is still active. `requires` remains the only ordering force.
+    out.consumerStillActive = window.__mods.active.has('theme');
+    // ...and a miss brought NOTHING up: no record was created for the id that
+    // was asked for and not found.
+    out.noRecordCreated = [window.__mods.active.has('nope'),
+                           window.__mods.active.has('later')];
+    out.activeGrewOnlyByExplicitActivations =
+        (window.__mods.active.size === before + 2);
+    out.softMisses = Object.keys(out).filter(function (k) {
+        return out[k] === 'undefined';
+    }).length;
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// E49 clause 5: two mods providing the SAME name is a non-event -- there is no
+// shared table to collide in.
+CASES.two_mods_may_provide_the_same_name = function () {
+    const a = activate('a');
+    const b = activate('b');
+    a.ctx.provide('thing', { who: function () { return 'a'; } });
+    b.ctx.provide('thing', { who: function () { return 'b'; } });
+    const c = activate('c');
+    const pa = c.ctx.consume('a', 'thing');
+    const pb = c.ctx.consume('b', 'thing');
+    const out = { a: pa.who(), b: pb.who(), distinct: pa !== pb };
+    // Tearing one down leaves the other completely untouched.
+    disable(a);
+    out.afterA = { deadA: u(pa.who()), liveB: pb.who(),
+                   freshA: u(c.ctx.consume('a', 'thing')),
+                   freshB: !!c.ctx.consume('b', 'thing') };
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// E49 clause 6: the provider tears down WHILE a consumer is mid-call.
+CASES.torn_down_mid_call = function () {
+    const provider = activate('p');
+    const log = [];
+    provider.ctx.provide('svc', {
+        suicide: function () {
+            log.push('entered');
+            // The mod is disabled from inside its own service call (a settings
+            // write, a Control Panel toggle reached from a handler...).
+            disable(provider);
+            log.push('left');
+            return 'finished';
+        },
+        after: function () { log.push('after'); return 'after-ran'; },
+    });
+    const consumer = activate('c');
+    const p = consumer.ctx.consume('p', 'svc');
+    const captured = p.after;
+    // The frame already entered runs to completion -- no proxy can unwind a
+    // stack, and pretending otherwise would be the dishonest promise.
+    const midCall = p.suicide();
+    // Everything AFTER that instant is dead, through every route.
+    const out = {
+        midCall: midCall, log: log,
+        nextCall: u(p.after()),
+        pluckedCall: u(captured()),
+        freshConsume: u(consumer.ctx.consume('p', 'svc')),
+        warnCount: warns.length,
+    };
+    // The same holds when the take-down has only STARTED: rec.unloading is set
+    // at the head of _runUnloads, before a single disposer runs, so a disposer
+    // that consumes gets the miss too.
+    const p2 = activate('p2');
+    p2.ctx.provide('svc', { hi: function () { return 'hi'; } });
+    const c2 = activate('c2');
+    const cap2 = c2.ctx.consume('p2', 'svc');
+    let fromDisposer = 'unset';
+    p2.ctx.onUnload(function () {
+        fromDisposer = { fresh: u(c2.ctx.consume('p2', 'svc')),
+                         capture: u(cap2.hi()) };
+    });
+    disable(p2);
+    out.fromDisposer = fromDisposer;
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// E49 clause 7: a throwing api member is isolated the way every ctx surface
+// isolates mod code -- the consumer sees undefined, not somebody else's throw.
+CASES.a_throwing_member_is_isolated = function () {
+    const provider = activate('p');
+    const api = {
+        boom: function () { throw new Error('boom'); },
+        fine: function () { return 'fine'; },
+    };
+    Object.defineProperty(api, 'hostile', {
+        enumerable: true,
+        get: function () { throw new Error('hostile getter'); },
+    });
+    provider.ctx.provide('svc', api);
+    const p = activate('c').ctx.consume('p', 'svc');
+    let threw = false;
+    let out = {};
+    try {
+        out = {
+            call: u(p.boom()),
+            read: u(p.hostile),
+            stillWorks: p.fine(),
+            keys: Object.keys(p),
+        };
+    } catch (e) { threw = true; }
+    return { threw: threw, out: out, errorCount: errors.length,
+             errors: errors, warns: warns };
+};
+
+// The invariant trap a proxy over the api ITSELF would have walked into: a
+// FROZEN api is idiomatic defensive code, and a `get` returning undefined for
+// its non-writable, non-configurable data properties throws TypeError.
+CASES.a_frozen_api_still_degrades = function () {
+    const provider = activate('p');
+    provider.ctx.provide('svc', Object.freeze({
+        run: function () { return 'ran'; },
+        N: 7,
+    }));
+    const consumer = activate('c');
+    const p = consumer.ctx.consume('p', 'svc');
+    const alive = { run: p.run(), N: p.N, keys: Object.keys(p) };
+    disable(provider);
+    let threw = null;
+    let dead = null;
+    try {
+        dead = { run: u(p.run()), N: u(p.N), keys: Object.keys(p),
+                 gopd: u(Object.getOwnPropertyDescriptor(p, 'N')) };
+    } catch (e) { threw = String(e); }
+    return { alive: alive, dead: dead, threw: threw,
+             warnCount: warns.length, warns: warns, errors: errors };
+};
+
+// The surface itself, its capability entries, and the refusals that must be
+// inert rather than fatal.
+CASES.surface_and_refusals = function () {
+    const m = activate('m');
+    const out = {
+        types: [typeof m.ctx.provide, typeof m.ctx.consume],
+        capabilities: [m.ctx.capabilities.provide, m.ctx.capabilities.consume],
+        has: [_modCtxHas(m.ctx, 'provide'), _modCtxHas(m.ctx, 'consume')],
+        unmet: _modUnmetNeeds({ needs: ['provide', 'consume'] }, m.ctx),
+        // The record carries the registry, per activation.
+        onTheRecord: (m.rec.services instanceof Map),
+        // The revoke disposer is on the chain at CTX-BUILD time -- before
+        // init() ran, so before anything a mod writes could throw.
+        unloadsAtBirth: m.rec.unloads.length,
+        // A ctx decorated twice keeps ONE map and ONE disposer. The shipped
+        // extender is called by name rather than through _applyCtxExtenders,
+        // which would also re-run #197's _ctxCapabilities -- that member is
+        // defineProperty'd and refuses redecoration, which is 86c's business
+        // and not this claim.
+        idempotent: (function () {
+            const services = m.rec.services;
+            const unloads = m.rec.unloads.length;
+            _ctxServices(m.ctx, m.rec);
+            return { sameMap: m.rec.services === services,
+                     unloadsGrew: m.rec.unloads.length - unloads };
+        })(),
+        // A record that cannot carry a registry gets no members at all rather
+        // than members that always refuse.
+        noRec: (function () {
+            const ctx = { id: 'x' };
+            _applyCtxExtenders(ctx, null);
+            return ['provide' in ctx, 'consume' in ctx];
+        })(),
+    };
+    // Providing from a DEAD activation is a quiet no-op, not a throw: the mod
+    // could not have known, and nobody could consume it anyway.
+    m.ctx.provide('early', { a: 1 });
+    disable(m);
+    let lateThrew = false;
+    try { m.ctx.provide('late', { b: 2 }); } catch (_) { lateThrew = true; }
+    out.lateProvideThrew = lateThrew;
+    out.lateConsume = u(activate('c').ctx.consume('m', 'late'));
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def services_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modservices") / "harness.js"
+    path.write_text(
+        _SERVICES_HARNESS
+        .replace("__CONFLICT__", _mod_conflict_error_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__SERVICES__", _services_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_services(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_provided_service_is_consumable_through_a_live_proxy(services_harness):
+    # The round trip, on the shipped code: pattern's api published by one
+    # activation, reached by another with no global, no parse-order dependency
+    # and no `requires`.
+    r = _run_services(services_harness, "round_trip")
+    assert r["errors"] == [] and r["warns"] == []
+    assert r["got"] is True
+    assert r["called"] == "applied:dots"
+    assert r["value"] == 3 and r["nested"] == {"dots": 1, "grid": 2}
+    assert r["log"] == ["apply:dots", "apply:self"], \
+        "the call did not reach the provider's own function"
+    # ONE proxy per (activation, name), shared by every consumer -- which is what
+    # makes per-use consume free and revocation a single flag.
+    assert r["sameProxy"] is True and r["sameFromOther"] is True
+    assert r["sameMember"] is True and r["wrapped"] is True
+    # Enumeration reaches the API, not the neutral target the proxy is built
+    # over. Reporting {} for a LIVE service would be a wrong answer rather than a
+    # degraded one -- the exact defect shape a general mechanism produces on a
+    # path its hand-rolled predecessor never had.
+    assert r["keys"] == ["apply", "PATTERNS", "version"]
+    assert r["has"] == [True, False]
+    assert r["spread"] == 3
+    assert r["json"] == {"v": 3, "n": {"dots": 1, "grid": 2}}
+    # A mod consuming ITSELF is unremarkable: the lookup is by provider id and
+    # its own record is active. Same object as any other consumer's.
+    assert r["self"] == {"got": True, "same": True, "called": "applied:self"}
+    # A callable api gets a callable proxy (the apply trap).
+    assert r["callable"] == {"isFn": True, "out": "hi you"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_teardown_revokes_and_a_dead_capture_warns_exactly_once(
+        services_harness):
+    # E49's core clause. The stale capture is the whole reason the proxy exists:
+    # `typeof applyPattern === 'function'` reads TRUE for a mod disabled ten
+    # minutes ago, because a hoisted global outlives the mod that declared it.
+    r = _run_services(services_harness, "a_dead_capture_degrades_and_warns_once")
+    assert r["errors"] == []
+    assert r["alive"] == {"call": "applied:live", "plucked": "applied:live2"}
+    # Every route through the dead proxy degrades. `call` is the one that
+    # matters most: with a get trap returning plain undefined this would be
+    # "p.apply is not a function" INSIDE the consumer -- a crash produced by the
+    # mechanism that exists to prevent one.
+    assert r["dead"] == {
+        "call": "undefined", "pluckedCall": "undefined", "read": "undefined",
+        "nested": "undefined", "has": False, "keys": [], "write": "undefined",
+        "del": True, "str": 'saw [mods] dead service "pattern:pattern"',
+        "fresh": "undefined",
+    }
+    # ...and the provider was never called again after teardown.
+    assert r["log"] == ["apply:live", "apply:live2"]
+    # EXACTLY ONE WARN, after 20 further touches on top of the 10 above: the flag
+    # lives on the registry entry, so a consumer hammering a dead service in a
+    # render loop warns once and then degrades in silence.
+    assert r["warnCount"] == 1, r["warns"]
+    assert 'service "pattern:pattern" is gone' in r["warns"][0]
+    assert "Warned once." in r["warns"][0]
+    # The teardown DISPOSER ran, not just the mid-teardown flag: the entry is
+    # revoked, the registry is empty, and the api reference is dropped so the
+    # provider's object can actually be collected.
+    assert r["registry"] == {"revoked": True, "api": None, "size": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_reproviding_a_live_name_from_the_same_mod_throws(services_harness):
+    # The one member of the pair that throws, and deliberately: two halves of one
+    # mod claiming one name is a programming error, unlike consume's soft miss.
+    r = _run_services(services_harness, "a_reprovide_of_a_live_name_throws")
+    assert r["errors"] == [] and r["warns"] == []
+    assert r["threw"], "a re-provide of a live name did not throw"
+    # The platform's OWN conflict type -- the same error a duplicate mod id
+    # raises, since it is the same "two claims on one name" mistake.
+    assert r["threw"]["name"] == "ModConflictError"
+    assert 'mod "pattern" already provides "pattern"' in r["threw"]["message"]
+    # A refused re-provide changes NOTHING: the first api is still the one a
+    # consumer gets.
+    assert r["kept"] == 1 and r["clobbered"] == "undefined"
+    # An unusable name or api is the other programming error and also throws.
+    assert r["bad"] == ["ctx.provide:", "ctx.provide(", "ctx.provide(",
+                        "ctx.provide(", "ctx.provide:"]
+    # A re-enabled mod is a NEW activation with an empty registry, so the name is
+    # free again -- the freshness is structural (the map hangs off the record),
+    # not maintained.
+    assert r["reThrew"] is False
+    assert r["afterReenable"] == 5
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_inactive_provider_consumes_to_undefined_with_no_edge(
+        services_harness):
+    # Decision 1, on every path the `typeof` probe never had. INSTALLED BUT NOT
+    # LOADED is the #163 one: an install applies on the NEXT page load, so a
+    # registered-but-un-inited mod has no activation record and `undefined` is
+    # the correct answer until the reload.
+    r = _run_services(services_harness,
+                      "an_inactive_provider_consumes_to_undefined")
+    assert r["errors"] == [] and r["warns"] == []
+    for key in ("unknown", "installedNotLoaded", "activeNoService", "wrongName",
+                "disabled"):
+        assert r[key] == "undefined", f"{key} was not a soft miss"
+    assert r["badArgs"] == ["undefined"] * 4
+    assert r["softMisses"] == 5
+    # NO DEPENDENCY EDGE: nothing was brought up to satisfy the miss, nothing was
+    # taken down, and the consumer is still active. An implicit edge would turn
+    # this soft probe into a take-down cascade -- `requires` stays the only way
+    # to force ordering.
+    assert r["consumerStillActive"] is True
+    assert r["noRecordCreated"] == [False, False]
+    assert r["activeGrewOnlyByExplicitActivations"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_two_mods_may_provide_the_same_name(services_harness):
+    # Namespacing by provider id, proven rather than asserted: there is no global
+    # service table to collide IN. Each activation's entries live on its own
+    # record and consume takes the provider id, so `a:thing` and `b:thing` never
+    # meet -- and disabling one leaves the other entirely alone.
+    r = _run_services(services_harness, "two_mods_may_provide_the_same_name")
+    assert r["errors"] == []
+    assert r["a"] == "a" and r["b"] == "b" and r["distinct"] is True
+    assert r["afterA"] == {"deadA": "undefined", "liveB": "b",
+                           "freshA": "undefined", "freshB": True}
+    # One dead service, one warn -- and it names WHICH one.
+    assert len(r["warns"]) == 1 and 'service "a:thing"' in r["warns"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_provider_torn_down_mid_call_finishes_then_goes_dead(services_harness):
+    # The honest answer to "torn down WHILE a consumer is mid-call": a frame that
+    # has already entered the provider runs to completion, because no proxy can
+    # unwind a stack. What IS guaranteed is that deadness starts at the HEAD of
+    # the take-down path -- _runUnloads sets rec.unloading before it drains a
+    # single disposer, and that flag is one of the two things liveness reads.
+    r = _run_services(services_harness, "torn_down_mid_call")
+    assert r["errors"] == []
+    assert r["midCall"] == "finished"
+    assert r["log"] == ["entered", "left"], \
+        "the in-flight call did not run to completion"
+    # Everything after that instant is dead, through every route -- including the
+    # method plucked while the provider was live.
+    assert r["nextCall"] == "undefined"
+    assert r["pluckedCall"] == "undefined"
+    assert r["freshConsume"] == "undefined"
+    assert r["warnCount"] == 1
+    # And a DISPOSER that consumes during the drain gets the same miss: the flag
+    # is set before the chain runs, so there is no window in which a service of a
+    # mod that is being taken down still answers.
+    assert r["fromDisposer"] == {"fresh": "undefined", "capture": "undefined"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_api_member_is_isolated_from_the_consumer(services_harness):
+    # A throwing member is isolated the way every other ctx surface isolates mod
+    # code: logged, and the consumer sees undefined rather than an exception
+    # thrown across a boundary it did not write. A throw that escaped here would
+    # take the CONSUMER down for the PROVIDER's bug -- #162's shape.
+    r = _run_services(services_harness, "a_throwing_member_is_isolated")
+    assert r["threw"] is False, "a provider's throw escaped into the consumer"
+    assert r["out"]["call"] == "undefined"
+    assert r["out"]["read"] == "undefined", "a throwing GETTER escaped"
+    assert r["out"]["stillWorks"] == "fine", \
+        "one bad member cost the consumer the rest of the service"
+    assert r["out"]["keys"] == ["boom", "fine", "hostile"]
+    # Reported, not swallowed: a broken service stays debuggable. Three, because
+    # the hostile getter is read twice -- once directly, once by the enumeration.
+    assert r["errorCount"] == 3
+    assert all('member "' in e and "threw (isolated" in e for e in r["errors"])
+    assert r["warns"] == [], "a live-but-throwing member is not a dead service"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_frozen_api_still_degrades_instead_of_throwing(services_harness):
+    # The invariant trap the obvious implementation walks into. `ctx.provide('x',
+    # Object.freeze({...}))` is idiomatic defensive code; a proxy over the API
+    # ITSELF must, per the JS proxy invariants, return the target's own value for
+    # a non-writable non-configurable data property -- so a dead `get` returning
+    # undefined would throw TypeError on every read instead of degrading. The
+    # neutral target is what makes deadness unconditional rather than dependent
+    # on the shape of somebody else's api.
+    r = _run_services(services_harness, "a_frozen_api_still_degrades")
+    assert r["errors"] == []
+    assert r["alive"] == {"run": "ran", "N": 7, "keys": ["run", "N"]}
+    assert r["threw"] is None, \
+        "a dead proxy over a FROZEN api threw instead of degrading"
+    assert r["dead"] == {"run": "undefined", "N": "undefined", "keys": [],
+                         "gopd": "undefined"}
+    assert r["warnCount"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_services_surface_and_its_refusals_are_inert(services_harness):
+    r = _run_services(services_harness, "surface_and_refusals")
+    assert r["errors"] == [] and r["warns"] == []
+    assert r["types"] == ["function", "function"]
+    # Both capability entries, resolved off the LIVE ctx a mod is handed -- the
+    # end-to-end half of the argument that two top-level members owe two entries.
+    assert r["capabilities"] == [1, 1]
+    assert r["has"] == [True, True] and r["unmet"] == []
+    assert r["onTheRecord"] is True
+    # The revoke disposer is registered at CTX-BUILD time -- before init() ran,
+    # so a provider that throws halfway through init still gets reversed by the
+    # loader's LIFO drain.
+    assert r["unloadsAtBirth"] == 1
+    assert r["idempotent"] == {"sameMap": True, "unloadsGrew": 0}
+    # No half-family: a record that cannot carry a registry gets NEITHER member,
+    # so ctx.capabilities reports both absent (which is true) and
+    # `needs: ['consume']` blocks the mod with a reason.
+    assert r["noRec"] == [False, False]
+    # Providing from a DEAD activation is a quiet no-op rather than a throw: the
+    # mod could not have known, and nobody could consume the entry anyway.
+    assert r["lateProvideThrew"] is False
+    assert r["lateConsume"] == "undefined"

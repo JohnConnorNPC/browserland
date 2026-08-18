@@ -211,6 +211,19 @@ _ORDERED = [
     # among the 86* companions, still before the mod-script splice, since a
     # mod's init reads the finished ctx. One <script>, one scope.
     "86f_js_mod_signal.js",
+    # #199: ctx.provide / ctx.consume -- the sanctioned inter-mod service seam,
+    # replacing hoisted globals plus fragment parse order (pattern exports
+    # `applyPattern` at top level; theme probes `typeof applyPattern`). A
+    # provider publishes a named api on its OWN activation record; a consumer
+    # gets a revocable proxy that goes dead -- undefined reads, no-op calls, one
+    # warn -- when that activation ends, and `undefined` when the provider is
+    # not active at all. Its own fragment for the same split-never-trim reason
+    # 86e/86f got one (86c is at the cap with 11 lines spare), and NOT folded
+    # into either: those are #196's save pipeline and #198's abort signal,
+    # different concerns that merely sit nearby. Ordered among the 86*
+    # companions, still before the mod-script splice, since a mod's init reads
+    # the finished ctx and may provide from it. One <script>, one scope.
+    "86g_js_mod_services.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",
