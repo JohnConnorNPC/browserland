@@ -287,6 +287,18 @@
                     if (key === 'toString' || key === _MOD_SERVICE_TO_PRIMITIVE) {
                         return entry.deadLabel;
                     }
+                    // `then` is the ONE function-shaped key a dead proxy must
+                    // NOT answer with a no-op, and it is the difference between
+                    // degrading and hanging. A service that publishes a `then`
+                    // is a thenable; hand a dead one to Promise.resolve() — or
+                    // just `await` it, or return it from a command's run(),
+                    // where 86h assimilates it — and the assimilator calls that
+                    // no-op with (resolve, reject). The no-op calls NEITHER, so
+                    // the promise never settles: an await that hangs for the
+                    // life of the page, and a broken "execute always resolves".
+                    // Answering `undefined` makes the dead proxy simply not a
+                    // thenable, which is the honest degrade.
+                    if (key === 'then') return undefined;
                     return entry.fnKeys.has(key) ? entry.deadFn : undefined;
                 }
                 let value;

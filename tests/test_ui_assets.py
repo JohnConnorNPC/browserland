@@ -18830,6 +18830,37 @@ CASES.a_throwing_member_is_isolated = function () {
 // The invariant trap a proxy over the api ITSELF would have walked into: a
 // FROZEN api is idiomatic defensive code, and a `get` returning undefined for
 // its non-writable, non-configurable data properties throws TypeError.
+// A dead proxy must not look THENABLE. If the service published a `then`,
+// the dead read would hand back the no-op function -- and Promise.resolve()
+// calls it with (resolve, reject), which it ignores, so the promise never
+// settles. An await that hangs for the life of the page, from a mechanism
+// whose entire contract is to degrade.
+CASES.a_dead_thenable_service_does_not_hang = async function () {
+    const provider = activate('p');
+    provider.ctx.provide('svc', {
+        then: function (res) { res('assimilated'); },
+        run: function () { return 'ran'; },
+    });
+    const consumer = activate('c');
+    const p = consumer.ctx.consume('p', 'svc');
+    // Live, it really is a thenable -- so the hazard is reachable, not theoretical.
+    const alive = await Promise.resolve(p);
+    disable(provider);
+    // Dead: `then` reads undefined, so this is a plain value, not a thenable.
+    const deadThen = typeof p.then;
+    let settled = 'HUNG';
+    await Promise.race([
+        Promise.resolve(p).then(function () { settled = 'settled'; }),
+        new Promise(function (r) { setTimeout(r, 50); }),
+    ]);
+    // ...and the ordinary dead-function degrade is untouched by the exception.
+    const deadRun = typeof p.run;
+    // JSON.stringify DROPS an undefined value, so report it as a label.
+    const ranDead = (p.run() === undefined) ? 'undefined' : 'A VALUE';
+    return { alive: alive, deadThen: deadThen, settled: settled,
+             deadRun: deadRun, ranDead: ranDead };
+};
+
 CASES.a_frozen_api_still_degrades = function () {
     const provider = activate('p');
     provider.ctx.provide('svc', Object.freeze({
@@ -19764,6 +19795,42 @@ CASES.a_throwing_guard_is_an_error_not_a_veto = async function () {
 // E50 clause: mid-teardown. A command executed from another disposer -- i.e.
 // after rec.unloading is set but BEFORE this command's own disposer has run --
 // must already read 'inactive' and must not call into the dying activation.
+// execute() promises never to reject. Reading `.then` off a guard's return
+// value RUNS A GETTER, and a getter that throws would escape synchronously --
+// past the promise, and out through the key dispatcher and the menu click
+// handler, neither of which has a catch.
+CASES.a_hostile_thenable_guard_cannot_escape = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    let ran = 0;
+    c.register('hostile', {
+        when: function () {
+            return { get then() { throw new Error('then boom'); } };
+        },
+        run: function () { ran += 1; return 'x'; },
+    });
+    let threwSync = false;
+    let res = null;
+    try { res = await c.execute('scratchpad:hostile'); }
+    catch (e) { threwSync = true; res = { escaped: String(e) }; }
+    return { threwSync: threwSync, res: res, ran: ran, errors: errors.slice() };
+};
+
+// Mod code must not be handed the registry's own record as `this`. Invoked as
+// entry.run(...), an ordinary function sees `this === entry` -- a live handle on
+// rec, dead, run and when.
+CASES.callbacks_do_not_receive_the_registry_entry = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    const seen = {};
+    c.register('probe', {
+        when: function () { seen.whenThis = (this === undefined) ? 'undefined' : typeof this; return true; },
+        run: function () { seen.runThis = (this === undefined) ? 'undefined' : typeof this; return 'ok'; },
+    });
+    const res = await c.execute('scratchpad:probe');
+    return { res: res, seen: seen };
+};
+
 CASES.a_command_executed_mid_teardown_is_inactive = async function () {
     const m = activate('scratchpad');
     let ran = 0;
@@ -20198,3 +20265,51 @@ def test_the_commands_surface_and_its_refusals_are_inert(commands_harness):
     assert r["late"] == {"ok": False, "reason": "absent"}
     assert len(r["warns"]) == 1 and "tearing down" in r["warns"][0]
     assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_thenable_service_does_not_hang_forever(services_harness):
+    # The cross-fragment hazard: 86g's dead proxy meets anything that awaits it.
+    # A service is allowed to publish a `then` -- and a dead read that returned
+    # the usual no-op function would be assimilated by Promise.resolve(), which
+    # calls it with (resolve, reject). The no-op calls neither, so the promise
+    # never settles. `then` is therefore the one function-shaped key a dead proxy
+    # answers with undefined instead.
+    r = _run_services(services_harness, "a_dead_thenable_service_does_not_hang")
+    assert r["errors"] == []
+    assert r["alive"] == "assimilated", (
+        "the live service was not actually a thenable, so this case proves "
+        "nothing about the dead one")
+    assert r["deadThen"] == "undefined", "a dead proxy still looks thenable"
+    assert r["settled"] == "settled", "awaiting a dead service hung"
+    # The ordinary degrade is unaffected: other function members still no-op.
+    assert r["deadRun"] == "function"
+    assert r["ranDead"] == "undefined"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_hostile_thenable_guard_cannot_escape_execute(commands_harness):
+    # execute()'s callers are a key dispatcher and a menu click handler, neither
+    # of which can catch anything -- so "never rejects" has to hold even when the
+    # guard's return value is hostile. Reading `.then` runs a getter.
+    r = _run_commands(commands_harness, "a_hostile_thenable_guard_cannot_escape")
+    assert r["threwSync"] is False, "the getter's throw escaped execute()"
+    assert r["res"]["ok"] is False
+    assert r["res"]["reason"] == "error", (
+        "a guard that could not be read is a defect, not a veto")
+    assert r["ran"] == 0, "run() was called despite an unreadable guard"
+    assert any("when() failed" in e for e in r["errors"]), \
+        "the isolation must stay visible in the console"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_command_callbacks_are_not_handed_the_registry_entry(commands_harness):
+    # Called as entry.run(...), an ordinary function sees `this === entry`: rec,
+    # dead, run and when, all writable. A guard could swap what executes in the
+    # same invocation, or set dead and make a live mod report inactive forever.
+    # Mod code is trusted (#71); handing it the bookkeeping by accident is still
+    # not a decision anyone made.
+    r = _run_commands(commands_harness, "callbacks_do_not_receive_the_registry_entry")
+    assert r["res"]["ok"] is True and r["res"]["value"] == "ok"
+    assert r["seen"]["whenThis"] == "undefined"
+    assert r["seen"]["runThis"] == "undefined"

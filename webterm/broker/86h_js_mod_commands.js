@@ -4,7 +4,10 @@
         //         scope: 'window',              // 'global' (default) | 'window'
         //         when: function (where) { return where.win.kind === 'note'; },
         //         run: function (args, where) { return save(where.win); },
-        //     });                               // -> 'scratchpad:save'
+        //     });                    // -> off(); the id is 'scratchpad:save'
+        //                            // (register PREFIXES; it does not hand
+        //                            //  the id back — calling what you think
+        //                            //  is an id would UNREGISTER it)
         //     const r = await ctx.commands.execute('scratchpad:save', args);
         //     // {ok:true, value} | {ok:false, reason:'absent' | 'inactive'
         //     //                                       | 'blocked' | 'error'}
@@ -244,7 +247,14 @@
         // which lands on the 'error' branch like any other failure.
         function _runModCommand(entry, args, where) {
             let out;
-            try { out = entry.run(args, where); }
+            // .call(undefined, …) rather than entry.run(…): invoked as a
+            // METHOD, an ordinary function sees `this === entry` and gets a
+            // mutable handle on the registry's own record — rec, dead, run,
+            // when. A guard could swap what runs in the same invocation, or
+            // set dead and make a live mod report inactive forever. Mod code
+            // is trusted (#71), but handing it the bookkeeping by accident is
+            // not a decision anyone made.
+            try { out = entry.run.call(undefined, args, where); }
             catch (e) { return Promise.resolve(_modCommandFailed(entry.id, 'run', e)); }
             return Promise.resolve(out).then(function (value) {
                 return { ok: true, value: value };
@@ -277,17 +287,35 @@
             }
             const where = { win: win };
             if (entry.when) {
-                let allowed;
-                try { allowed = entry.when(where); }
+                let allowed, isThenable;
+                try {
+                    allowed = entry.when.call(undefined, where);
+                    // A thenable guard is RESOLVED, never coerced (#168). It
+                    // costs the command its synchronous dispatch, which is why
+                    // a gesture-gated command wants a synchronous guard.
+                    //
+                    // The `.then` READ is inside this try, and that is not
+                    // fussiness: reading it runs a getter, and a getter that
+                    // throws would otherwise escape execute() synchronously —
+                    // straight past the promise this family swears never
+                    // rejects, and out through the key dispatcher and the menu
+                    // click handler, which have no catch of their own.
+                    isThenable = !!(allowed && typeof allowed.then === 'function');
+                }
                 catch (e) {
                     return Promise.resolve(
                         _modCommandFailed(entry.id, 'when', e));
                 }
-                // A thenable guard is RESOLVED, never coerced (#168). It costs
-                // the command its synchronous dispatch, which is why a
-                // gesture-gated command wants a synchronous guard.
-                if (allowed && typeof allowed.then === 'function') {
-                    return Promise.resolve(allowed).then(function (v) {
+                if (isThenable) {
+                    // Promise.resolve() reads `then` a SECOND time, so it gets
+                    // its own guard rather than riding the one above.
+                    let assimilated;
+                    try { assimilated = Promise.resolve(allowed); }
+                    catch (e) {
+                        return Promise.resolve(
+                            _modCommandFailed(entry.id, 'when', e));
+                    }
+                    return assimilated.then(function (v) {
                         if (!v) {
                             return { ok: false, reason: 'blocked',
                                      detail: 'when' };
