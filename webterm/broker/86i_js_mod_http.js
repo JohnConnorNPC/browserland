@@ -187,6 +187,24 @@
                 throw _modHttpArgError(rec,
                     'path must be an absolute route beginning with "/"');
             }
+            // ...and NOT an authority. `hostUrl` is `(host.url || '') + path`,
+            // and the SELF entry's url is '' — so a path of `//evil/x` is not a
+            // route on this broker, it is the protocol-relative URL
+            // `//evil/x`, which fetch resolves to another ORIGIN. hostFetch
+            // then attaches `Authorization: Bearer <that host's token>` to it.
+            // A mod building a path out of anything it did not write itself (a
+            // route name from a server response, a saved recording's id) would
+            // hand this broker's token to whoever chose the string. The whole
+            // point of this family is that `hostId` selects the target, so a
+            // `path` that can re-select it is not a footgun to document — it is
+            // the one the wrapper exists to remove. Backslashes too: several
+            // engines normalise `/\` to `//` before parsing.
+            if (path.charAt(1) === '/' || path.charAt(1) === '\\') {
+                throw _modHttpArgError(rec,
+                    'path must be a route, not an authority: "'
+                    + path.slice(0, 12) + '" would target another origin — '
+                    + 'the host is chosen by hostId, never by the path');
+            }
             const method = (typeof o.method === 'string' && o.method)
                 ? o.method.toUpperCase() : 'GET';
             const hasBody = (o.json !== undefined);
@@ -201,6 +219,17 @@
                     throw _modHttpArgError(rec,
                         '`json` is not serializable: ' + e);
                 }
+                // stringify does not always THROW on unserializable input: a
+                // function, a symbol, or an object whose toJSON() returns
+                // undefined all yield `undefined` quietly. Sending that would
+                // put a bodyless request on the wire under a json content-type
+                // — the broker answers bad_json and the caller reads it as a
+                // server fault rather than the call-site defect it is.
+                if (body === undefined) {
+                    throw _modHttpArgError(rec,
+                        '`json` serialized to nothing (a function, a symbol, '
+                        + 'or a toJSON returning undefined)');
+                }
             }
             // FAIL CLOSED, and note what is NOT here: no ''/'local'/undefined
             // fallback to localHost(). hostById resolves the local broker under
@@ -213,8 +242,16 @@
             }
             const timeoutMs = (o.timeoutMs === undefined || o.timeoutMs === null)
                 ? MOD_HTTP_TIMEOUT_MS : o.timeoutMs;
-            const deadline = (typeof timeoutMs === 'number'
+            // CLAMPED to the largest delay a timer can actually represent.
+            // setTimeout's delay is a signed 32-bit int: hand it 2**31 and it
+            // overflows to a negative, which fires on the NEXT TICK. A caller
+            // asking for a 25-day deadline would get one of about zero
+            // milliseconds — the exact opposite of what they wrote, and
+            // indistinguishable from a broker that answered instantly.
+            const MAX_DELAY = 2147483647;
+            let deadline = (typeof timeoutMs === 'number'
                 && isFinite(timeoutMs) && timeoutMs > 0) ? timeoutMs : 0;
+            if (deadline > MAX_DELAY) deadline = MAX_DELAY;
             // COMPOSE the caller's signal, never replace it — the rule hostFetch
             // already follows, restated here because this file owns the
             // controller now. An ALREADY-ABORTED caller signal (the common
@@ -292,7 +329,14 @@
         // branchable ('TimeoutError: timeout' vs 'AbortError: mod "x" was torn
         // down').
         function _modHttpFail(e) {
-            return { status: 0, error: String(e) };
+            // String(e) is not safe on its own: an abort reason whose
+            // primitive conversion throws would turn the failure REPORT into a
+            // rejection, from the function whose contract is that it never
+            // rejects. The fallback names the shape rather than guessing.
+            let msg;
+            try { msg = String(e); }
+            catch (_) { msg = 'request failed (unprintable error)'; }
+            return { status: 0, error: msg };
         }
         // The extender. NO SURFACE ON A BUILD THAT CANNOT CARRY IT: without a
         // constructible AbortController the total deadline is unenforceable,

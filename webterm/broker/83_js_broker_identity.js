@@ -68,8 +68,25 @@
             try {
                 for (const h of getHosts()) {
                     if (h.id === 'local' || h.brokerId) continue;
+                    // The url this answer is ABOUT, captured before the await.
+                    const probedUrl = h.url;
                     const id = await probeBrokerId(h.url, h.token);
-                    if (id) { h.brokerId = id; changed = true; }
+                    // #200: only write it back if the record still points where
+                    // it pointed when we asked. A repoint DURING the probe would
+                    // otherwise land the old broker's verified identity on the
+                    // new endpoint — and land it permanently, because the loop
+                    // above skips any host that already has one, so nothing
+                    // would ever re-probe it. That is the same mislabelling the
+                    // edit-branch reset exists to prevent, arriving a moment
+                    // later through the back door; clearing the field at edit
+                    // time is not enough on its own while an answer about the
+                    // OLD address is still in flight. A discarded answer costs
+                    // one probe: the record still has no id, so the next
+                    // refresh asks again, now about the new address.
+                    if (id && h.url === probedUrl) {
+                        h.brokerId = id;
+                        changed = true;
+                    }
                 }
             } finally {
                 _hostIdRefreshing = false;
