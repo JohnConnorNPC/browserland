@@ -1553,7 +1553,7 @@ disabled mod's `undefined` field and a real failure are all "nothing happened".
 
 | `reason` | means |
 | --- | --- |
-| `absent` | nothing ever registered that id **in this page** — a typo, or a mod that is not *installed*. Not fixable by toggling. |
+| `absent` | nothing ever registered that id **in this page** — a typo, a mod that is not *installed*, or one that has never been switched on this session (a disabled mod never ran `register`, so its ids are `absent` rather than `inactive`, and enabling it does fix them). |
 | `inactive` | the id was registered by a mod that is **not active now** — switched off, mid-teardown, or torn down since. Fixable by toggling that mod on. |
 | `blocked` | the command **declined this invocation**: `when()` said no, or it is window-scoped and no window is focused. |
 | `error` | the command **failed to answer** — `run` threw, its promise rejected, or `when()` threw. |
