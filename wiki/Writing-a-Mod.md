@@ -439,6 +439,12 @@ bumping it.
   `localStorage`, namespaced `webterm:mod:<id>:<key>`. **Per-browser**, string
   values, never synced. Every call swallows storage failures (private mode,
   quota) and `get` returns `null`.
+- **`ctx.prefs`** (#196) — the *sanctioned* browser-local tier: `get(key,
+  default)` / `set(key, value)` / `remove(key)` over its own
+  `webterm:modprefs:<id>:<key>` namespace, with **JSON** values rather than
+  strings. A **sibling** of `ctx.storage`, not a corner of it — the namespace is
+  the whole contract, and it is what makes these records survive "Reset local
+  view" and structurally unable to ride `/state`. See below.
 - **`ctx.serverStore`** — a durable per-mod key/value store on the broker
   (`/mod-store/<modId>`), scoped to this mod's id so one mod can neither read
   nor write another's. Every call resolves to the parsed body plus the HTTP
@@ -468,6 +474,16 @@ bumping it.
   check `modstore.noHistory` in that broker's `/info` **before** sending a
   credential, because the write that would stop the archiving is itself the
   write that archives.
+
+  Two members are built **on top of** `get`/`set` and have their own
+  subsections below: **`update(fn, opts)`** (#196), the compare-and-swap that
+  re-applies your reducer over the winner of a `409`, and
+  **`saveChain(opts)`** (#196), the debounced, single-in-flight save pipeline
+  built on `update`. Use them. Three mods hand-rolled a compare-and-swap
+  before these existed, and the rebase that is easiest to write by hand — adopt
+  the winner's `rev`, re-`PUT` the object you already had — is the one that
+  erases every key another browser changed in between (#158; it is why
+  `mods/mod-sync/` deliberately does not use core's `putHostState`).
 
 ### Host I/O
 
@@ -1049,6 +1065,231 @@ Feature-detect with `typeof ctx.hosts.invalidate === 'function'` or
 the family is not installed **at all**, so `ctx.capabilities` reports `hosts`
 absent — true — rather than handing you a member that silently does nothing.
 
+### Compare-and-swap writes: `ctx.serverStore.update` (#196)
+
+```js
+const res = await ctx.serverStore.update(fn, {
+    host?, retries?, purgeRevisions?, noHistory? });
+// -> {ok:true, rev, value} | {ok:false, error, status?, rev?, value?}
+```
+
+`get` → `fn(value, rev)` → `set`, and **on a `409 conflict` it re-reads and
+re-applies `fn` to the winner's value**. The blob that lost is never re-`PUT`.
+That single behaviour is the whole reason the helper exists.
+
+**`fn` must be pure over `(value, rev)`.** It is invoked **once per attempt**,
+so a side effect inside it happens once per attempt — bumping a counter,
+appending to a log, showing a toast, queuing another save. That is a caller
+bug, and the code deliberately does not defend against it, because the only
+available defence is to snapshot once and re-send that snapshot after a `409`
+— which *is* the #158 clobber, now with retries. Everything the write depends
+on that can change between attempts (the live editor buffer, the current
+selection, `Date.now()`) belongs **inside** `fn`, where it re-runs over the
+winner.
+
+Which is also why the shape is a **reducer and not a snapshot-getter**. An
+`update(gatherValue)` API cannot rebase: it has nothing to apply the winner's
+value to, so its only move after a `409` is to overwrite. The winner's value has
+to flow *through* your function.
+
+The rest of the contract:
+
+- **`value` is the winner's value**, freshly parsed on every attempt, and
+  `null` on a store nobody has written yet. `rev` is the revision it was read
+  at. Mutating `value` in place is safe, but the next value must be
+  **returned** — a reducer that only mutates returns `undefined`, which is
+  refused (`bad_value`) **before** any write, because the server 400s on a
+  missing `value` and a round trip is a slow way to learn that.
+- **An async reducer is first-class** — `fn` may return a promise.
+- **Bounded, and the conflict is surfaced.** One write plus a bounded number of
+  rebases; `retries` moves that budget and is **clamped** — the ceiling is not
+  the caller's to remove, because the mirror failure of a silent clobber is a
+  silent infinite rebase against a hot writer, and every attempt also writes
+  into the store's revision ring (#175). Exhausting the budget resolves
+  `{ok:false, error:'conflict'}` with the last winner's `rev` and `value` still
+  inlined, and **you** decide whether to widen, warn or drop.
+- **`not_active` is refused, not rebased.** It is a `409` too, but it means
+  this browser does not hold the `/state` write lease, so re-applying `fn` at a
+  fresher revision would burn the entire budget only to be refused again. It
+  comes straight back with the live `rev` inlined.
+- **A `409` that inlines the live value costs no extra round trip**; one that
+  does not (an older broker, or a remote one whose body is untrusted input)
+  falls back to an authoritative re-read — and **a failed read aborts without
+  writing**. So does the *initial* read: a response that is not this store's own
+  `200` shape is a refusal, never "an empty store", because reading it as
+  rev 0 / `value: null` would run your reducer down its "nothing stored yet"
+  branch on a store nobody could actually read.
+- **`opts` is snapshotted once and rides every attempt**, rebases included, so
+  `purgeRevisions` (#65) and `noHistory` (#192) cannot be dropped by a retry.
+  `noHistory` keeps `set()`'s strict tri-state: it is **presence-keyed**, and
+  **absent is not `false`** — absence means "leave this record's flag exactly as
+  it is", so a retry that helpfully sent `noHistory:false` would resume
+  archiving the very credentials the flag exists to keep out of the ring.
+- **Fail-closed, inherited.** Every request goes through your own
+  `ctx.serverStore.get`/`set`, so it is mod-scoped, lease-carrying and
+  host-routed exactly as they are: an unknown `opts.host` makes **no request**
+  and refuses before any `PUT` is attempted.
+- **It never rejects.** Every outcome resolves to a result, including
+  `{ok:false, error:'fn_failed'}` when your reducer throws (it is logged) and
+  `bad_fn` when the first argument is not a function.
+
+Feature-detect with `typeof ctx.serverStore.update === 'function'` or
+`needs: ['serverStore.update']`. It is a new **member**, not a new family, so
+there is no capability entry for it: `ctx.capabilities` is keyed by family name
+(`serverStore`), never by dotted path — the same as
+`ctx.windows.createAppWindow`. `ctxVersion` stays `1`.
+
+### The save chain: `ctx.serverStore.saveChain` (#196)
+
+```js
+const chain = ctx.serverStore.saveChain({
+    host?, debounceMs?, retries?, purgeRevisions?, noHistory? });
+chain.save(fn);      // -> true (queued) | false (a dead chain, or a non-fn)
+chain.flush();       // -> Promise<result>, never rejects
+chain.onState(fn);   // 'idle' | 'saving' | 'conflict'  -> unsubscribe fn
+```
+
+`scratchpad`'s save pipeline, canned. It adds **nothing** to the write itself —
+every send goes through `update()`, so the `409` rebase, the bounded budget, the
+fail-closed host lookup and the verbatim `purgeRevisions` / `noHistory`
+passthrough are inherited rather than re-implemented. What the chain owns is
+*when* to write, *how many* writes to make, and *what to tell the user* while it
+happens.
+
+`save(fn)` takes the **same pure `(value, rev)` reducer** `update()` takes, and
+the purity rule above applies unchanged — including this specific case: **do not
+call this chain's own `save()` from inside a reducer**, or a rebase queues the
+same work twice.
+
+- **Coalesced by composition, not by replacement.** Rapid saves queue, and the
+  queue is spliced into **one** batch composed in order — `fn2(fn1(value, rev),
+  rev)` — handed to `update()` as a single reducer. So two queued saves **both
+  apply**; an earlier caller's delta is never dropped on the floor. For a
+  reducer that produces the whole document every time (scratchpad's) that
+  degenerates to last-wins, which is exactly the old behaviour. Two
+  consequences: every reducer in a batch sees the **same** base `rev`, and one
+  reducer that throws or forgets to return refuses the **whole** batch, under
+  `update()`'s own error names.
+- **Single in flight, per chain.** At most one write from a given chain is
+  outstanding; saves arriving during it leave as exactly one more write. *Per
+  chain* is the honest scope — two chains in one mod address the **same**
+  per-mod record on a given broker (`opts.host` only picks whose copy), so they
+  serialize with each other only through the server's revision CAS, each
+  re-applying over the other's winner. Correct, but it spends conflict budget:
+  write one chain per record.
+- **Trailing debounce.** Each `save()` pushes the deadline out, which is what
+  makes a burst one write — and means a genuinely continuous writer only leaves
+  via the in-flight and `flush()` paths. `debounceMs` overrides the default and
+  is **clamped**, for the reason in the next bullet: a pending batch is dropped
+  at teardown, so an absurd debounce is data loss wearing a save's clothes.
+- **`onState`** reports `'saving'` while a write is outstanding, `'conflict'`
+  for an unresolved refusable `409` (`conflict` or `not_active` — scratchpad's
+  read-only banner), `'idle'` otherwise. It is deduplicated, it **fires once on
+  subscribe** so a banner mounted after the fact is correct without
+  reconstructing anything, a throwing listener cannot cost the chain its pump,
+  and the returned unsubscribe is yours to call.
+- **`flush()`** forces the pending batch past the debounce and resolves once an
+  in-flight write and anything already queued have completed — never waiting on
+  writes queued *after* it. With nothing outstanding it resolves
+  `{ok:true, idle:true}`, except while a conflict is unresolved, where it
+  reports that result rather than a fresh `ok`.
+- **It never retries a failed batch by itself.** `update()` already rebases a
+  `409` up to its budget; past that the batch is dropped and the chain reports
+  `'conflict'`. Scratchpad's answer is to re-attempt on the next interaction
+  while the banner is up; yours is yours.
+
+**The trap: a chain drops its pending batch at teardown.** Deliberately. The
+timer is cleared, the queue is discarded, the state listeners are released, and
+every outstanding `flush()` promise resolves `{ok:false, error:'unloaded'}`
+rather than hanging the caller awaiting it. From the first instant of a disable
+the chain reads dead — `save()` returns `false`, `flush()` resolves
+`{ok:false, error:'unloaded'}`, and a disable landing *between* `update()`'s read
+and its write is a drop, not a race.
+
+That is not the same posture as the `ctx.settings.text` debounce, which *does*
+flush on teardown, and the difference is the point: a settings commit reaches
+`localStorage` synchronously, so a teardown can complete it, while a chain write
+is a network round trip that a **synchronous** disable cannot await. "Flush on
+the way down" is precisely the write that lands *after* a re-enable and clobbers
+the new activation.
+
+So **a deliberate final flush must be called while the mod is still alive** —
+from a window-close cleanup (`win.cleanups`, which also runs on an ordinary
+close, with the mod up) or from an explicit save action such as a `Ctrl+S`
+handler. **Never from `ctx.onUnload`**, where the activation is already marked
+dead and the batch is dropped by design. `mods/scratchpad/` is the worked
+example on both counts: it flushes from `win.cleanups` (capturing the editor
+buffer *first*, because a later cleanup in the same drain destroys the editor
+view while `flush()` is still resolving), and its `Ctrl+S` path is a `save()`
+followed by a `flush()`. What no client-side check can recall is a request
+already handed to the network; that residual window is named here rather than
+papered over.
+
+Feature-detect with `typeof ctx.serverStore.saveChain === 'function'` or
+`needs: ['serverStore.saveChain']` — a **member**, so no capability entry, same
+as `update()` above. Scratchpad declares the `needs` and blocks: saving *is*
+that mod, so a build without the chain should read
+`blocked (needs serverStore.saveChain)` rather than open a notes window that
+silently drops every keystroke. `mods/help/` makes the opposite call for
+`ctx.events` and feature-detects instead, because a missing bus costs it one
+corpus refresh rather than all of its persistence. **Block when the loss is
+total; degrade when it is partial** — the two shipped mods are there to be
+copied from, in whichever direction fits.
+
+### Browser-local preferences: `ctx.prefs` (#196)
+
+```js
+ctx.prefs.get(key, default);   // -> the stored JSON value, or `default`
+ctx.prefs.set(key, value);     // -> true once it reads back
+ctx.prefs.remove(key);         // -> true (false only for a bad key)
+```
+
+A mod's own preferences, per **browser**, with a contract instead of a
+coincidence. Before this, both ways of reaching for core's `prefs` object were
+wrong: a **bare** key is wiped by "Reset local view"'s non-underscore sweep, and
+an **underscore** key stays local only because the `/state` blob happens to
+serialize `_settings` and `_layout` and nothing else — one edit there and it
+syncs, exactly as `_settings` already does (#153).
+
+**The namespace is the decision.** `webterm:modprefs:<id>:<key>`, one
+`localStorage` record per key, a **sibling** of the `webterm:mod:<id>:`
+namespace `ctx.storage` owns — never a sub-prefix inside it, and never a key on
+the core `prefs` object. Three consequences, each of them the point:
+
+- **"Reset local view" cannot reach it.** That sweep deletes keys off the
+  `prefs` *object* and re-serializes it; a `modprefs` record is not in it.
+- **The sync path cannot reach it.** The `/state` blob is built from
+  `prefs._settings` and `prefs._layout`, so a `ctx.prefs` write leaves the
+  serialized state byte-identical and no `/state` `PUT` is attributable to one.
+  It is not "local by convention" — it is structurally unable to sync. A future
+  "sync my prefs" is therefore a **new tier**, not a flag on this one.
+- **`ctx.storage` keeps its semantics exactly** — no reserved-prefix policing,
+  and no way to clobber a preference record through the raw surface, since a mod
+  id may not contain `:` and both namespaces end in one.
+
+Values are **JSON**, not strings (that is the other difference from
+`ctx.storage`). The failure posture is `ctx.storage`'s, copied deliberately:
+
+- `get(key, default)` returns `default` for a missing key, a bad key and a
+  **corrupt record** — a half-written or hand-edited value is a miss, never a
+  throw that takes down the `init()` reading it.
+- `set` returns `false` for a bad key or a value JSON cannot represent (a cycle,
+  `undefined`, a function) — and in that case **nothing is written**, so a
+  refused `set` never destroys what is already stored.
+- A `localStorage` that refuses (private mode, quota) is swallowed and the value
+  is kept **in memory for the life of the page** — not the activation — so a
+  disable and re-enable still finds what `localStorage` would have kept. A
+  refused `remove` reads as removed for the rest of the session rather than
+  resurrecting the record it could not delete.
+
+`prefs` is a **new family** at capability version 1, so it does have a
+capability entry: gate with `ctx.prefs && typeof ctx.prefs.get === 'function'`,
+`ctx.capabilities.prefs`, or `needs: ['prefs']`. `ctxVersion` stays `1`.
+
+And it is storage, not a boundary: like everything else on this page (§1), the
+records sit in the page's own `localStorage`, where any script on the origin can
+read them. Namespacing keeps mods from *colliding*, not from *looking*.
+
 ---
 
 ## 9. Help: `help.md` and the regen you must not skip
@@ -1493,8 +1734,22 @@ import.
 
 **`prefs`/settings values sync.** A `ctx.settings.*` key lives in the shared
 `/state` blob, so it is *not* browser-local even if it feels like a local
-preference. Use `ctx.storage` for genuinely per-browser state, and
-`isBrowserGlobal` only controls which Control Panel tab shows the widget.
+preference. Use `ctx.prefs` (or `ctx.storage`) for genuinely per-browser state,
+and `isBrowserGlobal` only controls which Control Panel tab shows the widget.
+
+**A `saveChain` flush from `ctx.onUnload` is a no-op.** The chain drops its
+pending batch the instant a teardown starts, so a "flush on the way down"
+registered as an unload disposer saves nothing and resolves
+`{ok:false, error:'unloaded'}` — by design, because a disable is synchronous and
+cannot await a network write, and one that landed anyway would clobber the next
+activation. Put the deliberate final flush somewhere the mod is still alive: a
+window-close cleanup, or an explicit save action (§8).
+
+**A reducer is re-run, so it must not *do* anything.** `serverStore.update` and
+`saveChain.save` invoke your `fn` once per attempt, and a `409` means another
+attempt. A side effect in there — a counter, a toast, another `save()` — runs
+once per attempt, and it is the one part of the CAS contract nothing can check
+for you.
 
 **Reflect must be idempotent.** `spec.reflect` on a settings pane runs on every
 `/state` convergence, not just on open. Rebuilding your DOM there destroys an
