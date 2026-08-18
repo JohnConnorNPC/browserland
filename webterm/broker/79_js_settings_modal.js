@@ -55,6 +55,11 @@
         const setMcpUrlEl = document.getElementById('set-mcp-url');
         const mcpConfigCache = new Map();     // hostId -> {enabled,token,default_mode,allow_launch}
         const mcpConfigFetching = new Set();  // hostIds with an in-flight GET
+        // #195: the CACHE joins the core-owned invalidation set; the in-flight
+        // SET deliberately does not. It is a request guard that drops its own
+        // entry on settle, and clearing it mid-flight would let a second GET
+        // start against a host that already has one out.
+        registerHostCache('mcpConfigCache', id => mcpConfigCache.delete(id));
         // Launch-profile editor (#70; per-host, same posture as MCP). The cache
         // holds the FULL /profiles/config objects (command/title/cwd + exists),
         // browser-realm-only — /profiles stays names-only.
@@ -63,6 +68,10 @@
         const setProfileDetectBtn = document.getElementById('set-profile-detect');
         const profilesConfigCache = new Map();     // hostId -> /profiles/config
         const profilesConfigFetching = new Set();  // hostIds with an in-flight GET
+        // #195: same split as the MCP pair above — the cache is invalidated,
+        // the in-flight guard is left to settle on its own.
+        registerHostCache('profilesConfigCache',
+                          id => profilesConfigCache.delete(id));
 
         // settingsTarget = the host whose settings the host-tab form edits.
         //   {hostId, isLocal, s (the settings object), save()}.

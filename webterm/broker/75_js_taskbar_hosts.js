@@ -225,6 +225,16 @@
                 st.ok = true;
                 st.everOk = true;
                 st.consecFailures = 0;
+                // #195: the OTHER auth-completion site. The overlay's submit
+                // handler (63) is the one a user drives; this is the one that
+                // fires when the token was fixed some other way — pasted into
+                // the host-edit form, or simply accepted again by a broker that
+                // had been refusing it. Gated on the TRUE->FALSE edge, so a
+                // steady-state poll every couple of seconds emits nothing, and
+                // an overlay success cannot double-fire either: 63 clears this
+                // same `st.authNeeded` before its own emit, so the next poll
+                // sees no transition.
+                const authRecovered = st.authNeeded === true;
                 st.authNeeded = false;
                 authPrompted.delete(host.id);
                 st.sessions = list;
@@ -233,6 +243,10 @@
                 // last-good data would count a window's absence a SECOND time
                 // and close it well inside its intended grace window.
                 st.fresh = true;
+                // Fire-after-apply: the whole success has landed above.
+                if (authRecovered && typeof _emitModEvent === 'function') {
+                    _emitModEvent('host:auth', { hostId: host.id });
+                }
             } catch (e) {
                 st.ok = false;
                 st.consecFailures += 1;

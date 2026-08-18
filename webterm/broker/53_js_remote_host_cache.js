@@ -9,6 +9,14 @@
         // remote's own integer rev, mirroring pushState's 409 adopt-and-retry.
         const hostStateCache = new Map();   // hostId -> {rev, settings, layout}
         const hostSaveChains = new Map();   // hostId -> tail Promise (serialize PUTs)
+        // #195: both belong to the core-owned invalidation set, registered HERE
+        // (beside the declaration) rather than remembered by whoever clears
+        // hosts. Dropping the save chain does not cancel a PUT already in
+        // flight; it stops the NEXT save being serialized behind a chain built
+        // against the old url, which is the same "the next request uses the new
+        // address" model the rest of the set follows.
+        registerHostCache('hostStateCache', id => hostStateCache.delete(id));
+        registerHostCache('hostSaveChains', id => hostSaveChains.delete(id));
         // While a REMOTE host's settings tab is open its cached blob is the
         // settingsTarget the change handlers mutate — the background prefetch
         // must not swap that object out from under an in-flight edit. Set by

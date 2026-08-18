@@ -11855,8 +11855,24 @@ def _startup_frag_src():
 _EMIT_SITES = [
     ("host:auth", "63_js_clipboard_auth.js",
      "_emitModEvent('host:auth', { hostId: host.id });"),
+    # The overlay is the auth completion a USER drives; this is the one that
+    # fires when the token was fixed some other way (pasted into the host-edit
+    # form, or accepted again by a broker that had been refusing it). Gated on
+    # the authNeeded TRUE->FALSE edge, so a steady-state poll emits nothing and
+    # an overlay success cannot double-fire (63 clears the same flag first).
+    ("host:auth", "75_js_taskbar_hosts.js",
+     "_emitModEvent('host:auth', { hostId: host.id });"),
     ("host:changed", "83_js_broker_identity.js",
      "_emitModEvent('host:changed', { hostId: changedHostId });"),
+    # `hidden` and `color` are fields of the host record, and the form above
+    # already emits when they are edited THERE. Staying silent on the quick
+    # toggle and the swatch would make the event depend on which surface the
+    # user reached for. Over-emitting an edge is recoverable by re-reading;
+    # a missing edge is unfixable from a mod (there is nothing to poll).
+    ("host:changed", "56_js_hosts.js",
+     "_emitModEvent('host:changed', { hostId: id });"),
+    ("host:changed", "83_js_broker_identity.js",
+     "_emitModEvent('host:changed', { hostId: host.id });"),
     ("host:removed", "83_js_broker_identity.js",
      "_emitModEvent('host:removed', { hostId: id });"),
     ("state:adopted", "85_js_startup.js",
@@ -11894,14 +11910,20 @@ def test_core_emits_exactly_the_five_events_at_the_named_sites():
             found.append((name, path.name))
     assert sorted(found) == sorted((n, f) for n, f, _c in _EMIT_SITES), \
         "the core emit points are #195's five events at its named sites"
-    # ...and each call is the exact shipped line, present once in the page.
+    # ...and each call is the exact shipped line, appearing in the assembled
+    # page exactly as many times as the table says. Counted from the table
+    # rather than hard-coded, because several sites now legitimately share a
+    # call string: both auth-completion sites read `host.id`, and both
+    # state:adopted latches send `{}`. A site that vanishes, or an extra copy
+    # of a line that is meant to be unique, still fails.
     for _name, frag, call in _EMIT_SITES:
         assert call in (BROKER_DIR / frag).read_text(encoding="utf-8")
-    assert INDEX_HTML.count("_emitModEvent('state:adopted', {});") == 2
-    for _name, _frag, call in _EMIT_SITES:
-        if "state:adopted" in call:
-            continue
-        assert INDEX_HTML.count(call) == 1, f"missing/duplicated: {call!r}"
+    want_counts = {}
+    for _n, _f, c in _EMIT_SITES:
+        want_counts[c] = want_counts.get(c, 0) + 1
+    for call, want in want_counts.items():
+        assert INDEX_HTML.count(call) == want, \
+            f"expected {want} copies of {call!r}, found {INDEX_HTML.count(call)}"
 
 
 def test_every_core_emit_is_typeof_guarded():
@@ -11994,6 +12016,65 @@ def _core_emit_sites_source():
     ])
 
 
+# --------------------------------------------------------------------------- #
+# #195/A36: the core-owned per-host invalidation -- shipped-source slicers.
+# Shared by the A35 emit harness above (its two host sites delegate to this
+# seam) and by A36's own cases at the tail of this file.
+# --------------------------------------------------------------------------- #
+
+_INVALIDATE_SLICE_START = "// ---- per-host cache invalidation (#195) ---"
+_INVALIDATE_SLICE_END = "// ---- end per-host cache invalidation ---"
+
+#: The five fragments that DECLARE a per-host cache, and the cache names each
+#: one owns. #195's floor is host-registry's own eight (`host-registry.js`
+#: invalidateHost), and the point of the atom is that the list now lives in
+#: core, registered by the fragment that declares the cache.
+_HOST_CACHE_SITES = {
+    "53_js_remote_host_cache.js": ["hostStateCache", "hostSaveChains"],
+    "63_js_clipboard_auth.js": ["authPrompted"],
+    "64_js_sessions_poll_control.js": ["hostPolls", "controlWs"],
+    "76_js_launch_fullscreen.js": ["profilesCache"],
+    "79_js_settings_modal.js": ["mcpConfigCache", "profilesConfigCache"],
+}
+
+
+def _host_invalidate_source():
+    """#195's invalidation seam in 50, verbatim: the clearer registry, the
+    repaint and invalidateHost itself. Declaration-only (one array and three
+    functions), which is what lets a node harness run the SHIPPED seam instead
+    of a copy of it; the markers keep the range honest."""
+    src = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    start = src.index(_INVALIDATE_SLICE_START)
+    end = src.index(_INVALIDATE_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _hostCacheClearers = [];",
+                   "function registerHostCache(name, clear) {",
+                   "function _repaintHostSurfaces() {",
+                   "function _logHostInvalidate(what, id, e) {",
+                   "function invalidateHost(id) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _host_cache_registrations(frag):
+    """Every ``registerHostCache(...)`` STATEMENT in one fragment, verbatim.
+    Multi-line calls count -- the match runs to the first ``);`` that ends a
+    line -- so a long cache name may wrap without falling out of the set."""
+    src = (BROKER_DIR / frag).read_text(encoding="utf-8")
+    return re.findall(r"^ +registerHostCache\(.*?\);$", src, re.S | re.M)
+
+
+def _host_cache_registrations_source():
+    """The eight shipped registrations, in page order. Executed by the node
+    harnesses, so "invalidate clears the eight" is proven against the real
+    registration sites rather than a list re-typed in a test."""
+    out = []
+    for frag in _HOST_CACHE_SITES:
+        out.extend(_host_cache_registrations(frag))
+    return "\n".join(out)
+
+
 # The sites run in a desktop reduced to what they actually touch: the host
 # array, the five per-host caches, the window map, the lifecycle flags. Every
 # stub is a dependency of a SLICED function -- no emit is re-typed here, and no
@@ -12040,6 +12121,11 @@ const profilesCache = new Map();
 const hostStateCache = new Map();
 const hostSaveChains = new Map();
 const authPrompted = new Set();
+// #195/A36: the other two members of the core-owned invalidation set. They are
+// 79's, and neither emit site reads them -- they are here because the SHIPPED
+// registrations are spliced in below and each one names its own cache.
+const mcpConfigCache = new Map();
+const profilesConfigCache = new Map();
 const sessions = new Map();
 const pendingOpens = new Map();
 const windows = new Map();
@@ -12063,6 +12149,16 @@ function renderHostStatus() { log.push('renderHostStatus'); }
 function renderSettings() { log.push('renderSettings'); }
 function refreshTaskbar() { log.push('refreshTaskbar'); }
 function showSettingsPane(p) { log.push('showSettingsPane:' + p); }
+
+// #195/A36: the SHIPPED per-host invalidation seam (50) and the eight SHIPPED
+// registrations (53/63/64/76/79). Not stubs: commitHostForm's edit branch and
+// removeHost now delegate their cache clearing AND their repaint to
+// invalidateHost, so a fake here would let the emit cases assert against a
+// desktop core never actually clears.
+__INVALIDATE__
+
+__HOST_CACHES__
+
 function makeLocalTarget() { return { id: 'local' }; }
 let currentSettingsTab = 'local';
 let settingsTarget = makeLocalTarget();
@@ -12423,6 +12519,8 @@ def emit_harness(tmp_path_factory):
         .replace("__EVENTS__", _events_source())
         .replace("__SITES__", _core_emit_sites_source())
         .replace("__AUTH__", _auth_submit_source())
+        .replace("__INVALIDATE__", _host_invalidate_source())
+        .replace("__HOST_CACHES__", _host_cache_registrations_source())
         .replace("__BOOT_ADOPT__", _boot_adopt_source()),
         encoding="utf-8")
     return path
@@ -13239,3 +13337,523 @@ def test_the_hook_costs_nothing_until_a_mod_uses_it(teardown_harness):
     assert r["cbs"] == 0, "the wrapper broke onTerminalCreate's unsubscribe"
     assert r["badOff"] == "function", \
         "a malformed subscribe must return an inert unsubscribe, not throw"
+
+
+# --------------------------------------------------------------------------- #
+# ctx.hosts.invalidate -- the core-owned per-host invalidation (#195, A36)
+# --------------------------------------------------------------------------- #
+
+_HOSTS_CTX_SLICE_START = "// ---- ctx.hosts.invalidate: the core-owned "
+_HOSTS_CTX_SLICE_END = "// ---- end ctx.hosts.invalidate ---"
+
+
+def _hosts_ctx_source():
+    """#195's ctx.hosts range in 86c, verbatim. Declaration-only apart from the
+    two guarded registration calls -- the same shape every other extender in
+    that fragment has, and what lets the harness run the SHIPPED family."""
+    src = _ctx_ext_src()
+    start = src.index(_HOSTS_CTX_SLICE_START)
+    end = src.index(_HOSTS_CTX_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("function _modInvalidateHost(id) {",
+                   "function _ctxHosts(ctx) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _host_registry_invalidate_floor():
+    """What host-registry's OWN invalidateHost clears, read out of the mod.
+
+    #195 moves the list to core and says the mod's eight are the FLOOR, so this
+    reads that list instead of re-typing it: if the mod is ever taught a ninth
+    per-host cache, the gate below fails until core registers it too. The mod
+    itself is NOT touched by this atom (its migration is #204) -- this only
+    reads it."""
+    src = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
+        encoding="utf-8")
+    start = src.index("function invalidateHost(id) {")
+    body = src[start:src.index("\n                }\n", start)]
+    caches = set(re.findall(r"try \{ (\w+)\.delete\(id\); \} catch", body))
+    calls = set(re.findall(r"try \{ (\w+)\(id\); \} catch", body))
+    assert len(caches) + len(calls) == 8, (
+        f"host-registry's invalidateHost no longer clears eight things: "
+        f"{sorted(caches)} + {sorted(calls)}")
+    return caches, calls
+
+
+def test_the_invalidation_seam_is_core_owned_and_ordered_first():
+    # A36's whole point: the authoritative "forget this host" list stops being a
+    # MOD's. It lands in core -- and in the FIRST JS fragment, because a cache
+    # registers itself at its own declaration site and the earliest of those
+    # (53's hostStateCache) must find the registry already there.
+    js = [n for n in ui._ORDERED if n.endswith(".js")]
+    assert js[0] == "50_js_constants.js", \
+        "the invalidation registry must live in the FIRST JS fragment"
+    for frag in _HOST_CACHE_SITES:
+        assert js.index(frag) > js.index("50_js_constants.js"), \
+            f"{frag} registers a cache before the registry exists"
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    for sym in ("const _hostCacheClearers = [];",
+                "function registerHostCache(name, clear) {",
+                "function invalidateHost(id) {",
+                "function _repaintHostSurfaces() {"):
+        assert sym in consts, f"{sym!r} did not land in 50"
+        # At core's own indent: host-registry still carries its own nested
+        # invalidateHost (16 spaces) until #204 retires it.
+        assert INDEX_HTML.count("\n        " + sym) == 1, \
+            f"#195 symbol missing/duplicated in the served page: {sym!r}"
+    # The mod keeps its own copy until #204 -- this atom must not have touched
+    # it -- and core's is a different, top-level declaration.
+    reg = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
+        encoding="utf-8")
+    assert "                function invalidateHost(id) {" in reg, \
+        "host-registry's own invalidateHost is #204's to migrate, not A36's"
+
+
+def test_every_per_host_cache_registers_itself_at_its_declaration_site():
+    # Trap 7: "future per-host caches register into invalidate instead of being
+    # remembered by mods". So the registration is a property of the fragment
+    # that DECLARES the cache, and the floor is host-registry's own eight, read
+    # out of the mod rather than re-typed here.
+    registered = {}
+    for frag, names in _HOST_CACHE_SITES.items():
+        stmts = _host_cache_registrations(frag)
+        got = [re.search(r"registerHostCache\('([^']+)'", s).group(1)
+               for s in stmts]
+        assert got == names, f"{frag} registers {got}, expected {names}"
+        for name in names:
+            registered[name] = frag
+    assert len(registered) == 8, \
+        f"the invalidation set is {len(registered)} caches, not eight"
+    # Nowhere else: a registration in a fragment that does not own the cache is
+    # exactly the "remembered by a stranger" shape this replaces.
+    for frag in ui._ORDERED:
+        if not frag.endswith(".js") or frag in _HOST_CACHE_SITES:
+            continue
+        src = (BROKER_DIR / frag).read_text(encoding="utf-8")
+        assert "registerHostCache(" not in src or frag == "50_js_constants.js", \
+            f"{frag} registers a per-host cache it does not declare"
+    # THE FLOOR. Every cache the mod clears by hand is covered by core now.
+    caches, calls = _host_registry_invalidate_floor()
+    missing = sorted(caches - set(registered))
+    assert not missing, (
+        f"host-registry clears {missing} and core does not: register each "
+        f"beside its own declaration with registerHostCache(...)")
+    # ...including the one that is not a cache at all: the /control socket.
+    joined = "\n".join(s for f in _HOST_CACHE_SITES
+                       for s in _host_cache_registrations(f))
+    for call in calls:
+        assert f"{call}(id)" in joined, \
+            f"host-registry's {call}(id) has no core clearer"
+
+
+def test_core_host_edit_and_removal_go_through_the_one_invalidate():
+    # The documented latent gap, closed: core's own edit path cleared THREE of
+    # the eight and its removal six. Both now call the one function, and neither
+    # keeps a hand-written clear beside it.
+    ident = _identity_frag_src()
+    commit = _frag_fn(ident, "async function commitHostForm() {")
+    remove = _frag_fn(ident, "function removeHost(id) {")
+    assert "invalidateHost(editing.id)" in commit, \
+        "the host EDIT path must go through invalidateHost"
+    assert "invalidateHost(id);" in remove, \
+        "the host REMOVAL path must go through invalidateHost"
+    for name in ("hostPolls", "profilesCache", "authPrompted", "hostStateCache",
+                 "hostSaveChains", "mcpConfigCache", "profilesConfigCache"):
+        assert f"{name}.delete(" not in commit, \
+            f"commitHostForm still clears {name} by hand"
+        assert f"{name}.delete(" not in remove, \
+            f"removeHost still clears {name} by hand"
+    assert "closeControlWs(" not in remove, \
+        "removeHost still closes the lease socket by hand"
+    # An ADD has nothing to forget, so it keeps the plain renders -- and a
+    # refused commit must still not repaint through either path.
+    assert "const invalidated = editing ? invalidateHost(editing.id) : false;" \
+        in commit
+
+
+def test_invalidation_and_notification_stay_separate():
+    # #195, stated as a hard rule: `invalidate` clears caches and repaints, and
+    # it does NOT emit `host:changed` -- only core mutation sites emit. That is
+    # what makes "a subscriber reacts to host:changed by invalidating" safe.
+    # Comment lines dropped: both ranges DOCUMENT the rule, and prose that
+    # names the call is not a call site (_code_only, A35's own helper).
+    seam = _code_only(_host_invalidate_source())
+    assert "_emitModEvent" not in seam, \
+        "the invalidation emitted an event; a host:changed subscriber that " \
+        "invalidates would then recurse"
+    assert "savePrefs" not in seam, \
+        "savePrefs is a MUTATION and belongs to the caller that changed " \
+        "something, not to an invalidation a mod can call"
+    fam = _code_only(_hosts_ctx_source())
+    assert "_emitModEvent" not in fam
+    # The emit stays at the mutation site, and AFTER the invalidate -- so a
+    # handler observes cleared caches and a finished repaint (fire-after-apply).
+    ident = _identity_frag_src()
+    _order_in(_frag_fn(ident, "async function commitHostForm() {"),
+              "const invalidated = editing ? invalidateHost(editing.id) : false;",
+              "_emitModEvent('host:changed', { hostId: changedHostId });")
+    _order_in(_frag_fn(ident, "function removeHost(id) {"),
+              "invalidateHost(id);",
+              "_emitModEvent('host:removed', { hostId: id });")
+
+
+def test_the_repaint_is_inside_the_invalidation():
+    # "clears caches and repaints" -- one call, because a cleared cache nothing
+    # repaints leaves stale pixels, and because the sequence carries a subtlety
+    # (renderHostStatus called EXPLICITLY, since refreshTaskbar coalesces on an
+    # in-flight run and can no-op) that no caller should have to re-derive. It
+    # is the removeHost-grade sequence host-registry hand-ran.
+    seam = _host_invalidate_source()
+    repaint = _frag_fn(seam, "function _repaintHostSurfaces() {")
+    _order_in(repaint, "'renderHostsList', renderHostsList",
+              "'renderSettingsTabs', renderSettingsTabs",
+              "'renderHostStatus', renderHostStatus",
+              "'refreshTaskbar', refreshTaskbar")
+    assert "_repaintHostSurfaces();" in _frag_fn(seam, "function invalidateHost(id) {")
+
+
+def test_the_hosts_family_registers_its_own_capability_entry():
+    # `hosts` is a NEW family (makeCtx's v1 literal has no such member), so it
+    # cannot ride the seed loop -- that must stay byte-equal to the literal --
+    # and registers its own entry, or ctx.capabilities lies by omission.
+    ext = _ctx_ext_src()
+    assert "_registerModCapability('hosts', 1);" in ext
+    assert "hosts" in _standalone_capability_registrations()
+    assert "hosts" in _ctx_families_added_by_extenders(), \
+        "the gate must be able to SEE the family: keep `ctx.hosts = ...` at " \
+        "the start of its own line"
+    assert "hosts" not in set(_ctx_family_keys()), \
+        "`hosts` is not a v1 family; it arrives through an extender"
+    seed = ext[ext.index("for (const _cap of ["):]
+    seed = seed[:seed.index("]")]
+    assert "'hosts'" not in seed
+    assert "_registerCtxExtender(_ctxHosts);" in ext
+    _assert_guarded_ctx_registration(ext, "_registerCtxExtender(_ctxHosts);")
+    # Additive: the contract version does not move.
+    assert "ctxVersion" not in _frag_fn(ext, "function _ctxHosts(ctx) {")
+    # No half-family: with core's seam missing the family is not installed at
+    # all, rather than installed-and-always-refusing (the CP8 finding), so
+    # ctx.capabilities stays OBSERVED rather than promised.
+    body = _frag_fn(ext, "function _ctxHosts(ctx) {")
+    assert "if (typeof invalidateHost !== 'function') return;" in body
+    assert "const fam = (ctx.hosts && typeof ctx.hosts === 'object')" in body
+    assert "ctx.hosts = fam;" in body
+
+
+# E36 is BEHAVIOUR -- what is actually cleared, what is repainted, and that a
+# handler cannot recurse -- so these cases execute the SHIPPED slices in node
+# the way #194/#195's do: the ctx-extender registry, #197's capability map,
+# #195's bus, the invalidation seam out of 50 and the EIGHT registration
+# statements out of the five fragments that declare the caches.
+_HOSTS_HARNESS = r"""
+'use strict';
+const errors = [];
+const warns = [];
+const infos = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = function () {
+    warns.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+__REGISTRY__
+
+__NEEDS__
+
+__EVENTS__
+
+// ---- the desktop the seam touches, and nothing else -----------------------
+// The eight real containers (declared in five fragments on the page; here in
+// one place because the SHIPPED registrations below are what binds them), the
+// /control socket the eighth clearer closes, and the four renders.
+const hostStateCache = new Map();
+const hostSaveChains = new Map();
+const authPrompted = new Set();
+const hostPolls = new Map();
+const profilesCache = new Map();
+const mcpConfigCache = new Map();
+const profilesConfigCache = new Map();
+const closedWs = [];
+function closeControlWs(id) { closedWs.push(id); }
+
+const renders = [];
+let _breakRender = '';
+function _render(name) {
+    renders.push(name);
+    if (_breakRender === name) throw new Error('render boom: ' + name);
+}
+function renderHostsList() { _render('renderHostsList'); }
+function renderSettingsTabs() { _render('renderSettingsTabs'); }
+function renderHostStatus() { _render('renderHostStatus'); }
+function refreshTaskbar() { _render('refreshTaskbar'); }
+
+__INVALIDATE__
+
+__HOST_CACHES__
+
+__HOSTS_CTX__
+
+// ---- driver ---------------------------------------------------------------
+function modCtx(id, seedFamily) {
+    const rec = { id: id, unloads: [] };
+    const ctx = { id: id, ctxVersion: 1 };
+    if (seedFamily) ctx.hosts = seedFamily;
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+
+const CONTAINERS = [
+    ['hostStateCache', function (id) { return hostStateCache.has(id); }],
+    ['hostSaveChains', function (id) { return hostSaveChains.has(id); }],
+    ['authPrompted', function (id) { return authPrompted.has(id); }],
+    ['hostPolls', function (id) { return hostPolls.has(id); }],
+    ['profilesCache', function (id) { return profilesCache.has(id); }],
+    ['mcpConfigCache', function (id) { return mcpConfigCache.has(id); }],
+    ['profilesConfigCache', function (id) {
+        return profilesConfigCache.has(id); }],
+];
+function seed(id) {
+    hostStateCache.set(id, { rev: 1 });
+    hostSaveChains.set(id, 'tail');
+    authPrompted.add(id);
+    hostPolls.set(id, { everOk: true });
+    profilesCache.set(id, { profiles: [] });
+    mcpConfigCache.set(id, { enabled: true });
+    profilesConfigCache.set(id, {});
+}
+function held(id) {
+    return CONTAINERS.filter(function (c) { return c[1](id); })
+                     .map(function (c) { return c[0]; });
+}
+function reset(id) {
+    seed(id);
+    renders.length = 0;
+    closedWs.length = 0;
+    _breakRender = '';
+}
+
+const CASES = {};
+
+// E36, clause one: the eight, and the removeHost-grade repaint.
+CASES.clears_the_eight_and_repaints = function () {
+    reset('h1');
+    seed('h2');                       // a neighbour, to prove this is per-HOST
+    const registered = _hostCacheClearers.map(function (c) { return c.name; });
+    const ok = invalidateHost('h1');
+    return { registered: registered, ok: ok, held: held('h1'),
+             neighbour: held('h2'), closedWs: closedWs.slice(),
+             renders: renders.slice() };
+};
+
+// A throwing clearer costs its own cache and nothing else -- not the clearers
+// behind it, not the repaint, not the caller.
+CASES.a_throwing_clearer_is_isolated = function () {
+    reset('h1');
+    let after = false;
+    const boom = registerHostCache('boom', function () {
+        throw new Error('clearer boom');
+    });
+    const later = registerHostCache('after-boom', function () { after = true; });
+    const dup = registerHostCache('boom', function () {});
+    let threw = false;
+    let ok = null;
+    try { ok = invalidateHost('h1'); } catch (_) { threw = true; }
+    // ...and a broken RENDER is isolated the same way: the other three still run.
+    reset('h1');
+    _breakRender = 'renderSettingsTabs';
+    let renderThrew = false;
+    try { invalidateHost('h1'); } catch (_) { renderThrew = true; }
+    return { boom: boom, later: later, dup: dup, ok: ok, threw: threw,
+             after: after, held: held('h1'), renders: renders.slice(),
+             renderThrew: renderThrew, errors: errors, warns: warns };
+};
+
+// A blank/non-string id forgets nothing and repaints nothing -- there is no
+// host to be stale about, and a repaint is not free.
+CASES.a_bad_id_is_refused = function () {
+    reset('h1');
+    const out = [];
+    [undefined, null, '', 0, 123, {}, ['h1']].forEach(function (v) {
+        out.push(invalidateHost(v));
+    });
+    const m = modCtx('m');
+    out.push(m.ctx.hosts.invalidate());
+    return { out: out, renders: renders.slice(), held: held('h1'),
+             errors: errors };
+};
+
+// E36, clause three: invalidate does NOT emit, so a subscriber that reacts to
+// `host:changed` by invalidating cannot recurse.
+CASES.invalidate_never_emits_and_cannot_recurse = function () {
+    const m = modCtx('m');
+    const seen = [];
+    let fromHandler = 0;
+    m.ctx.events.on('host:changed', function (p, meta) {
+        seen.push([p.hostId, meta.replayed]);
+        if (m.ctx.hosts.invalidate(p.hostId)) fromHandler += 1;
+    });
+    // A direct invalidate: nothing on the bus, no generation burned.
+    reset('h1');
+    const direct = m.ctx.hosts.invalidate('h1');
+    const afterDirect = { seen: seen.length, gen: _modEventGen,
+                          held: held('h1'), renders: renders.slice() };
+    // Now the core mutation site's emit. The handler invalidates from inside
+    // its own delivery, which must not produce a second delivery.
+    reset('h1');
+    const emitted = _emitModEvent('host:changed', { hostId: 'h1' });
+    return { direct: direct, afterDirect: afterDirect, emitted: emitted,
+             seen: seen, fromHandler: fromHandler, gen: _modEventGen,
+             queue: _modEventQueue.length, held: held('h1'),
+             renders: renders.slice(), warns: warns, errors: errors };
+};
+
+// The ctx surface: a real family, a true capability entry, and `needs` resolves
+// against the same live object.
+CASES.the_family_is_true_surface = function () {
+    const m = modCtx('m');
+    const caps = m.ctx.capabilities;
+    // A family a later fragment already put something on is DECORATED, never
+    // replaced (#200's ctx.hosts.list() is the obvious next member).
+    const d = modCtx('d', { list: function () { return 'mine'; } });
+    return { type: typeof m.ctx.hosts.invalidate,
+             hosts: caps.hosts, frozen: Object.isFrozen(caps),
+             met: _modUnmetNeeds({ needs: ['hosts', 'hosts.invalidate'] },
+                                 m.ctx),
+             unmet: _modUnmetNeeds({ needs: ['hosts.list'] }, m.ctx),
+             decorated: (typeof d.ctx.hosts.list === 'function')
+                 ? d.ctx.hosts.list() : null,
+             stillThere: typeof d.ctx.hosts.invalidate,
+             unloads: m.rec.unloads.length };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def hosts_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("hosts") / "harness.js"
+    path.write_text(
+        _HOSTS_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__EVENTS__", _events_source())
+        .replace("__INVALIDATE__", _host_invalidate_source())
+        .replace("__HOST_CACHES__", _host_cache_registrations_source())
+        .replace("__HOSTS_CTX__", _hosts_ctx_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_hosts(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_invalidate_clears_the_eight_and_runs_the_render_sequence(hosts_harness):
+    # E36, clause one, against the SHIPPED registrations: the eight things
+    # host-registry's invalidateHost clears, and the four renders it hand-ran.
+    r = _run_hosts(hosts_harness, "clears_the_eight_and_repaints")
+    assert r["errors"] == []
+    assert r["registered"] == [
+        "hostStateCache", "hostSaveChains", "authPrompted", "hostPolls",
+        "controlWs", "profilesCache", "mcpConfigCache", "profilesConfigCache"], \
+        "the registered set is the eight, in page order"
+    assert r["ok"] is True
+    assert r["held"] == [], "a per-host cache survived the invalidation"
+    assert r["closedWs"] == ["h1"], "the lease socket stayed open"
+    assert r["renders"] == ["renderHostsList", "renderSettingsTabs",
+                            "renderHostStatus", "refreshTaskbar"], \
+        "renderHostStatus is called EXPLICITLY: refreshTaskbar coalesces on " \
+        "an in-flight run and can no-op"
+    # Per HOST, not a flush: the neighbour's caches are untouched.
+    assert r["neighbour"] == ["hostStateCache", "hostSaveChains",
+                             "authPrompted", "hostPolls", "profilesCache",
+                             "mcpConfigCache", "profilesConfigCache"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_throwing_clearer_does_not_cost_the_others(hosts_harness):
+    r = _run_hosts(hosts_harness, "a_throwing_clearer_is_isolated")
+    assert r["boom"] is True and r["later"] is True
+    assert r["dup"] is False, "a duplicate cache NAME must be refused"
+    assert any("already registered" in w for w in r["warns"])
+    assert r["threw"] is False, \
+        "a broken cache must not throw into removeHost / a mod"
+    assert r["ok"] is True
+    assert r["after"] is True, "the clearer behind the throwing one was skipped"
+    assert r["held"] == [], "the eight ran even though a sibling threw"
+    assert any("boom" in e for e in r["errors"]), \
+        "a swallowed clearer failure must still be reported"
+    # A broken render is isolated the same way -- all four are attempted, and
+    # the throw does not escape.
+    assert r["renderThrew"] is False
+    assert r["renders"] == ["renderHostsList", "renderSettingsTabs",
+                            "renderHostStatus", "refreshTaskbar"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_bad_id_forgets_nothing_and_repaints_nothing(hosts_harness):
+    r = _run_hosts(hosts_harness, "a_bad_id_is_refused")
+    assert r["errors"] == []
+    assert r["out"] == [False] * 8, \
+        "only a non-empty string id names a host to forget"
+    assert r["renders"] == [], "a refused invalidation repainted anyway"
+    assert len(r["held"]) == 7, "a refused invalidation cleared something"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_invalidate_does_not_emit_and_a_subscriber_cannot_recurse(hosts_harness):
+    # E36, clause three, and #195's hard rule executed rather than grepped:
+    # "invalidate clears caches and repaints, and it does not emit
+    # host:changed -- only core mutation sites emit. A subscriber that reacts
+    # to host:changed by calling invalidate therefore cannot recurse."
+    r = _run_hosts(hosts_harness, "invalidate_never_emits_and_cannot_recurse")
+    assert r["errors"] == []
+    assert r["direct"] is True
+    assert r["afterDirect"]["seen"] == 0, \
+        "a direct invalidate reached a host:changed subscriber -- it emitted"
+    assert r["afterDirect"]["gen"] == 0, "the invalidation burned a generation"
+    assert r["afterDirect"]["held"] == [] and r["afterDirect"]["renders"]
+    # The core emit: exactly one delivery, even though the handler invalidates
+    # from inside it.
+    assert r["emitted"] is True
+    assert r["seen"] == [["h1", False]]
+    assert r["fromHandler"] == 1
+    assert r["gen"] == 1, "the handler's invalidate emitted a second event"
+    assert r["queue"] == 0
+    assert r["warns"] == [], "the bounded pass was never even approached"
+    assert r["held"] == [], "the handler's invalidate did not clear"
+    assert r["renders"] == ["renderHostsList", "renderSettingsTabs",
+                            "renderHostStatus", "refreshTaskbar"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_ctx_hosts_is_a_true_family_a_mod_can_declare(hosts_harness):
+    r = _run_hosts(hosts_harness, "the_family_is_true_surface")
+    assert r["errors"] == []
+    assert r["type"] == "function"
+    assert r["hosts"] == 1, "ctx.capabilities does not carry the new family"
+    assert r["frozen"] is True
+    assert r["met"] == [], "`needs: ['hosts.invalidate']` must resolve"
+    assert r["unmet"] == ["hosts.list"], "a member nobody ships must read unmet"
+    assert r["decorated"] == "mine", \
+        "the extender replaced a family instead of decorating it"
+    assert r["stillThere"] == "function"
+    assert r["unloads"] == 0, \
+        "invalidate is stateless -- it owes the teardown chain nothing"

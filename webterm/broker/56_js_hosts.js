@@ -141,5 +141,18 @@
             // renderHostsList is safe with the Control Panel closed (its
             // #set-hosts-list mount is static markup in 40_body.html).
             renderHostsList();
+            // #195: `hidden` is a field of the host record, and commitHostForm
+            // emits host:changed when the SAME field is edited through the
+            // Hosts form. Staying silent here would make the event depend on
+            // which of the four surfaces the user reached for, which no mod
+            // author could predict. Under-emitting is also the unfixable
+            // direction: the bus is a mod's only notification of a host change,
+            // so a mod rendering its own host list would go stale forever with
+            // nothing to poll. The edge carries an id, not a snapshot — a
+            // subscriber that only cares about connection identity re-reads and
+            // decides. No invalidate: no per-host cache is keyed on `hidden`.
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('host:changed', { hostId: id });
+            }
         }
 

@@ -145,11 +145,11 @@
                     editing.label = label || defaultHostLabel(url);
                     editing.url = url;
                     if (pass) editing.token = pass;   // empty = keep existing
-                    // The URL may now point somewhere else entirely — restart
-                    // its poll/profile state from scratch.
-                    hostPolls.delete(editing.id);
-                    profilesCache.delete(editing.id);
-                    authPrompted.delete(editing.id);
+                    // The URL may now point somewhere else entirely — every
+                    // per-host cache is dropped below, through the one
+                    // core-owned invalidateHost (#195). This used to clear
+                    // three of them by hand here, which is the "known latent
+                    // gap" host-registry's own comment named.
                     changedHostId = editing.id;
                 } else {
                     if (!pass) {
@@ -215,20 +215,41 @@
                 savePrefs();
                 resetHostForm();          // clears the form AND the error line
                 if (addWarning) setHostError(addWarning);
-                renderHostsList();
-                renderSettingsTabs();   // a new/renamed host changes the tab bar
-                refreshTaskbar();
+                // #195: an EDIT goes through THE invalidation path — every
+                // registered per-host cache, then the removeHost-grade repaint,
+                // which is a superset of the three renders below (it adds
+                // renderHostStatus, called explicitly because refreshTaskbar
+                // coalesces and can no-op). An ADD has nothing to forget: a
+                // freshly minted id was never cached under any address. If the
+                // invalidate refuses (it never should here — a real host has a
+                // non-empty id), the plain renders still run, so a commit can
+                // never end without a repaint.
+                const invalidated = editing ? invalidateHost(editing.id) : false;
+                if (!invalidated) {
+                    renderHostsList();
+                    renderSettingsTabs();   // a new host changes the tab bar
+                    refreshTaskbar();
+                }
+            } finally {
                 // #195: ONE edge for both halves of this form. The event table
                 // has no `host:added` — an add IS a change to the set of hosts
                 // this browser can reach, and a subscriber that wants the new
                 // record reads it (the payload carries ids, not snapshots).
-                // Emitted AFTER the mutation, the save AND the renders, so a
-                // handler that reads a host, a tab or the taskbar sees the
-                // committed desktop rather than a half-applied one.
+                //
+                // In the FINALLY, not at the end of the try, because this edge
+                // does not replay: a subscriber that misses it has no way to
+                // ask again. savePrefs (localStorage, which throws when the
+                // quota is full) and the renders below it are all fallible, and
+                // a throw in any of them would leave the host committed in
+                // memory and the change unannounced forever. `changedHostId`
+                // is set only on a path that actually mutated — every early
+                // return above leaves it '' — so moving the emit here cannot
+                // announce a commit that did not happen. The cost is that a
+                // handler may run before the repaint finished, which is
+                // recoverable (it reads state, not pixels); a lost edge is not.
                 if (changedHostId && typeof _emitModEvent === 'function') {
                     _emitModEvent('host:changed', { hostId: changedHostId });
                 }
-            } finally {
                 hostFormBusy = false;
                 hostAddBtn.disabled = false;
                 // resetHostForm() / startEditHost() relabel the button themselves;
@@ -246,10 +267,20 @@
             const idx = hosts.findIndex(h => h.id === id);
             if (idx === -1) return;
             hosts.splice(idx, 1);
-            // Close its windows now; drop its sessions, taskbar entries,
-            // poll/profile state, and every '<id>:*' pref key. App windows are
-            // hostId:'app' (not the removed host), so they're matched by their
-            // file host instead:
+            // #195: from the splice on, the host is GONE from this browser, so
+            // the edge announcing it is owed no matter how the rest of the
+            // take-down goes. The try/finally exists for that one reason: the
+            // tail below closes windows, walks three maps, touches the settings
+            // pane and calls savePrefs (localStorage, which throws on a full
+            // quota), and host:removed does not replay — a subscriber that
+            // misses it has no way to ask again, and would keep rendering a
+            // host that no longer exists. The throw still propagates.
+            try {
+            // Close its windows now; drop its sessions, taskbar entries and
+            // every '<id>:*' pref key. (Its per-host caches and its lease
+            // socket go through invalidateHost at the end — #195.) App windows
+            // are hostId:'app' (not the removed host), so they're matched by
+            // their file host instead:
             //  - a file manager handles removal IN PLACE, per pane (#46) — a
             //    split FM stays open on its surviving pane — and is matched by
             //    appKind, never the legacy win.fileHostId (which it no longer
@@ -281,12 +312,6 @@
                 if (k.charAt(0) === '_') continue;
                 if (k.slice(0, prefix.length) === prefix) delete prefs[k];
             }
-            closeControlWs(id);          // stop the lease channel for this host
-            hostPolls.delete(id);
-            profilesCache.delete(id);
-            authPrompted.delete(id);
-            hostStateCache.delete(id);   // drop the removed host's settings cache
-            hostSaveChains.delete(id);
             if (editingHostId === id) resetHostForm();
             // If the removed host's tab was open, fall back to the local tab.
             if (currentSettingsTab === id) {
@@ -301,19 +326,27 @@
             // stored/synced value tidy so local shows marked after the delete.
             if (getSettings().defaultHost === id) getSettings().defaultHost = '';
             savePrefs();
-            renderHostsList();
-            renderSettingsTabs();   // the removed host's tab disappears
-            renderHostStatus();
-            refreshTaskbar();
-            // #195: LAST, and deliberately so. This function is the whole
-            // removal — the splice, the windows, the sessions, the per-host
-            // prefs, the lease socket, five caches and four renders — and the
-            // event that replaces `win._hostRemoved` above must mean "that
-            // host is gone", not "it is going". The two early returns (the
-            // local host, an unknown id) removed nothing and reach nothing
-            // here.
-            if (typeof _emitModEvent === 'function') {
-                _emitModEvent('host:removed', { hostId: id });
+            // #195: the lease socket, every registered per-host cache and the
+            // four renders (including the tab that disappears), in ONE
+            // core-owned call. It used to be six hand-written clears up where
+            // resetHostForm is now, plus the render sequence here — a strict
+            // SUBSET of what a host removal actually has to forget, which is
+            // why host-registry kept its own longer list. Placed after
+            // savePrefs so the repaint is the last thing before the event, and
+            // nothing between the two can re-prime a cache (there is no await).
+            invalidateHost(id);
+            } finally {
+                // #195: LAST, and deliberately so. This function is the whole
+                // removal — the splice, the windows, the sessions, the per-host
+                // prefs, the invalidation (the lease socket, every registered
+                // per-host cache) and the four renders — and the event that
+                // replaces `win._hostRemoved` above must mean "that host is
+                // gone", not "it is going". The two early returns (the local
+                // host, an unknown id) removed nothing and return before the
+                // try, so they reach nothing here.
+                if (typeof _emitModEvent === 'function') {
+                    _emitModEvent('host:removed', { hostId: id });
+                }
             }
         }
 
@@ -481,6 +514,13 @@
                     renderHostsList();
                     refreshTaskbar();
                     renderHostStatus();
+                    // #195: same argument as toggleHostHidden (56) — the form
+                    // above emits host:changed for a colour edit, so the
+                    // swatch must too, or the event depends on which control
+                    // the user used. No invalidate: nothing caches `color`.
+                    if (typeof _emitModEvent === 'function') {
+                        _emitModEvent('host:changed', { hostId: host.id });
+                    }
                 };
                 const colorBtn = attachColorPicker(
                     colorTarget, row, PALETTE.map((c) => ({ color: c })),

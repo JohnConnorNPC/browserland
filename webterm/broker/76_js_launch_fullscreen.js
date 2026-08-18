@@ -151,6 +151,11 @@
                 return _cacheClear();
             };
         }
+        // #195: registered AFTER the wrap above, and it calls `.delete` as a
+        // METHOD so the lookup happens at invalidation time — the negative
+        // entry goes with the cached value, exactly as the comment on
+        // profilesFailAt promises, and this registration stays ignorant of it.
+        registerHostCache('profilesCache', id => profilesCache.delete(id));
         function profilesFailedRecently(hostId) {
             const at = profilesFailAt.get(hostId);
             if (at == null) return false;

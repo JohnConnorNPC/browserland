@@ -256,6 +256,11 @@
         //                a tick that reuses last-good data can't double-count a
         //                window's missingPolls and close it early
         const hostPolls = new Map();   // hostId -> state record
+        // #195: the poll record is per-host state about an ADDRESS, so a host
+        // whose url/token changed must start from scratch — everOk, the failure
+        // count and the session list all described the old broker. The next
+        // tick re-primes it through pollStateFor.
+        registerHostCache('hostPolls', id => hostPolls.delete(id));
         function pollStateFor(hostId) {
             let st = hostPolls.get(hostId);
             if (!st) {
@@ -377,6 +382,12 @@
             }
             controlSockets.delete(hostId);
         }
+        // #195: the one member of the invalidation set that is not a cache but
+        // a live SOCKET — a lease channel still dialing the old address has to
+        // go, or the host keeps a connection to a broker it no longer is. It is
+        // idempotent (a no-op when nothing is open), which is what the registry
+        // asks of a clearer; the poll loop re-opens it against the new url.
+        registerHostCache('controlWs', id => closeControlWs(id));
 
         function sendBecomeActive(host) {
             host = host || localHost();
@@ -390,8 +401,20 @@
             const active = !!msg.active;
             if (hostId === homeHostId()) {
                 _homeActive = active;
-                if (active) becomeActiveTransition();
-                else deactivateTransition();
+                // try/finally, because the emit must survive a transition that
+                // throws. teardownView is synchronous, so a throw inside it
+                // propagates out of here and would skip the emit — and the
+                // level is only retained by an emit that actually happens, so
+                // the loss would be permanent: a repeat frame carrying the same
+                // {active:false} hits `if (_deactivated) return` and tears down
+                // nothing, and a late subscriber would replay a stale level.
+                // The finally does not paper over the throw (it still
+                // propagates to the frame handler); it only stops one broken
+                // transition from muting the lease for the rest of the page.
+                try {
+                    if (active) becomeActiveTransition();
+                    else deactivateTransition();
+                } finally {
                 // #195: the single-active lease, as a LEVEL — the event that
                 // deletes workspaces' read of the core-private _deactivated.
                 //
@@ -410,14 +433,20 @@
                 // event, which this build's frozen table does not have.
                 //
                 // AFTER the transition: a loss has fully torn the view down
-                // before any handler runs, and a gain has already set
-                // _deactivated=false (both bootActiveView and rebuildView do it
-                // synchronously, before their first await), so a handler that
-                // reacts by writing shared state is no longer gated out. A
+                // before any handler runs (teardownView is synchronous), and a
+                // gain has already set _deactivated=false (both bootActiveView
+                // and rebuildView do it synchronously, before their first
+                // await), so a handler that reacts by writing shared state is
+                // no longer gated out. Note the asymmetry is deliberate and the
+                // claim is only what it says: on a GAIN the rebuild is still in
+                // flight when handlers run. It has to be — onControlStatus is
+                // the frame handler and cannot await — and the event names the
+                // LEASE, which core has genuinely learned, not the view. A
                 // repeated {active:X} is a level no-op, which is the same
                 // idempotence the transition wrappers below already enforce.
-                if (typeof _emitModEvent === 'function') {
-                    _emitModEvent('lease:changed', { active: _homeActive });
+                    if (typeof _emitModEvent === 'function') {
+                        _emitModEvent('lease:changed', { active: _homeActive });
+                    }
                 }
             } else {
                 onRemoteControlStatus(hostId, active, msg);

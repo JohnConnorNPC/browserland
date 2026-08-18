@@ -2075,3 +2075,83 @@
             _registerCtxExtender(_ctxTerminalTeardown);
         }
         // ---- end info.onModTeardown -----------------------------------------
+
+        // ---- ctx.hosts.invalidate: the core-owned invalidation (#195) --------
+        // "Forget everything this page knows about host <id>", for mods.
+        //
+        // WHAT IT REPLACES. host-registry hand-maintained the list: its
+        // invalidateHost cleared EIGHT core caches it does not own, declared in
+        // five different fragments, and then hand-sequenced four renders to
+        // apply one change. Its own comment called that list "a SUPERSET of what
+        // core's own edit path clears today — a known latent gap", which is the
+        // honest description of any list a stranger keeps: it was right on the
+        // day it was written and nothing makes it stay right. #195 moves the
+        // list to core (50: registerHostCache / invalidateHost, with each cache
+        // registering ITSELF beside its own declaration), points core's host
+        // edit and host removal at it, and hands the same call to mods here.
+        // One function, so core and a mod cannot disagree about what forgetting
+        // a host means, and the next per-host cache is covered by the fragment
+        // that adds it.
+        //
+        // THIS DOES NOT EMIT, AND THAT IS THE CONTRACT. Invalidation and
+        // notification are separate acts (#195): `invalidate` clears and
+        // repaints, only core MUTATION sites emit `host:changed` (83), and
+        // therefore a subscriber that reacts to `host:changed` by invalidating
+        // cannot recurse. Nothing below reaches _emitModEvent, and nothing in
+        // invalidateHost does either — the two halves meet only at the core
+        // sites, where the emit deliberately comes AFTER the invalidate so a
+        // handler observes cleared caches and a finished repaint.
+        //
+        // IT DOES NOT SAVE, EITHER. savePrefs() is a MUTATION (localStorage plus
+        // a /state push) and stays with the caller that changed something. A mod
+        // holding this can drop stale per-host state without writing prefs it
+        // does not own.
+        //
+        // A NEW FAMILY, so it registers its own capability entry — `hosts` is
+        // not in makeCtx's v1 literal (the seed loop above is that literal,
+        // byte for byte), and a family an extender adds with no entry makes
+        // ctx.capabilities lie by omission. `needs: ['hosts.invalidate']`
+        // resolves against it, and a mod can feature-detect with
+        // `typeof ctx.hosts.invalidate === 'function'`. ctxVersion stays 1.
+        //
+        // NO SIBLING DEPENDENCY, and no half-family: the ONLY precondition is
+        // core's own invalidateHost, and when that is missing the family is not
+        // installed at all rather than installed-and-always-refusing (the CP8
+        // finding). ctx.capabilities is observed, not promised, so a build
+        // without the seam reports `hosts` absent — which is true — instead of
+        // handing a mod a member that silently does nothing.
+        function _modInvalidateHost(id) {
+            // The refusal shape core's own returns: false for a blank/non-string
+            // id (nothing to forget, and no repaint owed), true when it ran.
+            // Never a throw — a mod calling this from a handler must not be able
+            // to take a repaint down with a bad argument.
+            try { return invalidateHost(id) === true; }
+            catch (e) {
+                try {
+                    console.error('[mods] hosts.invalidate failed for "'
+                        + String(id) + '":', e);
+                } catch (_) { /* console is gone */ }
+                return false;
+            }
+        }
+        function _ctxHosts(ctx) {
+            if (typeof invalidateHost !== 'function') return;
+            // DECORATES an existing object if a later fragment got there first
+            // (#200's ctx.hosts.list() is the obvious next member), for the same
+            // reason the window extenders never replace ctx.windows: replacing a
+            // family deletes a sibling's members.
+            const fam = (ctx.hosts && typeof ctx.hosts === 'object')
+                ? ctx.hosts : {};
+            fam.invalidate = function (id) { return _modInvalidateHost(id); };
+            ctx.hosts = fam;
+        }
+        // Guarded like every other registration in this fragment: a page
+        // assembled without #194's registry or #197's capability map must not
+        // throw at load.
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxHosts);
+        }
+        if (typeof _registerModCapability === 'function') {
+            _registerModCapability('hosts', 1);
+        }
+        // ---- end ctx.hosts.invalidate ---------------------------------------

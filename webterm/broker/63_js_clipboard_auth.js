@@ -658,6 +658,9 @@
         const authSubmitBtn = document.getElementById('auth-submit');
         let authOverlayHostId = null;   // host the open overlay belongs to
         const authPrompted = new Set(); // host ids already auto-popped
+        // #195: a host whose url/token just changed has to be allowed to
+        // auto-pop again — the "already asked" mark was about the OLD address.
+        registerHostCache('authPrompted', id => authPrompted.delete(id));
         let authSubmitting = false;     // a probe is in flight (double-submit guard)
         // Bumped every time the overlay opens on a host or closes. The submit
         // handler captures it, so a probe that resolves AFTER the user hit Cancel
