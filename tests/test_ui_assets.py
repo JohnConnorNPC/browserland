@@ -21253,6 +21253,68 @@ CASES.required_host_throws_synchronously = async function () {
     return out;
 };
 
+// THE TOKEN LEAK, as a case. `hostUrl` is `(host.url || '') + path` and the
+// SELF entry's url is '', so a path beginning `//` is not a route on this
+// broker -- it is a protocol-relative URL, which fetch resolves to another
+// ORIGIN, with this broker's bearer token attached. The realistic caller is a
+// mod building a path out of a value it did not write itself.
+CASES.a_path_cannot_re_select_the_host = async function () {
+    const peer = await listen(makePeer('A'));
+    const evil = await listen(makePeer('EVIL'));
+    // The self entry, exactly as a mod gets it: url '' and a real token.
+    HOSTS = [{ id: 'local', label: 'this broker', url: '', token: 'SECRET' },
+             { id: 'peer', label: 'peer', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const authority = evil.url.replace(/^https?:/, '');   // //127.0.0.1:PORT
+    const out = {
+        protoRelative: throws(function () {
+            return c.fetch('local', authority + '/capture');
+        }),
+        backslash: throws(function () {
+            return c.fetch('local', '/\\' + authority.slice(2) + '/capture');
+        }),
+        // A path that merely CONTAINS // deeper in is a route, not an
+        // authority, and must still work -- the rule is about position.
+        innerSlashes: await c.fetch('peer', '/json?x=a//b'),
+    };
+    out.evilHits = evil.hits;      // must be [] -- nothing reached the attacker
+    out.peerHits = peer.hits.length;
+    return out;
+};
+
+// A deadline beyond setTimeout's signed 32-bit range must not fire on the next
+// tick: a caller asking for ~25 days would otherwise get ~0ms, which is
+// indistinguishable from a broker that answered instantly.
+CASES.a_huge_deadline_is_clamped_not_wrapped = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const started = Date.now();
+    const res = await c.fetch('local', '/json', { timeoutMs: 2147483648 });
+    return { res: res, elapsed: Date.now() - started };
+};
+
+// JSON.stringify does NOT always throw on unserializable input: a function, a
+// symbol, or a toJSON returning undefined yield `undefined` quietly, which sent
+// a bodyless request under a json content-type.
+CASES.json_that_serializes_to_nothing_throws = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const out = {
+        fn: throws(function () {
+            return c.fetch('local', '/echo', { method: 'POST',
+                                               json: function () {} });
+        }),
+        toJSONUndefined: throws(function () {
+            return c.fetch('local', '/echo', { method: 'POST',
+                json: { toJSON: function () { return undefined; } } });
+        }),
+    };
+    out.hits = peer.hits.length;   // nothing may have been sent
+    return out;
+};
+
 // E53 clause: an unknown hostId fails CLOSED -- a resolved value, zero requests.
 CASES.unknown_host_issues_no_request = async function () {
     const peer = await listen(makePeer('A'));
@@ -22279,3 +22341,40 @@ def test_a_broker_removed_mid_save_fails_visibly_and_targets_nothing_else(
     assert r["res"]["error"] == "broker no longer configured"
     assert r["selfHits"] == ["POST /recording/begin"]
     assert r["remoteHits"] == [], "the save re-targeted another broker"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_path_cannot_re_select_the_host(http_harness):
+    # The most serious defect this surface had. hostId chooses the target; a
+    # path that can re-choose it defeats the entire premise, and does it while
+    # attaching the chosen host's bearer token.
+    r = _run_http(http_harness, "a_path_cannot_re_select_the_host")
+    assert r["protoRelative"]["threw"] is True, (
+        "a protocol-relative path was accepted -- it resolves to another "
+        "ORIGIN and carries this broker's token")
+    assert r["backslash"]["threw"] is True, (
+        "a backslash authority was accepted; engines normalise /\\ to //")
+    assert r["evilHits"] == [], "a request reached the attacker's origin"
+    # The rule is about POSITION: // deeper in a route is an ordinary path.
+    assert r["innerSlashes"]["status"] == 200
+    assert r["peerHits"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_huge_deadline_is_clamped_rather_than_wrapped(http_harness):
+    # setTimeout's delay is a signed 32-bit int; 2**31 overflows negative and
+    # fires immediately, so an enormous deadline became no deadline at all.
+    r = _run_http(http_harness, "a_huge_deadline_is_clamped_not_wrapped")
+    assert r["res"]["status"] == 200, (
+        "an oversized timeoutMs fired immediately instead of being clamped")
+    assert "error" not in r["res"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_json_that_serializes_to_nothing_is_refused(http_harness):
+    # A bodyless request under a json content-type comes back bad_json, which
+    # reads as a server fault rather than the call-site defect it is.
+    r = _run_http(http_harness, "json_that_serializes_to_nothing_throws")
+    assert r["fn"]["threw"] is True
+    assert r["toJSONUndefined"]["threw"] is True
+    assert r["hits"] == 0, "an empty-bodied request was sent"
