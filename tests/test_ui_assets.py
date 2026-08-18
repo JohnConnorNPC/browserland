@@ -14995,3 +14995,1090 @@ def test_a_help_window_opened_after_the_auth_is_not_replayed_at(
     assert r["atOpen"]["fetches"] == 1
     assert r["fetches"] == 1 and r["builds"] == r["atOpen"]["builds"]
     assert r["rail"] == ["getting-started", "mods"]
+
+
+# ---------------------------------------------------------------------------
+# ctx.prefs: the sanctioned browser-local tier (#196 / A42)
+# ---------------------------------------------------------------------------
+
+_PREFS_SLICE_START = \
+    "// ---- ctx.prefs: the sanctioned browser-local tier (#196) ---"
+_PREFS_SLICE_END = "// ---- end ctx.prefs ---"
+
+
+def _mod_prefs_source():
+    """A42's range in 86c, verbatim. Declaration-only apart from the two
+    guarded registrations, which is what lets the node harness below run the
+    SHIPPED tier instead of a re-typed copy; the markers keep the range
+    honest."""
+    src = _ctx_ext_src()
+    start = src.index(_PREFS_SLICE_START)
+    end = src.index(_PREFS_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _MOD_PREFS_NS = 'webterm:modprefs:';",
+                   "const _modPrefsMemory = new Map();",
+                   "function _modPrefsKey(id, key) {",
+                   "function _modPrefsRaw(k) {",
+                   "function _modPrefsGet(id, key, def) {",
+                   "function _modPrefsSet(id, key, value) {",
+                   "function _modPrefsRemove(id, key) {",
+                   "function _ctxPrefs(ctx) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _core_prefs_source():
+    """51's own prefs object: loadPrefs, savePrefsLocal and the shipped
+    `const prefs = loadPrefs();`, plus 50's STORAGE_KEY. Sliced rather than
+    re-typed because "resetLocalView cannot reach a modprefs record" is a claim
+    about the REAL core prefs object and the REAL localStorage record it is
+    serialized into."""
+    src = (BROKER_DIR / "51_js_prefs.js").read_text(encoding="utf-8")
+    key = "        const STORAGE_KEY = 'webterm:prefs:v1';"
+    assert key in (BROKER_DIR / "50_js_constants.js").read_text(
+        encoding="utf-8")
+    decl = "        const prefs = loadPrefs();"
+    assert decl + "\n" in src, "51 no longer declares prefs from loadPrefs()"
+    return "\n".join([
+        key,
+        _frag_fn(src, "function loadPrefs() {") + "\n        }",
+        _frag_fn(src, "function savePrefsLocal() {") + "\n        }",
+        decl,
+    ])
+
+
+def _state_sync_source():
+    """52 in full. Declaration-only (module lets plus function declarations),
+    so the harness runs the REAL _stateBlob / _stateSerialize / pushState --
+    "structurally unreachable by the sync path" is worth nothing asserted
+    against a copy."""
+    src = (BROKER_DIR / "52_js_state_sync.js").read_text(encoding="utf-8")
+    for needed in ("function _stateBlob() {", "function _stateSerialize() {",
+                   "function schedulePush() {", "async function pushState() {",
+                   "prefs._settings", "prefs._layout"):
+        assert needed in src, f"{needed} missing from 52"
+    return src
+
+
+def _ctx_storage_source():
+    """makeCtx's OWN ctx.storage literal (86:258-269) plus the namespace line
+    it closes over, wrapped in a factory. The sibling-namespace claim is about
+    the shipped surface, so the harness gets the shipped surface."""
+    src = _loader_src()
+    ns = "            const ns = 'webterm:mod:' + modId + ':';"
+    assert ns + "\n" in src, "makeCtx's storage namespace line moved"
+    start = src.index("                storage: {\n")
+    end = src.index("\n                },\n", start) + len("\n                },")
+    lit = src[start:end]
+    assert "localStorage.getItem(ns + key)" in lit
+    assert "localStorage.setItem(ns + key, value)" in lit
+    return ("        function shippedStorage(modId) {\n"
+            + ns + "\n"
+            + "            return ({\n" + lit + "\n            }).storage;\n"
+            + "        }")
+
+
+def test_ctx_prefs_lands_in_the_extension_fragment_and_is_registered():
+    # #196/A42: new ctx surface, so it lands in 86c -- the loader is at the #68
+    # 2500-line cap and the rule there is split, never trim.
+    loader = _loader_src()
+    ext = _ctx_ext_src()
+    for sym in ("function _modPrefsKey(id, key) {",
+                "function _modPrefsGet(id, key, def) {",
+                "function _modPrefsSet(id, key, value) {",
+                "function _modPrefsRemove(id, key) {",
+                "function _ctxPrefs(ctx) {"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A42 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's registry and #197's capability map, both
+    # `typeof`-guarded like every other registration in the fragment.
+    assert ("if (typeof _registerCtxExtender === 'function') {\n"
+            "            _registerCtxExtender(_ctxPrefs);\n"
+            "        }") in ext
+    assert ("if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('prefs', 1);\n"
+            "        }") in ext
+    # A NEW family owes a capability entry -- the CP7 drift gate
+    # (test_capability_seed_is_the_real_ctx_surface_minus_metadata) scans
+    # `ctx.<family> =` in every extension fragment and fails without one.
+    assert "prefs" in _standalone_capability_registrations()
+    assert "prefs" in _ctx_families_added_by_extenders()
+    # ctxVersion stays 1: this is additive, feature-detected surface (#196
+    # trap 2), so a mod that pins v1 still runs.
+    assert "ctxVersion: 1" not in ext
+
+
+def test_the_prefs_tier_never_names_the_sync_path():
+    # #196 trap 9, statically: nothing in the tier may feed _stateBlob. The
+    # execution proof is below; this is the cheap one that fails the moment
+    # somebody adds a "sync my prefs" flag to this tier instead of building the
+    # NEW tier the issue asks for. Comments are stripped -- the range documents
+    # the very names it must not call.
+    code = _code_only(_mod_prefs_source())
+    for banned in ("savePrefs", "schedulePush", "_stateBlob", "_stateSerialize",
+                   "hostFetch", "'/state'", "serverStore", "prefs[",
+                   "sessionStorage"):
+        assert banned not in code, \
+            f"the browser-local tier reaches {banned!r}"
+    # It owns its OWN namespace, a sibling of ctx.storage's -- never a
+    # sub-prefix inside `webterm:mod:<id>:` and never the core prefs record.
+    assert "'webterm:modprefs:'" in code
+    assert "'webterm:mod:'" not in code and "STORAGE_KEY" not in code
+    # ...and no core fragment writes that namespace behind the tier's back.
+    for path in sorted(BROKER_DIR.glob("*.js")):
+        if path.name == "86c_js_mod_ctx_ext.js":
+            continue
+        assert "webterm:modprefs" not in path.read_text(encoding="utf-8"), \
+            f"{path.name} writes the ctx.prefs namespace directly"
+
+
+_PREFS_HARNESS = r"""
+'use strict';
+// #196/A42 executed against SHIPPED slices: #194's extender registry, #197's
+// capability map, the prefs tier itself, core's own prefs object +
+// savePrefsLocal (51), the real /state sync (52), the real resetLocalView (83)
+// and makeCtx's real ctx.storage literal. Nothing below re-types any of them.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.slice.call(arguments).join(' '));
+};
+console.warn = function () {};
+
+// The browser's localStorage, and the two ways it fails: '' = healthy,
+// 'write' = readable but every write throws (the quota / private-mode shape),
+// 'all' = the property itself is unusable.
+let store = Object.create(null);
+let failMode = '';
+const localStorage = {
+    getItem: function (k) {
+        if (failMode === 'all') throw new Error('localStorage unavailable');
+        return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null;
+    },
+    setItem: function (k, v) {
+        if (failMode) throw new Error('QuotaExceededError');
+        store[k] = String(v);
+    },
+    removeItem: function (k) {
+        if (failMode) throw new Error('QuotaExceededError');
+        delete store[k];
+    },
+};
+function storeKeys() { return Object.keys(store).sort(); }
+
+__REGISTRY__
+__NEEDS__
+__PREFS__
+__COREPREFS__
+__STATESYNC__
+__RESET__
+__STORAGE__
+
+// Core the shipped slices reach but this harness does not exercise.
+const CLIENT_ID = 'c1';
+const puts = [];
+const log = [];
+function localHost() { return { id: 'local' }; }
+async function hostFetch(host, path, opts) {
+    puts.push(((opts && opts.method) || 'GET') + ' ' + path);
+    return { ok: true, status: 200,
+             json: async function () { return { rev: 9 }; } };
+}
+function teardownView() { log.push('teardownView'); }
+function rebuildView() { log.push('rebuildView'); }
+function showNotice(m) { log.push('notice:' + m); }
+function getSettings() {}
+function getLayout() {}
+function requestRelayout() {}
+function refreshOpenSectionUIs() {}
+function isSizeLocked() { return false; }
+function applyDisplaySettings() {}
+
+// One mod's ctx, built the way makeCtx builds it: the real extender pass over
+// {id, ctxVersion} plus the active-mod record every family hangs disposers on.
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    return { ctx: _applyCtxExtenders({ id: id, ctxVersion: 1 }, rec),
+             rec: rec };
+}
+
+const CASES = {};
+
+// E42/1: the contract. JSON round trip, the DEFAULT on a corrupt record,
+// remove(), and the refusals that write nothing.
+CASES.the_json_contract = function () {
+    const p = modCtx('clock').ctx.prefs;
+    const wrote = [p.set('obj', { x: 1, y: [1, 2] }), p.set('num', 5),
+                   p.set('str', 'hi'), p.set('bool', false),
+                   p.set('null', null)];
+    const round = { obj: p.get('obj'), num: p.get('num'), str: p.get('str'),
+                    bool: p.get('bool', 'DEFAULT'),
+                    nul: p.get('null', 'DEFAULT') };
+    const missing = p.get('nothing-here', 'DEFAULT');
+    store['webterm:modprefs:clock:corrupt'] = '{not json';
+    const corrupt = p.get('corrupt', 'DEFAULT');
+    // A refused value never destroys what is stored.
+    const cyc = {}; cyc.self = cyc;
+    const refused = [p.set('obj', cyc), p.set('obj', undefined),
+                     p.set('obj', function () {}), p.set('', 1),
+                     p.set(null, 1), p.set(7, 1)];
+    const kept = p.get('obj');
+    const badGets = [p.get('', 'DEFAULT'), p.get(null, 'DEFAULT'),
+                     p.get(7, 'DEFAULT')];
+    const removed = [p.remove('num'), p.remove(''), p.remove(null)];
+    return { wrote: wrote, round: round, missing: missing, corrupt: corrupt,
+             refused: refused, kept: kept, badGets: badGets, removed: removed,
+             afterRemove: p.get('num', 'DEFAULT'), keys: storeKeys(),
+             errors: errors };
+};
+
+// E42/2: it survives "Reset local view" -- proven by running 83's own sweep,
+// not by asserting a prefix string. The two shapes it replaces are seeded
+// beside it so the contrast is visible in one result.
+CASES.a_prefs_value_survives_reset_local_view = function () {
+    prefs._settings = { theme: 'dark' };
+    prefs._layout = { cols: 2 };
+    prefs['local:7'] = { left: 3 };      // a BARE key: the sweep's target
+    prefs._floatWs = { parked: true };   // today's underscore hack
+    const m = modCtx('help');
+    m.ctx.prefs.set('rail', ['getting-started']);
+    _booted = true;
+    _deactivated = false;
+    resetLocalView();
+    const cached = JSON.parse(store['webterm:prefs:v1'] || '{}');
+    return {
+        bareGone: prefs['local:7'] === undefined,
+        underscoreKept: prefs._floatWs !== undefined,
+        settingsKept: JSON.stringify(prefs._settings),
+        survived: m.ctx.prefs.get('rail', 'DEFAULT'),
+        // A fresh ctx -- the next page load's init -- reads it back too.
+        afterReinit: modCtx('help').ctx.prefs.get('rail', 'DEFAULT'),
+        record: store['webterm:modprefs:help:rail'],
+        // ...and it is NOT in the core prefs record the sweep rewrote.
+        inCoreCache: Object.keys(cached).sort(),
+        coreRecord: store['webterm:prefs:v1'],
+        keys: storeKeys(), log: log, puts: puts, errors: errors,
+    };
+};
+
+// E42/3: zero /state PUTs are attributable to a prefs write -- run against the
+// real _stateBlob and the real pushState, with a control edit proving the
+// harness would have caught one.
+CASES.no_state_put_is_attributable_to_a_prefs_write = async function () {
+    prefs._settings = { theme: 'dark' };
+    prefs._layout = { cols: 2 };
+    _stateReady = true;
+    _stateRev = 3;
+    _stateLastSerialized = _stateSerialize();
+    const before = _stateSerialize();
+    const keysBefore = Object.keys(prefs).sort();
+    const p = modCtx('clock').ctx.prefs;
+    p.set('accent', '#f00');
+    p.set('gone', { a: 1 });
+    p.remove('gone');
+    const after = _stateSerialize();
+    await pushState();
+    const afterPrefsWrites = puts.slice();
+    // The control: a genuinely synced edit, through the same shipped push.
+    prefs._settings.theme = 'light';
+    await pushState();
+    // Parsed from the serialization, not from _stateBlob() -- that returns
+    // LIVE references into prefs, which the control edit below mutates.
+    return { before: before, after: after, blob: JSON.parse(after),
+             keysBefore: keysBefore, keysAfter: Object.keys(prefs).sort(),
+             afterPrefsWrites: afterPrefsWrites, puts: puts,
+             keys: storeKeys(), errors: errors };
+};
+
+// E42/4: invisible to the SAME mod's ctx.storage, both ways.
+CASES.the_same_mods_ctx_storage_cannot_see_it = function () {
+    const m = modCtx('clock');
+    const st = shippedStorage('clock');
+    m.ctx.prefs.set('theme', 'dark');
+    const viaStorage = st.get('theme');
+    st.set('theme', 'via-storage');
+    return { viaStorage: viaStorage,
+             viaPrefs: m.ctx.prefs.get('theme', 'DEFAULT'),
+             storageNow: st.get('theme'),
+             keys: storeKeys(),
+             inStorageNs: storeKeys().filter(function (k) {
+                 return k.indexOf('webterm:mod:') === 0;
+             }),
+             errors: errors };
+};
+
+// The checkpoint-8 shape of question: localStorage unavailable AND the mod
+// disabled, then re-enabled. The fallback's lifetime is the PAGE, so the
+// values are still there -- one failure does not quietly become two.
+CASES.the_memory_fallback_outlives_a_disable_and_re_enable = function () {
+    failMode = 'all';
+    const first = modCtx('clock');
+    const wrote = first.ctx.prefs.set('face', { hands: true });
+    const live = first.ctx.prefs.get('face', 'DEFAULT');
+    // Disable: _runUnloads drains the record's LIFO chain. The tier registers
+    // nothing on it -- deliberately, that is what page lifetime means.
+    const unloads = first.rec.unloads.length;
+    first.rec.unloads.splice(0).reverse().forEach(function (fn) { fn(); });
+    const second = modCtx('clock');
+    const afterReenable = second.ctx.prefs.get('face', 'DEFAULT');
+    const neighbour = modCtx('clock-2').ctx.prefs.get('face', 'DEFAULT');
+    // ...and remove() still means removed, with no record to delete.
+    const removed = second.ctx.prefs.remove('face');
+    const afterRemove = modCtx('clock').ctx.prefs.get('face', 'DEFAULT');
+    return { wrote: wrote, live: live, unloads: unloads,
+             afterReenable: afterReenable, neighbour: neighbour,
+             removed: removed, afterRemove: afterRemove,
+             keys: storeKeys(), errors: errors };
+};
+
+// The half-failure: reads work, writes throw. Memory answers until a write
+// lands, then localStorage is authoritative again (so another tab is seen).
+CASES.a_refused_write_is_answered_from_memory_until_one_lands = function () {
+    const p = modCtx('clock').ctx.prefs;
+    p.set('n', 1);
+    const stored1 = store['webterm:modprefs:clock:n'];
+    failMode = 'write';
+    const wrote = p.set('n', 2);
+    const readBack = p.get('n', 'DEFAULT');
+    const recordStill = store['webterm:modprefs:clock:n'];
+    failMode = '';
+    p.set('n', 3);
+    const stored3 = store['webterm:modprefs:clock:n'];
+    store['webterm:modprefs:clock:n'] = '4';   // another tab
+    return { stored1: stored1, wrote: wrote, readBack: readBack,
+             recordStill: recordStill, stored3: stored3,
+             external: p.get('n', 'DEFAULT'), errors: errors };
+};
+
+// Ids where one is a prefix of another, on disk AND in the fallback map.
+CASES.ids_that_prefix_each_other_do_not_collide = function () {
+    const ids = ['a', 'ab', 'clock', 'clock-2'];
+    const c = {};
+    ids.forEach(function (id) { c[id] = modCtx(id).ctx; });
+    c.a.prefs.set('b:x', 'a-owns-this');
+    c.ab.prefs.set('x', 'ab-owns-this');
+    c.clock.prefs.set('x', 'clock');
+    c['clock-2'].prefs.set('x', 'clock-2');
+    const onDisk = { a: c.a.prefs.get('b:x'), ab: c.ab.prefs.get('x'),
+                     clock: c.clock.prefs.get('x'),
+                     clock2: c['clock-2'].prefs.get('x') };
+    const diskKeys = storeKeys();
+    store = Object.create(null);
+    failMode = 'all';
+    const m = {};
+    ids.forEach(function (id) { m[id] = modCtx(id).ctx; });
+    m.a.prefs.set('b:x', 'mem-a');
+    m.ab.prefs.set('x', 'mem-ab');
+    m.clock.prefs.set('x', 'mem-clock');
+    m['clock-2'].prefs.set('x', 'mem-clock-2');
+    return { onDisk: onDisk, diskKeys: diskKeys,
+             inMemory: { a: m.a.prefs.get('b:x'), ab: m.ab.prefs.get('x'),
+                         clock: m.clock.prefs.get('x'),
+                         clock2: m['clock-2'].prefs.get('x') },
+             keys: storeKeys(), errors: errors };
+};
+
+// The family is DECLARED: #197's map answers for it and `needs` resolves.
+CASES.the_family_is_declared_and_needs_resolves = function () {
+    const m = modCtx('clock');
+    return { level: m.ctx.capabilities.prefs,
+             unmet: _modUnmetNeeds(
+                 { needs: ['prefs', 'prefs.get', 'prefs.set', 'prefs.remove'] },
+                 m.ctx),
+             absent: _modUnmetNeeds({ needs: ['prefs.sync'] }, m.ctx),
+             ctxVersion: m.ctx.ctxVersion, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def prefs_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modprefs") / "harness.js"
+    path.write_text(
+        _PREFS_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__PREFS__", _mod_prefs_source())
+        .replace("__COREPREFS__", _core_prefs_source())
+        .replace("__STATESYNC__", _state_sync_source())
+        .replace("__RESET__", _emit_site_source(
+            _identity_frag_src(), "function resetLocalView() {",
+            "delete prefs[k];", "savePrefsLocal();"))
+        .replace("__STORAGE__", _ctx_storage_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_prefs(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_ctx_prefs_round_trips_json_and_defaults_on_a_corrupt_record(
+        prefs_harness):
+    r = _run_prefs(prefs_harness, "the_json_contract")
+    assert r["errors"] == []
+    assert r["wrote"] == [True] * 5
+    assert r["round"] == {"obj": {"x": 1, "y": [1, 2]}, "num": 5, "str": "hi",
+                          "bool": False, "nul": None}, \
+        "JSON values must round trip, and a stored null is a null"
+    assert r["missing"] == "DEFAULT"
+    # THE contract clause: a corrupt record is the default, not a throw and not
+    # an undefined -- an init() that reads a preference cannot be taken down by
+    # a half-written or hand-edited value.
+    assert r["corrupt"] == "DEFAULT"
+    # A value JSON cannot represent, and a key that is not a name, are refused
+    # -- and refused writes never destroy what is already stored.
+    assert r["refused"] == [False] * 6
+    assert r["kept"] == {"x": 1, "y": [1, 2]}
+    assert r["badGets"] == ["DEFAULT"] * 3
+    assert r["removed"] == [True, False, False]
+    assert r["afterRemove"] == "DEFAULT"
+    assert r["keys"] == ["webterm:modprefs:clock:bool",
+                         "webterm:modprefs:clock:corrupt",
+                         "webterm:modprefs:clock:null",
+                         "webterm:modprefs:clock:obj",
+                         "webterm:modprefs:clock:str"], \
+        "the records live under webterm:modprefs:<id>: and nowhere else"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_ctx_prefs_value_survives_reset_local_view(prefs_harness):
+    """E42's headline, and the criterion that distinguishes this tier from a
+    bare `prefs` key: 83's ACTUAL sweep runs, and the value is still there."""
+    r = _run_prefs(prefs_harness, "a_prefs_value_survives_reset_local_view")
+    assert r["errors"] == []
+    # The sweep really ran: the bare key is gone, the underscore keys are not,
+    # and the shipped rebuild path fired.
+    assert r["bareGone"] is True, "resetLocalView did not sweep -- test is inert"
+    assert r["underscoreKept"] is True
+    assert r["settingsKept"] == '{"theme":"dark"}'
+    assert r["log"] == ["teardownView", "rebuildView", "notice:local view reset"]
+    # ...and the preference survived it.
+    assert r["survived"] == ["getting-started"]
+    assert r["afterReinit"] == ["getting-started"]
+    assert r["record"] == '["getting-started"]'
+    # Because it was never IN the object the sweep walks, nor in the record
+    # savePrefsLocal rewrote.
+    assert r["inCoreCache"] == ["_floatWs", "_layout", "_settings"]
+    assert "rail" not in r["coreRecord"]
+    assert r["keys"] == ["webterm:modprefs:help:rail", "webterm:prefs:v1"]
+    # savePrefsLocal is localStorage-only, so the reset itself PUT nothing.
+    assert r["puts"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_no_state_put_is_attributable_to_a_ctx_prefs_write(prefs_harness):
+    """#196 trap 9 by EXECUTION against the real _stateBlob: a prefs write
+    leaves the synced blob byte-identical, so the shipped pushState has nothing
+    to send. A future "sync my prefs" is a NEW tier, not a flag on this one."""
+    r = _run_prefs(prefs_harness,
+                   "no_state_put_is_attributable_to_a_prefs_write")
+    assert r["errors"] == []
+    assert r["before"] == r["after"], "a prefs write changed the /state blob"
+    assert r["blob"] == {"settings": {"theme": "dark"}, "layout": {"cols": 2}}
+    # The core prefs object never grew a key either.
+    assert r["keysBefore"] == r["keysAfter"] == ["_layout", "_settings"]
+    assert r["afterPrefsWrites"] == [], \
+        "a /state PUT was attributable to a prefs write"
+    # The control: the SAME shipped pushState does PUT for a real synced edit,
+    # so the zero above is a property of the tier, not of a dead harness.
+    assert r["puts"] == ["PUT /state"]
+    assert r["keys"] == ["webterm:modprefs:clock:accent"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_prefs_record_is_invisible_to_the_same_mods_ctx_storage(
+        prefs_harness):
+    """The namespaces are SIBLINGS, not nested: `webterm:modprefs:<id>:` and
+    `webterm:mod:<id>:`. So there is no reserved prefix to police inside
+    ctx.storage, and no way for a mod to clobber its own preference records
+    through the raw surface."""
+    r = _run_prefs(prefs_harness, "the_same_mods_ctx_storage_cannot_see_it")
+    assert r["errors"] == []
+    assert r["viaStorage"] is None, "ctx.storage could read a prefs record"
+    # A same-named ctx.storage key is a different record, and neither moves.
+    assert r["viaPrefs"] == "dark"
+    assert r["storageNow"] == "via-storage"
+    assert r["keys"] == ["webterm:mod:clock:theme",
+                         "webterm:modprefs:clock:theme"]
+    assert r["inStorageNs"] == ["webterm:mod:clock:theme"], \
+        "a prefs record landed inside the ctx.storage namespace"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_memory_fallback_outlives_a_disable_and_re_enable(prefs_harness):
+    """The general mechanism reaching the case the special-cased path never
+    did: localStorage unavailable AND the mod toggled off and on. The fallback
+    is page-scoped, so "no localStorage" does not silently also mean "a toggle
+    wipes your preferences"."""
+    r = _run_prefs(prefs_harness,
+                   "the_memory_fallback_outlives_a_disable_and_re_enable")
+    assert r["errors"] == []
+    assert r["wrote"] is True and r["live"] == {"hands": True}
+    # The tier hangs nothing on the mod's teardown chain -- that IS the
+    # lifetime decision, not an oversight.
+    assert r["unloads"] == 0
+    assert r["afterReenable"] == {"hands": True}, \
+        "a re-enabled mod lost its preferences to the fallback's lifetime"
+    # Still per mod, though: the fallback is keyed by the full namespaced key.
+    assert r["neighbour"] == "DEFAULT"
+    # remove() means removed even with no record to delete.
+    assert r["removed"] is True and r["afterRemove"] == "DEFAULT"
+    assert r["keys"] == [], "something reached localStorage while it was down"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_refused_write_is_answered_from_memory_until_one_lands(
+        prefs_harness):
+    """The half-failure ctx.storage silently drops: readable, unwritable. The
+    fallback entry exists only where a write was refused, so it is strictly
+    newer than the record -- and a write that succeeds drops it again, which is
+    what keeps another tab's edit visible."""
+    r = _run_prefs(prefs_harness,
+                   "a_refused_write_is_answered_from_memory_until_one_lands")
+    assert r["errors"] == []
+    assert r["stored1"] == "1"
+    assert r["wrote"] is True and r["readBack"] == 2, \
+        "the refused write was not answered from memory"
+    assert r["recordStill"] == "1", "a refused write reached localStorage"
+    assert r["stored3"] == "3"
+    assert r["external"] == 4, \
+        "the fallback entry outlived the write that superseded it"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_ids_that_prefix_each_other_get_separate_namespaces(prefs_harness):
+    """'a' and 'ab': both namespaces are terminated by ':', and MOD_ID_RE
+    admits no ':' in an id, so 'a:' + k1 can never equal 'ab:' + k2. True on
+    disk and in the fallback map, which is keyed by the same full key."""
+    r = _run_prefs(prefs_harness, "ids_that_prefix_each_other_do_not_collide")
+    assert r["errors"] == []
+    assert r["onDisk"] == {"a": "a-owns-this", "ab": "ab-owns-this",
+                           "clock": "clock", "clock2": "clock-2"}
+    assert r["diskKeys"] == ["webterm:modprefs:a:b:x",
+                             "webterm:modprefs:ab:x",
+                             "webterm:modprefs:clock-2:x",
+                             "webterm:modprefs:clock:x"]
+    assert r["inMemory"] == {"a": "mem-a", "ab": "mem-ab",
+                             "clock": "mem-clock", "clock2": "mem-clock-2"}
+    assert r["keys"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_ctx_capabilities_reports_prefs_and_needs_resolves_against_it(
+        prefs_harness):
+    """#197: a NEW family owes an entry, or the map lies by omission. Observed
+    against the ctx the extender pass really built."""
+    r = _run_prefs(prefs_harness, "the_family_is_declared_and_needs_resolves")
+    assert r["errors"] == []
+    assert r["level"] == 1
+    assert r["unmet"] == []
+    assert r["absent"] == ["prefs.sync"]
+    assert r["ctxVersion"] == 1
+
+
+# ---------------------------------------------------------------------------
+# ctx.serverStore.update: CAS with a real 409 rebase (#196 / A40)
+# ---------------------------------------------------------------------------
+# The anti-#158 contract. Three mods hand-rolled this, and the one carrying
+# CREDENTIAL blobs is why it matters: a 409 rebase that re-PUTs the blob it was
+# handed erases every key another browser changed in the meantime. So the proof
+# has to be behavioural -- the reducer re-applied to the WINNER, and the loser's
+# body never sent again -- which means executing the shipped range against a
+# broker that follows app.py's PUT rules.
+
+_UPDATE_SLICE_START = \
+    "// ---- ctx.serverStore.update: CAS with a real 409 rebase (#196)"
+_UPDATE_SLICE_END = "// ---- end ctx.serverStore.update"
+
+
+def _update_source():
+    """A40's range in 86c, verbatim."""
+    src = (BROKER_DIR / "86c_js_mod_ctx_ext.js").read_text(encoding="utf-8")
+    a = src.index(_UPDATE_SLICE_START)
+    b = src.index(_UPDATE_SLICE_END, a)
+    body = src[a:b]
+    for sym in ("store.update = function (fn, opts)",
+                "async function _modStoreUpdate(store, fn, opts)"):
+        assert sym in body, f"the update range no longer defines {sym!r}"
+    return body
+
+
+def _store_transport_source():
+    """The REAL transport out of the loader -- `_modStoreHost` (the fail-closed
+    host lookup) and `_modStoreApi`. Sliced rather than stubbed, because
+    "an unknown opts.host makes no request" is a claim about THAT function."""
+    src = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    a = src.index("// ---- ctx.serverStore transport (#124, host routing #65)")
+    b = src.index("// Fire mod controls on convergence", a)
+    body = src[a:b]
+    for sym in ("function _modStoreHost(hostId)", "function _modStoreApi("):
+        assert sym in body, f"the transport range no longer defines {sym!r}"
+    return body
+
+
+def _store_literal_source():
+    """makeCtx's own `serverStore: {...}` family literal, verbatim -- so
+    update() is proven against the get/set a real mod is handed, not a pair of
+    test doubles that might disagree about rev CAS or the 409 body."""
+    src = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
+    a = src.index("                serverStore: {")
+    b = src.index("\n                },\n", a) + len("\n                },")
+    body = src[a:b]
+    assert "getRevision: function (n, opts)" in body
+    return body
+
+
+_UPDATE_HARNESS = r"""
+'use strict';
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+const SESSION_API_TIMEOUT_MS = 10000;
+const CLIENT_ID = 'client-1';
+
+// ---- the fake fleet + broker ----------------------------------------------
+let HOSTS = { local: { id: 'local' }, peer: { id: 'peer', label: 'Peer' } };
+function localHost() { return HOSTS.local; }
+function hostById(id) { return (id && HOSTS[id]) ? HOSTS[id] : null; }
+
+let BROKER = null;
+let FETCHES = [];          // every request that actually reached the wire
+function hostFetch(host, path, o) {
+    FETCHES.push({ host: host && host.id, path: path,
+                   method: (o && o.method) || 'GET',
+                   body: (o && o.body) ? JSON.parse(o.body) : undefined });
+    return Promise.resolve(BROKER(host, path, o));
+}
+function reply(status, obj) {
+    return { status: status, json: function () { return Promise.resolve(obj); } };
+}
+function garbage(status) {
+    return { status: status,
+             json: function () { return Promise.reject(new Error('not json')); } };
+}
+// A mod-store faithful to app.py's PUT rules for the parts under test.
+function makeBroker(opts) {
+    opts = opts || {};
+    const st = { rev: opts.rev || 0, value: (opts.value !== undefined)
+                 ? opts.value : null, noHistory: !!opts.noHistory };
+    const puts = [];
+    const fn = function (host, path, o) {
+        if (!o || o.method !== 'PUT') {
+            if (opts.readStatus) return reply(opts.readStatus, { ok: false, error: 'nope' });
+            if (opts.readGarbage) return garbage(200);
+            return reply(200, { rev: st.rev, value: st.value, revisions: [] });
+        }
+        const body = JSON.parse(o.body);
+        puts.push(body);
+        if (opts.notActive) {
+            return reply(409, { ok: false, error: 'not_active',
+                                rev: st.rev, value: st.value });
+        }
+        if (opts.beforeWrite) opts.beforeWrite(st, puts.length);
+        if (body.baseRev !== st.rev) {
+            const out = { ok: false, error: 'conflict', rev: st.rev };
+            if (!opts.conflictWithoutValue) out.value = st.value;
+            return reply(409, out);
+        }
+        if (opts.alwaysConflict) {
+            st.rev += 1;                       // a hot writer, forever ahead
+            const out = { ok: false, error: 'conflict', rev: st.rev };
+            if (!opts.conflictWithoutValue) out.value = st.value;
+            return reply(409, out);
+        }
+        if (body.noHistory !== undefined) st.noHistory = body.noHistory;
+        st.value = body.value;
+        st.rev += 1;
+        return reply(200, { ok: true, rev: st.rev, noHistory: st.noHistory });
+    };
+    fn.puts = puts;
+    fn.state = st;
+    return fn;
+}
+
+__REGISTRY__
+__TRANSPORT__
+function makeStore(modId) {
+    return { __STORE__ }.serverStore;
+}
+__UPDATE__
+
+function freshCtx(modId, brokerOpts) {
+    BROKER = makeBroker(brokerOpts);
+    FETCHES = [];
+    const ctx = { id: modId, serverStore: makeStore(modId) };
+    _applyCtxExtenders(ctx, { unloads: [] });
+    return ctx;
+}
+function puts() { return BROKER.puts; }
+function wire() {
+    return FETCHES.map(function (f) { return f.method + ' ' + f.path; });
+}
+
+const CASES = {};
+
+// E40 core: a seeded 409 re-applies fn to the WINNER, and the loser's blob is
+// never re-PUT.
+CASES.rebase_reapplies_to_the_winner = async function () {
+    const ctx = freshCtx('m', {
+        rev: 1, value: { a: 1 },
+        // Another browser lands {a:1,c:3} at rev 2 between our read and our PUT.
+        beforeWrite: function (st, n) {
+            if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+        },
+    });
+    const seen = [];
+    const res = await ctx.serverStore.update(function (value, rev) {
+        seen.push({ value: value, rev: rev });
+        return Object.assign({}, value, { b: 2 });
+    });
+    return { res: res, seen: seen, puts: puts(),
+             finalValue: BROKER.state.value, has: typeof ctx.serverStore.update };
+};
+
+CASES.retries_bounded = async function () {
+    const out = {};
+    for (const spec of [{ k: 'dflt' }, { k: 'r1', retries: 1 },
+                        { k: 'r0', retries: 0 }, { k: 'huge', retries: 1e9 }]) {
+        const ctx = freshCtx('m', { rev: 1, value: { a: 1 }, alwaysConflict: true });
+        const o = {};
+        if (spec.retries !== undefined) o.retries = spec.retries;
+        let calls = 0;
+        const res = await ctx.serverStore.update(function (v) {
+            calls += 1;
+            return Object.assign({}, v, { b: 2 });
+        }, o);
+        out[spec.k] = { res: res, puts: puts().length, calls: calls };
+    }
+    return out;
+};
+
+CASES.opts_pass_through_every_attempt = async function () {
+    const out = {};
+    const runs = {
+        flags: { purgeRevisions: true, noHistory: true },
+        absent: {},
+        explicit_false: { noHistory: false },
+        purge_only: { purgeRevisions: true },
+    };
+    for (const k of Object.keys(runs)) {
+        const ctx = freshCtx('m', {
+            rev: 1, value: { a: 1 },
+            beforeWrite: function (st, n) {
+                if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+            },
+        });
+        const res = await ctx.serverStore.update(function (v) {
+            return Object.assign({}, v, { b: 2 });
+        }, runs[k]);
+        out[k] = {
+            res: res,
+            puts: puts().map(function (b) {
+                return { baseRev: b.baseRev, value: b.value,
+                         purge: b.purgeRevisions,
+                         noHistoryPresent: ('noHistory' in b),
+                         noHistory: b.noHistory };
+            }),
+        };
+    }
+    return out;
+};
+
+CASES.unknown_host_fails_closed = async function () {
+    const ctx = freshCtx('m', { rev: 1, value: { a: 1 } });
+    let calls = 0;
+    const res = await ctx.serverStore.update(function (v) {
+        calls += 1; return { clobbered: true };
+    }, { host: 'nope', noHistory: true });
+    // ...and a KNOWN host still writes, so the refusal is the id, not the option.
+    const ok = await ctx.serverStore.update(function (v) {
+        return Object.assign({}, v, { b: 2 });
+    }, { host: 'peer' });
+    return { res: res, calls: calls, ok: ok, wire: wire(), puts: puts().length };
+};
+
+CASES.not_active_is_not_rebased = async function () {
+    const ctx = freshCtx('m', { rev: 3, value: { a: 1 }, notActive: true });
+    let calls = 0;
+    const res = await ctx.serverStore.update(function (v) {
+        calls += 1; return Object.assign({}, v, { b: 2 });
+    });
+    return { res: res, calls: calls, puts: puts().length };
+};
+
+CASES.conflict_without_an_inlined_value_rereads = async function () {
+    const ctx = freshCtx('m', {
+        rev: 1, value: { a: 1 }, conflictWithoutValue: true,
+        beforeWrite: function (st, n) {
+            if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+        },
+    });
+    const seen = [];
+    const res = await ctx.serverStore.update(function (value, rev) {
+        seen.push({ value: value, rev: rev });
+        return Object.assign({}, value, { b: 2 });
+    });
+    return { res: res, seen: seen, puts: puts(), wire: wire(),
+             finalValue: BROKER.state.value };
+};
+
+CASES.a_failed_read_never_writes = async function () {
+    const out = {};
+    for (const spec of [{ k: 'http500', readStatus: 500 },
+                        { k: 'garbage200', readGarbage: true }]) {
+        const ctx = freshCtx('m', spec);
+        let calls = 0;
+        const res = await ctx.serverStore.update(function (v) {
+            calls += 1; return { blank: true };
+        });
+        out[spec.k] = { res: res, calls: calls, puts: puts().length, wire: wire() };
+    }
+    return out;
+};
+
+CASES.never_rejects = async function () {
+    const ctx = freshCtx('m', { rev: 1, value: { a: 1 } });
+    const out = {};
+    out.threw = await ctx.serverStore.update(function () {
+        throw new Error('reducer boom');
+    });
+    out.threwPuts = puts().length;
+    out.undef = await ctx.serverStore.update(function () { /* forgot return */ });
+    out.undefPuts = puts().length;
+    out.notAFn = await ctx.serverStore.update(null);
+    out.asyncFn = await ctx.serverStore.update(async function (v) {
+        return Object.assign({}, v, { b: 2 });
+    });
+    out.wire = wire();
+    return out;
+};
+
+CASES.capability_shape = async function () {
+    const ctx = freshCtx('m', { rev: 0, value: null });
+    // A first write on a store nobody has touched: fn sees (null, 0).
+    const seen = [];
+    const res = await ctx.serverStore.update(function (v, rev) {
+        seen.push({ value: v, rev: rev });
+        return { seeded: true };
+    });
+    // A ctx with NO serverStore gets no half-family.
+    const bare = { id: 'bare' };
+    _applyCtxExtenders(bare, { unloads: [] });
+    return { res: res, seen: seen, bare: typeof bare.serverStore,
+             members: Object.keys(ctx.serverStore).sort() };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+    Promise.resolve().then(function () { return CASES[want](); })
+        .then(function (out) {
+            if (!('errors' in out)) out.errors = errors;
+            process.stdout.write(JSON.stringify(out) + '\n');
+        })
+        .catch(function (e) {
+            console.log('case threw: ' + ((e && e.stack) || e));
+            process.exit(3);
+        });
+})();"""
+
+
+@pytest.fixture(scope="module")
+def update_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("update") / "harness.js"
+    path.write_text(
+        _UPDATE_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TRANSPORT__", _store_transport_source())
+        .replace("__STORE__", _store_literal_source())
+        .replace("__UPDATE__", _update_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_update(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_409_reapplies_the_reducer_to_the_winner(update_harness):
+    # E40's core clause, and the #158 regression shape stated as a negative.
+    # Store at rev 1 = {a:1}; another browser lands {a:1,c:3} at rev 2 between
+    # our read and our write; our reducer adds b:2.
+    r = _run_update(update_harness, "rebase_reapplies_to_the_winner")
+    assert r["errors"] == []
+    assert r["has"] == "function", "update() is not on the family"
+    # The reducer saw the loser's value once, then the WINNER's -- at the
+    # winner's rev, which is what makes the retry's baseRev accepted.
+    assert r["seen"] == [{"value": {"a": 1}, "rev": 1},
+                         {"value": {"a": 1, "c": 3}, "rev": 2}]
+    sent = [(b["baseRev"], b["value"]) for b in r["puts"]]
+    assert sent == [
+        (1, {"a": 1, "b": 2}),
+        (2, {"a": 1, "c": 3, "b": 2}),
+    ], "the loser's blob was re-PUT, or the rebase did not re-apply fn"
+    # `c` survives: the whole point. A helper that re-sent its first body would
+    # have erased another browser's key -- #158, exactly.
+    assert r["finalValue"] == {"a": 1, "c": 3, "b": 2}
+    assert r["res"]["ok"] is True and r["res"]["rev"] == 3
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_hot_writer_ends_in_a_bounded_conflict_not_a_loop(update_harness):
+    # The mirror of #158's silent clobber is a silent infinite rebase. Against a
+    # broker that is forever one rev ahead, the budget has to run out and SAY so.
+    r = _run_update(update_harness, "retries_bounded")
+    assert r["errors"] == []
+    for k in ("dflt", "r1", "r0", "huge"):
+        assert r[k]["res"]["ok"] is False
+        assert r[k]["res"]["error"] == "conflict", \
+            "an exhausted budget must name the conflict, not a generic failure"
+    # retries counts REBASES, so attempts == retries + 1, and every attempt
+    # re-runs the reducer (which is why the wiki has to call fn pure).
+    assert (r["dflt"]["puts"], r["dflt"]["calls"]) == (4, 4)   # default 3
+    assert (r["r1"]["puts"], r["r1"]["calls"]) == (2, 2)
+    assert (r["r0"]["puts"], r["r0"]["calls"]) == (1, 1)
+    # A caller does not get to grant an absurd budget: every attempt writes a
+    # revision into the 50-deep ring.
+    assert r["huge"]["puts"] == 11, "the retry budget is not clamped"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_purge_and_nohistory_ride_every_attempt_including_the_rebase(
+        update_harness):
+    # #192's noHistory is PRESENCE-keyed, and #175 is why: a helper that drops
+    # the flag on the retry re-leaks the plaintext it was added to suppress.
+    # A rebase is exactly where a hand-rolled copy forgets it.
+    r = _run_update(update_harness, "opts_pass_through_every_attempt")
+    assert r["errors"] == []
+    flags = r["flags"]["puts"]
+    assert len(flags) == 2, "the rebase did not happen, so this proves nothing"
+    for body in flags:
+        assert body["purge"] is True
+        assert body["noHistoryPresent"] is True and body["noHistory"] is True
+    # Absent stays ABSENT -- the sticky flag must not be cleared by a writer
+    # that simply did not mention it.
+    for body in r["absent"]["puts"]:
+        assert body["noHistoryPresent"] is False
+    # ...and an explicit false is a real value, not an absence.
+    for body in r["explicit_false"]["puts"]:
+        assert body["noHistoryPresent"] is True and body["noHistory"] is False
+    for body in r["purge_only"]["puts"]:
+        assert body["purge"] is True and body["noHistoryPresent"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_unknown_host_writes_nothing_anywhere(update_harness):
+    # The fail-closed contract, inherited from the transport: an unknown id must
+    # never silently become a same-origin write. Proven against the real
+    # _modStoreHost, and with the reducer as the witness -- it is never even
+    # invoked, so there is no value that could have gone anywhere.
+    r = _run_update(update_harness, "unknown_host_fails_closed")
+    assert r["errors"] == []
+    assert r["res"]["ok"] is False
+    assert r["calls"] == 0, "the reducer ran for a host that does not exist"
+    # A KNOWN host in the same ctx still writes, so the refusal is the id --
+    # not the option bag, and not a dead harness.
+    assert r["ok"]["ok"] is True
+    assert [w for w in r["wire"] if "nope" in w] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_not_active_409_is_refused_rather_than_rebased(update_harness):
+    # Not every 409 is rebasable. A browser without the lease can never win, so
+    # burning the budget against it would re-run the reducer once per attempt
+    # for nothing. This is the case the shared helper reaches that the
+    # hand-rolled copies special-cased.
+    r = _run_update(update_harness, "not_active_is_not_rebased")
+    assert r["errors"] == []
+    assert r["res"]["ok"] is False
+    assert r["res"]["error"] == "not_active"
+    assert (r["puts"], r["calls"]) == (1, 1), "a dead lease was retried"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_409_with_no_inlined_value_is_re_read_not_guessed(update_harness):
+    # An older or odd broker can answer 409 without inlining the live value.
+    # The rebase then has to go and READ the winner -- never re-send its own
+    # body, and never invent one.
+    r = _run_update(update_harness, "conflict_without_an_inlined_value_rereads")
+    assert r["errors"] == []
+    assert r["seen"] == [{"value": {"a": 1}, "rev": 1},
+                         {"value": {"a": 1, "c": 3}, "rev": 2}]
+    assert [w.split()[0] for w in r["wire"]] == ["GET", "PUT", "GET", "PUT"], \
+        "the missing value was not fetched authoritatively"
+    assert all(w.endswith("/mod-store/m") for w in r["wire"]), \
+        "the rebase left the mod's own store"
+    assert r["finalValue"] == {"a": 1, "c": 3, "b": 2}
+    assert r["res"]["ok"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_failed_read_refuses_rather_than_writing_over_it(update_harness):
+    # The behaviour change this helper makes deliberately: a hand-rolled copy
+    # swallowed a failed GET and PUT at rev 0 anyway. For a credential publish,
+    # "I could not read what I am about to replace" must not become a write.
+    r = _run_update(update_harness, "a_failed_read_never_writes")
+    assert r["errors"] == []
+    for k in ("http500", "garbage200"):
+        assert r[k]["res"]["ok"] is False
+        assert r[k]["puts"] == 0, f"{k}: wrote over a store it could not read"
+        assert r[k]["calls"] == 0
+        assert [w for w in r[k]["wire"] if w.startswith("PUT")] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_update_never_rejects_whatever_the_reducer_does(update_harness):
+    # The family's posture: every failure is a value, never a rejection -- a mod
+    # awaiting this must not need a try/catch to stay alive.
+    r = _run_update(update_harness, "never_rejects")
+    assert r["threw"]["ok"] is False, "a throwing reducer escaped as a rejection"
+    assert r["threwPuts"] == 0, "a throwing reducer still wrote"
+    # A reducer that forgets to return is refused LOCALLY -- the server would
+    # 400 on the same presence check, so this is the same answer minus a round
+    # trip, and it cannot destroy the stored value.
+    assert r["undef"]["ok"] is False
+    assert r["undefPuts"] == 0
+    assert r["notAFn"]["ok"] is False
+    # ...and an async reducer is a first-class citizen.
+    assert r["asyncFn"]["ok"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_update_joins_the_family_it_extends_or_not_at_all(update_harness):
+    # The CP8 rule: an extender installs nothing rather than handing a mod a
+    # member that always refuses, so ctx.capabilities stays observed.
+    r = _run_update(update_harness, "capability_shape")
+    assert r["errors"] == []
+    assert r["bare"] == "undefined", \
+        "a ctx with no serverStore was given a half-family"
+    assert "update" in r["members"]
+    # A first write on a store nobody has touched: the reducer is handed the
+    # empty state uniformly, rather than each caller special-casing it.
+    assert r["seen"] == [{"value": None, "rev": 0}]
+    assert r["res"]["ok"] is True

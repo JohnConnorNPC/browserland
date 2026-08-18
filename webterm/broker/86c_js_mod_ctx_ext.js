@@ -2189,3 +2189,301 @@
             _registerModCapability('hosts', 1);
         }
         // ---- end ctx.hosts.invalidate ---------------------------------------
+
+        // ---- ctx.serverStore.update: CAS with a real 409 rebase (#196) -------
+        // The compare-and-swap three mods hand-rolled — and one of those copies
+        // (host-registry's publishTo, mods/host-registry/host-registry.js:914)
+        // is the path CREDENTIAL blobs take.
+        //
+        //     const res = await ctx.serverStore.update(fn, {
+        //         host?, retries? /* 3 */, purgeRevisions?, noHistory? });
+        //     // -> {ok:true, rev, value} | {ok:false, error:'conflict'|…}
+        //
+        // THE SEMANTIC, and the whole reason the helper exists: get ->
+        // fn(value, rev) -> set, and on a 409 conflict RE-READ and RE-APPLY
+        // `fn` to the WINNER's value. The loser's blob is never re-PUT. That is
+        // precisely what putHostState's 409 rebase lacks — it adopts the
+        // winner's rev and re-sends the whole object it was handed, erasing
+        // every key another browser changed in between (#158; mod-sync rewrote
+        // the entire /state wire over it and says so, mod-sync.js:466).
+        //
+        // WHICH MAKES `fn` PURE OVER (value, rev), BY CONTRACT. It is invoked
+        // once per attempt, so a side effect inside it happens once per
+        // attempt: a caller bug, and one this code deliberately does not defend
+        // against, because the only available defence — snapshot once, re-send
+        // that snapshot after a 409 — IS the #158 clobber. A late read (the
+        // live editor buffer at send time) therefore belongs INSIDE `fn`, where
+        // it re-runs over the winner. `value` is the winner's value, freshly
+        // parsed per attempt (mutating it in place is safe, but the result must
+        // be RETURNED, not merely mutated) and null on a store nobody has
+        // written; `rev` is the rev it was read at.
+        //
+        // BOUNDED, AND THE CONFLICT IS SURFACED. The mirror failure of a silent
+        // clobber is a silent infinite rebase against a hot writer, so the
+        // budget is finite: exhausting it resolves {ok:false, error:'conflict'}
+        // with the last winner's rev/value still inlined, and the caller decides
+        // whether to widen, warn or drop. Every attempt also writes a revision
+        // into the 50-deep ring, which is the second reason not to spin (#175).
+        //
+        // OPTIONS RIDE VERBATIM, ON EVERY ATTEMPT. `opts` is snapshotted ONCE
+        // and that single object is handed to every get()/set() — the discipline
+        // publishTo spells out by hand ("Both set() calls below share ONE opts
+        // object precisely so the 409 rebase cannot re-PUT without it"), here
+        // structural: nothing rebuilds the options between attempts, so
+        // purgeRevisions (#65) and noHistory (#192) cannot be dropped by a
+        // retry. noHistory keeps set()'s strict tri-state exactly as shipped —
+        // an explicit boolean rides the body, omitted/null stays OFF the wire —
+        // because ABSENCE is the server's third state ("leave this record's flag
+        // exactly as it is", app.py `no_history = body.get("noHistory", None)`),
+        // and a retry that helpfully sent noHistory:false would resume archiving
+        // the very credentials the flag exists to keep out of the ring.
+        //
+        // FAIL-CLOSED, INHERITED. Every request is made through the mod's OWN
+        // ctx.serverStore.get/set, so this is mod-scoped, lease-carrying and
+        // host-routed exactly as they are: an unknown opts.host resolves to no
+        // host, makes NO request, and the initial read refuses before any PUT is
+        // attempted — never a silent same-origin write. A read that does not
+        // come back as this store's own 200 shape is a refusal too, not an empty
+        // store.
+        //
+        // NOT A NEW FAMILY, so NO capability entry is owed: `serverStore` is
+        // already in ctx v1's seed list above and #197's map is per FAMILY (a
+        // name, never a dotted path). This adds a MEMBER, exactly like #194's
+        // ctx.windows.createAppWindow, and a mod gates on it the same way —
+        // `typeof ctx.serverStore.update === 'function'`, or
+        // `needs: ['serverStore.update']`, which _modCtxHas resolves segment by
+        // segment against the live ctx. Re-registering `serverStore` at level 2
+        // would be refused as a duplicate anyway; ctxVersion stays 1.
+        const _MOD_STORE_UPDATE_RETRIES = 3;
+        // The caller's own budget is CLAMPED: `retries` bounds both ring churn
+        // and a hot-writer loop, so an absurd value is not the caller's to grant.
+        const _MOD_STORE_UPDATE_MAX_RETRIES = 10;
+        function _modStoreRetryBudget(n) {
+            if (typeof n !== 'number' || !isFinite(n) || n < 0) {
+                return _MOD_STORE_UPDATE_RETRIES;
+            }
+            return Math.min(Math.floor(n), _MOD_STORE_UPDATE_MAX_RETRIES);
+        }
+        // One validated read -> {ok:true, rev, value} | {ok:false, status, error}.
+        // A 200 that is not this store's shape (an unparseable body degrades to
+        // {error:'HTTP 200'}; a remote broker's body is untrusted input, #174) is
+        // a FAILED read, never an empty store — reading it as rev 0 / value null
+        // would run `fn` down its "nothing stored yet" branch on a store we
+        // could not actually read.
+        async function _modStoreReadFor(store, wopts) {
+            const r = await store.get(wopts);
+            if (!r || r.status !== 200 || typeof r.rev !== 'number') {
+                return { ok: false, status: (r && r.status) || 0,
+                         error: (r && r.error) || 'read_failed' };
+            }
+            return { ok: true, rev: r.rev, value: r.value };
+        }
+        async function _modStoreUpdate(store, fn, opts) {
+            if (typeof fn !== 'function') return { ok: false, error: 'bad_fn' };
+            const wopts = Object.assign({}, opts);
+            const budget = _modStoreRetryBudget(wopts.retries);
+            let read = await _modStoreReadFor(store, wopts);
+            if (!read.ok) {
+                return { ok: false, status: read.status, error: read.error };
+            }
+            let value = read.value, rev = read.rev, attempt = 0;
+            for (;;) {
+                let next;
+                try { next = await fn(value, rev); }
+                catch (e) {
+                    try {
+                        console.error('[mods] serverStore.update reducer threw:',
+                                      e);
+                    } catch (_) { /* console is gone */ }
+                    return { ok: false, error: 'fn_failed' };
+                }
+                // The server checks PRESENCE of `value` and 400s without it, and
+                // JSON.stringify drops an undefined member — so a reducer that
+                // forgot to return would spend a round trip to learn that.
+                // Refused here instead, under the same name and with no write.
+                if (next === undefined) return { ok: false, error: 'bad_value' };
+                const res = await store.set(next, rev, wopts);
+                if (res && res.ok === true) {
+                    return Object.assign({}, res, { ok: true, value: next });
+                }
+                // 'not_active' is a 409 as well, and it is NOT rebasable: this
+                // browser does not hold the write lease, so re-applying `fn` at a
+                // fresher rev would burn the whole budget (re-running the
+                // reducer each time) only to be refused again. It comes straight
+                // back, live rev inlined, for the caller to adopt. Only
+                // 'conflict' rebases.
+                const conflict = !!(res && res.status === 409
+                                    && res.error === 'conflict');
+                if (!conflict || attempt >= budget) {
+                    const out = Object.assign({}, res, { ok: false });
+                    if (!out.error) out.error = 'write_failed';
+                    return out;
+                }
+                attempt += 1;
+                // Rebase. The 409 inlines the live value, so the common case
+                // costs no extra round trip — but only when it really carried
+                // one: PRESENCE, not truthiness (value:null is a legal stored
+                // value), plus a usable rev. Anything else (an older broker, or
+                // a remote one whose body is untrusted input) falls back to an
+                // authoritative re-read, and a re-read that fails ABORTS. What
+                // never happens on either path is a re-PUT of `next`: the loop
+                // returns to `fn` with the winner's value in hand.
+                if (typeof res.rev === 'number'
+                        && Object.prototype.hasOwnProperty.call(res, 'value')) {
+                    rev = res.rev;
+                    value = res.value;
+                    continue;
+                }
+                read = await _modStoreReadFor(store, wopts);
+                if (!read.ok) {
+                    return { ok: false, status: read.status, error: read.error };
+                }
+                rev = read.rev;
+                value = read.value;
+            }
+        }
+        function _ctxServerStoreUpdate(ctx) {
+            const store = ctx && ctx.serverStore;
+            // No half-family (the CP8 rule ctx.hosts follows above): a ctx whose
+            // serverStore is missing or differently shaped gets no update() at
+            // all, rather than one that always refuses — ctx.capabilities is
+            // OBSERVED, and `needs: ['serverStore.update']` then reads true.
+            if (!store || typeof store !== 'object'
+                    || typeof store.get !== 'function'
+                    || typeof store.set !== 'function') return;
+            // Decorated in place, per mod: makeCtx builds a fresh serverStore
+            // literal for each ctx, and `store` is captured so update() is
+            // scoped to that mod's store exactly like get/set/getRevision.
+            store.update = function (fn, opts) {
+                // The family's never-rejects posture: every outcome, including
+                // an unexpected throw anywhere above, RESOLVES to a result.
+                return _modStoreUpdate(store, fn, opts).catch(function (e) {
+                    try {
+                        console.error('[mods] serverStore.update failed:', e);
+                    } catch (_) { /* console is gone */ }
+                    return { ok: false, error: 'update_failed' };
+                });
+            };
+        }
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxServerStoreUpdate);
+        }
+        // ---- end ctx.serverStore.update -------------------------------------
+
+        // ---- ctx.prefs: the sanctioned browser-local tier (#196) ------------
+        // A mod's own preferences, per BROWSER, with a contract instead of a
+        // coincidence. Both shapes of core-`prefs` key are wrong: a BARE key is
+        // wiped by resetLocalView's non-underscore sweep (83), and an UNDERSCORE
+        // key stays local only because _stateBlob (52) happens to serialize
+        // `_settings`/`_layout` and nothing else — one edit there and it SYNCS,
+        // as `_settings` already does (#153). help's `_help` says so itself
+        // ("load-bearing twice over"); workspaces parks `_floatWs` the same
+        // way. Migrating those two is #204's wave, not this atom.
+        //
+        // ITS OWN NAMESPACE IS THE DECISION: `webterm:modprefs:<id>:`, one
+        // record per key, a SIBLING of the `webterm:mod:<id>:` namespace
+        // ctx.storage owns — never a sub-prefix inside it, and never a key in
+        // the core `prefs` object. Three consequences, each of them the point:
+        //   - resetLocalView cannot reach it: that sweep deletes keys off the
+        //     `prefs` OBJECT and re-serializes it into `webterm:prefs:v1` (51).
+        //   - the sync path cannot reach it: _stateBlob reads prefs._settings
+        //     and prefs._layout, so a prefs write leaves _stateSerialize()
+        //     byte-identical and no /state PUT is attributable to one. A future
+        //     "sync my prefs" is a NEW tier, not a flag on this one.
+        //   - ctx.storage keeps its semantics exactly — no reserved-prefix
+        //     policing, and no clobbering a preference record through the raw
+        //     surface: for one id 'webterm:mod:<id>:' + k could equal
+        //     'webterm:modprefs:<id>:' + key only if the id began 'prefs:', and
+        //     MOD_ID_RE (50) admits no ':' at all. That same no-':' shape keeps
+        //     prefix-related ids apart (both namespaces end in ':', so 'a:' + k1
+        //     never equals 'ab:' + k2), and #172's reserved-id rule is lexical,
+        //     so it covers this sixth id-keyed namespace for free.
+        //
+        // ctx.storage's exception-swallowing posture is copied deliberately (a
+        // sibling that diverged gratuitously would be a defect). New here: JSON
+        // values, the DEFAULT returned for a corrupt record rather than a throw,
+        // and an in-memory fallback whose lifetime is THE PAGE, NOT THE
+        // ACTIVATION — fragment-scoped, keyed by the full namespaced key, never
+        // cleared on teardown, so disable+re-enable still finds what localStorage
+        // would have kept; a per-ctx map would make "localStorage unavailable"
+        // also mean "a toggle wipes your prefs". Read FIRST: an entry exists
+        // only where a write was REFUSED, so it is strictly newer than the
+        // record, and a write that succeeds drops it again.
+        const _MOD_PREFS_NS = 'webterm:modprefs:';
+        //: full key -> serialized value, or the tombstone below when a REMOVE
+        //: was refused (so remove() reads as removed for the rest of the
+        //: session instead of resurrecting the record it could not delete).
+        const _modPrefsMemory = new Map();
+        const _MOD_PREFS_GONE = {};
+        // '' for anything that is not a non-empty string: a key is a NAME, and
+        // coercing `undefined` into a record literally called 'undefined' is a
+        // bug every caller that makes the same mistake would then share.
+        function _modPrefsKey(id, key) {
+            if (typeof key !== 'string' || !key) return '';
+            return _MOD_PREFS_NS + id + ':' + key;
+        }
+        function _modPrefsRaw(k) {
+            if (_modPrefsMemory.has(k)) {
+                const v = _modPrefsMemory.get(k);
+                return (v === _MOD_PREFS_GONE) ? null : v;
+            }
+            try { return localStorage.getItem(k); } catch (_) { return null; }
+        }
+        function _modPrefsGet(id, key, def) {
+            const k = _modPrefsKey(id, key);
+            if (!k) return def;
+            const raw = _modPrefsRaw(k);
+            if (typeof raw !== 'string') return def;
+            // A corrupt record is a MISS, not a throw: a half-written or
+            // hand-edited value must not break the init() that reads it.
+            try { return JSON.parse(raw); } catch (_) { return def; }
+        }
+        // true once the value reads back; false only for a bad key or a value
+        // JSON cannot represent (a cycle, undefined, a function) — and then
+        // nothing is written, so a refused set never destroys what is stored.
+        function _modPrefsSet(id, key, value) {
+            const k = _modPrefsKey(id, key);
+            if (!k) return false;
+            let raw;
+            try { raw = JSON.stringify(value); } catch (_) { return false; }
+            if (typeof raw !== 'string') return false;
+            try {
+                localStorage.setItem(k, raw);
+                _modPrefsMemory.delete(k);
+            } catch (_) { _modPrefsMemory.set(k, raw); }
+            return true;
+        }
+        function _modPrefsRemove(id, key) {
+            const k = _modPrefsKey(id, key);
+            if (!k) return false;
+            try {
+                localStorage.removeItem(k);
+                _modPrefsMemory.delete(k);
+            } catch (_) { _modPrefsMemory.set(k, _MOD_PREFS_GONE); }
+            return true;
+        }
+        // A NEW family, so it registers its own capability entry (#197) —
+        // `prefs` is not in makeCtx's v1 literal. No core precondition and no
+        // half-family: the fallback IS what an absent localStorage gets, so the
+        // only reason to withhold the surface is a ctx with no usable id, which
+        // would hand every such mod the SAME namespace.
+        function _ctxPrefs(ctx) {
+            const id = (ctx && typeof ctx.id === 'string') ? ctx.id : '';
+            if (!id) return;
+            // A later member belongs IN this literal (or decorates it) — never
+            // a second `ctx.prefs = {...}`, which would delete these three.
+            ctx.prefs = {
+                get: function (key, def) { return _modPrefsGet(id, key, def); },
+                set: function (key, val) { return _modPrefsSet(id, key, val); },
+                remove: function (key) { return _modPrefsRemove(id, key); },
+            };
+        }
+        // Guarded like every other registration in this fragment: a page
+        // assembled without #194's registry must not throw at load.
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxPrefs);
+        }
+        if (typeof _registerModCapability === 'function') {
+            _registerModCapability('prefs', 1);
+        }
+        // ---- end ctx.prefs --------------------------------------------------
