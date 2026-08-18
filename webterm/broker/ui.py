@@ -202,6 +202,15 @@ _ORDERED = [
     # order; still before the mod-script splice, since a mod's init reads the
     # finished ctx. One <script>, one scope, as with every 86* companion.
     "86e_js_mod_savechain.js",
+    # #198: ctx.signal -- one AbortSignal per mod ACTIVATION, aborted at the
+    # head of the take-down path (86's _runUnloads calls its _abortModSignal
+    # before the staged window close and before the LIFO chain). Its own
+    # fragment for the same split-never-trim reason 86e got one, and NOT folded
+    # into 86e: that is #196's save pipeline, a different concern and the one
+    # piece of work this signal must deliberately never abort. Ordered last
+    # among the 86* companions, still before the mod-script splice, since a
+    # mod's init reads the finished ctx. One <script>, one scope.
+    "86f_js_mod_signal.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

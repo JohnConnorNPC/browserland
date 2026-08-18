@@ -207,6 +207,22 @@
             // mod's own theme callback would run mid-teardown, after resources it
             // registered later have already been released.
             rec.unloading = true;
+            // #198: abort this activation's ctx.signal FIRST — ahead of the
+            // staged window close below and ahead of the LIFO chain (which is
+            // where #195's _fireModTeardowns rides, as an entry). Abort
+            // listeners fire synchronously, so a loop that is about to touch one
+            // of this mod's windows is told to stop BEFORE anything starts
+            // dismantling that window; after `unloading` for the #169 reason
+            // above, since a listener is mod code that may write a setting or
+            // touch a #196 saveChain, both of which must read this record as
+            // already dead. Its OWN try/catch: abort listeners run outside the
+            // per-callback isolation of the drain below (see 86f).
+            if (typeof _abortModSignal === 'function') {
+                try { _abortModSignal(rec); } catch (e) {
+                    console.error('[mods] ctx.signal abort failed for "'
+                        + (rec && rec.id) + '":', e);
+                }
+            }
             // #194: the STAGED take-down, and the reason it is a CALL here and
             // never an entry on the list below. A mod's factory-owned app
             // windows (ctx.windows.createAppWindow) close BEFORE the first

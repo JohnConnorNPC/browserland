@@ -17639,3 +17639,571 @@ def test_the_real_scratchpad_loses_nothing_when_closed_mid_write(
     assert r["stored"] == "B, typed while A was in flight"
     assert r["maxPutInflight"] == 1, "the close raced a second write out"
     assert r["windows"] == 0 and r["modAlive"] is True
+
+
+# --------------------------------------------------------------------------- #
+# ctx.signal -- the per-activation AbortSignal (#198 / A47)
+# --------------------------------------------------------------------------- #
+
+_SIGNAL_SLICE_START = "// ---- ctx.signal: the per-activation AbortSignal (#198)"
+_SIGNAL_SLICE_END = "// ---- end ctx.signal"
+
+
+def _signal_src():
+    return (BROKER_DIR / "86f_js_mod_signal.js").read_text(encoding="utf-8")
+
+
+def _signal_source():
+    """A47's range in 86f, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node cases below run the SHIPPED
+    surface rather than a copy of it."""
+    src = _signal_src()
+    a = src.index(_SIGNAL_SLICE_START)
+    b = src.index(_SIGNAL_SLICE_END, a)
+    body = src[a:b]
+    for sym in ("function _modSignalReason(rec) {",
+                "function _ctxSignal(ctx, rec) {",
+                "function _abortModSignal(rec) {"):
+        assert sym in body, f"the ctx.signal range no longer defines {sym!r}"
+    return body
+
+
+def _staged_close_source():
+    """#194's staged factory-window close, verbatim -- the take-down stage the
+    abort has to precede. Sliced because "the abort is observed before anything
+    starts dismantling a window" is a claim about THAT pass, not about a fixture
+    that logs in its place."""
+    ext = _ctx_ext_src()
+    body = (_frag_fn(ext, "function _modAppWindowLive(h) {") + "\n        }\n"
+            + _frag_fn(ext, "function _closeModAppWindows(rec) {")
+            + "\n        }\n")
+    assert "owned.entries()).reverse()" in body
+    return body
+
+
+def _ctx_file_literal():
+    """makeCtx's `file:` family, verbatim out of the ctx literal. The whole
+    literal is browser-only (550 lines of desktop wiring), but this ONE family
+    is not: every member delegates to _modFileApi, so lifting it gives the node
+    cases the real ctx.file.read a mod calls."""
+    src = _loader_src()
+    a = src.index("                file: {")
+    b = src.index("\n                },\n", a)
+    body = src[a:b] + "\n                },\n"
+    assert "return _modFileApi('/file/read', body, opts);" in body
+    return body
+
+
+def _signal_transport_source():
+    """The shipped ctx.file transport, end to end: 50's default deadline, 63's
+    hostFetch (which COMPOSES a caller signal with that deadline rather than
+    replacing it), 68's fileApiError/fileApiPost and 86's _modFileHost/
+    _modFileApi. Sliced rather than stubbed because "an aborted ctx.file call
+    resolves {ok:false} and never rejects" is a claim about those functions."""
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    files = (BROKER_DIR / "68_js_app_windows_files.js").read_text(
+        encoding="utf-8")
+    loader = _loader_src()
+    i = consts.index("        const FETCH_TIMEOUT_MS = ")
+    fetch_ms = consts[i:consts.index("\n", i) + 1]
+    a = auth.index("        function hostUrl(host, path) {")
+    b = auth.index("\n        }\n",
+                   auth.index("function hostFetch(host, path, opts) {", a))
+    host_fetch = auth[a:b] + "\n        }\n"
+    c = files.index("        const FILE_API_TIMEOUT_DEFAULT_MS =")
+    d = files.index("\n        }\n",
+                    files.index("function fileApiPost(path, body, host, opts) {",
+                                c))
+    file_api = files[c:d] + "\n        }\n"
+    mod_file = (_frag_fn(loader, "function _modFileHost(hostId) {")
+                + "\n        }\n"
+                + _frag_fn(loader, "function _modFileApi(route, body, opts) {")
+                + "\n        }\n")
+    for needed, body in (("const ctrl = new AbortController();", host_fetch),
+                         ("ctrl.abort(callerSignal.reason);", host_fetch),
+                         ("if (name === 'AbortError') {", file_api),
+                         ("signal: opts && opts.signal,", mod_file)):
+        assert needed in body, f"{needed!r} missing from the sliced transport"
+    return fetch_ms + host_fetch + file_api + mod_file
+
+
+def test_ctx_signal_lands_in_its_own_fragment_and_is_registered():
+    # A47: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap and the rule for
+    # that cap is split, never trim -- so ctx.signal gets a NEW ordered fragment
+    # rather than a shrunken neighbour (the same split 86a/86b/86c+86d/86e got).
+    assert "86f_js_mod_signal.js" in ui._ORDERED
+    assert (BROKER_DIR / "86f_js_mod_signal.js").is_file()
+    at = ui._ORDERED.index
+    # Ordered after every other 86* companion and before the mod-script splice,
+    # since a mod's init reads the FINISHED ctx.
+    assert at("86e_js_mod_savechain.js") < at("86f_js_mod_signal.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    # The split has to actually buy headroom: every fragment involved stays
+    # under the cap, including the loader the dispatch landed in.
+    for frag in ("86_js_mod_loader.js", "86c_js_mod_ctx_ext.js",
+                 "86f_js_mod_signal.js"):
+        lines = (BROKER_DIR / frag).read_text(encoding="utf-8").count("\n")
+        assert lines <= ui._MAX_LINES, f"{frag} has {lines} lines"
+    ext = _ctx_ext_src()
+    loader = _loader_src()
+    sig = _signal_src()
+    for sym in ("function _modSignalReason(rec) {",
+                "function _ctxSignal(ctx, rec) {",
+                "function _abortModSignal(rec) {"):
+        assert sym in sig, f"{sym!r} did not land in 86f"
+        assert sym not in ext and sym not in loader, \
+            f"{sym!r} belongs in 86f, not 86c or the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A47 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's registry, typeof-guarded exactly as 86c's own
+    # registrations are (a page assembled without the registry must not throw).
+    _assert_guarded_ctx_registration(sig, "_registerCtxExtender(_ctxSignal);")
+    assert ("if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('signal', 1);\n"
+            "        }") in sig
+    # ctxVersion stays 1: additive, feature-detected surface.
+    assert "ctxVersion" not in _code_only(sig)
+    assert "ctxVersion: 1," in loader
+
+
+def test_ctx_signal_owes_a_capability_entry_and_registers_it():
+    # The judgement, argued rather than assumed. #197's map is per FAMILY -- a
+    # bare top-level ctx member name -- and `signal` is a NEW top-level member,
+    # like #195's `hosts` and unlike A41's saveChain (a member of a family that
+    # already has an entry). Without the registration ctx.capabilities would lie
+    # by omission, which is what the seed-drift gate above enforces; assert both
+    # halves here so the argument is pinned where the surface is.
+    assert "signal" in _ctx_families_added_by_extenders(), \
+        "the extender must put `signal` on the ctx as a top-level member"
+    assert "signal" in _standalone_capability_registrations()
+    assert "signal" not in set(_ctx_family_keys()), \
+        "ctx.signal is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # It is a VALUE, not a function: the entry (and `needs`) is how a mod asks
+    # for it, since `typeof ctx.signal === 'function'` would be false for a
+    # surface that is demonstrably present.
+    assert "ctx.signal = ctrl.signal;" in _signal_src()
+
+
+def test_the_signal_abort_is_dispatched_ahead_of_every_takedown_stage():
+    # THE ordering claim, read off the source. The take-down path has three
+    # stages and the abort precedes all of them: the staged factory-window close
+    # (#194), the LIFO chain, and therefore #195's per-window teardowns, which
+    # ride that chain as an entry rather than as a call here.
+    loader = _loader_src()
+    body = _frag_fn(loader, "function _runUnloads(rec) {")
+    _order_in(body,
+              "rec.unloading = true;",
+              "typeof _abortModSignal === 'function'",
+              "_abortModSignal(rec);",
+              "typeof _closeModAppWindows === 'function'",
+              "_closeModAppWindows(rec);",
+              "rec.unloads.splice(0).reverse()")
+    # Guarded like every other loader call into a companion fragment, and
+    # isolated in its OWN try/catch: abort listeners run outside the drain's
+    # per-callback isolation, so a throwing one must not cost the mod the
+    # teardown chain this stands in front of.
+    assert "try { _abortModSignal(rec); } catch (e) {" in body
+    assert loader.count("_abortModSignal(rec)") == 1, \
+        "the abort dispatch has exactly one call site in the loader"
+    # NEVER an onUnload entry: registered, it would be the OLDEST entry and run
+    # LAST -- after every disposer it is supposed to precede.
+    for name, src in (("86", loader), ("86f", _signal_src())):
+        for line in src.splitlines():
+            if "_abortModSignal" not in line or line.lstrip().startswith("//"):
+                continue
+            assert "unloads.push" not in line and "onUnload(" not in line, (
+                f"{name}: the abort is registered as a teardown: {line!r}")
+    # #195's per-window disposers are an ENTRY on the chain, which is what makes
+    # one dispatch position cover them too. Pinned because the argument for
+    # where the abort sits depends on it.
+    ext = _ctx_ext_src()
+    assert "rec.unloads.push(function () { _fireModTeardowns(rec); });" in ext
+    assert "_fireModTeardowns" not in _code_only(loader), \
+        "the per-window teardowns are a chain ENTRY, never a call in _runUnloads"
+    # The loader owns the DISPATCH only: the controller stays on the record,
+    # reached through the companion, so 86 never grows a second way to abort.
+    assert "signalCtrl" not in loader
+    assert "AbortController" not in loader
+
+
+def test_the_signal_is_passed_explicitly_and_never_wired_in_ambiently():
+    # Decision 2, which is a claim about what the loader does NOT do: no helper
+    # call site anywhere injects ctx.signal for the mod. An ambient signal would
+    # abort work a mod deliberately wants to finish at teardown -- #196's
+    # saveChain teardown flush is the shipped example -- and would silently
+    # change every existing call site.
+    offenders = []
+    for path in sorted(BROKER_DIR.rglob("*.js")):
+        for line in _code_only(path.read_text(encoding="utf-8")).splitlines():
+            if "signal: ctx.signal" in line or "signal: rec.signal" in line:
+                offenders.append(f"{path.name}: {line.strip()}")
+    assert offenders == [], (
+        "a call site is injecting ctx.signal implicitly: " + str(offenders))
+    # The helpers still take one EXPLICITLY, which is the whole contract: a mod
+    # passes it, core never does.
+    loader = _loader_src()
+    assert "signal: opts && opts.signal," in loader
+    # ...and the counter-example is documented where the next migration will
+    # read it, not left as folklore.
+    sig = _signal_src()
+    assert "saveChain" in sig and "must NOT be handed ctx.signal" in sig
+
+
+_SIGNAL_HARNESS = r"""
+'use strict';
+// The four E47 clauses run the SHIPPED slices in node: #194's ctx-extender
+// registry, #197's capability map (so the new entry is proven end to end and
+// not just string-matched), the whole #198 range, 86's own _runUnloads, #194's
+// staged window close and the real ctx.file transport down to fetch().
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+// A throwing abort listener is reported to the GLOBAL handler and never to
+// whoever called abort() -- window.onerror in a browser, an uncaught exception
+// on the next tick in node. Captured here so a case can assert it was REPORTED
+// rather than swallowed, and so node's default handler does not kill the
+// process after the teardown it could not stop has already finished.
+const uncaught = [];
+process.on('uncaughtException', function (e) {
+    uncaught.push(String((e && e.message) || e));
+});
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// ---- the core surface these slices touch, and nothing else ----------------
+const windows = new Map();          // core's window registry (_modAppWindowLive)
+const HOSTS = { local: { id: 'local', url: '', token: 't' } };
+function localHost() { return HOSTS.local; }
+function hostById(id) { return (id && HOSTS[id]) ? HOSTS[id] : null; }
+// fetch(), modelled on the one behaviour under test: it never settles on its
+// own, and it REJECTS with the signal's reason when the request is aborted --
+// which is what the platform does and what fileApiError is written against.
+const REQUESTS = [];
+global.fetch = function (url, init) {
+    const s = init && init.signal;
+    REQUESTS.push({ url: url, signal: !!s });
+    return new Promise(function (_resolve, reject) {
+        if (!s) return;
+        if (s.aborted) return reject(s.reason);
+        s.addEventListener('abort', function () { reject(s.reason); });
+    });
+};
+
+__REGISTRY__
+__NEEDS__
+__SIGNAL__
+__UNLOADS__
+__STAGED__
+__TRANSPORT__
+function ctxFile() { return { __CTXFILE__ }.file; }
+
+// ---- driver ---------------------------------------------------------------
+// ONE ACTIVATION, the way initMod builds one: a fresh per-activation record
+// ({id, version, unloads}), a fresh ctx, and the extender registry applied to
+// it. A re-enable is another call with a NEW rec -- which is exactly what makes
+// the old activation's signal dead for good. `onUnload` is the one fixture,
+// copied from makeCtx's literal (that literal is 550 lines of browser-only
+// desktop wiring; this member is two).
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        file: ctxFile(),
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+// One factory-owned app window, in the shape _closeModAppWindows walks: the
+// mod's own appWindows Map, a handle whose close() disposes the core record.
+function openWindow(m, id, onClose) {
+    const win = { id: id, disposed: false };
+    windows.set(id, win);
+    const h = { win: win, close: function () {
+        win.disposed = true;
+        windows.delete(id);
+        onClose();
+    } };
+    if (!m.rec.appWindows) m.rec.appWindows = new Map();
+    m.rec.appWindows.set(id, h);
+    return h;
+}
+
+const CASES = {};
+
+// E47 clause 1: the abort is observed BEFORE the first onUnload callback runs
+// -- and before the staged window close that now precedes it.
+CASES.abort_precedes_every_takedown_stage = async function () {
+    const m = activate('m');
+    const log = [];
+    // The in-flight loop the hand-rolled dead flags exist for: a pending
+    // promise carrying ctx.signal, whose completion handler would touch a
+    // window.
+    const pending = new Promise(function (resolve) {
+        m.ctx.signal.addEventListener('abort', function () {
+            log.push('abort-listener');
+            resolve({ windowStillOpen: windows.has('w1'),
+                      unloadsRun: log.filter(function (x) {
+                          return x.indexOf('unload') === 0;
+                      }).length,
+                      // #169's flag / #196's activation generation: a listener
+                      // is mod code, and it must find the record ALREADY dead.
+                      recDead: !!m.rec.unloading });
+        });
+    });
+    openWindow(m, 'w1', function () { log.push('window-closed'); });
+    // The entry #195's onModTeardown pushes at its first registration: it goes
+    // on the chain, so it is an EARLY entry and runs LATE.
+    m.ctx.onUnload(function () { log.push('mod-teardown(#195)'); });
+    m.ctx.onUnload(function () { log.push('unload-1'); });
+    m.ctx.onUnload(function () { log.push('unload-2'); });
+    const before = { aborted: m.ctx.signal.aborted,
+                     unloading: !!m.rec.unloading };
+    _runUnloads(m.rec);
+    const observed = await pending;
+    return { log: log, before: before, observed: observed,
+             aborted: m.ctx.signal.aborted,
+             reasonName: m.ctx.signal.reason && m.ctx.signal.reason.name,
+             reasonMsg: String(m.ctx.signal.reason && m.ctx.signal.reason.message),
+             unloading: !!m.rec.unloading };
+};
+
+// E47 clause 2: a disabled-then-re-enabled mod gets a FRESH, un-aborted signal
+// -- and the dead activation's stays aborted for good.
+CASES.a_reenable_gets_a_fresh_signal = function () {
+    const first = activate('m');
+    const firstSignal = first.ctx.signal;
+    _runUnloads(first.rec);
+    const firstAborted = firstSignal.aborted;
+    // Re-enable: the SAME mod id, a NEW activation record.
+    const second = activate('m');
+    const out = {
+        firstAborted: firstAborted,
+        secondAborted: second.ctx.signal.aborted,
+        sameSignal: second.ctx.signal === firstSignal,
+        sameController: second.rec.signalCtrl === first.rec.signalCtrl,
+        onTheRecord: [typeof first.rec.signalCtrl,
+                      typeof second.rec.signalCtrl],
+        capability: second.ctx.capabilities.signal,
+        needsMet: _modUnmetNeeds({ needs: ['signal'] }, second.ctx),
+    };
+    // The second activation aborts on its own disable, and the first stays
+    // aborted -- a dead activation's loops never come back to life.
+    _runUnloads(second.rec);
+    out.secondAbortedAfter = second.ctx.signal.aborted;
+    out.firstStillAborted = firstSignal.aborted;
+    out.errors = errors;
+    return out;
+};
+
+// E47 clause 3: a throwing abort listener does not stop the unload chain.
+CASES.a_throwing_abort_listener_does_not_stop_teardown = async function () {
+    const m = activate('m');
+    const log = [];
+    m.ctx.signal.addEventListener('abort', function () {
+        log.push('listener-1');
+        throw new Error('boom');
+    });
+    m.ctx.signal.addEventListener('abort', function () {
+        log.push('listener-2');       // a sibling listener still runs
+    });
+    openWindow(m, 'w1', function () { log.push('window-closed'); });
+    m.ctx.onUnload(function () { log.push('unload-1'); });
+    m.ctx.onUnload(function () { log.push('unload-2'); });
+    let threw = false;
+    try { _runUnloads(m.rec); } catch (_) { threw = true; }
+    await sleep(1);                   // let the global report land
+    return { log: log, threw: threw, aborted: m.ctx.signal.aborted,
+             uncaught: uncaught, drained: m.rec.unloads.length };
+};
+
+// E47 clause 4: an aborted ctx.file call RESOLVES {ok:false} and never rejects
+// -- the family's own cancel shape, through the shipped transport.
+CASES.an_aborted_file_call_resolves_and_never_rejects = async function () {
+    const m = activate('m');
+    const settled = [];
+    const p = m.ctx.file.read('/etc/motd', { signal: m.ctx.signal }).then(
+        function (v) { settled.push('resolved'); return v; },
+        function (e) { settled.push('REJECTED'); return { rejected: String(e) }; });
+    await sleep(1);
+    const before = { requests: REQUESTS.length, settled: settled.slice(),
+                     signalReached: REQUESTS[0] && REQUESTS[0].signal };
+    _runUnloads(m.rec);
+    const res = await p;
+    // ...and a call STARTED after the teardown, on the already-aborted signal,
+    // resolves the same way rather than hanging or throwing.
+    const after = await m.ctx.file.read('/etc/motd', { signal: m.ctx.signal })
+        .catch(function (e) { return { rejected: String(e) }; });
+    return { before: before, settled: settled, res: res, after: after,
+             requests: REQUESTS.length };
+};
+
+// The surface itself, and the refusals that must be inert rather than fatal.
+CASES.surface_and_refusals = function () {
+    const m = activate('m');
+    return {
+        isSignal: typeof AbortSignal === 'function'
+            && (m.ctx.signal instanceof AbortSignal),
+        isValueNotFunction: typeof m.ctx.signal,
+        capability: m.ctx.capabilities.signal,
+        has: _modCtxHas(m.ctx, 'signal'),
+        unmet: _modUnmetNeeds({ needs: ['signal'] }, m.ctx),
+        // A record that cannot carry a controller gets no signal, and the
+        // dispatch on it is a no-op rather than a throw.
+        noRec: (function () {
+            const ctx = { id: 'x' };
+            _applyCtxExtenders(ctx, null);
+            return { signal: ('signal' in ctx),
+                     aborted: _abortModSignal(null),
+                     aborted2: _abortModSignal({ id: 'x' }) };
+        })(),
+        // Idempotent: a second drain dispatches nothing.
+        firstDispatch: _abortModSignal(m.rec),
+        secondDispatch: _abortModSignal(m.rec),
+        errors: errors,
+    };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def signal_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modsignal") / "harness.js"
+    path.write_text(
+        _SIGNAL_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__SIGNAL__", _signal_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__STAGED__", _staged_close_source())
+        .replace("__TRANSPORT__", _signal_transport_source())
+        .replace("__CTXFILE__", _ctx_file_literal()),
+        encoding="utf-8")
+    return path
+
+
+def _run_signal(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_abort_is_observed_before_the_first_unload_runs(signal_harness):
+    # E47's order assertion, and the reason the dispatch sits where it does: a
+    # loop that is about to touch one of this mod's windows must be told to stop
+    # BEFORE anything starts dismantling that window. Both stages that do the
+    # dismantling are here -- #194's staged close and the LIFO chain.
+    r = _run_signal(signal_harness, "abort_precedes_every_takedown_stage")
+    assert r["errors"] == []
+    assert r["before"] == {"aborted": False, "unloading": False}
+    assert r["log"] == ["abort-listener", "window-closed", "unload-2",
+                        "unload-1", "mod-teardown(#195)"], r["log"]
+    # ...observed from INSIDE the listener, which is the claim that matters: the
+    # window was still open and not one disposer had run.
+    # ...and the record already reads dead from inside that listener (#169's
+    # flag, and the generation #196's saveChain drops writes on), which is the
+    # other half of the placement: after the flag, before anything dismantles.
+    assert r["observed"] == {"windowStillOpen": True, "unloadsRun": 0,
+                             "recDead": True}
+    assert r["aborted"] is True
+    assert r["unloading"] is True
+    # A named AbortError, so every helper's failure mapping reads it as a cancel
+    # rather than as hostFetch's TimeoutError deadline.
+    assert r["reasonName"] == "AbortError"
+    assert 'mod "m" was torn down' in r["reasonMsg"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disabled_then_reenabled_mod_gets_a_fresh_unaborted_signal(
+        signal_harness):
+    # #198 trap 3, tested on the exact path it names. Reusing the controller
+    # across a re-enable is the obvious wrong implementation and it fails
+    # SILENTLY: every request the re-enabled mod makes aborts instantly and the
+    # mod looks broken with nothing in the console.
+    r = _run_signal(signal_harness, "a_reenable_gets_a_fresh_signal")
+    assert r["errors"] == []
+    assert r["firstAborted"] is True
+    assert r["secondAborted"] is False, \
+        "the re-enabled mod was handed the dead activation's aborted signal"
+    assert r["sameSignal"] is False and r["sameController"] is False
+    # The freshness is STRUCTURAL: the controller hangs off the per-activation
+    # record initMod builds, not off a map keyed by mod id.
+    assert r["onTheRecord"] == ["object", "object"]
+    # ...and the surface the fresh activation reports is the real one.
+    assert r["capability"] == 1 and r["needsMet"] == []
+    assert r["secondAbortedAfter"] is True
+    assert r["firstStillAborted"] is True, \
+        "a dead activation's signal must stay aborted for good"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_abort_listener_does_not_stop_the_unload_chain(
+        signal_harness):
+    # #198 trap 4: abort listeners run OUTSIDE _runUnloads's per-callback
+    # isolation, so the dispatch is wrapped on its own. Under DOM dispatch the
+    # throw does not even reach the caller -- it is reported globally and the
+    # remaining listeners still run -- which this pins from both ends.
+    r = _run_signal(signal_harness,
+                    "a_throwing_abort_listener_does_not_stop_teardown")
+    assert r["threw"] is False, "_runUnloads let a listener's throw escape"
+    assert r["aborted"] is True
+    # Every later stage still ran, in order.
+    assert r["log"] == ["listener-1", "listener-2", "window-closed",
+                        "unload-2", "unload-1"], r["log"]
+    assert r["drained"] == 0, "the teardown chain was not drained"
+    # Reported, not swallowed: a broken listener stays debuggable.
+    assert r["uncaught"] == ["boom"], r["uncaught"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_aborted_ctx_file_call_resolves_and_never_rejects(signal_harness):
+    # The never-rejects contract, through the shipped transport: ctx.file.read
+    # -> _modFileApi -> fileApiPost -> hostFetch's composition -> fetch ->
+    # fileApiError. The mod passes ctx.signal EXPLICITLY; nothing injects it.
+    r = _run_signal(signal_harness,
+                    "an_aborted_file_call_resolves_and_never_rejects")
+    assert r["errors"] == []
+    assert r["before"] == {"requests": 1, "settled": [], "signalReached": True}
+    assert r["settled"] == ["resolved"], "the aborted call REJECTED"
+    # The family's own cancel shape (68's fileApiError), not a new one: the
+    # abort reason is a named AbortError, so it reads as a cancel rather than as
+    # the deadline's TimeoutError.
+    assert r["res"] == {"ok": False, "aborted": True, "error": "cancelled"}
+    # A call started on an ALREADY-aborted signal answers the same way instead
+    # of hanging -- hostFetch aborts its composed controller up front.
+    assert r["after"] == {"ok": False, "aborted": True, "error": "cancelled"}
+    assert r["requests"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_signal_surface_and_its_refusals_are_inert(signal_harness):
+    r = _run_signal(signal_harness, "surface_and_refusals")
+    assert r["errors"] == []
+    assert r["isSignal"] is True
+    # A VALUE, not a function -- the detection a mod must use, and the reason
+    # the capability entry (and `needs`) matters more here than for a family
+    # whose members are callable.
+    assert r["isValueNotFunction"] == "object"
+    assert r["capability"] == 1 and r["has"] is True and r["unmet"] == []
+    # No half-family: a record that cannot carry a controller gets no ctx.signal
+    # at all, and dispatching on one is a no-op rather than a throw.
+    assert r["noRec"] == {"signal": False, "aborted": False, "aborted2": False}
+    # Idempotent: the second drain of the same record dispatches nothing.
+    assert r["firstDispatch"] is True and r["secondDispatch"] is False
