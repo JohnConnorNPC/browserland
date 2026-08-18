@@ -43,8 +43,22 @@
             ctxVersion: 1,
             defaultEnabled: true,   // inert until ⏺ is clicked (or auto-record is opted into)
             tiers: ['window', 'settings'],
+            // #200: EVERY byte this mod owns lives on a broker — capture saves
+            // through /recording/begin|chunk|commit, the library lists over
+            // /recordings, playback streams /recording?id=. So the scratchpad
+            // argument applies and the theme/help one does not: the loss is
+            // TOTAL, not partial. `needs` BLOCKS the mod, and blocked is the
+            // better failure here — without ctx.http a capture would still arm,
+            // fill memory for an hour and then have nowhere to go, which is
+            // data loss dressed up as a working feature. Blocked means no ⏺ at
+            // all, with a reason. (ctx.http is absent only on a build with no
+            // constructible AbortController — 86i's no-half-family rule.)
+            needs: ['http'],
             init: function (ctx) {
                 if (!ctx.windows || !ctx.registerWindowKind) return;
+                // Feature-detected as well as declared: the `needs` gate lives
+                // in 86c, so a page assembled without that fragment has no gate.
+                if (!ctx.http || typeof ctx.http.fetch !== 'function') return;
 
                 const LIB_WIN_ID = 'app:recorder';
                 // #151: both ceilings ROLL to a new segment (they used to stop).
@@ -102,13 +116,37 @@
                 // be replaced (a prefs adopt from /state rebuilds the array) or
                 // removed outright, so a captured one goes stale — holding a
                 // token that has since been re-entered, or naming a broker that
-                // is gone. And a missing host is NOT harmless: hostFetch(null,
-                // path) falls back to the SAME ORIGIN, so a stale reference
-                // would quietly run a delete against the local broker. Resolve
-                // at every call and treat "gone" as a visible error.
+                // is gone. Resolve at every call and treat "gone" as a visible
+                // error. The old footgun this comment used to write down — a
+                // null host falling back to the SAME ORIGIN, so a stale
+                // reference quietly ran a delete against the local broker — is
+                // GONE with #200: every route below goes through
+                // ctx.http.fetch, where a missing id throws at the door and an
+                // unknown one resolves {status: 0, error: 'host_not_found'}
+                // with no request issued at all.
                 const HOST_GONE = 'broker no longer configured';
+                // The origin broker is now SPELLED, never implied: it is the
+                // one `self: true` row of ctx.hosts.list() (#200). 'local' is
+                // the id core mints for it (getHosts entry 0) and stays the
+                // fallback for a build assembled without that member — and it
+                // is also the id already written into every saved player
+                // appData, so the two spellings agree by construction.
+                function selfHostId() {
+                    try {
+                        if (ctx.hosts && typeof ctx.hosts.list === 'function') {
+                            const rows = ctx.hosts.list();
+                            for (const h of rows) {
+                                if (h && h.self) return h.id;
+                            }
+                        }
+                    } catch (_) { /* fall through to the minted id */ }
+                    return 'local';
+                }
+                // Still a host OBJECT lookup, and deliberately: the only two
+                // things left that want one are promptFileHostAuth, which takes
+                // a host record, and the label. No fetch reads it.
                 function recHost(hostId) {
-                    return hostById(hostId || 'local');
+                    return hostById(hostId || selfHostId());
                 }
                 function recHostLabel(host) {
                     if (!host) return 'broker';
@@ -124,8 +162,9 @@
                                            String(id)]);
                 }
 
-                // ---- broker HTTP (the token rides an Authorization
-                // header, never the URL -- see hostFetch, #144) -------------
+                // ---- broker HTTP (ctx.http, #200: the token rides an
+                // Authorization header, never the URL -- see hostFetch,
+                // #144) -----------------------------------------------------
                 // Per-route deadlines. These are all JSON control calls on a
                 // broker, but they are not uniformly cheap: a chunk PUT
                 // writes up to 2 MiB (decoded) to disk and the commit does a
@@ -140,9 +179,13 @@
                     ['/recording/commit', 30000],
                 ]);
                 const REC_TIMEOUT_DEFAULT_MS = 10000;
+                // These deadlines are now TOTAL (#200): ctx.http keeps its
+                // timer armed across the body read, where hostFetch's was
+                // disarmed the moment the status line landed. A broker that
+                // answers a commit's headers and then stalls the JSON now
+                // fails at 30s instead of hanging until the tab is closed —
+                // the numbers are unchanged, what they cover grew.
                 async function recApi(hostId, path, opts) {
-                    const host = recHost(hostId);
-                    if (!host) return { ok: false, error: HOST_GONE };
                     const o = Object.assign({}, opts || {});
                     if (o.timeoutMs === undefined) {
                         // The query string ('/recording/notes?id=...') is not
@@ -151,10 +194,27 @@
                         o.timeoutMs = REC_TIMEOUT_MS.has(route)
                             ? REC_TIMEOUT_MS.get(route) : REC_TIMEOUT_DEFAULT_MS;
                     }
-                    const r = await hostFetch(host, path, o);
-                    let j = null;
-                    try { j = await r.json(); } catch (_) {}
-                    if (!j || typeof j !== 'object') {
+                    // NO ctx.signal on any recorder route. The save path is
+                    // reached FROM a teardown disposer and is supposed to
+                    // outlive the activation (#198's rule is about the work's
+                    // lifetime, not the callback that starts it): an
+                    // already-aborted signal here would drop the segment on
+                    // every disable-with-a-live-recording and raise the sticky
+                    // "recording not saved" notice. One recApi serves every
+                    // route, so it carries no signal at all.
+                    const r = await ctx.http.fetch(hostId || selfHostId(),
+                                                   path, o);
+                    // ctx.http NEVER rejects: a dead broker, a deadline and a
+                    // cancel all arrive as {status: 0, error}. `status` is
+                    // present on every complete answer, so status 0 is the
+                    // one branch that means "no answer at all".
+                    if (r.status === 0) {
+                        return { ok: false,
+                                 error: r.error === 'host_not_found'
+                                     ? HOST_GONE : String(r.error || 'failed') };
+                    }
+                    const j = r.json;
+                    if (!j || typeof j !== 'object' || Array.isArray(j)) {
                         // A broker predating #140 has no /recording/* routes at
                         // all and answers the catch-all 404 with HTML. Reported
                         // as 'HTTP 404' that reads as a recording that went
@@ -166,27 +226,73 @@
                         }
                         return { ok: false, error: 'HTTP ' + r.status };
                     }
-                    if (j.ok === undefined) j.ok = r.ok;
+                    // Response.ok's range, restated: ctx.http reports the
+                    // status and takes no view on it.
+                    if (j.ok === undefined) {
+                        j.ok = (r.status >= 200 && r.status < 300);
+                    }
                     return j;
                 }
                 function recPost(hostId, path, body) {
-                    return recApi(hostId, path, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body),
-                    });
+                    return recApi(hostId, path, { method: 'POST', json: body });
                 }
-                // recApi resolves an HTTP failure to {ok:false,error} but still
-                // REJECTS on a transport one (a dead broker, a deadline abort).
-                // With one local broker that was a remote possibility; fanning
-                // out over remotes makes it ordinary, so every call site that
-                // is not already inside a try/catch goes through here.
+                // recApi resolves every failure — HTTP and transport alike —
+                // to {ok:false,error} now that ctx.http never rejects. This
+                // stays as the guard for the one rejection left: ctx.http
+                // THROWS synchronously on a call-site defect (a relative path,
+                // an unserializable body), and inside an async function that
+                // surfaces as a rejected promise. A defect must not become a
+                // silent unhandled rejection in a repaint.
                 async function recTry(promise) {
                     try { return await promise; }
                     catch (e) {
                         return { ok: false,
                                  error: String((e && e.message) || e) };
                     }
+                }
+                // The recording BYTES (/recording?id=), shared by the download
+                // and the player — the two callers that used to hand-roll
+                // hostFetch + r.ok + an error-body re-read each. Deliberately
+                // NO deadline (timeoutMs: 0): this streams up to
+                // MAX_RECORDING_BYTES (256 MiB) and any fixed timer is a guess
+                // about the user's link speed. Under #200 that opt-out is now
+                // genuinely unbounded — there is no headers-only fallback
+                // deadline left underneath it.
+                //
+                // Resolves {ok:true, text} or {ok:false, error, auth}. `auth`
+                // is the one failure the user can fix, and the CALLER decides
+                // what to do about it: ctx.http never pops the prompt itself
+                // (#161's bug class), so the two call sites still call
+                // promptFileHostAuth — from a click and from a window load,
+                // never from a poll.
+                async function fetchRecordingBody(hostId, recId) {
+                    const r = await ctx.http.fetch(
+                        hostId || selfHostId(),
+                        '/recording?id=' + encodeURIComponent(recId),
+                        { timeoutMs: 0 });
+                    if (r.status === 0) {
+                        return { ok: false,
+                                 error: r.error === 'host_not_found'
+                                     ? HOST_GONE
+                                     : String(r.error || 'failed') };
+                    }
+                    if (r.status < 200 || r.status >= 300) {
+                        // The error BODY, not just the status: a 401 carries
+                        // {error:'auth_required'}, and reporting it as
+                        // 'HTTP 401' loses the one failure the user can fix.
+                        // The route serves octet-stream on success, so a JSON
+                        // error body is parsed by ctx.http and a non-JSON one
+                        // (the catch-all 404's HTML) is not — hence both reads.
+                        const err = (r.json && r.json.error)
+                            || ('HTTP ' + r.status);
+                        return { ok: false, error: err,
+                                 auth: err === 'auth_required' };
+                    }
+                    // `text`, not a Blob: /recording answers decoded NDJSON
+                    // (app.py's _recording_get gunzips server-side) and the
+                    // player parses that string anyway. The download re-encodes
+                    // it, which is byte-exact for the UTF-8 the writer emits.
+                    return { ok: true, text: (r.text === undefined) ? '' : r.text };
                 }
 
                 // ---- download ----------------------------------------------
@@ -231,33 +337,26 @@
                     if (dlBusy.has(busyKey)) return;
                     dlBusy.add(busyKey);
                     try {
-                        // NO deadline: this streams the recording itself, up to
-                        // MAX_RECORDING_BYTES (256 MiB). Any fixed timer is a
-                        // guess about the user's link speed, and losing a large
-                        // download to one is far worse than waiting for it.
-                        const r = await hostFetch(
-                            host,
-                            '/recording?id=' + encodeURIComponent(recId),
-                            { timeoutMs: 0 });
+                        const r = await fetchRecordingBody(host.id, recId);
                         if (!r.ok) {
-                            let j = null;
-                            try { j = await r.json(); } catch (_) {}
-                            const err = (j && j.error) || ('HTTP ' + r.status);
                             // Before this, a stale token (the broker restarted
                             // and minted a new one) SAVED the 401 JSON body as
                             // <id>.blrec — a 36-byte "recording" with no error
                             // shown anywhere. Re-open the login prompt instead.
-                            if (err === 'auth_required') {
-                                promptFileHostAuth(host);
-                            }
-                            dlReport(report, 'download failed: ' + err);
+                            // A transport failure lands here too now, rather
+                            // than in the catch: ctx.http never rejects.
+                            if (r.auth) promptFileHostAuth(host);
+                            dlReport(report, 'download failed: ' + r.error);
                             return;
                         }
-                        // blob(), not text(): the bytes stay opaque and the
-                        // Blob inherits the response's application/octet-stream,
-                        // where text() would decode UTF-8 into a UTF-16 string
-                        // and double peak memory for nothing.
-                        const url = URL.createObjectURL(await r.blob());
+                        // The Blob is built from the decoded text and re-typed
+                        // application/octet-stream. It used to be r.blob(),
+                        // which kept the bytes opaque; ctx.http reads a body as
+                        // text, and for the UTF-8 NDJSON this route serves the
+                        // round trip is byte-exact.
+                        const url = URL.createObjectURL(
+                            new Blob([r.text],
+                                     { type: 'application/octet-stream' }));
                         const a = document.createElement('a');
                         a.href = url;
                         a.download = recId + '.blrec';
@@ -274,11 +373,12 @@
                             URL.revokeObjectURL(url);
                         }, 10000);
                     } catch (e) {
-                        // fetch() REJECTS on a network failure (broker stopped,
-                        // tailnet dropped) rather than resolving with ok=false.
-                        // Unhandled, that would be a silent no-op — strictly
-                        // worse than the failed entry the download manager used
-                        // to show.
+                        // A network failure no longer arrives here (ctx.http
+                        // resolves it), but a call-site defect — ctx.http's
+                        // synchronous throw — and the Blob/anchor work below
+                        // still can. Unhandled, that would be a silent no-op —
+                        // strictly worse than the failed entry the download
+                        // manager used to show.
                         dlReport(report,
                                  'download failed: '
                                  + String((e && e.message) || e));
@@ -766,36 +866,42 @@
                     // the temp out from under it, destroying a recording that
                     // was about to land. Cleanup is for a failure BEFORE commit.
                     let committing = false;
-                    // Pinned to the LOCAL broker (#161): capture happens in
+                    // Pinned to the ORIGIN broker (#161): capture happens in
                     // this browser, so this is the one recorder path that does
                     // not take a host — the recording is filed here even when
-                    // the terminal it came from runs on a remote broker.
+                    // the terminal it came from runs on a remote broker. Named
+                    // ONCE, and named EXPLICITLY (#200): the whole three-call
+                    // begin/chunk/commit sequence must land on one broker, so
+                    // re-resolving per call would let a registry edit mid-save
+                    // send the commit somewhere the session does not exist.
+                    const selfId = selfHostId();
                     try {
-                        const b = await recPost('local', '/recording/begin', {});
+                        const b = await recPost(selfId, '/recording/begin', {});
                         if (!b.ok) return b;
                         recId = b.recording_id;
                         for (let off = 0; off < payload.length; off += CHUNK_RAW) {
                             const part = payload.subarray(off, off + CHUNK_RAW);
-                            const c = await recPost('local', '/recording/chunk', {
+                            const c = await recPost(selfId, '/recording/chunk', {
                                 recording_id: recId, offset: off,
                                 content_b64: bytesToB64(part),
                             });
                             if (!c.ok) throw new Error(c.error || 'chunk');
                         }
                         committing = true;
-                        return await recPost('local', '/recording/commit',
+                        return await recPost(selfId, '/recording/commit',
                                              { recording_id: recId, meta: meta });
                     } catch (e) {
                         // Best-effort cleanup; the ORIGINAL failure is what
                         // gets reported (mirrors the upload_abort contract).
                         if (recId && !committing) {
                             // The sync try/catch never saw this promise's
-                            // REJECTION — recApi rejects on a transport failure
-                            // (and now on a deadline abort), so a failed cleanup
-                            // became an unhandled rejection in the console. Catch
-                            // it on the promise; cleanup stays fire-and-forget so
-                            // the ORIGINAL failure is what gets reported.
-                            recPost('local', '/recording/abort',
+                            // REJECTION, so a failed cleanup became an
+                            // unhandled rejection in the console. recApi no
+                            // longer rejects on a transport failure (#200), but
+                            // ctx.http's synchronous argument throw still lands
+                            // as one, and cleanup stays fire-and-forget so the
+                            // ORIGINAL failure is what gets reported.
+                            recPost(selfId, '/recording/abort',
                                     { recording_id: recId }).catch(() => {});
                         }
                         return { ok: false, error: String(e && e.message || e) };
@@ -1532,31 +1638,18 @@
                         loading = true;
                         setStatus('loading…');
                         try {
-                            const host = recHost(recHostId);
-                            if (!host) throw new Error(HOST_GONE);
-                            // No deadline, same reason as downloadRecording:
-                            // the player loads the whole recording body.
-                            const r = await hostFetch(
-                                host,
-                                '/recording?id='
-                                + encodeURIComponent(recId),
-                                { timeoutMs: 0 });
+                            // Same helper as the download, deadline-free for
+                            // the same reason: the player loads the whole
+                            // recording body.
+                            const r = await fetchRecordingBody(recHostId, recId);
                             if (!r.ok) {
-                                // The error BODY, not just the status: a 401
-                                // carries {error:'auth_required'}, and reporting
-                                // it as 'HTTP 401' loses the one failure the
-                                // user can actually fix.
-                                let j = null;
-                                try { j = await r.json(); } catch (_) {}
-                                const err = (j && j.error) || ('HTTP ' + r.status);
-                                if (err === 'auth_required') {
-                                    promptFileHostAuth(host);
+                                if (r.auth) {
+                                    promptFileHostAuth(recHost(recHostId));
                                 }
-                                throw new Error(err);
+                                throw new Error(r.error);
                             }
-                            const text = await r.text();
                             if (closed) return;
-                            recData = parseRecording(text);
+                            recData = parseRecording(r.text);
                             duration = Math.max(
                                 1, recData.meta.durationMs
                                    || (recData.events.length

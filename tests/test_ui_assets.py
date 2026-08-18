@@ -753,7 +753,11 @@ def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
     buttons outright, so pin that the replacement is actually there."""
     src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
         encoding="utf-8")
-    assert "URL.createObjectURL(await r.blob())" in src
+    # #200 (A55): ctx.http reads a body as text, so the Blob is built from the
+    # decoded NDJSON rather than r.blob(). The invariant this test guards --
+    # never a tokened <a href> to the broker -- is unchanged.
+    assert "new Blob([r.text]," in src
+    assert "URL.createObjectURL(" in src
     assert "URL.revokeObjectURL(url)" in src, "blob URL must be revoked"
     # Both buttons go through the one helper.
     assert src.count("downloadRecording(") >= 3, \
@@ -782,19 +786,23 @@ def test_recorder_reaches_every_broker_not_just_the_local_one():
     # silently follow a reordered host list.
     assert "localHost()" not in src, \
         "recorder routes must name their broker, not default to getHosts()[0]"
+    # The capture path still pins ONE broker for the whole begin/chunk/commit
+    # sequence -- but since #200 (A55) it NAMES it instead of implying it: the
+    # `self: true` row of ctx.hosts.list(), resolved once into `selfId`.
     for route in ("/recording/begin", "/recording/chunk", "/recording/commit"):
-        assert "recPost('local', '%s'" % route in src, \
-            "capture uploads stay pinned to the local broker"
+        assert "recPost(selfId, '%s'" % route in src, \
+            "capture uploads stay pinned to ONE broker, resolved once"
+    assert "const selfId = selfHostId();" in src
+    assert "function selfHostId()" in src and "if (h && h.self) return h.id;" in src
     # Every call carries a host id, and a host that no longer resolves is an
-    # ERROR -- never a silent fall-through. hostFetch(null, path) targets the
-    # SAME ORIGIN, so a stale id must not reach it: that would run a delete
-    # against the local broker.
+    # ERROR -- never a silent fall-through. Under #200 that is ctx.http's own
+    # fail-closed contract ({status: 0, error: 'host_not_found'}, no request
+    # issued), which recApi translates into the mod's visible HOST_GONE.
     assert "async function recApi(hostId, path, opts)" in src
     assert "function recPost(hostId, path, body)" in src
     assert "async function downloadRecording(hostId, recId, report)" in src
-    assert re.search(r"const host = recHost\(hostId\);\s*\n\s*"
-                     r"if \(!host\) return \{ ok: false, error: HOST_GONE \};",
-                     src), "recApi must refuse a host it cannot resolve"
+    assert "? HOST_GONE : String(r.error || 'failed') };" in src, \
+        "recApi must surface a host it cannot resolve as a visible error"
     # The fan-out itself, and the per-host isolation that keeps one dead broker
     # from emptying the list.
     assert "hosts.map(" in src and "'/recordings'" in src
@@ -21609,3 +21617,665 @@ def test_no_ctx_http_on_a_build_that_cannot_carry_the_deadline(http_harness):
     assert r["capAbsent"] is True
     assert r["present"] is True
     assert r["capPresent"] is True
+
+
+# =========================================================================== #
+# recorder ON ctx.http (#200 / A55) -- the REFERENCE MIGRATION
+#
+# #200 ships the migration WITH the API on the argument that "the API does not
+# freeze against fixtures alone -- recorder is the production proof": recorder
+# is the mod whose own header comment WROTE DOWN the hostFetch(null, path)
+# same-origin footgun rather than being able to fix it. A string match on the
+# deleted comment cannot prove the swap -- CP8's finding about the #194
+# clipboard migration was exactly that: every assertion was a string match and
+# the mod was never executed. So the cases below run the SHIPPED recorder
+# slices against the SHIPPED ctx.http (86i), the SHIPPED ctx.hosts.list (86j),
+# 63's REAL hostFetch and REAL node http servers -- two of them, so "landed on
+# the broker it named" is a measurement on the peer that answered and not an
+# inference from the argument that was passed.
+# --------------------------------------------------------------------------- #
+
+
+def _recorder_src():
+    return (BROKER_DIR / "mods/recorder/recorder.js").read_text(encoding="utf-8")
+
+
+def _recorder_slice(start, end):
+    src = _recorder_src()
+    a = src.index(start)
+    b = src.index(end, a)
+    assert a < b, f"recorder slice markers out of order: {start!r}"
+    return src[a:b]
+
+
+def _recorder_http_source():
+    """recorder's broker-addressing + broker-HTTP + download + base64 sections,
+    verbatim. This is the range #200 rewrote: recApi/recPost/recTry, the shared
+    /recording?id= body read both the download and the player now go through,
+    and selfHostId -- the spelled origin broker."""
+    body = _recorder_slice("// ---- broker addressing (#161)", "// ---- capture ")
+    for sym in ("function selfHostId() {",
+                "function recHost(hostId) {",
+                "async function recApi(hostId, path, opts) {",
+                "function recPost(hostId, path, body) {",
+                "async function recTry(promise) {",
+                "async function fetchRecordingBody(hostId, recId) {",
+                "async function downloadRecording(hostId, recId, report) {",
+                "function bytesToB64(u8) {"):
+        assert sym in body, f"the recorder HTTP range no longer defines {sym!r}"
+    return body
+
+
+def _recorder_save_source():
+    """The save queue + saveRecording, verbatim -- the begin/chunk/commit
+    sequence that is the round trip E55 names."""
+    body = _recorder_slice("// Uploads are QUEUED", "// ---- per-terminal")
+    for sym in ("function enqueueSave(rec) {",
+                "function pumpSaves() {",
+                "async function saveRecording(rec) {"):
+        assert sym in body, f"the recorder save range no longer defines {sym!r}"
+    return body
+
+
+def _recorder_chunk_const():
+    """CHUNK_RAW, off the shipped source rather than re-typed: the multi-chunk
+    case below is only a multi-chunk case if it uses the real size."""
+    m = re.search(r"^\s*const CHUNK_RAW = .*$", _recorder_src(), re.M)
+    assert m, "recorder no longer declares CHUNK_RAW"
+    return m.group(0).strip()
+
+
+def test_recorder_has_no_raw_hostfetch_left_and_the_footgun_comment_is_gone():
+    # E55's deletion half -- necessary, nowhere near sufficient (the executing
+    # cases below are the rest). All three raw call sites (recApi, the download,
+    # the player load) are gone, and so is the paragraph that documented the
+    # footgun instead of fixing it.
+    src = _recorder_src()
+    assert "hostFetch(" not in src, \
+        "recorder still calls the raw hostFetch -- #200 routes it via ctx.http"
+    for gone in ("falls back to the SAME ORIGIN",
+                 "would quietly run a delete against the local broker",
+                 "hostFetch(null,"):
+        assert gone not in src, f"the footgun comment survives: {gone!r}"
+    # The replacement, in all three places.
+    assert src.count("ctx.http.fetch(") == 2, \
+        "one call in recApi, one in fetchRecordingBody -- and nothing else"
+    assert "async function fetchRecordingBody(hostId, recId) {" in src
+    # The player and the download share the one body reader: that is what made
+    # the third call site disappear rather than be re-typed.
+    assert src.count("await fetchRecordingBody(") == 2
+    player = src[src.index("// ---- load ---"):]
+    assert "fetchRecordingBody(recHostId, recId)" in player, \
+        "the player still hand-rolls its own body fetch"
+
+
+def test_recorder_passes_no_signal_on_any_route():
+    # THE #198 trap, and it is #198's rather than #200's: recorder starts a
+    # network save FROM an onUnload disposer (stopRecording -> enqueueSave ->
+    # the save fetch), and that work is SUPPOSED to outlive the activation. The
+    # pairing rule is about the work's LIFETIME, not the callback it starts in.
+    # ctx.http short-circuits an already-aborted caller signal before fetch is
+    # ever reached, so a signal on that path would lose the segment on every
+    # disable-with-a-live-recording and raise the sticky "recording not saved"
+    # notice. One recApi serves every route, so the absence is total and this
+    # gate is a whole-file one. (The executed proof is
+    # test_a_save_from_a_teardown_disposer_survives_an_aborted_ctx_signal.)
+    code = _code_only(_recorder_src())
+    for banned in ("ctx.signal", "signal:", "AbortController"):
+        assert banned not in code, \
+            f"recorder passes {banned!r} -- a teardown save must not be cancellable"
+
+
+def test_recorder_declares_needs_http_and_feature_detects_it():
+    # The `needs` judgement, written down where the drift gate can read it.
+    # EVERY byte recorder owns lives on a broker: capture saves through
+    # /recording/begin|chunk|commit, the library lists over /recordings,
+    # playback streams /recording?id=. So the scratchpad argument applies (#196
+    # -- content lives ONLY on the broker, the loss is TOTAL) and the
+    # help/theme one does not (#195/#199 -- partial loss, and `needs` BLOCKS
+    # the mod). Blocked is the better failure: without ctx.http a capture would
+    # still arm, fill memory for an hour and have nowhere to go.
+    src = _recorder_src()
+    assert "needs: ['http']," in src
+    # Declared AND feature-detected: the gate lives in 86c, so a page assembled
+    # without that fragment has no gate at all.
+    assert "if (!ctx.http || typeof ctx.http.fetch !== 'function') return;" in src
+    # The name resolves against a capability the build actually registers.
+    assert "http" in _standalone_capability_registrations()
+
+
+#: The recorder driver. Runs the shipped mod slices over the shipped wrapper,
+#: the shipped snapshot builder and 63's real transport, against two real
+#: brokers. Nothing about the migration is re-implemented here; the harness
+#: supplies only what a browser would -- a host registry, a document, a URL
+#: factory and a notice host.
+_RECORDER_HARNESS = r"""
+'use strict';
+const http = require('http');
+
+const FETCH_TIMEOUT_MS = 3000;      // 50_js_constants.js; ctx.http passes 0
+
+// ---- the browser half -----------------------------------------------------
+// getHosts is STUBBED (not sliced) for one reason, stated because it is the
+// harness's only deviation: core's entry 0 carries url '' -- the same-origin
+// local broker -- and node has no origin to resolve a relative URL against. So
+// the self row gets a real URL here. Everything that decides WHICH row is self
+// is still the shipped code: 86j's _modHostsList reads this array, and
+// hostById is the same linear scan core does.
+let ROWS = [];
+function getHosts() { return ROWS; }
+function hostById(id) {
+    for (const h of getHosts()) { if (h.id === id) return h; }
+    return null;
+}
+function invalidateHost() { return true; }
+function _registerModCapability() { return true; }
+
+let authPops = 0;
+function promptFileHostAuth() { authPops++; }
+let NOTICES = [];
+function showNotice(msg) { NOTICES.push(String(msg)); }
+
+// The DOM the download path touches, and nothing more. `URL` shadows node's
+// global class deliberately: createObjectURL does not exist there, and the
+// blob it is handed is what the byte-exactness case reads back.
+let BLOBS = [];
+const URL = {
+    createObjectURL: function (b) { BLOBS.push(b); return 'blob:' + BLOBS.length; },
+    revokeObjectURL: function () {},
+};
+function El() { this.children = []; }
+El.prototype.click = function () { this.clicked = true; };
+const document = {
+    createElement: function () { return new El(); },
+    body: { appendChild: function () {}, removeChild: function () {} },
+};
+const encoder = new TextEncoder();
+__CHUNK_RAW__
+
+__REGISTRY__
+__NEEDS__
+__HOSTFETCH__
+__HTTP__
+// 86c's _ctxHosts (#195) reduced to the one thing it does: it CREATES the
+// `hosts` family. Registered before 86j's extender, the order _ORDERED runs
+// them in.
+_registerCtxExtender(function (ctx) {
+    const fam = (ctx.hosts && typeof ctx.hosts === 'object') ? ctx.hosts : {};
+    fam.invalidate = function () { return true; };
+    ctx.hosts = fam;
+});
+__HOSTSLIST__
+
+// The ctx the mod's init would have been handed, built by the shipped
+// extenders. `ctx` is a free name in every recorder slice below.
+let ctx = null;
+function makeCtx() {
+    const c = { id: 'recorder', ctxVersion: 1 };
+    _applyCtxExtenders(c, { id: 'recorder', unloads: [] });
+    return c;
+}
+
+__RECHTTP__
+__RECSAVE__
+
+// ---- the brokers ----------------------------------------------------------
+// A faithful-enough /recording/* : server-minted ids, offset-checked chunks,
+// an atomic-ish commit, and the octet-stream body read. Each peer counts every
+// request it sees, so "landed on the broker it named" is measured on the peer.
+function makePeer(name, opts) {
+    opts = opts || {};
+    const st = { name: name, hits: [], files: {}, sessions: {}, n: 0,
+                 chunks: [], stalled: [], opts: opts };
+    st.server = http.createServer(function (req, res) {
+        const p = req.url.split('?')[0];
+        st.hits.push(req.method + ' ' + p);
+        let body = '';
+        req.on('data', function (c) { body += c; });
+        req.on('end', function () {
+            if (opts.legacy) {                 // a broker predating #140
+                res.writeHead(404, { 'Content-Type': 'text/html' });
+                res.end('<html>not found</html>');
+                return;
+            }
+            if (opts.unauth) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'auth_required' }));
+                return;
+            }
+            if (opts.stall) {                  // headers, one byte, silence
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.write('{"ok":');
+                st.stalled.push(res);
+                return;
+            }
+            const j = function (status, obj) {
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(obj));
+            };
+            let inb = null;
+            if (body) { try { inb = JSON.parse(body); } catch (_) { inb = null; } }
+            if (p === '/recording/begin') {
+                st.n++;
+                const id = name + '-rec' + st.n;
+                st.sessions[id] = { parts: [], next: 0 };
+                return j(200, { ok: true, recording_id: id });
+            }
+            if (p === '/recording/chunk') {
+                const s = st.sessions[inb && inb.recording_id];
+                if (!s) return j(404, { ok: false, error: 'no_session' });
+                if (inb.offset !== s.next) {
+                    return j(400, { ok: false, error: 'bad_offset' });
+                }
+                const buf = Buffer.from(inb.content_b64, 'base64');
+                st.chunks.push({ offset: inb.offset, len: buf.length });
+                s.parts.push(buf);
+                s.next += buf.length;
+                return j(200, { ok: true });
+            }
+            if (p === '/recording/commit') {
+                const id = inb && inb.recording_id;
+                const s = st.sessions[id];
+                if (!s) return j(404, { ok: false, error: 'no_session' });
+                st.files[id] = Buffer.concat(s.parts);
+                delete st.sessions[id];
+                return j(200, { ok: true, id: id, meta: inb.meta });
+            }
+            if (p === '/recording/abort') {
+                delete st.sessions[inb && inb.recording_id];
+                return j(200, { ok: true });
+            }
+            if (p === '/recordings') {
+                return j(200, { ok: true, recordings: Object.keys(st.files)
+                    .map(function (k) { return { id: k, title: name }; }) });
+            }
+            if (p === '/recording/notes') {
+                if (req.method === 'POST') return j(200, { ok: true, rev: 2 });
+                const id = decodeURIComponent(req.url.split('id=')[1] || '');
+                if (!st.files[id]) {
+                    // A KNOWN route 404s with a JSON body, so it keeps its own
+                    // error -- the contrast with the legacy peer's HTML 404.
+                    return j(404, { ok: false, error: 'not_found' });
+                }
+                return j(200, { ok: true, notes: [], rev: 1 });
+            }
+            if (p === '/recording') {
+                const id = decodeURIComponent(req.url.split('id=')[1] || '');
+                if (!st.files[id]) return j(404, { ok: false, error: 'not_found' });
+                res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+                res.end(st.files[id]);
+                return;
+            }
+            res.writeHead(404, { 'Content-Type': 'text/html' });
+            res.end('<html>no</html>');
+        });
+    });
+    return st;
+}
+const PEERS = [];
+function listen(peer) {
+    PEERS.push(peer);
+    return new Promise(function (resolve) {
+        peer.server.listen(0, '127.0.0.1', function () {
+            peer.url = 'http://127.0.0.1:' + peer.server.address().port;
+            resolve(peer);
+        });
+    });
+}
+function shutdown() {
+    for (const p of PEERS) {
+        for (const res of p.stalled) { try { res.destroy(); } catch (_) {} }
+        try { p.server.close(); } catch (_) {}
+        try { p.server.unref(); } catch (_) {}
+    }
+}
+// SELF is the local broker (the `self: true` row); REMOTE is another one.
+async function twoBrokers(selfOpts, remoteOpts) {
+    const selfPeer = await listen(makePeer('self', selfOpts));
+    const remote = await listen(makePeer('remote', remoteOpts));
+    ROWS = [
+        { id: 'local', label: 'this broker', url: selfPeer.url, token: 'tok-self' },
+        { id: 'r1', label: 'remote', url: remote.url, token: 'tok-remote' },
+    ];
+    ctx = makeCtx();
+    NOTICES = []; BLOBS = []; authPops = 0;
+    return { selfPeer: selfPeer, remote: remote };
+}
+function mkRec(bytes) {
+    const events = [];
+    let n = 0;
+    while (n < bytes) {
+        const d = 'x'.repeat(Math.min(65536, bytes - n));
+        events.push({ t: n, k: 'o', d: d });
+        n += d.length;
+    }
+    return { title: 'a session', cols: 100, rows: 30, startedAt: 1000,
+             durationMs: 4200, fontFamily: 'mono', fontSize: 14,
+             events: events, bytes: n, series: 'ser-1', seg: 2,
+             ui: { saveGen: 0, setLabel: function () {} } };
+}
+
+const CASES = {};
+
+// E55's round trip: a recording captured in this browser is filed on the
+// ORIGIN broker -- the `self: true` row -- even though the page is attached to
+// two, and the whole begin/chunk/commit sequence lands on that ONE peer.
+//
+// And the #198 trap, executed: ctx.signal is ALREADY ABORTED here, the shape a
+// save started from an onUnload disposer sees. recorder passes no signal, so
+// the segment still lands. Wire a signal into recApi and this case loses it.
+CASES.save_round_trip = async function () {
+    const b = await twoBrokers();
+    const ac = new AbortController();
+    ac.abort(new DOMException('mod "recorder" was torn down', 'AbortError'));
+    ctx.signal = ac.signal;                       // the teardown shape
+    const rec = mkRec(3 * 1024 * 1024 + 7);
+    const evs = rec.events.map(function (e) { return JSON.stringify(e); });
+    const res = await enqueueSave(rec);
+    const id = Object.keys(b.selfPeer.files)[0];
+    const text = (b.selfPeer.files[id] || Buffer.from('')).toString('utf8');
+    const lines = text.split('\n');
+    const meta = JSON.parse(lines[0]);
+    return {
+        res: res, signalWasAborted: ctx.signal.aborted,
+        selfHits: b.selfPeer.hits, remoteHits: b.remote.hits,
+        chunks: b.selfPeer.chunks, chunkRaw: CHUNK_RAW,
+        meta: meta, bodyMatches: lines.slice(1, -1).join('\n') === evs.join('\n'),
+        trailingNewline: text.charAt(text.length - 1) === '\n',
+        eventCount: evs.length, storedBytes: text.length,
+        openSessions: Object.keys(b.selfPeer.sessions).length,
+    };
+};
+
+// The footgun, gone and MEASURED: a stale host id used to fall through
+// hostFetch(null, path) to the same origin. ctx.http fails closed, so every
+// spelling of "the broker is gone" issues NO request at all -- on either peer.
+CASES.a_stale_host_id_reaches_no_broker = async function () {
+    const b = await twoBrokers();
+    const api = await recApi('ghost', '/recordings');
+    const post = await recPost('ghost', '/recording/begin', {});
+    const body = await fetchRecordingBody('ghost', 'x');
+    await downloadRecording('ghost', 'x', null);
+    return { api: api, post: post, body: body, notices: NOTICES,
+             selfHits: b.selfPeer.hits, remoteHits: b.remote.hits };
+};
+
+// Cross-broker addressing: each read lands on the broker it names, and only
+// that one. This is the claim the #161 source-slice tests could not make.
+CASES.each_route_lands_on_the_broker_it_names = async function () {
+    const b = await twoBrokers();
+    await enqueueSave(mkRec(64));               // a recording ON self
+    b.remote.files['remote-rec9'] = Buffer.from('{"v":1}\n{"t":0}\n', 'utf8');
+    const selfHitsBefore = b.selfPeer.hits.length;
+    const remoteList = await recApi('r1', '/recordings');
+    const selfList = await recApi('local', '/recordings');
+    const remoteBody = await fetchRecordingBody('r1', 'remote-rec9');
+    const emptyId = await recApi('', '/recordings');   // '' means "the origin"
+    return {
+        remoteList: remoteList, selfList: selfList, remoteBody: remoteBody,
+        emptyIdOk: emptyId.ok,
+        remoteHits: b.remote.hits,
+        selfHits: b.selfPeer.hits.slice(selfHitsBefore),
+        selfRow: ctx.hosts.list().filter(function (h) { return h.self; })
+            .map(function (h) { return h.id; }),
+    };
+};
+
+// The error shape, re-read rather than mechanically rewritten. A broker
+// predating #140 answers the catch-all 404 with HTML and must say what that
+// actually is; a KNOWN route's JSON 404 keeps its own error.
+CASES.error_shapes = async function () {
+    const b = await twoBrokers({}, { legacy: true });
+    const legacy = await recApi('r1', '/recordings');
+    const known = await recApi('local', '/recording/notes?id=nope');
+    const legacyBody = await fetchRecordingBody('r1', 'x');
+    return { legacy: legacy, known: known, legacyBody: legacyBody,
+             remoteHits: b.remote.hits };
+};
+
+// A 401 is DATA at the wrapper (#161's bug class: no background pop), and the
+// CALL SITE decides -- the download does prompt, because it is a click.
+CASES.auth_required = async function () {
+    const b = await twoBrokers({}, { unauth: true });
+    const api = await recApi('r1', '/recordings');
+    const body = await fetchRecordingBody('r1', 'x');
+    const popsBeforeDownload = authPops;
+    await downloadRecording('r1', 'x', null);
+    return { api: api, body: body, popsBeforeDownload: popsBeforeDownload,
+             pops: authPops, notices: NOTICES, hits: b.remote.hits.length };
+};
+
+// The download is still never a tokened <a href>: it is a blob, and the bytes
+// that come back are the bytes that were stored -- including non-ASCII, which
+// the text round trip ctx.http imposes has to survive.
+CASES.download_is_byte_exact = async function () {
+    const b = await twoBrokers();
+    const stored = '{"v":1,"title":"café — 日本"}\n{"t":0}\n';
+    b.remote.files['r9'] = Buffer.from(stored, 'utf8');
+    const reports = [];
+    await downloadRecording('r1', 'r9', function (m) { reports.push(m); });
+    const blob = BLOBS[0];
+    const text = blob ? await blob.text() : null;
+    return { reports: reports, notices: NOTICES, blobs: BLOBS.length,
+             type: blob && blob.type, text: text,
+             matches: text === stored,
+             bytes: blob ? blob.size : -1,
+             expectBytes: Buffer.byteLength(stored, 'utf8') };
+};
+
+// What recorder's own machinery LOST to the total deadline: nothing it wrote,
+// but what its numbers now cover grew. A broker that answers the headers and
+// then stalls the body used to hang the call forever (hostFetch's deadline is
+// cleared when the status line lands); recorder now gets a branchable
+// {ok:false,error} at roughly its own timeout.
+CASES.the_deadline_covers_a_stalled_body = async function () {
+    const b = await twoBrokers({ stall: true });
+    const t0 = Date.now();
+    const r = await recApi('local', '/recordings', { timeoutMs: 300 });
+    const elapsed = Date.now() - t0;
+    return { r: r, elapsed: elapsed, hits: b.selfPeer.hits };
+};
+
+// A save whose broker vanishes MID-sequence: the begin lands, the row is
+// removed, and the chunk must fail visibly rather than silently re-targeting
+// anything. The abort cleanup is fire-and-forget and must not reject.
+CASES.a_broker_removed_mid_save = async function () {
+    const b = await twoBrokers();
+    const rec = mkRec(64);
+    const realFetch = ctx.http.fetch;
+    let calls = 0;
+    ctx.http.fetch = function (hostId, path, opts) {
+        calls++;
+        if (path === '/recording/chunk') ROWS = [];      // the registry edit
+        return realFetch(hostId, path, opts);
+    };
+    const res = await enqueueSave(rec);
+    await new Promise(function (r) { setTimeout(r, 50); });
+    return { res: res, calls: calls, selfHits: b.selfPeer.hits,
+             remoteHits: b.remote.hits };
+};
+
+const name = process.argv[2];
+Promise.resolve().then(function () { return CASES[name](); }).then(function (out) {
+    console.log(JSON.stringify(out));
+    shutdown();
+    setTimeout(function () { process.exit(0); }, 250);
+}, function (e) {
+    console.error((e && e.stack) || String(e));
+    shutdown();
+    setTimeout(function () { process.exit(1); }, 250);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def recorder_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("recorder200") / "harness.js"
+    path.write_text(
+        _RECORDER_HARNESS
+        .replace("__CHUNK_RAW__", _recorder_chunk_const())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__HOSTFETCH__", _host_fetch_source())
+        .replace("__HTTP__", _http_source())
+        .replace("__HOSTSLIST__", _hosts_list_source())
+        .replace("__RECHTTP__", _recorder_http_source())
+        .replace("__RECSAVE__", _recorder_save_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_recorder(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_save_from_a_teardown_disposer_survives_an_aborted_ctx_signal(
+        recorder_harness):
+    # E55's round trip, and the #198 trap in the same run. ctx.signal is
+    # already aborted -- what a save started from an onUnload disposer sees --
+    # and the segment still lands, in full, on the broker the mod named.
+    r = _run_recorder(recorder_harness, "save_round_trip")
+    assert r["signalWasAborted"] is True, "the trap case armed nothing"
+    assert r["res"]["ok"] is True, r["res"]
+    # begin, N chunks, commit -- all of them on the SELF peer, none on the
+    # other configured broker.
+    assert r["remoteHits"] == [], "the capture upload left the origin broker"
+    assert r["selfHits"][0] == "POST /recording/begin"
+    assert r["selfHits"][-1] == "POST /recording/commit"
+    assert len(r["chunks"]) > 1, "the multi-chunk path was never exercised"
+    assert r["selfHits"].count("POST /recording/chunk") == len(r["chunks"])
+    # Contiguous offsets at the shipped chunk size.
+    off = 0
+    for c in r["chunks"]:
+        assert c["offset"] == off, r["chunks"]
+        assert c["len"] <= r["chunkRaw"]
+        off += c["len"]
+    assert off == r["storedBytes"]
+    # The stored NDJSON is meta + every event, byte for byte.
+    assert r["bodyMatches"] is True, "the uploaded events do not match"
+    assert r["trailingNewline"] is True
+    assert r["meta"]["title"] == "a session"
+    assert r["meta"]["events"] == r["eventCount"]
+    assert (r["meta"]["series"], r["meta"]["seg"]) == ("ser-1", 2)
+    # The commit closed the session: no abort cleanup ran.
+    assert r["openSessions"] == 0
+    assert "POST /recording/abort" not in r["selfHits"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_stale_recorder_host_id_now_reaches_no_broker_at_all(recorder_harness):
+    # THE footgun, measured. Before #200 a stale id fell through
+    # hostFetch(null, path) to the SAME ORIGIN -- which is how a delete for a
+    # removed broker ran against the local one. ctx.http fails closed, so the
+    # peers logged nothing.
+    r = _run_recorder(recorder_harness, "a_stale_host_id_reaches_no_broker")
+    assert r["selfHits"] == [] and r["remoteHits"] == [], \
+        "a stale host id still issued a request -- the same-origin fallback is back"
+    for key in ("api", "post", "body"):
+        assert r[key]["ok"] is False
+        assert r[key]["error"] == "broker no longer configured", r[key]
+    # The download reports it where the user can see it, sticky.
+    assert r["notices"] == ["download failed: broker no longer configured"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_every_recorder_route_lands_on_the_broker_it_names(recorder_harness):
+    # #161's claim, finally executed rather than source-sliced: the library
+    # list and the playback body each hit exactly one peer, and the origin
+    # broker is the `self: true` row rather than a null host.
+    r = _run_recorder(recorder_harness, "each_route_lands_on_the_broker_it_names")
+    assert r["selfRow"] == ["local"], "exactly one self row, and it is entry 0"
+    assert r["remoteList"]["ok"] is True
+    assert [x["title"] for x in r["remoteList"]["recordings"]] == ["remote"]
+    assert [x["title"] for x in r["selfList"]["recordings"]] == ["self"]
+    assert r["remoteBody"]["ok"] is True
+    assert r["remoteBody"]["text"] == '{"v":1}\n{"t":0}\n'
+    # The remote broker saw ONLY the two reads addressed to it -- the capture
+    # upload that ran first never touched it.
+    assert r["remoteHits"] == ["GET /recordings", "GET /recording"]
+    # Two reads on self: the one addressed to 'local', and the '' one below.
+    assert r["selfHits"] == ["GET /recordings", "GET /recordings"]
+    # '' still means "the origin broker" AT THE MOD's door -- recorder resolves
+    # it to the self id before ctx.http, which accepts no such spelling.
+    assert r["emptyIdOk"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_recorder_error_shapes_survived_the_swap(recorder_harness):
+    # The shape changed underneath: raw hostFetch returned a Response and threw
+    # on transport failure; ctx.http resolves {status, ...} and never throws.
+    # The two error messages recorder makes its own decisions on must still be
+    # produced.
+    r = _run_recorder(recorder_harness, "error_shapes")
+    assert r["legacy"] == {"ok": False, "error": "no recorder on this broker"}, \
+        "an HTML catch-all 404 reads as a recording that went missing"
+    assert r["known"] == {"ok": False, "error": "not_found"}, \
+        "a KNOWN route's JSON 404 must keep its own error"
+    assert r["legacyBody"]["ok"] is False
+    assert r["legacyBody"]["error"] == "HTTP 404"
+    assert r["remoteHits"], "the legacy peer was never actually asked"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_401_reaches_recorder_as_data_and_only_a_click_prompts(
+        recorder_harness):
+    # ctx.http has NO auth side effects (#161's bug class), so recApi hands the
+    # 401 back as data and the poll-shaped callers stay silent. The download is
+    # a CLICK, so it prompts -- the pre-fix behaviour saved the 401 JSON body
+    # as a 36-byte .blrec with no error shown anywhere.
+    r = _run_recorder(recorder_harness, "auth_required")
+    assert r["api"] == {"ok": False, "error": "auth_required"}
+    assert r["body"]["ok"] is False and r["body"]["auth"] is True
+    assert r["popsBeforeDownload"] == 0, "a read popped the login modal"
+    assert r["pops"] == 1, "the download did not offer the remedy"
+    assert r["notices"] == ["download failed: auth_required"]
+    assert r["hits"] >= 3
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_download_is_a_blob_and_is_byte_exact(recorder_harness):
+    # ctx.http reads a body as text, so the download re-encodes it. For the
+    # UTF-8 NDJSON /recording serves that round trip must be byte-exact --
+    # a download has to be the archived artifact.
+    r = _run_recorder(recorder_harness, "download_is_byte_exact")
+    assert r["reports"] == [] and r["notices"] == []
+    assert r["blobs"] == 1
+    assert r["type"] == "application/octet-stream"
+    assert r["matches"] is True, r["text"]
+    assert r["bytes"] == r["expectBytes"], \
+        "the text round trip changed the byte count"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_recorders_deadlines_now_cover_the_body(recorder_harness):
+    # What recorder's own timeout handling lost: nothing it hand-rolled (it
+    # never had an AbortController -- it passed timeoutMs to hostFetch). What
+    # it GAINED is that its per-route numbers are now total. A broker that
+    # answers the headers and stalls the body used to hang the call forever.
+    r = _run_recorder(recorder_harness, "the_deadline_covers_a_stalled_body")
+    assert r["r"]["ok"] is False
+    assert "TimeoutError" in r["r"]["error"], r["r"]
+    assert r["elapsed"] < 3000, \
+        f"the deadline did not cover the body: {r['elapsed']}ms"
+    assert r["elapsed"] >= 250
+    assert r["hits"] == ["GET /recordings"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_broker_removed_mid_save_fails_visibly_and_targets_nothing_else(
+        recorder_harness):
+    # The sequence is pinned to ONE broker, resolved once -- but the ROW can
+    # still disappear between calls. It must fail closed (no request, no
+    # re-target onto the other configured broker) and report, and the
+    # fire-and-forget abort must not become an unhandled rejection.
+    r = _run_recorder(recorder_harness, "a_broker_removed_mid_save")
+    assert r["res"]["ok"] is False
+    assert r["res"]["error"] == "broker no longer configured"
+    assert r["selfHits"] == ["POST /recording/begin"]
+    assert r["remoteHits"] == [], "the save re-targeted another broker"
