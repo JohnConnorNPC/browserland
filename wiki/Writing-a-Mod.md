@@ -522,6 +522,15 @@ bumping it.
 
 ### Host I/O
 
+- **`ctx.http.fetch(hostId, path, opts)`** (#200) — the sanctioned
+  authenticated request to any broker, resolving to `{status, json?|text?,
+  error?}` and never rejecting. `hostId` is **required** (a missing one throws
+  synchronously — there is no same-origin default) and `timeoutMs` is a
+  **total** deadline including the body read, unlike raw `hostFetch`. See
+  below.
+- **`ctx.hosts.list()`** (#200) — a frozen `[{id, label, url, brokerId, self}]`
+  snapshot, no token. `brokerId` is `null` until the host has answered over
+  `/info`. See below.
 - **`ctx.file`** — `read` / `write` / `list` / `delete` / `upload` / `mkdir` /
   `copy` / `move` / `zip` / `unzip` / `stat` / `setattr` / `hash`, plus the
   chunked family (`readChunk`, `uploadBegin`, `uploadChunk`, `uploadCommit`,
@@ -1633,6 +1642,164 @@ its `action` and does not throw — that pass runs at *render* time, where a thr
 would cost the whole context menu. A command menu item defaults to
 `enabled: true`. Both normalizations are identity-preserving: declare no
 `command:` and the very same objects reach core.
+
+### Authenticated HTTP: `ctx.http.fetch` (#200)
+
+```js
+const r = await ctx.http.fetch(hostId, '/info', {
+    method: 'GET',   // default
+    json,            // request body; sets content-type
+    timeoutMs,       // TOTAL deadline — including the body read (default 15000)
+    signal,          // composes with ctx.signal
+});
+// -> {status, json?|text?, error?}   NEVER rejects.
+```
+
+One sanctioned way for a mod to make an authenticated request to a broker —
+this one or a peer. It wraps core's raw `hostFetch` (core keeps `hostFetch`
+unchanged); it does not replace it.
+
+- **`hostId` is required, and a bad one throws *synchronously*.** There is no
+  same-origin default: `''`, `null`, `undefined` and any non-string throw a
+  `TypeError` at the call site rather than resolving to an error value. Passing
+  no host is a program defect, and a mod that swallows every result shape must
+  not be able to swallow it into an accidental same-origin write. **Targeting
+  this broker is spelled out**: pass the `id` of the `self: true` row from
+  `ctx.hosts.list()`.
+- **A `path` must be a route, not an authority.** It must begin with `/`, and
+  `//…` or `/\…` throws. This is not pedantry. The URL is built as
+  `(host.url || '') + path` and the self entry's `url` is `''`, so
+  `'//evil/x'` is not a route on this broker — it is a protocol-relative URL
+  that resolves to **another origin**, and `hostFetch` would attach this
+  broker's bearer token to it. The realistic case is a mod building a path out
+  of a value it did not write itself (a route name from a server response, a
+  saved recording's id). `hostId` chooses the target; a `path` may never
+  re-choose it.
+- **An unknown `hostId` fails closed with no request issued** —
+  `{status: 0, error: 'host_not_found'}`. That is a resolved value, not a
+  throw, because a stale id is *data* (the user deleted a host between a poll
+  and its retry).
+- **It never rejects, and `status` is always present.** On a complete answer
+  `status` is the HTTP status and there is **no `error` key at all** — which is
+  what keeps `{status: 401, text: ''}` and `{status: 200, text: ''}` different
+  objects. `error` never substitutes for an HTTP status. `status: 0` + `error`
+  is reserved for the cases with no answer to report: an unresolved host, a
+  transport failure, a cancel, a deadline. A route a *peer* does not have
+  arrives that way too (the preflight surfaces an opaque `TypeError` with no
+  status behind it), which is exactly what cross-broker callers feature-detect
+  on.
+- **`timeoutMs` is a TOTAL deadline, including the body read** — and that
+  difference is the reason this family exists. Raw `hostFetch`'s deadline stops
+  at the headers: `fetch()` resolves the moment the status line lands, so a
+  route that answers and then stalls its body hangs forever, and every mod that
+  cared hand-rolled its own `AbortController` around the read. `ctx.http` keeps
+  its timer armed across `r.text()` (and calls `hostFetch` with `timeoutMs: 0`,
+  deliberately disarming the headers-only one, so the two cannot race). A body
+  that dies mid-stream is `{status: 0, error: 'TimeoutError: timeout'}` — never
+  a `{status: 200}` with a truncated string. `timeoutMs: 0` (or any
+  non-positive / non-finite value) opts out, and that opt-out is genuinely
+  unbounded: there is no headers-only deadline left underneath.
+- **JSON is parsed only when the content-type says json *and* the parse
+  succeeds**; otherwise you get `text`. A body the peer mislabelled comes back
+  as `text` for you to decide about, and a plain-text `42` stays a string.
+- **`signal` composes with `ctx.signal`** — it is never replaced, and an
+  already-aborted caller signal aborts before `fetch` is reached, so no request
+  leaves a dead activation. The #198 pairing rule applies **here specifically**:
+  work that must outlive the activation takes no signal. `recorder` passes it
+  **nowhere**, because its save path is reached from an `onUnload` disposer; an
+  already-aborted signal there would drop the segment on every
+  disable-with-a-live-recording.
+- **No auth side effects.** A 401 comes back *as* a 401. Nothing in `ctx.http`
+  pops the auth overlay or touches the auth bookkeeping — a background poll
+  opening a modal was the #161 bug class. Only an explicit user action should
+  re-prompt; recovery belongs to the mod.
+- A body on a `GET`/`HEAD`, and a `json` that does not serialize (including one
+  that quietly stringifies to `undefined` — a function, a symbol, a `toJSON`
+  returning `undefined`), also **throw**.
+- **Feature-detect it:** `ctx.http && typeof ctx.http.fetch === 'function'`,
+  `ctx.capabilities.http`, `needs: ['http']`. A build with no constructible
+  `AbortController` cannot honour the total deadline, so it gets **no
+  `ctx.http` at all** rather than one whose `timeoutMs` silently does nothing.
+  `ctxVersion` stays `1`.
+
+**Whether to declare `needs: ['http']` is a loss question, not a taste
+question.** `recorder` declares it (and is `defaultEnabled`): every byte it
+owns lives on a broker, so without `ctx.http` a capture would still arm, fill
+memory for an hour and have nowhere to go — data loss dressed up as a working
+feature. `needs` *blocks* the mod, and blocked-with-a-reason is the better
+failure. Contrast `help` and `theme`, which deliberately decline a `needs` for
+the surfaces they use: their loss is **partial**, and a `needs` would block the
+whole mod over a degraded corner.
+
+### Verified broker identity: `ctx.hosts.list` (#200)
+
+```js
+ctx.hosts.list();
+// -> [{id, label, url, brokerId, self}]   frozen snapshot
+```
+
+A read-only snapshot of this browser's host registry. Every row is a fresh
+frozen object of copied scalars and the array is frozen too, so you cannot
+reach the live record through it and a later registry edit cannot mutate a
+snapshot you are holding. There is **no `token`** on a row: it is not identity,
+no mod needs it to key a cache, and `ctx.file` / `ctx.http` already carry it
+for you without showing it. Mutation stays with core (the Hosts form) and
+`ctx.hosts.invalidate`.
+
+**Identity is two fields, and neither pretends to be the other:**
+
+- **`id`** — the local registry handle. Stable for *this browser's* list and
+  meaningless anywhere else: `'local'` here and `'local'` in another browser
+  are two different brokers. Use it to address a host through the rest of the
+  `ctx` — it is what you pass to `ctx.http.fetch`.
+- **`brokerId`** — cross-URL identity: the broker *said* this, over `/info`,
+  and it is the same string under every address that broker answers on. Use it
+  as a cache key, or to notice that two rows are one machine.
+
+**`brokerId` is `null` until the host has answered.** Not a provisional hash of
+the URL, not the URL, not the `id` — `null`. A guess later swapped for a
+verified value is worse than an absence: every cache keyed on the guess
+survives the swap while pointing at the wrong broker. "Unverified" is a real
+state (an older broker with no `/info`, a wrong token, a host that is simply
+offline), it can last the whole session, and **a caller branching on identity
+must handle `null` explicitly rather than falling back to the URL** — that
+fallback is precisely what `update`'s old `hostFingerprint = host.url` did
+wrong. The same broker at `127.0.0.1`, `localhost` and its Tailscale address is
+three "fingerprints"; a URL repointed at a *different* broker keeps the same
+one.
+
+**A URL repoint resets `brokerId` to `null`, and it is never carried over.**
+Carrying it would label a new — possibly hostile — endpoint with the old
+broker's verified identity. After a repoint the field goes null and then either
+comes back the same (one broker under a second address) or comes back
+*different* (a genuinely different broker) — the transition URL-as-fingerprint
+could not represent at all.
+
+**Neither field is ever a merge key for registry entries.** That is #174's
+lesson and it cost a host-repoint vector: matching an *incoming* entry's `id`
+against a local record and then updating the local URL from it let anyone who
+could write the shared blob re-point a broker entry at a machine they
+controlled. `brokerId` is no safer for that job — it is a string a remote
+endpoint chose to say. Both fields are for **change detection and cache keys on
+this page only**; a mod that syncs host records must key its merge on something
+the user authorized.
+
+**Exactly one row has `self: true`** — the local broker (`id` `'local'`, `url`
+`''`). Its `brokerId` is learned by a different path from every other row, but
+the same null-until-answered rule applies, so no "is this me" branch is needed
+beyond the flag:
+
+```js
+function selfHostId() {
+    for (const h of ctx.hosts.list()) if (h.self) return h.id;
+    return null;
+}
+```
+
+`list` is a **member** of the existing `hosts` family (#195 created it for
+`invalidate`), so it owes no capability entry of its own: feature-detect with
+`typeof ctx.hosts.list === 'function'`, or declare the finer
+`needs: ['hosts.list']`. `ctxVersion` stays `1`.
 
 ---
 
