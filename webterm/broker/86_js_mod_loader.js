@@ -664,14 +664,27 @@
                 // { tiling } saying which — it used to run only in tiling mode, so
                 // a contributor that offers tiling-only actions must check the flag
                 // rather than assume. Core owns the separator above the block.
+                // #199: an action/item may name a `command:` id instead of
+                // carrying a run/action, so Ctrl+S-style dispatch targets a
+                // command rather than a `win._*` field. 86h does the
+                // normalization (this file is at the cap) and is identity-
+                // preserving when nothing declares one, so every existing caller
+                // is untouched; `typeof`-guarded like every call into a
+                // companion.
                 registerKeyActions: function (actions) {
-                    return _modTrack(rec, registerKeyActions(actions));
+                    return _modTrack(rec, registerKeyActions(
+                        (typeof _modCommandKeyActions === 'function')
+                            ? _modCommandKeyActions(rec, actions) : actions));
                 },
                 registerWindowMenuItems: function (fn) {
-                    return _modTrack(rec, registerWindowMenuItems(fn));
+                    return _modTrack(rec, registerWindowMenuItems(
+                        (typeof _modCommandMenuFn === 'function')
+                            ? _modCommandMenuFn(rec, fn) : fn));
                 },
                 registerDesktopMenuItems: function (fn) {
-                    return _modTrack(rec, registerDesktopMenuItems(fn));
+                    return _modTrack(rec, registerDesktopMenuItems(
+                        (typeof _modCommandMenuFn === 'function')
+                            ? _modCommandMenuFn(rec, fn) : fn));
                 },
                 // #116 (S14): per-terminal-window lifecycle. onTerminalCreate(cb)
                 // subscribes a mod to EVERY terminal window — REPLAYED over those

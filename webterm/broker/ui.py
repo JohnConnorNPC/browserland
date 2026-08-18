@@ -224,6 +224,16 @@ _ORDERED = [
     # companions, still before the mod-script splice, since a mod's init reads
     # the finished ctx and may provide from it. One <script>, one scope.
     "86g_js_mod_services.js",
+    # #199: ctx.commands -- named, owned dispatch targets for keybindings, menu
+    # items and core->mod calls, replacing the duck-typed `win._*` field
+    # (scratchpad's Ctrl+S) and the hoisted-on-purpose functions (help). Its own
+    # fragment for the same split-never-trim reason 86e/86f got one: 86c AND the
+    # loader are both at the cap, which is why the loader's three registrar
+    # wrappers only CALL into this file (typeof-guarded) to normalize a
+    # `command:` id. Ordered among the 86* companions, still before the mod-
+    # script splice, since a mod's init reads the finished ctx. One <script>,
+    # one scope.
+    "86h_js_mod_commands.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

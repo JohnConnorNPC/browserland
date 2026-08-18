@@ -19134,3 +19134,820 @@ def test_the_services_surface_and_its_refusals_are_inert(services_harness):
     # mod could not have known, and nobody could consume the entry anyway.
     assert r["lateProvideThrew"] is False
     assert r["lateConsume"] == "undefined"
+
+
+# --------------------------------------------------------------------------- #
+# ctx.commands -- the dispatch surface (#199 / A50)
+# --------------------------------------------------------------------------- #
+
+_COMMANDS_SLICE_START = "// ---- ctx.commands: the dispatch surface (#199)"
+_COMMANDS_SLICE_END = "// ---- end ctx.commands"
+
+
+def _commands_src():
+    return (BROKER_DIR / "86h_js_mod_commands.js").read_text(encoding="utf-8")
+
+
+def _commands_source():
+    """A50's range in 86h, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node harness below run the
+    SHIPPED dispatch surface instead of a copy of it."""
+    src = _commands_src()
+    start = src.index(_COMMANDS_SLICE_START)
+    end = src.index(_COMMANDS_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for sym in ("const _MOD_COMMANDS = new Map();",
+                "function _focusedModWindow() {",
+                "function _registerModCommand(rec, id, spec) {",
+                "function _execModCommand(fullId, args) {",
+                "function _modCommandKeyActions(rec, actions) {",
+                "function _modCommandMenuItems(items) {",
+                "function _modCommandMenuFn(rec, fn) {",
+                "function _ctxCommands(ctx, rec) {"):
+        assert sym in body, f"the ctx.commands range no longer defines {sym!r}"
+    return body
+
+
+def _keys_registrar_source():
+    """#148's key-action registry and menu contributors out of 78, verbatim --
+    the registrars a `command:` has to be additive to. Sliced rather than faked
+    because "every existing caller keeps working untouched" is a claim about
+    THOSE functions: they own the {id,label,run} validation, the duplicate-id
+    refusal and _pushMenuItems's swallow-a-throwing-contributor rule."""
+    src = (BROKER_DIR / "78_js_keybindings.js").read_text(encoding="utf-8")
+    a = src.index("        // ---- key-action registry (#148) ---")
+    b = src.index("        // Canonical combo string for a keydown", a)
+    body = src[a:b]
+    for sym in ("function keyActionById(id) {",
+                "function registerKeyActions(actions) {",
+                "function registerWindowMenuItems(fn) {",
+                "function registerDesktopMenuItems(fn) {",
+                "function _pushMenuItems(fn, items, arg) {"):
+        assert sym in body, f"{sym!r} missing from the sliced range"
+    return body
+
+
+def _loader_helpers_source():
+    """ModConflictError + _modTrack, verbatim: the duplicate-registration error
+    type a command collision has to raise, and the disposer bookkeeping the ctx
+    registrar wrappers below run through."""
+    src = _loader_src()
+    return (_frag_fn(src, "function ModConflictError(message) {")
+            + "\n        }\n"
+            + _frag_fn(src, "function _modTrack(rec, off) {") + "\n        }\n")
+
+
+def _ctx_registrar_literal():
+    """makeCtx's three registrar members, verbatim out of the ctx literal --
+    THE call sites #199 changes. Lifted for the same reason _ctx_file_literal is:
+    the literal as a whole is browser-only, these three members are not, and a
+    `command:` reaching core through anything but the shipped wrapper would
+    prove nothing."""
+    src = _loader_src()
+    a = src.index("                registerKeyActions: function (actions) {")
+    b = src.index("                registerDesktopMenuItems: function (fn) {", a)
+    body = src[a:src.index("\n                },\n", b)] + "\n                },\n"
+    assert "_modCommandKeyActions(rec, actions) : actions));" in body
+    assert body.count("_modCommandMenuFn(rec, fn) : fn));") == 2
+    return body
+
+
+def test_commands_land_in_their_own_fragment_and_are_registered():
+    # A50: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap and so is the
+    # loader; the rule for that cap is split, never trim -- so ctx.commands gets
+    # a NEW ordered fragment (the precedent 86e/#196 and 86f/#198 set), and the
+    # loader keeps only the guarded calls INTO it.
+    assert "86h_js_mod_commands.js" in ui._ORDERED
+    assert (BROKER_DIR / "86h_js_mod_commands.js").is_file()
+    at = ui._ORDERED.index
+    # After the other 86* companions (extenders run in _ORDERED order) and still
+    # before the mod-script splice, since a mod's init reads the finished ctx.
+    assert at("86c_js_mod_ctx_ext.js") < at("86h_js_mod_commands.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    assert at("86f_js_mod_signal.js") < at("86h_js_mod_commands.js")
+    for frag in ("86_js_mod_loader.js", "86c_js_mod_ctx_ext.js",
+                 "86h_js_mod_commands.js"):
+        n = len((BROKER_DIR / frag).read_text(encoding="utf-8").splitlines())
+        assert n <= ui._MAX_LINES, f"{frag} is over the cap at {n}"
+    # The whole surface reaches the served page, exactly once, and none of it
+    # leaked back into the two fragments that had no room for it.
+    cmds = _commands_src()
+    for sym in ("function _execModCommand(fullId, args) {",
+                "function _registerModCommand(rec, id, spec) {",
+                "function _modCommandKeyActions(rec, actions) {",
+                "function _modCommandMenuFn(rec, fn) {",
+                "const _MOD_COMMANDS = new Map();"):
+        assert sym in cmds, f"{sym!r} did not land in 86h"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#199 symbol missing/duplicated in the served page: {sym!r}"
+        assert sym not in _loader_src() and sym not in _ctx_ext_src(), \
+            f"{sym!r} belongs in 86h, not 86c or the loader"
+    # The extender registration is guarded, for a page assembled without #194's
+    # registry -- a bare call there would be a ReferenceError at load.
+    assert "if (typeof _registerCtxExtender === 'function') {" in cmds
+    assert cmds.index("if (typeof _registerCtxExtender === 'function') {") \
+        < cmds.index("_registerCtxExtender(_ctxCommands);")
+    assert ("        if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('commands', 1);\n"
+            "        }\n") in cmds
+
+
+def test_ctx_commands_owes_a_capability_entry_and_registers_it():
+    # #197's map is per FAMILY -- a bare top-level ctx member name -- and
+    # `commands` is a NEW top-level member, exactly like #195's `hosts` and
+    # #198's `signal`. (#196's saveChain owed none: it decorates `serverStore`,
+    # a member of a family that already has an entry.) Without this the map
+    # would lie by omission about surface the build demonstrably has.
+    assert "commands" in _ctx_families_added_by_extenders(), \
+        "the extender must put `commands` on the ctx as a top-level member"
+    assert "commands" in _standalone_capability_registrations()
+    assert "commands" not in set(_ctx_family_keys()), \
+        "ctx.commands is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # Additive: a new family does not move the contract version.
+    assert "ctxVersion: 1," in _loader_src()
+
+
+def test_the_command_call_sites_in_the_loader_are_guarded_and_additive():
+    # The loader is at the cap, so it carries the CALLS and none of the logic --
+    # the way it calls _abortModSignal (#198) and _emitModEvent (#195). Both
+    # normalizers are typeof-guarded: the mirror case (this loader served
+    # without 86h) must be no normalization at all, never a ReferenceError that
+    # kills every mod's registerKeyActions.
+    body = _ctx_registrar_literal()
+    assert "(typeof _modCommandKeyActions === 'function')" in body
+    assert body.count("(typeof _modCommandMenuFn === 'function')") == 2
+    # Core's own registrars are still what actually registers -- the normalizer
+    # sits in front of them, it does not replace them.
+    for call in ("registerKeyActions(", "registerWindowMenuItems(",
+                 "registerDesktopMenuItems("):
+        assert call in body
+    assert body.count("_modTrack(rec,") == 3
+    # ...and the logic itself is nowhere near this file.
+    loader = _loader_src()
+    for sym in ("function _modCommandKeyActions(", "function _modCommandMenuFn(",
+                "function _execModCommand("):
+        assert sym not in loader, f"{sym!r} belongs in 86h, not the loader"
+
+
+_COMMANDS_HARNESS = r"""
+'use strict';
+// E50 runs the SHIPPED slices in node: #194's ctx-extender registry, #197's
+// capability map (so the new entry is proven end to end, not string-matched),
+// the whole #199 range, 86's own _runUnloads and _modTrack, the three ctx
+// registrar wrappers verbatim out of makeCtx's literal, and 78's real
+// registerKeyActions / menu contributors underneath them.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+const warns = [];
+console.warn = function () {
+    warns.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+// Every outcome crosses the JSON boundary through here: an Error does not
+// survive JSON.stringify, and `reason` is the part that is closed and stable.
+function shape(r) {
+    const o = { ok: r.ok };
+    if ('reason' in r) o.reason = r.reason;
+    if ('detail' in r) o.detail = r.detail;
+    if ('value' in r) o.value = (r.value === undefined) ? '<undefined>' : r.value;
+    if ('error' in r) o.error = String(r.error && r.error.message);
+    return o;
+}
+function throws(fn) {
+    try { fn(); return { threw: false }; }
+    catch (e) { return { threw: true, name: e.name, message: String(e.message) }; }
+}
+
+// ---- the core surface these slices touch, and nothing else ----------------
+const windows = new Map();      // core's window registry (73)
+let frontId = null;             // core's focused-window pointer (64/66)
+const CORE_KEY_ACTIONS = [];    // core's own actions; none of them is a command
+
+__HELPERS__
+__KEYS__
+__REGISTRY__
+__NEEDS__
+__COMMANDS__
+__UNLOADS__
+
+// makeCtx's three registrar members, verbatim -- the wrappers a `command:`
+// travels through on its way to core.
+function ctxRegistrars(rec) { return { __REGISTRARS__ }; }
+
+// ---- driver ---------------------------------------------------------------
+// ONE ACTIVATION, the way initMod builds one: a fresh per-activation record
+// ({id, version, unloads}), a fresh ctx, and the extender registry applied to
+// it. A re-enable is another call with a NEW rec.
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+    };
+    Object.assign(ctx, ctxRegistrars(rec));
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+function openWindow(id) {
+    const win = { id: id, disposed: false, kind: 'note' };
+    windows.set(id, win);
+    frontId = id;
+    return win;
+}
+
+const CASES = {};
+
+// E50 clause: the four-word outcome vocabulary, each word on its own path, and
+// the never-throws contract that makes it usable from a key dispatcher.
+CASES.the_four_outcomes = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    c.register('save', { run: function (args) { return args; } });
+    c.register('later', { run: function () { return Promise.resolve('async ok'); } });
+    c.register('veto', { when: function () { return false; },
+                         run: function () { return 'ran anyway'; } });
+    c.register('boom', { run: function () { throw new Error('sync boom'); } });
+    c.register('reject', {
+        run: function () { return Promise.reject(new Error('async boom')); } });
+    const out = {
+        ok: shape(await c.execute('scratchpad:save', { a: 1 })),
+        asyncOk: shape(await c.execute('scratchpad:later')),
+        // 'absent': nothing ever registered it. Three flavours -- a typo in the
+        // local half, a mod that is not installed, and the unprefixed id, which
+        // is the mistake `register` auto-prefixing invites.
+        absent: shape(await c.execute('scratchpad:nope')),
+        absentMod: shape(await c.execute('nosuchmod:save')),
+        unprefixed: shape(await c.execute('save')),
+        notAString: shape(await c.execute(null)),
+        blocked: shape(await c.execute('scratchpad:veto')),
+        errorSync: shape(await c.execute('scratchpad:boom')),
+        errorAsync: shape(await c.execute('scratchpad:reject')),
+        // ALWAYS a Promise, even for the outcomes decided synchronously.
+        isPromise: typeof c.execute('scratchpad:nope').then === 'function',
+    };
+    // The mod is disabled BETWEEN register and execute -- the case a
+    // `win._saveToServer` field answers with `undefined` and no explanation.
+    _runUnloads(m.rec);
+    out.inactive = shape(await c.execute('scratchpad:save'));
+    // ...and a re-enable brings the SAME id back live, through a NEW record.
+    const again = activate('scratchpad');
+    again.ctx.commands.register('save', { run: function () { return 'v2'; } });
+    out.afterReenable = shape(await again.ctx.commands.execute('scratchpad:save'));
+    out.errors = errors;
+    out.warns = warns;
+    return out;
+};
+
+// E50 clause: scope. The focused window reaches BOTH run and when; no focused
+// window is 'blocked' with neither called; a global command gets win:null even
+// when something IS focused.
+CASES.scope_and_the_focused_window = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    const seen = [];
+    c.register('save', {
+        scope: 'window',
+        when: function (where) {
+            seen.push(['when', where.win && where.win.id]);
+            return where.win.kind === 'note';
+        },
+        run: function (args, where) {
+            seen.push(['run', where.win && where.win.id]);
+            return { id: where.win.id, isCoreRecord: where.win === windows.get('w1') };
+        },
+    });
+    c.register('ping', {
+        run: function (args, where) {
+            seen.push(['global', where.win]);
+            return { winIsNull: where.win === null, hasWin: ('win' in where) };
+        },
+    });
+    const out = {};
+    // 1. window-scoped, nothing focused.
+    out.noFocus = shape(await c.execute('scratchpad:save'));
+    out.seenWhileUnfocused = seen.slice();
+    const w = openWindow('w1');
+    // 2. window-scoped, a window focused.
+    out.focused = shape(await c.execute('scratchpad:save'));
+    // 3. global-scoped while a window IS focused.
+    out.global = shape(await c.execute('scratchpad:ping'));
+    // 4. a front id naming a window that is gone is no focus at all.
+    w.disposed = true;
+    out.disposedFront = shape(await c.execute('scratchpad:save'));
+    windows.delete('w1');
+    out.strandedFront = shape(await c.execute('scratchpad:save'));
+    frontId = null;
+    out.seen = seen;
+    out.errors = errors;
+    return out;
+};
+
+// E50 clause: the auto-prefix IS the namespace, so a collision between two mods
+// is unrepresentable rather than merely discouraged.
+CASES.ids_cannot_collide_across_mods = async function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    a.ctx.commands.register('save', { run: function () { return 'alpha ran'; } });
+    b.ctx.commands.register('save', { run: function () { return 'beta ran'; } });
+    const out = {
+        alpha: shape(await a.ctx.commands.execute('alpha:save')),
+        beta: shape(await b.ctx.commands.execute('beta:save')),
+        // beta cannot spell its way into alpha's namespace...
+        crossNamespace: throws(function () {
+            b.ctx.commands.register('alpha:save', { run: function () {} });
+        }),
+        // ...nor double-prefix its own (which would strand 'beta:beta:save').
+        selfPrefixed: throws(function () {
+            b.ctx.commands.register('beta:save', { run: function () {} });
+        }),
+        // A duplicate WITHIN one mod is the only collision left, and it is a
+        // hard error rather than a silent last-wins.
+        duplicate: throws(function () {
+            a.ctx.commands.register('save', { run: function () {} });
+        }),
+    };
+    // alpha's registration still answers with alpha's function.
+    out.alphaAgain = shape(await a.ctx.commands.execute('alpha:save'));
+    // A teardown is per-mod: alpha goes inactive, beta is untouched.
+    _runUnloads(a.rec);
+    out.alphaAfter = shape(await a.ctx.commands.execute('alpha:save'));
+    out.betaAfter = shape(await b.ctx.commands.execute('beta:save'));
+    out.errors = errors;
+    return out;
+};
+
+// E50 clause: isolation, and the line between a veto and a defect.
+CASES.a_throwing_guard_is_an_error_not_a_veto = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    let ran = 0;
+    c.register('guarded', {
+        when: function () { throw new Error('guard boom'); },
+        run: function () { ran += 1; return 'x'; },
+    });
+    c.register('vetoed', {
+        when: function () { return false; },
+        run: function () { ran += 1; return 'x'; },
+    });
+    // #168's shipped bug, as a case: a coerced async guard allows EVERYTHING,
+    // because !!promise is true.
+    c.register('asyncFalse', {
+        when: function () { return Promise.resolve(false); },
+        run: function () { ran += 1; return 'x'; },
+    });
+    c.register('asyncReject', {
+        when: function () { return Promise.reject(new Error('async guard')); },
+        run: function () { ran += 1; return 'x'; },
+    });
+    return {
+        threw: shape(await c.execute('scratchpad:guarded')),
+        vetoed: shape(await c.execute('scratchpad:vetoed')),
+        asyncFalse: shape(await c.execute('scratchpad:asyncFalse')),
+        asyncReject: shape(await c.execute('scratchpad:asyncReject')),
+        ran: ran,
+        errors: errors,
+    };
+};
+
+// E50 clause: mid-teardown. A command executed from another disposer -- i.e.
+// after rec.unloading is set but BEFORE this command's own disposer has run --
+// must already read 'inactive' and must not call into the dying activation.
+CASES.a_command_executed_mid_teardown_is_inactive = async function () {
+    const m = activate('scratchpad');
+    let ran = 0;
+    m.ctx.commands.register('save', {
+        run: function () { ran += 1; return 'ran'; } });
+    let pending = null;
+    // Registered AFTER the command, so the LIFO drain runs it FIRST.
+    m.ctx.onUnload(function () {
+        pending = m.ctx.commands.execute('scratchpad:save');
+    });
+    _runUnloads(m.rec);
+    const during = shape(await pending);
+    return { during: during, ran: ran, drained: m.rec.unloads.length,
+             after: shape(await m.ctx.commands.execute('scratchpad:save')),
+             errors: errors };
+};
+
+// E50 clause: registerKeyActions accepts `command:` -- the Ctrl+S shape
+// scratchpad's win._saveToServer migrates onto -- and every existing caller
+// goes through untouched.
+CASES.key_actions_accept_a_command = async function () {
+    const m = activate('scratchpad');
+    let ran = 0;
+    let sawArgs = null;
+    let sawWin = '<unset>';
+    m.ctx.commands.register('save', {       // GLOBAL scope, on purpose
+        run: function (args, where) {
+            ran += 1;
+            sawArgs = args;
+            sawWin = (where.win === null) ? '<null>' : String(where.win.id);
+            return 'saved';
+        } });
+    m.ctx.commands.register('boom', {
+        run: function () { throw new Error('key boom'); } });
+    const out = {};
+    // A window IS focused while the key fires -- the fifth path the
+    // `win._saveToServer` field never had, on the keybinding that reaches it.
+    openWindow('w1');
+    // The identity-preserving path: an ordinary action reaches core as ITSELF.
+    const plain = [{ id: 'plain', label: 'Plain', run: function () {} }];
+    m.ctx.registerKeyActions(plain);
+    out.plainUntouched = keyActionById('plain').run === plain[0].run;
+    m.ctx.registerKeyActions([
+        { id: 'sp-save', label: 'Save', command: 'scratchpad:save',
+          commandArgs: { via: 'key' } },
+        { id: 'sp-boom', label: 'Boom', command: 'scratchpad:boom' },
+    ]);
+    const act = keyActionById('sp-save');
+    out.registered = !!act && act.label === 'Save' && typeof act.run === 'function';
+    // The dispatcher's call, verbatim (78 wraps it in a try -- it must not
+    // need to).
+    out.dispatchThrew = throws(function () { act.run(); }).threw;
+    await sleep(1);
+    out.ran = ran;
+    out.sawArgs = sawArgs;
+    out.sawWin = sawWin;
+    out.focusedWhileDispatching = frontId;
+    // A command whose run throws does not come back out of the dispatcher.
+    out.boomThrew = throws(function () { keyActionById('sp-boom').run(); }).threw;
+    await sleep(1);
+    // Declaring both is refused at REGISTRATION time (inside init, where a
+    // throw is an initMod rollback) -- and nothing is half-registered.
+    out.both = throws(function () {
+        m.ctx.registerKeyActions([{ id: 'sp-both', label: 'Both',
+                                    command: 'scratchpad:save',
+                                    run: function () {} }]);
+    });
+    out.bothRegistered = !!keyActionById('sp-both');
+    // Teardown drops the actions AND the commands they dispatch into.
+    _runUnloads(m.rec);
+    out.actionAfter = !!keyActionById('sp-save');
+    out.commandAfter = shape(await m.ctx.commands.execute('scratchpad:save'));
+    out.errors = errors;
+    return out;
+};
+
+// E50 clause: the menu registrars accept `command:` too, and no mod code runs
+// during a render -- so a throwing guard cannot reach the renderer.
+CASES.menu_items_accept_a_command = async function () {
+    const m = activate('scratchpad');
+    let ran = null;
+    let whenCalls = 0;
+    m.ctx.commands.register('save', {
+        run: function (args) { ran = args || '<no-args>'; return 'saved'; } });
+    m.ctx.commands.register('boom', {
+        run: function () { throw new Error('menu boom'); } });
+    m.ctx.commands.register('guarded', {
+        when: function () { whenCalls += 1; throw new Error('guard boom'); },
+        run: function () { ran = 'guarded ran'; },
+    });
+    m.ctx.registerWindowMenuItems(function (win) {
+        return [
+            { sep: true },
+            { label: 'Save', command: 'scratchpad:save',
+              commandArgs: { via: 'menu' } },
+            { label: 'Guarded', command: 'scratchpad:guarded' },
+            { label: 'Boom', command: 'scratchpad:boom' },
+            // An item that brought its own action keeps it: at RENDER time a
+            // throw would cost the whole menu, so the key path's both-declared
+            // refusal deliberately has no twin here.
+            { label: 'Own', enabled: true, command: 'scratchpad:save',
+              action: function () { ran = 'own action'; } },
+        ];
+    });
+    const items = [];
+    _pushMenuItems(_windowMenuItems, items, { id: 'w1' });
+    const out = {
+        count: items.length,
+        sepUntouched: items[0].sep === true && !('action' in items[0]),
+        labels: items.map(function (it) { return it.label; }),
+        // renderMenu wires a click only for an enabled item.
+        enabled: items.slice(1).map(function (it) { return !!it.enabled; }),
+        // Nothing called the guard while rendering.
+        whenCallsAtRender: whenCalls,
+    };
+    items[1].action();
+    await sleep(1);
+    out.ranFromMenu = ran;
+    // Clicking an item whose guard throws does not throw at the click site...
+    out.guardedThrew = throws(function () { items[2].action(); }).threw;
+    await sleep(1);
+    out.whenCallsAtClick = whenCalls;
+    // ...and neither does one whose run throws.
+    out.boomThrew = throws(function () { items[3].action(); }).threw;
+    await sleep(1);
+    items[4].action();
+    out.ownAction = ran;
+    // A contributor that throws is still _pushMenuItems's to log and swallow --
+    // the wrapper calls it OUTSIDE its own try for exactly that reason.
+    m.ctx.registerDesktopMenuItems(function () { throw new Error('contrib'); });
+    const deskItems = [];
+    out.contributorThrew = throws(function () {
+        _pushMenuItems(_desktopMenuItems, deskItems, { tiling: true });
+    }).threw;
+    out.deskItems = deskItems.length;
+    out.errors = errors;
+    return out;
+};
+
+// The surface itself, its capability entry, and the refusals that must be inert
+// rather than fatal.
+CASES.surface_and_refusals = async function () {
+    const m = activate('scratchpad');
+    const out = {
+        shape: [typeof m.ctx.commands, typeof m.ctx.commands.register,
+                typeof m.ctx.commands.execute],
+        capability: m.ctx.capabilities.commands,
+        has: _modCtxHas(m.ctx, 'commands'),
+        hasMember: _modCtxHas(m.ctx, 'commands.register'),
+        unmet: _modUnmetNeeds({ needs: ['commands', 'commands.register'] },
+                              m.ctx),
+        // No half-family: no per-activation record, no surface at all.
+        noRec: (function () {
+            const ctx = { id: 'x' };
+            _applyCtxExtenders(ctx, null);
+            return 'commands' in ctx;
+        })(),
+        // Malformed registrations throw at init, where initMod rolls the mod
+        // back -- they do not half-register something undispatchable.
+        noRun: throws(function () { m.ctx.commands.register('x', {}); }),
+        badScope: throws(function () {
+            m.ctx.commands.register('x', { scope: 'app', run: function () {} });
+        }),
+        badWhen: throws(function () {
+            m.ctx.commands.register('x', { when: 1, run: function () {} });
+        }),
+        emptyId: throws(function () {
+            m.ctx.commands.register('', { run: function () {} });
+        }),
+    };
+    out.afterBadRegistrations = shape(await m.ctx.commands.execute('scratchpad:x'));
+    // A registration arriving from a stray timer after the activation died is
+    // refused loudly and inertly: it must not throw (nobody is there to catch
+    // it) and must not resurrect dead code under a live id.
+    _runUnloads(m.rec);
+    let off = null;
+    out.lateRegisterThrew = throws(function () {
+        off = m.ctx.commands.register('late', { run: function () {} });
+    }).threw;
+    out.lateDisposer = typeof off;
+    out.lateOffThrew = throws(function () { off(); }).threw;
+    out.late = shape(await m.ctx.commands.execute('scratchpad:late'));
+    out.warns = warns;
+    out.errors = errors;
+    return out;
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def commands_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modcommands") / "harness.js"
+    path.write_text(
+        _COMMANDS_HARNESS
+        .replace("__HELPERS__", _loader_helpers_source())
+        .replace("__KEYS__", _keys_registrar_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__COMMANDS__", _commands_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__REGISTRARS__", _ctx_registrar_literal()),
+        encoding="utf-8")
+    return path
+
+
+def _run_commands(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_execute_resolves_one_of_four_branchable_outcomes(commands_harness):
+    # E50's vocabulary clause. The whole value of four words instead of one is
+    # that a caller can BRANCH: 'absent' is a typo or an uninstalled mod,
+    # 'inactive' is "turn that mod on", 'blocked' is "not right now", 'error' is
+    # a defect. A `win._*` field collapses all four into `undefined`.
+    r = _run_commands(commands_harness, "the_four_outcomes")
+    assert r["ok"] == {"ok": True, "value": {"a": 1}}
+    assert r["asyncOk"] == {"ok": True, "value": "async ok"}
+    for key in ("absent", "absentMod", "unprefixed", "notAString"):
+        assert r[key] == {"ok": False, "reason": "absent"}, key
+    assert r["blocked"] == {"ok": False, "reason": "blocked", "detail": "when"}
+    assert r["errorSync"] == {"ok": False, "reason": "error",
+                              "error": "sync boom"}
+    assert r["errorAsync"] == {"ok": False, "reason": "error",
+                               "error": "async boom"}
+    # ALWAYS a Promise -- including for outcomes decided synchronously, so a
+    # caller never has to ask which kind of answer it got.
+    assert r["isPromise"] is True
+    # The mod was disabled BETWEEN register and execute: 'inactive', which is a
+    # different sentence from 'absent' and the reason the teardown leaves a
+    # tombstone instead of deleting the entry.
+    assert r["inactive"] == {"ok": False, "reason": "inactive"}
+    # ...and a re-enable rebinds the same id to the NEW activation's function.
+    assert r["afterReenable"] == {"ok": True, "value": "v2"}
+    # Isolation is VISIBLE: both failures were logged, naming the command, and
+    # nothing else was.
+    assert len(r["errors"]) == 2, r["errors"]
+    assert all('command "scratchpad:' in e for e in r["errors"]), r["errors"]
+    assert r["warns"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_scope_decides_what_the_focused_window_argument_is(commands_harness):
+    # E50's scope clause, and the standing question: what happens on the paths
+    # `win._saveToServer` never had? It was only ever reached WITH a window.
+    r = _run_commands(commands_harness, "scope_and_the_focused_window")
+    # A window-scoped command with nothing focused is 'blocked' -- and neither
+    # run NOR when was called, so no mod ever has to re-check a null win (which
+    # is the guard this family exists to delete).
+    assert r["noFocus"] == {"ok": False, "reason": "blocked",
+                            "detail": "no-window"}
+    assert r["seenWhileUnfocused"] == []
+    # With a window focused, BOTH when and run get it -- and it is core's own
+    # record, not a copy.
+    assert r["focused"] == {"ok": True,
+                            "value": {"id": "w1", "isCoreRecord": True}}
+    assert r["seen"][0] == ["when", "w1"] and r["seen"][1] == ["run", "w1"]
+    # A GLOBAL command dispatched while a window IS focused gets win:null. Scope
+    # is a contract, not a hint: handing it the focused window opportunistically
+    # would make a later global->window migration a silent no-op.
+    assert r["global"] == {"ok": True, "value": {"winIsNull": True,
+                                                 "hasWin": True}}
+    assert r["seen"][2] == ["global", None]
+    # A front id naming a disposed or already-forgotten window is no focus at
+    # all -- the same rule closeFrontWindow (78) applies.
+    assert r["disposedFront"] == {"ok": False, "reason": "blocked",
+                                  "detail": "no-window"}
+    assert r["strandedFront"] == {"ok": False, "reason": "blocked",
+                                  "detail": "no-window"}
+    assert len(r["seen"]) == 3, r["seen"]
+    assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_auto_prefix_makes_a_cross_mod_collision_unrepresentable(
+        commands_harness):
+    # The standing question again: a `win._*` field could collide only on one
+    # window, and only between two mods decorating it. A globally-addressable id
+    # can collide everywhere -- so the namespace has to be structural.
+    r = _run_commands(commands_harness, "ids_cannot_collide_across_mods")
+    assert r["alpha"] == {"ok": True, "value": "alpha ran"}
+    assert r["beta"] == {"ok": True, "value": "beta ran"}
+    assert r["alphaAgain"] == {"ok": True, "value": "alpha ran"}
+    # A mod cannot spell its way into another's namespace: `register` refuses a
+    # local id containing ':'. That refusal is what makes the prefix a namespace
+    # instead of a convention.
+    assert r["crossNamespace"]["threw"] is True
+    assert ':' in r["crossNamespace"]["message"]
+    # ...and the same rule catches the double-prefix trap (a mod passing its own
+    # id would otherwise register 'beta:beta:save' and wonder where it went).
+    assert r["selfPrefixed"]["threw"] is True
+    # The only collision left is within ONE mod, and it is hard-refused rather
+    # than last-wins -- the rule registerKeyActions already enforces.
+    assert r["duplicate"] == {"threw": True, "name": "ModConflictError",
+                              "message": 'command "alpha:save" already exists'}
+    # Teardown is per-mod: alpha's ids go inactive, beta's are untouched.
+    assert r["alphaAfter"] == {"ok": False, "reason": "inactive"}
+    assert r["betaAfter"] == {"ok": True, "value": "beta ran"}
+    assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_guard_reads_as_error_and_a_veto_reads_as_blocked(
+        commands_harness):
+    # E50's isolation clause, at the point where it is a JUDGEMENT: a guard that
+    # throws did not say no, it failed to answer. Mapping it to 'blocked' would
+    # hide a broken guard as a normal "not right now" forever.
+    r = _run_commands(commands_harness, "a_throwing_guard_is_an_error_not_a_veto")
+    assert r["threw"] == {"ok": False, "reason": "error", "error": "guard boom"}
+    assert r["vetoed"] == {"ok": False, "reason": "blocked", "detail": "when"}
+    # A thenable guard is RESOLVED, not coerced: `!!promise` is true, so the
+    # coerced version would let every async guard allow everything (#168).
+    assert r["asyncFalse"] == {"ok": False, "reason": "blocked",
+                               "detail": "when"}
+    assert r["asyncReject"] == {"ok": False, "reason": "error",
+                                "error": "async guard"}
+    # run() was never reached on any of the four.
+    assert r["ran"] == 0
+    assert len(r["errors"]) == 2, r["errors"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_command_executed_mid_teardown_reads_inactive(commands_harness):
+    # The gap the tombstone alone does not cover: the drain is LIFO, so a
+    # disposer registered LATER runs BEFORE this command's own disposer. Between
+    # those two moments the entry is still live and its mod is already dead --
+    # which is why rec.unloading is checked as well.
+    r = _run_commands(commands_harness,
+                      "a_command_executed_mid_teardown_is_inactive")
+    assert r["during"] == {"ok": False, "reason": "inactive"}
+    assert r["ran"] == 0, "a dying activation's run() was called"
+    assert r["drained"] == 0
+    assert r["after"] == {"ok": False, "reason": "inactive"}
+    assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_register_key_actions_accepts_a_command_id(commands_harness):
+    # E50's registrar clause, on the exact shape scratchpad's Ctrl+S migrates
+    # onto -- and the additive half: an ordinary action reaches core as ITSELF.
+    r = _run_commands(commands_harness, "key_actions_accept_a_command")
+    assert r["plainUntouched"] is True, \
+        "the normalizer rewrote an action that declared no command:"
+    assert r["registered"] is True
+    # The dispatcher calls run() with nothing to catch an exception with; both
+    # of these must come back clean, including the one whose command throws.
+    assert r["dispatchThrew"] is False
+    assert r["boomThrew"] is False
+    assert r["ran"] == 1
+    assert r["sawArgs"] == {"via": "key"}
+    # A GLOBAL command dispatched from a keybinding while a window IS focused
+    # still gets win:null. The keybinding path is the same _execModCommand call
+    # as ctx.commands.execute, so scope -- not the caller -- decides.
+    assert r["focusedWhileDispatching"] == "w1"
+    assert r["sawWin"] == "<null>"
+    # Declaring both command: and run: is a registration-time error, and nothing
+    # is half-registered when it fires.
+    assert r["both"]["threw"] is True
+    assert "command:" in r["both"]["message"] and "run:" in r["both"]["message"]
+    assert r["bothRegistered"] is False
+    # Teardown releases the key action AND the command behind it.
+    assert r["actionAfter"] is False
+    assert r["commandAfter"] == {"ok": False, "reason": "inactive"}
+    assert len(r["errors"]) == 1 and 'scratchpad:boom' in r["errors"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_menu_items_accept_a_command_and_no_mod_code_runs_at_render(
+        commands_harness):
+    # The other half of E50's registrar clause. The deliberate omission is the
+    # interesting part: when() is NOT called at render time to grey an item out.
+    # Two arbiters is how a menu shows an item enabled and then does nothing --
+    # and a render-time guard that throws would take the whole menu with it.
+    r = _run_commands(commands_harness, "menu_items_accept_a_command")
+    assert r["count"] == 5
+    assert r["sepUntouched"] is True, "a separator was rewritten"
+    assert r["labels"] == [None, "Save", "Guarded", "Boom", "Own"]
+    assert r["enabled"] == [True, True, True, True]
+    assert r["whenCallsAtRender"] == 0, "mod code ran during a menu render"
+    assert r["ranFromMenu"] == {"via": "menu"}
+    # A click on an item whose guard throws, and one whose run throws, both come
+    # back clean -- renderMenu's click handler has nothing to catch with either.
+    assert r["guardedThrew"] is False and r["boomThrew"] is False
+    assert r["whenCallsAtClick"] == 1, "the guard runs at CLICK time, once"
+    # An item that brought its own action keeps it.
+    assert r["ownAction"] == "own action"
+    # ...and a throwing contributor is still swallowed and logged by core, not
+    # by the wrapper: the wrapper calls it outside its own try.
+    assert r["contributorThrew"] is False
+    assert r["deskItems"] == 0
+    assert any(e.startswith("[menu] contributor threw") for e in r["errors"]), \
+        r["errors"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_commands_surface_and_its_refusals_are_inert(commands_harness):
+    r = _run_commands(commands_harness, "surface_and_refusals")
+    assert r["shape"] == ["object", "function", "function"]
+    # #197's map is per family, and `commands` is a new top-level family -- so
+    # it owes an entry, and `needs` resolves both the family and the member.
+    assert r["capability"] == 1
+    assert r["has"] is True and r["hasMember"] is True
+    assert r["unmet"] == []
+    # No half-family: without the per-activation record that owns registration
+    # and teardown there is no ctx.commands at all, so the capability map
+    # reports it absent -- which is true.
+    assert r["noRec"] is False
+    # A malformed registration throws (initMod rolls the mod back) rather than
+    # landing something nothing can dispatch.
+    for key in ("noRun", "badScope", "badWhen", "emptyId"):
+        assert r[key]["threw"] is True, key
+    assert r["afterBadRegistrations"] == {"ok": False, "reason": "absent"}
+    # A register() arriving after the activation died is refused loudly and
+    # inertly: no throw into a stray timer, no dead code under a live id.
+    assert r["lateRegisterThrew"] is False
+    assert r["lateDisposer"] == "function" and r["lateOffThrew"] is False
+    assert r["late"] == {"ok": False, "reason": "absent"}
+    assert len(r["warns"]) == 1 and "tearing down" in r["warns"][0]
+    assert r["errors"] == []
