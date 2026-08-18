@@ -2497,12 +2497,16 @@ def test_the_help_corpus_memo_is_dropped_on_a_first_login():
     # exists to trigger would go out unauthenticated and change nothing.
     assert auth.index("host.token = candidate") < auth.index(
         "notifyHelpHostAuth(host.id)")
-    # An already-open Help window refreshes rather than waiting to be reopened:
-    # 63's _onHostAuth loop runs AFTER the notify above, so the re-fetch there
-    # sees a retired memo.
+    # An already-open Help window refreshes rather than waiting to be reopened.
+    # #195/A38 moved that refresh off the `win._onHostAuth` convention field and
+    # onto the bus, so what must run after the notify is now the EMIT -- and 63
+    # fires it after the legacy loop, which is after the notify either way.
     help_mod = (BROKER_DIR / "mods" / "help"
                 / "help.js").read_text(encoding="utf-8")
-    assert "win._onHostAuth = (hid) => {" in help_mod
+    assert "ctx.events.on('host:auth', function (p) {" in help_mod
+    assert "fetchHelpCorpus().then(() => refreshHelpCorpus(win))" in help_mod
+    assert auth.index("notifyHelpHostAuth(host.id)") < auth.index(
+        "_emitModEvent('host:auth', { hostId: host.id });")
     assert auth.index("notifyHelpHostAuth(host.id)") < auth.index(
         "win._onHostAuth(host.id)")
 
@@ -5048,10 +5052,14 @@ def test_git_mod_packaged_and_manifest_agrees():
     assert "ctx.windows.onTerminalCreate(" in src
     assert "ctx.session.git(" in src
     assert "hostFetch(" not in src, "the raw inline git fetch must be gone from the mod"
-    # Per-window teardown covers BOTH a window close (onDispose) and a mod disable
-    # (ctx.onUnload drains the disposer set) — no stray interval / orphan DOM.
-    assert "info.onDispose(" in src
-    assert "ctx.onUnload(" in src
+    # Per-window teardown covers BOTH a window close and a mod disable — no stray
+    # interval / orphan DOM. #195/A38 made that ONE registration: info.onModTeardown
+    # fires on the first of the two, so the hand-kept disposer set drained from
+    # ctx.onUnload is gone and info.onDispose is only the degraded fallback.
+    assert "info.onModTeardown(teardown)" in src
+    assert "info.onDispose(teardown);" in src
+    assert "ctx.onUnload(" not in src, \
+        "the mod-disable half is core's now (#195), not a set this mod keeps"
     assert "clearInterval(" in src
     # Ships in the served page, AFTER the aistatus mod (appended last in _MODS).
     assert "id: 'git'" in INDEX_HTML
@@ -13857,3 +13865,991 @@ def test_ctx_hosts_is_a_true_family_a_mod_can_declare(hosts_harness):
     assert r["stillThere"] == "function"
     assert r["unloads"] == 0, \
         "invalidate is stateless -- it owes the teardown chain nothing"
+
+
+# ---------------------------------------------------------------------------
+# A38: the two REFERENCE MIGRATIONS (#195)
+#
+# #195's own argument for shipping migrations beside the API is that "the
+# contract does not freeze on fixture behaviour alone". Everything below
+# therefore EXECUTES the shipped mod source against the shipped core slices --
+# the CP8 precedent set by test_the_real_clipboard_mod_runs_on_the_factory --
+# rather than string-matching the diff:
+#
+#   git  -- its `disposers` Set + `decorated` WeakSet, replaced by A37's
+#           info.onModTeardown, run against 67's real bag and 86's real drain.
+#   help -- its `win._onHostAuth` convention field, replaced by an A34
+#           ctx.events.on('host:auth') subscription, run against the real bus.
+# ---------------------------------------------------------------------------
+
+
+def _git_mod_source():
+    """The shipped git mod, verbatim -- #195's reference migration for
+    info.onModTeardown."""
+    src = (BROKER_DIR / "mods" / "git" / "git.js").read_text(encoding="utf-8")
+    for needed in ("registerMod({", "ctx.windows.onTerminalCreate(",
+                   "info.onModTeardown(teardown)"):
+        assert needed in src, f"{needed} missing from the shipped git mod"
+    return src
+
+
+def test_the_git_mod_keeps_no_disposer_bookkeeping_of_its_own():
+    """E38, the deletion half, stated at the source so the behaviour cases below
+    cannot be satisfied by a mod that kept its old machinery as well."""
+    src = _git_mod_source()
+    # The two structures #195 names, and the drain that emptied one of them.
+    assert "new Set()" not in src, "git still keeps a disposer Set by hand"
+    assert "new WeakSet()" not in src, "git still keeps a decorate-once WeakSet"
+    assert "ctx.onUnload(" not in src, \
+        "the mod-disable half is core's now -- git owes it no unload entry"
+    # ONE registration covers both exits, and info.onDispose survives only as the
+    # degraded path for a build whose bag has no hook to offer.
+    assert src.count("info.onModTeardown(teardown)") == 1
+    assert src.count("info.onDispose(teardown);") == 1
+    _order_in(src, "typeof info.onModTeardown === 'function'",
+              "info.onModTeardown(teardown)", "info.onDispose(teardown);")
+    # And it reaches the served page (the mod is concatenated into INDEX_HTML).
+    assert "info.onModTeardown(teardown)" in INDEX_HTML
+
+
+# The driver that runs the SHIPPED git mod on the SHIPPED hook. Appended after
+# A37's harness, so 67's real per-terminal bag, 86c's real teardown range, the
+# extender registry and 86's real _runUnloads are all already in scope -- the
+# same construction the clipboard driver uses over the window factory.
+_GIT_DRIVER = r"""
+// ---- the real git mod (#195's reference migration) -------------------------
+let GIT_DECL = null;
+function registerMod(decl) { GIT_DECL = decl; }
+// Core globals the shipped git mod reaches for that A37's harness does not
+// need. Stubs, not behaviour.
+function appIconSvg() { return '<svg data-icon="git"></svg>'; }
+
+// A38's harness element: A37's El (which core's bag and barOf read) plus the
+// members a real widget touches. Listeners are kept as RECORDS so a case can
+// fire the button and so "the teardown removed them" is observable.
+function GitEl(tag) {
+    El.call(this, '');
+    this.tagName = tag;
+    this.style = {};
+    this.listeners = [];
+    this.textContent = '';
+    this.innerHTML = '';
+    this.offsetLeft = 0; this.offsetTop = 0; this.offsetHeight = 0;
+    const self = this;
+    this.classList = {
+        contains: function (c) { return self._cls().indexOf(c) !== -1; },
+        add: function (c) { self._setCls(c, true); },
+        remove: function (c) { self._setCls(c, false); },
+        toggle: function (c, on) {
+            self._setCls(c, on === undefined ? !this.contains(c) : !!on);
+        },
+    };
+}
+GitEl.prototype = Object.create(El.prototype);
+GitEl.prototype.constructor = GitEl;
+GitEl.prototype._cls = function () {
+    return this.className.split(' ').filter(function (c) { return !!c; });
+};
+GitEl.prototype._setCls = function (c, on) {
+    const parts = this._cls();
+    const i = parts.indexOf(c);
+    if (on && i === -1) parts.push(c);
+    if (!on && i !== -1) parts.splice(i, 1);
+    this.className = parts.join(' ');
+};
+GitEl.prototype.addEventListener = function (type, fn, cap) {
+    this.listeners.push({ type: type, fn: fn, cap: !!cap });
+};
+GitEl.prototype.removeEventListener = function (type, fn, cap) {
+    for (let i = 0; i < this.listeners.length; i++) {
+        const L = this.listeners[i];
+        if (L.type === type && L.fn === fn && L.cap === !!cap) {
+            this.listeners.splice(i, 1);
+            return;
+        }
+    }
+};
+GitEl.prototype.contains = function () { return false; };
+GitEl.prototype.types = function () {
+    return this.listeners.map(function (L) { return L.type; }).sort();
+};
+GitEl.prototype.fire = function (type) {
+    for (const L of this.listeners.slice()) {
+        if (L.type !== type) continue;
+        L.fn({ target: this, key: '', stopPropagation: function () {},
+               preventDefault: function () {} });
+    }
+};
+
+// document, reduced to what the widget and its popover use. The two capture
+// listeners the popover adds are the orphan-listener claim's evidence.
+const docListeners = [];
+const document = {
+    createElement: function (tag) { return new GitEl(tag); },
+    addEventListener: function (type, fn, cap) {
+        docListeners.push({ type: type, fn: fn, cap: !!cap });
+    },
+    removeEventListener: function (type, fn, cap) {
+        for (let i = 0; i < docListeners.length; i++) {
+            const L = docListeners[i];
+            if (L.type === type && L.fn === fn && L.cap === !!cap) {
+                docListeners.splice(i, 1);
+                return;
+            }
+        }
+    },
+};
+function docTypes() {
+    return docListeners.map(function (L) { return L.type; }).sort();
+}
+// Shadowed so the mod's 800 ms first fetch is recorded rather than scheduled: a
+// pending node timer would outlive the case and paint a torn-down window.
+const timeouts = [];
+function setTimeout(fn, ms) { timeouts.push({ fn: fn, ms: ms }); return timeouts.length; }
+
+__GIT__
+
+const gitPosts = [];
+const stops = [];
+const intervals = [];
+
+// The two ctx capabilities git reads beyond A37's harness ctx. The interval is
+// the {stop}-shaped one ctx.visibility hands out, so "the keep-alive poll was
+// stopped" is observable -- it is the leak #195 names.
+function gitCtxExtras(ctx) {
+    ctx.session = { git: function (id, opts) {
+        gitPosts.push([id, opts && opts.host]);
+        return Promise.resolve({ status: 200,
+                                 json: { ok: true, branch: 'main', dirty: false } });
+    } };
+    ctx.visibility = { pausableInterval: function (fn, ms) {
+        const t = { fn: fn, ms: ms, stopped: false };
+        intervals.push(t);
+        return { stop: function () { t.stopped = true; stops.push(ms); } };
+    } };
+    return ctx;
+}
+function bootGit() {
+    const m = modCtx('git');
+    GIT_DECL.init(gitCtxExtras(m.ctx));
+    return m;
+}
+// A page assembled WITHOUT 86c: the same ctx literal 86 hands out, with the
+// extender pass skipped, so core's bag reaches the mod undecorated. The only
+// path on which git's fallback is live -- here so "is that fallback dead code?"
+// is answered rather than assumed.
+function bootGitBare() {
+    const rec = { id: 'git', unloads: [] };
+    const ctx = {
+        id: 'git', ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    GIT_DECL.init(gitCtxExtras(ctx));
+    return { rec: rec, ctx: ctx };
+}
+function gitBtnOf(win) { return win.dom.querySelector('.btn-git'); }
+function liveIntervals() {
+    return intervals.filter(function (t) { return !t.stopped; }).length;
+}
+
+const GITCASES = {};
+
+// The clause #195's Playwright bullet names: disable the migrated git mod with a
+// live terminal open -> the per-window widget goes, WITHOUT the window closing.
+// The popover is opened first, so the document-level listeners and the DOM nodes
+// the old `disposers` drain existed to reclaim are all in play.
+GITCASES.disable_removes_the_widget = function () {
+    const m = bootGit();
+    const win = openTerminal();                // opened AFTER subscribe: the EMIT
+    const btn = gitBtnOf(win);
+    btn.fire('click');                         // open the status popover
+    const opened = { bar: barOf(win), doc: docTypes(), btn: btn.types(),
+                     intervals: liveIntervals(), posts: gitPosts.length };
+    _runUnloads(m.rec);                        // the mod DISABLE
+    return {
+        opened: opened,
+        bar: barOf(win), doc: docTypes(), btn: btn.types(),
+        intervals: liveIntervals(), stops: stops.length,
+        stillOpen: windows.get(win.id) === win,
+        disposed: win.disposed,
+        onDesktop: win.dom.parentNode === desktop,
+        live: Array.from(m.rec.winTeardowns || []).length,
+    };
+};
+
+// Order two: the window closes first. The widget goes there, and the disable
+// that follows must not run the teardown again -- what the old idempotence flag
+// plus the self-removing Set entry were for.
+GITCASES.close_then_disable = function () {
+    const win = openTerminal();                // open BEFORE subscribe: the REPLAY
+    const m = bootGit();
+    const btn = gitBtnOf(win);
+    btn.fire('click');
+    const decorated = barOf(win);
+    closeWindow(win.id);
+    const afterClose = { bar: barOf(win), doc: docTypes(), stops: stops.length,
+                         intervals: liveIntervals() };
+    _runUnloads(m.rec);
+    return { decorated: decorated, afterClose: afterClose,
+             stops: stops.length, doc: docTypes(),
+             live: Array.from(m.rec.winTeardowns || []).length,
+             windows: windows.size };
+};
+
+// The whole job of the Set git used to keep: ONE disable reaches EVERY live
+// window it decorated -- replayed and live, minus the one that already left --
+// exactly once each, and closes none of them.
+GITCASES.disable_reaches_every_live_terminal = function () {
+    const before = openTerminal();
+    const m = bootGit();                       // replays over `before`
+    const a = openTerminal();
+    const b = openTerminal();
+    closeWindow(a.id);                         // one leaves early
+    const afterClose = { stops: stops.length,
+                         live: Array.from(m.rec.winTeardowns || []).length };
+    _runUnloads(m.rec);
+    const late = openTerminal();               // nothing decorates it now
+    return {
+        afterClose: afterClose, stops: stops.length,
+        bars: [barOf(before), barOf(b), barOf(late)],
+        openWindows: windows.size,
+        disposed: [before.disposed, b.disposed, late.disposed],
+        live: Array.from(m.rec.winTeardowns || []).length,
+        intervals: liveIntervals(),
+    };
+};
+
+// The bookkeeping claim, executed: the live-window set lives on the RECORD (A37
+// keeps it once for every mod) and git contributes exactly one entry to the
+// teardown chain beyond the loader's own unsubscribe -- it registers no
+// ctx.onUnload at all.
+GITCASES.the_set_is_cores = function () {
+    const m = bootGit();
+    const atInit = { unloads: m.rec.unloads.length,
+                     set: m.rec.winTeardowns === undefined };
+    const w1 = openTerminal();
+    const afterOne = { unloads: m.rec.unloads.length,
+                       live: Array.from(m.rec.winTeardowns || []).length };
+    const w2 = openTerminal();
+    const afterTwo = { unloads: m.rec.unloads.length,
+                       live: Array.from(m.rec.winTeardowns || []).length };
+    // One entry per MOD on the chain however many windows it decorates, and one
+    // per WINDOW on that window's own cleanups.
+    const cleanups = [w1.cleanups.length, w2.cleanups.length];
+    _runUnloads(m.rec);
+    return { atInit: atInit, afterOne: afterOne, afterTwo: afterTwo,
+             cleanups: cleanups,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
+// The degraded build. Without the hook the mod keeps the window-close half it
+// has always had -- the widget is reclaimed when the terminal closes -- and
+// loses only the disable half, which is the right way round: a mod that
+// registered NOTHING would leak a 15s interval and a document listener per
+// terminal for the life of the page.
+GITCASES.no_hook_keeps_the_close_half = function () {
+    const m = bootGitBare();
+    const win = openTerminal();
+    const btn = gitBtnOf(win);
+    btn.fire('click');
+    const opened = { bar: barOf(win), doc: docTypes(),
+                     hook: typeof m.ctx.windows.onTerminalCreate };
+    _runUnloads(m.rec);                        // a disable this build cannot see
+    const afterDisable = { bar: barOf(win), doc: docTypes(),
+                           stops: stops.length,
+                           set: m.rec.winTeardowns === undefined,
+                           cleanups: win.cleanups.length };
+    closeWindow(win.id);                       // ...but the close still reclaims
+    return { opened: opened, afterDisable: afterDisable,
+             bar: barOf(win), doc: docTypes(), stops: stops.length,
+             intervals: liveIntervals() };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!GITCASES[want]) {
+        console.log('no such git case: ' + want);
+        process.exit(2);
+    }
+    const out = GITCASES[want]();
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def gitmod_harness(tmp_path_factory):
+    """A37's teardown harness, plus the real git mod."""
+    path = tmp_path_factory.mktemp("gitmod") / "harness.js"
+    path.write_text(
+        # Everything ABOVE A37's own dispatcher: it exits on an unknown case, so
+        # the git driver appended below would never run.
+        (_TEARDOWN_HARNESS.split("const want = process.argv[2];")[0]
+         .replace("__TERMINALS__", _terminal_create_source())
+         .replace("__REGISTRY__", _ctx_registry_source())
+         .replace("__TEARDOWN__", _teardown_source())
+         .replace("__UNLOADS__", _run_unloads_source()))
+        + _GIT_DRIVER.replace("__GIT__", _git_mod_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_gitmod(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"git case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_git_mod_gives_up_its_widget_without_giving_up_the_terminal(
+        gitmod_harness):
+    """E38, and #195's Playwright bullet run in node: disable the migrated git
+    mod with a live terminal window open -> the per-window widget is removed via
+    onModTeardown WITHOUT the window closing."""
+    r = _run_gitmod(gitmod_harness, "disable_removes_the_widget")
+    assert r["errors"] == []
+    # Decorated, popover open: the button + label sit left of min/close (the
+    # popover anchors inside the title bar), and its two CAPTURE listeners are
+    # on the document.
+    assert r["opened"]["bar"] == ["tb-btn btn-git muted", "git-label",
+                                  "tb-btn btn-min", "tb-btn btn-close",
+                                  "git-popover"]
+    assert r["opened"]["doc"] == ["keydown", "mousedown"]
+    assert r["opened"]["btn"] == ["click", "mousedown"]
+    assert r["opened"]["intervals"] == 1 and r["opened"]["posts"] >= 1
+    # After the DISABLE: every one of them is reclaimed...
+    assert r["bar"] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["doc"] == [], "the popover's document listeners were orphaned"
+    assert r["btn"] == []
+    assert r["intervals"] == 0 and r["stops"] == 1, \
+        "the 15s keep-alive poll outlived the mod"
+    # ...and the WINDOW is untouched. A terminal belongs to core.
+    assert r["stillOpen"] is True and r["disposed"] is False
+    assert r["onDesktop"] is True
+    assert r["live"] == 0, "a torn-down window stayed in the mod's live set"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_git_mod_tears_down_once_when_the_window_closes_first(
+        gitmod_harness):
+    """The other order, and the one the deleted machinery existed to survive: a
+    window close and a later mod disable are ONE teardown, not two."""
+    r = _run_gitmod(gitmod_harness, "close_then_disable")
+    assert r["errors"] == []
+    # The REPLAY decorated a terminal that was already open before init.
+    assert r["decorated"] == ["tb-btn btn-git muted", "git-label",
+                              "tb-btn btn-min", "tb-btn btn-close",
+                              "git-popover"]
+    assert r["afterClose"]["bar"] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["afterClose"]["doc"] == []
+    assert r["afterClose"]["stops"] == 1
+    assert r["afterClose"]["intervals"] == 0
+    # The disable that follows finds nothing left to do.
+    assert r["stops"] == 1, "the mod disable re-ran a teardown the close ran"
+    assert r["doc"] == []
+    assert r["live"] == 0 and r["windows"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_disable_reaches_every_terminal_the_real_git_mod_decorated(
+        gitmod_harness):
+    """The `disposers` Set's whole job, now core's: a mod disable must reach the
+    windows that are still OPEN (win.cleanups never fires for them), each exactly
+    once, and must close none of them."""
+    r = _run_gitmod(gitmod_harness, "disable_reaches_every_live_terminal")
+    assert r["errors"] == []
+    # Three decorated (one by replay, two live); one closed early.
+    assert r["afterClose"]["stops"] == 1
+    assert r["afterClose"]["live"] == 2, "the closed window stayed in the set"
+    # The disable tears down the two survivors and stops nothing twice.
+    assert r["stops"] == 3
+    assert r["bars"][0] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["bars"][1] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["bars"][2] == ["tb-btn btn-min", "tb-btn btn-close"], \
+        "a terminal opened after the disable was still decorated"
+    assert r["openWindows"] == 3 and r["disposed"] == [False, False, False]
+    assert r["live"] == 0 and r["intervals"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_git_mod_contributes_no_teardown_bookkeeping_of_its_own(
+        gitmod_harness):
+    """Where the deleted Set went. It is on the RECORD, built lazily by A37, one
+    entry on the LIFO chain per MOD however many windows it decorates -- and git
+    registers no ctx.onUnload beside it, which is the deletion made visible at
+    runtime rather than by grep."""
+    r = _run_gitmod(gitmod_harness, "the_set_is_cores")
+    assert r["errors"] == []
+    # At init, before any terminal: only the loader's own create-hook
+    # unsubscribe, and no set at all (a mod that never registers pays nothing).
+    assert r["atInit"] == {"unloads": 1, "set": True}
+    # The first window arms it: ONE more chain entry, forever.
+    assert r["afterOne"] == {"unloads": 2, "live": 1}
+    assert r["afterTwo"] == {"unloads": 2, "live": 2}, \
+        "a second window added a second entry to the mod's teardown chain"
+    # ...and one entry per window on that window's own cleanups.
+    assert r["cleanups"] == [1, 1]
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_git_mod_degrades_rather_than_leaks_without_the_hook(
+        gitmod_harness):
+    """The question the migration owes an answer to: is the `info.onDispose`
+    fallback dead code? Not on a page assembled without 86c -- there the bag
+    reaches the mod undecorated, and without that line every terminal would keep
+    a 15s poll and a document listener for the life of the page. What is lost is
+    only the DISABLE half, which is what an older build never had."""
+    r = _run_gitmod(gitmod_harness, "no_hook_keeps_the_close_half")
+    assert r["errors"] == []
+    assert r["opened"]["bar"] == ["tb-btn btn-git muted", "git-label",
+                                  "tb-btn btn-min", "tb-btn btn-close",
+                                  "git-popover"]
+    assert r["opened"]["doc"] == ["keydown", "mousedown"]
+    # A disable on this build cannot reach a live window -- honestly degraded,
+    # and no per-mod set was ever built for it either.
+    assert r["afterDisable"]["bar"] == ["tb-btn btn-git muted", "git-label",
+                                        "tb-btn btn-min", "tb-btn btn-close",
+                                        "git-popover"]
+    assert r["afterDisable"]["stops"] == 0
+    assert r["afterDisable"]["set"] is True
+    assert r["afterDisable"]["cleanups"] == 1, \
+        "the fallback disposer never reached win.cleanups"
+    # ...and the close still reclaims every one of them.
+    assert r["bar"] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["doc"] == [] and r["stops"] == 1 and r["intervals"] == 0
+
+
+def _help_mod_source():
+    """The shipped help mod, verbatim -- #195's reference migration for the
+    ctx.events bus."""
+    src = (BROKER_DIR / "mods" / "help" / "help.js").read_text(encoding="utf-8")
+    for needed in ("registerMod({", "function openHelpWindow(appData) {",
+                   "ctx.events.on('host:auth', function (p) {"):
+        assert needed in src, f"{needed} missing from the shipped help mod"
+    return src
+
+
+def test_the_help_mod_no_longer_writes_the_convention_field():
+    """E38, the deletion half. Core still INVOKES `win._onHostAuth` -- editor,
+    file-manager and recorder migrate under #204 -- so what must be gone is
+    help's ASSIGNMENT, not core's caller."""
+    src = _help_mod_source()
+    assert "win._onHostAuth =" not in src, \
+        "help still writes the duck-typed convention field"
+    # The subscription rides the bus, feature-detected rather than declared as a
+    # `needs` (which would block the whole mod -- chip, window kind, hotkey -- on
+    # a build without 86c, to protect one corpus refresh).
+    assert "if (ctx.events && typeof ctx.events.on === 'function') {" in src
+    assert "\n            needs: [" not in src, \
+        "a `needs` here would block the mod, not degrade it"
+    # Core's caller is untouched, and so is the loop it lives in.
+    auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    assert "try { win._onHostAuth(host.id); } catch (_) {}" in auth
+    assert "_emitModEvent('host:auth', { hostId: host.id });" in auth
+    # ...and #204's other three consumers still have theirs.
+    for mod, entry in (("editor", "editor.js"),
+                       ("file-manager", "file-manager.js"),
+                       ("recorder", "recorder.js")):
+        other = (BROKER_DIR / "mods" / mod / entry).read_text(encoding="utf-8")
+        assert "win._onHostAuth =" in other, \
+            f"{mod} was migrated here -- it belongs to #204"
+    # The subscription reaches the served page.
+    assert "ctx.events.on('host:auth', function (p) {" in INDEX_HTML
+
+
+# The help mod's migration is BEHAVIOUR -- an emit reaches an open Help window,
+# a foreign host does not, a disable stops it -- so this runs the SHIPPED help
+# mod against the SHIPPED bus. Core's own surface is stubbed only where help
+# reaches THROUGH it (the corpus fetch, the window chrome); everything the claim
+# is about is real: the bus, the teardown drain, and every line of help.js.
+_HELP_HARNESS = r"""
+'use strict';
+const errors = [];
+const infos = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+__REGISTRY__
+
+__EVENTS__
+
+__UNLOADS__
+
+// ---- a DOM the shipped help window really builds itself in ----------------
+function Elem(tag) {
+    this.tagName = String(tag || 'div').toLowerCase();
+    this.className = '';
+    this.id = '';
+    this.children = [];
+    this.parentNode = null;
+    this.style = {};
+    this.dataset = {};
+    this.listeners = [];
+    this.value = '';
+    this.innerHTML = '';
+    this.checked = false;
+    this.scrollTop = 0;
+    this.offsetTop = 0;
+    this._text = '';
+    const self = this;
+    this.classList = {
+        contains: function (c) { return self._cls().indexOf(c) !== -1; },
+        add: function (c) { self._setCls(c, true); },
+        remove: function (c) { self._setCls(c, false); },
+        toggle: function (c, on) {
+            self._setCls(c, on === undefined ? !this.contains(c) : !!on);
+        },
+    };
+}
+// textContent CLEARS on write, which is how renderHelpInto empties the rail and
+// the scroll body before it repaints them -- the observable this case reads
+// "the window re-rendered" off.
+Object.defineProperty(Elem.prototype, 'textContent', {
+    get: function () { return this._text; },
+    set: function (v) {
+        this._text = (v === null || v === undefined) ? '' : String(v);
+        for (const kid of this.children) kid.parentNode = null;
+        this.children = [];
+    },
+});
+Elem.prototype._cls = function () {
+    return this.className.split(' ').filter(function (c) { return !!c; });
+};
+Elem.prototype._setCls = function (c, on) {
+    const parts = this._cls();
+    const i = parts.indexOf(c);
+    if (on && i === -1) parts.push(c);
+    if (!on && i !== -1) parts.splice(i, 1);
+    this.className = parts.join(' ');
+};
+Elem.prototype._drop = function (kid) {
+    const i = this.children.indexOf(kid);
+    if (i !== -1) this.children.splice(i, 1);
+    kid.parentNode = null;
+};
+Elem.prototype.appendChild = function (kid) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    kid.parentNode = this;
+    this.children.push(kid);
+    return kid;
+};
+Elem.prototype.removeChild = function (kid) { this._drop(kid); return kid; };
+Elem.prototype.remove = function () {
+    if (this.parentNode) this.parentNode._drop(this);
+};
+Elem.prototype.contains = function (n) {
+    if (n === this) return true;
+    for (const kid of this.children) if (kid.contains && kid.contains(n)) return true;
+    return false;
+};
+Elem.prototype.matches = function (sel) {
+    if (!sel || sel.indexOf('[') !== -1) return false;   // attribute selectors
+    if (sel.charAt(0) === '#') return this.id === sel.slice(1);
+    if (sel.charAt(0) === '.') return this._cls().indexOf(sel.slice(1)) !== -1;
+    return this.tagName === sel.toLowerCase();
+};
+Elem.prototype.querySelectorAll = function (sel) {
+    const out = [];
+    for (const kid of this.children) {
+        if (kid.matches && kid.matches(sel)) out.push(kid);
+        if (kid.querySelectorAll) out.push.apply(out, kid.querySelectorAll(sel));
+    }
+    return out;
+};
+Elem.prototype.querySelector = function (sel) {
+    const all = this.querySelectorAll(sel);
+    return all.length ? all[0] : null;
+};
+Elem.prototype.addEventListener = function (type, fn) {
+    this.listeners.push({ type: type, fn: fn });
+};
+Elem.prototype.removeEventListener = function (type, fn) {
+    for (let i = 0; i < this.listeners.length; i++) {
+        if (this.listeners[i].type === type && this.listeners[i].fn === fn) {
+            this.listeners.splice(i, 1);
+            return;
+        }
+    }
+};
+Elem.prototype.setAttribute = function (k, v) { this[k] = v; };
+Elem.prototype.getAttribute = function (k) { return this[k]; };
+Elem.prototype.focus = function () { focused.push(this.className); };
+Elem.prototype.scrollTo = function () {};
+Elem.prototype.getBoundingClientRect = function () {
+    return { width: 1200, height: 800, left: 0, top: 0 };
+};
+
+const focused = [];
+const byId = {};
+function mkEl(tag, id) {
+    const el = new Elem(tag);
+    if (id) { el.id = id; byId[id] = el; }
+    return el;
+}
+const desktop = mkEl('div', 'desktop');
+mkEl('div', 'taskbar');
+mkEl('div', 'taskbar-items');
+const document = {
+    createElement: function (tag) { return new Elem(tag); },
+    createTextNode: function (t) {
+        const n = new Elem('#text');
+        n.textContent = t;
+        return n;
+    },
+    getElementById: function (id) {
+        return Object.prototype.hasOwnProperty.call(byId, id) ? byId[id] : null;
+    },
+};
+// Shadowed: the first-run hint timer (1.8 s) and the open-time focus must be
+// recorded, not scheduled -- a pending node timer would outlive the case.
+const timeouts = [];
+function setTimeout(fn, ms) { timeouts.push({ fn: fn, ms: ms }); return timeouts.length; }
+function clearTimeout() {}
+// A real macrotask, so every promise chain the mod started has settled before a
+// case reads its counters.
+function tick() {
+    return new Promise(function (resolve) { setImmediate(resolve); });
+}
+
+// ---- core, reduced to what the shipped help mod reaches through ------------
+const window = { __mods: { helpCards: [] } };
+const windows = new Map();
+const sessions = new Map();
+const prefs = {};
+let frontId = null;
+let _stateReady = true;
+let corpusFetches = 0;
+let entryBuilds = 0;
+let corpusSections = ['getting-started'];
+// #173's whole point: /help-corpus.json serves the INSTALLED mods' sections
+// only to a caller holding the token, so a corpus fetched before the login
+// overlay was answered is SHORT. Core commits the token before it emits, so a
+// case flips this exactly where 63 does.
+let hasToken = false;
+const reveals = [];
+function savePrefs() {}
+function savePrefsLocal() {}
+function getSettings() { return {}; }
+function showNotice() {}
+function appIconSvg() { return ''; }
+function localHost() { return { id: 'local', name: 'this browser' }; }
+function cssEscape(s) { return String(s); }
+function newAppId(kind) { return 'app:' + kind; }
+function defaultColor() { return '#4aa3ff'; }
+function normalizeHex(c) { return c; }
+function clampGeom(g) { return g; }
+function addResizeHandles() {}
+function finishWindowPlacement() {}
+function wireAppChrome() {}
+function updateTaskbarColor() {}
+function updateTaskbarLabel() {}
+function buildTaskbarItem() { return new Elem('div'); }
+function revealAndFocusWindow(id) { reveals.push(id); }
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    win.dom.remove();
+    windows.delete(id);
+}
+function buildAppChrome(spec) {
+    const dom = new Elem('div');
+    dom.className = 'term-window ' + spec.appClass;
+    const titleText = new Elem('div');
+    titleText.className = 'title-text';
+    return { dom: dom, titleText: titleText };
+}
+// 80_js_help_window.js's half of the corpus, reduced to a counter and the
+// section list the merged (post-token) answer is longer than.
+function fetchHelpCorpus() {
+    corpusFetches += 1;
+    corpusSections = hasToken
+        ? ['getting-started', 'mods'] : ['getting-started'];
+    return Promise.resolve(true);
+}
+function buildHelpEntries() {
+    entryBuilds += 1;
+    return corpusSections.map(function (slug) {
+        return { slug: slug, section: slug, title: slug + ' card',
+                 bodyFrags: [{ t: 'p', spans: [{ t: 'text', v: 'body' }] }],
+                 keys: '', _hay: slug };
+    });
+}
+function fetchProfiles() { return Promise.resolve({}); }
+function fetchMcpConfig() { return Promise.resolve({}); }
+
+// ---- the real help mod (#195's reference migration) ------------------------
+let HELP_DECL = null;
+function registerMod(decl) { HELP_DECL = decl; }
+
+__HELP__
+
+const kinds = {};
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        registerWindowKind: function (spec) { kinds[spec.appKind] = spec; return spec; },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+function bootHelp() {
+    const m = modCtx('help');
+    HELP_DECL.init(m.ctx);
+    return m;
+}
+// The window, opened the way core opens it: through the kind this mod
+// registered, whose factory IS openHelpWindow.
+function openHelp() { return kinds.help.factory({}); }
+function railOf(win) {
+    return win._help.railEl.children.map(function (el) {
+        return el.querySelector('.help-rail-label')._text;
+    });
+}
+
+const HELPCASES = {};
+
+// The migration, end to end: a completed host auth on the BUS reaches the open
+// Help window and re-fetches + re-renders its corpus -- what `win._onHostAuth`
+// did, minus the field.
+HELPCASES.auth_refreshes_the_open_window = async function () {
+    const m = bootHelp();
+    const win = openHelp();
+    await tick();                       // the three open-time fetch chains settle
+    const opened = {
+        id: win.id, kind: win.appKind,
+        legacyHook: typeof win._onHostAuth,     // the field must be GONE
+        rail: railOf(win),
+        fetches: corpusFetches, builds: entryBuilds,
+    };
+    // A sentinel in the scroll body: renderHelpInto clears it, so its
+    // disappearance is proof the window really re-rendered.
+    const marker = document.createElement('div');
+    marker.className = 'marker';
+    win._help.scrollEl.appendChild(marker);
+    const before = { fetches: corpusFetches, builds: entryBuilds };
+    hasToken = true;                    // core commits the token, THEN emits
+    const emitted = _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    return {
+        opened: opened, before: before, emitted: emitted,
+        fetches: corpusFetches, builds: entryBuilds,
+        markerGone: win._help.scrollEl.children.indexOf(marker) === -1,
+        rail: railOf(win),
+        sections: win._help.scrollEl.children.map(function (el) {
+            return el.className;
+        }),
+    };
+};
+
+// The guard the old field carried, kept: only the corpus's own host. A remote
+// broker's auth changes nothing this window is showing.
+HELPCASES.a_foreign_hosts_auth_is_ignored = async function () {
+    const m = bootHelp();
+    const win = openHelp();
+    await tick();
+    const before = { fetches: corpusFetches, builds: entryBuilds };
+    hasToken = true;                    // a remote broker's token, not ours
+    _emitModEvent('host:auth', { hostId: 'remote-1' });
+    await tick();
+    return { before: before,
+             fetches: corpusFetches, builds: entryBuilds,
+             rail: railOf(win) };
+};
+
+// The per-window scoping the bus does not carry: the bus is a BROADCAST, so the
+// window is resolved at DELIVERY time. No Help window open -> nothing happens,
+// and nothing throws (the field could not even be reached before).
+HELPCASES.no_open_window_is_a_no_op = async function () {
+    const m = bootHelp();
+    hasToken = true;
+    const never = _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    const withNone = { fetches: corpusFetches, builds: entryBuilds };
+    // ...and a window that has been CLOSED is out of core's map, so it is not
+    // found either -- the old field died with the record for the same reason.
+    const win = openHelp();
+    await tick();
+    const afterOpen = { fetches: corpusFetches, builds: entryBuilds };
+    closeWindow(win.id);
+    _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    return { emitted: never, withNone: withNone, afterOpen: afterOpen,
+             fetches: corpusFetches, builds: entryBuilds,
+             windows: windows.size };
+};
+
+// Auto-unsubscribe at teardown: the discipline every ctx primitive follows, and
+// the reason this mod registers no ctx.onUnload for the subscription.
+HELPCASES.a_disable_drops_the_subscription = async function () {
+    const m = bootHelp();
+    const win = openHelp();
+    await tick();
+    _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    const live = { fetches: corpusFetches, builds: entryBuilds };
+    _runUnloads(m.rec);
+    _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    return { live: live, fetches: corpusFetches, builds: entryBuilds,
+             chip: !!document.getElementById('taskbar').children.length };
+};
+
+// An EDGE event never replays: a Help window opened AFTER the auth is not told
+// about it (it fetched the merged corpus on open, which is why that is right).
+HELPCASES.the_edge_never_replays = async function () {
+    const m = bootHelp();
+    hasToken = true;
+    _emitModEvent('host:auth', { hostId: 'local' });
+    await tick();
+    const win = openHelp();
+    await tick();
+    const atOpen = { fetches: corpusFetches, builds: entryBuilds };
+    await tick();
+    return { atOpen: atOpen, fetches: corpusFetches, builds: entryBuilds,
+             rail: railOf(win) };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!HELPCASES[want]) {
+        console.log('no such help case: ' + want);
+        process.exit(2);
+    }
+    Promise.resolve().then(function () { return HELPCASES[want](); })
+        .then(function (out) {
+            if (!('errors' in out)) out.errors = errors;
+            process.stdout.write(JSON.stringify(out) + '\n');
+        })
+        .catch(function (e) {
+            console.log('help case threw: ' + ((e && e.stack) || e));
+            process.exit(3);
+        });
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def helpmod_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("helpmod") / "harness.js"
+    path.write_text(
+        _HELP_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__EVENTS__", _events_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__HELP__", _help_mod_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_helpmod(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"help case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_help_mod_refreshes_its_window_from_the_bus(helpmod_harness):
+    """E38: help's `win._onHostAuth` is a bus subscription -- proven by running
+    the shipped mod's own init against the shipped bus and emitting."""
+    r = _run_helpmod(helpmod_harness, "auth_refreshes_the_open_window")
+    assert r["errors"] == []
+    # The window is the real one the mod's registered kind builds...
+    assert r["opened"]["id"] == "app:help" and r["opened"]["kind"] == "help"
+    # ...and it carries no convention field at all any more.
+    assert r["opened"]["legacyHook"] == "undefined", \
+        "help is still writing win._onHostAuth onto its window"
+    # Its corpus was fetched once on open, pre-token (one section).
+    assert r["opened"]["rail"] == ["getting-started"]
+    assert r["emitted"] is True
+    # The auth emit re-fetched AND re-rendered: #173's merged corpus, in place.
+    assert r["fetches"] == r["before"]["fetches"] + 1
+    assert r["builds"] == r["before"]["builds"] + 1
+    assert r["markerGone"] is True, "the window never re-rendered"
+    assert r["rail"] == ["getting-started", "mods"], \
+        "the installed-mod sections never reached the open window"
+    assert r["sections"] == ["help-section", "help-section"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_help_mod_ignores_another_brokers_auth(helpmod_harness):
+    """The `hid !== lh.id` guard the field carried, kept on the bus: the payload
+    is `{hostId}` and only the corpus's own host matters."""
+    r = _run_helpmod(helpmod_harness, "a_foreign_hosts_auth_is_ignored")
+    assert r["errors"] == []
+    assert r["fetches"] == r["before"]["fetches"]
+    assert r["builds"] == r["before"]["builds"]
+    assert r["rail"] == ["getting-started"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_bus_is_a_broadcast_but_helps_handler_stays_window_scoped(
+        helpmod_harness):
+    """`win._onHostAuth` was per-window by construction; ctx.events is a
+    broadcast. Help is single-instance, so the fan-out is findHelpWindow() at
+    DELIVERY time -- no window, or a closed one, is nothing to refresh, and it
+    is not an error either."""
+    r = _run_helpmod(helpmod_harness, "no_open_window_is_a_no_op")
+    assert r["errors"] == [], "the handler threw with no Help window open"
+    assert r["emitted"] is True, "the emit itself must still happen"
+    assert r["withNone"] == {"fetches": 0, "builds": 0}
+    # The window that opened in between fetched once, on open; the emit after it
+    # was CLOSED added nothing.
+    assert r["afterOpen"]["fetches"] == 1
+    assert r["fetches"] == r["afterOpen"]["fetches"]
+    assert r["builds"] == r["afterOpen"]["builds"]
+    assert r["windows"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_the_real_help_mod_drops_its_subscription(helpmod_harness):
+    """on() pushes its own unsubscribe onto the mod's LIFO chain, which is why
+    the migration adds no ctx.onUnload of its own."""
+    r = _run_helpmod(helpmod_harness, "a_disable_drops_the_subscription")
+    assert r["errors"] == []
+    assert r["live"]["fetches"] == 2, "the live subscription never fired"
+    assert r["fetches"] == r["live"]["fetches"], \
+        "a disabled mod was still being delivered host:auth"
+    assert r["builds"] == r["live"]["builds"]
+    assert r["chip"] is False, "the mod's own teardown chain did not run"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_help_window_opened_after_the_auth_is_not_replayed_at(
+        helpmod_harness):
+    """`host:auth` is an EDGE event: it does not replay. Right for this
+    consumer, because a Help window opened after the login fetches the merged
+    corpus on open -- a replay would be a second, pointless round trip."""
+    r = _run_helpmod(helpmod_harness, "the_edge_never_replays")
+    assert r["errors"] == []
+    # One fetch, and it is the OPEN's own -- not a replayed auth.
+    assert r["atOpen"]["fetches"] == 1
+    assert r["fetches"] == 1 and r["builds"] == r["atOpen"]["builds"]
+    assert r["rail"] == ["getting-started", "mods"]

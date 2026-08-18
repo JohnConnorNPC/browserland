@@ -596,21 +596,10 @@
             try { fetchHelpCorpus().then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchProfiles(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
             try { fetchMcpConfig(localHost()).then(() => refreshHelpCorpus(win)).catch(() => {}); } catch (_) {}
-            // #173: a corpus fetched before the login overlay was answered has
-            // no installed-mod sections (that half needs the token). Core's
-            // notifyHelpHostAuth drops the memo on login and runs BEFORE this
-            // hook, so re-asking here gets the merged corpus rather than the
-            // one already cached. Everything else in the window is per-page
-            // state, so there is nothing else to redo.
-            win._onHostAuth = (hid) => {
-                let lh = null;
-                try { lh = localHost(); } catch (_) {}
-                if (!lh || hid !== lh.id) return;   // only the corpus's host
-                try {
-                    fetchHelpCorpus().then(() => refreshHelpCorpus(win))
-                        .catch(() => {});
-                } catch (_) {}
-            };
+            // NOTHING is hooked onto the window for a host auth. That used to be
+            // `win._onHostAuth`, the duck-typed field core invoked by name; #195
+            // moved it onto ctx.events, and the subscription lives in init()
+            // beside the rest of this mod's core-facing wiring.
 
             finishWindowPlacement(win);
             setTimeout(() => { try { win._help.searchEl.focus(); } catch (_) {} }, 0);
@@ -713,5 +702,49 @@
                 }
                 const hintTimer = setTimeout(maybeShowHelpHint, 1800);
                 ctx.onUnload(function () { clearTimeout(hintTimer); });
+
+                // #195 REFERENCE MIGRATION: the corpus refetch on a completed
+                // host auth, on the core->mod event bus. It replaces
+                // `win._onHostAuth` — a field this mod wrote onto its window for
+                // core to invoke BY NAME, which core still does for the three
+                // consumers #204 has yet to migrate.
+                //
+                // WHY IT REFETCHES (#173): a corpus fetched before the login
+                // overlay was answered has no installed-mod sections — that half
+                // needs the token. Core's notifyHelpHostAuth drops the memo
+                // BEFORE it emits, so re-asking here gets the merged corpus
+                // rather than the one already cached. Everything else in the
+                // window is per-page state, so there is nothing else to redo.
+                //
+                // THE BUS IS A BROADCAST and the old field was per-window, so
+                // the window is resolved at DELIVERY time instead: Help is
+                // single-instance, so findHelpWindow() is the whole of that
+                // fan-out, and it is if anything stricter than the field was —
+                // a closed Help window is out of `windows` and gets nothing,
+                // and a Help window opened after the auth fetches the merged
+                // corpus on open anyway.
+                //
+                // No ctx.onUnload for it: on() pushes its own unsubscribe onto
+                // this mod's teardown chain. Feature-detected rather than
+                // declared as `needs: ['events']`, and that is the deliberate
+                // half — a `needs` would BLOCK the whole mod on a build without
+                // 86c, costing the "?" chip, the window kind and the hotkey to
+                // protect one corpus refresh. Help is fully usable without the
+                // event; it is not without its window.
+                if (ctx.events && typeof ctx.events.on === 'function') {
+                    ctx.events.on('host:auth', function (p) {
+                        const win = findHelpWindow();
+                        if (!win) return;
+                        let lh = null;
+                        try { lh = localHost(); } catch (_) {}
+                        // only the corpus's host — a remote broker's auth
+                        // changes nothing this window is showing.
+                        if (!lh || !p || p.hostId !== lh.id) return;
+                        try {
+                            fetchHelpCorpus().then(() => refreshHelpCorpus(win))
+                                .catch(() => {});
+                        } catch (_) {}
+                    });
+                }
             },
         });

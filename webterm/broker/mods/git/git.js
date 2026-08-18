@@ -14,11 +14,15 @@
         // old inline gitPost used, byte-identical ({status,json}, fail-open).
         //
         // Per-window state lives in the callback's CLOSURE (one per terminal), not
-        // on the win object. Teardown is idempotent and covers BOTH exits: a window
-        // CLOSE (onDispose → win.cleanups, drained by closeWindow / the active-view
-        // rebuild) AND a mod DISABLE (ctx.onUnload drains a Set holding every live
-        // window's teardown) — so no stray 15s interval, no orphan document
-        // listener, and the ⎇ button + label are removed in either case.
+        // on the win object. Teardown covers BOTH exits through ONE registration:
+        // info.onModTeardown (#195), which fires exactly once on the first of a
+        // window CLOSE (win.cleanups, drained by closeWindow / the active-view
+        // rebuild) and a mod DISABLE — so no stray 15s interval, no orphan document
+        // listener, and the ⎇ button + label are removed in either case. This mod
+        // is #195's reference migration for that hook: it used to hand-ride the two
+        // chains itself, with a Set of live-window teardowns drained from
+        // ctx.onUnload beside an info.onDispose, and a decorate-once WeakSet in
+        // front of both. Core keeps all three now.
         registerMod({
             id: 'git',
             version: '1.0.0',
@@ -37,17 +41,11 @@
                 // scope, so define a local one.
                 const stopProp = function (e) { e.stopPropagation(); };
 
-                // Every LIVE window's idempotent teardown, so a mod DISABLE
-                // (ctx.onUnload) can tear down widgets on windows that are still
-                // open — win.cleanups only fires on window close/rebuild. Each
-                // teardown removes itself from the set, so a window close and a mod
-                // disable never double-run and the set never leaks dead entries.
-                const disposers = new Set();
-                // Belt-and-braces: never decorate the same win twice. Replay and
-                // the create-time emit are mutually exclusive for one subscription,
-                // but a WeakSet keyed by win keeps it robust (and self-cleaning: a
-                // closed win is GC'd out of the set).
-                const decorated = new WeakSet();
+                // NO `needs` on the decl for this: `needs` names a path on CTX
+                // (#197 resolves 'windows.onTerminalCreate'), and onModTeardown is
+                // a member of the per-delivery info BAG, which no ctx path can
+                // reach. The bail above is what covers an absent ctx.windows, and
+                // the per-registration check below covers an absent hook.
 
                 // Feature-detected {stop}-shaped interval: a runtime-installed
                 // copy of this mod can run against an older core with no
@@ -66,8 +64,12 @@
                 ctx.windows.onTerminalCreate(function (info) {
                     const win = info.win;
                     const titleBar = info.titleBar;
-                    if (!win || !titleBar || decorated.has(win)) return;
-                    decorated.add(win);
+                    // No decorate-once guard of this mod's own: one subscription's
+                    // replay and its create-time emit are mutually exclusive, so
+                    // core delivers each window to this callback exactly once
+                    // (#116) — the WeakSet that used to sit here was belt-and-braces
+                    // over a guarantee core already makes.
+                    if (!win || !titleBar) return;
 
                     // ---- per-window title-bar UI (moved from core) ------------
                     // Starts muted (no status known yet); hidden when the cwd is
@@ -287,20 +289,15 @@
                     gitBtn.addEventListener('mousedown', stopProp);
                     gitBtn.addEventListener('click', onGitClick);
 
-                    // One idempotent teardown for BOTH exits (window close via
-                    // onDispose, mod disable via the disposers drain). Removes the
-                    // listeners, closes the popover (dropping its document-level
-                    // listeners), clears the keep-alive interval, and removes the
-                    // DOM nodes. Self-removes from the set so a second call no-ops.
+                    // One teardown for BOTH exits. Removes the listeners, closes the
+                    // popover (dropping its document-level listeners), clears the
+                    // keep-alive interval, and removes the DOM nodes. `torn` is the
+                    // flag the async refreshGit and the two timers already read to
+                    // tell a dead window from a live one, so it doubles as the
+                    // idempotence guard the fallback path below still wants.
                     const teardown = function () {
                         if (torn) return;
                         torn = true;
-                        disposers.delete(teardown);
-                        // Drop the decorate-once guard so IF this exact win object
-                        // were ever re-emitted (it is not today — closeWindow /
-                        // teardownView both discard the win before any replay), a
-                        // future create would re-decorate rather than silently skip.
-                        decorated.delete(win);
                         gitBtn.removeEventListener('mousedown', stopProp);
                         gitBtn.removeEventListener('click', onGitClick);
                         closeGitPopover();
@@ -308,8 +305,19 @@
                         try { gitBtn.remove(); } catch (_) {}
                         try { gitLabel.remove(); } catch (_) {}
                     };
-                    disposers.add(teardown);
-                    info.onDispose(teardown);
+                    // #195: ONE registration, both exits. onModTeardown fires on the
+                    // first of the window closing and this mod being disabled, and a
+                    // disable removes the widget WITHOUT closing the terminal (the
+                    // window is core's, not this mod's). It returns false when it
+                    // would never fire at all — a build with no 86c, a window already
+                    // gone, this mod mid-teardown — and then the window-close half is
+                    // still worth arming, because a leaked 15s interval plus a live
+                    // document listener is the worse failure. It is the one line this
+                    // rode before, not a second set.
+                    if (!(typeof info.onModTeardown === 'function'
+                          && info.onModTeardown(teardown))) {
+                        info.onDispose(teardown);
+                    }
 
                     // Initial fetch shortly after open, plus a slow keep-alive poll.
                     // Both best-effort; refreshGit never throws and self-guards on
@@ -323,17 +331,9 @@
                     }, 15000);
                 });
 
-                // Mod teardown: tear down every LIVE window's widget (win.cleanups
-                // only fires on window close, not on a mod disable). Each teardown
-                // is idempotent + self-removing, so a window that closes first has
-                // already left the set. The onTerminalCreate unsubscribe is
-                // auto-registered by the loader (rec.unloads), so no new windows get
-                // decorated after this.
-                ctx.onUnload(function () {
-                    for (const t of Array.from(disposers)) {
-                        try { t(); } catch (_) {}
-                    }
-                    disposers.clear();
-                });
+                // No ctx.onUnload drain here any more: the mod-disable half of every
+                // window's teardown is what info.onModTeardown registered above, and
+                // the onTerminalCreate unsubscribe is auto-registered by the loader
+                // (rec.unloads), so no terminal opened after a disable gets a widget.
             },
         });
