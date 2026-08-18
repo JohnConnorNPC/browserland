@@ -16842,7 +16842,9 @@ def test_savechain_joins_the_family_it_extends_or_not_at_all(savechain_harness):
     r = _run_savechain(savechain_harness, "family_shape")
     assert r["errors"] == []
     assert "saveChain" in r["members"] and "update" in r["members"]
-    assert r["chainMembers"] == ["flush", "onState", "save"]
+    # dispose() is the fourth member: a chain shorter-lived than the
+    # activation has to be able to give its rec.unloads entry back.
+    assert r["chainMembers"] == ["dispose", "flush", "onState", "save"]
     assert r["bare"] == "undefined", \
         "a ctx with no serverStore was given a half-family"
     assert r["partial"] == ["get"], \
@@ -16901,7 +16903,11 @@ def test_scratchpad_deleted_its_hand_rolled_save_chain():
     # test_modstore_nohistory pins that scratchpad must never set the flag.
     assert "purgeRevisions" not in src and "noHistory" not in src
     # The banner rides onState, and the subscription is dropped with the window.
-    assert "win.cleanups.push(chain.onState(function (state) {" in src
+    # The banner rides onState with the RESULT, not the state alone: it comes
+    # down on a genuine success only, never on a bare 'idle' (which is also
+    # where a transport failure, a 5xx and a 413 land).
+    assert "win.cleanups.push(chain.onState(function (state, res) {" in src
+    assert "else if (state === 'idle' && res && res.ok === true) {" in src
     assert "if (state === 'conflict') enterRO();" in src
     # The final flush is a WINDOW cleanup, never an onUnload (#196 trap 6): from
     # an onUnload rec.unloading is already set and 86e drops the batch.
@@ -16966,6 +16972,11 @@ function makeBroker(opts) {
                  value: (opts.value !== undefined) ? opts.value : null };
     const puts = [];
     const fn = function (host, path, o) {
+        // A broker that has stopped answering. Flipped MID-test (fn.opts is
+        // exposed) so a banner can be raised against a LIVE broker first --
+        // that ordering is the whole question: does a later transport failure
+        // retract a warning that is still true?
+        if (opts.dead) return reply(503, { ok: false, error: 'unreachable' });
         if (!o || o.method !== 'PUT') {
             return reply(200, { rev: st.rev, value: st.value, revisions: [] });
         }
@@ -17296,6 +17307,56 @@ SCRATCHCASES.closing_the_window_flushes_the_pending_edit = async function () {
              modAlive: window.__mods.active.has('scratchpad') };
 };
 
+// The chain is per WINDOW; rec.unloads is per ACTIVATION. So every open pushes
+// a disposer that a close has to give back, or the list grows for the life of
+// the activation and each dead chain in it retains its last result -- which for
+// a 409 carries the server's inlined value, i.e. a whole notes document per
+// leaked entry. Five cycles, counted after each close.
+SCRATCHCASES.opening_and_closing_leaks_no_disposers = async function () {
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] } });
+    const m = activate();
+    const base = m.rec.unloads.length;
+    const counts = [];
+    for (let i = 0; i < 5; i++) {
+        const win = await open();
+        typeInto(win, 'cycle ' + i);
+        closeWindow('app:scratch');
+        await waitFor(function () { return puts().length >= i + 1; }, 2000);
+        await sleep(20);
+        counts.push(m.rec.unloads.length - base);
+    }
+    return { counts: counts, puts: puts().length, texts: texts(),
+             stored: stored() };
+};
+
+// A save failure that is NOT a conflict must not RETRACT a read-only banner
+// that is still true. Every save now begins with a GET, so an unreachable
+// broker lands the chain on 'idle' -- and refresh() dedupes on the state, so a
+// PERSISTENT failure never fires 'conflict' again: retract it once and the
+// window shows no warning for the rest of the session while storing nothing.
+SCRATCHCASES.a_transport_failure_does_not_retract_the_banner = async function () {
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] }, notActive: true });
+    const m = activate();
+    const win = await open();
+    typeInto(win, 'first');
+    await waitFor(function () { return win.serverRO === true; }, 3000);
+    const raised = { banner: banner(win), serverRO: win.serverRO };
+    // Now the broker stops answering entirely, and the user clicks in the
+    // window (the read-only retry path).
+    BROKER.opts.dead = true;
+    fire(win.dom, 'mousedown');
+    await sleep(60);
+    const afterFailure = { banner: banner(win), serverRO: win.serverRO };
+    // ...and whatever they type next must still be treated as unsaveable.
+    typeInto(win, 'typed after the failure');
+    await sleep(900);
+    return { raised: raised, afterFailure: afterFailure,
+             stored: stored(), banner: banner(win),
+             serverRO: win.serverRO };
+};
+
 // The adversarial reviewer's second blocker, as a case rather than an argument:
 // close the window while a write is ALREADY in flight, with a newer keystroke
 // queued behind it. Single-in-flight means flush() cannot send that one now, and
@@ -17514,6 +17575,51 @@ def test_the_real_scratchpad_flushes_on_close_which_it_never_used_to(
     # The mod is still ALIVE -- that is what makes the flush legal; the same
     # call from an onUnload would be dropped by the chain.
     assert r["modAlive"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_transport_failure_does_not_retract_the_read_only_banner(
+        scratchpad_harness):
+    # The migration's real regression, and the mirror of a question the drafter
+    # DID ask: it tested that a no-host refusal must not RAISE a banner a retry
+    # could never clear -- but never that a non-conflict result must not CLEAR
+    # one that is still true.
+    #
+    # It matters more than a flicker. Every save now begins with a GET, so an
+    # unreachable broker lands the chain on 'idle', and refresh() dedupes on the
+    # state: once retracted, a PERSISTENT failure never fires 'conflict' again.
+    # The window then shows no warning at all while storing nothing.
+    r = _run_scratchpad(scratchpad_harness,
+                     "a_transport_failure_does_not_retract_the_banner")
+    assert r["errors"] == []
+    assert r["raised"] == {"banner": "shown", "serverRO": True}, \
+        "the 409 never raised the banner, so this proves nothing"
+    assert r["afterFailure"] == {"banner": "shown", "serverRO": True}, \
+        "a transport failure retracted a read-only banner that was still true"
+    # ...and the state it describes is real: nothing the user typed afterwards
+    # reached the broker.
+    assert r["banner"] == "shown" and r["serverRO"] is True
+    assert r["stored"] == "seed", "text landed while the broker was unreachable"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_opening_and_closing_the_window_leaks_no_chain_disposers(
+        scratchpad_harness):
+    # The chain is per WINDOW; rec.unloads is per ACTIVATION. Without a dispose()
+    # every open pushes an entry a close can never give back -- and each dead
+    # chain retains its last result, which for a 409 is the server's inlined
+    # value, i.e. a whole notes document per leaked entry. Unbounded over a long
+    # session of opening and closing the notes window.
+    r = _run_scratchpad(scratchpad_harness, "opening_and_closing_leaks_no_disposers")
+    assert r["errors"] == []
+    assert r["counts"] == [0, 0, 0, 0, 0], \
+        "a chain disposer survived its window (counts grow +1 per open)"
+    # The close-time flush still works -- dispose() must not kill the batch it
+    # was about to send, which is the trap: flush() is asynchronous, so
+    # disposing in the same tick eats the very save this cleanup exists for.
+    assert r["puts"] == 5
+    assert r["texts"] == ["cycle 0", "cycle 1", "cycle 2", "cycle 3", "cycle 4"]
+    assert r["stored"] == "cycle 4"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

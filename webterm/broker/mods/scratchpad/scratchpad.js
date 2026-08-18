@@ -416,9 +416,23 @@
                     // forever instead. onState fires once on subscribe, so the
                     // banner is already correct before the first save; 'saving'
                     // leaves it exactly as it is.
-                    win.cleanups.push(chain.onState(function (state) {
+                    //
+                    // The banner comes DOWN only on a genuine success, never on
+                    // 'idle' alone. 'idle' is also where a transport failure, a
+                    // 5xx and a 413 land, and every save now begins with a GET
+                    // (update() reads before it writes), so a broker that is
+                    // merely unreachable would otherwise retract a warning that
+                    // is still true. Worse, it would stay retracted: refresh()
+                    // dedupes on the state, so a PERSISTENT failure never fires
+                    // 'conflict' again and the user types into a window that
+                    // shows no warning and stores nothing. The old code cleared
+                    // it on `res.ok` for exactly this reason; the result rides
+                    // the second argument, so the gate is the same one.
+                    win.cleanups.push(chain.onState(function (state, res) {
                         if (state === 'conflict') enterRO();
-                        else if (state === 'idle') exitRO();
+                        else if (state === 'idle' && res && res.ok === true) {
+                            exitRO();
+                        }
                     }));
                     // Save NOW, past the debounce and past the RO gate: Ctrl+S,
                     // the "Take over" button, a click anywhere in the window
@@ -448,9 +462,27 @@
                     // destroys the CM view: the reducer must not be the only
                     // thing that ever reads the buffer. A chain with nothing
                     // queued makes no request at all.
+                    // dispose() when the flush has SETTLED, never beside it. The
+                    // chain is per WINDOW while rec.unloads is per ACTIVATION,
+                    // so without a dispose each open leaks one disposer that
+                    // also retains the chain's last result — a whole notes blob
+                    // when that result is a 409. But flush() is asynchronous:
+                    // disposing in the same tick kills the batch it was about to
+                    // send, which is the close-time save this cleanup exists for.
+                    // So it hangs off the promise, on both settle paths.
                     win.cleanups.push(() => {
                         try { captureActive(); } catch (_) {}
-                        try { chain.flush(); } catch (_) {}
+                        const done = () => {
+                            try { chain.dispose(); } catch (_) {}
+                        };
+                        try {
+                            const p = chain.flush();
+                            if (p && typeof p.then === 'function') {
+                                p.then(done, done);
+                            } else {
+                                done();
+                            }
+                        } catch (_) { done(); }
                     });
 
                     // ---- History panel ----------------------------------------

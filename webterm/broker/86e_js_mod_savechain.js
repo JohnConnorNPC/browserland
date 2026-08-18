@@ -368,7 +368,24 @@
             // family's disposer. rec.unloading already makes the chain dead on
             // its own; this is what releases the timer and the listeners.
             if (rec && Array.isArray(rec.unloads)) rec.unloads.push(die);
-            return { save: save, flush: flush, onState: onState };
+            // ...and `dispose()` is how a chain shorter-lived than the
+            // ACTIVATION gives that entry back. A chain built per WINDOW (which
+            // scratchpad's is, because its reducer needs the window closure)
+            // would otherwise push one `die` per open and never release it: the
+            // list grows for the life of the activation, and every dead chain
+            // in it retains its last result — which for a 409 carries the
+            // server's inlined value, i.e. a whole document per leaked entry.
+            // Idempotent, and it kills the chain as well as unhooking it, so a
+            // disposed chain cannot write after its window is gone.
+            function dispose() {
+                die();
+                if (rec && Array.isArray(rec.unloads)) {
+                    const i = rec.unloads.indexOf(die);
+                    if (i !== -1) rec.unloads.splice(i, 1);
+                }
+            }
+            return { save: save, flush: flush, onState: onState,
+                     dispose: dispose };
         }
         function _ctxServerStoreSaveChain(ctx, rec) {
             const store = ctx && ctx.serverStore;
