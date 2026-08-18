@@ -493,7 +493,22 @@
                 services.forEach(function (entry) {
                     try {
                         entry.revoked = true;
-                        entry.api = null;
+                        // RE-SNAPSHOT the function keys before dropping the api. The
+            // snapshot taken at provide() time misses every method added after
+            // it — `ctx.provide('x', api); api.later = fn;` is an ordinary
+            // shape, as is filling an object in a later phase — and a getter-
+            // exposed method was never in it either. Those worked while live
+            // and threw "is not a function" inside the consumer once dead,
+            // which is the precise failure the snapshot exists to prevent.
+            // Re-taking it here costs one walk at teardown and closes the gap
+            // for anything the provider ever actually exposed.
+            try {
+                const late = _modServiceFnKeys(entry.api);
+                if (late && typeof late.forEach === 'function') {
+                    late.forEach(function (k) { entry.fnKeys.add(k); });
+                }
+            } catch (_) { /* a hostile api; keep the provide-time snapshot */ }
+            entry.api = null;
                         entry.wrappers = null;
                     } catch (_) {}
                 });

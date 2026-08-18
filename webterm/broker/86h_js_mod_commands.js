@@ -166,6 +166,25 @@
             } catch (_) { return null; }
         }
 
+        // The single liveness gate, and it is keyed on REGISTRY IDENTITY rather
+        // than on a flag. `entry.dead` only ever becomes true on a tombstone
+        // the disposer PUTS IN THE MAP — the captured entry object itself is
+        // never mutated — so a check that reads entry.dead cannot see an
+        // unregistration at all. Identity can: if the map no longer holds this
+        // exact entry, this registration is over, whether it was replaced,
+        // deleted or tombstoned.
+        //
+        // Both dispatch paths call this immediately before run(). The async one
+        // always did; the SYNCHRONOUS one did not, and a guard that tears down
+        // its own mod ("if the doc is gone, disable me") then returned true and
+        // ran against the torn-down closure, reporting ok:true.
+        function _modCommandStillLive(entry) {
+            if (!entry || entry.dead || !entry.rec || entry.rec.unloading) {
+                return false;
+            }
+            return _MOD_COMMANDS.get(entry.id) === entry;
+        }
+
         // One 'error' outcome, logged once. The log is the isolation being
         // VISIBLE: a swallowed exception with no console line is how a broken
         // command becomes "the button does nothing" for a week. `error` carries
@@ -231,10 +250,21 @@
             // after a later throw, and the LIFO drain all release it exactly
             // once. Identity-checked: a stale disposer from a previous
             // activation must never tombstone the CURRENT one's entry.
+            // A tombstone is earned by TEARDOWN, not by unregistration. The
+            // disposer knows which it is: `rec.unloading` is set at the head of
+            // _runUnloads, so a drain tombstones (the id stays known and answers
+            // 'inactive', which is the sentence "turn that mod on"), while a
+            // mod voluntarily calling off() while still alive DELETES — nobody
+            // should be told to enable a mod that is already enabled, and the
+            // id genuinely is gone until something registers it again.
             const off = function () {
                 if (_MOD_COMMANDS.get(full) !== entry) return;
-                _MOD_COMMANDS.set(full, { id: full, modId: modId, scope: scope,
-                                          dead: true });
+                if (rec && rec.unloading) {
+                    _MOD_COMMANDS.set(full, { id: full, modId: modId,
+                                              scope: scope, dead: true });
+                } else {
+                    _MOD_COMMANDS.delete(full);
+                }
             };
             rec.unloads.push(off);
             return off;
@@ -316,26 +346,54 @@
                             _modCommandFailed(entry.id, 'when', e));
                     }
                     return assimilated.then(function (v) {
+                        // Re-checked after the await -- the mod may have been
+                        // torn down while its own guard was pending, and running
+                        // a dead activation's code is the one thing this family
+                        // must never do. BEFORE the verdict, deliberately: a
+                        // guard that tore its own mod down and then said no did
+                        // answer, but the answer no longer matters, and
+                        // 'blocked' would send a caller back to retry something
+                        // that cannot run until the mod is switched on again.
+                        // Dead outranks vetoed.
+                        if (!_modCommandStillLive(entry)) {
+                            return { ok: false, reason: 'inactive' };
+                        }
                         if (!v) {
                             return { ok: false, reason: 'blocked',
                                      detail: 'when' };
                         }
-                        // Re-checked after the await: the mod may have been torn
-                        // down while its own guard was pending, and running a
-                        // dead activation's code is the one thing this family
-                        // must never do.
-                        if (entry.dead || !entry.rec || entry.rec.unloading) {
-                            return { ok: false, reason: 'inactive' };
+                        // The WINDOW is re-derived too, not just the mod. A
+                        // window-scoped command whose guard awaited can have had
+                        // its window closed in the meantime, and handing run() a
+                        // disposed, deregistered window re-imposes exactly the
+                        // `typeof win._saveToServer` re-check this family exists
+                        // to delete — inside every async-guarded command. A
+                        // fresh object, so a guard that mutated `where.win`
+                        // cannot decide what run() sees.
+                        if (entry.scope === 'window') {
+                            const now = _focusedModWindow();
+                            if (!now) {
+                                return { ok: false, reason: 'blocked',
+                                         detail: 'no-window' };
+                            }
+                            return _runModCommand(entry, args, { win: now });
                         }
-                        return _runModCommand(entry, args, where);
+                        return _runModCommand(entry, args, { win: null });
                     }, function (e) {
                         return _modCommandFailed(entry.id, 'when', e);
                     });
+                }
+                // Same ordering as the async branch above: dead outranks vetoed.
+                if (!_modCommandStillLive(entry)) {
+                    return Promise.resolve({ ok: false, reason: 'inactive' });
                 }
                 if (!allowed) {
                     return Promise.resolve({ ok: false, reason: 'blocked',
                                             detail: 'when' });
                 }
+            }
+            if (!_modCommandStillLive(entry)) {
+                return Promise.resolve({ ok: false, reason: 'inactive' });
             }
             return _runModCommand(entry, args, where);
         }

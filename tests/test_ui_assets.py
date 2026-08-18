@@ -18861,6 +18861,27 @@ CASES.a_dead_thenable_service_does_not_hang = async function () {
              deadRun: deadRun, ranDead: ranDead };
 };
 
+// A method added AFTER provide() -- publish the object, then fill it, or attach
+// during a later phase -- was missing from the provide-time snapshot, so it
+// worked while live and threw "is not a function" inside the consumer once
+// dead: the exact failure the snapshot exists to prevent.
+CASES.a_late_added_method_still_degrades = function () {
+    const provider = activate('p');
+    const api = { early: function () { return 'early'; } };
+    provider.ctx.provide('svc', api);
+    api.late = function () { return 'late'; };          // after provide()
+    const consumer = activate('c');
+    const p = consumer.ctx.consume('p', 'svc');
+    const alive = { early: p.early(), late: p.late() };
+    disable(provider);
+    const out = {};
+    for (const k of ['early', 'late']) {
+        try { out[k] = (p[k]() === undefined) ? 'no-op' : 'A VALUE'; }
+        catch (e) { out[k] = 'threw:' + String(e && e.message); }
+    }
+    return { alive: alive, dead: out };
+};
+
 CASES.a_frozen_api_still_degrades = function () {
     const provider = activate('p');
     provider.ctx.provide('svc', Object.freeze({
@@ -19831,6 +19852,99 @@ CASES.callbacks_do_not_receive_the_registry_entry = async function () {
     return { res: res, seen: seen };
 };
 
+// The fragment's own stated invariant -- "running a dead activation's code is
+// the one thing this family must never do" -- was enforced only on the ASYNC
+// guard path. A synchronous guard that tears its own mod down ("if the doc is
+// gone, disable me") then returned true, and run() executed against the
+// torn-down closure reporting ok:true.
+CASES.a_sync_guard_cannot_run_a_dead_activation = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    let ran = 0;
+    c.register('selfkill', {
+        when: function () { _runUnloads(m.rec); return true; },
+        run: function () { ran += 1; return 'RAN ON DEAD ACTIVATION'; },
+    });
+    const res = await c.execute('scratchpad:selfkill');
+    // ...and the same guard returning FALSE must say inactive, not blocked:
+    // the mod is gone, which is a different sentence from "not right now".
+    const m2 = activate('scratchpad');
+    const c2 = m2.ctx.commands;
+    c2.register('selfkill2', {
+        when: function () { _runUnloads(m2.rec); return false; },
+        run: function () { ran += 1; return 'x'; },
+    });
+    const res2 = await c2.execute('scratchpad:selfkill2');
+    return { res: res, res2: res2, ran: ran };
+};
+
+// off() is not teardown. Unregistering during a pending async guard used to run
+// the OLD closure anyway -- and even over a replacement registered under the
+// same id -- because the post-await check read entry.dead (only ever set on a
+// tombstone PUT IN THE MAP, never on the captured entry) instead of asking
+// whether the registry still holds this exact entry.
+CASES.unregistering_during_a_pending_guard_stops_the_old_closure = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    let ran = 0;
+    let release = null;
+    const off = c.register('swap', {
+        when: function () {
+            return new Promise(function (r) { release = r; });
+        },
+        run: function () { ran += 1; return 'OLD CLOSURE RAN'; },
+    });
+    const pending = c.execute('scratchpad:swap');
+    off();
+    // A replacement under the same id, which the old closure must not preempt.
+    c.register('swap', { run: function () { ran += 1; return 'v2'; } });
+    release(true);
+    const res = await pending;
+    const live = await c.execute('scratchpad:swap');
+    return { res: res, live: live, ran: ran };
+};
+
+// A voluntary off() while the mod is ALIVE deletes rather than tombstoning: an
+// operator told 'inactive' is told "turn that mod on", and it already is on.
+// A tombstone is earned by teardown.
+CASES.off_deletes_but_teardown_tombstones = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    const off = c.register('gone', { run: function () { return 'x'; } });
+    off();
+    const afterOff = await c.execute('scratchpad:gone');
+    const m2 = activate('other');
+    m2.ctx.commands.register('kept', { run: function () { return 'x'; } });
+    _runUnloads(m2.rec);
+    const afterTeardown = await c.execute('other:kept');
+    return { afterOff: afterOff, afterTeardown: afterTeardown };
+};
+
+// A window-scoped command whose guard awaited must not be handed a window that
+// closed in the meantime. Handing run() a disposed, deregistered window
+// re-imposes the very `typeof win._saveToServer` re-check this family deletes.
+CASES.an_async_guard_does_not_hand_run_a_dead_window = async function () {
+    const m = activate('scratchpad');
+    const c = m.ctx.commands;
+    const win = openWindow('w1');
+    let seen = 'NOTHING';
+    let release = null;
+    c.register('needswin', {
+        scope: 'window',
+        when: function () { return new Promise(function (r) { release = r; }); },
+        run: function (args, where) {
+            seen = where.win ? (where.win.id + ':disposed=' + !!where.win.disposed)
+                             : 'null';
+            return 1;
+        },
+    });
+    const pending = c.execute('scratchpad:needswin');
+    win.disposed = true; windows.delete('w1'); frontId = null;
+    release(true);
+    const res = await pending;
+    return { res: res, seen: seen };
+};
+
 CASES.a_command_executed_mid_teardown_is_inactive = async function () {
     const m = activate('scratchpad');
     let ran = 0;
@@ -20313,3 +20427,61 @@ def test_command_callbacks_are_not_handed_the_registry_entry(commands_harness):
     assert r["res"]["ok"] is True and r["res"]["value"] == "ok"
     assert r["seen"]["whenThis"] == "undefined"
     assert r["seen"]["runThis"] == "undefined"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_synchronous_guard_cannot_run_a_dead_activation(commands_harness):
+    # 86h states this as its own invariant, and enforced it only on the async
+    # path. The synchronous fall-through had no gate at all.
+    r = _run_commands(commands_harness, "a_sync_guard_cannot_run_a_dead_activation")
+    assert r["ran"] == 0, "a torn-down activation's run() executed"
+    assert r["res"] == {"ok": False, "reason": "inactive"}
+    assert r["res2"] == {"ok": False, "reason": "inactive"}, (
+        "a guard that killed its own mod and returned false reported 'blocked' "
+        "-- 'not right now' instead of 'that mod is gone'")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_unregistering_during_a_pending_guard_stops_the_old_closure(
+        commands_harness):
+    # The liveness gate is keyed on registry IDENTITY, not on entry.dead --
+    # which is only ever set on a tombstone put IN THE MAP, never on the
+    # captured entry, so it could not see an unregistration at all.
+    r = _run_commands(commands_harness,
+                      "unregistering_during_a_pending_guard_stops_the_old_closure")
+    assert r["res"] == {"ok": False, "reason": "inactive"}, \
+        "an unregistered command ran after off()"
+    # The replacement is intact and dispatchable.
+    assert r["live"]["ok"] is True and r["live"]["value"] == "v2"
+    assert r["ran"] == 1, "the old closure ran as well as the replacement"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_off_deletes_while_teardown_tombstones(commands_harness):
+    # 'inactive' means "turn that mod on". A mod that unregistered a command
+    # while running is already on, so saying 'inactive' sends an operator to
+    # a switch that is not the problem.
+    r = _run_commands(commands_harness, "off_deletes_but_teardown_tombstones")
+    assert r["afterOff"] == {"ok": False, "reason": "absent"}
+    assert r["afterTeardown"] == {"ok": False, "reason": "inactive"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_async_guard_does_not_hand_run_a_dead_window(commands_harness):
+    # The mod was re-derived after the await; the WINDOW was not.
+    r = _run_commands(commands_harness,
+                      "an_async_guard_does_not_hand_run_a_dead_window")
+    assert r["seen"] == "NOTHING", (
+        "run() was called with a window that closed during the guard")
+    assert r["res"] == {"ok": False, "reason": "blocked", "detail": "no-window"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_method_added_after_provide_still_degrades(services_harness):
+    # `ctx.provide('x', api); api.later = fn;` is an ordinary shape. The
+    # provide-time snapshot missed it, so it worked live and threw once dead.
+    r = _run_services(services_harness, "a_late_added_method_still_degrades")
+    assert r["errors"] == []
+    assert r["alive"] == {"early": "early", "late": "late"}
+    assert r["dead"] == {"early": "no-op", "late": "no-op"}, (
+        "a late-added method threw inside the consumer instead of no-oping")
