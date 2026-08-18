@@ -234,6 +234,18 @@ _ORDERED = [
     # script splice, since a mod's init reads the finished ctx. One <script>,
     # one scope.
     "86h_js_mod_commands.js",
+    # #200: ctx.http.fetch(hostId, path, opts) -- the sanctioned authenticated
+    # HTTP call, replacing the raw hoisted hostFetch for mods. It kills that
+    # helper's two documented footguns: a null host silently targeting the same
+    # origin (hostId is REQUIRED and throws SYNCHRONOUSLY; an unknown one fails
+    # closed with no request issued), and a deadline that stops at headers (this
+    # one is TOTAL -- it spans the body read, which is what mod-sync hand-rolled
+    # an AbortController around). Its own fragment for the same split-never-trim
+    # reason 86e/86f/86g/86h got one: 86c is at the 2500-line cap. Ordered among
+    # the 86* companions, still before the mod-script splice, since a mod's init
+    # reads the finished ctx. One <script>, one scope: it calls 63's hostFetch
+    # and 56's hostById directly, and core keeps hostFetch unchanged.
+    "86i_js_mod_http.js",
     # #200: ctx.hosts.list() -- a read-only host snapshot carrying VERIFIED
     # broker identity (#64's brokerId out of /info, null until the host has
     # answered, reset on a URL repoint), replacing update's hand-rolled

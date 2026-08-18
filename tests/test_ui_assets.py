@@ -20955,3 +20955,657 @@ def test_list_decorates_the_hosts_family_instead_of_replacing_it(
     r = _run_hosts_list(hosts_list_harness, "family_is_decorated")
     assert r["hasInvalidate"] == "function"
     assert r["hasList"] == "function"
+
+
+# --------------------------------------------------------------------------- #
+# ctx.http.fetch -- the sanctioned authenticated fetch (#200 / A53)
+# --------------------------------------------------------------------------- #
+
+_HTTP_SLICE_START = "// ---- ctx.http: the sanctioned authenticated fetch (#200)"
+_HTTP_SLICE_END = "// ---- end ctx.http"
+
+
+def _http_src():
+    return (BROKER_DIR / "86i_js_mod_http.js").read_text(encoding="utf-8")
+
+
+def _http_source():
+    """A53's range in 86i, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node harness below drive the
+    SHIPPED wrapper instead of a copy of it."""
+    src = _http_src()
+    start = src.index(_HTTP_SLICE_START)
+    end = src.index(_HTTP_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for sym in ("const MOD_HTTP_TIMEOUT_MS = ",
+                "function _modHttpArgError(rec, msg) {",
+                "function _modHttpTimeoutReason() {",
+                "function _modHttpBody(status, ctype, text) {",
+                "function _modHttpFetch(rec, hostId, path, opts) {",
+                "function _modHttpFail(e) {",
+                "function _ctxHttp(ctx, rec) {"):
+        assert sym in body, f"the ctx.http range no longer defines {sym!r}"
+    return body
+
+
+def _host_fetch_source():
+    """63's hostUrl + hostFetch, verbatim -- the transport ctx.http wraps.
+
+    Sliced rather than faked because the whole point of A53 is what happens at
+    the seam: that hostFetch attaches the bearer token, that it COMPOSES a
+    caller signal instead of replacing it, and above all that its own deadline
+    stops at the headers. A fake would let the total-deadline case pass against
+    a transport that never had the bug."""
+    src = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    a = src.index("        function hostUrl(host, path) {")
+    b = src.index("        function hostWsUrl(host, path) {", a)
+    body = src[a:b]
+    assert "function hostFetch(host, path, opts) {" in body
+    assert "headers.set('Authorization', 'Bearer ' + host.token);" in body
+    return body
+
+
+def test_http_lands_in_its_own_fragment_and_is_registered():
+    # A53: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap and the rule for
+    # that cap is split, never trim -- so ctx.http gets a NEW ordered fragment,
+    # the precedent 86e/86f/86g/86h set. File and registration must agree in
+    # BOTH directions, which is what this pair of asserts is.
+    assert "86i_js_mod_http.js" in ui._ORDERED
+    assert (BROKER_DIR / "86i_js_mod_http.js").is_file()
+    at = ui._ORDERED.index
+    # After 86c (it uses that fragment's registrars) and still before the
+    # mod-script splice, since a mod's init reads the finished ctx.
+    assert at("86c_js_mod_ctx_ext.js") < at("86i_js_mod_http.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    for frag in ("86_js_mod_loader.js", "86c_js_mod_ctx_ext.js",
+                 "86i_js_mod_http.js"):
+        n = len((BROKER_DIR / frag).read_text(encoding="utf-8").splitlines())
+        assert n <= ui._MAX_LINES, f"{frag} is over the cap at {n}"
+    # The whole surface reaches the served page, exactly once, and none of it
+    # leaked back into the two fragments that had no room for it.
+    http = _http_src()
+    for sym in ("function _modHttpFetch(rec, hostId, path, opts) {",
+                "function _modHttpBody(status, ctype, text) {",
+                "function _ctxHttp(ctx, rec) {"):
+        assert sym in http, f"{sym!r} did not land in 86i"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#200 symbol missing/duplicated in the served page: {sym!r}"
+        assert sym not in _loader_src() and sym not in _ctx_ext_src(), \
+            f"{sym!r} belongs in 86i, not 86c or the loader"
+    # The registrations are guarded, for a page assembled without #194's
+    # registry -- a bare call there would be a ReferenceError at load.
+    assert "if (typeof _registerCtxExtender === 'function') {" in http
+    assert http.index("if (typeof _registerCtxExtender === 'function') {") \
+        < http.index("_registerCtxExtender(_ctxHttp);")
+    assert ("        if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('http', 1);\n"
+            "        }\n") in http
+    # Core keeps hostFetch: #200 wraps it, it does not change it.
+    assert "function hostFetch(host, path, opts) {" in \
+        (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+
+
+def test_ctx_http_owes_a_capability_entry_and_registers_it():
+    # #197's map is per FAMILY -- a bare top-level ctx member name -- and `http`
+    # is a NEW top-level member, exactly like #195's `hosts`, #198's `signal`
+    # and #199's `commands`. (#196's saveChain owed none: it decorates
+    # `serverStore`, a member of a family that already has an entry.) Without
+    # this the map would lie by omission about surface the build has.
+    assert "http" in _ctx_families_added_by_extenders(), \
+        "the extender must put `http` on the ctx as a top-level member"
+    assert "http" in _standalone_capability_registrations()
+    assert "http" not in set(_ctx_family_keys()), \
+        "ctx.http is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # Additive: a new family does not move the contract version.
+    assert "ctxVersion: 1," in _loader_src()
+
+
+def test_ctx_http_has_no_auth_side_effects_by_construction():
+    # #161's bug class: a background repaint that force-popped the host auth
+    # prompt. A 401 is DATA here. The enforcement is structural -- the fragment
+    # names none of 63's auth-overlay machinery -- and the harness below proves
+    # the 401 comes back as a 401; this gate is what stops one being added.
+    http = _http_src()
+    # CODE only: the fragment's own prose names the machinery it refuses to
+    # touch, and writing that refusal down is the point rather than a breach.
+    code = "\n".join(ln for ln in http.splitlines()
+                     if not ln.strip().startswith("//"))
+    for sym in ("promptFileHostAuth", "authPrompted", "authOverlay",
+                "showAuthOverlay", "auth-overlay"):
+        assert sym not in code, \
+            f"{sym!r} called from 86i -- ctx.http must never pop the prompt"
+    # ...and it goes through hostFetch (token attach, nothing else), never
+    # through a wrapper that owns retry/auth recovery.
+    assert "hostFetch(host, path, init)" in http
+    assert "fileApiPost" not in http
+
+
+def test_the_total_deadline_disarms_hostfetchs_headers_only_one():
+    # The load-bearing half, asserted statically as well as executed: hostFetch
+    # is handed timeoutMs: 0 (its documented opt-out) so its deadline -- which
+    # is cleared the moment the headers land -- cannot fire first and make the
+    # total one unobservable. Two live deadlines would race and the shorter,
+    # weaker one would always win.
+    http = _http_src()
+    assert "const init = { method: method, signal: ctrl.signal, timeoutMs: 0 };" \
+        in http, "hostFetch's headers-only deadline is still armed"
+    # The timer is cleared in done(), which only the body-read continuations
+    # call -- never on the headers.
+    assert ("return r.text().then(function (text) {\n"
+            "                    done();") in http
+    assert "if (timer !== null) clearTimeout(timer);" in http
+
+
+_HTTP_HARNESS = r"""
+'use strict';
+// E53 runs the SHIPPED slices in node against REAL http servers: #194's
+// ctx-extender registry, #197's capability map, 63's real hostUrl/hostFetch
+// (the transport whose deadline stops at the headers), and the whole #200
+// range. Nothing about the wrapper is re-implemented here; the harness supplies
+// only what a browser would -- a host registry and a page to be on.
+const http = require('http');
+
+const FETCH_TIMEOUT_MS = 3000;      // 50_js_constants.js; unused (we pass 0)
+
+// ---- the host registry, the browser half of it ---------------------------
+// Entry 0 is the implicit local host, id 'local' (56_js_hosts.js). The real
+// hostById is a linear scan over that array, and ctx.http must resolve through
+// it with NO ''/'local'/undefined fallback of its own.
+let HOSTS = [];
+function hostById(id) {
+    for (const h of HOSTS) { if (h.id === id) return h; }
+    return null;
+}
+// #161's tripwire: if anything in the sliced range ever reaches for the auth
+// overlay, this counter moves. A 401 must leave it at zero.
+let authPops = 0;
+function promptFileHostAuth() { authPops++; }
+
+__REGISTRY__
+__NEEDS__
+__HOSTFETCH__
+__HTTP__
+
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    const ctx = { id: id, ctxVersion: 1 };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+function throws(fn) {
+    try { const v = fn(); return { threw: false, value: String(v) }; }
+    catch (e) { return { threw: true, name: e.name, message: String(e.message) }; }
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+// ---- the peers -----------------------------------------------------------
+// Every request is counted, so "no request issued" is a measurement and not an
+// inference. /stall answers with headers and then never finishes its body --
+// the exact shape hostFetch's deadline cannot see.
+function makePeer(name) {
+    const state = { name: name, hits: [], stalled: [] };
+    state.server = http.createServer(function (req, res) {
+        state.hits.push(req.method + ' ' + req.url);
+        state.lastAuth = req.headers['authorization'] || null;
+        const p = req.url.split('?')[0];
+        if (p === '/stall') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.write('{"partial":');       // headers + a byte, then silence
+            state.stalled.push(res);
+            return;
+        }
+        if (p === '/unauth') { res.writeHead(401); res.end(''); return; }
+        if (p === '/empty') {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end(''); return;
+        }
+        if (p === '/json') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, who: name })); return;
+        }
+        if (p === '/mislabelled') {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end('{"ok":true}'); return;
+        }
+        if (p === '/slow') {
+            setTimeout(function () {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ who: name }));
+            }, 250);
+            return;
+        }
+        if (p === '/echo') {
+            let body = '';
+            req.on('data', function (c) { body += c; });
+            req.on('end', function () {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    method: req.method, body: body,
+                    auth: req.headers['authorization'] || null,
+                    ctype: req.headers['content-type'] || null,
+                }));
+            });
+            return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('no such route');
+    });
+    return state;
+}
+const PEERS = [];
+// Windows libuv asserts (!UV_HANDLE_CLOSING) if the process exits while a
+// stalled socket is still mid-close, so a case tears its peers down and gives
+// the loop a moment before exiting. The stalled responses are destroyed by
+// hand: server.close() waits for them forever, which is what "stalled" means.
+function shutdown() {
+    for (const p of PEERS) {
+        for (const res of p.stalled) { try { res.destroy(); } catch (_) {} }
+        try { p.server.close(); } catch (_) {}
+        try { p.server.unref(); } catch (_) {}
+    }
+}
+function listen(peer) {
+    PEERS.push(peer);
+    return new Promise(function (resolve) {
+        peer.server.listen(0, '127.0.0.1', function () {
+            peer.url = 'http://127.0.0.1:' + peer.server.address().port;
+            resolve(peer);
+        });
+    });
+}
+
+const CASES = {};
+
+// E53 clause: hostId is REQUIRED and throws SYNCHRONOUSLY -- the same-origin
+// default dies at the door, with no request issued on any of its spellings.
+CASES.required_host_throws_synchronously = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const out = {
+        nul: throws(function () { return c.fetch(null, '/json'); }),
+        undef: throws(function () { return c.fetch(undefined, '/json'); }),
+        noArgs: throws(function () { return c.fetch(); }),
+        empty: throws(function () { return c.fetch('', '/json'); }),
+        notAString: throws(function () { return c.fetch(7, '/json'); }),
+        relPath: throws(function () { return c.fetch('local', 'info'); }),
+        badPath: throws(function () { return c.fetch('local', null); }),
+        bodyOnGet: throws(function () {
+            return c.fetch('local', '/echo', { json: { a: 1 } });
+        }),
+        cyclicJson: throws(function () {
+            const o = {}; o.self = o;
+            return c.fetch('local', '/echo', { method: 'POST', json: o });
+        }),
+    };
+    // ...and the self entry from ctx.hosts.list() IS how you reach this broker.
+    out.selfEntry = await c.fetch('local', '/json');
+    out.hits = peer.hits;
+    return out;
+};
+
+// E53 clause: an unknown hostId fails CLOSED -- a resolved value, zero requests.
+CASES.unknown_host_issues_no_request = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const out = {};
+    // A resolved value, not a throw: an id going stale is DATA (the user
+    // deleted the host between a poll and its retry).
+    out.threw = throws(function () { return c.fetch('ghost', '/json'); }).threw;
+    out.res = await c.fetch('ghost', '/json');
+    out.isPromise = typeof c.fetch('ghost', '/json').then === 'function';
+    await c.fetch('ghost', '/json');
+    // The footgun in one line: hostFetch(null, '/json') would have hit the
+    // origin. Nothing reached the peer at all.
+    out.hits = peer.hits;
+    return out;
+};
+
+// E53 clause, the load-bearing one: the deadline is TOTAL. The peer sends its
+// status line and one byte, then stalls forever.
+CASES.the_deadline_covers_the_body = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('mod-sync').ctx.http;
+    const t0 = Date.now();
+    const res = await c.fetch('local', '/stall', { timeoutMs: 300 });
+    const elapsed = Date.now() - t0;
+    // THE CONTRAST, run through the very transport being wrapped: hostFetch's
+    // own deadline resolves the headers and is then disarmed, so the body read
+    // it hands back never settles. This is the bug mod-sync hand-rolled around.
+    const raw = { headers: false, bodySettled: false };
+    const r = await hostFetch(HOSTS[0], '/stall', { timeoutMs: 300 });
+    raw.headers = (r.status === 200);
+    await Promise.race([
+        r.text().then(function () { raw.bodySettled = true; },
+                      function () { raw.bodySettled = 'rejected'; }),
+        sleep(1200),
+    ]);
+    return { res: res, elapsed: elapsed, raw: raw, hits: peer.hits };
+};
+
+// E53 clause: 401 != empty 200, status is ALWAYS present, and no auth side
+// effects on the way past.
+CASES.a_401_is_not_an_empty_200 = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: 'tok' }];
+    const c = activate('update').ctx.http;
+    const out = {
+        unauth: await c.fetch('local', '/unauth'),
+        empty: await c.fetch('local', '/empty'),
+        json: await c.fetch('local', '/json'),
+        mislabelled: await c.fetch('local', '/mislabelled'),
+        notFound: await c.fetch('local', '/nope'),
+    };
+    out.unauthHasError = ('error' in out.unauth);
+    out.emptyHasError = ('error' in out.empty);
+    out.same = JSON.stringify(out.unauth) === JSON.stringify(out.empty);
+    out.authPops = authPops;
+    out.sentAuth = peer.lastAuth;
+    return out;
+};
+
+// E53 clause: a route the peer does not have comes back BRANCHABLE. The #157
+// shape -- an old peer whose preflight 404s -- surfaces as an opaque network
+// failure with no status behind it, so status 0 + error is the only honest
+// answer; a peer that IS reachable and merely lacks the route keeps its 404.
+CASES.a_route_the_peer_does_not_have = async function () {
+    const peer = await listen(makePeer('A'));
+    const dead = await listen(makePeer('dead'));
+    const deadUrl = dead.url;
+    await new Promise(function (r) { dead.server.close(r); });
+    HOSTS = [
+        { id: 'local', label: 'this broker', url: peer.url, token: '' },
+        { id: 'peer', label: 'old peer', url: deadUrl, token: '' },
+    ];
+    const c = activate('update').ctx.http;
+    const opaque = await c.fetch('peer', '/mod-store/x', { timeoutMs: 2000 });
+    const present = await c.fetch('local', '/nope');
+    return {
+        opaque: { status: opaque.status, hasError: ('error' in opaque),
+                  error: String(opaque.error) },
+        present: present,
+        // The two are distinguishable, which is the whole point: one means
+        // "feature-detect said no", the other "the peer answered".
+        branchable: (opaque.status === 0 && present.status === 404),
+    };
+};
+
+// E53 clause: {signal} composes with #198's ctx.signal -- both the
+// already-aborted case (no request at all) and the abort-mid-body case.
+CASES.the_caller_signal_composes = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: peer.url, token: '' }];
+    const c = activate('recorder').ctx.http;
+    const out = {};
+    // 1. ALREADY aborted before the call -- the shape a torn-down activation's
+    // scheduled poll has. No request may be issued.
+    const dead = new AbortController();
+    dead.abort(new DOMException('mod "recorder" was torn down', 'AbortError'));
+    out.preAborted = await c.fetch('local', '/json', { signal: dead.signal });
+    out.hitsAfterPreAborted = peer.hits.slice();
+    // 2. Aborted DURING the stalled body, well inside a long deadline: the
+    // caller's reason wins, and it is not the timeout's.
+    const live = new AbortController();
+    const t0 = Date.now();
+    const p = c.fetch('local', '/stall',
+                      { timeoutMs: 60000, signal: live.signal });
+    await sleep(150);
+    live.abort(new DOMException('cancelled by the user', 'AbortError'));
+    out.midFlight = await p;
+    out.midFlightMs = Date.now() - t0;
+    // 3. A long-lived caller signal must not accumulate one listener per call
+    // (one ctx.signal per activation, hundreds of polls behind it).
+    const shared = new AbortController();
+    for (let i = 0; i < 25; i++) {
+        await c.fetch('local', '/json', { signal: shared.signal });
+    }
+    out.sharedStillWorks = await c.fetch('local', '/json',
+                                         { signal: shared.signal });
+    out.hits = peer.hits.length;
+    return out;
+};
+
+// The standing question's last case: the host record is REPOINTED while a call
+// is in flight. The resolved object is bound before the request, so the answer
+// comes from the endpoint the call was issued to -- never from the new one.
+CASES.a_repoint_mid_flight_does_not_redirect = async function () {
+    const a = await listen(makePeer('A'));
+    const b = await listen(makePeer('B'));
+    HOSTS = [{ id: 'local', label: 'this broker', url: a.url, token: '' }];
+    const c = activate('update').ctx.http;
+    const p = c.fetch('local', '/slow');
+    await sleep(50);
+    HOSTS[0].url = b.url;               // the registry edit lands mid-flight
+    const inFlight = await p;
+    const next = await c.fetch('local', '/slow');
+    return { inFlight: inFlight, next: next, aHits: a.hits, bHits: b.hits };
+};
+
+// The request itself: method, JSON body, content-type, and the bearer token
+// hostFetch attaches -- the part ctx.http exists to stop every mod re-typing.
+CASES.the_request_is_shaped_and_authenticated = async function () {
+    const peer = await listen(makePeer('A'));
+    HOSTS = [{ id: 'local', label: 'this', url: peer.url, token: 'sekret' }];
+    const c = activate('recorder').ctx.http;
+    const post = await c.fetch('local', '/echo',
+                               { method: 'post', json: { a: 1 } });
+    const get = await c.fetch('local', '/echo');
+    return { post: post, get: get, hits: peer.hits };
+};
+
+// The no-half-family rule: no constructible AbortController -> no ctx.http at
+// all, and #197's map says so rather than shipping a dead deadline.
+CASES.no_surface_without_an_abortcontroller = async function () {
+    const real = global.AbortController;
+    global.AbortController = undefined;
+    const m = activate('recorder');
+    global.AbortController = real;
+    const caps = _modCapabilityMap(m.ctx);
+    const full = activate('recorder');
+    return {
+        absent: (m.ctx.http === undefined),
+        capAbsent: (caps.http === undefined || caps.http === false),
+        present: !!(full.ctx.http && typeof full.ctx.http.fetch === 'function'),
+        capPresent: !!_modCapabilityMap(full.ctx).http,
+    };
+};
+
+const name = process.argv[2];
+if (!CASES[name]) { console.error('unknown case ' + name); process.exit(2); }
+CASES[name]().then(function (out) {
+    console.log(JSON.stringify(out));
+    shutdown();
+    setTimeout(function () { process.exit(0); }, 250);
+}, function (e) {
+    console.error((e && e.stack) || String(e));
+    shutdown();
+    setTimeout(function () { process.exit(1); }, 250);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def http_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modhttp") / "harness.js"
+    path.write_text(
+        _HTTP_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__HOSTFETCH__", _host_fetch_source())
+        .replace("__HTTP__", _http_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_http(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_hostid_is_required_and_throws_synchronously(http_harness):
+    # E53's first clause. Every spelling of "no host" -- including '', which the
+    # OTHER host-routed families accept as the local broker -- is a synchronous
+    # TypeError here, because the same-origin default is exactly the footgun
+    # #200 exists to remove.
+    r = _run_http(http_harness, "required_host_throws_synchronously")
+    for key in ("nul", "undef", "noArgs", "empty", "notAString"):
+        assert r[key]["threw"] is True, f"{key} did not throw"
+        assert r[key]["name"] == "TypeError"
+        assert "hostId is required" in r[key]["message"], key
+        # The message spells the replacement, since the caller has to be told
+        # WHICH id targets this broker.
+        assert "ctx.hosts.list()" in r[key]["message"]
+    # The other argument defects throw too -- each one would otherwise issue a
+    # different request than the caller meant.
+    assert r["relPath"]["threw"] and "absolute route" in r["relPath"]["message"]
+    assert r["badPath"]["threw"]
+    assert r["bodyOnGet"]["threw"] and "GET" in r["bodyOnGet"]["message"]
+    assert r["cyclicJson"]["threw"] \
+        and "serializable" in r["cyclicJson"]["message"]
+    # ...and the sanctioned way to reach this broker works: the id of the
+    # `self: true` entry.
+    assert r["selfEntry"]["status"] == 200
+    assert r["selfEntry"]["json"] == {"ok": True, "who": "A"}
+    # ZERO of the throwing calls reached the wire.
+    assert r["hits"] == ["GET /json"], r["hits"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_unknown_host_fails_closed_with_no_request(http_harness):
+    # The contract ctx.file keeps (_modFileApi's synthetic host_not_found),
+    # measured rather than inferred: the peer logged nothing at all.
+    r = _run_http(http_harness, "unknown_host_issues_no_request")
+    assert r["threw"] is False, "a stale host id is data, not a program defect"
+    assert r["res"] == {"status": 0, "error": "host_not_found"}
+    assert r["isPromise"] is True
+    assert r["hits"] == [], \
+        "an unknown host issued a request -- the same-origin fallback is back"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_total_deadline_aborts_a_stalled_body(http_harness):
+    # THE case. The peer sends 200 + one byte and then stalls forever.
+    # hostFetch's deadline is cleared when those headers land, so the raw
+    # transport hands back a Response whose body never settles -- that is the
+    # bug mod-sync hand-rolled an AbortController around, and the harness
+    # reproduces it in the same run so this test cannot pass against a
+    # transport that was never broken.
+    r = _run_http(http_harness, "the_deadline_covers_the_body")
+    assert r["raw"]["headers"] is True, \
+        "the contrast case never got headers, so it proves nothing"
+    assert r["raw"]["bodySettled"] is False, (
+        "raw hostFetch's body read settled within 1.2s -- the headers-only "
+        "deadline this wrapper exists to fix is no longer reproducible")
+    # ctx.http, on the same route with a 300ms budget: a resolved, branchable
+    # timeout at roughly the deadline.
+    assert r["res"]["status"] == 0
+    assert "TimeoutError" in r["res"]["error"], r["res"]
+    assert "json" not in r["res"] and "text" not in r["res"], \
+        "a truncated body was reported as an answer"
+    assert r["elapsed"] < 2000, (
+        f"the deadline did not cover the body: {r['elapsed']}ms for a 300ms "
+        f"budget")
+    assert r["elapsed"] >= 250, "it aborted before the deadline"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_401_stays_distinguishable_from_an_empty_200(http_harness):
+    # The #174 fix, restated: ctx.serverStore.get once dropped the status and a
+    # 401 and an empty body became the same object. `status` is ALWAYS present
+    # and `error` never substitutes for an HTTP-level one.
+    r = _run_http(http_harness, "a_401_is_not_an_empty_200")
+    assert r["unauth"] == {"status": 401, "text": ""}
+    assert r["empty"] == {"status": 200, "text": ""}
+    assert r["same"] is False
+    assert r["unauthHasError"] is False, "an HTTP status came back as an error"
+    assert r["emptyHasError"] is False
+    assert r["json"] == {"status": 200, "json": {"ok": True, "who": "A"}}
+    # A body the peer mislabelled is text, not a guess -- and a 404 is a 404.
+    assert r["mislabelled"] == {"status": 200, "text": '{"ok":true}'}
+    assert r["notFound"] == {"status": 404, "text": "no such route"}
+    # NO AUTH SIDE EFFECTS (#161): the 401 did not pop anything.
+    assert r["authPops"] == 0, "ctx.http force-popped the host auth prompt"
+    # The token still rides the request -- this is the AUTHENTICATED fetch.
+    assert r["sentAuth"] == "Bearer tok"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_route_an_old_peer_lacks_is_branchable(http_harness):
+    # #157: a new route is invisible to an old peer -- the preflight 404s and
+    # the browser surfaces an opaque network error with no status behind it.
+    # There is nothing to invent, so it must arrive as {status: 0, error} a
+    # caller can feature-detect on, distinct from a peer that answered 404.
+    r = _run_http(http_harness, "a_route_the_peer_does_not_have")
+    assert r["opaque"]["status"] == 0
+    assert r["opaque"]["hasError"] is True
+    assert r["present"]["status"] == 404
+    assert r["branchable"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_caller_signal_composes_and_never_leaks(http_harness):
+    # #198 composition, both halves. An already-aborted signal is the shape a
+    # torn-down activation's scheduled poll has: it must issue NO request.
+    r = _run_http(http_harness, "the_caller_signal_composes")
+    assert r["preAborted"]["status"] == 0
+    assert "AbortError" in r["preAborted"]["error"]
+    assert "torn down" in r["preAborted"]["error"], \
+        "the caller's reason was replaced by ours"
+    assert r["hitsAfterPreAborted"] == [], \
+        "a request went out on an already-aborted signal"
+    # Aborted mid-body, far inside a 60s deadline: the CALLER's reason wins and
+    # it resolves promptly rather than at the deadline.
+    assert r["midFlight"]["status"] == 0
+    assert "cancelled by the user" in r["midFlight"]["error"]
+    assert "TimeoutError" not in r["midFlight"]["error"]
+    assert r["midFlightMs"] < 5000
+    # A long-lived signal keeps working after 25 completed calls -- the
+    # listeners were removed rather than piling up on it.
+    assert r["sharedStillWorks"]["status"] == 200
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_repoint_mid_flight_does_not_redirect_the_call(http_harness):
+    # The host is resolved ONCE and the OBJECT handed to hostFetch, so an edit
+    # to the registry lands on the NEXT call. An in-flight request can never be
+    # re-pointed at a different (possibly hostile) endpoint under the old
+    # call's expectations.
+    r = _run_http(http_harness, "a_repoint_mid_flight_does_not_redirect")
+    assert r["inFlight"] == {"status": 200, "json": {"who": "A"}}
+    assert r["next"] == {"status": 200, "json": {"who": "B"}}
+    assert r["aHits"] == ["GET /slow"]
+    assert r["bHits"] == ["GET /slow"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_request_carries_method_json_and_the_bearer_token(http_harness):
+    r = _run_http(http_harness, "the_request_is_shaped_and_authenticated")
+    body = r["post"]["json"]
+    assert body["method"] == "POST", "the method was not normalized"
+    assert body["body"] == '{"a":1}'
+    assert body["ctype"] == "application/json"
+    assert body["auth"] == "Bearer sekret"
+    # GET is the default and carries no body.
+    assert r["get"]["json"]["method"] == "GET"
+    assert r["get"]["json"]["body"] == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_no_ctx_http_on_a_build_that_cannot_carry_the_deadline(http_harness):
+    # The CP8 no-half-family rule. Without a constructible AbortController the
+    # TOTAL deadline -- the whole reason this family exists -- is
+    # unenforceable, so the family is absent and #197's map says so, rather
+    # than a fetch whose timeoutMs silently does nothing.
+    r = _run_http(http_harness, "no_surface_without_an_abortcontroller")
+    assert r["absent"] is True
+    assert r["capAbsent"] is True
+    assert r["present"] is True
+    assert r["capPresent"] is True
