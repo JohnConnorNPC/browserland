@@ -16082,3 +16082,768 @@ def test_update_joins_the_family_it_extends_or_not_at_all(update_harness):
     # empty state uniformly, rather than each caller special-casing it.
     assert r["seen"] == [{"value": None, "rev": 0}]
     assert r["res"]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# ctx.serverStore.saveChain (#196 / A41) -- scratchpad's save pipeline, canned.
+#
+# The claims are all about TIMING and LIFECYCLE (how many writes leave, how many
+# are outstanding at once, and which activation they belong to), so every one of
+# them is proven by EXECUTING the shipped range against a broker that follows
+# app.py's PUT rules -- including the real _runUnloads, so "a dead activation
+# writes nothing" is a claim about the shipped teardown rather than a stand-in.
+
+_SAVECHAIN_SLICE_START = "// ---- ctx.serverStore.saveChain (#196)"
+_SAVECHAIN_SLICE_END = "// ---- end ctx.serverStore.saveChain"
+
+
+def _savechain_src():
+    return (BROKER_DIR / "86e_js_mod_savechain.js").read_text(encoding="utf-8")
+
+
+def _savechain_source():
+    """A41's range in 86e, verbatim."""
+    src = _savechain_src()
+    a = src.index(_SAVECHAIN_SLICE_START)
+    b = src.index(_SAVECHAIN_SLICE_END, a)
+    body = src[a:b]
+    for sym in ("function _modStoreSaveChain(store, opts, rec)",
+                "function _ctxServerStoreSaveChain(ctx, rec)"):
+        assert sym in body, f"the saveChain range no longer defines {sym!r}"
+    return body
+
+
+def _run_unloads_source():
+    """The loader's OWN _runUnloads, verbatim -- the teardown a disable actually
+    runs. Sliced rather than faked, because "a write from a dead activation is
+    dropped" is a claim about THAT function: it is what sets rec.unloading, and
+    it sets it before draining rec.unloads."""
+    src = _loader_src()
+    a = src.index("        // LIFO teardown: run a mod's onUnload callbacks "
+                  "newest-first, each")
+    b = src.index("        // ---- ctx-extender registry (#194) -> "
+                  "86c_js_mod_ctx_ext.js ---", a)
+    body = src[a:b]
+    assert "function _runUnloads(rec) {" in body
+    assert "rec.unloading = true;" in body, \
+        "the teardown no longer marks the record dead"
+    return body
+
+
+def test_savechain_lands_in_its_own_fragment_and_is_registered():
+    # #196/A41: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap (A40 + A42
+    # landed there), and the rule for that cap is split, never trim -- so
+    # saveChain gets a NEW ordered fragment rather than a shrunken neighbour.
+    assert "86e_js_mod_savechain.js" in ui._ORDERED
+    assert (BROKER_DIR / "86e_js_mod_savechain.js").is_file()
+    at = ui._ORDERED.index
+    # Ordered AFTER 86c (every send goes through that fragment's
+    # _modStoreUpdate, and extenders run in _ORDERED order) and before the
+    # mod-script splice, since a mod's init reads the finished ctx.
+    assert at("86c_js_mod_ctx_ext.js") < at("86d_js_mod_help_cards.js") \
+        < at("86e_js_mod_savechain.js") < at(ui._MOD_SPLICE_BEFORE)
+    # The split has to actually buy headroom: BOTH files under the cap.
+    for frag in ("86c_js_mod_ctx_ext.js", "86e_js_mod_savechain.js"):
+        lines = (BROKER_DIR / frag).read_text(encoding="utf-8").count("\n")
+        assert lines <= ui._MAX_LINES, f"{frag} has {lines} lines"
+    ext = _ctx_ext_src()
+    loader = _loader_src()
+    chain = _savechain_src()
+    for sym in ("function _modStoreSaveChain(store, opts, rec) {",
+                "function _ctxServerStoreSaveChain(ctx, rec) {",
+                "function _modChainWait(n) {"):
+        assert sym in chain, f"{sym!r} did not land in 86e"
+        assert sym not in ext and sym not in loader, \
+            f"{sym!r} belongs in 86e, not 86c or the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A41 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's registry, typeof-guarded exactly as 86c's own
+    # registrations are (a page assembled without the registry must not throw).
+    assert ("if (typeof _registerCtxExtender === 'function') {\n"
+            "            _registerCtxExtender(_ctxServerStoreSaveChain);\n"
+            "        }") in chain
+    # NO capability entry is owed, and this is the A40 argument re-checked
+    # rather than assumed: #197's map is per FAMILY, `serverStore` is already a
+    # ctx v1 family, and saveChain is a MEMBER of it (the fragment puts nothing
+    # new on `ctx.<name>`). A stray entry here would claim a family that does
+    # not exist, and the CP7 seed-drift gate would fail on it.
+    assert "serverStore" in _ctx_family_keys()
+    assert "saveChain" not in _standalone_capability_registrations()
+    assert "saveChain" not in _ctx_families_added_by_extenders()
+    assert "_registerModCapability" not in _code_only(chain)
+    # Built ON A40 rather than beside it: no second CAS loop in this fragment.
+    # Trailing comments are stripped too -- the range documents the very things
+    # it must not do.
+    code = re.sub(r"\s+//.*$", "", _code_only(chain), flags=re.M)
+    assert code.count("_modStoreUpdate(") == 1, \
+        "the chain has more than one send site, or stopped using A40's CAS"
+    assert "409" not in code and "getRevision" not in code, \
+        "the chain is doing its own CAS -- the rebase is update()'s job"
+    # ctxVersion stays 1: additive, feature-detected surface (#196 trap 2).
+    assert "ctxVersion: 1" not in chain
+
+
+_SAVECHAIN_HARNESS = r"""
+'use strict';
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+const SESSION_API_TIMEOUT_MS = 10000;
+const CLIENT_ID = 'client-1';
+// Every request takes real time, so "at most one PUT in flight" is a claim the
+// harness can actually observe being violated.
+const DELAY = 4;
+
+let HOSTS = { local: { id: 'local' }, peer: { id: 'peer', label: 'Peer' } };
+function localHost() { return HOSTS.local; }
+function hostById(id) { return (id && HOSTS[id]) ? HOSTS[id] : null; }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+let BROKER = null;
+let FETCHES = [];
+let PUT_INFLIGHT = 0, PUT_MAX = 0, REQ_INFLIGHT = 0;
+function hostFetch(host, path, o) {
+    const method = (o && o.method) || 'GET';
+    FETCHES.push({ host: host && host.id, path: path, method: method,
+                   body: (o && o.body) ? JSON.parse(o.body) : undefined });
+    const res = BROKER(host, path, o);      // the server sees it on ARRIVAL
+    REQ_INFLIGHT += 1;
+    if (method === 'PUT') {
+        PUT_INFLIGHT += 1;
+        if (PUT_INFLIGHT > PUT_MAX) PUT_MAX = PUT_INFLIGHT;
+    }
+    return new Promise(function (resolve) {
+        setTimeout(function () {
+            REQ_INFLIGHT -= 1;
+            if (method === 'PUT') PUT_INFLIGHT -= 1;
+            resolve(res);
+        }, DELAY);
+    });
+}
+function reply(status, obj) {
+    return { status: status, json: function () { return Promise.resolve(obj); } };
+}
+// A mod-store faithful to app.py's PUT rules for the parts under test.
+function makeBroker(opts) {
+    opts = opts || {};
+    const st = { rev: opts.rev || 0,
+                 value: (opts.value !== undefined) ? opts.value : null,
+                 noHistory: !!opts.noHistory };
+    const puts = [];
+    const fn = function (host, path, o) {
+        if (!o || o.method !== 'PUT') {
+            if (opts.onRead) opts.onRead();
+            return reply(200, { rev: st.rev, value: st.value, revisions: [] });
+        }
+        const body = JSON.parse(o.body);
+        puts.push(body);
+        if (opts.notActive) {
+            return reply(409, { ok: false, error: 'not_active',
+                                rev: st.rev, value: st.value });
+        }
+        if (opts.beforeWrite) opts.beforeWrite(st, puts.length);
+        if (body.baseRev !== st.rev) {
+            return reply(409, { ok: false, error: 'conflict',
+                                rev: st.rev, value: st.value });
+        }
+        if (opts.alwaysConflict) {
+            st.rev += 1;                     // a hot writer, forever ahead
+            return reply(409, { ok: false, error: 'conflict',
+                                rev: st.rev, value: st.value });
+        }
+        if (body.noHistory !== undefined) st.noHistory = body.noHistory;
+        st.value = body.value;
+        st.rev += 1;
+        return reply(200, { ok: true, rev: st.rev, noHistory: st.noHistory });
+    };
+    fn.puts = puts;
+    fn.state = st;
+    fn.opts = opts;
+    return fn;
+}
+
+__REGISTRY__
+__TRANSPORT__
+function makeStore(modId) {
+    return { __STORE__ }.serverStore;
+}
+__UPDATE__
+__SAVECHAIN__
+__UNLOADS__
+
+function setBroker(brokerOpts) {
+    BROKER = makeBroker(brokerOpts);
+    FETCHES = [];
+    PUT_INFLIGHT = 0;
+    PUT_MAX = 0;
+    REQ_INFLIGHT = 0;
+    return BROKER;
+}
+// ONE ACTIVATION, the way initMod builds one: a fresh per-activation record, a
+// fresh ctx, and the extender registry applied to it. A re-enable is another
+// call with a NEW rec -- which is exactly what makes the old chain's generation
+// dead for good.
+function activate(modId, rec) {
+    const ctx = { id: modId, serverStore: makeStore(modId) };
+    _applyCtxExtenders(ctx, rec);
+    return ctx;
+}
+function puts() { return BROKER.puts; }
+function wire() {
+    return FETCHES.map(function (f) { return f.method + ' ' + f.path; });
+}
+function bodies() {
+    return puts().map(function (b) {
+        return { baseRev: b.baseRev, value: b.value, purge: b.purgeRevisions,
+                 noHistoryPresent: ('noHistory' in b), noHistory: b.noHistory };
+    });
+}
+function setN(n) {
+    return function (v) { return Object.assign({}, v, { n: n }); };
+}
+
+const CASES = {};
+
+// E41 clause 1: N rapid saves collapse into <=2 PUTs, at most one in flight.
+CASES.coalesced_single_in_flight = async function () {
+    setBroker({ rev: 1, value: { n: 0 } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 5 });
+    const states = [];
+    chain.onState(function (s) { states.push(s); });
+    for (let i = 1; i <= 10; i++) chain.save(setN(i));
+    const p = chain.flush();
+    // ...and ten MORE while that write is in flight: they queue behind it and
+    // leave as exactly one further PUT.
+    await sleep(1);
+    const during = { inflight: REQ_INFLIGHT, puts: puts().length };
+    for (let i = 11; i <= 20; i++) chain.save(setN(i));
+    const first = await p;
+    const second = await chain.flush();
+    await sleep(30);                       // nothing may trail in afterwards
+    return { puts: puts().length, maxPutInflight: PUT_MAX, during: during,
+             first: first, second: second, states: states,
+             values: puts().map(function (b) { return b.value; }),
+             finalValue: BROKER.state.value };
+};
+
+// E41 clause 2: a seeded 409 re-applies the reducer to the WINNER -- through
+// the chain, not just through update() directly.
+CASES.rebase_through_the_chain = async function () {
+    setBroker({ rev: 1, value: { a: 1 },
+        beforeWrite: function (st, n) {
+            if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+        } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    const seen = [];
+    chain.save(function (value, rev) {
+        seen.push({ value: value, rev: rev });
+        return Object.assign({}, value, { b: 2 });
+    });
+    const res = await chain.flush();
+    return { res: res, seen: seen, bodies: bodies(),
+             finalValue: BROKER.state.value };
+};
+
+// Coalescing is COMPOSITION, not replacement: a batch keeps every queued
+// caller's delta, and a rebase re-applies all of them over the winner.
+CASES.composition_survives_a_rebase = async function () {
+    setBroker({ rev: 1, value: { a: 1 },
+        beforeWrite: function (st, n) {
+            if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+        } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    chain.save(function (v) { return Object.assign({}, v, { x: 1 }); });
+    chain.save(function (v) { return Object.assign({}, v, { y: 2 }); });
+    const res = await chain.flush();
+    return { res: res, bodies: bodies(), finalValue: BROKER.state.value };
+};
+
+// E41 clause 3, and #196 trap 7. The disable is REAL: the loader's own
+// _runUnloads, executed between the save and the send.
+CASES.dead_activation_drops = async function () {
+    setBroker({ rev: 1, value: { live: 'original' } });
+    const rec = { unloads: [] };
+    const ctx = activate('m', rec);
+    const chain = ctx.serverStore.saveChain({ debounceMs: 5 });
+    const queued = chain.save(function () { return { live: 'STALE' }; });
+    _runUnloads(rec);                       // <- the disable
+    const afterDisableSave = chain.save(function () {
+        return { live: 'STALE-2' };
+    });
+    const flushed = await chain.flush();
+    await sleep(30);                        // outlive the debounce that was armed
+    const afterDisable = { puts: puts().length, wire: wire(),
+                           unloading: !!rec.unloading, unloads: rec.unloads.length };
+
+    // Re-enable: a NEW activation record and a NEW ctx, as initMod builds them.
+    const rec2 = { unloads: [] };
+    const ctx2 = activate('m', rec2);
+    const chain2 = ctx2.serverStore.saveChain({ debounceMs: 0 });
+    const queued2 = chain2.save(function () { return { live: 'NEW' }; });
+    const res2 = await chain2.flush();
+    await sleep(30);
+    return { queued: queued, afterDisableSave: afterDisableSave,
+             flushed: flushed, afterDisable: afterDisable, queued2: queued2,
+             res2: res2, puts: puts().length, wire: wire(),
+             values: puts().map(function (b) { return b.value; }),
+             finalValue: BROKER.state.value };
+};
+
+// The narrower window: the activation dies BETWEEN update()'s read and its
+// write. The gate is what turns that into a drop rather than a race.
+CASES.dead_between_the_read_and_the_write = async function () {
+    const rec = { unloads: [] };
+    setBroker({ rev: 1, value: { live: 'original' },
+                onRead: function () { _runUnloads(rec); } });
+    const ctx = activate('m', rec);
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    let calls = 0;
+    chain.save(function () { calls += 1; return { live: 'STALE' }; });
+    const res = await chain.flush();
+    await sleep(30);
+    return { res: res, calls: calls, wire: wire(), puts: puts().length,
+             finalValue: BROKER.state.value };
+};
+
+// onState is the read-only banner's channel: an exhausted rebase budget and a
+// dead write lease both raise it, and the next successful write lowers it.
+CASES.conflict_raises_and_clears_the_banner = async function () {
+    setBroker({ rev: 1, value: { a: 1 }, alwaysConflict: true });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    const states = [];
+    const off = chain.onState(function (s) { states.push(s); });
+    chain.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+    const bad = await chain.flush();
+    const badPuts = puts().length;
+    // A flush with nothing pending must not report a fresh success while the
+    // banner is up.
+    const idleWhileConflicted = await chain.flush();
+    BROKER.opts.alwaysConflict = false;     // the other writer stops
+    chain.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+    const good = await chain.flush();
+    off();
+    chain.save(function (v) { return Object.assign({}, v, { d: 4 }); });
+    await chain.flush();
+    return { states: states, bad: bad, badPuts: badPuts, good: good,
+             idleWhileConflicted: idleWhileConflicted, puts: puts().length,
+             finalValue: BROKER.state.value };
+};
+
+CASES.not_active_raises_the_banner_without_retrying = async function () {
+    setBroker({ rev: 3, value: { a: 1 }, notActive: true });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    const states = [];
+    chain.onState(function (s) { states.push(s); });
+    let calls = 0;
+    chain.save(function (v) { calls += 1; return Object.assign({}, v, { b: 2 }); });
+    const res = await chain.flush();
+    return { res: res, states: states, calls: calls, puts: puts().length };
+};
+
+CASES.flush_with_nothing_pending = async function () {
+    setBroker({ rev: 1, value: { a: 1 } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 5 });
+    const states = [];
+    chain.onState(function (s) { states.push(s); });
+    const empty = await chain.flush();
+    const emptyWire = wire();
+    // ...and the chain still works afterwards.
+    chain.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+    const after = await chain.flush();
+    const emptyAgain = await chain.flush();
+    return { empty: empty, after: after, emptyAgain: emptyAgain,
+             states: states, emptyWire: emptyWire, puts: puts().length };
+};
+
+// The caller scratchpad's copy never had: a REMOTE host id. The fail-closed
+// contract is inherited from the transport, so a chain pointed at a host that
+// does not exist must write NOTHING -- never silently same-origin.
+CASES.unknown_host_fails_closed = async function () {
+    setBroker({ rev: 1, value: { a: 1 } });
+    const ctx = activate('m', { unloads: [] });
+    const bad = ctx.serverStore.saveChain({ host: 'nope', debounceMs: 0 });
+    const states = [];
+    bad.onState(function (s) { states.push(s); });
+    let calls = 0;
+    bad.save(function () { calls += 1; return { clobbered: true }; });
+    const res = await bad.flush();
+    // A KNOWN host in the same ctx still writes, so the refusal is the id.
+    const ok = ctx.serverStore.saveChain({ host: 'peer', debounceMs: 0 });
+    ok.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+    const res2 = await ok.flush();
+    return { res: res, calls: calls, res2: res2, states: states, wire: wire(),
+             finalValue: BROKER.state.value };
+};
+
+// Two chains in ONE mod address the SAME record: single-in-flight is per chain,
+// so they serialize only through the server's rev CAS -- and both deltas have
+// to survive that, which is the whole anti-#158 point applied to a new caller.
+CASES.two_chains_one_record = async function () {
+    setBroker({ rev: 1, value: {} });
+    const ctx = activate('m', { unloads: [] });
+    const a = ctx.serverStore.saveChain({ debounceMs: 0 });
+    const b = ctx.serverStore.saveChain({ debounceMs: 0 });
+    a.save(function (v) { return Object.assign({}, v, { a: 1 }); });
+    b.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+    const both = await Promise.all([a.flush(), b.flush()]);
+    return { both: both, puts: puts().length,
+             finalValue: BROKER.state.value };
+};
+
+CASES.opts_ride_every_write = async function () {
+    const out = {};
+    const runs = {
+        flags: { purgeRevisions: true, noHistory: true },
+        absent: {},
+        explicit_false: { noHistory: false },
+    };
+    for (const k of Object.keys(runs)) {
+        setBroker({ rev: 1, value: { a: 1 },
+            beforeWrite: function (st, n) {
+                if (n === 1) { st.rev = 2; st.value = { a: 1, c: 3 }; }
+            } });
+        const ctx = activate('m', { unloads: [] });
+        const o = Object.assign({ debounceMs: 0 }, runs[k]);
+        const chain = ctx.serverStore.saveChain(o);
+        chain.save(function (v) { return Object.assign({}, v, { b: 2 }); });
+        const res = await chain.flush();
+        // Mutating the caller's bag afterwards must not reach the wire: the
+        // chain snapshots it ONCE, the way update() does.
+        o.purgeRevisions = false;
+        o.noHistory = false;
+        chain.save(function (v) { return Object.assign({}, v, { e: 5 }); });
+        await chain.flush();
+        out[k] = { res: res, bodies: bodies() };
+    }
+    return out;
+};
+
+CASES.never_rejects = async function () {
+    setBroker({ rev: 1, value: { a: 1 } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain({ debounceMs: 0 });
+    const out = {};
+    out.notAFn = chain.save(null);
+    // A throwing reducer refuses the WHOLE batch it was coalesced into, which
+    // is update()'s answer for one reducer applied to the group.
+    chain.save(function (v) { return Object.assign({}, v, { ok: 1 }); });
+    chain.save(function () { throw new Error('reducer boom'); });
+    out.threw = await chain.flush();
+    out.threwPuts = puts().length;
+    chain.save(function () { /* forgot to return */ });
+    out.undef = await chain.flush();
+    out.undefPuts = puts().length;
+    // ...and the chain is still usable, with an async reducer.
+    chain.save(async function (v) { return Object.assign({}, v, { b: 2 }); });
+    out.asyncFn = await chain.flush();
+    out.wire = wire();
+    out.finalValue = BROKER.state.value;
+    return out;
+};
+
+CASES.family_shape = async function () {
+    setBroker({ rev: 1, value: { a: 1 } });
+    const ctx = activate('m', { unloads: [] });
+    const chain = ctx.serverStore.saveChain();
+    // A ctx with NO serverStore gets no half-family...
+    const bare = { id: 'bare' };
+    _applyCtxExtenders(bare, { unloads: [] });
+    // ...and a store too old to carry the write half gets neither member: A40
+    // declines first, and the chain declines because A40 did.
+    const partial = { id: 'partial', serverStore: { get: function () {} } };
+    _applyCtxExtenders(partial, { unloads: [] });
+    return { members: Object.keys(ctx.serverStore).sort(),
+             chainMembers: Object.keys(chain).sort(),
+             bare: typeof bare.serverStore,
+             partial: Object.keys(partial.serverStore).sort() };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+    Promise.resolve().then(function () { return CASES[want](); })
+        .then(function (out) {
+            if (!('errors' in out)) out.errors = errors;
+            process.stdout.write(JSON.stringify(out) + '\n');
+        })
+        .catch(function (e) {
+            console.log('case threw: ' + ((e && e.stack) || e));
+            process.exit(3);
+        });
+})();"""
+
+
+@pytest.fixture(scope="module")
+def savechain_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("savechain") / "harness.js"
+    path.write_text(
+        _SAVECHAIN_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TRANSPORT__", _store_transport_source())
+        .replace("__STORE__", _store_literal_source())
+        .replace("__UPDATE__", _update_source())
+        .replace("__SAVECHAIN__", _savechain_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_savechain(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_rapid_saves_coalesce_into_two_writes_one_at_a_time(savechain_harness):
+    # E41's first clause. Twenty saves, ten of them landing while a write is
+    # already outstanding: one batch goes out, the rest wait behind it and leave
+    # as ONE more. The failure this pins is the naive shape -- a write per save,
+    # or two overlapping writes racing each other's baseRev.
+    r = _run_savechain(savechain_harness, "coalesced_single_in_flight")
+    assert r["errors"] == []
+    assert r["puts"] == 2, "N rapid saves did not coalesce into <=2 writes"
+    assert r["maxPutInflight"] == 1, "two writes from one chain overlapped"
+    # The second ten really were queued DURING the first write, or this case
+    # proves only that a burst debounces.
+    assert r["during"]["inflight"] >= 1
+    assert r["during"]["puts"] <= 1
+    # Composition, so the last reducer in each batch decides `n` -- and no
+    # write carries an intermediate value from the middle of a burst.
+    assert [v["n"] for v in r["values"]] == [10, 20]
+    assert r["finalValue"] == {"n": 20}
+    assert r["first"]["ok"] is True and r["second"]["ok"] is True
+    # The banner channel: it starts idle, reports the write, and lands idle.
+    assert r["states"][0] == "idle" and r["states"][1] == "saving"
+    assert r["states"][-1] == "idle"
+    assert "conflict" not in r["states"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_seeded_409_reapplies_the_reducer_through_the_chain(savechain_harness):
+    # E41's second clause, and the #158 regression shape stated as a negative:
+    # the chain must not re-PUT the body it already sent. It cannot, because the
+    # queued thing is a REDUCER, not a snapshot -- #196 trap 3.
+    r = _run_savechain(savechain_harness, "rebase_through_the_chain")
+    assert r["errors"] == []
+    assert r["seen"] == [{"value": {"a": 1}, "rev": 1},
+                         {"value": {"a": 1, "c": 3}, "rev": 2}]
+    sent = [(b["baseRev"], b["value"]) for b in r["bodies"]]
+    assert sent == [
+        (1, {"a": 1, "b": 2}),
+        (2, {"a": 1, "c": 3, "b": 2}),
+    ], "the chain re-PUT its own snapshot instead of re-applying the reducer"
+    assert r["finalValue"] == {"a": 1, "c": 3, "b": 2}
+    assert r["res"]["ok"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_coalesced_batch_keeps_every_delta_across_a_rebase(savechain_harness):
+    # Coalescing by REPLACEMENT would silently drop the first caller's delta --
+    # invisible in the reference mod (its reducer produced the whole document)
+    # and a data-loss bug in a shared surface. Composition, and both deltas
+    # re-apply over the winner.
+    r = _run_savechain(savechain_harness, "composition_survives_a_rebase")
+    assert r["errors"] == []
+    sent = [(b["baseRev"], b["value"]) for b in r["bodies"]]
+    assert sent == [
+        (1, {"a": 1, "x": 1, "y": 2}),
+        (2, {"a": 1, "c": 3, "x": 1, "y": 2}),
+    ]
+    assert r["finalValue"] == {"a": 1, "c": 3, "x": 1, "y": 2}
+    assert r["res"]["ok"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_activation_writes_nothing_and_re_enable_is_clean(
+        savechain_harness):
+    # E41's third clause and #196 trap 7, proven against the SHIPPED teardown:
+    # save -> _runUnloads(rec) -> flush(). Disable is synchronous and cannot
+    # await the flush, so the only safe answer is to drop.
+    r = _run_savechain(savechain_harness, "dead_activation_drops")
+    assert r["errors"] == []
+    assert r["queued"] is True, "the pre-disable save never got queued"
+    assert r["afterDisable"]["unloading"] is True, "the disable did not happen"
+    assert r["afterDisable"]["unloads"] == 0, "_runUnloads did not drain"
+    # A save made after the disable is refused outright, not queued to race.
+    assert r["afterDisableSave"] is False
+    # The flush from the dead activation sends NOTHING -- not even a read --
+    # and resolves rather than hanging the caller awaiting it.
+    assert r["flushed"] == {"ok": False, "error": "unloaded"}
+    assert r["afterDisable"]["puts"] == 0
+    assert r["afterDisable"]["wire"] == [], \
+        "a dead activation still reached the wire"
+    # ...and the pending debounce that was armed at disable time never fires:
+    # the counts above are taken after outliving it.
+    #
+    # Re-enable: the new activation's write lands untouched, and the stale one
+    # never shows up behind it.
+    assert r["queued2"] is True
+    assert r["res2"]["ok"] is True
+    assert r["puts"] == 1, "a dead activation's write landed after re-enable"
+    assert r["values"] == [{"live": "NEW"}]
+    assert r["finalValue"] == {"live": "NEW"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disable_between_the_read_and_the_write_drops_the_write(
+        savechain_harness):
+    # The narrow window a "check once, then send" chain leaves open: the
+    # activation dies while update() is between its GET and its PUT. The gate
+    # the chain hands update() closes it -- the read happened, the reducer even
+    # ran, and the PUT is still refused client-side.
+    r = _run_savechain(savechain_harness, "dead_between_the_read_and_the_write")
+    assert r["errors"] == []
+    assert [w.split()[0] for w in r["wire"]] == ["GET"], \
+        "the write survived a disable that landed mid-update"
+    assert r["puts"] == 0
+    assert r["calls"] == 1, "the case did not actually reach the reducer"
+    assert r["res"] == {"ok": False, "error": "unloaded"}
+    assert r["finalValue"] == {"live": "original"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_conflict_state_raises_the_banner_and_a_success_clears_it(
+        savechain_harness):
+    # 'conflict' is what scratchpad's read-only banner reads. It means the
+    # rebase budget is spent against a hotter writer -- bounded, per #196 trap
+    # 4, because the mirror of a silent clobber is a silent infinite rebase.
+    r = _run_savechain(savechain_harness, "conflict_raises_and_clears_the_banner")
+    assert r["errors"] == []
+    assert r["bad"]["ok"] is False and r["bad"]["error"] == "conflict"
+    assert r["badPuts"] == 4, "the inherited retry budget (3 rebases) moved"
+    assert r["states"] == ["idle", "saving", "conflict", "saving", "idle"]
+    # A flush with nothing pending reports the UNRESOLVED conflict rather than
+    # a fresh success -- an idle-looking ok here is how a banner gets cleared
+    # by a caller that saved nothing.
+    assert r["idleWhileConflicted"]["ok"] is False
+    assert r["idleWhileConflicted"]["error"] == "conflict"
+    assert r["good"]["ok"] is True
+    # The unsubscribe returned by onState really detaches: the last save/flush
+    # pair happens after off() and adds no states.
+    assert r["states"].count("saving") == 2
+    assert r["finalValue"]["d"] == 4
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_lease_raises_the_banner_without_burning_the_budget(
+        savechain_harness):
+    # not_active is a 409 too, and A40 refuses to rebase it (this browser cannot
+    # win). The chain must surface it as the same read-only banner without
+    # re-running the reducer once per attempt.
+    r = _run_savechain(savechain_harness,
+                       "not_active_raises_the_banner_without_retrying")
+    assert r["errors"] == []
+    assert r["res"]["ok"] is False and r["res"]["error"] == "not_active"
+    assert (r["puts"], r["calls"]) == (1, 1), "a dead lease was retried"
+    assert r["states"] == ["idle", "saving", "conflict"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_flush_with_nothing_pending_is_a_no_op(savechain_harness):
+    # The caller the reference implementation never had: a teardown/Ctrl+S flush
+    # on a chain nobody has written to. It must not read, must not write, and
+    # must still resolve.
+    r = _run_savechain(savechain_harness, "flush_with_nothing_pending")
+    assert r["errors"] == []
+    assert r["empty"] == {"ok": True, "idle": True}
+    assert r["emptyWire"] == [], "an empty flush still hit the wire"
+    assert r["after"]["ok"] is True, "the chain was wedged by an empty flush"
+    assert r["emptyAgain"] == {"ok": True, "idle": True}
+    assert r["puts"] == 1
+    assert r["states"] == ["idle", "saving", "idle"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_chain_on_an_unknown_host_writes_nothing_anywhere(savechain_harness):
+    # opts.host is the other caller the reference implementation never had: it
+    # always wrote same-origin. The fail-closed contract is inherited from the
+    # transport, and the reducer is the witness -- it is never even invoked, so
+    # there is no value that could have gone anywhere.
+    r = _run_savechain(savechain_harness, "unknown_host_fails_closed")
+    assert r["errors"] == []
+    assert r["res"]["ok"] is False
+    assert r["calls"] == 0, "the reducer ran for a host that does not exist"
+    assert [w for w in r["wire"] if "nope" in w] == []
+    # A no-host refusal is not a conflict: it must not raise a read-only banner
+    # that a retry could never clear.
+    assert "conflict" not in r["states"]
+    # ...and a KNOWN host in the same ctx still writes, so the refusal is the
+    # id rather than a dead harness.
+    assert r["res2"]["ok"] is True
+    assert r["finalValue"] == {"a": 1, "b": 2}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_two_chains_in_one_mod_do_not_clobber_each_other(savechain_harness):
+    # Single-in-flight is per CHAIN, and two chains in one mod address the same
+    # per-mod record. What keeps that safe is not the chain but the CAS it
+    # writes through: the loser re-applies its reducer over the winner.
+    r = _run_savechain(savechain_harness, "two_chains_one_record")
+    assert r["errors"] == []
+    assert [b["ok"] for b in r["both"]] == [True, True]
+    assert r["finalValue"] == {"a": 1, "b": 2}, \
+        "one chain clobbered the other's delta"
+    assert r["puts"] == 3, "the second chain did not have to rebase"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_purge_and_nohistory_ride_every_write_the_chain_makes(savechain_harness):
+    # #196 trap 5: a helper that cannot carry these forces credential writers
+    # back to hand-rolled CAS, which is how plaintext reached the ring (#175).
+    # The chain adds two new places to drop them -- the coalesce and the second
+    # batch -- on top of the rebase update() already had to get right.
+    r = _run_savechain(savechain_harness, "opts_ride_every_write")
+    assert r["errors"] == []
+    flags = r["flags"]["bodies"]
+    assert len(flags) == 3, "the rebase did not happen, so this proves nothing"
+    for body in flags:
+        assert body["purge"] is True
+        assert body["noHistoryPresent"] is True and body["noHistory"] is True
+    # Absent stays ABSENT: the server's third state is "leave the record's flag
+    # alone", and a chain that helpfully sent noHistory:false would resume
+    # archiving the very credentials the flag exists to keep out of the ring.
+    for body in r["absent"]["bodies"]:
+        assert body["noHistoryPresent"] is False
+    for body in r["explicit_false"]["bodies"]:
+        assert body["noHistoryPresent"] is True and body["noHistory"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_chain_never_rejects_whatever_the_caller_does(savechain_harness):
+    # The family's posture: every failure is a value. A mod awaiting flush()
+    # must not need a try/catch to stay alive -- least of all at teardown.
+    r = _run_savechain(savechain_harness, "never_rejects")
+    assert r["notAFn"] is False
+    assert r["threw"]["ok"] is False, "a throwing reducer escaped as a rejection"
+    assert r["threw"]["error"] == "fn_failed"
+    assert r["threwPuts"] == 0, "a throwing reducer still wrote"
+    assert r["undef"]["ok"] is False and r["undef"]["error"] == "bad_value"
+    assert r["undefPuts"] == 0
+    assert r["asyncFn"]["ok"] is True
+    assert r["finalValue"] == {"a": 1, "b": 2}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_savechain_joins_the_family_it_extends_or_not_at_all(savechain_harness):
+    # The CP8 rule A40 follows: an extender installs nothing rather than handing
+    # a mod a member that always refuses, so ctx.capabilities stays OBSERVED and
+    # `needs: ['serverStore.saveChain']` reads true only when it is real.
+    r = _run_savechain(savechain_harness, "family_shape")
+    assert r["errors"] == []
+    assert "saveChain" in r["members"] and "update" in r["members"]
+    assert r["chainMembers"] == ["flush", "onState", "save"]
+    assert r["bare"] == "undefined", \
+        "a ctx with no serverStore was given a half-family"
+    assert r["partial"] == ["get"], \
+        "a store without the write half was decorated anyway"

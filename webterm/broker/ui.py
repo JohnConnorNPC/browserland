@@ -193,6 +193,15 @@ _ORDERED = [
     # (86) and _lateRegister (86b) call into them at runtime, which the one
     # shared <script> scope makes work in either direction.
     "86d_js_mod_help_cards.js",
+    # #196: ctx.serverStore.saveChain -- the debounced, single-in-flight,
+    # rebase-on-409 save pipeline scratchpad hand-rolled, canned as a shared
+    # member of the serverStore family. Its own fragment because 86c is at the
+    # 2500-line cap and the rule there is split, never trim (the same split 86a
+    # /86b/86c+86d got). Ordered AFTER 86c because every send goes through that
+    # fragment's _modStoreUpdate, and because extenders run in THIS list's
+    # order; still before the mod-script splice, since a mod's init reads the
+    # finished ctx. One <script>, one scope, as with every 86* companion.
+    "86e_js_mod_savechain.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",
