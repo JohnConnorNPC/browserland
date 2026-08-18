@@ -2284,11 +2284,17 @@ def test_pattern_mod_packaged_and_manifest_agrees():
     assert "def: 'none'" in src
     # And the mod ships in the served page (present in the mod / gone from core),
     # registered AFTER the theme mod so notifyModSettings writes the chrome vars
-    # before the pattern repaints on a both-changed /state pull, and applyPattern
-    # is a hoisted global the theme mod's coupling can still reach.
+    # before the pattern repaints on a both-changed /state pull. #199 / A51: the
+    # painter is no longer a hoisted global — it lives inside init() and is
+    # published as a service, so the whole coupling is one ctx.provide.
     assert "ctx.settings.select('pattern'" in INDEX_HTML
     assert "id: 'pattern'" in INDEX_HTML
     assert "function applyPattern" in INDEX_HTML
+    assert "ctx.provide('pattern', { apply: applyPattern })" in src
+    assert "ctx.provide('pattern', { apply: applyPattern })" in INDEX_HTML
+    # The painter is declared INSIDE init, not at the mod's top level: that is
+    # what makes it die with the activation instead of outliving it.
+    assert src.index("init: function (ctx) {") < src.index("function applyPattern")
     assert INDEX_HTML.index("id: 'theme'") < INDEX_HTML.index("id: 'pattern'")
 
 
@@ -7370,7 +7376,11 @@ def test_portable_mod_lint_nothing_runs_at_top_level_but_registermod():
 #: decoupling a mod forces this list to shrink. Not a rewrite request -- whether
 #: to break any of these couplings is a separate decision.
 _MOD_CROSS_FRAGMENT_CALL_INS = {
-    ("applyPattern", "pattern", "mod:theme/theme.js"),
+    # (#199 / A51 removed the pattern<->theme edge: `applyPattern` was a hoisted
+    # top-level global that theme probed with `typeof`; it now lives inside
+    # pattern's init and reaches theme through ctx.provide / ctx.consume, which
+    # owns no shipped top-level name at all. The migration this list's own
+    # docstring said would shrink it.)
     # #194 moved the help-card family out of the loader, verbatim, to get 86
     # back under the fragment cap -- so these two edges now sit in 86d. The
     # coupling itself is unchanged: same code, same one <script>.
@@ -19134,6 +19144,243 @@ def test_the_services_surface_and_its_refusals_are_inert(services_harness):
     # mod could not have known, and nobody could consume the entry anyway.
     assert r["lateProvideThrew"] is False
     assert r["lateConsume"] == "undefined"
+
+
+# --------------------------------------------------------------------------- #
+# the pattern + theme REFERENCE MIGRATION (#199 / A51)
+# --------------------------------------------------------------------------- #
+
+def _pattern_mod_source():
+    """The shipped pattern mod, verbatim."""
+    src = (BROKER_DIR / "mods" / "pattern" / "pattern.js").read_text(
+        encoding="utf-8")
+    assert "ctx.provide('pattern', { apply: applyPattern })" in src
+    return src
+
+
+def _theme_mod_source():
+    """The shipped theme mod, verbatim."""
+    src = (BROKER_DIR / "mods" / "theme" / "theme.js").read_text(
+        encoding="utf-8")
+    assert "ctx.consume('pattern', 'pattern')" in src
+    return src
+
+
+def test_the_typeof_applypattern_probe_is_gone_from_theme():
+    # Necessary, nowhere near sufficient (the executing clauses below are the
+    # proof) -- but E51 names the probe explicitly, so it gets its own guard.
+    theme = _code_only(_theme_mod_source())
+    assert "typeof applyPattern" not in theme
+    assert "applyPattern" not in theme, \
+        "theme must not name pattern's painter at all -- it consumes a service"
+    assert "ctx.consume('pattern', 'pattern')" in theme
+    # ...and the painter is no longer a top-level global in pattern either, so
+    # there is nothing left for a probe to find.
+    pat = _code_only(_pattern_mod_source())
+    assert "\n        function applyPattern" not in pat, \
+        "applyPattern is still declared at the mod's TOP LEVEL"
+    # No `needs`/`requires` was bought with the migration: consume adds no
+    # dependency edge, and a theme mod that cannot repaint somebody else's
+    # pattern is still a working theme mod.
+    assert "needs:" not in theme and "requires:" not in theme
+
+
+_PAIR_DRIVER = r"""
+// ---- A51: the REAL pattern + theme mods, on the REAL #199 seam -------------
+// Nothing about the coupling is re-typed here. The two mod files are pasted
+// verbatim above the driver (as the clipboard reference migration does with the
+// window factory), the ctx they get is the one _applyCtxExtenders built from
+// the shipped 86g, and the only fixtures are the browser bits node has not got:
+// a #desktop element, computed styles, and core's getSettings().
+const VARS = { '--bg': '#1e1e1e', '--bg-3': '#3a3a3a' };
+const DESK = { style: { backgroundImage: '', backgroundSize: '' } };
+let SETTINGS = { theme: 'night', pattern: 'dots' };
+function getSettings() { return SETTINGS; }
+global.document = {
+    getElementById: function (id) { return (id === 'desktop') ? DESK : null; },
+    documentElement: {
+        style: { setProperty: function (k, v) { VARS[k] = v; } },
+    },
+};
+global.getComputedStyle = function () {
+    return { getPropertyValue: function (k) { return VARS[k] || ''; } };
+};
+const MODS = {};
+function registerMod(def) { MODS[def.id] = def; }
+
+__PATTERN__
+__THEME__
+
+// One ctx.settings fixture for both mods: select() and radio() are the same
+// shape here (a read-through get + an onChange the /state convergence fires).
+const CHANGE = {};
+function startMod(id) {
+    const m = activate(id);
+    CHANGE[id] = [];
+    const mk = function (key) {
+        return function (k) {
+            return {
+                get: function () { return SETTINGS[k]; },
+                onChange: function (fn) { CHANGE[id].push(fn); },
+            };
+        };
+    };
+    m.ctx.settings = { select: mk(), radio: mk() };
+    MODS[id].init(m.ctx);
+    return m;
+}
+function pickTheme(name) {
+    SETTINGS = { theme: name, pattern: SETTINGS.pattern };
+    CHANGE.theme.forEach(function (fn) { fn(name); });
+}
+function paint() {
+    return { image: DESK.style.backgroundImage, size: DESK.style.backgroundSize };
+}
+
+const PAIR = {};
+
+// E51 clause 1: the coupling still WORKS, through provide/consume, with no
+// global and no parse-order dependency.
+PAIR.the_pair_still_repaints = function () {
+    const pattern = startMod('pattern');
+    const theme = startMod('theme');
+    const out = {};
+    // pattern's own init painted the saved `dots` off the night vars.
+    out.onBoot = paint();
+    // The whole point of the coupling: a THEME-only change repaints the pattern
+    // in the NEW colors. The pattern select is change-detected and does not fire.
+    pickTheme('redmond');
+    out.afterThemeChange = paint();
+    out.bg3 = VARS['--bg-3'];
+    // The old global is nowhere: nothing declares applyPattern at top level, so
+    // `typeof applyPattern === 'function'` -- the probe this replaced -- is now
+    // false even while the pattern mod is fully ACTIVE.
+    out.globalProbe = (typeof applyPattern);
+    out.service = !!theme.ctx.consume('pattern', 'pattern');
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// E51 clause 2: the off -> on cycle. Disabled provider => consume is undefined
+// => theme degrades to a theme-only change; re-enabled => the repaint is back.
+PAIR.disable_then_reenable = function () {
+    let pattern = startMod('pattern');
+    const theme = startMod('theme');
+    const out = { booted: paint() };
+    // A capture taken while the provider was LIVE, kept across the teardown --
+    // the case the typeof probe could not see at all.
+    const stale = theme.ctx.consume('pattern', 'pattern');
+    disable(pattern);
+    // pattern's own onUnload cleared the desktop background.
+    out.afterDisable = paint();
+    out.consumeWhileOff = u(theme.ctx.consume('pattern', 'pattern'));
+    pickTheme('day');
+    // ...and a theme change while pattern is off does NOT repaint the pattern.
+    out.themeChangeWhileOff = paint();
+    out.staleCall = u(stale.apply('dots'));
+    out.stalePainted = paint();
+    out.warnsAfterStale = warns.length;
+    // Re-enable: a brand-new activation, a brand-new service entry.
+    pattern = startMod('pattern');
+    out.afterReenable = paint();
+    pickTheme('midnight');
+    out.afterReenableThemeChange = paint();
+    out.bg3 = VARS['--bg-3'];
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+const wantPair = process.argv[2];
+if (!PAIR[wantPair]) { console.log('no such case: ' + wantPair); process.exit(2); }
+Promise.resolve().then(PAIR[wantPair]).then(function (out) {
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def pair_harness(tmp_path_factory):
+    """The #199 service seam, plus the REAL pattern and theme mods."""
+    path = tmp_path_factory.mktemp("modpair") / "harness.js"
+    path.write_text(
+        (_SERVICES_HARNESS.split("const want = process.argv[2];")[0]
+         .replace("__CONFLICT__", _mod_conflict_error_source())
+         .replace("__REGISTRY__", _ctx_registry_source())
+         .replace("__NEEDS__", _needs_source())
+         .replace("__UNLOADS__", _run_unloads_source())
+         .replace("__SERVICES__", _services_source()))
+        + _PAIR_DRIVER.replace("__PATTERN__", _pattern_mod_source())
+                      .replace("__THEME__", _theme_mod_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_pair(harness, case):
+    proc = subprocess.run([NODE, str(harness), case], capture_output=True,
+                          text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"pair case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_pattern_and_theme_mods_couple_through_the_service_seam(
+        pair_harness):
+    """#199's argument for shipping a migration with the API: the API does not
+    freeze against fixtures alone. This is the production proof -- the shipped
+    pattern.js and theme.js, executed against the shipped 86g."""
+    r = _run_pair(pair_harness, "the_pair_still_repaints")
+    assert r["errors"] == [] and r["warns"] == []
+    # pattern's init painted the saved `dots` off the night vars.
+    assert "radial-gradient" in r["onBoot"]["image"]
+    assert "#3a3a3a" in r["onBoot"]["image"]
+    assert r["onBoot"]["size"] == "14px 14px"
+    # A theme-only change repainted it in the NEW colors -- the one thing this
+    # coupling exists for, now travelling through provide/consume.
+    assert r["bg3"] == "#808080"
+    assert "#808080" in r["afterThemeChange"]["image"], \
+        "the theme change did not reach pattern's painter through the service"
+    assert "#3a3a3a" not in r["afterThemeChange"]["image"]
+    # And the probe it replaced is now FALSE even with pattern fully active:
+    # there is no top-level applyPattern left to find.
+    assert r["globalProbe"] == "undefined"
+    assert r["service"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disabled_pattern_mod_stops_the_theme_repaint_and_recovers(
+        pair_harness):
+    """THE BEHAVIOUR CHANGE, named rather than slipped in. `typeof applyPattern
+    === 'function'` was TRUE for a DISABLED pattern mod -- the declaration
+    outlives the activation -- so theme kept calling into a torn-down closure
+    and re-painted a background the mod's own teardown had just cleared. With
+    ctx.consume the answer is undefined, so a theme change while pattern is off
+    changes the theme and nothing else. Off -> on restores the repaint."""
+    r = _run_pair(pair_harness, "disable_then_reenable")
+    assert r["errors"] == []
+    assert "radial-gradient" in r["booted"]["image"]
+    # pattern's teardown cleared the desktop...
+    assert r["afterDisable"] == {"image": "", "size": ""}
+    # ...and consume reports the truth the probe could not: nobody is there.
+    assert r["consumeWhileOff"] == "undefined"
+    # THE CHANGE: the desktop stays clear across a theme change. Under the old
+    # probe this line repainted `dots` from a dead mod.
+    assert r["themeChangeWhileOff"] == {"image": "", "size": ""}
+    # A capture held across the teardown no-ops instead of painting, and warns
+    # exactly once.
+    assert r["staleCall"] == "undefined"
+    assert r["stalePainted"] == {"image": "", "size": ""}
+    assert r["warnsAfterStale"] == 1
+    assert len(r["warns"]) == 1 and 'pattern:pattern' in r["warns"][0]
+    # Re-enabled: a fresh activation, a fresh service entry, the repaint back --
+    # in the CURRENT theme's colors, not the ones it went away with.
+    assert "radial-gradient" in r["afterReenable"]["image"]
+    assert r["bg3"] == "#1e3a6b"
+    assert "#1e3a6b" in r["afterReenableThemeChange"]["image"]
 
 
 # --------------------------------------------------------------------------- #

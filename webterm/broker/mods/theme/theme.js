@@ -15,16 +15,35 @@
         // default survives even before this mod loads (CSS :root is night).
         //
         // PATTERN COUPLING (intentional, do NOT remove): the desktop background
-        // pattern is now owned by mods/pattern/pattern.js (S3 / #76) and is theme-
-        // var-aware — its applyPattern (a hoisted global declared in that mod)
-        // reads the live --bg/--bg-3 this mod sets. So apply() re-runs applyPattern
-        // AFTER writing the vars, byte-for-byte what the deleted #set-theme change
-        // handler did (applyTheme -> applyPattern). This is the ONLY thing that
-        // repaints the pattern on a theme-only change: the pattern mod's select is
-        // change-detected, so it does NOT fire when just `theme` changed (local
-        // pick or a cross-browser /state pull). Dropping this re-apply would leave
-        // a theme change painting the pattern in stale colors. Guarded by typeof
-        // so the theme mod still works if the pattern mod is absent/disabled.
+        // pattern is owned by mods/pattern/pattern.js (S3 / #76) and is theme-
+        // var-aware — its painter reads the live --bg/--bg-3 this mod sets. So
+        // apply() re-paints the pattern AFTER writing the vars, byte-for-byte what
+        // the deleted #set-theme change handler did (applyTheme -> applyPattern).
+        // This is the ONLY thing that repaints the pattern on a theme-only change:
+        // the pattern mod's select is change-detected, so it does NOT fire when
+        // just `theme` changed (local pick or a cross-browser /state pull).
+        // Dropping this re-apply would leave a theme change painting the pattern
+        // in stale colors.
+        //
+        // #199 MIGRATED HOW IT IS REACHED. It used to be
+        // `typeof applyPattern === 'function'` against a hoisted global. That
+        // probe answered one question — "did some fragment declaring that name
+        // evaluate?" — and a top-level `function` declaration outlives the mod
+        // that declared it, so it read TRUE for a pattern mod that had been
+        // switched off, and the call landed in a torn-down closure. It is now
+        // ctx.consume('pattern', 'pattern'), which is undefined unless the
+        // pattern mod is ACTIVE right now. USER-VISIBLE CONSEQUENCE, stated
+        // rather than slipped in: with the pattern mod DISABLED and a pattern
+        // still selected in the settings blob, a theme change no longer repaints
+        // the desktop pattern. That is correct — a disabled mod's teardown has
+        // already cleared the desktop background — where the old probe would
+        // have re-painted it from a dead mod's closure.
+        //
+        // NO `needs: ['consume']`: `needs` BLOCKS a mod on a build that lacks the
+        // capability, and a theme mod that sets six CSS vars but cannot repaint
+        // somebody else's pattern is still a working theme mod. The soft
+        // feature-detect below is the honest shape for an optional coupling; a
+        // hard declaration would trade a missing repaint for no theme at all.
         registerMod({
             id: 'theme',
             version: '1.0.0',
@@ -73,14 +92,25 @@
                 }
                 // Set the theme vars, then re-paint the (pattern-mod-owned, theme-
                 // var-aware) pattern off the fresh vars — see PATTERN COUPLING
-                // above. typeof-guarded so an absent/disabled pattern mod is a
-                // clean no-op rather than a (caught) ReferenceError.
+                // above. Consumed PER USE, which is #199's recommended pattern
+                // and the reason nothing here has to be revalidated: every call
+                // asks the loader's active-mod map afresh, so an absent, not-yet-
+                // loaded, disabled or mid-teardown pattern mod is undefined and
+                // this is a clean no-op.
+                //
+                // THE try/catch STAYS, and it is not the old ReferenceError
+                // guard. It covers what the seam does NOT: `ctx.consume` is
+                // absent entirely on a build without Proxy/Reflect/WeakMap (the
+                // no-half-family rule), where calling it would be a TypeError,
+                // and `getSettings()` is core's, evaluated in this frame before
+                // the proxy is ever touched. The proxy isolates only throws from
+                // INSIDE the provider's member.
                 function apply(name) {
                     applyTheme(name);
                     try {
-                        if (typeof applyPattern === 'function') {
-                            applyPattern(getSettings().pattern);
-                        }
+                        const pattern = (typeof ctx.consume === 'function')
+                            ? ctx.consume('pattern', 'pattern') : null;
+                        if (pattern) pattern.apply(getSettings().pattern);
                     } catch (_) {}
                 }
 

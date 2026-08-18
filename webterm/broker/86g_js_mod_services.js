@@ -7,11 +7,14 @@
         //     const p = ctx.consume('pattern', 'pattern');
         //     if (p) p.apply(name);        // absent/inactive provider -> undefined
         //
-        // WHAT IT REPLACES. Cross-mod calls today are hoisted globals plus
-        // fragment parse order: pattern leaves `applyPattern` and `PATTERNS` at
-        // the top level of the one shared <script> (mods/pattern/pattern.js) and
-        // theme probes `typeof applyPattern === 'function'` before calling it
-        // (mods/theme/theme.js). That probe answers exactly one question — "did
+        // WHAT IT REPLACES. Cross-mod calls were hoisted globals plus fragment
+        // parse order: pattern left `applyPattern` and `PATTERNS` at the top
+        // level of the one shared <script> (mods/pattern/pattern.js) and theme
+        // probed `typeof applyPattern === 'function'` before calling it
+        // (mods/theme/theme.js). Both are migrated onto this seam now — they are
+        // #199's reference pair — so the past tense here is real, not aspiration;
+        // the remaining consumers (scratchpad, editor, help) are #204's. Read on
+        // for why the probe had to go: it answers exactly one question — "did
         // some fragment declaring that name evaluate?" — and it cannot answer any
         // of the ones that matter. Whose name is it? Is that mod still ACTIVE, or
         // was it switched off in the Control Panel ten minutes ago? What happens
