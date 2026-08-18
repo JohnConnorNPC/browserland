@@ -428,6 +428,10 @@ bumping it.
   not promised** — a family whose own ctx extender threw during setup is
   simply absent from the map, exactly as it is absent from `ctx` itself, so
   the two can never disagree.
+- **`ctx.events.on(name, fn)`** (#195) — subscribe to the core → mod event bus.
+  Returns an unsubscribe fn, which also rides teardown. Five declared events,
+  two of which replay their current state to a late subscriber; the table and
+  its rules are the contract, so read them below before you use it.
 
 ### Storage
 
@@ -484,6 +488,10 @@ bumping it.
   out of a terminal) or `'in'` (pasted in), for every copy/paste core captures.
   Returns an unsubscribe fn and is *also* dropped on teardown, so capturing
   stops the moment the mod is disabled.
+- **`ctx.hosts.invalidate(id)`** (#195) — "forget everything this page knows
+  about host `<id>`": clears every registered per-host cache and repaints the
+  host surfaces, returning a boolean. It notifies nobody and saves nothing —
+  see below.
 
 ### Desktop, taskbar and menus
 
@@ -506,7 +514,11 @@ bumping it.
   receives `{ tiling }` saying which — check it rather than assuming tiling.
 - **`ctx.windows.onTerminalCreate(cb)`** — subscribes to every terminal window,
   **replayed over those already open** and fired for future ones. `cb` gets
-  `{ win, titleBar, host, wireId, addTitleBarItem, onDispose }`.
+  `{ win, titleBar, host, wireId, addTitleBarItem, onDispose, onModTeardown }`
+  — one subscription's replay and its create-time emit are mutually exclusive,
+  so each window reaches your callback exactly once and you need no
+  decorate-once `WeakSet`. `onModTeardown` (#195) is the per-window disposer;
+  it has its own section below.
 
 ### Control Panel
 
@@ -799,6 +811,243 @@ every caller expecting a record. A **restore** hook is the one place a handle
 `return h;` and `return h.win;` are both correct there, but a factory only
 has the one right answer. `mods/clipboard/clipboard.js`'s
 `openClipboardWindow` says exactly this at its own `return h.win` line.
+
+### Core events: `ctx.events.on` (#195)
+
+Every host- and state-lifecycle fact core wants to tell a mod has travelled as
+an ad-hoc duck-typed protocol: a `win._onHostAuth` field core invokes **by
+name**, a `win._hostRemoved` beside it, Help polling the core-private
+`_stateReady` 20 × 500 ms for the initial adoption, workspaces reading the
+core-private `_deactivated`. Nothing registers those and nothing types them, so
+core cannot refactor its auth form, its host list or its boot sequencing without
+auditing every mod. `ctx.events` is the one channel that replaces all of it —
+and it is the channel to write **new** code against; migrating the remaining
+readers off those private names is still in progress (#204).
+
+```js
+const off = ctx.events.on('state:adopted', function (payload, meta) {
+    // payload — the table's shape below, frozen
+    // meta    — {name, shape, gen, replayed}, frozen
+});
+off();      // unsubscribe; `off` also rides this mod's teardown automatically
+```
+
+**The table is the contract.**
+
+| name | shape | payload | replay on subscribe |
+|---|---|---|---|
+| `host:auth` | edge | `{hostId}` | no |
+| `host:changed` | edge | `{hostId}` | no |
+| `host:removed` | edge | `{hostId}` | no |
+| `state:adopted` | level | `{gen}` | **yes, exactly once** |
+| `lease:changed` | level | `{active, gen}` | **yes, exactly once** |
+
+A name this build does not declare is refused **inertly** — a `console.info`
+and an unsubscribe fn that does nothing — never a throw, so a mod written
+against a newer build keeps running here (§5's "absence is never an error").
+
+**Edge vs. level is the whole design, not a flag.** An *edge* event is a thing
+that **happened**: a subscriber that was not there missed it, and replaying it
+later would be a lie about when it happened. A *level* event is a state that
+**is**: a subscriber arriving late is entitled to the current one and gets it
+immediately, exactly once, out of its own `on()` call. The two level events are
+precisely the two a mod otherwise has to poll or read a core private for — the
+replay is what a 20-tick `_stateReady` timer is *for*, done properly. A level
+only replays once it *exists*: subscribe before core has learned the lease and
+there is nothing retained to hand you, so you are told at the first transition
+like everyone else.
+
+**Exactly once — replay XOR live.** A subscriber that was there before the emit
+is told live; one that arrives afterwards is told by its own replay. Never zero,
+never twice — including the nasty case where a handler subscribes from inside
+another handler, i.e. after an emit has been *applied* but before it has been
+*delivered*. It is enforced per **subscription**, so two mods each get their own
+exactly-once and a mod that unsubscribes and re-subscribes is told again.
+
+**`gen` is stamped by the bus.** A `gen` key on the payload a core site passes
+is **dropped**; the bus owns that field. It is a monotonic counter over every
+emit that actually happened, across all five names — an ordering aid, so you can
+tell a replay of `gen` 3 arriving after a live `gen` 5 is stale. It is **not**
+the `/state` revision and **not** a lease epoch. Only a *level* payload carries
+it; an edge does not, but the meta bag carries it for both. Payloads are a
+shallow **copy** of what core passed, and frozen.
+
+**A level emit that changes nothing does not happen.** Equality is shallow
+`Object.is` over the own keys, ignoring `gen`: no generation is taken, no
+handler is called, nothing is re-retained. That is why `state:adopted` fires
+**exactly once ever** even though core has two adopt latches — the boot pull and
+the lease-loss rebuild both emit an empty payload, so whichever runs second is a
+no-op — and why a repeated `{active: false}` from the lease socket is silent.
+
+**Fire-after-apply.** Core emits *after* it has mutated, and the bus applies its
+own state (the generation, the retained level) before it calls anybody, so a
+handler observes finished state rather than a half-applied one. Two limits the
+code states out loud and this page will not overstate:
+
+- `lease:changed` is **HOME only**. The payload has no `hostId` — one retained
+  level cannot speak for N brokers, and a remote broker's lease is a per-host
+  mask with no event in this build's table.
+- On a lease **loss** the view is fully torn down before any handler runs; on a
+  **gain** the rebuild is still in flight. The event names the **lease**, which
+  core has genuinely learned, not the view.
+
+**Handler isolation.** A throwing handler is logged and its siblings still run,
+and the throw never reaches the core mutation site that emitted.
+
+**Auto-unsubscribe at teardown.** `off` is pushed onto this mod's LIFO teardown
+chain as well as returned, so a disabled mod stops hearing about hosts even if
+it never calls the function it was handed.
+
+**Re-entrancy is coalesced and bounded.** An emit raised from inside a handler
+joins the pass already running instead of nesting one, so a cascade's stack
+depth is constant and the delivery order stays the order things were applied in.
+Level events coalesce while still queued (two lease changes inside one pass
+deliver the final state once); an **edge never coalesces**, because two auth
+successes are two facts. The pass is capped — exhausting it drops what is left
+with a `console.warn`, rather than livelocking the UI thread.
+
+**Only core emits.** `ctx.events` carries `on` and nothing else. A mod that
+could emit `host:removed` could lie to every other mod about core state, and
+inter-mod messaging is a separate surface with its own trust story (#199).
+Adding an emit later is additive.
+
+**Where each event comes from**, so you know what it means:
+
+- `host:auth` — a completed host authentication, and a poll that finds a host's
+  auth has recovered.
+- `host:changed` — a committed host add/edit, the host colour swatch, and the
+  hidden toggle. Only paths that actually mutated emit it. The edge carries an
+  id, not a snapshot: re-read what you care about and decide.
+- `host:removed` — *after* the whole removal has finished, so it means "that
+  host is gone", not "it is going".
+- `state:adopted` — the first `/state` adoption, whether that is the boot pull
+  or a lease-loss rebuild that beat it.
+- `lease:changed` — the home single-active lease, per control frame.
+
+**Feature-detect it.** `events` is its own capability family at version 1, so
+`ctx.capabilities.events`, `if (ctx.events)` / `typeof ctx.events.on ===
+'function'` and `needs: ['events']` all work. `mods/help/help.js` is the shipped
+worked example — its corpus refetch on `host:auth`, replacing the
+`win._onHostAuth` field it used to write. Note it **feature-detects instead of
+declaring `needs: ['events']`**, deliberately: a `needs` blocks the whole mod,
+and Help without the bus is missing one corpus refresh, while Help blocked has
+no chip, no window kind and no hotkey. Weigh that trade the same way.
+
+Core still invokes `win._onHostAuth` by name for the three mods #204 has yet to
+migrate. That is legacy, not a pattern — do not add a fourth.
+
+### Per-window teardown: `info.onModTeardown` (#195)
+
+A mod that decorates a **terminal** window has two exits to cover, owned by two
+channels, neither of which covers the other:
+
+| chain | fires when | does **not** fire when |
+|---|---|---|
+| `win.cleanups` — `info.onDispose` | the **window** closes (`closeWindow`, and the lease-loss rebuild) | the mod is disabled with that window still open |
+| `rec.unloads` — `ctx.onUnload` | the **mod** is disabled | one of the windows it decorated closes |
+
+So a widget needed a disposer on both, an idempotence flag so the first exit
+disarmed the second, and a set so the mod-side entry could still reach the open
+windows. Core keeps all of that now:
+
+```js
+ctx.windows.onTerminalCreate(function (info) {
+    info.addTitleBarItem(btn);
+    if (!(typeof info.onModTeardown === 'function'
+          && info.onModTeardown(teardown))) {
+        info.onDispose(teardown);        // refusal / older build — see below
+    }
+});
+```
+
+- **Exactly once, on the first of the two.** Both exits fire the same
+  per-(mod, window) state, and it is marked spent before its callbacks run — so
+  close-then-disable, disable-then-close, and a callback that closes its own
+  window or disables its own mod from inside the teardown it is running in are
+  all the same single call.
+- **A disable does not close the window.** A terminal belongs to core, not to
+  the mod that decorated it: this removes the decoration and leaves everything
+  else where it was. (#194's staged take-down *does* close a mod's windows at
+  disable — those are the mod's own factory windows. A terminal never is.)
+- **It returns a boolean**, and a refusal is never a throw: `false` for a
+  non-function, for a window that is already gone, for this mod being
+  mid-teardown, and for a state that has already fired. You can see the `false`
+  and run your own cleanup, which is exactly what the fallback above is.
+- **Callbacks run LIFO**, each isolated, so one broken disposer strands neither
+  the window's remaining ones nor the chain behind them.
+- **The state is per (mod, window), not per delivery.** A mod may hold more than
+  one `onTerminalCreate` subscription and every one is handed a bag for the same
+  window; they all register into one state, so a window carries one
+  `win.cleanups` entry per **mod** however many teardowns that mod registers on
+  it.
+- **Where it sits in the LIFO chain.** The mod-side entry is pushed at your
+  first accepted registration — normally inside `init()`, on the
+  `onTerminalCreate` replay — so it is an *early* entry and therefore runs
+  *late*, after disposers you registered afterwards. A self-contained widget
+  teardown belongs there; if you need your widget gone *before* some other
+  resource you own, tear that one down from the same callback.
+- **No new capability entry, and `needs` cannot name it.** `windows` is already
+  a v1 family and this adds a member to it, so the map is unchanged; `needs`
+  resolves a path on **`ctx`** (§5) and the per-delivery info bag is not
+  reachable from `ctx`. Feature-detect with `typeof info.onModTeardown ===
+  'function'`.
+- One accepted cost: a disable leaves its spent `win.cleanups` entry on the
+  window. Splicing it out at fire time is the one thing this must not do —
+  `closeWindow` iterates that array with `for…of`, and removing an entry
+  mid-drain skips the next one — so an enable/disable cycle on a long-lived
+  terminal leaves one dead closure per cycle.
+
+**`mods/git/git.js` is the shipped reference migration.** Its hand-kept
+`disposers` Set, the `ctx.onUnload` block that drained it and the decorate-once
+`decorated` `WeakSet` in front of both are all gone, replaced by the one
+registration above at the same site. (The `WeakSet` needed no replacement:
+`onTerminalCreate` already delivers each window once per subscription.) What it
+**keeps** is the `info.onDispose` fallback, deliberately: `onModTeardown` is
+absent on a page assembled without the extension fragment and returns `false`
+on a dead window or a mod mid-teardown, and in those cases arming the
+window-close half alone is still worth it — a leaked 15 s poll plus a live
+document-level listener on every terminal is the worse failure. It is the one
+line the mod rode before, not a second set.
+
+### Forgetting a host: `ctx.hosts.invalidate` (#195)
+
+`hosts` is a **new family** at capability version 1, and `invalidate(id)` is its
+first member: "forget everything this page knows about host `<id>`".
+
+It clears **every registered per-host cache** and then repaints the host
+surfaces (the hosts list, the settings tabs, the host status chips and the
+taskbar). The list is core's, not a caller's — each cache registers itself
+beside its own declaration — so the eight this build has (the per-host state
+cache and its save chain, the auth-prompt latch, the poll record, the `/control`
+socket, and three config caches) *and* whatever the next fragment adds are
+covered by the one call. The cautionary example is in the tree:
+`mods/host-registry/` still carries its own hand-maintained copy of that list,
+and its own comment calls that copy "a known latent gap". A list kept by a
+stranger is right on the day it is written and nothing makes it stay right —
+call this instead.
+
+It returns `true` when it ran and `false` for a blank / non-string id (nothing
+to forget, and no repaint owed) or an internal failure — **never a throw**, so
+calling it from inside an event handler cannot take a repaint down with a bad
+argument.
+
+Two things it deliberately does **not** do:
+
+- **It does not emit.** Invalidation and notification are separate acts: only
+  core *mutation* sites emit `host:changed`. So a `host:changed` subscriber may
+  call `ctx.hosts.invalidate()` without recursing.
+- **It does not save.** `savePrefs()` is a mutation (localStorage plus a
+  `/state` push) and stays with the caller that actually changed something, so a
+  mod can drop stale per-host state without writing prefs it does not own.
+
+Clearing a cache does not cancel an in-flight request; it drops the stale value
+so the *next* request uses the new url/token, and the poll loop re-primes on its
+next tick.
+
+Feature-detect with `typeof ctx.hosts.invalidate === 'function'` or
+`needs: ['hosts.invalidate']`. On a build whose core has no invalidation path
+the family is not installed **at all**, so `ctx.capabilities` reports `hosts`
+absent — true — rather than handing you a member that silently does nothing.
 
 ---
 
