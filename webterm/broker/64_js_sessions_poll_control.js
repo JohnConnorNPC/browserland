@@ -416,7 +416,10 @@
                     else deactivateTransition();
                 } finally {
                 // #195: the single-active lease, as a LEVEL — the event that
-                // deletes workspaces' read of the core-private _deactivated.
+                // workspaces' read of the core-private _deactivated becomes
+                // once #204 migrates it. That read is still shipped; this is
+                // the channel that makes deleting it possible, not the
+                // deletion itself.
                 //
                 // THIS is the site and not the four `_deactivated = …` writes
                 // inside bootActiveView / teardownView / rebuildView: this is

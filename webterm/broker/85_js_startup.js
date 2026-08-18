@@ -75,8 +75,9 @@
             if (_statePendingPush) { _statePendingPush = false; schedulePush(); }
             _markStateReady();
             // #195: THE adopt — the one restoreAppWindows waits on (#167's
-            // race), and the level that deletes help's 20x500 ms _stateReady
-            // poll. Fired last: the flag is set, a push that queued behind it
+            // race), and the level that replaces help's 20x500 ms _stateReady
+            // poll once #204 migrates it (that poll is still shipped).
+            // Fired last: the flag is set, a push that queued behind it
             // has been released, and _stateReadyPromise (the boot restore gate)
             // is resolved, so a handler observes a fully adopted state.
             //
