@@ -16847,3 +16847,689 @@ def test_savechain_joins_the_family_it_extends_or_not_at_all(savechain_harness):
         "a ctx with no serverStore was given a half-family"
     assert r["partial"] == ["get"], \
         "a store without the write half was decorated anyway"
+
+
+# --------------------------------------------------------------------------- #
+# scratchpad ON the chain (#196 / A43) -- the REFERENCE migration.
+#
+# #196 ships the migration WITH the API on the argument that saveChain IS
+# scratchpad's pipeline, canned, "so the swap proves the chain against the mod
+# that defined its semantics before the contract freezes". A string match on the
+# deleted block cannot prove that -- CP8's finding about the #194 clipboard
+# migration was exactly this: every assertion was a string match and the mod was
+# never executed. So the cases below run the SHIPPED scratchpad against the
+# SHIPPED chain, A40's SHIPPED CAS, the SHIPPED /mod-store transport, the
+# SHIPPED window-kind registry and the SHIPPED _runUnloads. The debounce is the
+# real 800ms too: these cases wait it out rather than dialling it down, because
+# "rapid edits still coalesce" is a claim about the interval the mod ships.
+# --------------------------------------------------------------------------- #
+
+
+def _scratchpad_mod_source():
+    """The shipped scratchpad mod, verbatim."""
+    src = (BROKER_DIR / "mods" / "scratchpad" / "scratchpad.js").read_text(
+        encoding="utf-8")
+    for needed in ("registerMod({",
+                   "function openScratchWindow(appData) {",
+                   "ctx.serverStore.saveChain({"):
+        assert needed in src, f"{needed} missing from the shipped scratchpad"
+    return src
+
+
+def test_scratchpad_deleted_its_hand_rolled_save_chain():
+    # E43's deletion half -- necessary, nowhere near sufficient (the executing
+    # cases below are the rest). `:372-407` was the debounced, single-in-flight
+    # chain with the rebase and the read-only banner: gone, along with the three
+    # win fields that drove it and the remembered baseRev the CAS used.
+    src = _code_only(_scratchpad_mod_source())
+    for gone in ("win._saving", "win._saveAgain", "win._saveTimer",
+                 "win.baseRev", "ctx.serverStore.set(",
+                 "res.error === 'not_active'", "res.error === 'conflict'",
+                 "setTimeout(", "clearTimeout("):
+        assert gone not in src, \
+            f"scratchpad still hand-rolls its save chain: {gone!r}"
+    # ...and what replaced it: ONE chain, built with this mod's own debounce so
+    # 86e's default and the mod's constant cannot drift apart in silence.
+    assert src.count("ctx.serverStore.saveChain({") == 1
+    assert "debounceMs: SAVE_DEBOUNCE });" in src
+    assert "const SAVE_DEBOUNCE = 800;" in src
+    # The reducer shape, not a snapshot: what save() is handed is a function,
+    # and the buffer read lives INSIDE it (#196 trap 3).
+    assert "function saveReducer() { return gatherValue(); }" in src
+    assert "chain.save(saveReducer);" in src
+    # No purgeRevisions / noHistory: the ring IS the History panel (#124), and
+    # test_modstore_nohistory pins that scratchpad must never set the flag.
+    assert "purgeRevisions" not in src and "noHistory" not in src
+    # The banner rides onState, and the subscription is dropped with the window.
+    assert "win.cleanups.push(chain.onState(function (state) {" in src
+    assert "if (state === 'conflict') enterRO();" in src
+    # The final flush is a WINDOW cleanup, never an onUnload (#196 trap 6): from
+    # an onUnload rec.unloading is already set and 86e drops the batch.
+    assert "chain.flush();" in src
+    unload = src.split("ctx.onUnload(function () {")[1]
+    assert "flush" not in unload, "a teardown flush is dropped, not sent"
+    # The surface it cannot run without is declared AND feature-detected: the
+    # gate lives in 86c, so a page assembled without that fragment has no gate.
+    assert "needs: ['serverStore.saveChain']," in src
+    assert "typeof ctx.serverStore.saveChain !== 'function'" in src
+
+
+#: The scratchpad driver. Appended after the window-factory harness (its own
+#: dispatcher stripped, exactly as the clipboard driver does it), so the core
+#: scaffold is already in scope; what it adds is the half the factory harness
+#: never needed -- the /mod-store transport, makeCtx's serverStore literal,
+#: A40's CAS, A41's chain, a CodeMirror small enough to read, and the mod.
+_SCRATCHPAD_DRIVER = r"""
+// ---- the wire ------------------------------------------------------------
+const CLIENT_ID = 'client-1';
+const DELAY = 4;                 // ms per request, so "in flight" is observable
+
+let HOSTS = { local: { id: 'local' } };
+function localHost() { return HOSTS.local; }
+function hostById(id) { return (id && HOSTS[id]) ? HOSTS[id] : null; }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+// Wait for something to HAPPEN, with a deadline -- never a bare sleep sized to
+// "surely long enough". (A bare sleep is fine for the mirror claim, "nothing
+// happened by now", and that is the only place below that uses one.)
+async function waitFor(pred, ms) {
+    const t0 = Date.now();
+    while (!pred() && Date.now() - t0 < (ms || 2000)) await sleep(5);
+    return pred();
+}
+
+let BROKER = null;
+let FETCHES = [];
+let PUT_INFLIGHT = 0, PUT_MAX = 0;
+function hostFetch(host, path, o) {
+    const method = (o && o.method) || 'GET';
+    FETCHES.push(method + ' ' + path);
+    const res = BROKER(host, path, o);          // the server sees it on ARRIVAL
+    if (method === 'PUT') {
+        PUT_INFLIGHT += 1;
+        if (PUT_INFLIGHT > PUT_MAX) PUT_MAX = PUT_INFLIGHT;
+    }
+    return new Promise(function (resolve) {
+        setTimeout(function () {
+            if (method === 'PUT') PUT_INFLIGHT -= 1;
+            resolve(res);
+        }, DELAY);
+    });
+}
+function reply(status, obj) {
+    return { status: status, json: function () { return Promise.resolve(obj); } };
+}
+// A41's mod-store double, faithful to app.py's PUT rules for the parts under
+// test: rev CAS, the 409 with the live value inlined, the lease refusal.
+function makeBroker(opts) {
+    opts = opts || {};
+    const st = { rev: opts.rev || 0,
+                 value: (opts.value !== undefined) ? opts.value : null };
+    const puts = [];
+    const fn = function (host, path, o) {
+        if (!o || o.method !== 'PUT') {
+            return reply(200, { rev: st.rev, value: st.value, revisions: [] });
+        }
+        const body = JSON.parse(o.body);
+        puts.push(body);
+        if (opts.notActive) {
+            return reply(409, { ok: false, error: 'not_active',
+                                rev: st.rev, value: st.value });
+        }
+        if (opts.beforeWrite) opts.beforeWrite(st, puts.length);
+        if (body.baseRev !== st.rev) {
+            return reply(409, { ok: false, error: 'conflict',
+                                rev: st.rev, value: st.value });
+        }
+        st.value = body.value;
+        st.rev += 1;
+        return reply(200, { ok: true, rev: st.rev });
+    };
+    fn.puts = puts;
+    fn.state = st;
+    fn.opts = opts;
+    return fn;
+}
+function setBroker(brokerOpts) {
+    BROKER = makeBroker(brokerOpts);
+    FETCHES = [];
+    PUT_INFLIGHT = 0;
+    PUT_MAX = 0;
+    return BROKER;
+}
+function puts() { return BROKER.puts; }
+function wire() { return FETCHES.slice(); }
+// The note text each PUT actually carried -- the whole point of the late read.
+function texts() {
+    return puts().map(function (b) {
+        return (b.value && b.value.tabs || []).map(function (t) { return t.text; })
+            .join('|');
+    });
+}
+function stored() {
+    const v = BROKER.state.value;
+    return (v && v.tabs || []).map(function (t) { return t.text; }).join('|');
+}
+
+__TRANSPORT__
+function makeStore(modId) {
+    return { __STORE__ }.serverStore;
+}
+__UPDATE__
+__SAVECHAIN__
+
+// ---- events, on the factory harness's element stub ------------------------
+// It stubs addEventListener as a no-op (nothing there needed to dispatch). The
+// read-only banner's "Take over" button and the click-while-read-only retry are
+// both event handlers, so this records them and `fire` dispatches.
+El.prototype.addEventListener = function (type, fn) {
+    if (!this.__h) this.__h = {};
+    this.__h[type] = (this.__h[type] || []).concat(fn);
+};
+El.prototype.removeEventListener = function (type, fn) {
+    const l = this.__h && this.__h[type];
+    if (l) {
+        this.__h[type] = l.filter(function (f) { return f !== fn; });
+    }
+};
+function fire(el, type, ev) {
+    const l = (el && el.__h && el.__h[type]) || [];
+    const e = Object.assign({ stopPropagation: function () {},
+                              preventDefault: function () {} }, ev || {});
+    l.slice().forEach(function (fn) { fn(e); });
+    return l.length;
+}
+
+// ---- a CodeMirror small enough to read ------------------------------------
+// The mod builds its editors on the editor mod's ONE shared build; what it
+// actually USES of it is a doc it can read at any moment and an updateListener
+// that fires on every keystroke. That is what this provides -- so `typeInto`
+// below is a real keystroke as far as the save pipeline is concerned.
+function flat(x, out) {
+    out = out || [];
+    if (Array.isArray(x)) { x.forEach(function (k) { flat(k, out); }); }
+    else if (x) { out.push(x); }
+    return out;
+}
+function EditorView(cfg) {
+    this.state = cfg && cfg.state;
+    this.dom = document.createElement('div');
+    this.dom.className = 'cm-editor';
+    this.destroyed = false;
+}
+EditorView.prototype.setState = function (s) { this.state = s; };
+EditorView.prototype.focus = function () {};
+EditorView.prototype.destroy = function () { this.destroyed = true; };
+EditorView.theme = function () { return { __ext: 'theme' }; };
+EditorView.lineWrapping = { __ext: 'wrap' };
+EditorView.updateListener = {
+    of: function (fn) { return { __update: fn }; },
+};
+const EditorState = {
+    create: function (cfg) {
+        const st = { text: String((cfg && cfg.doc) == null ? '' : cfg.doc),
+                     listeners: [], keys: [] };
+        st.doc = { toString: function () { return st.text; } };
+        flat(cfg && cfg.extensions).forEach(function (e) {
+            if (e && e.__update) st.listeners.push(e.__update);
+            if (e && e.__keymap) st.keys = st.keys.concat(e.__keymap);
+        });
+        return st;
+    },
+};
+const ext = function () { return { __ext: 1 }; };
+const CM = {
+    view: { EditorView: EditorView,
+            keymap: { of: function (b) { return { __keymap: b }; } },
+            drawSelection: ext, highlightActiveLine: ext,
+            rectangularSelection: ext, crosshairCursor: ext },
+    state: { EditorState: EditorState },
+    commands: { history: ext, defaultKeymap: [], historyKeymap: [],
+                indentWithTab: { __ext: 'tab' } },
+    language: { syntaxHighlighting: ext, defaultHighlightStyle: { __ext: 'hl' },
+                indentOnInput: ext },
+    theme: { oneDark: { __ext: 'dark' } },
+    langs: { markdown: function () { return []; } },
+};
+let cmLoads = 0;
+function loadCodeMirror() { cmLoads += 1; return Promise.resolve(CM); }
+
+// A keystroke: the buffer moves and CM's updateListener fires, which is the
+// only thing the mod subscribes to.
+function typeInto(win, text) {
+    const st = win.cmView.state;
+    st.text = String(text);
+    st.listeners.slice().forEach(function (fn) { fn({ docChanged: true }); });
+}
+// The buffer moves with NO keystroke event -- used to model "the user typed on
+// while a write was in flight" from inside the broker, where dispatching a
+// listener would recurse into the pipeline being measured.
+function setBuffer(win, text) { win.cmView.state.text = String(text); }
+function pressCtrlS(win) {
+    const keys = (win.cmView.state.keys || []);
+    for (let i = 0; i < keys.length; i++) {
+        if (keys[i] && keys[i].key === 'Mod-s') return keys[i].run();
+    }
+    return null;
+}
+function banner(win) {
+    const el = win.dom.querySelector('.app-scratch-ro');
+    return el ? (el.style.display === '' ? 'shown' : 'hidden') : 'missing';
+}
+
+// ---- the shipped mod ------------------------------------------------------
+let DECL = null;
+function registerMod(decl) { DECL = decl; }
+
+__SCRATCHPAD__
+
+// ONE ACTIVATION, the way initMod builds one: a fresh per-activation record, a
+// fresh ctx with the v1 members this mod reads, the extender registry applied
+// to it, then init(). A re-enable is another call with a NEW rec.
+function activate() {
+    const rec = { id: 'scratchpad', version: '1.0.0', unloads: [] };
+    window.__mods.active.set('scratchpad', rec);
+    const ctx = {
+        id: 'scratchpad', ctxVersion: 1,
+        serverStore: makeStore('scratchpad'),
+        windows: { onTerminalCreate: function () {} },
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        registerWindowKind: function (spec) {
+            return _modRegisterWindowKind(rec, spec);
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    DECL.init(ctx);
+    return { rec: rec, ctx: ctx };
+}
+// The launch path core drives: the REAL openAppWindow -> buildAppWindow ->
+// the kind's factory. Then hydrate has to finish (a GET, then the CM build).
+async function open() {
+    const win = openAppWindow({ id: 'app:scratch', appKind: 'scratchpad' });
+    await sleep(DELAY * 8);
+    return win;
+}
+
+const SCRATCHCASES = {};
+
+// E43 clause 1. Ten keystrokes inside one debounce leave as ONE write, and the
+// write carries the LAST of them -- at the mod's own 800ms, waited out.
+SCRATCHCASES.rapid_edits_coalesce = async function () {
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] } });
+    const m = activate();
+    const win = await open();
+    const loaded = { loading: win._loading, doc: win.cmView.state.text,
+                     tabs: win.scratchTabs.length, cmLoads: cmLoads,
+                     wire: wire(), banner: banner(win) };
+    const t0 = Date.now();
+    for (let i = 1; i <= 10; i++) typeInto(win, 'edit ' + i);
+    const immediately = puts().length;
+    await sleep(400);                    // still INSIDE the trailing debounce
+    const midDebounce = { puts: puts().length, elapsed: Date.now() - t0 };
+    await waitFor(function () { return puts().length >= 1; }, 2000);
+    const afterDebounce = { puts: puts().length, texts: texts(),
+                            baseRevs: puts().map(function (b) { return b.baseRev; }),
+                            wire: wire(), maxPutInflight: PUT_MAX,
+                            elapsed: Date.now() - t0 };
+    // Ctrl+S is the mod's own "save NOW" path: it must not wait 800ms.
+    typeInto(win, 'saved by hand');
+    const sAt = Date.now();
+    pressCtrlS(win);
+    await waitFor(function () { return puts().length >= 2; }, 2000);
+    const afterCtrlS = { puts: puts().length, texts: texts(),
+                         elapsed: Date.now() - sAt };
+    // ...and the flush consumed the queued batch -- nothing trails in later.
+    await sleep(900);
+    return { loaded: loaded, immediately: immediately, midDebounce: midDebounce,
+             afterDebounce: afterDebounce, afterCtrlS: afterCtrlS,
+             puts: puts().length, texts: texts(), stored: stored(),
+             hasSaveHook: typeof win._saveToServer, banner: banner(win),
+             serverRO: win.serverRO };
+};
+
+// E43 clause 2. A dead write lease (409 not_active) raises the read-only
+// banner through onState -- and a click while read-only re-attempts, which is
+// how the mod resyncs once the user takes the lease over.
+SCRATCHCASES.a_seeded_409_raises_the_read_only_banner = async function () {
+    setBroker({ rev: 1, notActive: true, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] } });
+    const m = activate();
+    const win = await open();
+    const before = { banner: banner(win), serverRO: win.serverRO };
+    typeInto(win, 'while another browser is active');
+    await waitFor(function () { return puts().length >= 1; }, 2000);
+    await sleep(30);
+    const refused = { banner: banner(win), serverRO: win.serverRO,
+                      puts: puts().length };
+    // Read-only gates the DEBOUNCED path: a further keystroke queues nothing.
+    typeInto(win, 'typed while read-only');
+    await sleep(900);
+    const whileRO = { puts: puts().length, banner: banner(win) };
+    // ...but a click on the window re-attempts, still refused.
+    fire(win.dom, 'mousedown');
+    await waitFor(function () { return puts().length >= 2; }, 2000);
+    await sleep(30);
+    const retried = { puts: puts().length, banner: banner(win) };
+    // The user becomes the active browser and hits "Take over".
+    BROKER.opts.notActive = false;
+    const clicked = fire(win.dom.querySelector('.app-scratch-ro-retry'), 'click');
+    await waitFor(function () { return puts().length >= 3; }, 2000);
+    await sleep(30);
+    return { before: before, refused: refused, whileRO: whileRO,
+             retried: retried, clicked: clicked, banner: banner(win),
+             serverRO: win.serverRO, puts: puts().length, texts: texts(),
+             stored: stored() };
+};
+
+// THE ATOM'S WHOLE RISK, as a behaviour. The reducer reads the live buffer at
+// SEND time, so when a 409 rebases it the second attempt carries what the
+// editor holds THEN -- not the body that already lost (#196 trap 3 / #158).
+SCRATCHCASES.a_rebase_re_reads_the_live_buffer = async function () {
+    let win = null;
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] },
+        beforeWrite: function (st, n) {
+            if (n !== 1) return;
+            st.rev += 1;                      // another writer got there first
+            setBuffer(win, 'typed DURING the first attempt');
+        } });
+    const m = activate();
+    win = await open();
+    typeInto(win, 'typed before the first attempt');
+    await waitFor(function () { return puts().length >= 2; }, 2500);
+    await sleep(30);
+    return { puts: puts().length, texts: texts(),
+             baseRevs: puts().map(function (b) { return b.baseRev; }),
+             wire: wire(), maxPutInflight: PUT_MAX, stored: stored(),
+             tabText: win.scratchTabs[0].text };
+};
+
+// E43 clause 3 / #196 trap 7, against the SHIPPED teardown: a disable landing
+// inside the debounce leaves nothing that can land afterwards, and the next
+// activation's write is untouched by it.
+SCRATCHCASES.disable_mid_debounce_leaves_no_stale_write = async function () {
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] } });
+    const m = activate();
+    const win = await open();
+    typeInto(win, 'STALE');
+    _runUnloads(m.rec);                       // <- the disable, mid-debounce
+    await sleep(1000);                        // outlive the armed debounce
+    const afterDisable = { puts: puts().length, wire: wire(),
+                           unloading: !!m.rec.unloading,
+                           unloads: m.rec.unloads.length,
+                           windows: windows.size, kindGone: !lookupWindowKind('scratchpad') };
+    // Re-enable: a NEW record, a NEW ctx, a NEW window.
+    const m2 = activate();
+    const win2 = await open();
+    const hydrated = win2.scratchTabs[0].text;   // read BEFORE the new edit
+    typeInto(win2, 'NEW');
+    await waitFor(function () { return puts().length >= 1; }, 2500);
+    await sleep(30);
+    return { afterDisable: afterDisable, puts: puts().length, texts: texts(),
+             stored: stored(), hydrated: hydrated,
+             sameWin: win === win2 };
+};
+
+// The teardown the chain DOES support, and the one the deleted block only
+// claimed to do: closeWindow sets win.disposed BEFORE draining cleanups, so the
+// old flush -- which went through a runSave() that returns early on disposed --
+// could never have written. A close inside the debounce must not lose the edit.
+SCRATCHCASES.closing_the_window_flushes_the_pending_edit = async function () {
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] } });
+    const m = activate();
+    const win = await open();
+    typeInto(win, 'typed just before the close');
+    const beforeClose = puts().length;
+    closeWindow('app:scratch');
+    const disposedAtCleanup = win.disposed;
+    await waitFor(function () { return puts().length >= 1; }, 2000);
+    await sleep(30);
+    const flushed = { puts: puts().length, texts: texts() };
+    await sleep(900);                          // nothing trails in afterwards
+    return { beforeClose: beforeClose, disposedAtCleanup: disposedAtCleanup,
+             flushed: flushed, puts: puts().length, texts: texts(),
+             stored: stored(), windows: windows.size,
+             modAlive: window.__mods.active.has('scratchpad') };
+};
+
+// The adversarial reviewer's second blocker, as a case rather than an argument:
+// close the window while a write is ALREADY in flight, with a newer keystroke
+// queued behind it. Single-in-flight means flush() cannot send that one now, and
+// a close is synchronous -- so if the chain died with the window, the newest
+// text would be dropped. It does not: the chain's generation is the mod's
+// ACTIVATION, and the mod is still up.
+SCRATCHCASES.closing_mid_flight_still_lands_the_queued_edit = async function () {
+    let win = null;
+    setBroker({ rev: 1, value: { v: 1,
+        tabs: [{ id: 't1', name: 'Notes', text: 'seed' }] },
+        beforeWrite: function (st, n) {
+            if (n !== 1) return;
+            // The first PUT has ARRIVED and has not answered yet.
+            typeInto(win, 'B, typed while A was in flight');
+            closeWindow('app:scratch');
+        } });
+    const m = activate();
+    win = await open();
+    typeInto(win, 'A');
+    await waitFor(function () { return puts().length >= 2; }, 3000);
+    await sleep(50);
+    return { puts: puts().length, texts: texts(), stored: stored(),
+             maxPutInflight: PUT_MAX, windows: windows.size,
+             modAlive: window.__mods.active.has('scratchpad') };
+};
+
+(function () {
+    const want = process.argv[2];
+    if (!SCRATCHCASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+    Promise.resolve().then(function () { return SCRATCHCASES[want](); })
+        .then(function (out) {
+            if (!('errors' in out)) out.errors = errors;
+            process.stdout.write(JSON.stringify(out) + '\n');
+        })
+        .catch(function (e) {
+            console.log('case threw: ' + ((e && e.stack) || e));
+            process.exit(3);
+        });
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def scratchpad_harness(tmp_path_factory):
+    """The window-factory harness, plus the store half, plus the real mod."""
+    path = tmp_path_factory.mktemp("scratchmod") / "harness.js"
+    path.write_text(
+        # Everything ABOVE the base harness's own dispatcher (it exits on an
+        # unknown case, so an appended driver would never run) -- the clipboard
+        # migration's idiom, for the same reason.
+        (_WINFAC_HARNESS.split("const want = process.argv[2];")[0]
+         .replace("__REGISTRY__", _ctx_registry_source())
+         .replace("__FACTORY__", _winfac_source())
+         .replace("__KINDS__", _window_kind_registry_source())
+         .replace("__RESTORE__", _restore_lifecycle_source())
+         .replace("__TAKEDOWN__", _loader_takedown_source()))
+        + _SCRATCHPAD_DRIVER
+        .replace("__TRANSPORT__", _store_transport_source())
+        .replace("__STORE__", _store_literal_source())
+        .replace("__UPDATE__", _update_source())
+        .replace("__SAVECHAIN__", _savechain_source())
+        .replace("__SCRATCHPAD__", _scratchpad_mod_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_scratchpad(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"scratchpad case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_coalesces_rapid_edits_on_the_chain(
+        scratchpad_harness):
+    # E43 clause 1, executed: the mod hydrates through the shipped transport,
+    # ten keystrokes land inside one 800ms debounce, and ONE write leaves.
+    r = _run_scratchpad(scratchpad_harness, "rapid_edits_coalesce")
+    assert r["errors"] == []
+    assert r["loaded"] == {"loading": False, "doc": "seed", "tabs": 1,
+                           "cmLoads": 1,
+                           "wire": ["GET /mod-store/scratchpad"],
+                           "banner": "hidden"}, r["loaded"]
+    # Trailing, not leading: nothing goes out on the first keystroke, and
+    # nothing goes out 400ms in either. (The elapsed ms rides along so a probe
+    # that overshot 800 on a loaded machine reads as the timing artefact it is
+    # rather than as a mod that stopped debouncing.)
+    assert r["immediately"] == 0
+    assert r["midDebounce"]["puts"] == 0, r["midDebounce"]
+    assert r["midDebounce"]["elapsed"] < 800, (
+        "the mid-debounce probe overshot the debounce: " + str(r["midDebounce"]))
+    a = r["afterDebounce"]
+    assert a["puts"] == 1, "ten keystrokes did not coalesce into one write"
+    assert a["texts"] == ["edit 10"], "the write did not carry the LAST edit"
+    assert a["maxPutInflight"] == 1
+    # Every send reads the live rev through A40's CAS -- the mod no longer
+    # remembers a baseRev of its own, so a GET precedes each PUT.
+    assert a["baseRevs"] == [1]
+    assert a["wire"] == ["GET /mod-store/scratchpad"] * 2 \
+        + ["PUT /mod-store/scratchpad"], a["wire"]
+    # ...and the debounce really is the mod's 800ms, not 86e's default by luck.
+    assert 800 <= a["elapsed"] < 1600, a["elapsed"]
+    # Ctrl+S goes NOW, past the debounce...
+    assert r["afterCtrlS"]["puts"] == 2
+    assert r["afterCtrlS"]["texts"] == ["edit 10", "saved by hand"]
+    assert r["afterCtrlS"]["elapsed"] < 800, (
+        "Ctrl+S waited for the debounce instead of flushing")
+    # ...and consumed the batch it flushed: no third write trails in.
+    assert r["puts"] == 2 and r["stored"] == "saved by hand"
+    assert r["hasSaveHook"] == "function"
+    assert r["banner"] == "hidden" and r["serverRO"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_raises_its_banner_from_the_chain_state(
+        scratchpad_harness):
+    # E43 clause 2. The banner used to be raised by a hand-written branch on
+    # res.error; it is now the chain's 'conflict' state, and the mod's two
+    # retry paths (a click anywhere while read-only, the "Take over" button)
+    # still reach the server.
+    r = _run_scratchpad(scratchpad_harness,
+                        "a_seeded_409_raises_the_read_only_banner")
+    assert r["errors"] == []
+    assert r["before"] == {"banner": "hidden", "serverRO": False}, \
+        "onState fires on subscribe -- the banner must start correct"
+    assert r["refused"] == {"banner": "shown", "serverRO": True, "puts": 1}
+    # A dead lease is not rebasable, so it costs exactly one write...
+    assert r["whileRO"] == {"puts": 1, "banner": "shown"}, \
+        "a keystroke while read-only queued a write"
+    # ...and a click re-attempts it (once), still refused.
+    assert r["retried"] == {"puts": 2, "banner": "shown"}
+    assert r["clicked"] == 1, "the Take over button lost its handler"
+    assert r["puts"] == 3
+    # Every one of the three carries the buffer as of ITS send: the two writes
+    # made after the read-only keystroke both carry it, because the reducer
+    # reads the live editor rather than replaying what the first attempt sent.
+    # Nothing typed under the banner is lost.
+    assert r["texts"] == ["while another browser is active",
+                          "typed while read-only",
+                          "typed while read-only"], r["texts"]
+    assert r["stored"] == "typed while read-only"
+    assert r["banner"] == "hidden" and r["serverRO"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_rebases_onto_the_live_buffer(scratchpad_harness):
+    """The atom's whole risk, stated as a behaviour rather than a comment.
+
+    `chain.save(fn)` takes a reducer, not a snapshot, precisely so the late read
+    of the live editor buffer happens INSIDE `fn` at send time -- and therefore
+    re-happens on a rebase. If the mod had captured its value at save() time,
+    the second attempt would re-PUT the body that already lost, which is #158's
+    clobber with retries."""
+    r = _run_scratchpad(scratchpad_harness, "a_rebase_re_reads_the_live_buffer")
+    assert r["errors"] == []
+    assert r["puts"] == 2, "the seeded 409 did not rebase"
+    assert r["texts"] == ["typed before the first attempt",
+                          "typed DURING the first attempt"], (
+        "the rebase re-PUT the snapshot it already sent instead of re-reading "
+        "the live buffer")
+    assert r["baseRevs"] == [1, 2], "the rebase did not adopt the winner's rev"
+    # The 409 inlines the live value, so the rebase costs no second GET.
+    assert r["wire"] == ["GET /mod-store/scratchpad"] * 2 \
+        + ["PUT /mod-store/scratchpad"] * 2, r["wire"]
+    assert r["maxPutInflight"] == 1
+    assert r["stored"] == "typed DURING the first attempt"
+    assert r["tabText"] == "typed DURING the first attempt"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_drops_a_debounce_it_was_disabled_during(
+        scratchpad_harness):
+    # E43 clause 3, against the shipped _runUnloads: the mod is disabled while a
+    # save is still inside its debounce. Nothing may land afterwards -- not when
+    # the timer would have fired, and not after the mod comes back.
+    r = _run_scratchpad(scratchpad_harness,
+                        "disable_mid_debounce_leaves_no_stale_write")
+    assert r["errors"] == []
+    d = r["afterDisable"]
+    assert d["unloading"] is True and d["unloads"] == 0, "the disable did not run"
+    assert d["windows"] == 0, "the mod's teardown left its window open"
+    assert d["kindGone"] is True
+    assert d["puts"] == 0, "a disabled activation still wrote"
+    assert d["wire"] == ["GET /mod-store/scratchpad"], \
+        "a dead activation reached the wire"
+    # The new activation writes normally, and the stale text never shows up.
+    assert r["sameWin"] is False
+    assert r["hydrated"] == "seed", "the re-enable did not re-read the server"
+    assert r["puts"] == 1 and r["texts"] == ["NEW"]
+    assert r["stored"] == "NEW"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_flushes_on_close_which_it_never_used_to(
+        scratchpad_harness):
+    """The behaviour the migration had to NOT drop -- and which turned out to be
+    broken before it: closeWindow sets `win.disposed` before draining cleanups,
+    so the old close-flush called a runSave() that returned early every time. It
+    is now a chain.flush() from the same window cleanup, which is the supported
+    shape (#196 trap 6) and does not consult the window at all."""
+    r = _run_scratchpad(scratchpad_harness,
+                        "closing_the_window_flushes_the_pending_edit")
+    assert r["errors"] == []
+    assert r["beforeClose"] == 0, "the edit was not still inside the debounce"
+    assert r["disposedAtCleanup"] is True, (
+        "core stopped marking the window disposed before the cleanups -- the "
+        "reason this flush cannot go through runSave()")
+    assert r["flushed"] == {"puts": 1,
+                            "texts": ["typed just before the close"]}
+    assert r["puts"] == 1, "the close flushed twice"
+    assert r["stored"] == "typed just before the close"
+    assert r["windows"] == 0
+    # The mod is still ALIVE -- that is what makes the flush legal; the same
+    # call from an onUnload would be dropped by the chain.
+    assert r["modAlive"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_scratchpad_loses_nothing_when_closed_mid_write(
+        scratchpad_harness):
+    """The adversarial pass on this migration called this a data-loss blocker:
+    close the window while a write is in flight and a newer keystroke is queued
+    behind it -- single-in-flight means flush() cannot send that one yet, and a
+    close is synchronous. It holds anyway, and the reason is worth pinning: the
+    chain's generation is the mod's ACTIVATION, not the window, so a close
+    leaves it alive to finish. Only a disable kills it."""
+    r = _run_scratchpad(scratchpad_harness,
+                        "closing_mid_flight_still_lands_the_queued_edit")
+    assert r["errors"] == []
+    assert r["puts"] == 2, "the edit queued behind the in-flight write was lost"
+    assert r["texts"] == ["A", "B, typed while A was in flight"], r["texts"]
+    assert r["stored"] == "B, typed while A was in flight"
+    assert r["maxPutInflight"] == 1, "the close raced a second write out"
+    assert r["windows"] == 0 and r["modAlive"] is True

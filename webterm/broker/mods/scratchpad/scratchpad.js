@@ -18,21 +18,44 @@
         // webterm:appwindows:v1. Writes reuse the /state single-active-client
         // lease: a NON-active browser reads but its saves get 409 not_active
         // (surfaced as a read-only banner); it takes over writes by becoming
-        // active. Conflicts (rare — only one browser can be active) rebase onto
-        // the live rev and re-push the LATEST local content (last-writer-wins for
-        // the active browser; a slow in-flight save can never clobber newer keys
-        // because gatherValue() re-captures at send time and saves are single-
-        // in-flight).
+        // active.
+        //
+        // Saves ride ctx.serverStore.saveChain (#196, 86e) — the shared
+        // debounced, single-in-flight, rebase-on-409 chain that was canned FROM
+        // the pipeline this file used to hand-roll, so this mod is that issue's
+        // reference migration and the swap is the proof. What it keeps: the same
+        // 800ms trailing debounce, one write outstanding at a time, and the
+        // late read — the reducer handed to save() reads the live CM buffer at
+        // SEND time and re-reads it on every rebase, so a slow save can never
+        // re-PUT a snapshot that already lost (#196 trap 3, the #158 clobber).
+        // Content is one whole document, so composing coalesced reducers
+        // degenerates to last-writer-wins for the active browser, exactly as
+        // before. What it gains: update()'s bounded rebase instead of a single
+        // hand-rolled re-push, and the banner driven off chain.onState.
         registerMod({
             id: 'scratchpad',
             version: '1.0.0',
             ctxVersion: 1,
             requires: ['editor'],          // shares the editor's single CM build
             tiers: ['storage', 'window'],  // ctx.serverStore (#124) + a window kind
+            // #196/#197: the surface this mod cannot run without. Saving IS the
+            // mod — content lives only on the broker — so a build without the
+            // chain should report "blocked (needs serverStore.saveChain)" rather
+            // than open a notes window that silently drops every keystroke. That
+            // is the opposite call from help's (#195), and deliberately: help
+            // feature-detects because a missing bus costs it ONE feature, while
+            // a missing chain costs this mod all of its persistence.
+            needs: ['serverStore.saveChain'],
             init: function (ctx) {
                 // The whole point is durable server storage; no-op on an older
-                // loader that predates ctx.serverStore (#124).
-                if (!ctx.serverStore) return;
+                // loader that predates ctx.serverStore (#124) or the save chain
+                // (#196). The `needs` gate above already refuses those builds —
+                // but it lives in 86c, and a page assembled without THAT has no
+                // gate at all, so the runtime check stays.
+                if (!ctx.serverStore
+                        || typeof ctx.serverStore.saveChain !== 'function') {
+                    return;
+                }
 
                 // Stable id for the SINGLE scratchpad window (open-or-focus): a
                 // fixed id through openAppWindow dedupes + un-minimizes, so a
@@ -163,10 +186,13 @@
                             ? Object.assign({}, appData.floatGeom) : null,
                         locked,
                         dirty: false,
-                        // scratchpad state
-                        scratchTabs: [], activeTab: 0, baseRev: 0,
+                        // scratchpad state. No baseRev / _saving / _saveAgain /
+                        // _saveTimer: the CAS revision, the single-in-flight
+                        // latch and the debounce all live inside the save chain
+                        // now (#196), and a field nothing updates is worse than
+                        // no field at all.
+                        scratchTabs: [], activeTab: 0,
                         cmView: null, serverRO: false, _loading: true,
-                        _saving: false, _saveAgain: false, _saveTimer: null,
                         _suppressCm: false, _makeState: null, _histPreview: null,
                     };
                     windows.set(id, win);
@@ -200,17 +226,8 @@
                     win.cleanups.push(
                         () => dom.removeEventListener('mousedown', onDomDown));
 
-                    // Best-effort flush of a pending debounced save on close so an
-                    // edit in the last SAVE_DEBOUNCE ms still reaches the server.
-                    win.cleanups.push(() => {
-                        if (win._saveTimer) {
-                            clearTimeout(win._saveTimer);
-                            win._saveTimer = null;
-                            if (!win.serverRO && !win._loading) {
-                                try { runSave(); } catch (_) {}
-                            }
-                        }
-                    });
+                    // (The final flush on close is registered with the save
+                    // chain below, where the chain it flushes is in scope.)
 
                     // ---- tab UI -----------------------------------------------
                     function captureActive() {
@@ -342,7 +359,17 @@
                     }
                     win._refreshScratchTabBar = refreshTabBar;
 
-                    // ---- save pipeline ----------------------------------------
+                    // ---- save pipeline (on ctx.serverStore.saveChain, #196) ---
+                    // The debounce, the single-in-flight latch and the 409
+                    // rebase that used to be written out here are the chain's
+                    // now (86e), which was canned from this very pipeline. The
+                    // debounce is passed explicitly even though 86e's default is
+                    // this same 800ms, so the two can never silently drift.
+                    // No purgeRevisions / no noHistory: the revision ring IS the
+                    // History panel (#124), and notes are not credentials (#192).
+                    const chain = ctx.serverStore.saveChain({
+                        debounceMs: SAVE_DEBOUNCE });
+
                     // The value is pure content; view state (activeTab/geom) rides
                     // the localStorage record, so a tab switch never bumps a rev.
                     function gatherValue() {
@@ -350,12 +377,28 @@
                         return { v: 1, tabs: win.scratchTabs.map((t) => ({
                             id: t.id, name: t.name, text: t.text })) };
                     }
+                    // THE LATE READ, and the reason save() takes a reducer rather
+                    // than a snapshot: the live CM buffer is read HERE, when the
+                    // batch is actually sent, and read AGAIN on each rebase — so
+                    // a 409 re-pushes what the user has typed by then, never the
+                    // body that already lost (#196 trap 3 / the #158 clobber).
+                    // The winner's `value` is deliberately unread: content is one
+                    // whole document and the write lease means the active browser
+                    // is its only writer, so this is the last-writer-wins the
+                    // hand-rolled chain had, unchanged. Pure over (value, rev) as
+                    // the contract demands — captureActive() only copies CM's
+                    // buffer into the tab record, so re-running it per attempt
+                    // observes more, never does more.
+                    function saveReducer() { return gatherValue(); }
+                    // Trailing debounce: every edit calls save() again, and each
+                    // call pushes the chain's deadline out. Queuing the same
+                    // reducer per edit is what re-arms it; the chain composes a
+                    // coalesced batch, which for a whole-document reducer
+                    // degenerates to last-wins — one PUT carrying the newest
+                    // content, exactly as before.
                     function scheduleSave() {
                         if (win._loading || win.serverRO) return;
-                        if (win._saveTimer) clearTimeout(win._saveTimer);
-                        win._saveTimer = setTimeout(() => {
-                            win._saveTimer = null; runSave();
-                        }, SAVE_DEBOUNCE);
+                        chain.save(saveReducer);
                     }
                     function enterRO() {
                         win.serverRO = true;
@@ -365,47 +408,50 @@
                         win.serverRO = false;
                         roBanner.style.display = 'none';
                     }
-                    // Single in-flight save; re-captures the LATEST content each
-                    // call (never replays a stale snapshot). Callable directly
-                    // (Ctrl+S / retry / restore) — the RO/loading gate lives in
-                    // scheduleSave, not here, so a retry can attempt while RO.
-                    async function runSave() {
-                        if (win._loading || win.disposed) return;
-                        if (win._saving) { win._saveAgain = true; return; }
-                        win._saving = true;
-                        try {
-                            const value = gatherValue();
-                            const res = await ctx.serverStore.set(
-                                value, win.baseRev);
-                            if (res && res.ok) {
-                                win.baseRev = res.rev;
-                                if (win.serverRO) exitRO();
-                            } else if (res && res.error === 'not_active') {
-                                if (typeof res.rev === 'number') {
-                                    win.baseRev = res.rev;
-                                }
-                                enterRO();
-                            } else if (res && res.error === 'conflict') {
-                                // Someone advanced the rev (a restore, or a browser
-                                // that took the lease). Adopt it and re-push OUR
-                                // latest content (last-writer-wins for the active
-                                // browser). No editor overwrite — the user is typing.
-                                if (typeof res.rev === 'number') {
-                                    win.baseRev = res.rev;
-                                }
-                                win._saveAgain = true;
-                            }
-                            // else transport/400/413/500: leave state; a later
-                            // edit reschedules.
-                        } finally {
-                            win._saving = false;
-                            if (win._saveAgain && !win.serverRO && !win._loading) {
-                                win._saveAgain = false;
-                                scheduleSave();
-                            }
+                    // The read-only banner is the chain's 'conflict' state: a 409
+                    // this browser cannot resolve — 'not_active' (another browser
+                    // holds the write lease: the common case, and the only one
+                    // the old code raised the banner for) or a rebase budget
+                    // spent against a hotter writer, which the old code retried
+                    // forever instead. onState fires once on subscribe, so the
+                    // banner is already correct before the first save; 'saving'
+                    // leaves it exactly as it is.
+                    win.cleanups.push(chain.onState(function (state) {
+                        if (state === 'conflict') enterRO();
+                        else if (state === 'idle') exitRO();
+                    }));
+                    // Save NOW, past the debounce and past the RO gate: Ctrl+S,
+                    // the "Take over" button, a click anywhere in the window
+                    // while read-only, and a History restore all land here. The
+                    // gate lives in scheduleSave, not here, so a retry can
+                    // attempt while RO. Returns the chain's result promise, which
+                    // never rejects.
+                    function runSave() {
+                        if (win._loading || win.disposed) {
+                            return Promise.resolve(null);
                         }
+                        chain.save(saveReducer);
+                        return chain.flush();
                     }
                     win._saveToServer = runSave;   // Ctrl+S hook
+                    // The deliberate final flush (#196 trap 6), from the WINDOW
+                    // cleanup — which runs on an ordinary close with the mod
+                    // still alive, so an edit made in the last SAVE_DEBOUNCE ms
+                    // still reaches the server. Never from ctx.onUnload: by then
+                    // rec.unloading is set and 86e drops the batch, because a
+                    // disable is synchronous and cannot await a flush. This also
+                    // fixes what the block it replaces only claimed to do — that
+                    // one called runSave(), which returns early on win.disposed,
+                    // and closeWindow sets disposed BEFORE draining cleanups.
+                    // captureActive() runs first because flush() resolves
+                    // asynchronously while a LATER cleanup in this same drain
+                    // destroys the CM view: the reducer must not be the only
+                    // thing that ever reads the buffer. A chain with nothing
+                    // queued makes no request at all.
+                    win.cleanups.push(() => {
+                        try { captureActive(); } catch (_) {}
+                        try { chain.flush(); } catch (_) {}
+                    });
 
                     // ---- History panel ----------------------------------------
                     function historyOpen() {
@@ -522,11 +568,12 @@
                         refreshTabBar();
                         closeHistory();
                         saveAppWindow(win);
-                        // Persist immediately as a NEW rev, superseding any pending
-                        // debounced autosave (cancel it so we don't double-write).
-                        if (win._saveTimer) {
-                            clearTimeout(win._saveTimer); win._saveTimer = null;
-                        }
+                        // Persist immediately as a NEW rev. A pending debounced
+                        // autosave no longer has to be cancelled by hand: it is
+                        // already queued on the chain, so this flush coalesces it
+                        // into the SAME write — and both reducers read the
+                        // restored tabs at send time, so there is one PUT and it
+                        // carries the restored content.
                         runSave();
                     }
 
@@ -535,8 +582,9 @@
                         let got = null;
                         try { got = await ctx.serverStore.get(); } catch (_) {}
                         if (win.disposed || !windows.has(id)) return;
-                        win.baseRev = (got && typeof got.rev === 'number')
-                            ? got.rev : 0;
+                        // No rev to remember: every send re-reads the live rev
+                        // through ctx.serverStore.update's CAS (#196), so a
+                        // hydrate that raced a write cannot leave a stale base.
                         let tabs = tabsFromValue(got && got.value);
                         if (!tabs.length) {
                             tabs = [{ id: newTabId(), name: 'Notes', text: '' }];
