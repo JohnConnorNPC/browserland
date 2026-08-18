@@ -20532,6 +20532,39 @@ def _hosts_list_source():
     return body
 
 
+def _refresh_identities_source():
+    """83's REAL `refreshHostIdentities`, verbatim.
+
+    Sliced rather than restated because the thing under test is its write-back
+    guard: it awaits a probe and may only store the answer if the record still
+    points where it pointed when the probe started. A hand-written stand-in
+    cannot fail the way the real one did -- which is exactly what happened, and
+    is why AS281 was marked tested when nothing covered it.
+    """
+    src = (BROKER_DIR / "83_js_broker_identity.js").read_text(encoding="utf-8")
+    start = src.index("        async function refreshHostIdentities() {")
+    # Brace-balanced rather than line-heuristic: _frag_fn stops one line
+    # short of the closing brace for this function, and an unbalanced slice
+    # is a node SyntaxError -- a harness that looks broken rather than a
+    # claim that looks false.
+    depth, j = 0, start
+    while j < len(src):
+        ch = src[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                j += 1
+                break
+        j += 1
+    body = src[start:j]
+    assert body.count("{") == body.count("}"), "unbalanced slice"
+    assert "const probedUrl = h.url;" in body, \
+        "the write-back guard is gone from refreshHostIdentities"
+    return body
+
+
 def _host_edit_branch_source():
     """commitHostForm's EDIT branch, verbatim out of 83 -- the repoint reset.
     Sliced rather than faked because "a URL repoint resets brokerId to null" is
@@ -20642,13 +20675,25 @@ function _registerModCapability() { return true; }
 // (refreshHostIdentities) and localInfo's answer written onto entry 0
 // (learnLocalBrokerId).
 const BROKERS = {};      // url -> broker_id the endpoint answers with
-function refreshHostIdentities() {
-    for (const h of getHosts()) {
-        if (h.id === 'local' || h.brokerId) continue;
-        const id = BROKERS[h.url];
-        if (id) h.brokerId = id;
-    }
+// probeBrokerId is the ONLY thing faked here: it is a network call. It is async
+// and gated, so a case can hold an answer open and repoint the record while it
+// is in flight -- which is the entire point, and which the previous synchronous
+// stand-in could not express.
+let _probeGate = null;           // a case sets this to a promise to hold answers
+let _probeCalls = [];
+function probeBrokerId(url, token) {
+    _probeCalls.push(url);
+    const answer = BROKERS[url] || null;
+    if (!_probeGate) return Promise.resolve(answer);
+    return _probeGate.then(function () { return answer; });
 }
+// The re-entrancy guard the real refreshHostIdentities closes over; it is
+// declared beside the function in 83, outside the slice.
+let _hostIdRefreshing = false;
+let savePrefsLocalCalls = 0;
+function savePrefsLocal() { savePrefsLocalCalls += 1; }
+function renderHostsList() {}
+__REFRESH_IDENTITIES__
 function learnLocalBrokerId() {
     const id = BROKERS['<self>'];
     if (id) getHosts()[0].brokerId = id;
@@ -20686,36 +20731,36 @@ const CASES = {};
 
 // A host that has NEVER answered /info -- the path a URL fingerprint could not
 // represent at all, because a URL is always available.
-CASES.never_answered = function () {
+CASES.never_answered = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     const before = ctxFor().hosts.list();
     BROKERS['http://a:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     const after = ctxFor().hosts.list();
     return { before: before, after: after };
 };
 
 // The SAME broker under two URLs: two registry rows, two local ids, ONE
 // brokerId. This is the property update's URL-as-fingerprint lacks.
-CASES.one_broker_two_urls = function () {
+CASES.one_broker_two_urls = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' },
           { id: 'r2', label: 'b', url: 'http://100.1.2.3:4445' }]);
     BROKERS['http://a:4445'] = 'BID-A';
     BROKERS['http://100.1.2.3:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     return { rows: ctxFor().hosts.list() };
 };
 
 // A URL repointed at a DIFFERENT broker, through the shipped edit branch.
-CASES.repoint_resets = function () {
+CASES.repoint_resets = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     BROKERS['http://a:4445'] = 'BID-A';
     BROKERS['http://evil:4445'] = 'BID-EVIL';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     const verified = ctxFor().hosts.list();
     editHost(getHosts()[1], 'a', 'http://evil:4445', '');
     const repointed = ctxFor().hosts.list();
-    refreshHostIdentities();       // the repaint's background re-learn
+    await refreshHostIdentities();       // the repaint's background re-learn
     const relearned = ctxFor().hosts.list();
     // ...and a label-only edit must NOT throw away an identity still true.
     editHost(getHosts()[1], 'renamed', 'http://evil:4445', '');
@@ -20726,30 +20771,30 @@ CASES.repoint_resets = function () {
 
 // The same broker under a SECOND URL, via a repoint: null, then the SAME id
 // back -- the transition that says "still the same machine".
-CASES.repoint_same_broker = function () {
+CASES.repoint_same_broker = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     BROKERS['http://a:4445'] = 'BID-A';
     BROKERS['http://100.1.2.3:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     editHost(getHosts()[1], 'a', 'http://100.1.2.3:4445', '');
     const during = ctxFor().hosts.list();
-    refreshHostIdentities();
+    await refreshHostIdentities();
     return { during: during, after: ctxFor().hosts.list() };
 };
 
 // Removed and re-added: a NEW local id, and the brokerId is null until the new
 // record answers for itself. The local handle is not portable across removal;
 // the verified identity is the only thing that says "this is the same broker".
-CASES.remove_and_readd = function () {
+CASES.remove_and_readd = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     BROKERS['http://a:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     const first = ctxFor().hosts.list()[1];
     seed([]);                                   // removal
     const empty = ctxFor().hosts.list();
     seed([{ id: 'r9', label: 'a', url: 'http://a:4445' }]);
     const readded = ctxFor().hosts.list()[1];
-    refreshHostIdentities();
+    await refreshHostIdentities();
     const answered = ctxFor().hosts.list()[1];
     return { first: first, empty: empty, readded: readded,
              answered: answered };
@@ -20757,7 +20802,7 @@ CASES.remove_and_readd = function () {
 
 // The self entry: exactly one, and its id arrives by learnLocalBrokerId --
 // a different path, the same null-until-answered rule.
-CASES.self_entry = function () {
+CASES.self_entry = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     const before = ctxFor().hosts.list();
     BROKERS['<self>'] = 'BID-SELF';
@@ -20768,10 +20813,10 @@ CASES.self_entry = function () {
 };
 
 // Read-only: a mod must not be able to mutate the registry through it.
-CASES.read_only = function () {
+CASES.read_only = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     BROKERS['http://a:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     const rows = ctxFor().hosts.list();
     let threw = 0;
     try { rows.push({ id: 'x' }); } catch (e) { threw++; }
@@ -20790,18 +20835,50 @@ CASES.read_only = function () {
 
 // Two snapshots are independent objects, so a mod holding one does not see a
 // later registry mutation through it (and cannot be handed a live record).
-CASES.snapshot_is_detached = function () {
+CASES.snapshot_is_detached = async function () {
     seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
     const held = ctxFor().hosts.list();
     BROKERS['http://a:4445'] = 'BID-A';
-    refreshHostIdentities();
+    await refreshHostIdentities();
     getHosts()[1].label = 'renamed';
     return { held: held, fresh: ctxFor().hosts.list() };
 };
 
 // #195's member survives -- this extender decorates the family, never replaces
 // it -- and `list` is reachable by path the way `needs` resolves it.
-CASES.family_is_decorated = function () {
+// AS281, which was recorded as tested while nothing covered it. The edit-branch
+// reset is not sufficient on its own: an identity probe already IN FLIGHT when
+// the user repoints will answer about the OLD address, and writing that answer
+// back labels the NEW endpoint with the old broker's verified id -- permanently,
+// because the refresh loop skips any host that already has one.
+CASES.an_inflight_probe_cannot_relabel_a_repointed_host = async function () {
+    seed([{ id: 'local', label: 'this broker', url: '', token: '',
+            brokerId: '' },
+          { id: 'h1', label: 'one', url: 'https://a.example',
+            token: '', brokerId: '' }]);
+    BROKERS['https://a.example'] = 'BID-A';
+    BROKERS['https://b.example'] = 'BID-B';
+    // Hold the probe open, start the refresh, then repoint mid-flight exactly
+    // as commitHostForm's edit branch does (clearing the id it just reset).
+    let release = null;
+    _probeGate = new Promise(function (r) { release = r; });
+    const running = refreshHostIdentities();
+    const h1 = getHosts()[1];
+    h1.url = 'https://b.example';
+    h1.brokerId = '';                       // the edit-branch reset
+    release();
+    await running;
+    const afterStaleAnswer = h1.brokerId;
+
+    // The record kept no id, so the NEXT refresh asks again -- now about the
+    // address it actually points at -- and that answer is kept.
+    _probeGate = null;
+    await refreshHostIdentities();
+    return { afterStaleAnswer: afterStaleAnswer, finalId: h1.brokerId,
+             probed: _probeCalls.slice() };
+};
+
+CASES.family_is_decorated = async function () {
     seed([]);
     const ctx = ctxFor();
     return {
@@ -20827,6 +20904,7 @@ def hosts_list_harness(tmp_path_factory):
     path = tmp_path_factory.mktemp("modhostslist") / "harness.js"
     path.write_text(
         _HOSTS_LIST_HARNESS
+        .replace("__REFRESH_IDENTITIES__", _refresh_identities_source())
         .replace("__GETHOSTS__", _get_hosts_source())
         .replace("__REGISTRY__", _ctx_registry_source())
         .replace("__HOSTSLIST__", _hosts_list_source())
@@ -22378,3 +22456,21 @@ def test_json_that_serializes_to_nothing_is_refused(http_harness):
     assert r["fn"]["threw"] is True
     assert r["toJSONUndefined"]["threw"] is True
     assert r["hits"] == 0, "an empty-bodied request was sent"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_inflight_probe_cannot_relabel_a_repointed_host(hosts_list_harness):
+    # The half of the repoint story the edit-branch reset cannot cover on its
+    # own. This test exists because the ledger claimed it was covered and the
+    # harness had a SYNCHRONOUS stand-in for refreshHostIdentities -- which
+    # cannot express a race, so reverting the fix left the suite green.
+    r = _run_hosts_list(hosts_list_harness,
+                        "an_inflight_probe_cannot_relabel_a_repointed_host")
+    assert r["afterStaleAnswer"] == "", (
+        "an answer about the OLD address was written onto the repointed "
+        "record -- and permanently, since the refresh loop skips a host that "
+        "already has an id")
+    # The discarded answer costs exactly one extra probe, and the second one
+    # asks about the address the record now points at.
+    assert r["probed"] == ["https://a.example", "https://b.example"]
+    assert r["finalId"] == "BID-B"

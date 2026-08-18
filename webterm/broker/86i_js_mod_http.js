@@ -199,6 +199,25 @@
             // `path` that can re-select it is not a footgun to document — it is
             // the one the wrapper exists to remove. Backslashes too: several
             // engines normalise `/\` to `//` before parsing.
+            // ...and no C0 control anywhere in it. This is not belt-and-braces:
+            // the URL parser REMOVES every ASCII tab, LF and CR from its input
+            // BEFORE parsing, so `/<TAB>/evil/x` has a second character that is
+            // not a slash — it passes a charAt(1) test — and then parses as
+            // `//evil/x`, i.e. the very authority the check below refuses.
+            // Rejecting the whole C0 range costs nothing (a control character
+            // has no business in an unencoded route; %09 still works) and does
+            // not depend on remembering which three the parser happens to
+            // strip. Checked BEFORE the authority test, because the point is
+            // that the string the parser sees is not the string we validated.
+            for (let i = 0; i < path.length; i++) {
+                const cc = path.charCodeAt(i);
+                if (cc <= 0x1f || cc === 0x7f) {
+                    throw _modHttpArgError(rec,
+                        'path must not contain control characters: the URL '
+                        + 'parser strips tab/LF/CR before parsing, so they can '
+                        + 'smuggle an authority past every check');
+                }
+            }
             if (path.charAt(1) === '/' || path.charAt(1) === '\\') {
                 throw _modHttpArgError(rec,
                     'path must be a route, not an authority: "'
