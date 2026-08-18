@@ -753,10 +753,11 @@ def test_recorder_downloads_via_a_blob_not_a_tokened_anchor():
     buttons outright, so pin that the replacement is actually there."""
     src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
         encoding="utf-8")
-    # #200 (A55): ctx.http reads a body as text, so the Blob is built from the
-    # decoded NDJSON rather than r.blob(). The invariant this test guards --
-    # never a tokened <a href> to the broker -- is unchanged.
-    assert "new Blob([r.text]," in src
+    # #200: the download asks ctx.http for a Blob (`blob: true`) and passes it
+    # straight through, so a 256 MiB recording is never decoded into a UTF-16
+    # string first. The invariant this test guards -- never a tokened <a href>
+    # to the broker -- is unchanged.
+    assert "new Blob([r.blob]," in src
     assert "URL.createObjectURL(" in src
     assert "URL.revokeObjectURL(url)" in src, "blob URL must be revoked"
     # Both buttons go through the one helper.
@@ -21799,7 +21800,7 @@ def _recorder_http_source():
                 "async function recApi(hostId, path, opts) {",
                 "function recPost(hostId, path, body) {",
                 "async function recTry(promise) {",
-                "async function fetchRecordingBody(hostId, recId) {",
+                "async function fetchRecordingBody(hostId, recId, wantBlob) {",
                 "async function downloadRecording(hostId, recId, report) {",
                 "function bytesToB64(u8) {"):
         assert sym in body, f"the recorder HTTP range no longer defines {sym!r}"
@@ -21840,7 +21841,7 @@ def test_recorder_has_no_raw_hostfetch_left_and_the_footgun_comment_is_gone():
     # The replacement, in all three places.
     assert src.count("ctx.http.fetch(") == 2, \
         "one call in recApi, one in fetchRecordingBody -- and nothing else"
-    assert "async function fetchRecordingBody(hostId, recId) {" in src
+    assert "async function fetchRecordingBody(hostId, recId, wantBlob) {" in src
     # The player and the download share the one body reader: that is what made
     # the third call site disappear rather than be re-typed.
     assert src.count("await fetchRecordingBody(") == 2

@@ -265,11 +265,19 @@
                 // (#161's bug class), so the two call sites still call
                 // promptFileHostAuth — from a click and from a window load,
                 // never from a poll.
-                async function fetchRecordingBody(hostId, recId) {
+                // `wantBlob` is the DOWNLOAD's path and exists for size, not
+                // taste. The player parses the NDJSON, so it wants the decoded
+                // text; the download only moves bytes to a file, and reading a
+                // recording at the broker's 256 MiB cap as text decodes UTF-8
+                // into a UTF-16 string that is then copied again into the Blob.
+                // Asking ctx.http for a Blob keeps the bytes opaque and lets the
+                // browser spill them, which is what the pre-migration r.blob()
+                // did and what its comment said it was for.
+                async function fetchRecordingBody(hostId, recId, wantBlob) {
                     const r = await ctx.http.fetch(
                         hostId || selfHostId(),
                         '/recording?id=' + encodeURIComponent(recId),
-                        { timeoutMs: 0 });
+                        { timeoutMs: 0, blob: wantBlob === true });
                     if (r.status === 0) {
                         return { ok: false,
                                  error: r.error === 'host_not_found'
@@ -283,8 +291,16 @@
                         // The route serves octet-stream on success, so a JSON
                         // error body is parsed by ctx.http and a non-JSON one
                         // (the catch-all 404's HTML) is not — hence both reads.
-                        const err = (r.json && r.json.error)
-                            || ('HTTP ' + r.status);
+                        // A blob read does not parse, so recover the error
+                        // body's text before reporting: an error is small, and
+                        // losing 'auth_required' to an 'HTTP 401' is precisely
+                        // the failure this branch exists to avoid.
+                        let j = r.json;
+                        if (!j && r.blob && typeof r.blob.text === 'function') {
+                            try { j = JSON.parse(await r.blob.text()); }
+                            catch (_) { j = null; }
+                        }
+                        const err = (j && j.error) || ('HTTP ' + r.status);
                         return { ok: false, error: err,
                                  auth: err === 'auth_required' };
                     }
@@ -292,6 +308,9 @@
                     // (app.py's _recording_get gunzips server-side) and the
                     // player parses that string anyway. The download re-encodes
                     // it, which is byte-exact for the UTF-8 the writer emits.
+                    if (wantBlob === true) {
+                        return { ok: true, blob: r.blob };
+                    }
                     return { ok: true, text: (r.text === undefined) ? '' : r.text };
                 }
 
@@ -337,7 +356,7 @@
                     if (dlBusy.has(busyKey)) return;
                     dlBusy.add(busyKey);
                     try {
-                        const r = await fetchRecordingBody(host.id, recId);
+                        const r = await fetchRecordingBody(host.id, recId, true);
                         if (!r.ok) {
                             // Before this, a stale token (the broker restarted
                             // and minted a new one) SAVED the 401 JSON body as
@@ -349,13 +368,14 @@
                             dlReport(report, 'download failed: ' + r.error);
                             return;
                         }
-                        // The Blob is built from the decoded text and re-typed
-                        // application/octet-stream. It used to be r.blob(),
-                        // which kept the bytes opaque; ctx.http reads a body as
-                        // text, and for the UTF-8 NDJSON this route serves the
-                        // round trip is byte-exact.
+                        // The bytes are never decoded: ctx.http's `blob`
+                        // option hands back the Blob the response carried, so
+                        // a 256 MiB recording is not first turned into a
+                        // UTF-16 string and then copied. Re-typed
+                        // application/octet-stream so the file lands with the
+                        // name and type we chose rather than the route's.
                         const url = URL.createObjectURL(
-                            new Blob([r.text],
+                            new Blob([r.blob],
                                      { type: 'application/octet-stream' }));
                         const a = document.createElement('a');
                         a.href = url;

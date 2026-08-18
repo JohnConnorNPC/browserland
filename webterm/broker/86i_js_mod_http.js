@@ -313,6 +313,7 @@
                     caller.removeEventListener('abort', onCallerAbort);
                 }
             };
+            const wantBlob = (o.blob === true);
             const init = { method: method, signal: ctrl.signal, timeoutMs: 0 };
             if (hasBody) {
                 init.body = body;
@@ -328,6 +329,26 @@
                 try { ctype = r.headers.get('content-type'); }
                 catch (_) { ctype = null; }
                 const status = r.status;
+                // `blob: true` reads the body as a Blob instead of text, and
+                // exists for exactly one reason: SIZE. Reading a large body as
+                // text decodes UTF-8 into a UTF-16 JS string, so a recording at
+                // the broker's 256 MiB cap is held once as a string and again
+                // as whatever the caller builds from it, where a Blob can be
+                // spilled to disk by the browser and never fully resident. The
+                // recorder download is the shipped case (its own comment chose
+                // blob() for this before it moved onto this family). The
+                // deadline still covers the read, and the result carries `blob`
+                // in place of json/text -- no parsing, since the point is not
+                // to touch the bytes.
+                if (wantBlob) {
+                    return r.blob().then(function (blob) {
+                        done();
+                        return { status: status, blob: blob };
+                    }, function (e) {
+                        done();
+                        return _modHttpFail(e);
+                    });
+                }
                 return r.text().then(function (text) {
                     done();
                     return _modHttpBody(status, ctype, text);
