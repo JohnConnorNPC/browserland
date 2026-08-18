@@ -12549,3 +12549,693 @@ def test_reset_local_view_does_not_fake_a_lease_flip(emit_harness):
         "the reset did not actually run the teardown/rebuild pair"
     assert r["geomGone"] is True
     assert r["deactivated"] is False
+
+
+# ---------------------------------------------------------------------------
+# info.onModTeardown: the per-window, per-mod disposer (#195 / A37)
+# ---------------------------------------------------------------------------
+
+_TEARDOWN_SLICE_START = \
+    "// ---- info.onModTeardown: the per-window, per-mod disposer (#195) ---"
+_TEARDOWN_SLICE_END = "// ---- end info.onModTeardown ---"
+
+
+def _teardown_source():
+    """A37's range in 86c, verbatim. Declaration-only apart from the guarded
+    _registerCtxExtender call, which is what lets the node harness below run the
+    SHIPPED hook rather than a re-typed copy of it; the markers keep the range
+    honest."""
+    src = _ctx_ext_src()
+    start = src.index(_TEARDOWN_SLICE_START)
+    end = src.index(_TEARDOWN_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("function _modTeardownSet(rec) {",
+                   "function _logModTeardownError(state, e) {",
+                   "function _fireModTeardown(state) {",
+                   "function _fireModTeardowns(rec) {",
+                   "function _modOnTeardown(rec, state, fn) {",
+                   "function _modTerminalInfo(rec, info) {",
+                   "function _ctxTerminalTeardown(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+_TERM_CREATE_SLICE_START = "const termCreateCbs = [];"
+_TERM_CREATE_SLICE_END = "// ---- window create / minimize / restore / close ---"
+
+
+def _terminal_create_source():
+    """#116's per-terminal-window hook in 67, verbatim -- the subscribe, the
+    replay and the info bag A37 decorates. Sliced rather than re-typed because
+    "the hook adds a member to CORE's bag" is a claim about the shipped bag: a
+    hand-copied one could not make it."""
+    src = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    start = src.index(_TERM_CREATE_SLICE_START)
+    end = src.index(_TERM_CREATE_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("function _emitTerminalCreate(win, cb) {",
+                   "function registerTerminalCreate(cb) {",
+                   "addTitleBarItem: function (node) {",
+                   "onDispose: function (fn) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_on_mod_teardown_lands_in_the_extension_fragment():
+    # #195/A37: new ctx surface, so it lands in 86c -- the loader is at the #68
+    # 2500-line cap and the rule there is split, never trim.
+    loader = _loader_src()
+    ext = _ctx_ext_src()
+    for sym in ("function _modTeardownSet(rec) {",
+                "function _fireModTeardown(state) {",
+                "function _fireModTeardowns(rec) {",
+                "function _modOnTeardown(rec, state, fn) {",
+                "function _modTerminalInfo(rec, info) {",
+                "function _ctxTerminalTeardown(ctx, rec) {"):
+        assert sym in ext, f"{sym!r} did not land in 86c"
+        assert sym not in loader, f"{sym!r} belongs in 86c, not the loader"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A37 symbol missing/duplicated in the served page: {sym!r}"
+    # Registered through #194's extender registry, guarded exactly like #195's
+    # and #197's registrations (a page assembled without the registry must not
+    # throw at load).
+    assert "_registerCtxExtender(_ctxTerminalTeardown);" in ext
+    _assert_guarded_ctx_registration(ext,
+                                     "_registerCtxExtender(_ctxTerminalTeardown);")
+    # Additive: the contract version does not move.
+    body = _frag_fn(ext, "function _ctxTerminalTeardown(ctx, rec) {")
+    assert "ctxVersion" not in body
+    assert "ctxVersion: 1," in loader
+
+
+def test_on_mod_teardown_wraps_the_v1_hook_and_owes_no_capability_entry():
+    # The member is added to the EXISTING v1 `windows` family, so #197's map is
+    # already true about it (the map is per FAMILY) -- the same call #194's
+    # createAppWindow made. A new entry would claim a family that does not
+    # exist; the seed-drift gate is what would catch the opposite mistake.
+    ext = _ctx_ext_src()
+    assert "_registerModCapability('onModTeardown'" not in ext
+    assert "onModTeardown" not in _standalone_capability_registrations()
+    assert "onModTeardown" not in _ctx_families_added_by_extenders(), \
+        "onModTeardown is a MEMBER of ctx.windows' bag, never a ctx family"
+    assert "'windows'" in ext[ext.index("for (const _cap of ["):], \
+        "the family this decorates must already be in the v1 seed"
+    # WRAPPED, never replaced: the subscription, the replay over open terminals
+    # and the auto-unsubscribe on rec.unloads all stay the loader's and core's.
+    body = _frag_fn(ext, "function _ctxTerminalTeardown(ctx, rec) {")
+    assert "const sub = fam && fam.onTerminalCreate;" in body
+    assert "if (typeof sub !== 'function') return;" in body
+    assert "return sub.call(this, function (info) {" in body
+    assert "cb(_modTerminalInfo(rec, info))" in body
+    # ...and a malformed subscribe keeps core's posture rather than throwing.
+    assert "if (typeof cb !== 'function') return sub.call(this, cb);" in body
+    # A disable leaves its win.cleanups entry on a window that may outlive the
+    # mod by hours, and that entry holds the state -- so a spent state stops
+    # holding the record and the window. (Removing the entry instead is the one
+    # thing it must not do: closeWindow iterates that array with for-of.)
+    fire = _frag_fn(ext, "function _fireModTeardown(state) {")
+    assert "state.rec = null;" in fire and "state.win = null;" in fire
+    _order_in(fire, "state.fired = true;", "fns[i]();", "state.rec = null;")
+
+
+def test_the_loader_still_spells_on_terminal_create_the_way_the_harness_does():
+    # The node harness re-types 86's three-line ctx.windows.onTerminalCreate
+    # (the loader is not sliced into it). This is the assertion that keeps the
+    # copy honest -- if the loader stops pushing `off` onto rec.unloads, the
+    # teardown cases below would be testing a fiction.
+    body = _frag_fn(_loader_src(), "function makeCtx(modId, rec) {")
+    for line in ("onTerminalCreate: function (cb) {",
+                 "const off = registerTerminalCreate(cb);",
+                 "rec.unloads.push(off);"):
+        assert line in body, f"the loader no longer spells {line!r}"
+
+
+# E37 is BEHAVIOUR -- exactly once, on the FIRST of two exits, in both orders --
+# so these cases execute the SHIPPED slices in node: #194's extender registry,
+# #116's whole per-terminal hook out of 67 (so the bag really is core's), A37's
+# range, and 86's own _runUnloads for the disable half. The per-mod record is the
+# one fixture, reduced to the two fields an extender may read off it.
+_TEARDOWN_HARNESS = r"""
+'use strict';
+// ---- the surface these shipped slices touch, and nothing else -------------
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+// A DOM stub with the four operations the bag's addTitleBarItem and a widget's
+// own removal need. querySelector resolves a single class selector, which is
+// all 67 asks it for ('.title-bar' / '.btn-min').
+function El(cls) { this.className = cls || ''; this.children = []; this.parentNode = null; }
+El.prototype._drop = function (kid) {
+    const i = this.children.indexOf(kid);
+    if (i !== -1) this.children.splice(i, 1);
+    kid.parentNode = null;
+};
+El.prototype.appendChild = function (kid) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    kid.parentNode = this;
+    this.children.push(kid);
+    return kid;
+};
+El.prototype.insertBefore = function (kid, ref) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.remove = function () {
+    if (this.parentNode) this.parentNode._drop(this);
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+
+// Core's window Map + the host lookup the bag reads. Nothing else of 64/67 is
+// needed: the sliced hook only ever touches these. `desktop` is what "the
+// window is still on screen" is read off.
+const windows = new Map();
+const desktop = new El('desktop');
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__UNLOADS__
+
+// ---- driver ---------------------------------------------------------------
+// openWindow's terminal half, reduced to what #116's create-time emit needs --
+// including the SNAPSHOT of termCreateCbs, so a callback that (un)subscribes
+// mid-emit cannot skip or revisit a sibling (67:319).
+let winSeq = 0;
+function openTerminal() {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    bar.appendChild(new El('tb-btn btn-close'));
+    dom.appendChild(bar);
+    const win = { id: id, sid: String(winSeq), hostId: 'h1', type: 'term',
+                  dom: dom, cleanups: [], disposed: false };
+    desktop.appendChild(dom);
+    windows.set(id, win);
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    return win;
+}
+// closeWindow's teardown (73), reduced to the drain A37 rides: disposed, the
+// cleanups drain, the emptying that follows it, and the map removal.
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    win.dom.remove();
+    windows.delete(id);
+}
+// The title bar's controls, in order -- what "the widget was removed" and "the
+// window is untouched" are both read off.
+function barOf(win) {
+    return win.dom.querySelector('.title-bar').children.map(function (el) {
+        return el.className;
+    });
+}
+// One ctx per mod, built the way makeCtx builds it: the v1 literal, then the
+// extenders. `windows.onTerminalCreate` is 86's own three lines, re-typed
+// because the loader is not sliced in here (a python assertion beside these
+// cases keeps the copy equal to the shipped member).
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+// The git mod, reduced to the thing A37 exists for: a per-terminal title-bar
+// widget with ONE idempotent teardown, and no disposer Set or `decorated`
+// WeakSet of its own.
+function decorate(m, log, opts) {
+    return m.ctx.windows.onTerminalCreate(function (info) {
+        const btn = new El('tb-btn btn-git');
+        info.addTitleBarItem(btn);
+        info.onModTeardown(function () {
+            log.push('teardown:' + info.win.id);
+            btn.remove();
+            if (opts && opts.thenClose) closeWindow(info.win.id);
+            if (opts && opts.thenDisable) _runUnloads(m.rec);
+            if (opts && opts.thenThrow) throw new Error('boom');
+        });
+    });
+}
+
+const CASES = {};
+
+// E37, order one: the window closes FIRST. The teardown runs there, and the
+// later mod disable must not run it again.
+CASES.close_then_disable = function () {
+    const m = modCtx('git');
+    const log = [];
+    const win = openTerminal();          // open BEFORE subscribe: the REPLAY
+    decorate(m, log);
+    const decorated = barOf(win);
+    closeWindow(win.id);
+    const afterClose = log.slice();
+    const barAfterClose = barOf(win);
+    _runUnloads(m.rec);
+    return { decorated: decorated, afterClose: afterClose, log: log,
+             barAfterClose: barAfterClose,
+             live: Array.from(m.rec.winTeardowns || []).length,
+             windows: windows.size };
+};
+
+// E37, order two, and the clause that matters most: the mod is disabled while
+// the terminal is LIVE. The widget goes; the window does not.
+CASES.disable_then_close = function () {
+    const m = modCtx('git');
+    const log = [];
+    decorate(m, log);
+    const win = openTerminal();          // opened AFTER subscribe: the EMIT
+    const decorated = barOf(win);
+    _runUnloads(m.rec);
+    const afterDisable = {
+        log: log.slice(), bar: barOf(win),
+        stillOpen: windows.get(win.id) === win,
+        disposed: win.disposed,
+        onDesktop: win.dom.parentNode === desktop,
+        cleanups: win.cleanups.length,
+    };
+    closeWindow(win.id);
+    return { decorated: decorated, afterDisable: afterDisable, log: log,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
+// Every live window is torn down by one disable, each exactly once, and none of
+// them is closed -- the `disposers` Set git keeps by hand, kept by core.
+CASES.disable_tears_down_every_live_window = function () {
+    const m = modCtx('git');
+    const log = [];
+    const before = openTerminal();
+    decorate(m, log);                    // replays over `before`
+    const a = openTerminal();
+    const b = openTerminal();
+    closeWindow(a.id);                   // one of them leaves early
+    const afterClose = log.slice();
+    _runUnloads(m.rec);
+    const afterDisable = log.slice();
+    // ...and a window opened after the disable is not decorated at all: the
+    // loader's own unsubscribe rode the same chain.
+    const late = openTerminal();
+    closeWindow(before.id);
+    closeWindow(b.id);
+    return { afterClose: afterClose, afterDisable: afterDisable, log: log,
+             lateBar: barOf(late), openBars: [barOf(before), barOf(b)],
+             live: Array.from(m.rec.winTeardowns || []).length,
+             windows: windows.size };
+};
+
+// Two teardowns on one window run newest-first (the _runUnloads discipline),
+// and one window's exit never fires another's.
+CASES.lifo_and_per_window = function () {
+    const m = modCtx('git');
+    const log = [];
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        seen.push(info.win.id);
+        const ok = [];
+        ok.push(info.onModTeardown(function () { log.push('first:' + info.win.id); }));
+        ok.push(info.onModTeardown(function () { log.push('second:' + info.win.id); }));
+        info.win._ok = ok;
+    });
+    const a = openTerminal();
+    const b = openTerminal();
+    closeWindow(a.id);
+    const afterA = log.slice();
+    // Read BEFORE the disable: _runUnloads splices the chain it drains.
+    const unloads = m.rec.unloads.length;
+    _runUnloads(m.rec);
+    return { seen: seen, afterA: afterA, log: log, ok: a._ok,
+             unloads: unloads,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
+// A throwing teardown is isolated: from its siblings on the same window, from
+// the OTHER windows in the disable pass, and from the chain behind it.
+CASES.throwing_teardown_is_isolated = function () {
+    const m = modCtx('git');
+    const log = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModTeardown(function () { log.push('outer:' + info.win.id); });
+        info.onModTeardown(function () { throw new Error('boom'); });
+    });
+    const a = openTerminal();
+    const b = openTerminal();
+    let tail = false;
+    m.rec.unloads.push(function () { tail = true; });
+    let threw = false;
+    try { _runUnloads(m.rec); } catch (_) { threw = true; }
+    return { log: log, threw: threw, tail: tail, errors: errors,
+             live: Array.from(m.rec.winTeardowns || []).length,
+             windows: windows.size };
+};
+
+// The re-entrant halves. A teardown that CLOSES its own window from inside the
+// disable pass comes straight back through win.cleanups...
+CASES.teardown_closes_its_own_window = function () {
+    const m = modCtx('git');
+    const log = [];
+    decorate(m, log, { thenClose: true });
+    const a = openTerminal();
+    const b = openTerminal();
+    _runUnloads(m.rec);
+    return { log: log, windows: windows.size,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
+// ...and a teardown that DISABLES its own mod from inside a window close comes
+// back through rec.unloads. Either way: once per window, never twice.
+CASES.teardown_disables_its_own_mod = function () {
+    const m = modCtx('git');
+    const log = [];
+    decorate(m, log, { thenDisable: true });
+    const a = openTerminal();
+    const b = openTerminal();
+    closeWindow(a.id);
+    const afterClose = log.slice();
+    const barB = barOf(b);
+    _runUnloads(m.rec);                  // the real disable, now a no-op
+    // Read BEFORE the last close: the nested disable must have left `b` open.
+    const stillOpen = windows.size;
+    closeWindow(b.id);
+    return { afterClose: afterClose, log: log, barB: barB,
+             stillOpen: stillOpen,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
+// The surface: core's bag plus one member, and refusals that are inert.
+CASES.surface_and_refusals = function () {
+    const m = modCtx('git');
+    const ran = [];
+    let bag = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        // The FIRST window's bag, kept: this subscription is still live when
+        // the case opens another terminal below, and the bag being examined
+        // must stay the one whose window these refusals are about.
+        if (bag) return;
+        bag = info;
+        info.onModTeardown(function () { ran.push('one'); });
+    });
+    const win = openTerminal();
+    const keys = Object.keys(bag).sort();
+    const badFn = bag.onModTeardown(null);
+    const good = bag.onModTeardown(function () { ran.push('two'); });
+    closeWindow(win.id);
+    // A window that is already gone: win.cleanups has been drained AND emptied,
+    // so an entry pushed now would be held forever -- refused, like the bag's
+    // own onDispose refuses one.
+    const afterClose = bag.onModTeardown(function () { ran.push('never'); });
+    // A mod mid-teardown may not register either.
+    const during = modCtx('during');
+    let midRet = null;
+    let midBag = null;
+    during.ctx.windows.onTerminalCreate(function (info) { midBag = info; });
+    const live = openTerminal();
+    during.rec.unloads.push(function () {
+        midRet = midBag.onModTeardown(function () { ran.push('mid'); });
+    });
+    _runUnloads(during.rec);
+    closeWindow(live.id);
+    return { keys: keys, isFn: typeof bag.onModTeardown, badFn: badFn,
+             good: good, afterClose: afterClose, midRet: midRet, ran: ran,
+             sameWin: bag.win === win };
+};
+
+// Exactly once per accepted REGISTRATION -- the posture of the two chains this
+// rides -- and the closure a disable leaves on a live window is inert.
+CASES.per_registration_and_a_spent_closure = function () {
+    const m = modCtx('git');
+    const log = [];
+    const twice = function () { log.push('twice'); };
+    let bag = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        if (bag) return;
+        bag = info;
+        info.onModTeardown(twice);
+        info.onModTeardown(twice);       // the SAME function, deliberately
+    });
+    const win = openTerminal();
+    _runUnloads(m.rec);
+    const afterDisable = log.slice();
+    // The window outlives the disabled mod, still carrying the entry the arming
+    // pushed. Draining it must do nothing at all.
+    const held = win.cleanups.length;
+    const late = bag.onModTeardown(function () { log.push('late'); });
+    closeWindow(win.id);
+    return { afterDisable: afterDisable, log: log, held: held, late: late };
+};
+
+// A mod that never registers a teardown pays nothing: no set on the record and
+// no entry on the LIFO chain but the loader's own unsubscribe.
+CASES.costs_nothing_until_used = function () {
+    const m = modCtx('quiet');
+    let saw = 0;
+    const off = m.ctx.windows.onTerminalCreate(function () { saw += 1; });
+    openTerminal();
+    const unloads = m.rec.unloads.length;
+    const set = m.rec.winTeardowns === undefined;
+    // ...and the unsubscribe the wrapper hands back is core's own: after it, a
+    // new terminal is not delivered at all.
+    off();
+    openTerminal();
+    const bad = m.ctx.windows.onTerminalCreate(null);
+    return { saw: saw, unloads: unloads, noSet: set, cbs: termCreateCbs.length,
+             badOff: typeof bad };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def teardown_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modteardown") / "harness.js"
+    path.write_text(
+        _TEARDOWN_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_teardown(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_on_mod_teardown_fires_once_when_the_window_closes_first(
+        teardown_harness):
+    # E37, order one. The window close wins the race, and the mod disable that
+    # follows must not run the teardown a second time.
+    r = _run_teardown(teardown_harness, "close_then_disable")
+    assert r["errors"] == []
+    assert r["decorated"] == ["tb-btn btn-git", "tb-btn btn-min",
+                              "tb-btn btn-close"], \
+        "the widget must land left of min/close, on a REPLAYED window"
+    assert r["afterClose"] == ["teardown:h1:1"]
+    assert r["log"] == ["teardown:h1:1"], \
+        "the mod disable ran a teardown the window close had already run"
+    assert r["barAfterClose"] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["live"] == 0, "a closed window stayed in the mod's live set"
+    assert r["windows"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_a_mod_removes_the_widget_without_closing_the_window(
+        teardown_harness):
+    # E37, order two -- and the clause the hook exists for. win.cleanups fires
+    # on close and never on disable, so before this a live terminal kept its
+    # widget (or the mod had to keep its own set). The window belongs to CORE:
+    # the disable removes the decoration and nothing else.
+    r = _run_teardown(teardown_harness, "disable_then_close")
+    assert r["errors"] == []
+    assert r["decorated"] == ["tb-btn btn-git", "tb-btn btn-min",
+                              "tb-btn btn-close"]
+    after = r["afterDisable"]
+    assert after["log"] == ["teardown:h1:1"], "the disable did not fire it"
+    assert after["bar"] == ["tb-btn btn-min", "tb-btn btn-close"], \
+        "the widget survived the disable"
+    assert after["stillOpen"] is True and after["disposed"] is False, \
+        "disabling a mod closed a window that belongs to core"
+    assert after["onDesktop"] is True, "the window was taken off the desktop"
+    assert after["cleanups"] == 1, \
+        "the window's own cleanups must be left intact (and inert)"
+    assert r["log"] == ["teardown:h1:1"], \
+        "the later window close ran the teardown a second time"
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_disable_tears_down_every_window_the_mod_decorated(
+        teardown_harness):
+    # The `disposers` Set git keeps by hand: a disable must reach every window
+    # that is still open, and skip the one that already closed.
+    r = _run_teardown(teardown_harness, "disable_tears_down_every_live_window")
+    assert r["errors"] == []
+    assert r["afterClose"] == ["teardown:h1:2"]
+    assert sorted(r["afterDisable"]) == ["teardown:h1:1", "teardown:h1:2",
+                                         "teardown:h1:3"]
+    assert r["log"] == r["afterDisable"], "a window was torn down twice"
+    assert r["openBars"] == [["tb-btn btn-min", "tb-btn btn-close"]] * 2
+    assert r["lateBar"] == ["tb-btn btn-min", "tb-btn btn-close"], \
+        "a terminal opened after the disable was still decorated"
+    assert r["live"] == 0
+    assert r["windows"] == 1, "the disable closed windows it does not own"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_teardowns_run_newest_first_and_never_cross_windows(teardown_harness):
+    # LIFO, mirroring _runUnloads and win.cleanups -- and the scope claim: one
+    # window's exit is not another's.
+    r = _run_teardown(teardown_harness, "lifo_and_per_window")
+    assert r["errors"] == []
+    assert r["ok"] == [True, True], "a registration was refused"
+    assert r["afterA"] == ["second:h1:1", "first:h1:1"], \
+        "the window's teardowns did not run newest-first, or crossed windows"
+    assert r["log"] == ["second:h1:1", "first:h1:1",
+                        "second:h1:2", "first:h1:2"]
+    # Two windows, two teardowns each, and still ONE entry on the LIFO chain
+    # beside the loader's unsubscribe: the set is per MOD, not per window.
+    assert r["unloads"] == 2
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_throwing_teardown_starves_neither_its_siblings_nor_the_chain(
+        teardown_harness):
+    # The teardown-callback policy, one level down: isolated per callback, so a
+    # broken disposer cannot strand another window's widget on screen or take
+    # the mod's remaining unloads with it.
+    r = _run_teardown(teardown_harness, "throwing_teardown_is_isolated")
+    assert r["threw"] is False, "a mod's throw escaped the disable"
+    assert sorted(r["log"]) == ["outer:h1:1", "outer:h1:2"], \
+        "a throwing teardown starved a sibling or another window"
+    assert r["tail"] is True, "the rest of the LIFO chain was starved"
+    assert len(r["errors"]) == 2
+    assert all("[mods] onModTeardown callback failed" in e for e in r["errors"])
+    assert any('"git"' in e and '"h1:1"' in e for e in r["errors"]), \
+        "the log must name the mod and the window"
+    assert r["live"] == 0
+    assert r["windows"] == 2, "an isolated failure closed a window"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_teardown_that_closes_its_own_window_fires_once(teardown_harness):
+    # Re-entrancy, half one: the callback re-enters through win.cleanups while
+    # the disable pass is still running. The state is marked spent BEFORE the
+    # callbacks run, so it comes back to a closed door.
+    r = _run_teardown(teardown_harness, "teardown_closes_its_own_window")
+    assert r["errors"] == []
+    assert sorted(r["log"]) == ["teardown:h1:1", "teardown:h1:2"]
+    assert len(r["log"]) == 2, "a re-entrant close ran the teardown twice"
+    assert r["windows"] == 0, "the callback's own closeWindow did not run"
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_teardown_that_disables_its_own_mod_fires_once(teardown_harness):
+    # Re-entrancy, half two: the callback re-enters through rec.unloads from
+    # inside a window close. The OTHER window is torn down by that nested
+    # disable, exactly once, and neither window is closed by it.
+    r = _run_teardown(teardown_harness, "teardown_disables_its_own_mod")
+    assert r["errors"] == []
+    assert r["afterClose"] == ["teardown:h1:1", "teardown:h1:2"], \
+        "the nested disable missed the live window, or re-ran the closing one"
+    assert r["log"] == r["afterClose"], "a later exit fired a spent teardown"
+    assert r["barB"] == ["tb-btn btn-min", "tb-btn btn-close"]
+    assert r["stillOpen"] == 1, "the nested disable closed a live window"
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_bag_keeps_core_members_and_refuses_inertly(teardown_harness):
+    # The hook DECORATES core's bag (67), it does not replace it -- every member
+    # #116 hands a mod is still there. And every refusal is a false, never a
+    # throw and never a silent deferral.
+    r = _run_teardown(teardown_harness, "surface_and_refusals")
+    assert r["errors"] == []
+    assert r["keys"] == ["addTitleBarItem", "host", "onDispose",
+                         "onModTeardown", "titleBar", "win", "wireId"], \
+        "the bag lost (or gained) a member"
+    assert r["isFn"] == "function" and r["sameWin"] is True
+    assert r["badFn"] is False, "a non-function was registered"
+    assert r["good"] is True
+    assert r["afterClose"] is False, \
+        "a teardown registered on a dead window would be held forever"
+    assert r["midRet"] is False, "a mod mid-teardown registered a callback"
+    assert r["ran"] == ["two", "one"], \
+        "the refused callbacks must never run, and the accepted two are LIFO"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_exactly_once_is_per_registration_and_the_leftover_is_inert(
+        teardown_harness):
+    # "Exactly once" is per accepted REGISTRATION, the posture win.cleanups and
+    # rec.unloads already take -- a hook that deduped by function identity would
+    # silently drop a second, legitimately identical disposer.
+    r = _run_teardown(teardown_harness, "per_registration_and_a_spent_closure")
+    assert r["errors"] == []
+    assert r["afterDisable"] == ["twice", "twice"], \
+        "the same function registered twice must run twice, once per call"
+    assert r["held"] == 1, "the arming entry must still be on the live window"
+    assert r["late"] is False
+    assert r["log"] == r["afterDisable"], \
+        "the closure a disable left behind fired a second time on close"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_hook_costs_nothing_until_a_mod_uses_it(teardown_harness):
+    # Lazy by design: the set and its single LIFO entry are built on the first
+    # accepted registration, so a mod that only reads the bag is unchanged --
+    # and the unsubscribe the wrapper returns is still core's own.
+    r = _run_teardown(teardown_harness, "costs_nothing_until_used")
+    assert r["errors"] == []
+    assert r["saw"] == 1
+    assert r["unloads"] == 1, "the hook charged a mod that never used it"
+    assert r["noSet"] is True
+    assert r["cbs"] == 0, "the wrapper broke onTerminalCreate's unsubscribe"
+    assert r["badOff"] == "function", \
+        "a malformed subscribe must return an inert unsubscribe, not throw"

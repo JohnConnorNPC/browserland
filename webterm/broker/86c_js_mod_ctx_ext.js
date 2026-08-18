@@ -1829,3 +1829,249 @@
             _registerModCapability('events', 1);
         }
         // ---- end ctx.events -------------------------------------------------
+
+        // ---- info.onModTeardown: the per-window, per-mod disposer (#195) -----
+        // The hook a mod that DECORATES a terminal window has had to build by
+        // hand. git's title-bar widget keeps a `disposers` Set of every live
+        // window's teardown plus a `decorated` WeakSet (mods/git/git.js), and
+        // it keeps them because the two exits it must cover are owned by two
+        // different channels, neither of which covers the other:
+        //
+        //   win.cleanups   fires when the WINDOW closes (closeWindow, 73; the
+        //                  lease-loss rebuild, 84) — and never when the mod is
+        //                  disabled with that window still open.
+        //   rec.unloads    fires when the MOD is disabled — and never when one
+        //                  of the windows it decorated closes.
+        //
+        // So a widget needs a disposer on both, an idempotence flag so the
+        // first exit disarms the second, and a set so the mod-side entry can
+        // still reach the windows that are open. This is the whole of it:
+        //
+        //     ctx.windows.onTerminalCreate(function (info) {
+        //         info.addTitleBarItem(btn);
+        //         info.onModTeardown(function () { btn.remove(); });
+        //     });
+        //
+        // EXACTLY ONCE, ON THE FIRST OF THE TWO — not twice, not zero times.
+        // Both exits fire the SAME per-delivery state, and that state is marked
+        // spent (and unhooked from the mod's set) BEFORE its callbacks run. So
+        // close-then-disable and disable-then-close are the same single call,
+        // and so is the re-entrant case: a callback that closes its own window,
+        // or disables its own mod, from inside the teardown it is running in.
+        //
+        // A DISABLE DOES NOT CLOSE THE WINDOW. A terminal belongs to core, not
+        // to the mod that decorated it: this removes the decoration and leaves
+        // everything else where it was. (#194's staged take-down does close a
+        // mod's windows at disable — those are the mod's OWN factory windows. A
+        // terminal never is, and nothing here touches one.)
+        //
+        // WHY A MEMBER OF THE BAG AND NOT AN EVENT: its scope is one WINDOW and
+        // one MOD, and ctx.events above is a broadcast with neither. And why
+        // not just "call info.onDispose and ctx.onUnload yourself": that pair
+        // IS the hand-rolled version, and the idempotence and the live-window
+        // set are the halves a mod gets wrong.
+        //
+        // HOW IT REACHES A BAG CORE BUILDS. `_emitTerminalCreate` (67) builds
+        // the bag and knows nothing about mods — it is handed a callback, not a
+        // record. So this extender WRAPS ctx.windows.onTerminalCreate and
+        // decorates each bag on its way through: per mod, because `rec` is this
+        // extender's argument, and per window, because core builds a fresh bag
+        // for every delivery.
+        //
+        // Additive and feature-detected. `windows` is already a v1 capability
+        // family (#116's onTerminalCreate lives there), so this DECORATES the
+        // family in place and registers NO new capability entry — the map is
+        // per family, the same call #194's createAppWindow made. A mod tests
+        // `typeof info.onModTeardown === 'function'` and keeps its own disposer
+        // set as the fallback on an older build.
+
+        // THIS mod's live per-window teardown states — git's `disposers` Set,
+        // kept once by core instead of once per mod. On the RECORD rather than
+        // in this fragment's scope (the arguments-not-closure rule), and built
+        // LAZILY: a mod that never registers a teardown pays nothing, and the
+        // entry this puts on the LIFO chain is ONE per mod, not one per window.
+        // null when the record cannot carry it — the window-close half still
+        // arms, because a degraded hook beats a missing one.
+        //
+        // WHERE IT SITS IN THE CHAIN, stated because the drain is LIFO: the
+        // entry is pushed at the mod's FIRST accepted registration, which is
+        // normally inside its init() (the onTerminalCreate replay), so it is an
+        // EARLY entry and therefore runs LATE — after the disposers that mod
+        // registered afterwards. A widget teardown is a self-contained closure
+        // (git's is: remove two listeners, stop an interval, remove two nodes),
+        // so that is the right end of the chain for it; a mod that needs its
+        // widget gone BEFORE some other resource it owns should tear that one
+        // down from the same callback.
+        function _modTeardownSet(rec) {
+            if (!rec || typeof rec !== 'object') return null;
+            if (rec.winTeardowns) return rec.winTeardowns;
+            if (!Array.isArray(rec.unloads)) return null;
+            rec.winTeardowns = new Set();
+            rec.unloads.push(function () { _fireModTeardowns(rec); });
+            return rec.winTeardowns;
+        }
+
+        // One place this reports a failure, and it must not become the second
+        // one: `rec.id` and `win.id` are attacker-adjacent reads (a proxy, a
+        // throwing getter), and a throw HERE would escape into win.cleanups or
+        // into the unload chain this stands in front of.
+        function _logModTeardownError(state, e) {
+            try {
+                console.error('[mods] onModTeardown callback failed for "'
+                    + (state && state.rec && state.rec.id) + '" on window "'
+                    + (state && state.win && state.win.id) + '":', e);
+            } catch (_) {
+                try { console.error('[mods] onModTeardown callback failed'); }
+                catch (__) { /* console is gone; keep tearing down */ }
+            }
+        }
+
+        // Fire ONE window's teardown for ONE mod, at most once ever. The mark
+        // and the unhook happen BEFORE the callbacks run, which is what makes
+        // the re-entrant case safe: a callback that closes its own window comes
+        // straight back through win.cleanups, finds the state spent, and
+        // returns instead of running the list a second time. LIFO and isolated
+        // per callback, mirroring _runUnloads and win.cleanups — one broken
+        // disposer must not strand this window's remaining ones, nor the chain
+        // standing behind them.
+        //
+        // Exactly once per accepted REGISTRATION, which is the posture of the
+        // two chains this rides: pushing the same function twice onto
+        // win.cleanups or rec.unloads runs it twice there too, and a hook that
+        // deduped by identity would silently drop a second, legitimately
+        // identical disposer.
+        //
+        // The state is EMPTIED at the end: a disable leaves its win.cleanups
+        // closure on a window that may outlive the mod by hours, and that
+        // closure holds this object — so it must stop holding the record and
+        // the window. Cleared after the loop, not before, so a failure is still
+        // reported against the mod and window it happened on.
+        function _fireModTeardown(state) {
+            if (!state || state.fired) return false;
+            state.fired = true;
+            if (state.set) { state.set.delete(state); state.set = null; }
+            const fns = state.fns.splice(0).reverse();
+            for (let i = 0; i < fns.length; i++) {
+                try { fns[i](); }
+                catch (e) { _logModTeardownError(state, e); }
+            }
+            state.rec = null;
+            state.win = null;
+            return true;
+        }
+
+        // The mod-disable half: every window this mod still decorates, newest
+        // first (the direction every other teardown here runs). A SNAPSHOT,
+        // because a callback may close a window — which fires and unhooks THAT
+        // window's state through win.cleanups, mutating the set underneath this
+        // loop. Returns how many windows it tore down, so the disable path can
+        // tell "nothing was decorated" from "this never ran".
+        function _fireModTeardowns(rec) {
+            const set = rec && rec.winTeardowns;
+            if (!set || typeof set.forEach !== 'function') return 0;
+            const list = Array.from(set).reverse();
+            let n = 0;
+            for (let i = 0; i < list.length; i++) {
+                if (_fireModTeardown(list[i])) n += 1;
+            }
+            set.clear();          // belt-and-braces: every fire unhooks its own
+            return n;
+        }
+
+        // info.onModTeardown(fn). true when the callback is registered, false
+        // for every refusal, and a refusal is never a throw: a non-function; a
+        // window that is already gone (win.cleanups has been drained AND
+        // emptied, so an entry pushed now would be held forever — the reason
+        // the bag's own onDispose refuses one too); a state that has already
+        // fired; and a mod mid-teardown, whose LIFO chain _runUnloads has
+        // already spliced. The caller can see the false and run its own
+        // cleanup, which is the same posture the app-window handle takes.
+        //
+        // ARMING is the first accepted call, once per window: the state joins
+        // the mod's set (the disable half) and one entry goes onto win.cleanups
+        // (the close half). Both fire the SAME state, so the second and every
+        // later callback needs no further plumbing — and the window carries one
+        // entry per MOD however many teardowns that mod registers on it.
+        //
+        // A DISABLE LEAVES ITS win.cleanups ENTRY BEHIND, spent and inert; the
+        // window drops it whenever it closes. Splicing it out at fire time is
+        // the one thing this must NOT do: closeWindow iterates that array with
+        // for-of, and removing an entry mid-drain skips the next one. An
+        // enable/disable cycle on a long-lived terminal therefore leaves one
+        // dead closure per cycle, which is the cheap side of that trade.
+        function _modOnTeardown(rec, state, fn) {
+            if (typeof fn !== 'function' || !state || state.fired) return false;
+            const win = state.win;
+            if (!win || win.disposed || !Array.isArray(win.cleanups)) return false;
+            if (rec && rec.unloading) return false;
+            if (!state.armed) {
+                state.armed = true;
+                state.set = _modTeardownSet(rec);
+                if (state.set) state.set.add(state);
+                win.cleanups.push(function () { _fireModTeardown(state); });
+            }
+            state.fns.push(fn);
+            return true;
+        }
+
+        // Decorate ONE bag on its way from core to one mod's callback. The
+        // state lives in this closure, per delivery — which is exactly "one
+        // window, one mod", the scope the hook claims.
+        //
+        // IN PLACE, because core builds a fresh literal per delivery (67) and
+        // decorating it keeps every member core adds to it later; replacing it
+        // with a copy would freeze today's shape into this fragment. The copy
+        // is only the fallback for a bag that has been frozen since: in sloppy
+        // mode that assignment silently vanishes and the hook would go missing
+        // with nobody the wiser, which is the one outcome worse than either.
+        function _modTerminalInfo(rec, info) {
+            if (!info || typeof info !== 'object') return info;
+            const state = { rec: rec, win: info.win, fns: [],
+                            fired: false, armed: false, set: null };
+            const onModTeardown = function (fn) {
+                return _modOnTeardown(rec, state, fn);
+            };
+            try {
+                info.onModTeardown = onModTeardown;
+                if (info.onModTeardown === onModTeardown) return info;
+            } catch (_) { /* a frozen bag under strict mode: copy instead */ }
+            const copy = Object.assign({}, info);
+            copy.onModTeardown = onModTeardown;
+            return copy;
+        }
+
+        // The extender. WRAPS ctx.windows.onTerminalCreate — the loader's
+        // member, or whatever an earlier extender left there — and never
+        // replaces it: the subscription, the replay over the terminals already
+        // open and the auto-unsubscribe on rec.unloads all stay core's and the
+        // loader's, and this adds one member to what they hand over. A build
+        // with no onTerminalCreate has no bag to decorate, so nothing is
+        // installed and the family is left exactly as it was found.
+        //
+        // NO SIBLING DEPENDENCY: the preconditions are its two arguments and a
+        // member the LOADER owns. Nothing another extender installs is read
+        // here, so per-extender isolation cannot turn a sibling's throw into a
+        // hook that is present and always refusing (the CP8 finding).
+        function _ctxTerminalTeardown(ctx, rec) {
+            const fam = (ctx.windows && typeof ctx.windows === 'object')
+                ? ctx.windows : null;
+            const sub = fam && fam.onTerminalCreate;
+            if (typeof sub !== 'function') return;
+            fam.onTerminalCreate = function (cb) {
+                // A malformed call keeps core's own posture: register
+                // TerminalCreate hands back an inert unsubscribe, never a throw.
+                if (typeof cb !== 'function') return sub.call(this, cb);
+                return sub.call(this, function (info) {
+                    return cb(_modTerminalInfo(rec, info));
+                });
+            };
+        }
+        // Guarded like every other registration in this fragment. No capability
+        // entry: this adds a member to the EXISTING v1 `windows` family (the
+        // map is per family), so the seed already names it and the drift gate
+        // stays satisfied — the call #194's createAppWindow made, for the same
+        // reason. `needs: ['windows.onTerminalCreate']` still resolves.
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxTerminalTeardown);
+        }
+        // ---- end info.onModTeardown -----------------------------------------
