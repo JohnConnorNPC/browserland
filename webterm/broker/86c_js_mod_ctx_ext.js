@@ -2005,10 +2005,17 @@
             if (!win || win.disposed || !Array.isArray(win.cleanups)) return false;
             if (rec && rec.unloading) return false;
             if (!state.armed) {
+                // The close half goes on FIRST, and `armed` is only set once it
+                // is actually on. Arming before the push means a throw there
+                // (a frozen cleanups array) leaves a state that believes it is
+                // armed but has no close hook: the window would close and run
+                // nothing, and a retry could not repair it because `armed`
+                // short-circuits this whole block. Order it the other way and a
+                // failed arm simply does not arm.
+                win.cleanups.push(function () { _fireModTeardown(state); });
                 state.armed = true;
                 state.set = _modTeardownSet(rec);
                 if (state.set) state.set.add(state);
-                win.cleanups.push(function () { _fireModTeardown(state); });
             }
             state.fns.push(fn);
             return true;
@@ -2024,10 +2031,37 @@
         // is only the fallback for a bag that has been frozen since: in sloppy
         // mode that assignment silently vanishes and the hook would go missing
         // with nobody the wiser, which is the one outcome worse than either.
+        //
+        // The state is keyed per (mod, window), NOT per delivery. A mod is
+        // allowed more than one onTerminalCreate subscription, and every one of
+        // them is handed a bag for the same window — with a state per delivery
+        // that mod would collect two states, two win.cleanups entries and two
+        // members of its own set for one window, and a disposer registered
+        // through both bags would run twice. The WeakMap hangs off the mod
+        // record, so it dies with the activation and holds no window alive.
+        function _modTeardownState(rec, win) {
+            if (!rec || typeof rec !== 'object' || !win) return null;
+            if (!rec.winTeardownStates) {
+                try { rec.winTeardownStates = new WeakMap(); }
+                catch (_) { return null; }
+            }
+            let state = null;
+            try { state = rec.winTeardownStates.get(win) || null; }
+            catch (_) { return null; }
+            // A spent state is not reused: it has already fired for this
+            // window, and its refusal is the contract.
+            if (state) return state;
+            state = { rec: rec, win: win, fns: [],
+                      fired: false, armed: false, set: null };
+            try { rec.winTeardownStates.set(win, state); } catch (_) {}
+            return state;
+        }
+
         function _modTerminalInfo(rec, info) {
             if (!info || typeof info !== 'object') return info;
-            const state = { rec: rec, win: info.win, fns: [],
-                            fired: false, armed: false, set: null };
+            const state = _modTeardownState(rec, info.win)
+                || { rec: rec, win: info.win, fns: [],
+                     fired: false, armed: false, set: null };
             const onModTeardown = function (fn) {
                 return _modOnTeardown(rec, state, fn);
             };

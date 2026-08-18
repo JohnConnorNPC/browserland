@@ -13008,6 +13008,36 @@ CASES.lifo_and_per_window = function () {
              live: Array.from(m.rec.winTeardowns || []).length };
 };
 
+// TWO subscriptions, ONE mod, ONE window. A mod may subscribe to
+// onTerminalCreate more than once, and every subscription is handed a bag for
+// the same window. The state is keyed per (mod, window) rather than per
+// delivery, so the second bag joins the first window's state instead of
+// starting a rival one -- otherwise the window would carry two cleanups
+// entries and the mod's set two members for one window, and a shared disposer
+// registered through both bags would run twice on one close.
+CASES.two_subscriptions_share_one_window_state = function () {
+    const m = modCtx('git');
+    const log = [];
+    let shared = 0;
+    const bump = function () { shared += 1; };
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModTeardown(function () { log.push('subA'); });
+        info.onModTeardown(bump);
+    });
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModTeardown(function () { log.push('subB'); });
+    });
+    const a = openTerminal();
+    const cleanups = a.cleanups.length;
+    const states = Array.from(m.rec.winTeardowns || []).length;
+    closeWindow(a.id);
+    const afterClose = log.slice();
+    _runUnloads(m.rec);                  // the disable adds nothing
+    return { cleanups: cleanups, states: states, afterClose: afterClose,
+             log: log, shared: shared,
+             live: Array.from(m.rec.winTeardowns || []).length };
+};
+
 // A throwing teardown is isolated: from its siblings on the same window, from
 // the OTHER windows in the disable pass, and from the chain behind it.
 CASES.throwing_teardown_is_isolated = function () {
@@ -13246,6 +13276,28 @@ def test_teardowns_run_newest_first_and_never_cross_windows(teardown_harness):
     # Two windows, two teardowns each, and still ONE entry on the LIFO chain
     # beside the loader's unsubscribe: the set is per MOD, not per window.
     assert r["unloads"] == 2
+    assert r["live"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_two_subscriptions_from_one_mod_share_one_window_state(
+        teardown_harness):
+    # The scope the hook claims is one window x one MOD, and nothing stops a mod
+    # subscribing to onTerminalCreate twice -- every subscription is handed a bag
+    # for the same window. Keyed per delivery, that mod would collect two states,
+    # two win.cleanups entries and two members of its own set for a single
+    # window, and a disposer registered through both bags would run twice on one
+    # close: exactly the double-fire the hand-rolled WeakSet used to guard.
+    r = _run_teardown(teardown_harness, "two_subscriptions_share_one_window_state")
+    assert r["errors"] == []
+    assert r["cleanups"] == 1, \
+        "each subscription armed its own close hook on the same window"
+    assert r["states"] == 1, "the mod's set holds one state per window, not per bag"
+    # Both subscriptions' callbacks still run -- sharing the state must not cost
+    # the second bag its registration -- and each runs exactly once.
+    assert sorted(r["afterClose"]) == ["subA", "subB"]
+    assert r["shared"] == 1, "a disposer registered through both bags ran twice"
+    assert r["log"] == r["afterClose"], "the later disable fired a spent state"
     assert r["live"] == 0
 
 
