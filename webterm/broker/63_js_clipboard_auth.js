@@ -790,6 +790,24 @@
                 if (win.disposed || !win._onHostAuth) continue;
                 try { win._onHostAuth(host.id); } catch (_) {}
             }
+            // #195: the same fact, on the bus — the event the per-window
+            // convention hook above becomes once #204 migrates its four
+            // consumers. This is THE auth-completion site: the only place a
+            // host's token changes because a broker ACCEPTED it (the /sessions
+            // probe on line ~722 answered ok; a 401 returned above). Fired
+            // here, one line after the hook it replaces, rather than at the end
+            // of the handler: every mutation the success performs has landed
+            // (token stored + saved, authNeeded cleared, overlay closed,
+            // control WS re-dialled, mod/help policy re-asked, legacy hooks
+            // run), and the reattach loop below is the one call left that is
+            // NOT exception-isolated — a throw out of reattachWindow must not
+            // be able to swallow the event. Guarded because 86c may be absent
+            // from an assembled page (the guard is about ABSENCE, not order:
+            // one <script>, so the declaration is hoisted — see the note in
+            // 85_js_startup.js's adopt emit).
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('host:auth', { hostId: host.id });
+            }
             // Heal in place: re-dial THIS host's windows that died on auth
             // (or are just dead) — the relay re-snapshots on attach.
             for (const win of windows.values()) {

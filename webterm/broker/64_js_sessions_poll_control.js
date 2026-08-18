@@ -392,6 +392,33 @@
                 _homeActive = active;
                 if (active) becomeActiveTransition();
                 else deactivateTransition();
+                // #195: the single-active lease, as a LEVEL — the event that
+                // deletes workspaces' read of the core-private _deactivated.
+                //
+                // THIS is the site and not the four `_deactivated = …` writes
+                // inside bootActiveView / teardownView / rebuildView: this is
+                // the only place core LEARNS its HOME lease level (the broker
+                // is the source of truth; _homeActive is the mirror, assigned
+                // three lines up), and resetLocalView (83) drives
+                // teardownView+rebuildView back to back with no lease change at
+                // all — emitting off those writes would announce a loss and a
+                // regain that never happened.
+                //
+                // HOME only. The payload has no hostId, so one retained level
+                // cannot speak for N brokers; a remote broker's lease is a
+                // per-host mask (applyRemoteLease, 84) and would need its own
+                // event, which this build's frozen table does not have.
+                //
+                // AFTER the transition: a loss has fully torn the view down
+                // before any handler runs, and a gain has already set
+                // _deactivated=false (both bootActiveView and rebuildView do it
+                // synchronously, before their first await), so a handler that
+                // reacts by writing shared state is no longer gated out. A
+                // repeated {active:X} is a level no-op, which is the same
+                // idempotence the transition wrappers below already enforce.
+                if (typeof _emitModEvent === 'function') {
+                    _emitModEvent('lease:changed', { active: _homeActive });
+                }
             } else {
                 onRemoteControlStatus(hostId, active, msg);
             }

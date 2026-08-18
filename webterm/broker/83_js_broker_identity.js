@@ -134,6 +134,12 @@
             hostAddBtn.disabled = true;
             hostAddBtn.textContent = 'checking…';
             let addWarning = '';
+            // #195: the host this commit actually mutated, or '' if none did.
+            // Set in BOTH branches and read once after the renders below, so
+            // every early return in between (no password, a declined duplicate
+            // confirm, the post-await re-check) leaves it empty and emits
+            // nothing — a refused commit changed no host.
+            let changedHostId = '';
             try {
                 if (editing) {
                     editing.label = label || defaultHostLabel(url);
@@ -144,6 +150,7 @@
                     hostPolls.delete(editing.id);
                     profilesCache.delete(editing.id);
                     authPrompted.delete(editing.id);
+                    changedHostId = editing.id;
                 } else {
                     if (!pass) {
                         // A remote /session/kill, /state etc. is token-gated, so a
@@ -199,9 +206,11 @@
                         setHostError('host already configured');
                         return;
                     }
-                    live.push({ id: mintHostId(),
-                                label: label || defaultHostLabel(url),
-                                url, token: pass, brokerId });
+                    const added = { id: mintHostId(),
+                                    label: label || defaultHostLabel(url),
+                                    url, token: pass, brokerId };
+                    live.push(added);
+                    changedHostId = added.id;
                 }
                 savePrefs();
                 resetHostForm();          // clears the form AND the error line
@@ -209,6 +218,16 @@
                 renderHostsList();
                 renderSettingsTabs();   // a new/renamed host changes the tab bar
                 refreshTaskbar();
+                // #195: ONE edge for both halves of this form. The event table
+                // has no `host:added` — an add IS a change to the set of hosts
+                // this browser can reach, and a subscriber that wants the new
+                // record reads it (the payload carries ids, not snapshots).
+                // Emitted AFTER the mutation, the save AND the renders, so a
+                // handler that reads a host, a tab or the taskbar sees the
+                // committed desktop rather than a half-applied one.
+                if (changedHostId && typeof _emitModEvent === 'function') {
+                    _emitModEvent('host:changed', { hostId: changedHostId });
+                }
             } finally {
                 hostFormBusy = false;
                 hostAddBtn.disabled = false;
@@ -286,6 +305,16 @@
             renderSettingsTabs();   // the removed host's tab disappears
             renderHostStatus();
             refreshTaskbar();
+            // #195: LAST, and deliberately so. This function is the whole
+            // removal — the splice, the windows, the sessions, the per-host
+            // prefs, the lease socket, five caches and four renders — and the
+            // event that replaces `win._hostRemoved` above must mean "that
+            // host is gone", not "it is going". The two early returns (the
+            // local host, an unknown id) removed nothing and reach nothing
+            // here.
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('host:removed', { hostId: id });
+            }
         }
 
         function startEditHost(id) {

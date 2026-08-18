@@ -313,6 +313,17 @@
             // out-of-order /state.
             if (_deactivated || epoch !== _viewEpoch) return;
             _stateReady = true;
+            // #195: the OTHER assignment of the same latch, so the same event.
+            // Normally a no-op — state:adopted is a LEVEL and its payload is
+            // empty both times, so a re-adopt after a lease-loss rebuild is
+            // value-equal to the retained one, takes no generation and tells
+            // nobody (that is what makes "never twice" true here rather than
+            // hoped for). It is NOT dead code: a lease flip whose rebuild pull
+            // beats the boot pull makes this line the first adopt of the page,
+            // and a subscriber gated on the boot emit alone would wait forever.
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('state:adopted', {});
+            }
             try { applyDisplaySettings(); } catch (_) {}
             restoreAppWindows();
             seedRestoreQueue();

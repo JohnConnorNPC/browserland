@@ -74,6 +74,24 @@
             _stateReady = true;
             if (_statePendingPush) { _statePendingPush = false; schedulePush(); }
             _markStateReady();
+            // #195: THE adopt — the one restoreAppWindows waits on (#167's
+            // race), and the level that deletes help's 20x500 ms _stateReady
+            // poll. Fired last: the flag is set, a push that queued behind it
+            // has been released, and _stateReadyPromise (the boot restore gate)
+            // is resolved, so a handler observes a fully adopted state.
+            //
+            // Order, not just presence, is why this sits behind an `await`.
+            // Every fragment shares ONE <script> scope, so `_emitModEvent` is
+            // hoisted and the typeof guard reads true from the first line of
+            // the page — it protects against 86c being ABSENT from an assembly,
+            // never against running before 86c's own consts initialize. This
+            // emit is safe because `await pullState(true)` defers it past the
+            // whole script's evaluation. A synchronous emit from a fragment
+            // ordered before 86c would pass the guard and then hit the bus's
+            // const tables in their TDZ.
+            if (typeof _emitModEvent === 'function') {
+                _emitModEvent('state:adopted', {});
+            }
         })();
         fetchProfiles(localHost());   // prefetch LOCAL only — remote menus
                                       // populate lazily on right-click

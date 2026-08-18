@@ -11814,3 +11814,738 @@ def test_a_payload_is_copied_frozen_and_the_bus_owns_gen(events_harness):
     assert r["genOnEdge"] == [False, False], \
         "an EDGE payload carries ids, not a generation"
     assert r["frozen"] is True and r["writeThrew"] is True
+
+
+# --------------------------------------------------------------------------- #
+# #195's CORE EMIT POINTS (A35) -- the five mutation sites that drive the bus
+# --------------------------------------------------------------------------- #
+# A34 shipped the bus with no caller. These are the sites, and #195 names them:
+# auth success, host add/edit/remove, the /state adopt, and lease gain/loss.
+# Each one is a guarded one-liner at an EXISTING mutation, placed AFTER it -- so
+# the cases below do not string-match the calls, they SLICE the shipped
+# functions into node and run them, and assert what a handler saw about core
+# state at the moment it was called.
+
+
+def _auth_frag_src():
+    return (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+
+
+def _poll_frag_src():
+    return (BROKER_DIR / "64_js_sessions_poll_control.js").read_text(
+        encoding="utf-8")
+
+
+def _identity_frag_src():
+    return (BROKER_DIR / "83_js_broker_identity.js").read_text(encoding="utf-8")
+
+
+def _lifecycle_frag_src():
+    return (BROKER_DIR / "84_js_active_view_lifecycle.js").read_text(
+        encoding="utf-8")
+
+
+def _startup_frag_src():
+    return (BROKER_DIR / "85_js_startup.js").read_text(encoding="utf-8")
+
+
+#: event -> (fragment, the SHIPPED call). The whole A35 contract in one table:
+#: five events, six calls (state:adopted has two assignments of the same latch,
+#: and the bus makes the second a no-op).
+_EMIT_SITES = [
+    ("host:auth", "63_js_clipboard_auth.js",
+     "_emitModEvent('host:auth', { hostId: host.id });"),
+    ("host:changed", "83_js_broker_identity.js",
+     "_emitModEvent('host:changed', { hostId: changedHostId });"),
+    ("host:removed", "83_js_broker_identity.js",
+     "_emitModEvent('host:removed', { hostId: id });"),
+    ("state:adopted", "85_js_startup.js",
+     "_emitModEvent('state:adopted', {});"),
+    ("state:adopted", "84_js_active_view_lifecycle.js",
+     "_emitModEvent('state:adopted', {});"),
+    ("lease:changed", "64_js_sessions_poll_control.js",
+     "_emitModEvent('lease:changed', { active: _homeActive });"),
+]
+
+_EMIT_CALL_RE = re.compile(r"_emitModEvent\('([a-z:]+)'")
+#: A guarded call, in the one shape #195 documents -- optionally behind a cheap
+#: precondition (`changedHostId && ...`), never on its own.
+_EMIT_GUARDED_RE = re.compile(
+    r"if \((?:[A-Za-z0-9_.]+ && )?typeof _emitModEvent === 'function'\) \{\n"
+    r"\s+_emitModEvent\('([a-z:]+)'")
+
+
+def _code_only(src):
+    """``src`` with whole-line // comments dropped. 86c documents the A35 call
+    shape inside its own comment block, and a doc example is not a call site."""
+    return "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("//"))
+
+
+def test_core_emits_exactly_the_five_events_at_the_named_sites():
+    # The whole point of A35: the bus stops being dead code. Every call in the
+    # served page, by fragment and by event -- so a sixth event, a site that
+    # quietly moved, or a duplicated emit is a failing test rather than a
+    # behaviour change nobody notices.
+    found = []
+    for path in sorted(BROKER_DIR.glob("*.js")):
+        for name in _EMIT_CALL_RE.findall(
+                _code_only(path.read_text(encoding="utf-8"))):
+            found.append((name, path.name))
+    assert sorted(found) == sorted((n, f) for n, f, _c in _EMIT_SITES), \
+        "the core emit points are #195's five events at its named sites"
+    # ...and each call is the exact shipped line, present once in the page.
+    for _name, frag, call in _EMIT_SITES:
+        assert call in (BROKER_DIR / frag).read_text(encoding="utf-8")
+    assert INDEX_HTML.count("_emitModEvent('state:adopted', {});") == 2
+    for _name, _frag, call in _EMIT_SITES:
+        if "state:adopted" in call:
+            continue
+        assert INDEX_HTML.count(call) == 1, f"missing/duplicated: {call!r}"
+
+
+def test_every_core_emit_is_typeof_guarded():
+    # #195 trap 2, and the reason the guard exists: a page can be assembled
+    # WITHOUT 86c (the fragment list is data), and a core mutation site must
+    # then be unguarded-but-alive rather than a ReferenceError that takes the
+    # host editor down with it.
+    for path in sorted(BROKER_DIR.glob("*.js")):
+        code = _code_only(path.read_text(encoding="utf-8"))
+        calls = _EMIT_CALL_RE.findall(code)
+        if not calls:
+            continue
+        assert calls == _EMIT_GUARDED_RE.findall(code), \
+            f"an unguarded _emitModEvent call in {path.name}"
+
+
+def test_no_mod_emits_on_the_bus():
+    # WHO MAY EMIT: core, and only core. ctx.events carries `on` and nothing
+    # else, so a mod reaching the emitter would have to do it through the
+    # shared #71 scope -- which is exactly what this refuses.
+    for path in sorted((BROKER_DIR / "mods").rglob("*.js")):
+        assert "_emitModEvent" not in path.read_text(encoding="utf-8"), \
+            f"{path.name} emits a core event"
+
+
+def _auth_submit_source():
+    """The shipped auth-form submit handler (63), verbatim -- the whole probe,
+    the 401 branch and the success path the host:auth emit sits in."""
+    src = _auth_frag_src()
+    start = src.index("        document.getElementById('auth-form')"
+                      ".addEventListener('submit', async (e) => {")
+    end = src.index("\n        });\n", start) + len("\n        });")
+    body = src[start:end]
+    for needed in ("host.token = candidate;",
+                   "if (resp.status === 401) {",
+                   "try { win._onHostAuth(host.id); } catch (_) {}",
+                   "_emitModEvent('host:auth', { hostId: host.id });",
+                   "reattachWindow(win);"):
+        assert needed in body, f"{needed} missing from the sliced handler"
+    return body
+
+
+def _boot_adopt_source():
+    """85's initStateSync IIFE, verbatim. Wrapped in a function by the harness
+    (not re-typed) so a case can choose WHEN the boot adopt happens."""
+    src = _startup_frag_src()
+    start = src.index("        (async function initStateSync() {")
+    end = src.index("\n        })();\n", start) + len("\n        })();")
+    body = src[start:end]
+    for needed in ("await pullState(true);", "_stateReady = true;",
+                   "_markStateReady();",
+                   "_emitModEvent('state:adopted', {});"):
+        assert needed in body, f"{needed} missing from the sliced IIFE"
+    return body
+
+
+def _emit_site_source(src, sig, *needed):
+    body = _frag_fn(src, sig) + "\n        }\n"
+    for want in needed:
+        assert want in body, f"{want} missing from {sig!r}"
+    return body
+
+
+def _core_emit_sites_source():
+    """The shipped functions the emits live in, plus the two lifecycle helpers
+    onControlStatus dispatches through. Concatenated in page order."""
+    ident = _identity_frag_src()
+    poll = _poll_frag_src()
+    return "\n".join([
+        _emit_site_source(poll, "function onControlStatus(hostId, msg) {",
+                          "_homeActive = active;",
+                          "_emitModEvent('lease:changed', "
+                          "{ active: _homeActive });"),
+        _emit_site_source(poll, "function becomeActiveTransition() {",
+                          "rebuildView();"),
+        _emit_site_source(poll, "function deactivateTransition() {",
+                          "teardownView();"),
+        _emit_site_source(ident, "async function commitHostForm() {",
+                          "let changedHostId = '';",
+                          "_emitModEvent('host:changed', "
+                          "{ hostId: changedHostId });"),
+        _emit_site_source(ident, "function removeHost(id) {",
+                          "_emitModEvent('host:removed', { hostId: id });"),
+        _emit_site_source(ident, "function resetLocalView() {",
+                          "teardownView();", "rebuildView();"),
+        _emit_site_source(_lifecycle_frag_src(),
+                          "async function rebuildView() {",
+                          "_stateReady = true;",
+                          "_emitModEvent('state:adopted', {});"),
+    ])
+
+
+# The sites run in a desktop reduced to what they actually touch: the host
+# array, the five per-host caches, the window map, the lifecycle flags. Every
+# stub is a dependency of a SLICED function -- no emit is re-typed here, and no
+# case asserts on anything but what a real subscriber saw.
+_EMIT_HARNESS = r"""
+'use strict';
+const errors = [];
+const warns = [];
+const infos = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = function () {
+    warns.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+__REGISTRY__
+
+__NEEDS__
+
+__EVENTS__
+
+// ---- the desktop the five sites touch, and nothing else -------------------
+// Ordered side effects. "AFTER the mutation" is the whole A35 contract, so it
+// has to be observable rather than asserted from the source's shape.
+const log = [];
+
+// commitHostForm refuses a URL that IS this broker; nothing else here reads it.
+const window = { location: { origin: 'http://home:4445' } };
+const prefs = {};
+let _hostRecords = [];
+function getHosts() { return _hostRecords; }
+function hostById(id) {
+    for (const h of _hostRecords) { if (h.id === id) return h; }
+    return null;
+}
+function localHost() { return _hostRecords[0]; }
+function homeHostId() { return 'local'; }
+const hostPolls = new Map();
+const profilesCache = new Map();
+const hostStateCache = new Map();
+const hostSaveChains = new Map();
+const authPrompted = new Set();
+const sessions = new Map();
+const pendingOpens = new Map();
+const windows = new Map();
+const closed = [];
+function closeWindow(key) { closed.push(key); windows.delete(key); }
+function closeControlWs(id) { log.push('closeControlWs:' + id); }
+function openControlWs(host) { log.push('openControlWs:' + host.id); }
+const reattached = [];
+function reattachWindow(win) {
+    reattached.push(win.id || 'win');
+    log.push('reattach');
+}
+function savePrefs() { log.push('savePrefs'); }
+function savePrefsLocal() { log.push('savePrefsLocal'); }
+function showNotice(t) { log.push('notice:' + t); }
+const settings = { defaultHost: '' };
+function getSettings() { return settings; }
+function renderHostsList() { log.push('renderHostsList'); }
+function renderSettingsTabs() { log.push('renderSettingsTabs'); }
+function renderHostStatus() { log.push('renderHostStatus'); }
+function renderSettings() { log.push('renderSettings'); }
+function refreshTaskbar() { log.push('refreshTaskbar'); }
+function showSettingsPane(p) { log.push('showSettingsPane:' + p); }
+function makeLocalTarget() { return { id: 'local' }; }
+let currentSettingsTab = 'local';
+let settingsTarget = makeLocalTarget();
+let settingsOpenHostId = null;
+
+// ---- the host form (83) ---------------------------------------------------
+let editingHostId = null;
+let hostFormBusy = false;
+const hostLabelEl = { value: '' };
+const hostUrlEl = { value: '' };
+const hostPassEl = { value: '' };
+const hostAddBtn = { disabled: false, textContent: 'add' };
+const hostErrors = [];
+function setHostError(m) { hostErrors.push(m); }
+function resetHostForm() {
+    editingHostId = null;
+    hostAddBtn.textContent = 'add';
+    hostLabelEl.value = ''; hostUrlEl.value = ''; hostPassEl.value = '';
+}
+function normalizeHostUrl(u) { return String(u || '').trim(); }
+function defaultHostLabel(u) { return u; }
+let _idSeq = 0;
+function mintHostId() { _idSeq += 1; return 'h' + _idSeq; }
+// The /info identity probe and the duplicate confirm, both steerable: two of
+// the early returns between the form and the emit are a declined duplicate and
+// a tokenless remote, and a refused commit must announce nothing.
+let _probeId = null;
+let _probeReached = true;
+async function probeBrokerId(url, token, out) {
+    log.push('probeBrokerId');
+    if (out) { out.reached = _probeReached; out.timedOut = !_probeReached; }
+    return _probeId;
+}
+let _dupHost = null;
+function findHostByBrokerId(id, hosts) { return _dupHost; }
+let _confirmAnswer = true;
+async function openConfirmDialog(opts) {
+    log.push('confirm');
+    return _confirmAnswer;
+}
+
+// ---- the auth overlay (63) ------------------------------------------------
+let authOverlayHostId = null;
+let authSubmitting = false;
+let authGeneration = 0;
+const authTokenEl = { value: '' };
+const authSubmitBtn = { disabled: false, textContent: 'log in' };
+const authErrorEl = { textContent: '', classList: { add: function () {} } };
+function hideAuthOverlay() { log.push('hideAuthOverlay'); }
+function notifyModsHostAuth(id) { log.push('notifyModsHostAuth'); }
+function notifyHelpHostAuth(id) { log.push('notifyHelpHostAuth'); }
+let _probeStatus = 200;
+let _probeThrows = null;
+async function hostFetch(host, path, opts) {
+    log.push('fetch:' + path);
+    if (_probeThrows) {
+        const e = new Error('unreachable');
+        e.name = _probeThrows;
+        throw e;
+    }
+    return { status: _probeStatus,
+             ok: _probeStatus >= 200 && _probeStatus < 300 };
+}
+let _authSubmit = null;
+const document = {
+    getElementById: function (id) {
+        if (id === 'auth-form') {
+            return { addEventListener: function (t, fn) { _authSubmit = fn; } };
+        }
+        return null;      // #taskbar etc: every read of one is null-guarded
+    },
+    querySelector: function () { return null; },
+};
+
+// ---- the lifecycle flags (52) and the transitions core dispatches through --
+let _homeActive = false;
+let _booted = false;
+let _deactivated = false;
+let _viewEpoch = 0;
+let _stateReady = false;
+let _statePendingPush = false;
+let _markedReady = 0;
+function _markStateReady() { _markedReady += 1; log.push('markStateReady'); }
+function schedulePush() { log.push('schedulePush'); }
+async function pullState(initial) { log.push('pullState:' + !!initial); }
+function applyDisplaySettings() {}
+function restoreAppWindows() { log.push('restoreAppWindows'); }
+function seedRestoreQueue() {}
+function startSlowPoll() {}
+function showBecomeActiveOverlay() { log.push('showBecomeActiveOverlay'); }
+function hideBecomeActiveOverlay() { log.push('hideBecomeActiveOverlay'); }
+const remoteLease = [];
+function onRemoteControlStatus(hostId, active, msg) {
+    remoteLease.push([hostId, active]);
+}
+// 84's bootActiveView and teardownView, reduced to the lifecycle writes the
+// lease emit stands behind (both clear/raise _deactivated SYNCHRONOUSLY, before
+// any await). rebuildView is NOT reduced -- it carries the second state:adopted
+// emit, so it is sliced in with the rest.
+function bootActiveView() {
+    if (_booted) return;
+    _booted = true;
+    _deactivated = false;
+    _viewEpoch += 1;
+    log.push('bootActiveView');
+}
+function teardownView() {
+    _deactivated = true;
+    _viewEpoch += 1;
+    showBecomeActiveOverlay();
+    log.push('teardownView');
+}
+
+__SITES__
+
+__AUTH__
+
+// 85's boot adopt, verbatim, wrapped so a case chooses when it runs.
+function runBootAdopt() {
+__BOOT_ADOPT__
+}
+
+// ---- driver ---------------------------------------------------------------
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = { id: id, ctxVersion: 1 };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+function tick() { return new Promise(function (r) { setTimeout(r, 0); }); }
+
+const CASES = {};
+
+// E35/1: a host auth COMPLETES -> host:auth {hostId}. A rejected password and
+// an unreachable broker mutate nothing, so they announce nothing.
+CASES.auth_success_emits_host_auth = async function () {
+    _hostRecords = [{ id: 'local', url: '', token: '' },
+                    { id: 'h1', url: 'http://h1:4445', token: 'stale' }];
+    hostPolls.set('h1', { authNeeded: true });
+    authPrompted.add('h1');
+    windows.set('w1', { id: 'w1', disposed: false, hostId: 'h1',
+                        wsOpen: false, authFailed: true,
+                        _onHostAuth: function () { log.push('legacyHook'); } });
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('host:auth', function (p, meta) {
+        log.push('busHandler');
+        const h = hostById(p.hostId);
+        const st = hostPolls.get(p.hostId);
+        seen.push([p.hostId, meta.shape, meta.replayed,
+                   Object.keys(p).join(','),
+                   h && h.token, st && st.authNeeded,
+                   authPrompted.has(p.hostId)]);
+    });
+    authOverlayHostId = 'h1';
+    authTokenEl.value = 'right';
+    _probeStatus = 200;
+    await _authSubmit({ preventDefault: function () {} });
+    const order = log.filter(function (s) {
+        return s === 'legacyHook' || s === 'busHandler' || s === 'reattach';
+    });
+    const afterSuccess = seen.length;
+    // A WRONG password: the 401 branch returns before the token is stored.
+    authTokenEl.value = 'wrong';
+    _probeStatus = 401;
+    await _authSubmit({ preventDefault: function () {} });
+    const afterRejected = seen.length;
+    // ...and a broker that never answered is not a wrong secret either.
+    authTokenEl.value = 'right';
+    _probeStatus = 200;
+    _probeThrows = 'TimeoutError';
+    await _authSubmit({ preventDefault: function () {} });
+    _probeThrows = null;
+    return { seen: seen, order: order, afterSuccess: afterSuccess,
+             afterRejected: afterRejected, afterUnreachable: seen.length,
+             token: hostById('h1').token, reattached: reattached };
+};
+
+// E35/2: an ADD and an EDIT are both host:changed -- the table has no
+// host:added -- and a commit the form REFUSED emits nothing.
+CASES.host_add_and_edit_emit_host_changed = async function () {
+    _hostRecords = [{ id: 'local', url: '', token: '' }];
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('host:changed', function (p, meta) {
+        const h = hostById(p.hostId);
+        seen.push([p.hostId, meta.shape, meta.replayed,
+                   Object.keys(p).join(','),
+                   h && h.label, h && h.url, h && h.token,
+                   getHosts().length, hostPolls.has(p.hostId)]);
+    });
+    hostLabelEl.value = 'box';
+    hostUrlEl.value = 'http://box:4445';
+    hostPassEl.value = 'sekrit';
+    await commitHostForm();
+    const addedId = seen.length ? seen[0][0] : null;
+    // A tokenless remote is refused BEFORE anything is pushed.
+    hostLabelEl.value = 'nope';
+    hostUrlEl.value = 'http://nope:4445';
+    hostPassEl.value = '';
+    await commitHostForm();
+    // ...and so is a duplicate broker the user declined to add anyway.
+    _probeId = 'bid-1';
+    _dupHost = { id: 'local', label: 'this broker' };
+    _confirmAnswer = false;
+    hostLabelEl.value = 'twin';
+    hostUrlEl.value = 'http://twin:4445';
+    hostPassEl.value = 'p';
+    await commitHostForm();
+    _probeId = null; _dupHost = null; _confirmAnswer = true;
+    const afterRefusals = seen.length;
+    // The EDIT half of the same form: same id, new label/url, kept token.
+    hostPolls.set(addedId, { authNeeded: false });
+    editingHostId = addedId;
+    hostLabelEl.value = 'renamed';
+    hostUrlEl.value = 'http://box2:4445';
+    hostPassEl.value = '';
+    await commitHostForm();
+    return { seen: seen, addedId: addedId, afterRefusals: afterRefusals,
+             hosts: getHosts().map(function (h) { return h.id; }) };
+};
+
+// E35/3: a REMOVE is host:removed, and "removed" means finished -- the record,
+// its windows, its caches and its pref keys are all gone when a handler runs.
+CASES.host_remove_emits_host_removed = function () {
+    _hostRecords = [{ id: 'local', url: '', token: '' },
+                    { id: 'h1', url: 'http://h1:4445', token: 't' }];
+    hostPolls.set('h1', {});
+    profilesCache.set('h1', {});
+    hostStateCache.set('h1', {});
+    hostSaveChains.set('h1', {});
+    authPrompted.add('h1');
+    prefs['h1:7'] = { left: 1 };
+    sessions.set('h1:7', {});
+    windows.set('w1', { id: 'w1', disposed: false, hostId: 'h1' });
+    settings.defaultHost = 'h1';
+    currentSettingsTab = 'h1';
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('host:removed', function (p, meta) {
+        seen.push([p.hostId, meta.shape, meta.replayed,
+                   Object.keys(p).join(','),
+                   hostById(p.hostId) === null,
+                   hostPolls.has(p.hostId), profilesCache.has(p.hostId),
+                   hostStateCache.has(p.hostId), hostSaveChains.has(p.hostId),
+                   prefs['h1:7'] === undefined, sessions.has('h1:7'),
+                   closed.slice(), settings.defaultHost, currentSettingsTab]);
+    });
+    removeHost('h1');
+    const afterRemove = seen.length;
+    removeHost('local');        // never removable
+    removeHost('ghost');        // an id that was never there
+    return { seen: seen, afterRemove: afterRemove, after: seen.length,
+             hosts: getHosts().map(function (h) { return h.id; }) };
+};
+
+// E35/4: lease gain and loss -> lease:changed {active, gen}, with the LEVEL
+// replay a late subscriber is entitled to. A repeat is not a transition, and a
+// REMOTE broker's lease is not this level.
+CASES.lease_gain_and_loss_replay_on_subscribe = async function () {
+    const m = modCtx('m');
+    const seen = [];
+    const order = [];
+    m.ctx.events.on('lease:changed', function (p, meta) {
+        seen.push([p.active, p.gen, meta.replayed, Object.keys(p).join(','),
+                   _deactivated, _booted, _homeActive]);
+        order.push('lease:' + p.active);
+    });
+    m.ctx.events.on('state:adopted', function () { order.push('adopted'); });
+    const beforeAnyStatus = seen.length;
+    onControlStatus('local', { active: true });     // first activation
+    onControlStatus('local', { active: true });     // repeat: not a transition
+    onControlStatus('local', { active: false });    // lost it
+    onControlStatus('local', { active: true });     // took it back
+    await tick();
+    onControlStatus('r1', { active: false });       // a REMOTE broker's lease
+    // A mod that loads while the lease is already held replays the CURRENT
+    // level once, from its own on() -- workspaces' _deactivated read, deleted.
+    const late = modCtx('late');
+    const replayed = [];
+    late.ctx.events.on('lease:changed', function (p, meta) {
+        replayed.push([p.active, p.gen, meta.replayed]);
+    });
+    return { seen: seen, order: order, replayed: replayed,
+             beforeAnyStatus: beforeAnyStatus, remote: remoteLease,
+             deactivated: _deactivated };
+};
+
+// E35/5: the /state adopt. The boot adopt is the level; the lease-regain
+// re-adopt is value-equal and therefore silent.
+CASES.state_adopted_at_the_boot_adopt = async function () {
+    const m = modCtx('early');
+    const early = [];
+    m.ctx.events.on('state:adopted', function (p, meta) {
+        early.push([p.gen, meta.replayed, Object.keys(p).join(','),
+                    _stateReady, _markedReady]);
+    });
+    const beforeAdopt = early.length;
+    runBootAdopt();
+    await tick();
+    const afterAdopt = early.length;
+    const l = modCtx('late');
+    const late = [];
+    l.ctx.events.on('state:adopted', function (p, meta) {
+        late.push([p.gen, meta.replayed]);
+    });
+    // The rebuild path's own `_stateReady = true` -- the shipped rebuildView.
+    _booted = true;
+    _deactivated = true;
+    await rebuildView();
+    await tick();
+    return { beforeAdopt: beforeAdopt, afterAdopt: afterAdopt, early: early,
+             late: late, gen: _modEventGen, stateReady: _stateReady,
+             marked: _markedReady,
+             rebuilt: log.indexOf('restoreAppWindows') !== -1 };
+};
+
+// The site choice itself, proven: "Reset local view" drives teardownView +
+// rebuildView back to back with NO lease change. Emitting off the four
+// `_deactivated = ...` writes would announce a loss and a regain that never
+// happened; emitting where core LEARNS its lease does not.
+CASES.reset_local_view_is_not_a_lease_flip = async function () {
+    const m = modCtx('m');
+    const seen = [];
+    m.ctx.events.on('lease:changed', function (p) { seen.push(p.active); });
+    onControlStatus('local', { active: true });
+    await tick();
+    const afterGain = seen.slice();
+    prefs['h1:7'] = { left: 1 };
+    log.length = 0;
+    resetLocalView();
+    await tick();
+    return { afterGain: afterGain, seen: seen, deactivated: _deactivated,
+             tore: log.indexOf('teardownView') !== -1,
+             rebuilt: log.indexOf('restoreAppWindows') !== -1,
+             geomGone: prefs['h1:7'] === undefined };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def emit_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("emits") / "harness.js"
+    path.write_text(
+        _EMIT_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__NEEDS__", _needs_source())
+        .replace("__EVENTS__", _events_source())
+        .replace("__SITES__", _core_emit_sites_source())
+        .replace("__AUTH__", _auth_submit_source())
+        .replace("__BOOT_ADOPT__", _boot_adopt_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_emit(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_completed_host_auth_reaches_the_bus(emit_harness):
+    # E35, clause one. The site is the auth form's SUCCESS path -- the one place
+    # a host's token changes because a broker ACCEPTED it -- so the two failure
+    # branches beside it stay silent.
+    r = _run_emit(emit_harness, "auth_success_emits_host_auth")
+    assert r["errors"] == []
+    assert r["seen"] == [["h1", "edge", False, "hostId", "right", False, False]], \
+        "the handler must see the ACCEPTED token already stored, the " \
+        "auth-needed flag cleared and the re-prompt memo retired"
+    assert r["afterSuccess"] == 1
+    assert r["afterRejected"] == 1, "a 401 announced an auth that never happened"
+    assert r["afterUnreachable"] == 1, "an unreachable broker is not an auth"
+    assert r["token"] == "right"
+    # Ordered where the convention hook it replaces fires, and BEFORE the window
+    # heal: reattachWindow is the one call left in that path that is not
+    # exception-isolated, and a throw there must not swallow the event.
+    assert r["order"] == ["legacyHook", "busHandler", "reattach"]
+    assert r["reattached"] == ["w1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_host_add_and_a_host_edit_both_reach_the_bus(emit_harness):
+    # E35, clause two. #195's table has no `host:added`, and inventing one would
+    # break a frozen contract -- an add IS a change to the set of hosts this
+    # browser can reach, and the payload carries the id either way.
+    r = _run_emit(emit_harness, "host_add_and_edit_emit_host_changed")
+    assert r["errors"] == []
+    added, edited = r["seen"]
+    assert added == [r["addedId"], "edge", False, "hostId",
+                     "box", "http://box:4445", "sekrit", 2, False], \
+        "the ADD must be committed to the live host array before the event"
+    assert edited == [r["addedId"], "edge", False, "hostId",
+                      "renamed", "http://box2:4445", "sekrit", 2, False], \
+        "the EDIT must be applied -- and its per-host caches dropped -- first"
+    # Two refused commits in between: a tokenless remote and a declined
+    # duplicate. Neither mutated a host, so neither announced one.
+    assert r["afterRefusals"] == 1
+    assert r["hosts"] == ["local", r["addedId"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_removed_host_reaches_the_bus_after_it_is_gone(emit_harness):
+    # E35, clause two again. removeHost IS the removal -- the splice, the
+    # windows, the sessions, the pref keys, five caches and four renders -- so
+    # the event that replaces `win._hostRemoved` fires at the END of it.
+    r = _run_emit(emit_harness, "host_remove_emits_host_removed")
+    assert r["errors"] == []
+    assert r["seen"] == [["h1", "edge", False, "hostId",
+                          True, False, False, False, False, True, False,
+                          ["w1"], "", "local"]], \
+        "a handler must observe the host GONE, not going"
+    assert r["afterRemove"] == 1
+    assert r["after"] == 1, "the local host / an unknown id removed nothing"
+    assert r["hosts"] == ["local"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_lease_gain_and_loss_reach_the_bus_and_replay(emit_harness):
+    # E35, clause three, both halves: the transitions, and the replay a mod that
+    # loaded mid-lease is entitled to (workspaces' _deactivated read).
+    r = _run_emit(emit_harness, "lease_gain_and_loss_replay_on_subscribe")
+    assert r["errors"] == []
+    assert r["beforeAnyStatus"] == 0, \
+        "a lease level with no broker status yet replayed anyway"
+    assert r["seen"] == [
+        [True, 1, False, "active,gen", False, True, True],
+        [False, 2, False, "active,gen", True, True, False],
+        [True, 3, False, "active,gen", False, True, True]], \
+        "a repeated {active:true} is not a transition, and a handler must see " \
+        "the lifecycle flag already applied"
+    # The lease is the broker's word; the /state adopt a regain triggers lands
+    # after it, never before.
+    assert r["order"] == ["lease:true", "lease:false", "lease:true", "adopted"]
+    assert r["remote"] == [["r1", False]], \
+        "a REMOTE broker's lease must not move the HOME level"
+    assert r["replayed"] == [[True, 3, True]], \
+        "a late subscriber gets the CURRENT level once, marked replayed"
+    assert r["deactivated"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_state_adopt_reaches_the_bus_once(emit_harness):
+    # E35, clause four. The boot adopt is the level help's 20x500 ms poll was
+    # waiting for; the lease-regain re-adopt is value-equal, so it takes no
+    # generation and tells nobody -- "never zero, never twice", at the site.
+    r = _run_emit(emit_harness, "state_adopted_at_the_boot_adopt")
+    assert r["errors"] == []
+    assert r["beforeAdopt"] == 0
+    assert r["afterAdopt"] == 1
+    assert r["early"] == [[1, False, "gen", True, 1]], \
+        "the emit must land after the flag AND after the boot restore gate"
+    assert r["late"] == [[1, True]], "a mod loading later is told at subscribe"
+    assert r["gen"] == 1, "the rebuild's re-adopt burned a generation"
+    assert r["stateReady"] is True and r["marked"] == 1
+    assert r["rebuilt"] is True, "the shipped rebuildView did not run"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_reset_local_view_does_not_fake_a_lease_flip(emit_harness):
+    # Why the lease emit is at onControlStatus and not at the four
+    # `_deactivated = ...` writes: "Reset local view" (83) tears the view down
+    # and rebuilds it with the lease untouched. Emitting off those writes would
+    # tell every mod this browser lost and regained a lease it never let go of.
+    r = _run_emit(emit_harness, "reset_local_view_is_not_a_lease_flip")
+    assert r["errors"] == []
+    assert r["afterGain"] == [True]
+    assert r["seen"] == [True], "a view reset was announced as a lease flip"
+    assert r["tore"] is True and r["rebuilt"] is True, \
+        "the reset did not actually run the teardown/rebuild pair"
+    assert r["geomGone"] is True
+    assert r["deactivated"] is False
