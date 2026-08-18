@@ -1415,10 +1415,20 @@ deliberate final `flush()`: `mods/scratchpad/` calls it from a **window-close
 cleanup** precisely so a last edit reaches the server, and neither
 `serverStore.update()` nor `saveChain` takes a `signal` at all — there is no
 option to pass one, and that is deliberate. The failure to avoid is threading
-`ctx.signal` through the writes *you* make on that same close-time path (a final
+`ctx.signal` through the writes *you* make on that same path (a final
 `ctx.file.write`, a last `ctx.session` call): a disable would then abort exactly
-the work you added the cleanup for. **If it must survive the teardown, it does
-not take the signal.**
+the work you added the cleanup for.
+
+The rule is about **the work's lifetime, not the callback it starts in**, and
+this is worth being exact about, because the clearest teardown-surviving write
+in the repo starts from an `onUnload`. `mods/recorder/` stops a live recording
+from its unload disposer and saves what it captured — and that disposer runs
+*after* the abort, by construction. It is safe today only because nothing hands
+it a signal; give it one and `hostFetch` short-circuits an already-aborted
+caller signal before it ever calls `fetch`, so every disable with a live
+recording would lose the segment. So do not read this as "close-time paths are
+the risky ones": **if it must survive the teardown, it does not take the signal,
+wherever it is started from.**
 
 ---
 

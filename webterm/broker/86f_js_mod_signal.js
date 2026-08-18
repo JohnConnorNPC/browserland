@@ -116,12 +116,24 @@
         // from scratchpad's WINDOW cleanup precisely so a last edit reaches the
         // server. That flush must NOT be handed ctx.signal, and it is not: the
         // chain's own sends go through _modStoreUpdate, which nothing here
-        // touches, and decision 2 above is what keeps it that way. The rule
-        // generalizes — if a piece of work is supposed to OUTLIVE the teardown,
-        // it does not take the signal, and the two shapes for that work are the
-        // ones #196 already documents (a window-close cleanup, or a Ctrl+S
-        // handler), never an onUnload. A migration that reflexively threads
-        // ctx.signal through every call will abort its own last save.
+        // touches, and decision 2 above is what keeps it that way.
+        //
+        // The rule is about the WORK'S LIFETIME, not the callback it starts in.
+        // Saying "a window-close cleanup or a Ctrl+S handler, never an
+        // onUnload" would be the wrong rule and a dangerous one, because the
+        // clearest teardown-surviving write in this repo IS started from an
+        // onUnload: recorder's disposer stops a live recording and saves what
+        // it captured (mods/recorder/recorder.js — ctx.onUnload -> disposers ->
+        // stopRecording(win,'teardown') -> enqueueSave -> hostFetch), and that
+        // disposer necessarily runs AFTER the abort dispatched above. It is
+        // safe today only because nothing hands it a signal. Hand it one — as
+        // #198's own migration table invites for recorder — and hostFetch
+        // short-circuits an already-aborted caller signal before it ever calls
+        // fetch (63), so every disable with a live recording would lose the
+        // segment and raise the sticky "recording not saved" notice. So: work
+        // that must outlive the activation does not take the signal, wherever
+        // it is started from. A migration that reflexively threads ctx.signal
+        // through every call will abort its own last save.
         //
         // A NEW CAPABILITY ENTRY IS OWED, and this is the argument, not an
         // assumption: #197's map is per FAMILY — a bare top-level ctx member

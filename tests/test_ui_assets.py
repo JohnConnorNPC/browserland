@@ -18119,6 +18119,37 @@ CASES.an_aborted_file_call_resolves_and_never_rejects = async function () {
              requests: REQUESTS.length };
 };
 
+// AS213, as an executable case rather than a doc claim: the signal cancels the
+// WORK, not the CONTINUATION. #198's own acceptance fixture is worded around
+// this -- it specifies a slow `hostFetch`, which REJECTS on abort, so the
+// continuation never runs and "zero DOM mutations" goes green for the wrong
+// reason. ctx.file is the aggravated case the issue's own contract paragraph
+// highlights: it RESOLVES {ok:false, aborted:true}, so the continuation does
+// run, and it runs after _runUnloads has gone synchronously through the staged
+// window close and the whole drain. Anything it touches is already gone.
+CASES.a_continuation_resumes_after_the_whole_teardown = async function () {
+    const m = activate('m');
+    const log = [];
+    // Shared, still-attached state of exactly the kind a completion handler
+    // updates -- the taskbar chips update.js's dead flags exist to protect.
+    const shared = { painted: 0 };
+    m.ctx.onUnload(function () { log.push('unload'); });
+    const p = m.ctx.file.read('/etc/motd', { signal: m.ctx.signal })
+        .then(function (res) {
+            log.push('continuation');
+            // The check the wiki now tells you to write. Recorded BOTH ways so
+            // the test shows what the unguarded version would have done.
+            if (!(res && res.aborted)) shared.painted += 1;
+            return res;
+        });
+    await sleep(1);
+    _runUnloads(m.rec);
+    const atTeardownEnd = log.slice();      // synchronously after the drain
+    const res = await p;
+    return { atTeardownEnd: atTeardownEnd, log: log, res: res,
+             aborted: !!(res && res.aborted), painted: shared.painted };
+};
+
 // The surface itself, and the refusals that must be inert rather than fatal.
 CASES.surface_and_refusals = function () {
     const m = activate('m');
@@ -18268,6 +18299,35 @@ def test_an_aborted_ctx_file_call_resolves_and_never_rejects(signal_harness):
     # of hanging -- hostFetch aborts its composed controller up front.
     assert r["after"] == {"ok": False, "aborted": True, "error": "cancelled"}
     assert r["requests"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_aborted_call_s_continuation_runs_after_the_whole_teardown(
+        signal_harness):
+    # The limit the issue's own prose denies, pinned so it cannot be forgotten:
+    # "every in-flight loop observes the abort before the first disposer" is true
+    # of an abort LISTENER and false of an awaiting continuation. The signal
+    # cancels the work; the continuation still resumes, a microtask later, with
+    # the whole teardown already behind it.
+    #
+    # This is also why #198's acceptance fixture would have passed for the wrong
+    # reason: it specifies a slow hostFetch, which REJECTS on abort, so no
+    # continuation runs at all. ctx.file resolves instead -- and it is the family
+    # the issue's own contract paragraph singles out.
+    r = _run_signal(signal_harness,
+                    "a_continuation_resumes_after_the_whole_teardown")
+    assert r["errors"] == []
+    # The drain completed with the continuation NOT yet run...
+    assert r["atTeardownEnd"] == ["unload"], (
+        "the continuation ran inside the synchronous teardown -- if this ever "
+        "becomes true the documented hazard has changed shape")
+    # ...and it ran afterwards, which is the whole point.
+    assert r["log"] == ["unload", "continuation"]
+    assert r["aborted"] is True, "the call was not actually cancelled"
+    # The guard the wiki prescribes is what keeps it from touching shared state.
+    # Without `if (!res.aborted)` this would be 1: a completion handler
+    # repainting chrome that teardown has already taken down.
+    assert r["painted"] == 0
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
