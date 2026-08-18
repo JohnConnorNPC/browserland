@@ -142,9 +142,26 @@
             let changedHostId = '';
             try {
                 if (editing) {
+                    // #200: a URL repoint RESETS the verified identity. The
+                    // record's brokerId is what a broker SAID over /info at the
+                    // old address; the new address is a different endpoint
+                    // until it answers for itself, and possibly a hostile one.
+                    // Carrying the old id over would label it with another
+                    // broker's verified identity — the same shape as #174's
+                    // host-repoint vector — and would silently validate every
+                    // cache keyed on that id. Cleared to '' (the record's
+                    // spelling of "not learned"; ctx.hosts.list reports it as
+                    // null), which is exactly what refreshHostIdentities probes
+                    // for, and the invalidate-driven renderHostsList below
+                    // re-runs it — so this converges back to a verified value
+                    // without a second code path. Only on an ACTUAL change: a
+                    // label- or password-only edit must not throw away an
+                    // identity that is still true.
+                    const urlRepointed = editing.url !== url;
                     editing.label = label || defaultHostLabel(url);
                     editing.url = url;
                     if (pass) editing.token = pass;   // empty = keep existing
+                    if (urlRepointed) editing.brokerId = '';
                     // The URL may now point somewhere else entirely — every
                     // per-host cache is dropped below, through the one
                     // core-owned invalidateHost (#195). This used to clear

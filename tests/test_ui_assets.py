@@ -20485,3 +20485,473 @@ def test_a_method_added_after_provide_still_degrades(services_harness):
     assert r["alive"] == {"early": "early", "late": "late"}
     assert r["dead"] == {"early": "no-op", "late": "no-op"}, (
         "a late-added method threw inside the consumer instead of no-oping")
+
+
+# ===========================================================================
+# #200 / A54 -- ctx.hosts.list(): VERIFIED broker identity for mods.
+#
+# The hand-rolled thing being replaced is `hostFingerprint = host.url`
+# (mods/update/update.js). E54's whole content is the paths a URL never had:
+# a host that never answered /info, one broker under two URLs, a URL repointed
+# at a DIFFERENT broker, a remove-and-re-add, and the self entry (whose id is
+# learned by learnLocalBrokerId, a different path). Those are decided by
+# RUNNING the shipped code, not by reading it -- the harness below slices the
+# real fragment and the real edit branch out of 83.
+# ===========================================================================
+
+_HOSTS_LIST_SLICE_START = "// ---- ctx.hosts.list(): VERIFIED broker identity"
+_HOSTS_LIST_SLICE_END = "// ---- end ctx.hosts.list ---"
+
+
+def _hosts_list_src():
+    return (BROKER_DIR / "86j_js_mod_hosts_list.js").read_text(encoding="utf-8")
+
+
+def _hosts_list_source():
+    """A54's range in 86j, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node harness run the SHIPPED
+    snapshot builder instead of a copy of it."""
+    src = _hosts_list_src()
+    start = src.index(_HOSTS_LIST_SLICE_START)
+    end = src.index(_HOSTS_LIST_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for sym in ("function _modHostBrokerId(h) {",
+                "function _modHostEntry(h, selfId) {",
+                "function _modHostsList() {",
+                "function _ctxHostsList(ctx) {"):
+        assert sym in body, f"the ctx.hosts.list range no longer defines {sym!r}"
+    return body
+
+
+def _host_edit_branch_source():
+    """commitHostForm's EDIT branch, verbatim out of 83 -- the repoint reset.
+    Sliced rather than faked because "a URL repoint resets brokerId to null" is
+    a claim about THAT branch: it is the only place a stored host's url is
+    rewritten, and a copy of it here would keep passing after the shipped one
+    regressed."""
+    src = (BROKER_DIR / "83_js_broker_identity.js").read_text(encoding="utf-8")
+    a = src.index("                if (editing) {")
+    b = src.index("                    changedHostId = editing.id;", a)
+    body = (src[a:b] + "                    changedHostId = editing.id;\n"
+            + "                }\n")
+    assert "const urlRepointed = editing.url !== url;" in body
+    assert "if (urlRepointed) editing.brokerId = '';" in body
+    return body
+
+
+def _get_hosts_source():
+    """getHosts, verbatim out of 56 -- the registry normalizer the snapshot is
+    read off. It owns "entry 0 is always the implicit local host", which is
+    what makes `self` exactly one entry."""
+    src = (BROKER_DIR / "56_js_hosts.js").read_text(encoding="utf-8")
+    a = src.index("        function getHosts() {")
+    b = src.index("        function allHosts()", a)
+    return src[a:b]
+
+
+def test_hosts_list_lands_in_its_own_fragment_and_is_registered():
+    # 86c is at the #68 2500-line cap and the rule for that cap is split, never
+    # trim -- so ctx.hosts.list gets a NEW ordered fragment (the precedent
+    # 86e/86f/86g/86h set). The drift gate reads BOTH directions: a file with no
+    # registration never reaches the page, a registration with no file breaks
+    # the build.
+    assert "86j_js_mod_hosts_list.js" in ui._ORDERED
+    assert (BROKER_DIR / "86j_js_mod_hosts_list.js").is_file()
+    at = ui._ORDERED.index
+    # AFTER 86c -- it DECORATES the `hosts` family that fragment created, and
+    # extenders run in _ORDERED order -- and still before the mod-script splice,
+    # since a mod's init reads the finished ctx.
+    assert at("86c_js_mod_ctx_ext.js") < at("86j_js_mod_hosts_list.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    for frag in ("86c_js_mod_ctx_ext.js", "86j_js_mod_hosts_list.js"):
+        n = len((BROKER_DIR / frag).read_text(encoding="utf-8").splitlines())
+        assert n <= ui._MAX_LINES, f"{frag} is over the cap at {n}"
+    src = _hosts_list_src()
+    for sym in ("function _modHostsList() {", "function _modHostBrokerId(h) {",
+                "function _ctxHostsList(ctx) {"):
+        assert sym in src, f"{sym!r} did not land in 86j"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#200 symbol missing/duplicated in the served page: {sym!r}"
+        assert sym not in _ctx_ext_src(), f"{sym!r} belongs in 86j, not 86c"
+    # Guarded registration, for a page assembled without #194's registry.
+    assert "if (typeof _registerCtxExtender === 'function') {" in src
+    assert src.index("if (typeof _registerCtxExtender === 'function') {") \
+        < src.index("_registerCtxExtender(_ctxHostsList);")
+
+
+def test_hosts_list_is_a_member_of_an_existing_family_not_a_new_one():
+    # #197's map is per FAMILY. `hosts` is NOT new -- #195 created it in 86c for
+    # `invalidate` -- so `list` owes no entry of its own: the saveChain case (a
+    # member of `serverStore`), not the signal case (a new top-level family).
+    # The one _registerModCapability('hosts', 1) call in 86j is idempotent
+    # (86c's registrar refuses a name already present) and covers only the build
+    # where 86c installed no `hosts` family at all, which would leave this
+    # fragment putting a family on the ctx with no entry.
+    assert "hosts" in _standalone_capability_registrations()
+    assert "hosts" in _ctx_families_added_by_extenders()
+    src = _hosts_list_src()
+    assert src.count("_registerModCapability(") == 1
+    assert "_registerModCapability('hosts', 1);" in src
+    # No new family name sneaks in from this fragment.
+    assert set(re.findall(r"^\s*ctx\.([A-Za-z_$][\w$]*)\s*=(?!=)", src, re.M)) \
+        == {"hosts"}
+    # And it does not replace the family object -- that would delete #195's
+    # invalidate.
+    assert "const fam = (ctx.hosts && typeof ctx.hosts === 'object')" in src
+
+
+def test_hosts_list_hands_out_no_token():
+    # The host record carries the broker's auth password. It is not identity,
+    # and a snapshot that leaked it would make every mod a credential holder.
+    src = _hosts_list_src()
+    entry = src[src.index("function _modHostEntry(h, selfId) {"):
+                src.index("function _modHostsList() {")]
+    assert "token" not in entry
+
+
+_HOSTS_LIST_HARNESS = r"""
+'use strict';
+// E54 runs the SHIPPED slices in node: #194's ctx-extender registry, 56's real
+// getHosts, 86j's whole #200 range, and commitHostForm's EDIT branch verbatim
+// out of 83 -- so the repoint reset is proven by executing the code that ships,
+// not by matching a string.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+// ---- the core surface these slices touch, and nothing else ----------------
+const prefs = { _hosts: [] };
+function getSettings() { return {}; }
+function savePrefs() {}
+function savePrefsLocal() {}
+function defaultHostLabel(url) { return url; }
+function invalidateHost() { return true; }
+function _registerModCapability() { return true; }
+// The learned-identity paths (83), reduced to what they DO to the record:
+// probeBrokerId's answer written onto a host that has none
+// (refreshHostIdentities) and localInfo's answer written onto entry 0
+// (learnLocalBrokerId).
+const BROKERS = {};      // url -> broker_id the endpoint answers with
+function refreshHostIdentities() {
+    for (const h of getHosts()) {
+        if (h.id === 'local' || h.brokerId) continue;
+        const id = BROKERS[h.url];
+        if (id) h.brokerId = id;
+    }
+}
+function learnLocalBrokerId() {
+    const id = BROKERS['<self>'];
+    if (id) getHosts()[0].brokerId = id;
+}
+
+__GETHOSTS__
+__REGISTRY__
+// 86c's _ctxHosts (#195), reduced to the one thing it does to the ctx: it
+// CREATES the `hosts` family and puts `invalidate` on it. Registered BEFORE the
+// sliced fragment, because that is the order _ORDERED runs the two extenders --
+// which is exactly the condition under which "decorate, never replace" matters.
+_registerCtxExtender(function (ctx) {
+    const fam = (ctx.hosts && typeof ctx.hosts === 'object') ? ctx.hosts : {};
+    fam.invalidate = function () { return true; };
+    ctx.hosts = fam;
+});
+__HOSTSLIST__
+
+// commitHostForm's edit branch, verbatim. Its free names are the ones stubbed
+// above plus the four locals the form computes.
+function editHost(editing, label, url, pass) {
+    let changedHostId = '';
+__EDITBRANCH__
+    return changedHostId;
+}
+
+function ctxFor() {
+    const ctx = { id: 'm', ctxVersion: 1 };
+    _applyCtxExtenders(ctx, { id: 'm', unloads: [] });
+    return ctx;
+}
+function seed(rows) { prefs._hosts = rows; getHosts(); }
+
+const CASES = {};
+
+// A host that has NEVER answered /info -- the path a URL fingerprint could not
+// represent at all, because a URL is always available.
+CASES.never_answered = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    const before = ctxFor().hosts.list();
+    BROKERS['http://a:4445'] = 'BID-A';
+    refreshHostIdentities();
+    const after = ctxFor().hosts.list();
+    return { before: before, after: after };
+};
+
+// The SAME broker under two URLs: two registry rows, two local ids, ONE
+// brokerId. This is the property update's URL-as-fingerprint lacks.
+CASES.one_broker_two_urls = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' },
+          { id: 'r2', label: 'b', url: 'http://100.1.2.3:4445' }]);
+    BROKERS['http://a:4445'] = 'BID-A';
+    BROKERS['http://100.1.2.3:4445'] = 'BID-A';
+    refreshHostIdentities();
+    return { rows: ctxFor().hosts.list() };
+};
+
+// A URL repointed at a DIFFERENT broker, through the shipped edit branch.
+CASES.repoint_resets = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    BROKERS['http://a:4445'] = 'BID-A';
+    BROKERS['http://evil:4445'] = 'BID-EVIL';
+    refreshHostIdentities();
+    const verified = ctxFor().hosts.list();
+    editHost(getHosts()[1], 'a', 'http://evil:4445', '');
+    const repointed = ctxFor().hosts.list();
+    refreshHostIdentities();       // the repaint's background re-learn
+    const relearned = ctxFor().hosts.list();
+    // ...and a label-only edit must NOT throw away an identity still true.
+    editHost(getHosts()[1], 'renamed', 'http://evil:4445', '');
+    const labelOnly = ctxFor().hosts.list();
+    return { verified: verified, repointed: repointed,
+             relearned: relearned, labelOnly: labelOnly };
+};
+
+// The same broker under a SECOND URL, via a repoint: null, then the SAME id
+// back -- the transition that says "still the same machine".
+CASES.repoint_same_broker = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    BROKERS['http://a:4445'] = 'BID-A';
+    BROKERS['http://100.1.2.3:4445'] = 'BID-A';
+    refreshHostIdentities();
+    editHost(getHosts()[1], 'a', 'http://100.1.2.3:4445', '');
+    const during = ctxFor().hosts.list();
+    refreshHostIdentities();
+    return { during: during, after: ctxFor().hosts.list() };
+};
+
+// Removed and re-added: a NEW local id, and the brokerId is null until the new
+// record answers for itself. The local handle is not portable across removal;
+// the verified identity is the only thing that says "this is the same broker".
+CASES.remove_and_readd = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    BROKERS['http://a:4445'] = 'BID-A';
+    refreshHostIdentities();
+    const first = ctxFor().hosts.list()[1];
+    seed([]);                                   // removal
+    const empty = ctxFor().hosts.list();
+    seed([{ id: 'r9', label: 'a', url: 'http://a:4445' }]);
+    const readded = ctxFor().hosts.list()[1];
+    refreshHostIdentities();
+    const answered = ctxFor().hosts.list()[1];
+    return { first: first, empty: empty, readded: readded,
+             answered: answered };
+};
+
+// The self entry: exactly one, and its id arrives by learnLocalBrokerId --
+// a different path, the same null-until-answered rule.
+CASES.self_entry = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    const before = ctxFor().hosts.list();
+    BROKERS['<self>'] = 'BID-SELF';
+    learnLocalBrokerId();
+    const after = ctxFor().hosts.list();
+    return { before: before, after: after,
+             selfCount: after.filter(function (h) { return h.self; }).length };
+};
+
+// Read-only: a mod must not be able to mutate the registry through it.
+CASES.read_only = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    BROKERS['http://a:4445'] = 'BID-A';
+    refreshHostIdentities();
+    const rows = ctxFor().hosts.list();
+    let threw = 0;
+    try { rows.push({ id: 'x' }); } catch (e) { threw++; }
+    try { rows[1].url = 'http://evil:4445'; } catch (e) { threw++; }
+    try { rows[1].brokerId = 'BID-FAKE'; } catch (e) { threw++; }
+    try { delete rows[1].self; } catch (e) { threw++; }
+    return {
+        threw: threw,
+        live: getHosts().map(function (h) {
+            return { id: h.id, url: h.url, brokerId: h.brokerId || null };
+        }),
+        again: ctxFor().hosts.list(),
+        len: rows.length,
+    };
+};
+
+// Two snapshots are independent objects, so a mod holding one does not see a
+// later registry mutation through it (and cannot be handed a live record).
+CASES.snapshot_is_detached = function () {
+    seed([{ id: 'r1', label: 'a', url: 'http://a:4445' }]);
+    const held = ctxFor().hosts.list();
+    BROKERS['http://a:4445'] = 'BID-A';
+    refreshHostIdentities();
+    getHosts()[1].label = 'renamed';
+    return { held: held, fresh: ctxFor().hosts.list() };
+};
+
+// #195's member survives -- this extender decorates the family, never replaces
+// it -- and `list` is reachable by path the way `needs` resolves it.
+CASES.family_is_decorated = function () {
+    seed([]);
+    const ctx = ctxFor();
+    return {
+        hasInvalidate: typeof ctx.hosts.invalidate,
+        hasList: typeof ctx.hosts.list,
+    };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    if (!('errors' in out)) out.errors = errors;
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    console.log('case threw: ' + ((e && e.stack) || e));
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def hosts_list_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modhostslist") / "harness.js"
+    path.write_text(
+        _HOSTS_LIST_HARNESS
+        .replace("__GETHOSTS__", _get_hosts_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__HOSTSLIST__", _hosts_list_source())
+        .replace("__EDITBRANCH__", _host_edit_branch_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_hosts_list(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_broker_id_is_null_until_the_host_has_answered(hosts_list_harness):
+    # E54's first clause, and the one a URL fingerprint cannot express: a host
+    # that has never answered /info has NO cross-URL identity, and the api says
+    # so rather than substituting the address.
+    r = _run_hosts_list(hosts_list_harness, "never_answered")
+    assert r["before"][1] == {"id": "r1", "label": "a", "url": "http://a:4445",
+                              "brokerId": None, "self": False}
+    assert r["after"][1]["brokerId"] == "BID-A"
+    # No provisional value in between: null, then the verified string. Nothing
+    # was silently substituted under a caller's cache key.
+    assert r["before"][1]["brokerId"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_broker_under_two_urls_has_one_broker_id(hosts_list_harness):
+    # THE property `hostFingerprint = host.url` lacks: two addresses of one
+    # machine were two fingerprints, so a per-host cache was duplicated and a
+    # per-broker decision could be taken twice.
+    r = _run_hosts_list(hosts_list_harness, "one_broker_two_urls")
+    rows = r["rows"]
+    assert rows[1]["brokerId"] == rows[2]["brokerId"] == "BID-A"
+    # ...while the LOCAL handles stay distinct: two registry rows, and `id` is
+    # what addresses one of them.
+    assert rows[1]["id"] != rows[2]["id"]
+    assert rows[1]["url"] != rows[2]["url"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_url_repoint_resets_broker_id_and_never_carries_it_over(
+        hosts_list_harness):
+    # The core clause. A repoint points the row at a DIFFERENT endpoint; the old
+    # broker's verified identity must not travel to it, or a possibly hostile
+    # host inherits a name every cache trusts (#174's vector, one layer up).
+    r = _run_hosts_list(hosts_list_harness, "repoint_resets")
+    assert r["verified"][1]["brokerId"] == "BID-A"
+    assert r["repointed"][1]["url"] == "http://evil:4445"
+    assert r["repointed"][1]["brokerId"] is None, \
+        "the old broker's verified id was carried over to a new endpoint"
+    # It converges again on its own -- and to the NEW broker's id, which is the
+    # transition a URL fingerprint could not represent.
+    assert r["relearned"][1]["brokerId"] == "BID-EVIL"
+    # ...and a label-only edit keeps an identity that is still true.
+    assert r["labelOnly"][1]["label"] == "renamed"
+    assert r["labelOnly"][1]["brokerId"] == "BID-EVIL"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_repoint_to_the_same_broker_comes_back_the_same(hosts_list_harness):
+    # Reset is not the same as "changed": moving a row to a second address of
+    # the SAME broker goes null, then back to the identical id -- so a caller
+    # can tell "same machine, new address" from "different machine".
+    r = _run_hosts_list(hosts_list_harness, "repoint_same_broker")
+    assert r["during"][1]["brokerId"] is None
+    assert r["after"][1]["brokerId"] == "BID-A"
+    assert r["after"][1]["url"] == "http://100.1.2.3:4445"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_remove_and_readd_mints_a_new_local_id_and_reverifies(
+        hosts_list_harness):
+    # `id` is the LOCAL handle: it does not survive a removal, so it can never
+    # be a merge key across browsers or across a re-add. `brokerId` is what says
+    # "the same broker" -- and only after the new record answers for itself.
+    r = _run_hosts_list(hosts_list_harness, "remove_and_readd")
+    assert r["first"] == {"id": "r1", "label": "a", "url": "http://a:4445",
+                          "brokerId": "BID-A", "self": False}
+    # Removal leaves only the self entry.
+    assert len(r["empty"]) == 1 and r["empty"][0]["self"] is True
+    assert r["readded"]["id"] == "r9"
+    assert r["readded"]["brokerId"] is None, \
+        "a re-added record inherited a verified identity it never earned"
+    assert r["answered"]["brokerId"] == "BID-A"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_exactly_one_entry_is_self_and_it_verifies_by_its_own_path(
+        hosts_list_harness):
+    # The self entry's brokerId is learned by learnLocalBrokerId (same-origin
+    # /info), not by the remote probe -- and it obeys the SAME null-until-
+    # answered rule, so a caller needs no branch for "is this me".
+    r = _run_hosts_list(hosts_list_harness, "self_entry")
+    assert r["selfCount"] == 1
+    assert r["before"][0]["self"] is True and r["before"][0]["url"] == ""
+    assert r["before"][0]["brokerId"] is None
+    assert r["after"][0]["brokerId"] == "BID-SELF"
+    assert all(h["self"] is False for h in r["after"][1:])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_snapshot_is_read_only_and_detached(hosts_list_harness):
+    # A mod must not be able to mutate the registry through it. Frozen array,
+    # frozen rows: in strict mode every write throws, and either way the live
+    # record is unchanged -- a silent no-op would be enough, the throw is a
+    # bonus.
+    r = _run_hosts_list(hosts_list_harness, "read_only")
+    assert r["threw"] == 4
+    assert r["len"] == 2
+    assert r["live"][1] == {"id": "r1", "url": "http://a:4445",
+                            "brokerId": "BID-A"}
+    assert r["again"][1]["url"] == "http://a:4445"
+    assert r["again"][1]["brokerId"] == "BID-A"
+    # A held snapshot does not track later registry mutations either.
+    d = _run_hosts_list(hosts_list_harness, "snapshot_is_detached")
+    assert d["held"][1] == {"id": "r1", "label": "a", "url": "http://a:4445",
+                            "brokerId": None, "self": False}
+    assert d["fresh"][1]["brokerId"] == "BID-A"
+    assert d["fresh"][1]["label"] == "renamed"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_list_decorates_the_hosts_family_instead_of_replacing_it(
+        hosts_list_harness):
+    # Replacing ctx.hosts would delete #195's invalidate -- the rule every
+    # window extender follows, and the reason 86c's comment named this fragment
+    # in advance.
+    r = _run_hosts_list(hosts_list_harness, "family_is_decorated")
+    assert r["hasInvalidate"] == "function"
+    assert r["hasList"] == "function"

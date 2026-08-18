@@ -234,6 +234,18 @@ _ORDERED = [
     # script splice, since a mod's init reads the finished ctx. One <script>,
     # one scope.
     "86h_js_mod_commands.js",
+    # #200: ctx.hosts.list() -- a read-only host snapshot carrying VERIFIED
+    # broker identity (#64's brokerId out of /info, null until the host has
+    # answered, reset on a URL repoint), replacing update's hand-rolled
+    # `hostFingerprint = host.url`. A MEMBER of the existing `hosts` family
+    # (#195 created it in 86c for `invalidate`), so it owes no new capability
+    # entry -- the saveChain case, not the signal case. Its own fragment for
+    # the same split-never-trim reason 86e/86f/86g/86h got one: 86c is at the
+    # 2500-line cap. Ordered AFTER 86c because it DECORATES that fragment's
+    # family and extenders run in THIS list's order; still before the mod-
+    # script splice, since a mod's init reads the finished ctx. One <script>,
+    # one scope.
+    "86j_js_mod_hosts_list.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",
