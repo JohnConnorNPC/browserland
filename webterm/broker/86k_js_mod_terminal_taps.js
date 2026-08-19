@@ -67,12 +67,20 @@
             if (typeof fn !== 'function') return noop;
             const lists = _termTapLists(win, true);
             if (!lists || !Array.isArray(lists[kind])) return noop;
-            lists[kind].push(fn);
+            // A RECORD per registration, not the bare function. The same fn may
+            // legitimately be registered twice (two subscriptions sharing one
+            // handler), and identity-by-function made that ambiguous: off2()
+            // removed whichever entry indexOf found FIRST, so the second
+            // registration survived the dispatch liveness recheck and still
+            // fired, while its own off() was already spent and could never
+            // remove it. A record is unique by construction.
+            const rec = { fn: fn };
+            lists[kind].push(rec);
             let off = false;
             return function () {
                 if (off) return false;
                 off = true;
-                const i = lists[kind].indexOf(fn);
+                const i = lists[kind].indexOf(rec);
                 if (i === -1) return false;
                 lists[kind].splice(i, 1);
                 return true;
@@ -88,8 +96,21 @@
                 if (ArrayBuffer.isView(data) && typeof data.slice === 'function') {
                     return data.slice();
                 }
-            } catch (_) { /* an exotic payload: hand it over unchanged */ }
-            return data;
+                // An ARRAY is the case that made "read-only" false. The JSON
+                // output frame is SERVER-supplied, so `data.data` can be `[65]`
+                // -- xterm accepts it, and it was handed to the taps by
+                // reference while xterm still held the same array for its
+                // ASYNC write queue. One tap could then rewrite both what a
+                // sibling observed and what the terminal later parsed: every
+                // observer silently a transformer, which is the one thing this
+                // family promises it is not.
+                if (Array.isArray(data)) return data.slice();
+            } catch (_) { /* fall through to the honest answer below */ }
+            // Neither string, view nor array. Rather than hand out a live
+            // object reference, hand out nothing: a tap cannot mutate what it
+            // was not given, and "I cannot show you this safely" is a truthful
+            // answer where a shared reference is not.
+            return null;
         }
 
         // One dispatch. SNAPSHOT + liveness recheck, which is what makes the
@@ -104,12 +125,12 @@
             const snapshot = live.slice();
             let n = 0;
             for (let i = 0; i < snapshot.length; i++) {
-                const fn = snapshot[i];
-                if (live.indexOf(fn) === -1) continue;   // gone since the snap
+                const rec = snapshot[i];
+                if (live.indexOf(rec) === -1) continue;  // gone since the snap
                 let payload;
                 try { payload = make(); }
                 catch (_) { return n; }
-                try { fn(payload); n += 1; }
+                try { rec.fn(payload); n += 1; }
                 catch (e) {
                     try { console.error('[windows] terminal tap (' + kind
                         + ') failed:', e); } catch (_) {}
@@ -330,9 +351,9 @@
             let n = 0;
             for (let i = 0; i < listed.length; i++) {
                 if (win.disposed) return n;
-                const fn = listed[i];
-                if (live.indexOf(fn) === -1) continue;
-                try { fn(_copyTermModes(snap)); n += 1; }
+                const rec = listed[i];
+                if (live.indexOf(rec) === -1) continue;
+                try { rec.fn(_copyTermModes(snap)); n += 1; }
                 catch (e) {
                     try { console.error('[windows] terminal modes subscriber'
                         + ' failed:', e); } catch (_) {}
@@ -381,32 +402,55 @@
         function _addTermModesSub(win, fn) {
             const noop = function () { return false; };
             if (typeof fn !== 'function') return noop;
+            // A DISPOSED terminal takes no subscribers. The sampler already
+            // checks this, but registration did not -- so a retained info bag
+            // could subscribe to a dead terminal and be replayed with whatever
+            // its disposed internals still happened to answer.
+            if (win && win.disposed) return noop;
             const st = _termModesState(win, true);
             if (!st) return noop;
-            st.subs.push(fn);
-            // THE REPLAY. Seed `last` from a live read if the sampler has not
-            // run yet, then hand this subscriber the current snapshot now.
-            if (!st.last) {
-                const now = readTermModes(win);
-                if (now) st.last = now;
-            }
-            const snap = st.last
-                || { mouseTracking: 'none', mouseActive: false,
-                     altScreen: false };
-            try { fn(_copyTermModes(snap)); }
-            catch (e) {
-                try { console.error('[windows] terminal modes subscriber'
-                    + ' failed:', e); } catch (_) {}
-            }
+            const rec = { fn: fn };
+            st.subs.push(rec);
+            // off() is built and the removal is ARMED BEFORE the replay fires.
+            // The replay is synchronous mod code: it may close the terminal or
+            // disable its own mod, and either drains the cleanup that is
+            // supposed to remove this subscription. Arming afterwards means
+            // registering against a teardown that has already run, and the
+            // subscription outlives the thing that owned it.
             let off = false;
-            return function () {
+            const offFn = function () {
                 if (off) return false;
                 off = true;
-                const i = st.subs.indexOf(fn);
+                const i = st.subs.indexOf(rec);
                 if (i === -1) return false;
                 st.subs.splice(i, 1);
                 return true;
             };
+            // THE REPLAY, now that off() exists and can be armed by the caller.
+            //
+            // Read LIVE when a sample is already queued: `last` is the last
+            // SAMPLED state, and between a mode change and the frame that
+            // observes it, `last` is stale by construction. A subscriber
+            // arriving in that window was told the old value and then told the
+            // new one a frame later -- a transition that never happened.
+            let snap = st.last;
+            if (!snap || st.frame) {
+                const now = readTermModes(win);
+                if (now) { snap = now; st.last = now; }
+            }
+            // An UNREADABLE getter replays NOTHING. Substituting a default
+            // would announce 'none' for a terminal that may well be
+            // mouse-active, and the next successful sample would then report a
+            // transition out of a state core never observed. Saying nothing is
+            // the honest form of "we do not know yet".
+            if (snap) {
+                try { rec.fn(_copyTermModes(snap)); }
+                catch (e) {
+                    try { console.error('[windows] terminal modes subscriber'
+                        + ' failed:', e); } catch (_) {}
+                }
+            }
+            return offFn;
         }
 
         // A SECOND extender rather than another member on _modTerminalTaps'

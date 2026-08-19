@@ -104,8 +104,14 @@
         // means "drop mine", which is the same code path as a teardown --
         // deliberately, so a mod cannot get a revert that core's own unload
         // does not also get.
-        function _termFontSet(win, owner, family) {
+        function _termFontSet(win, owner, family, rec) {
             if (!win || typeof owner !== 'string' || !owner) return false;
+            // A DEAD activation may not take ownership. Teardown releases the
+            // owner but the arming is one-shot, so a retained bag calling
+            // setFont from a stray callback after its mod was disabled used to
+            // re-create the owner entry -- with no teardown left to ever remove
+            // it, and a live terminal wearing a dead mod's font permanently.
+            if (rec && rec.unloading) return false;
             const fam = (typeof family === 'string') ? family.trim() : '';
             if (!fam) return _termFontRelease(win, owner);
             const stack = _termFontStack(win, true);
@@ -143,6 +149,13 @@
         // proposeDimensions bails on exactly that check.
         function _termCellDims(win) {
             try {
+                // A DISPOSED terminal measures nothing. xterm can leave the
+                // last dimensions object resident on a disposed render
+                // service, so a retained bag would otherwise answer with the
+                // box the terminal had when it died -- a stale measurement
+                // presented as a current one, which is the same class of lie
+                // as the 9x17 fallback this replaces.
+                if (!win || win.disposed) return null;
                 const term = win && win.term;
                 const core = term && term._core;
                 const rs = core && core._renderService;
@@ -162,8 +175,17 @@
         // 86k's `_armTermTapRemoval`, for the same reason: win.cleanups fires
         // only on window CLOSE, so a mod disabled while its terminals are open
         // would otherwise leave its font on screen forever.
+        // The armed set is keyed on the BAG, in a WeakSet this fragment owns --
+        // not a property ON the bag. `info` is handed to mod code and to every
+        // other extender, so an internal lifecycle flag living there is one
+        // `info._fontArmed = 1` away from silently disabling cleanup
+        // registration, after which a disabled mod leaves its font on screen
+        // for good. A WeakSet cannot be reached by a caller and dies with the
+        // bag.
+        const _termFontArmed = new WeakSet();
         function _armTermFontRelease(rec, info, win, owner) {
-            if (info && info._fontArmed) return;
+            if (!info) return;
+            if (_termFontArmed.has(info)) return;
             const release = function () { return _termFontRelease(win, owner); };
             let armed = false;
             if (info && typeof info.onModTeardown === 'function') {
@@ -175,7 +197,7 @@
             if (info && typeof info.onDispose === 'function') {
                 try { info.onDispose(release); } catch (_) {}
             }
-            try { info._fontArmed = true; } catch (_) {}
+            try { _termFontArmed.add(info); } catch (_) {}
         }
 
         // Decorate ONE onTerminalCreate bag, per mod and per window -- the
@@ -189,8 +211,12 @@
                 cellDims: function () { return _termCellDims(info.win); },
                 setFont: function (family) {
                     if (!owner) return false;
+                    // The record is passed so the set can refuse a DEAD
+                    // activation. Arming first would otherwise register a
+                    // release on a teardown that has already run.
+                    if (rec && rec.unloading) return false;
                     _armTermFontRelease(rec, info, info.win, owner);
-                    return _termFontSet(info.win, owner, family);
+                    return _termFontSet(info.win, owner, family, rec);
                 },
             };
             try {

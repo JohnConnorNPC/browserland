@@ -23461,7 +23461,7 @@ def _term_font_source():
                    "function _termFontStack(win, create) {",
                    "function _termFontWanted(win) {",
                    "function _termFontApply(win) {",
-                   "function _termFontSet(win, owner, family) {",
+                   "function _termFontSet(win, owner, family, rec) {",
                    "function _termFontRelease(win, owner) {",
                    "function _termCellDims(win) {",
                    "function _armTermFontRelease(rec, info, win, owner) {",
