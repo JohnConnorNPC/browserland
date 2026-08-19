@@ -24,6 +24,15 @@
         // exact family on disable — so this literal MUST stay equal to the mod's
         // TERM_FONT_DEFAULT (guarded by test_termfont_symbols_removed_from_core_
         // fragments). When the mod is off, terminals use this baseline.
+        //
+        // #201: THIS IS NOW THE SINGLE SOURCE, AND IT IS READABLE. A mod reads
+        // it as `ctx.terminals.defaults.fontFamily` (86l_js_mod_terminal_font.js
+        // exposes this very const by reference, not a copy of the literal), and
+        // sets a per-terminal override through `info.setFont(family)` — which
+        // 86l applies and, on that mod's teardown, reverts to the surviving
+        // writer or back to here. The mod's own TERM_FONT_DEFAULT survives one
+        // release for compatibility; the byte-match test now polices that there
+        // is exactly ONE literal in core, not that two copies agree.
         const TERM_FONT_BASELINE = 'Consolas, "Liberation Mono", monospace';
         // Build the per-window context object and hand it to ONE subscriber. Used
         // by both the create-time emit and the replay, so both see an identical
@@ -821,6 +830,25 @@
             const onResizeDisp = term.onResize((d) => dispatchTermResize(win, d));
             win.cleanups.push(() => {
                 try { onResizeDisp.dispose(); } catch (_) {}
+            });
+
+            // #201: THE ONE MODE SAMPLER. `term.modes` is a getter with no
+            // change event, so info.onModesChanged is fed by sampling it —
+            // once per terminal for every subscriber, replacing the identical
+            // per-mod poll in mods/mousemode/mousemode.js. onWriteParsed is
+            // the trigger because every mode change arrives as parsed output by
+            // definition (an app's DECSET/DECRST, the RIS an exiting app leaves
+            // behind, and the mouse modes the agent RE-ASSERTS in a reattach
+            // snapshot's postamble, #154), and an idle terminal costs nothing.
+            // A SUBSCRIPTION, not a patch — the instance is untouched, so
+            // recorder's term.write patch is unaffected.
+            const onParsedDisp = (typeof term.onWriteParsed === 'function')
+                ? term.onWriteParsed(() => armTermModesSample(win))
+                : null;
+            win.cleanups.push(() => {
+                try { if (onParsedDisp) onParsedDisp.dispose(); } catch (_) {}
+                // A queued frame must not sample a window that is gone.
+                cancelTermModesSample(win);
             });
 
             // Track IME composition so relayout never reparents (and aborts a

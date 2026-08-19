@@ -2342,11 +2342,17 @@ def test_termfont_symbols_removed_from_core_fragments():
         text = (BROKER_DIR / name).read_text(encoding="utf-8")
         for sym in symbols:
             assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
-    # Core constructs terminals with its own baseline (the decoupling), and that
-    # literal MUST match the mod's TERM_FONT_DEFAULT so a disabled mod's terminals
-    # land on the same font as a fresh core-only terminal. Parse the ACTUAL const
-    # assignments (not mere literal presence) and assert they are byte-equal, so a
-    # dead string / comment can't satisfy the coupling and a real drift is caught.
+    # RETARGETED BY #201/A60. Core's baseline is now the SINGLE SOURCE and it is
+    # READABLE (`ctx.terminals.defaults.fontFamily`, exposed from 86l by
+    # reference), so the duplication this test used to police is on its way out:
+    # the mod's TERM_FONT_DEFAULT survives one release for compatibility (A61
+    # migrates it), and the standing rule -- exactly one literal in core, exposed
+    # rather than copied -- is asserted by
+    # test_the_font_baseline_is_single_source_and_readable. What remains here is
+    # the compatibility half: while the constant still exists in the mod, it must
+    # equal the one source, so a disabled mod's terminals land where a fresh
+    # core-only terminal does. Parse the ACTUAL const assignments (not mere
+    # literal presence) so a dead string / comment can't satisfy the coupling.
     import re
     core67 = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
     assert "fontFamily: TERM_FONT_BASELINE" in core67, \
@@ -23413,3 +23419,1049 @@ def test_a_write_that_threw_is_not_reported_and_a_midflight_unsub_is_obeyed(
     assert "first:lost" not in r["seen"] and "second:lost" not in r["seen"]
     # ...and the tap unsubscribed from inside the dispatch does not run in it.
     assert r["seen"] == ["first:kept"]
+
+
+# --- #201 / A60: info.cellDims / info.setFont / ctx.terminals ---------------
+# E60 is BEHAVIOUR, so the cases below EXECUTE the shipped fragments: 86l
+# whole, #116's per-terminal hook out of 67 (which is where TERM_FONT_BASELINE
+# itself lives -- the harness gets the baseline from the SAME const the page
+# does), A37's onModTeardown range, #194's extender registry and 86's
+# _runUnloads. Nothing about ownership or the revert chain is re-typed here.
+
+_FONT_SLICE_START = "// ---- info.cellDims / info.setFont / ctx.terminals (#201) ---"
+_FONT_SLICE_END = "// ---- end info.cellDims / info.setFont / ctx.terminals ---"
+
+
+def _term_font_src():
+    return (BROKER_DIR / "86l_js_mod_terminal_font.js").read_text(encoding="utf-8")
+
+
+def _term_font_source():
+    """86l's range, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the harness run the SHIPPED apply
+    and revert path instead of a transcription of it."""
+    src = _term_font_src()
+    start = src.index(_FONT_SLICE_START)
+    end = src.index(_FONT_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _termFontOwners = new WeakMap();",
+                   "function _termFontStack(win, create) {",
+                   "function _termFontWanted(win) {",
+                   "function _termFontApply(win) {",
+                   "function _termFontSet(win, owner, family) {",
+                   "function _termFontRelease(win, owner) {",
+                   "function _termCellDims(win) {",
+                   "function _armTermFontRelease(rec, info, win, owner) {",
+                   "function _modTerminalFont(rec, info) {",
+                   "function _ctxTerminalFont(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_the_terminal_font_surface_lands_in_its_own_fragment_and_is_registered():
+    # New ctx surface, so it lands in a NEW ordered fragment: 86c is at the #68
+    # 2500-line cap and the rule there is split, never trim.
+    assert "86l_js_mod_terminal_font.js" in ui._ORDERED
+    order = ui._ORDERED.index("86l_js_mod_terminal_font.js")
+    # AFTER 86c (extenders run in _ORDERED order, and the revert arms on
+    # #195's info.onModTeardown, which must already be on the bag)...
+    assert order > ui._ORDERED.index("86c_js_mod_ctx_ext.js")
+    # ...and BEFORE the boot fragment, so a mod's init reads the finished ctx.
+    assert order < ui._ORDERED.index("90_js_mod_boot.js")
+    frag = _term_font_src()
+    assert len(frag.splitlines()) <= 2500, "#68 cap"
+    loader, ext = _loader_src(), _ctx_ext_src()
+    for sym in ("function _termFontApply(win) {", "function _termCellDims(win) {",
+                "function _ctxTerminalFont(ctx, rec) {"):
+        assert sym in frag, f"{sym!r} did not land in 86l"
+        assert sym not in loader and sym not in ext, \
+            f"{sym!r} belongs in 86l, not in the loader or 86c"
+    # It reaches the served page exactly once.
+    for sym in ("function _termFontRelease(win, owner) {",
+                "_registerModCapability('terminals', 1);"):
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#201 font symbol missing/duplicated in the served page: {sym!r}"
+    # NO HARDCODED CELL BOX. recorder's 9x17 fallback is the anti-pattern this
+    # replaces; a literal pair of magic numbers here would reintroduce it.
+    code = _js_strip_comments_and_strings(frag)
+    assert "9" not in code.replace("_", "") or "17" not in code, \
+        "86l looks like it carries a hardcoded cell box"
+    assert "return null;" in _frag_fn(frag, "function _termCellDims(win) {")
+    # The registration is guarded, for a page assembled without #194's registry
+    # or #197's capability map -- a bare call would be a ReferenceError there.
+    assert "if (typeof _registerCtxExtender === 'function') {" in frag
+    assert "if (typeof _registerModCapability === 'function') {" in frag
+
+
+def test_the_font_baseline_is_single_source_and_readable():
+    # THE RETARGET. The baseline used to be a constant DUPLICATED in the mod
+    # with a test policing the duplication; it is now readable ctx surface, so
+    # what is policed is that core holds exactly ONE literal and exposes THAT
+    # const by reference (a second copy in 86l would be the same drift the old
+    # test existed to catch, one fragment further along).
+    import re
+    core67 = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    m_core = re.search(r"const\s+TERM_FONT_BASELINE\s*=\s*('[^']*'|\"[^\"]*\");",
+                       core67)
+    assert m_core and m_core.group(1) == _TERM_FONT_BASELINE_LITERAL
+    frag = _js_strip_comments_and_strings(_term_font_src())
+    assert "fontFamily: TERM_FONT_BASELINE" in frag, \
+        "ctx.terminals.defaults must expose the const, not a copy of its value"
+    assert "return TERM_FONT_BASELINE;" in frag, \
+        "the revert floor must be the same const"
+    # Exactly one occurrence of the literal across every served core fragment.
+    bare = _TERM_FONT_BASELINE_LITERAL[1:-1]
+    hits = [n for n in ui._ORDERED
+            if bare in (BROKER_DIR / n).read_text(encoding="utf-8")]
+    assert hits == ["67_js_window_lifecycle.js"], \
+        f"the baseline literal is duplicated across core fragments: {hits}"
+    # The served page also carries the MOD's surviving copy (termfont's
+    # TERM_FONT_DEFAULT, kept for one release and migrated by A61), which is why
+    # this counts the CORE fragments rather than the whole page.
+
+
+_FONT_HARNESS = r"""
+'use strict';
+// #201/A60: the shipped font/cell surface, driven. Everything below the
+// fixtures is a sliced fragment; no ownership or revert logic is re-typed.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+function El(cls) { this.className = cls || ''; this.children = []; this.parentNode = null; }
+El.prototype._drop = function (kid) {
+    const i = this.children.indexOf(kid);
+    if (i !== -1) this.children.splice(i, 1);
+    kid.parentNode = null;
+};
+El.prototype.appendChild = function (kid) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    kid.parentNode = this;
+    this.children.push(kid);
+    return kid;
+};
+El.prototype.insertBefore = function (kid, ref) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.remove = function () { if (this.parentNode) this.parentNode._drop(this); };
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+
+const windows = new Map();
+const desktop = new El('desktop');
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__FONT__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+// xterm, reduced to what the font path touches: an `options` bag and the
+// private render-service dimensions cellDims reads. A FRESH terminal has NOT
+// rendered -- _renderService.dimensions.css.cell is 0x0, exactly as the
+// vendored 5.3 build leaves it before the first paint (FitAddon's own
+// proposeDimensions bails on that same check) -- so nothing is measurable
+// until fit() runs. Cell WIDTH is derived from the font family, which is what
+// makes "what does cellDims report across a font change" answerable.
+const FONT_WIDTHS = { 'A-font': 7.5, 'B-font': 11.25 };
+function FakeTerm() {
+    this.options = { fontFamily: null, fontSize: 14 };
+    this.fits = 0;
+    this._core = { _renderService: { dimensions: { css: { cell:
+        { width: 0, height: 0 } } } } };
+}
+FakeTerm.prototype._render = function () {
+    const fam = this.options.fontFamily;
+    const cell = this._core._renderService.dimensions.css.cell;
+    cell.width = Object.prototype.hasOwnProperty.call(FONT_WIDTHS, fam)
+        ? FONT_WIDTHS[fam] : 9.6;
+    cell.height = 17.5;
+};
+
+// Core's OWN refit (73's refitSoon -> sendResize), reduced: the shipped one
+// defers two animation frames and re-measures through readCellDims, which
+// changes WHEN it happens, not WHETHER. Both halves that matter are kept: a
+// disposed window is skipped, and a terminal that has not rendered measures
+// nothing (sendResize bails on a null cell box).
+function refitSoon(win) {
+    if (!win || win.disposed) return;
+    win.term.fits += 1;
+    if (win.term._core._renderService.dimensions.css.cell.width) {
+        win.term._render();
+    }
+}
+
+let winSeq = 0;
+function openTerminal(rendered) {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const term = new FakeTerm();
+    // Core's construction-time value, from the SAME const the page uses.
+    term.options.fontFamily = TERM_FONT_BASELINE;
+    const win = { id: id, sid: String(winSeq), hostId: 'h1', type: 'term',
+                  dom: dom, term: term, cleanups: [], disposed: false,
+                  fitAddon: null };
+    if (rendered) term._render();
+    desktop.appendChild(dom);
+    windows.set(id, win);
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    return win;
+}
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    win.dom.remove();
+    windows.delete(id);
+}
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+// Set a font from mod `id` on every terminal it is handed, once.
+function fontMod(id, family) {
+    const m = modCtx(id);
+    m.infos = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        m.infos.push(info);
+        info.setFont(family);
+    });
+    return m;
+}
+function shown(win) { return win.term.options.fontFamily; }
+
+const CASES = {};
+
+// cellDims() IS null BEFORE THE FIRST RENDER -- and it is a MEASUREMENT
+// afterwards, tracking the font change that caused the re-fit. No 9x17.
+CASES.cell_dims_pre_render = function () {
+    const m = modCtx('asker');
+    const out = { noRenderService: null, preRender: null, afterRender: null,
+                  afterFontChange: null, baseline: null };
+    m.ctx.windows.onTerminalCreate(function (info) {
+        out.preRender = info.cellDims();
+        // A build/instance with no private render service at all.
+        const keep = info.win.term._core;
+        info.win.term._core = null;
+        out.noRenderService = info.cellDims();
+        info.win.term._core = keep;
+        out.baseline = info.win.term.options.fontFamily;
+        info.win.term._render();
+        out.afterRender = info.cellDims();
+        info.setFont('B-font');            // re-fits -> re-measures
+        out.afterFontChange = info.cellDims();
+    });
+    openTerminal(false);
+    out.defaults = m.ctx.terminals.defaults.fontFamily;
+    out.errors = errors;
+    return out;
+};
+
+// SETTING A FONT BEFORE THE FIRST RENDER still applies -- cellDims being null
+// is an honest "not measured yet", not a broken terminal.
+CASES.set_before_first_render = function () {
+    const win = openTerminal(false);
+    const m = fontMod('early', 'A-font');
+    const preDims = m.infos[0].cellDims();
+    win.term._render();
+    return { shown: shown(win), preDims: preDims, fits: win.term.fits,
+             postDims: m.infos[0].cellDims(), errors: errors };
+};
+
+// TWO MODS, ONE TERMINAL. Last writer wins; disabling the LAST writer reverts
+// to the earlier surviving one; disabling both reverts to the baseline.
+CASES.last_writer_then_revert_chain = function () {
+    const win = openTerminal(true);
+    const a = fontMod('a', 'A-font');
+    const b = fontMod('b', 'B-font');
+    const afterBoth = shown(win);
+    _runUnloads(b.rec);                       // disable the LAST writer
+    const afterDisableB = shown(win);
+    _runUnloads(a.rec);                       // disable the survivor too
+    return { afterBoth: afterBoth, afterDisableB: afterDisableB,
+             afterDisableA: shown(win), baseline: TERM_FONT_BASELINE,
+             fits: win.term.fits, errors: errors };
+};
+
+// THE OTHER ORDER. Disabling the EARLIER writer must not disturb the screen;
+// disabling the last one then falls all the way to the baseline, not to the
+// dead mod's font.
+CASES.disable_the_earlier_writer_first = function () {
+    const win = openTerminal(true);
+    const a = fontMod('a', 'A-font');
+    const b = fontMod('b', 'B-font');
+    _runUnloads(a.rec);
+    const afterDisableA = shown(win);
+    _runUnloads(b.rec);
+    return { afterDisableA: afterDisableA, afterDisableB: shown(win),
+             baseline: TERM_FONT_BASELINE, errors: errors };
+};
+
+// ONE MOD, MANY TERMINALS + a mod that sets a font TWICE. The second call
+// updates that mod's own entry rather than stacking a second one, so the
+// revert goes straight to the baseline.
+CASES.one_owner_per_mod_across_terminals = function () {
+    const first = openTerminal(true);
+    const m = fontMod('multi', 'A-font');     // REPLAY over `first`
+    const second = openTerminal(true);        // EMIT
+    m.infos[0].setFont('B-font');             // same mod, same terminal, again
+    const before = [shown(first), shown(second)];
+    _runUnloads(m.rec);
+    return { before: before, after: [shown(first), shown(second)],
+             baseline: TERM_FONT_BASELINE,
+             stillOpen: [windows.has(first.id), windows.has(second.id)],
+             disposed: [first.disposed, second.disposed], errors: errors };
+};
+
+// A FONT SET ON A TERMINAL THAT IS THEN DISPOSED. The window's close drains
+// the release; the later mod teardown must be a quiet no-op -- no apply on a
+// dead terminal, no throw, nothing logged.
+CASES.dispose_then_teardown = function () {
+    const win = openTerminal(true);
+    const m = fontMod('doomed', 'A-font');
+    const beforeClose = shown(win);
+    const fitsBefore = win.term.fits;
+    closeWindow(win.id);
+    const afterClose = shown(win);
+    _runUnloads(m.rec);
+    return { beforeClose: beforeClose, afterClose: afterClose,
+             afterTeardown: shown(win), fitsBefore: fitsBefore,
+             fitsAfter: win.term.fits, errors: errors };
+};
+
+// setFont(null) is a mod dropping its OWN override -- the same revert chain a
+// teardown runs, reachable while the mod stays enabled.
+CASES.set_font_null_drops_only_mine = function () {
+    const win = openTerminal(true);
+    const a = fontMod('a', 'A-font');
+    const b = fontMod('b', 'B-font');
+    b.infos[0].setFont(null);
+    const afterBDrops = shown(win);
+    a.infos[0].setFont('');
+    return { afterBDrops: afterBDrops, afterADrops: shown(win),
+             baseline: TERM_FONT_BASELINE, errors: errors };
+};
+
+// The readable baseline: a family on the ctx, frozen, needing no window.
+CASES.defaults_are_readable_and_frozen = function () {
+    const m = modCtx('reader');
+    const before = m.ctx.terminals.defaults.fontFamily;
+    let threw = null;
+    try { m.ctx.terminals.defaults.fontFamily = 'hijacked'; }
+    catch (e) { threw = String(e && e.name); }
+    return { before: before, after: m.ctx.terminals.defaults.fontFamily,
+             baseline: TERM_FONT_BASELINE, threw: threw,
+             frozen: Object.isFrozen(m.ctx.terminals),
+             errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+_BASELINE = "Consolas, \"Liberation Mono\", monospace"
+
+
+@pytest.fixture(scope="module")
+def font_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("termfontcore") / "harness.js"
+    path.write_text(
+        _FONT_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__FONT__", _term_font_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_font(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_cell_dims_is_null_before_the_first_render(font_harness):
+    r = _run_font(font_harness, "cell_dims_pre_render")
+    assert r["errors"] == []
+    # THE DECISION, executed: no measurement yet means null. Never 9x17.
+    assert r["preRender"] is None
+    assert r["noRenderService"] is None
+    # After a render it is the real box, and after a font change it is the box
+    # THAT font measures -- so a caller re-reading it across setFont is right.
+    assert r["afterRender"] == {"width": 9.6, "height": 17.5}
+    assert r["afterFontChange"] == {"width": 11.25, "height": 17.5}
+    assert r["baseline"] == r["defaults"] == _BASELINE
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_font_set_before_the_first_render_still_applies(font_harness):
+    r = _run_font(font_harness, "set_before_first_render")
+    assert r["errors"] == []
+    assert r["preDims"] is None
+    assert r["shown"] == "A-font"
+    assert r["fits"] >= 1, "the font changed but the grid was never re-fit"
+    assert r["postDims"] == {"width": 7.5, "height": 17.5}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_set_font_is_last_writer_wins_with_an_owner_record(font_harness):
+    # THE ATOM'S OWN TEST. Two font mods on one terminal: the last one wins,
+    # and disabling it reverts to the SURVIVING writer -- not to the baseline,
+    # and not leaving a dead mod's font on screen.
+    r = _run_font(font_harness, "last_writer_then_revert_chain")
+    assert r["errors"] == []
+    assert r["afterBoth"] == "B-font"
+    assert r["afterDisableB"] == "A-font", \
+        "a disabled last writer reverted past the surviving writer"
+    assert r["afterDisableA"] == r["baseline"] == _BASELINE
+    assert r["fits"] >= 3, "each applied font change must re-fit the grid"
+
+    # The other disable order: the earlier writer leaving changes nothing on
+    # screen, and the last writer leaving falls to the baseline.
+    r = _run_font(font_harness, "disable_the_earlier_writer_first")
+    assert r["errors"] == []
+    assert r["afterDisableA"] == "B-font", "a dead mod's disable stole the screen"
+    assert r["afterDisableB"] == r["baseline"] == _BASELINE, \
+        "the terminal was stranded on a disabled mod's font"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_one_owner_record_per_mod_across_every_terminal(font_harness):
+    r = _run_font(font_harness, "one_owner_per_mod_across_terminals")
+    assert r["errors"] == []
+    # The replayed terminal AND the one opened later both carry the override;
+    # the mod's second setFont updated its own entry rather than stacking.
+    assert r["before"] == ["B-font", "A-font"]
+    assert r["after"] == [_BASELINE, _BASELINE]
+    # A disable is not a close: the terminals belong to core.
+    assert r["stillOpen"] == [True, True]
+    assert r["disposed"] == [False, False]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disposed_terminal_survives_a_later_mod_teardown(font_harness):
+    r = _run_font(font_harness, "dispose_then_teardown")
+    assert r["errors"] == []
+    assert r["beforeClose"] == "A-font"
+    # Nothing is applied to a dead terminal -- not on close, not on teardown.
+    assert r["afterClose"] == "A-font"
+    assert r["afterTeardown"] == "A-font"
+    assert r["fitsAfter"] == r["fitsBefore"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_set_font_null_drops_only_the_callers_override(font_harness):
+    r = _run_font(font_harness, "set_font_null_drops_only_mine")
+    assert r["errors"] == []
+    assert r["afterBDrops"] == "A-font"
+    assert r["afterADrops"] == r["baseline"] == _BASELINE
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_terminal_defaults_are_readable_and_not_writable(font_harness):
+    r = _run_font(font_harness, "defaults_are_readable_and_frozen")
+    assert r["errors"] == []
+    assert r["before"] == r["after"] == r["baseline"] == _BASELINE
+    assert r["frozen"] is True
+
+
+# --- #201 / A59: info.onModesChanged ----------------------------------------
+# ONE core sampler replacing mods/mousemode's per-mod poll. E59 is BEHAVIOUR,
+# so every case below EXECUTES the shipped fragments: 86k's modes range and its
+# taps range (for _armTermTapRemoval), #116's per-terminal hook out of 67, A37's
+# onModTeardown range, #194's extender registry, 86's _runUnloads -- plus the
+# core sampler subscription lifted VERBATIM out of 67. Nothing is re-typed.
+
+_MODES_SLICE_START = "// ---- info.onModesChanged (#201) ---"
+_MODES_SLICE_END = "// ---- end info.onModesChanged ---"
+
+
+def _term_modes_source():
+    """86k's onModesChanged range, verbatim."""
+    src = _term_taps_src()
+    start = src.index(_MODES_SLICE_START)
+    end = src.index(_MODES_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _termModes = new WeakMap();",
+                   "function _termModesState(win, create) {",
+                   "function readTermModes(win) {",
+                   "function _sameTermModes(a, b) {",
+                   "function _dispatchTermModes(win, snap) {",
+                   "function sampleTermModes(win) {",
+                   "function armTermModesSample(win) {",
+                   "function cancelTermModesSample(win) {",
+                   "function _addTermModesSub(win, fn) {",
+                   "function _modTerminalModes(rec, info) {",
+                   "function _ctxTerminalModes(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _term_modes_sampler_source():
+    """67's onWriteParsed subscription + its cleanup, verbatim -- the whole of
+    the feed. One per terminal, whatever the subscriber count."""
+    src = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    start = src.index("            const onParsedDisp = (typeof term.onWriteParsed")
+    end = src.index("// Track IME composition")
+    assert start < end
+    body = src[start:end]
+    assert "armTermModesSample(win)" in body
+    assert "cancelTermModesSample(win);" in body
+    return body
+
+
+def test_on_modes_changed_lands_in_86k_and_is_registered_as_an_extender():
+    frag = _term_taps_src()
+    assert len(frag.splitlines()) <= ui._MAX_LINES
+    loader, ext = _loader_src(), _ctx_ext_src()
+    for sym in ("function sampleTermModes(win) {",
+                "function armTermModesSample(win) {",
+                "function _addTermModesSub(win, fn) {",
+                "function _modTerminalModes(rec, info) {",
+                "function _ctxTerminalModes(ctx, rec) {"):
+        assert sym in frag, f"{sym!r} did not land in 86k"
+        assert sym not in loader and sym not in ext
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A59 symbol missing/duplicated in the served page: {sym!r}"
+    _assert_guarded_ctx_registration(frag,
+                                     "_registerCtxExtender(_ctxTerminalModes);")
+    # A MEMBER of the existing v1 `windows` family: no capability, no version
+    # bump, and the subscription/replay/auto-unsubscribe stay core's.
+    body = _frag_fn(frag, "function _ctxTerminalModes(ctx, rec) {")
+    assert "const sub = fam.onTerminalCreate;" in body
+    assert "cb(_modTerminalModes(rec, info))" in body
+
+
+def test_there_is_exactly_one_core_mode_sampler_and_it_wraps_nothing():
+    # ONE sampler, in core, fed by a SUBSCRIPTION to xterm's public event --
+    # never an assignment over term.*, which would break recorder's restore
+    # check exactly as A58 documents.
+    life = _js_strip_comments_and_strings(
+        (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8"))
+    assert life.count("term.onWriteParsed(") == 1
+    assert life.count("armTermModesSample(win)") == 1
+    frag = _term_taps_src()
+    for bad in ("term.modes =", ".onWriteParsed =", "term.buffer ="):
+        assert bad not in frag
+    # ...and no other core fragment polls the modes getter.
+    for name in _core_js_fragments():
+        if name == "86k_js_mod_terminal_taps.js":
+            continue
+        src = _js_strip_comments_and_strings(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        assert "mouseTrackingMode" not in src, \
+            f"{name} samples the modes getter behind core's back"
+    vendor = (BROKER_DIR / "vendor" / "xterm.js").read_text(
+        encoding="utf-8", errors="replace")
+    # #154's group rule, in the surface itself: ONE resolved protocol, not a set
+    # of independent 1000/1002/1003 flags -- which is why a transition here is a
+    # group transition and per-flag events are not expressible.
+    assert "get modes()" in vendor
+    assert "this._core.coreMouseService.activeProtocol" in vendor
+
+
+def test_the_mode_sampler_adds_no_funnel_call_site():
+    # onWriteParsed is NOT in the gate's method alphabet, and the sampler calls
+    # nothing that is -- so A59 leaves the enumeration untouched. Verified, not
+    # assumed: the scan is re-derived here.
+    scanned = {k: len(v) for k, v in _scan_funnel_call_sites().items()}
+    assert scanned == {k: c for k, (c, _kind) in _TERM_FUNNEL_EXPECTED.items()}
+    assert not any(k[0] == "86k_js_mod_terminal_taps.js" for k in scanned)
+
+
+_MODES_HARNESS = r"""
+'use strict';
+// #201/A59: the shipped sampler, driven. Everything below the fixtures is a
+// sliced fragment or a reduced core driver.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+// The DOM sliver _emitTerminalCreate resolves a title bar from.
+function El(cls) { this.className = cls || ''; this.children = []; this.parentNode = null; }
+El.prototype.appendChild = function (kid) { kid.parentNode = this; this.children.push(kid); return kid; };
+El.prototype.insertBefore = function (kid, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+const windows = new Map();
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__MODES__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+// rAF, with a HIDDEN tab: a hidden tab queues frames and runs none, which is
+// the browser's actual behaviour and the reason a mode change made while
+// hidden is delivered (coalesced) only when the tab comes back.
+let hidden = false;
+let rafSeq = 0;
+const rafQueue = new Map();
+function requestAnimationFrame(fn) { rafSeq += 1; rafQueue.set(rafSeq, fn); return rafSeq; }
+function cancelAnimationFrame(h) { rafQueue.delete(h); }
+function flushFrames() {
+    if (hidden) return 0;
+    const due = Array.from(rafQueue.entries());
+    rafQueue.clear();
+    for (const [, fn] of due) fn();
+    return due.length;
+}
+
+// xterm, reduced to the surface the sampler reads: the `modes` GETTER (one
+// resolved mouse protocol, per #154 -- there is no per-flag set to read), the
+// buffer namespace, and the onWriteParsed EVENT.
+function FakeTerm() {
+    this.protocol = 'none';
+    this.alt = false;
+    this.reads = 0;
+    this.throwOnModes = false;
+    this._parsed = [];
+    const self = this;
+    Object.defineProperty(this, 'modes', { get: function () {
+        self.reads += 1;
+        if (self.throwOnModes) throw new Error('modes getter blew up');
+        return { mouseTrackingMode: self.protocol, bracketedPasteMode: false };
+    } });
+    Object.defineProperty(this, 'buffer', { get: function () {
+        return { active: { type: self.alt ? 'alternate' : 'normal' } };
+    } });
+}
+FakeTerm.prototype.onWriteParsed = function (fn) {
+    const self = this;
+    this._parsed.push(fn);
+    return { dispose: function () {
+        const i = self._parsed.indexOf(fn);
+        if (i !== -1) self._parsed.splice(i, 1);
+    } };
+};
+FakeTerm.prototype._emitParsed = function () {
+    for (const fn of this._parsed.slice()) fn();
+};
+// The parser, with #154's semantics. DECSET picks a protocol; DECRST of ANY
+// mouse mode clears the WHOLE group; RIS resets the mouse service; DECSTR
+// does not touch it. Every one of these arrives as parsed output.
+const DECSET_MOUSE = { 1000: 'vt200', 1002: 'drag', 1003: 'any', 9: 'x10' };
+FakeTerm.prototype.parse = function (op, arg) {
+    if (op === 'decset' && DECSET_MOUSE[arg]) this.protocol = DECSET_MOUSE[arg];
+    else if (op === 'decrst' && DECSET_MOUSE[arg]) this.protocol = 'none';
+    else if (op === 'ris') { this.protocol = 'none'; this.alt = false; }
+    else if (op === 'decstr') { /* leaves the mouse service alone */ }
+    else if (op === 'altscreen') this.alt = !!arg;
+    this._emitParsed();
+};
+
+let winSeq = 0;
+function openTerminal(pre) {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const term = new FakeTerm();
+    if (typeof pre === 'function') pre(term);   // an ALREADY-moused terminal
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const win = { id: id, type: 'term', term: term, dom: dom, hostId: 'h1',
+                  sid: String(winSeq), cleanups: [], disposed: false };
+    windows.set(id, win);
+    // #116's emit fires BEFORE the sampler is armed, exactly as in 67 (line
+    // ~319 vs ~838) -- so a subscriber's replay must not depend on it.
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    // --- 67's sampler subscription, verbatim ---
+    __SAMPLER__
+    return win;
+}
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    windows.delete(id);
+}
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+
+const CASES = {};
+
+// TWO MODS, ONE TERMINAL, ONE SAMPLER. Both see every transition; the getter
+// is read ONCE per frame whatever the subscriber count (the whole point of
+// moving mousemode's poll into core), and each subscriber gets its own object.
+CASES.two_mods_one_sampler = function () {
+    const a = modCtx('a'), b = modCtx('b');
+    const seenA = [], seenB = [];
+    a.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (m) { seenA.push(m); });
+    });
+    b.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (m) { seenB.push(m); });
+    });
+    const win = openTerminal();
+    const afterSubscribe = win.term.reads;
+    win.term.parse('decset', 1002);
+    win.term.parse('decset', 1002);   // no change: re-asserted, not a transition
+    const frames = flushFrames();
+    const readsForOneFrame = win.term.reads - afterSubscribe;
+    win.term.parse('altscreen', true);
+    flushFrames();
+    return { seenA: seenA, seenB: seenB, frames: frames,
+             readsForOneFrame: readsForOneFrame,
+             shared: seenA[0] === seenB[0], errors: errors };
+};
+
+// COALESCED UNDER FLOOD: many parsed writes between paints cost ONE sample and
+// deliver ONE event carrying the final state.
+CASES.flood_is_coalesced = function () {
+    const m = modCtx('flood');
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seen.push(s.mouseTracking); });
+    });
+    const win = openTerminal();
+    const base = win.term.reads;
+    for (let i = 0; i < 50; i++) win.term.parse('decset', 1002);
+    win.term.parse('decset', 1003);
+    const readsBeforeFrame = win.term.reads - base;
+    flushFrames();
+    return { seen: seen, readsBeforeFrame: readsBeforeFrame,
+             readsAfterFrame: win.term.reads - base, errors: errors };
+};
+
+// THE REPLAY, on a terminal that is ALREADY moused when the mod is enabled --
+// mousemode's synchronous initial sample, now core's. A second subscriber
+// arriving later gets the same replay without a write.
+CASES.replay_on_subscribe = function () {
+    const win = openTerminal(function (t) { t.protocol = 'any'; t.alt = true; });
+    const m = modCtx('late');
+    const first = [];
+    m.ctx.windows.onTerminalCreate(function (info) {   // REPLAY over `win`
+        if (info.win !== win) return;
+        info.onModesChanged(function (s) { first.push(s); });
+    });
+    const later = [];
+    const m2 = modCtx('later');
+    m2.ctx.windows.onTerminalCreate(function (info) {
+        if (info.win !== win) return;
+        info.onModesChanged(function (s) { later.push(s); });
+    });
+    // ...and a terminal that has never seen a mode reports the defaults.
+    const fresh = [];
+    const m3 = modCtx('fresh');
+    m3.ctx.windows.onTerminalCreate(function (info) {
+        if (info.win.term.protocol === 'none') {
+            info.onModesChanged(function (s) { fresh.push(s); });
+        }
+    });
+    const virgin = openTerminal();
+    return { first: first, later: later, fresh: fresh,
+             framesPending: rafQueue.size, errors: errors };
+};
+
+// #154, EXECUTED. The group value is what moves: a DECRST of ANY member clears
+// the whole group in ONE event; RIS reports a transition to 'none'; DECSTR
+// reports nothing at all, because the sampler reads STATE, never the bytes.
+CASES.group_transitions = function () {
+    const m = modCtx('modes');
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seen.push(s.mouseTracking); });
+    });
+    const win = openTerminal();
+    const step = function (op, arg) { win.term.parse(op, arg); flushFrames(); };
+    step('decset', 1000);        // vt200
+    step('decset', 1002);        // -> drag  (one transition)
+    step('decset', 1003);        // -> any
+    step('decrst', 1000);        // DECRST of ANY member clears the GROUP
+    step('decset', 1002);
+    step('decstr');              // does NOT reset the mouse service: silence
+    const afterDecstr = seen.slice();
+    step('ris');                 // DOES: one transition to 'none'
+    step('ris');                 // already none: silence
+    return { seen: seen, afterDecstr: afterDecstr, errors: errors };
+};
+
+// A HIDDEN TAB runs no frames, so nothing is delivered while hidden; when the
+// tab comes back the queued sample runs ONCE and reports the FINAL state --
+// mousemode's existing behaviour, made explicit. (State, not events.)
+CASES.hidden_tab = function () {
+    const m = modCtx('hidden');
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seen.push(s.mouseTracking); });
+    });
+    const win = openTerminal();
+    hidden = true;
+    win.term.parse('decset', 1002);
+    win.term.parse('decset', 1003);
+    win.term.parse('decrst', 1003);
+    win.term.parse('decset', 1000);
+    flushFrames();
+    const whileHidden = seen.slice();
+    hidden = false;
+    const frames = flushFrames();
+    return { whileHidden: whileHidden, seen: seen, frames: frames,
+             errors: errors };
+};
+
+// DISPOSED BETWEEN THE SAMPLE AND THE DISPATCH: the first subscriber closes
+// the window, and the second is not told about a terminal that is gone. A
+// throwing subscriber costs its siblings nothing either.
+CASES.disposed_midflight = function () {
+    const m = modCtx('edge');
+    const order = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) {
+            order.push('a:' + s.mouseTracking);
+            if (s.mouseTracking === 'drag') closeWindow(info.win.id);
+        });
+        info.onModesChanged(function () { throw new Error('boom'); });
+        info.onModesChanged(function (s) { order.push('c:' + s.mouseTracking); });
+    });
+    const win = openTerminal();
+    const replay = order.slice();
+    win.term.parse('decset', 1002);
+    flushFrames();
+    return { replay: replay, order: order, errors: errors };
+};
+
+// AUTO-REMOVED at dispose AND at mod teardown, and an UNREADABLE getter keeps
+// the last known state instead of inventing a transition to 'none'.
+CASES.lifecycle_and_unreadable = function () {
+    const a = modCtx('a'), b = modCtx('b');
+    const seenA = [], seenB = [];
+    a.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seenA.push(s.mouseTracking); });
+    });
+    b.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seenB.push(s.mouseTracking); });
+    });
+    const win = openTerminal();
+    win.term.parse('decset', 1002); flushFrames();
+    _runUnloads(a.rec);                       // disable mod a: terminal stays up
+    win.term.parse('decset', 1003); flushFrames();
+    // The getter throws: no state is known, so nothing is reported.
+    win.term.throwOnModes = true;
+    win.term.parse('decrst', 1003); flushFrames();
+    win.term.throwOnModes = false;
+    const afterThrow = seenB.slice();
+    win.term.parse('decset', 9); flushFrames();
+    const parsedBefore = win.term._parsed.length;
+    closeWindow(win.id);                      // dispose: subscription + frame go
+    win.term.protocol = 'any';
+    win.term._emitParsed();
+    flushFrames();
+    return { seenA: seenA, seenB: seenB, afterThrow: afterThrow,
+             stillOpen: windows.has(win.id), parsedBefore: parsedBefore,
+             parsedAfter: win.term._parsed.length, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def modes_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("termmodes") / "harness.js"
+    path.write_text(
+        _MODES_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__MODES__", _term_modes_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__SAMPLER__", _term_modes_sampler_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_modes(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_two_mods_share_one_sampler(modes_harness):
+    r = _run_modes(modes_harness, "two_mods_one_sampler")
+    assert r["errors"] == []
+    # Replay + the drag transition + the alt-screen one, for BOTH mods.
+    want = [{"mouseTracking": "none", "mouseActive": False, "altScreen": False},
+            {"mouseTracking": "drag", "mouseActive": True, "altScreen": False},
+            {"mouseTracking": "drag", "mouseActive": True, "altScreen": True}]
+    assert r["seenA"] == want
+    assert r["seenB"] == want
+    assert r["shared"] is False, "two subscribers share one payload object"
+    # ONE frame and ONE getter read served both mods -- the poll is core's now.
+    assert r["frames"] == 1
+    assert r["readsForOneFrame"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_flood_costs_one_sample_and_one_event(modes_harness):
+    r = _run_modes(modes_harness, "flood_is_coalesced")
+    assert r["errors"] == []
+    assert r["readsBeforeFrame"] == 0, "the modes getter was read per write"
+    assert r["readsAfterFrame"] == 1
+    # 51 parsed writes, one delivery, carrying the FINAL state.
+    assert r["seen"] == ["none", "any"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_current_snapshot_is_replayed_on_subscribe(modes_harness):
+    r = _run_modes(modes_harness, "replay_on_subscribe")
+    assert r["errors"] == []
+    moused = {"mouseTracking": "any", "mouseActive": True, "altScreen": True}
+    # A terminal that was ALREADY moused before the mod existed: the subscriber
+    # is told so synchronously, with no write and no frame.
+    assert r["first"] == [moused]
+    assert r["later"] == [moused], "the second subscriber missed the replay"
+    assert r["framesPending"] == 0, "the replay went through the rAF path"
+    # A terminal that has never seen a mode reports the real defaults.
+    assert r["fresh"] == [{"mouseTracking": "none", "mouseActive": False,
+                           "altScreen": False}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_transitions_are_group_transitions_and_ris_differs_from_decstr(
+        modes_harness):
+    # #154: xterm keeps ONE activeProtocol, so a DECRST of any member clears the
+    # whole group -- one event to 'none', never a per-flag flip. RIS resets the
+    # mouse service; DECSTR does not.
+    r = _run_modes(modes_harness, "group_transitions")
+    assert r["errors"] == []
+    assert r["afterDecstr"] == ["none", "vt200", "drag", "any", "none", "drag"]
+    assert r["seen"] == r["afterDecstr"] + ["none"], \
+        "DECSTR reported a transition, or RIS did not"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_hidden_tab_defers_and_coalesces_rather_than_dropping(modes_harness):
+    r = _run_modes(modes_harness, "hidden_tab")
+    assert r["errors"] == []
+    # Nothing is delivered while hidden (rAF does not run) -- mousemode's poll
+    # behaved identically. The subscriber sees only the replay.
+    assert r["whileHidden"] == ["none"]
+    # Coming back runs the queued sample ONCE, reporting the final state; the
+    # intermediate drag/any/none are not replayed, because these are STATE
+    # notifications, not an event log.
+    assert r["frames"] == 1
+    assert r["seen"] == ["none", "vt200"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_terminal_disposed_mid_dispatch_stops_the_walk(modes_harness):
+    r = _run_modes(modes_harness, "disposed_midflight")
+    assert r["replay"] == ["a:none", "c:none"], \
+        "a throwing subscriber cost a sibling its replay"
+    assert len(r["errors"]) == 1 and "modes subscriber" in r["errors"][0]
+    # The first subscriber closed the window; the third is not told about a
+    # terminal that no longer exists.
+    assert r["order"] == ["a:none", "c:none", "a:drag"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_subscriptions_end_at_teardown_and_at_dispose(modes_harness):
+    r = _run_modes(modes_harness, "lifecycle_and_unreadable")
+    assert r["errors"] == []
+    # Disabling mod a strips its subscriber while the terminal stays open...
+    assert r["seenA"] == ["none", "drag"]
+    # ...and an unreadable getter reports NOTHING rather than a fake 'none'.
+    assert r["afterThrow"] == ["none", "drag", "any"]
+    assert r["seenB"] == ["none", "drag", "any", "x10"]
+    # Closing the window disposes the ONE sampler subscription.
+    assert r["parsedBefore"] == 1 and r["parsedAfter"] == 0
+    assert r["stillOpen"] is False

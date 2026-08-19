@@ -216,3 +216,231 @@
             _registerCtxExtender(_ctxTerminalTaps);
         }
         // ---- end info.tapOutput / tapInput / onResize -----------------------
+
+        // ---- info.onModesChanged (#201) -------------------------------------
+        // ONE CORE SAMPLER instead of a poll per mod. xterm exposes `term.modes`
+        // as a GETTER with no change event, so mods/mousemode/mousemode.js:20-34
+        // samples it on `term.onWriteParsed` behind a requestAnimationFrame.
+        // That shape is right and is kept verbatim here — what changes is that
+        // it runs ONCE per terminal for N subscribers instead of once per mod:
+        //
+        //     ctx.windows.onTerminalCreate(function (info) {
+        //         info.onModesChanged(function (modes) {
+        //             modes.mouseTracking;   // 'none'|'x10'|'vt200'|'drag'|'any'
+        //             modes.mouseActive;     // mouseTracking !== 'none'
+        //             modes.altScreen;       // the alternate buffer is up
+        //         });
+        //     });
+        //
+        // GROUP TRANSITIONS, NOT PER-FLAG FLIPS (#154). xterm's DECRST of ANY
+        // mouse-tracking mode clears the WHOLE group — coreMouseService keeps a
+        // single activeProtocol, not a set of independent 1000/1002/1003 flags —
+        // so per-flag events would be a fiction this surface cannot honestly
+        // produce. `term.modes.mouseTrackingMode` IS the group's resolved value
+        // (`switch(activeProtocol){case'X10':…}` in the vendored build), and a
+        // "transition" here is a change in that one value: 'vt200'->'any' is one
+        // event, and any DECRST that drops the group is exactly one event to
+        // 'none'. It follows for free that RIS (which resets the mouse service)
+        // reports a transition to 'none' while DECSTR (which does not) reports
+        // nothing: the sampler reads STATE after the parse and never interprets
+        // the escape bytes, so it cannot get that distinction wrong.
+        //
+        // REPLAY ON SUBSCRIBE. Subscribing fires fn once, synchronously, with
+        // the CURRENT snapshot — otherwise every subscriber re-invents
+        // mousemode's initial sample, which exists because onTerminalCreate
+        // replays over terminals that are already running an app that may not
+        // write again for minutes. A terminal that has never seen a mode
+        // reports the real read of xterm's defaults: mouseTracking 'none',
+        // mouseActive false, altScreen false.
+        //
+        // COALESCED, AND HONEST ABOUT HIDDEN TABS. onWriteParsed only ARMS a
+        // rAF (the getter allocates a fresh 9-field object per read, and a
+        // flooding terminal parses far faster than it paints). rAF does not run
+        // in a hidden tab, so a mode change made while hidden is delivered when
+        // the tab is shown again, coalesced with everything else that happened
+        // meanwhile — the subscriber sees the final STATE, not the intermediate
+        // ones. That is mousemode's existing behaviour, unchanged; these events
+        // describe persistent state, so a missed intermediate is not a lost
+        // fact. Nothing here is a suitable trigger for one-shot side effects.
+        //
+        // Same lifecycle as the taps above: isolated per subscriber, removed at
+        // terminal dispose AND at mod teardown (_armTermTapRemoval), and nothing
+        // touches `term.*` by assignment — the sampler is a SUBSCRIPTION to
+        // xterm's public onWriteParsed event, so recorder's write patch and this
+        // coexist.
+        const _termModes = new WeakMap();   // win -> {subs, last, frame}
+
+        function _termModesState(win, create) {
+            if (!win || typeof win !== 'object') return null;
+            let st = null;
+            try { st = _termModes.get(win) || null; }
+            catch (_) { return null; }
+            if (st || !create) return st;
+            st = { subs: [], last: null, frame: 0 };
+            try { _termModes.set(win, st); } catch (_) { return null; }
+            return st;
+        }
+
+        // The read. `null` means UNREADABLE (a getter that threw, or no term),
+        // which tells us nothing about the mode — the caller keeps the last
+        // known state rather than claiming 'none' and reporting a transition
+        // that did not happen. mousemode takes the same posture.
+        function readTermModes(win) {
+            const term = win && win.term;
+            if (!term) return null;
+            let mouse = 'none';
+            try {
+                const m = term.modes;
+                mouse = (m && m.mouseTrackingMode) || 'none';
+            } catch (_) { return null; }
+            let alt = false;
+            try {
+                const buf = term.buffer && term.buffer.active;
+                // A build with no buffer namespace reports 'not alternate',
+                // which is the truth for a terminal that cannot switch.
+                alt = !!(buf && buf.type === 'alternate');
+            } catch (_) { return null; }
+            return { mouseTracking: mouse, mouseActive: mouse !== 'none',
+                     altScreen: alt };
+        }
+
+        function _sameTermModes(a, b) {
+            return !!a && !!b
+                && a.mouseTracking === b.mouseTracking
+                && a.mouseActive === b.mouseActive
+                && a.altScreen === b.altScreen;
+        }
+        // A FRESH object per subscriber: one subscriber must not be able to
+        // rewrite what the next one is told, and core keeps `last` for itself.
+        function _copyTermModes(s) {
+            return { mouseTracking: s.mouseTracking,
+                     mouseActive: !!s.mouseActive, altScreen: !!s.altScreen };
+        }
+
+        // SNAPSHOT + liveness recheck, exactly as _dispatchTermTaps: a
+        // subscriber that unsubscribes (or closes the window) mid-dispatch is
+        // not called again, and one registered mid-dispatch does not join the
+        // pass. A terminal disposed between the sample and the dispatch stops
+        // the walk — the snapshot is already stale.
+        function _dispatchTermModes(win, snap) {
+            const st = _termModesState(win, false);
+            const live = st && st.subs;
+            if (!live || !live.length) return 0;
+            const listed = live.slice();
+            let n = 0;
+            for (let i = 0; i < listed.length; i++) {
+                if (win.disposed) return n;
+                const fn = listed[i];
+                if (live.indexOf(fn) === -1) continue;
+                try { fn(_copyTermModes(snap)); n += 1; }
+                catch (e) {
+                    try { console.error('[windows] terminal modes subscriber'
+                        + ' failed:', e); } catch (_) {}
+                }
+            }
+            return n;
+        }
+
+        // The sampler proper. Change-detected: an output frame that carried no
+        // mode change costs one getter read and nothing else.
+        function sampleTermModes(win) {
+            if (!win || win.disposed) return 0;
+            const st = _termModesState(win, false);
+            if (!st) return 0;
+            const now = readTermModes(win);
+            if (!now) return 0;
+            if (_sameTermModes(st.last, now)) return 0;
+            st.last = now;
+            return _dispatchTermModes(win, now);
+        }
+
+        // Core's own hook: 67 arms this from term.onWriteParsed, and cancels
+        // the pending frame in win.cleanups. At most one sample per frame no
+        // matter how much output arrives.
+        function armTermModesSample(win) {
+            const st = _termModesState(win, true);
+            if (!st || st.frame) return false;
+            if (typeof requestAnimationFrame !== 'function') {
+                sampleTermModes(win);
+                return true;
+            }
+            st.frame = requestAnimationFrame(function () {
+                st.frame = 0;
+                sampleTermModes(win);
+            });
+            return true;
+        }
+        function cancelTermModesSample(win) {
+            const st = _termModesState(win, false);
+            if (!st || !st.frame) return false;
+            try { cancelAnimationFrame(st.frame); } catch (_) {}
+            st.frame = 0;
+            return true;
+        }
+
+        function _addTermModesSub(win, fn) {
+            const noop = function () { return false; };
+            if (typeof fn !== 'function') return noop;
+            const st = _termModesState(win, true);
+            if (!st) return noop;
+            st.subs.push(fn);
+            // THE REPLAY. Seed `last` from a live read if the sampler has not
+            // run yet, then hand this subscriber the current snapshot now.
+            if (!st.last) {
+                const now = readTermModes(win);
+                if (now) st.last = now;
+            }
+            const snap = st.last
+                || { mouseTracking: 'none', mouseActive: false,
+                     altScreen: false };
+            try { fn(_copyTermModes(snap)); }
+            catch (e) {
+                try { console.error('[windows] terminal modes subscriber'
+                    + ' failed:', e); } catch (_) {}
+            }
+            let off = false;
+            return function () {
+                if (off) return false;
+                off = true;
+                const i = st.subs.indexOf(fn);
+                if (i === -1) return false;
+                st.subs.splice(i, 1);
+                return true;
+            };
+        }
+
+        // A SECOND extender rather than another member on _modTerminalTaps'
+        // bag: the two ranges stay independently sliceable (each has its own
+        // executed test), and extenders compose — this one wraps the wrapper
+        // A58 installed, so a create callback receives a bag carrying
+        // onModTeardown (86c), the three taps (above) and onModesChanged.
+        function _modTerminalModes(rec, info) {
+            if (!info || typeof info !== 'object') return info;
+            const member = function (fn) {
+                const off = _addTermModesSub(info && info.win, fn);
+                if (typeof fn === 'function') _armTermTapRemoval(rec, info, off);
+                return off;
+            };
+            try {
+                info.onModesChanged = member;
+                if (info.onModesChanged === member) return info;
+            } catch (_) { /* a frozen bag under strict mode: copy instead */ }
+            return Object.assign({}, info, { onModesChanged: member });
+        }
+
+        function _ctxTerminalModes(ctx, rec) {
+            const fam = ctx.windows;
+            if (!fam || typeof fam !== 'object') return;
+            const sub = fam.onTerminalCreate;
+            if (typeof sub !== 'function') return;
+            fam.onTerminalCreate = function (cb) {
+                if (typeof cb !== 'function') return sub.call(this, cb);
+                return sub.call(this, function (info) {
+                    return cb(_modTerminalModes(rec, info));
+                });
+            };
+        }
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxTerminalModes);
+        }
+        // ---- end info.onModesChanged ----------------------------------------

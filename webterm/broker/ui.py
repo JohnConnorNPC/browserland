@@ -272,6 +272,19 @@ _ORDERED = [
     # removal) and extenders run in THIS list's order; still before the mod-
     # script splice, since a mod's init reads the finished ctx.
     "86k_js_mod_terminal_taps.js",
+    # #201: info.cellDims() / info.setFont() + the `terminals` family, whose
+    # `defaults.fontFamily` makes 67's TERM_FONT_BASELINE READABLE -- retiring
+    # the duplicated constant a test had to police. cellDims() returns null
+    # before the first render (never recorder's hardcoded 9x17), and setFont is
+    # last-writer-wins WITH AN OWNER RECORD so core can revert a disabled mod's
+    # terminal to the surviving writer, else to the baseline. Its own fragment
+    # for the same split-never-trim reason 86e-86k got one: 86c is at the 2500-
+    # line cap. Ordered AFTER 86c (it decorates that fragment's bag, and
+    # extenders run in THIS list's order) and after 86k, which decorates the
+    # same bag -- either order works, since the two add disjoint members;
+    # last-registered simply wraps first. Still before the mod-script splice,
+    # since a mod's init reads the finished ctx.
+    "86l_js_mod_terminal_font.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",
