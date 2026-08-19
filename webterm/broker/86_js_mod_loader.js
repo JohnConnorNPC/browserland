@@ -1279,7 +1279,7 @@
         // an explicit "clear this" indistinguishable from a no-op and strand the
         // junk in the synced blob — see _modSettingText.
         function _valueAccessor(entry, key, read, coerce, valid, unchanged) {
-            const accessor = {
+            const accessor = { ok: true,   // #203: healthy; an OLD loader has no `ok` at all, so a mod tests `ok === false`, never `!ok` (86a)
                 get: function () { return read(); },
                 set: function (value) {
                     value = coerce(value);
@@ -1375,6 +1375,8 @@
         // it is a known option, else the (non-written) default.
         function _modSettingChoice(rec, kind, key, options, opts) {
             opts = opts || {};
+            const rej = _modSettingReject(rec, kind, key, options, opts);  // #203 §1: BEFORE any element exists
+            if (rej) return rej;   // degraded accessor: no widget mounts, the mod keeps running (86a)
             options = _normChoiceOptions(options);
             // Object.create(null), and `=== true` on every read. A plain
             // object INHERITS constructor/toString/hasOwnProperty, so a

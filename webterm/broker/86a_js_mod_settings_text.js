@@ -133,9 +133,12 @@
                          && isFinite(opts.maxLength) && opts.maxLength >= 1)
                 ? Math.min(Math.floor(opts.maxLength), MAX_MOD_TEXT_LEN)
                 : MAX_MOD_TEXT_LEN;
+            // #203 (§1): a malformed suggestions list no longer throws out of
+            // registration and kills the mod — it costs the datalist and logs a
+            // warning. See _modTextSuggestions at the foot of this fragment.
             const suggestions = (opts.options == null)
                 ? [] : (Array.isArray(opts.options) && !opts.options.length
-                        ? [] : _normChoiceOptions(opts.options));
+                        ? [] : _modTextSuggestions(rec, key, opts.options));
             const fallback = _modTextCoerce(opts.def, max);
             const userValidate = (typeof opts.validate === 'function')
                 ? opts.validate : null;
@@ -310,3 +313,127 @@
             return accessor;
         }
 
+
+        // ---- #203 (§1): a malformed option list degrades, it does not kill ---
+        // Until now _normChoiceOptions THREW on an empty/invalid/duplicate list,
+        // the throw escaped registration, and initMod's fault isolation rolled
+        // the WHOLE mod back — one duplicate string in a computed list disabled
+        // everything the mod does. clock ships defensive dedup (clock.js:130-134)
+        // against exactly that, which is this platform's bug, not clock's.
+        //
+        // So the shape errors of an OPTION LIST — and only those — stop being
+        // fatal. The primitive mounts no widget and hands back a DEGRADED
+        // accessor; the mod keeps running and decides for itself whether a dead
+        // control is survivable:
+        //
+        //   s.ok            false (true on a healthy control)
+        //   s.error         'duplicate_option' | 'invalid_options'
+        //   s.get()         the coerced def, else '' — never throws
+        //   s.set(v)        no-op (the family's existing silent-drop idiom)
+        //   s.onChange(fn)  accepted, never fires
+        //
+        // FEATURE-DETECT WITH `s.ok === false`, NEVER `!s.ok`. An older loader
+        // has no `ok` at all, so `!s.ok` reads every HEALTHY accessor on that
+        // broker as rejected and would degrade a mod that is working fine.
+        //
+        // What stays fatal is unchanged and deliberate: a throw from the mod's
+        // own init(), ModConflictError on a duplicate id, and the ctxVersion
+        // refusal. Those are the isolation contract, not sharp edges.
+        //
+        // These are function DECLARATIONS with no fragment-level let/const
+        // between them: an init-time path that reads a not-yet-initialized
+        // fragment binding is a TDZ ReferenceError that disables the whole mod,
+        // and this JS never runs in CI (#162).
+
+        // The shape verdict on an options list: '' when it is fine, else the
+        // STABLE code both `s.error` and the Mods-pane warning row carry. One
+        // vocabulary on both sides, so what the operator reads is what the mod
+        // branched on. It mirrors _normChoiceOptions' three throws exactly and
+        // never throws itself. ('async_validator' is #203 §2's code and is not
+        // decided here.)
+        function _modChoiceFault(options) {
+            if (!Array.isArray(options) || !options.length) {
+                return 'invalid_options';
+            }
+            const seen = Object.create(null);
+            for (const o of options) {
+                if (!o || typeof o.value !== 'string') return 'invalid_options';
+                if (seen[o.value] === true) return 'duplicate_option';
+                seen[o.value] = true;
+            }
+            return '';
+        }
+
+        // Human text for a code, at the one place that owns the vocabulary.
+        function _modChoiceFaultText(code) {
+            return (code === 'duplicate_option')
+                ? 'the options list repeats a value'
+                : 'the options list must be a non-empty array of '
+                  + '{value,label} with string values';
+        }
+
+        // Record a degraded control against the mod's ACTIVE record. Living on
+        // `rec` rather than in a keyed bag is the whole teardown story: disableMod
+        // drops the record from window.__mods.active, so the warning disappears
+        // with the mod and a re-init starts from a clean list — no unload hook to
+        // forget and no stale row to explain. console.error still fires, because
+        // the console is where a developer looks first.
+        function _modSettingWarn(rec, key, code, message) {
+            console.error('[mods] settings "' + rec.id + ':' + key + '" — '
+                + message + ' (' + code + '); this control is degraded, the '
+                + 'rest of the mod keeps running');
+            if (!Array.isArray(rec.settingWarnings)) rec.settingWarnings = [];
+            // Bounded: a mod looping over a broken computed list must not be
+            // able to grow an unbounded array behind a pane nobody has open.
+            if (rec.settingWarnings.length < 20) {
+                rec.settingWarnings.push(
+                    { key: key, code: code, message: message });
+            }
+        }
+
+        // The degraded accessor. get() answers the declared default put through
+        // the same coercion every stored string gets (so a non-string `def`
+        // answers '' rather than leaking a number into a mod's string path), and
+        // it is a CONSTANT: with no widget and no writer there is nothing that
+        // could change it.
+        function _modDegradedAccessor(code, def) {
+            const value = _modTextCoerce(def, MAX_MOD_TEXT_LEN);
+            const accessor = {
+                ok: false,
+                error: code,
+                get: function () { return value; },
+                set: function () {},                 // silent drop, as ever
+                onChange: function () { return accessor; },
+            };
+            return accessor;
+        }
+
+        // The seam radio/select/combo call FIRST, before a single element is
+        // created: a rejected control must mount NO widget in the Control Panel.
+        // Returns null when the list is fine (the caller carries on and builds
+        // the real control), else the degraded accessor to hand straight back.
+        function _modSettingReject(rec, kind, key, options, opts) {
+            const code = _modChoiceFault(options);
+            if (!code) return null;
+            _modSettingWarn(rec, key, code,
+                'settings ' + kind + ': ' + _modChoiceFaultText(code));
+            return _modDegradedAccessor(code, opts && opts.def);
+        }
+
+        // text degrades DIFFERENTLY, and that asymmetry is the point: only its
+        // optional SUGGESTIONS list can be malformed, and suggestions are a
+        // shortcut, not a domain. A bad list there costs the datalist and earns a
+        // warning — the accessor stays fully functional (ok stays true), because
+        // a free-text box with no suggestions is still a working free-text box.
+        function _modTextSuggestions(rec, key, options) {
+            if (options == null) return [];
+            if (Array.isArray(options) && !options.length) return [];
+            const code = _modChoiceFault(options);
+            if (code) {
+                _modSettingWarn(rec, key, code,
+                    'settings text suggestions: ' + _modChoiceFaultText(code)
+                    + ' — the box works, without a suggestion list');
+                return [];
+            }
+            return _normChoiceOptions(options);
+        }

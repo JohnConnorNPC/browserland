@@ -8520,6 +8520,7 @@ def _needs_harness_text(with_companion=True):
         "function _modIsRegistered(id) {",
         "function _modClamp(v, n) {",
         "function _modPermissionsView(catRow) {",
+        "function _modSettingWarningsOf(id) {",
         "function _modStatusRow(id, catRow, decl) {"))
     return (_NEEDS_HARNESS
             .replace("__LOADER__", loader_bits)
@@ -25966,8 +25967,16 @@ def test_the_describe_fallbacks_do_not_drift_from_the_primitives():
         == _expr_after(choice, "const fallback = (typeof opts.def")
     # text's maxLength clamp and its suggestion list
     assert _expr_after(declared, "const max =") == _expr_after(text, "const max =")
-    assert _expr_after(declared, "const suggestions =") \
-        == _expr_after(text, "const suggestions =")
+    # #203: the two now diverge at the TAIL CALL only -- 86a routes a malformed
+    # suggestions list through _modTextSuggestions (warn, no datalist, never a
+    # throw) while describe keeps calling the throwing _normChoiceOptions, whose
+    # throw _ctxModIntrospect swallows so a rejected control leaves no
+    # describable ghost behind. Everything before that call still has to match
+    # character-for-character.
+    assert _expr_after(declared, "const suggestions =").replace(
+        "_normChoiceOptions(opts.options)", "<normalize>") \
+        == _expr_after(text, "const suggestions =").replace(
+            "_modTextSuggestions(rec, key, opts.options)", "<normalize>")
     # ...and the normalizers are BORROWED, never re-typed here.
     for owned in ("function _normChoiceOptions(", "function _modTextCoerce(",
                   "MAX_MOD_TEXT_LEN = "):
@@ -27525,3 +27534,472 @@ def test_a_removed_node_closes_the_popover(popover_harness):
     assert r["openBefore"] is True
     assert r["openAfter"] is False, "the popover stayed open with no node"
     assert r["reasons"] == ["node-gone"], "onClose was not told why"
+
+
+# ---------------------------------------------------------------------------
+# #203 (A68/E68): a malformed settings OPTION LIST stops being mod-fatal.
+# ---------------------------------------------------------------------------
+# _normChoiceOptions threw, the throw escaped registration, and initMod's fault
+# isolation rolled the WHOLE mod back -- one duplicate string in a computed list
+# disabled everything the mod does. Now radio/select/combo hand back a DEGRADED
+# accessor (ok:false + a stable code), mount no widget, and the mod keeps
+# running; text, whose list is only OPTIONAL suggestions, keeps a fully
+# functional accessor and merely loses its datalist.
+
+
+def test_the_choice_seam_rejects_before_a_single_element_exists():
+    # The order is the "no widget mounts" guarantee: the reject runs BEFORE
+    # _controlSection and before the throwing normalizer, so a rejected control
+    # cannot leave half a widget in the Control Panel.
+    choice = _frag_fn(_loader_src(),
+                      "function _modSettingChoice(rec, kind, key, options, opts) {")
+    assert "const rej = _modSettingReject(rec, kind, key, options, opts);" in choice
+    assert "if (rej) return rej;" in choice
+    assert choice.index("_modSettingReject(") \
+        < choice.index("options = _normChoiceOptions(options);") \
+        < choice.index("_controlSection(rec, opts)"), \
+        "the reject must precede BOTH the normalizer and the first element"
+    # The healthy accessor says so. `ok` lives on the ONE shared writer, so
+    # boolean/radio/select/combo/text all answer it identically.
+    va = _frag_fn(_loader_src(),
+                  "function _valueAccessor(entry, key, read, coerce, valid, unchanged) {")
+    assert "const accessor = { ok: true," in va
+    # The idiom is documented where `ok` is introduced: an OLD loader has no
+    # `ok` at all, so `!s.ok` would read every healthy accessor there as
+    # rejected. Both halves of the seam say it.
+    assert "`ok === false`" in va and "never `!ok`" in va
+    text = _text_src()
+    assert "`s.ok === false`" in text and "NEVER `!s.ok`" in text
+    # text's own wiring: its OPTIONAL suggestions list routes through the
+    # softening helper, and the throwing normalizer is gone from the primitive
+    # entirely -- otherwise a bad suggestions list still kills the mod and the
+    # harness case below (which calls the helper directly) would never see it.
+    body = _frag_fn(text, "function _modSettingText(rec, key, opts) {")
+    assert "? [] : _modTextSuggestions(rec, key, opts.options));" in body
+    assert "_normChoiceOptions" not in body,         "a malformed suggestions list must not reach the throwing normalizer"
+    # Shipped on the page, once.
+    for sym in ("function _modSettingReject(rec, kind, key, options, opts) {",
+                "function _modDegradedAccessor(code, def) {",
+                "function _modChoiceFault(options) {",
+                "function _modTextSuggestions(rec, key, options) {"):
+        assert INDEX_HTML.count(sym) == 1, f"#203 symbol missing/duplicated: {sym!r}"
+
+
+def test_only_the_option_list_softens_and_the_isolation_contract_stands():
+    # The blast radius, pinned. init() throwing, a duplicate id and the
+    # ctxVersion refusal are the isolation contract -- #203 softens the option
+    # list SHAPE and nothing else.
+    loader = _loader_src()
+    assert "return { ok: false, reason: 'init-threw', error: e };" in loader
+    assert "throw ModConflictError('registerMod: duplicate mod id \"' + id + '\"');" in loader
+    # _normChoiceOptions still throws: it is now unreachable-by-shape from the
+    # primitives, and 86n's describe still relies on that throw.
+    norm = _frag_fn(loader, "function _normChoiceOptions(options) {")
+    assert norm.count("throw new Error(") == 3
+    # The vocabulary is CLOSED here and shared with the pane. 'async_validator'
+    # is #203 section 2's code and is deliberately NOT decided in this fragment.
+    fault = _frag_fn(_text_src(), "function _modChoiceFault(options) {")
+    assert "return 'invalid_options';" in fault
+    assert "return 'duplicate_option';" in fault
+    assert "async_validator" not in fault
+
+
+def test_the_mods_pane_row_carries_the_same_code_the_accessor_exposes():
+    pkgs = _packages_src()
+    row = _frag_fn(pkgs, "function _modStatusRow(id, catRow, decl) {")
+    assert "warnings: _modSettingWarningsOf(id)," in row
+    # `state` STAYS 'active'. A new state would break every existing reader of
+    # the vocabulary, and a mod with one dead control has not failed.
+    assert "state = 'degraded'" not in pkgs and "'warned'" not in pkgs
+    helper = _frag_fn(pkgs, "function _modSettingWarningsOf(id) {")
+    # Read LIVE off the ACTIVE record: a disable drops the record, so the
+    # warnings go with it and there is no lifetime to manage.
+    assert "window.__mods.active.get(id)" in helper
+    assert "rec.settingWarnings" in helper
+    # Rendered under the row, in _rebuildRows -- NOT in a reflect. #168:
+    # notifyModSettings sets entry.last BEFORE reflecting, so a skip path added
+    # to a reflect masks convergence forever.
+    rebuild = _frag_nested_fn(pkgs, "function _rebuildRows() {")
+    assert "for (const w of (s.warnings || [])) {" in rebuild
+    assert "warn.className = 'set-mod-warning';" in rebuild
+    assert "warn.dataset.warnCode = w.code;" in rebuild
+    reflect = _frag_nested_fn(pkgs, "function _reflectManager() {")
+    assert "warnings" not in reflect, \
+        "a reflect must not gain a skip path over the warning line (#168)"
+    # __test.statusOf answers from the same row builder, so the warnings ride it.
+    assert "statusRows: function () { return _modStatusRows(); }," in _loader_src()
+    assert "return _modStatusRows().find(" in _loader_src()
+
+
+_DEGRADE_HARNESS = r"""
+'use strict';
+// #203/A68 executed: the SHIPPED reject seam, degraded accessor, warning record
+// and status row, driven through the real registerMod/initMod. The one fixture
+// is makeCtx -- the real one is 550 lines of DOM closures -- whose `select`
+// reproduces the loader's seam VERBATIM (a source test pins that it does) and
+// then records that a widget WOULD have been mounted.
+const errors = [];
+const infos = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.info = function () {
+    infos.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = console.error;
+
+const window = { __mods: {
+    ctxVersion: 1,
+    registered: [],
+    active: new Map(),
+    policy: {},
+    catalog: [],
+    packages: Object.create(null),
+    missingRequires: Object.create(null),
+    cycleState: Object.create(null),
+    settingToggles: [],
+    sorted: false,
+} };
+const ENABLED = new Set();
+function _currentPackageId() { return null; }
+function _lateRegister() {}
+function isModEnabled(id) {
+    const pin = _pin(id);
+    if (pin !== null) return pin;
+    return ENABLED.has(id);
+}
+__CONSTANTS__
+
+// the synced settings blob a healthy control writes, and the mounts a rejected
+// one must never make
+let PREFS = {};
+let saves = 0;
+const mounts = [];
+const reflects = [];
+function getSettings() { return PREFS; }
+function savePrefs() { saves += 1; }
+function notifyModTheme() {}
+function _trackControl(rec, entry) {
+    window.__mods.settingToggles.push(entry);
+    rec.unloads.push(function () {
+        const l = window.__mods.settingToggles;
+        const i = l.indexOf(entry);
+        if (i !== -1) l.splice(i, 1);
+    });
+}
+
+__LOADER__
+
+__TEXT__
+
+__REGISTRY__
+
+__PACKAGES__
+
+// The choice primitive with its DOM half replaced by a mount counter. The two
+// lines before the counter are the shipped seam, character-for-character.
+function choice(kind, rec, key, options, opts) {
+    opts = opts || {};
+    const rej = _modSettingReject(rec, kind, key, options, opts);
+    if (rej) return rej;
+    options = _normChoiceOptions(options);
+    const valid = Object.create(null);
+    for (const o of options) valid[o.value] = true;
+    const fallback = (typeof opts.def === 'string' && valid[opts.def] === true)
+        ? opts.def : options[0].value;
+    const read = function () {
+        const v = getSettings()[key];
+        return (typeof v === 'string' && valid[v] === true) ? v : fallback;
+    };
+    const entry = { modId: rec.id, kind: kind, key: key, read: read,
+                    onChange: null, last: read(),
+                    reflect: function () { reflects.push(key); } };
+    mounts.push(rec.id + ':' + key);      // the widget the real one would build
+    _trackControl(rec, entry);
+    return _valueAccessor(entry, key, read,
+        function (v) { return String(v); },
+        function (v) { return valid[v] === true; });
+}
+
+function makeCtx(modId, rec) {
+    const ctx = {
+        id: modId,
+        ctxVersion: window.__mods.ctxVersion,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        settings: {
+            radio: function (k, o, p) { return choice('radio', rec, k, o, p); },
+            select: function (k, o, p) { return choice('select', rec, k, o, p); },
+            combo: function (k, o, p) { return choice('combo', rec, k, o, p); },
+            // text's suggestions half, which is all of text that can be
+            // malformed (the accessor below it is untouched by #203).
+            suggestions: function (k, o) {
+                return _modTextSuggestions(rec, k, o);
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return ctx;
+}
+
+// ---- driver ---------------------------------------------------------------
+function run(id, init) {
+    const d = { id: id, init: init };
+    registerMod(d);
+    const reg = window.__mods.registered;
+    const entry = reg[reg.length - 1];
+    ENABLED.add(id);
+    return { res: initMod(entry), entry: entry };
+}
+function row(id) {
+    const entry = window.__mods.registered.find(
+        function (m) { return m.id === id; }) || null;
+    return _modStatusRow(id, null, entry);
+}
+// JSON.stringify DROPS undefined, so an absent key would read as a pass. Every
+// probe answers a LABEL instead of a hole.
+function probe(s) {
+    return {
+        ok: ('ok' in s) ? s.ok : '<absent>',
+        error: ('error' in s) ? s.error : '<absent>',
+        get: s.get(),
+    };
+}
+
+const CASES = {};
+
+// A duplicate option value: the control dies, the MOD does not.
+CASES.duplicate = function () {
+    let fired = 0;
+    let after = null;
+    let unloaded = 0;
+    const r = run('x-fixture', function (ctx) {
+        ctx.onUnload(function () { unloaded += 1; });   // FIRST (#162)
+        const s = ctx.settings.select(
+            'mode', [{ value: 'a', label: 'A' }, { value: 'b' },
+                     { value: 'a', label: 'again' }], { def: 'b' });
+        s.onChange(function () { fired += 1; });
+        s.set('a');                       // no-op, silently
+        after = probe(s);
+        // the mod carries on: a SECOND, healthy control still mounts
+        const t = ctx.settings.radio('theme',
+            [{ value: 'light' }, { value: 'dark' }], { def: 'dark' });
+        after.second = probe(t);
+    });
+    const st = row('x-fixture');
+    return {
+        res: r.res, degraded: after, fired: fired, prefs: PREFS, saves: saves,
+        mounts: mounts, active: Array.from(window.__mods.active.keys()),
+        state: st.state, label: st.label, warnings: st.warnings,
+        unloaded: unloaded, errors: errors,
+    };
+};
+
+// An empty list and a non-string value are both 'invalid_options'.
+CASES.invalid = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        out = {
+            empty: probe(ctx.settings.select('a', [], { def: 'zz' })),
+            notArray: probe(ctx.settings.combo('b', 'nope', { def: 'q' })),
+            numberValue: probe(ctx.settings.radio(
+                'c', [{ value: 'ok' }, { value: 2 }], {})),
+            noDef: probe(ctx.settings.select('d', [], {})),
+            weirdDef: probe(ctx.settings.select('e', [], { def: 7 })),
+        };
+    });
+    const st = row('x-fixture');
+    return { out: out, mounts: mounts, state: st.state,
+             codes: st.warnings.map(function (w) { return w.key + '=' + w.code; }),
+             active: Array.from(window.__mods.active.keys()), errors: errors };
+};
+
+// The control is well-formed: ok is TRUE, the widget mounts, nothing warns, and
+// set() still writes the blob.
+CASES.healthy = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        const s = ctx.settings.select('mode',
+            [{ value: 'a' }, { value: 'b' }], { def: 'a' });
+        out = probe(s);
+        s.set('b');
+        out.afterSet = s.get();
+    });
+    const st = row('x-fixture');
+    return { out: out, prefs: PREFS, saves: saves, mounts: mounts,
+             state: st.state, warnings: st.warnings, errors: errors };
+};
+
+// text: only its SUGGESTIONS can be malformed, so a bad list costs the datalist
+// and warns -- it never degrades the accessor.
+CASES.text_suggestions = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        out = {
+            bad: ctx.settings.suggestions('font',
+                [{ value: 'a' }, { value: 'a' }]),
+            absent: ctx.settings.suggestions('g', null),
+            emptyList: ctx.settings.suggestions('h', []),
+            good: ctx.settings.suggestions('i',
+                [{ value: 'x', label: 'X' }, { value: 'y' }]),
+        };
+    });
+    const st = row('x-fixture');
+    return { out: out, warnings: st.warnings, state: st.state,
+             errors: errors };
+};
+
+// A disable takes the warnings with it, and a re-init starts clean.
+CASES.disable_clears = function () {
+    function init(ctx) {
+        ctx.settings.select('mode', [{ value: 'a' }, { value: 'a' }], {});
+    }
+    run('x-fixture', init);
+    const before = row('x-fixture').warnings;
+    disableMod('x-fixture');
+    const after = row('x-fixture').warnings;
+    const entry = window.__mods.registered[0];
+    ENABLED.add('x-fixture');
+    initMod(entry);
+    const again = row('x-fixture').warnings;
+    return { before: before, after: after, again: again,
+             activeAfter: Array.from(window.__mods.active.keys()),
+             errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def degrade_harness(tmp_path_factory):
+    loader = _loader_src()
+    pkgs = _packages_src()
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    m = re.search(r"^\s*const MAX_MOD_TEXT_LEN = \d+;$", consts, re.M)
+    assert m, "MAX_MOD_TEXT_LEN moved"
+
+    def whole(src, sig):
+        return _frag_fn(src, sig) + "\n        }\n"
+
+    loader_bits = "\n".join(whole(loader, sig) for sig in (
+        "function ModConflictError(message) {",
+        "function registerMod(decl) {",
+        "function _runUnloads(rec) {",
+        "function _pin(id) {",
+        "function _normChoiceOptions(options) {",
+        "function _valueAccessor(entry, key, read, coerce, valid, unchanged) {",
+        "function initMod(decl, opts) {",
+        "function disableMod(id) {"))
+    pkg_bits = "\n".join(whole(pkgs, sig) for sig in (
+        "function _modBag(name) {",
+        "function _modIsRegistered(id) {",
+        "function _modClamp(v, n) {",
+        "function _modPermissionsView(catRow) {",
+        "function _modSettingWarningsOf(id) {",
+        "function _modStatusRow(id, catRow, decl) {"))
+    path = tmp_path_factory.mktemp("moddegrade") / "harness.js"
+    path.write_text(
+        _DEGRADE_HARNESS
+        .replace("__CONSTANTS__", m.group(0))
+        .replace("__LOADER__", loader_bits)
+        # 86a whole: it is declaration-only (nothing runs until a mod's init
+        # calls it), which is exactly what makes it runnable outside a browser.
+        .replace("__TEXT__", _text_src())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__PACKAGES__", pkg_bits),
+        encoding="utf-8")
+    return path
+
+
+def _run_degrade(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_duplicate_option_degrades_the_control_not_the_mod(degrade_harness):
+    r = _run_degrade(degrade_harness, "duplicate")
+    # THE POINT: the mod is up. Before #203 the throw escaped registration and
+    # initMod rolled the whole thing back.
+    assert r["res"] == {"ok": True, "id": "x-fixture"}
+    assert r["active"] == ["x-fixture"]
+    assert r["unloaded"] == 0, "the mod was rolled back"
+    assert r["state"] == "active", "a degraded control is not a failed mod"
+    # The accessor: false, a stable code, the coerced def, a dead setter.
+    assert r["degraded"]["ok"] is False
+    assert r["degraded"]["error"] == "duplicate_option"
+    assert r["degraded"]["get"] == "b", "get() answers the declared default"
+    assert r["prefs"] == {} and r["saves"] == 0, "set() wrote something"
+    assert r["fired"] == 0, "onChange fired on a control that has no value"
+    # No widget for the rejected control; the mod's OTHER control still mounts.
+    assert r["mounts"] == ["x-fixture:theme"]
+    assert r["degraded"]["second"] == {"ok": True, "error": "<absent>",
+                                       "get": "dark"}
+    # The operator sees it, with the SAME code the mod branched on.
+    assert [w["key"] for w in r["warnings"]] == ["mode"]
+    assert r["warnings"][0]["code"] == "duplicate_option"
+    assert "repeats a value" in r["warnings"][0]["message"]
+    assert len(r["errors"]) == 1 and "duplicate_option" in r["errors"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_every_other_bad_shape_is_invalid_options(degrade_harness):
+    r = _run_degrade(degrade_harness, "invalid")
+    assert r["active"] == ["x-fixture"] and r["state"] == "active"
+    for name in ("empty", "notArray", "numberValue", "noDef", "weirdDef"):
+        assert r["out"][name]["ok"] is False, name
+        assert r["out"][name]["error"] == "invalid_options", name
+    # get() is the COERCED def, else '' -- never a throw and never a number.
+    assert r["out"]["empty"]["get"] == "zz"
+    assert r["out"]["noDef"]["get"] == ""
+    assert r["out"]["weirdDef"]["get"] == "7"
+    assert r["mounts"] == [], "a rejected control must mount no widget"
+    assert r["codes"] == ["a=invalid_options", "b=invalid_options",
+                          "c=invalid_options", "d=invalid_options",
+                          "e=invalid_options"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_healthy_control_says_ok_and_still_writes(degrade_harness):
+    r = _run_degrade(degrade_harness, "healthy")
+    assert r["out"]["ok"] is True and r["out"]["error"] == "<absent>"
+    assert r["out"]["get"] == "a" and r["out"]["afterSet"] == "b"
+    assert r["prefs"] == {"mode": "b"} and r["saves"] == 1
+    assert r["mounts"] == ["x-fixture:mode"]
+    assert r["warnings"] == [] and r["state"] == "active"
+    assert r["errors"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_text_loses_its_datalist_and_keeps_its_accessor(degrade_harness):
+    r = _run_degrade(degrade_harness, "text_suggestions")
+    # A bad SUGGESTIONS list is not a broken control: no datalist, one warning.
+    assert r["out"]["bad"] == []
+    assert r["out"]["good"] == [{"value": "x", "label": "X"},
+                                {"value": "y", "label": "y"}]
+    # An absent/empty list is a mod honestly computing none -- never a warning.
+    assert r["out"]["absent"] == [] and r["out"]["emptyList"] == []
+    assert [w["key"] for w in r["warnings"]] == ["font"]
+    assert r["warnings"][0]["code"] == "duplicate_option"
+    assert "without a suggestion list" in r["warnings"][0]["message"]
+    assert r["state"] == "active"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disable_takes_the_warning_row_with_it(degrade_harness):
+    r = _run_degrade(degrade_harness, "disable_clears")
+    assert [w["code"] for w in r["before"]] == ["duplicate_option"]
+    assert r["after"] == [], "the warning outlived the activation"
+    # A re-init starts from a clean list -- one activation, one warning, not two.
+    assert [w["code"] for w in r["again"]] == ["duplicate_option"]
+    assert r["activeAfter"] == ["x-fixture"]

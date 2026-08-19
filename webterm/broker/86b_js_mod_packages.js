@@ -717,6 +717,20 @@
                         perms.appendChild(b);
                     }
                     row.appendChild(perms);
+                    // #203 (§1): a control this mod declared with a malformed
+                    // option list. Built HERE, with the rest of the row, and
+                    // deliberately NOT in _reflectManager: notifyModSettings
+                    // sets entry.last BEFORE reflecting, so a skip path added to
+                    // a reflect masks convergence forever (#168). This one is a
+                    // plain append on a row that is being created from scratch,
+                    // so it has no skip path to add.
+                    for (const w of (s.warnings || [])) {
+                        const warn = document.createElement('div');
+                        warn.className = 'set-mod-warning';
+                        warn.dataset.warnCode = w.code;
+                        warn.textContent = w.key + ': ' + w.message;
+                        row.appendChild(warn);
+                    }
                     // #163 (S5): Uninstall, on INSTALLED rows only. A shipped
                     // mod is in the page's own bundle and cannot be removed by
                     // any broker call, so offering the control there would be a
@@ -795,6 +809,12 @@
         //   id, title, version, source: 'shipped'|'installed', gen|null,
         //   state, label, requires[], missing[], missingRequires[], tiers[],
         //   needs[], unmetNeeds[] (#197),
+        //   warnings: [{key, code, message}] (#203 — additive; a running mod
+        //     with a degraded settings control. `state` STAYS 'active': the
+        //     vocabulary below is load-bearing for existing readers and a mod
+        //     with one dead control is not a mod that failed. `code` is the
+        //     SAME stable code the accessor exposes as `s.error`, so what the
+        //     operator reads is what the mod branched on),
         //   permissions: {state, names[]} (#193 — see _modPermissionsView),
         //   registered, active, enabled, pin: true|false|null, toggleable
         //
@@ -970,6 +990,9 @@
                 // manifest the broker linted would be worse than no copy, since
                 // it is the one an operator would read while deciding.
                 permissions: _modPermissionsView(catRow),
+                // #203: read LIVE off the active record, so a disable makes it
+                // vanish with the record and a re-init starts clean.
+                warnings: _modSettingWarningsOf(id),
                 registered: !!decl,
                 active: active,
                 enabled: enabled,
@@ -979,6 +1002,20 @@
                 // so the checkbox must not pretend otherwise.
                 toggleable: !!decl && pin === null,
             };
+        }
+
+        // #203 (§1): the degraded-settings-control warnings a mod has accrued
+        // this activation. 86a records them on the ACTIVE record; nothing else
+        // owns a copy, so there is no lifetime to manage — a mod that is not
+        // active has none by construction. Cloned per entry so a pane render can
+        // never reach into the loader's state.
+        function _modSettingWarningsOf(id) {
+            const rec = window.__mods.active.get(id);
+            const list = rec && rec.settingWarnings;
+            if (!Array.isArray(list)) return [];
+            return list.map(function (w) {
+                return { key: w.key, code: w.code, message: w.message };
+            });
         }
 
         // ---- the `permissions` display (#193) -------------------------------
