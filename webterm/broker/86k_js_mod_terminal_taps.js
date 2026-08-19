@@ -252,6 +252,20 @@
         // ---- end info.tapOutput / tapInput / onResize -----------------------
 
         // ---- info.onModesChanged (#201) -------------------------------------
+        //
+        // IT IS A LEVEL SURFACE WITH AN EDGE-SHAPED NAME, and #195 already owns
+        // that vocabulary (_MOD_EVENT_SHAPES, 86c: every event is 'edge' or
+        // 'level'). Saying the word is worth more than the paragraph below it,
+        // because it makes the non-guarantee predictable rather than
+        // surprising: a level surface reports WHAT IS, not WHAT HAPPENED. Two
+        // changes inside one animation frame deliver ONE event carrying the
+        // final state, and a change plus its reversal inside one frame deliver
+        // NONE — correctly, because nothing is different afterwards. The same
+        // is true across a hidden tab, where rAF does not run at all and an
+        // arbitrary number of transitions collapse into the state you get back.
+        // So: drive UI off it, never a one-shot side effect. Counting how many
+        // times an app grabbed the mouse is not a question this surface can
+        // answer, and no amount of care at the call site will make it one.
         // ONE CORE SAMPLER instead of a poll per mod. xterm exposes `term.modes`
         // as a GETTER with no change event. mods/mousemode/mousemode.js USED TO
         // sample it itself on `term.onWriteParsed` behind a

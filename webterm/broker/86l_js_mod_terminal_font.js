@@ -1,4 +1,17 @@
         // ---- info.cellDims / info.setFont / ctx.terminals (#201) -----------
+        //
+        // A NAMED LIMIT, because the owner record's guarantee is narrower than
+        // it looks: it holds among setFont USERS only. mods/termfont still
+        // writes `win.term.options.fontFamily` directly (#201 asked it to
+        // migrate the baseline READ, not the apply path — moving the apply
+        // changes the reflow from this frame to refitSoon's defer, and changes
+        // its teardown target from the baseline to the surviving writer, so it
+        // is its own atom). The stack never learns about that write. So:
+        // termfont applies Fira, a setFont user is then disabled, the stack
+        // empties, and the revert writes the BASELINE over termfont's live
+        // font — the exact stomp this record exists to prevent, one layer out.
+        // Latent today because nothing in the tree calls setFont; it becomes
+        // real the moment something does, which is #204's problem to finish.
         // Two gaps closed together, because they are the same gap: a mod that
         // wants to know how big a cell is, or to change what a terminal is
         // rendered in, has had to reach INTO xterm and guess.

@@ -120,6 +120,23 @@ rather than deleting it. What remains is narrower and is the same containment
 boundary as limit 2: a mod that replaces `term.resize` by assignment and never
 calls through fires no event. Limits 2, 3 and 4 stand as written.
 
+## What the gate does NOT cover
+
+Two bounded scope limits, recorded so the word "complete" above stays honest:
+
+1. **Only `.js` entries of `_ORDERED` are scanned.** `00_head.html`, `40_body.html`
+   and `99_tail.html` are in `_ORDERED` and are never read by the scan. Checked
+   at the time of writing: `40_body.html` ends by opening the single `<script>`
+   and carries no inline JS, and `99_tail.html` is three lines — so there is no
+   live hole. A `<script>` block added to one of those files would reach the
+   page and the gate would not see it.
+2. **The scan is textual, so computed access evades it.** `win.term['write'](d)`
+   or `const w = win.term.write; w(d)` produce no match and leave the counts
+   unchanged. Property access with a literal name does not evade it — both
+   `win.term?.write(` and `wins[id].term.write(` produce a new key and fail the
+   gate. So the doc's claim is precisely "no second write SPELLING in core",
+   not "no possible write expression".
+
 ## The gate
 
 `tests/test_ui_assets.py`:
