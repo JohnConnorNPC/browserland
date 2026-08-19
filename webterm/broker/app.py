@@ -2231,6 +2231,8 @@ _CSP_HOSTNAME_RE = re.compile(r"\A[a-z0-9-]+(?:\.[a-z0-9-]+)*\Z")
 #: header. (Bracketed IPv6 is narrower than CSP3's written grammar but the
 #: engines accept it, and a LAN IPv6 broker needs its ws twin.)
 _CSP_IPV6_RE = re.compile(r"\A[0-9a-f:.]+\Z")
+#: A bracketed authority must hold an IPv6 literal and nothing else.
+_CSP_BRACKET_IPV6_RE = re.compile(r"//\[[0-9a-fA-F:.]+\](?::|/|\Z)")
 
 
 def _csp_origin_pair(entry: Any, idx: int) -> Optional[Tuple[str, str]]:
@@ -2255,6 +2257,16 @@ def _csp_origin_pair(entry: Any, idx: int) -> Optional[Tuple[str, str]]:
     raw = entry["url"].strip()
     if len(raw) > MAX_CSP_HOST_URL_CHARS:
         _skip("over-long url")
+        return None
+    # A bracket means IPv6 or nothing. urlsplit STRIPS brackets without
+    # validating what was inside on some versions (3.10 accepts "[evil.com]"
+    # and hands back "evil.com"; 3.11+ raises), so an origin that differs
+    # from what the value denotes could reach the header, differently per
+    # interpreter. No privilege is gained — the writer could send
+    # "http://evil.com" directly — but a source must mean what it says, and
+    # this broker runs on more than one Python.
+    if "[" in raw and not _CSP_BRACKET_IPV6_RE.search(raw):
+        _skip("bracketed host that is not an IPv6 literal")
         return None
     # Pre-reject controls, whitespace and backslashes: urlsplit is not a
     # validator — it silently STRIPS \r \n \t anywhere in the string, and a
@@ -2381,6 +2393,19 @@ def csp_hosts_fragment(app: Sanic) -> str:
 #: cookie value and cannot appear in an origin, so no decoder sits in front of
 #: the hardened parse.
 CSP_HOSTS_COOKIE = "bl_csp_hosts"
+#: The https-only twin. The ``__Host-`` prefix is enforced by the BROWSER:
+#: it refuses the cookie unless it is Secure, Path=/ and — the point here —
+#: carries NO ``Domain``. Without that, cookies are not origin-scoped: any
+#: sibling host under a registrable parent (``ts.net`` is a public suffix,
+#: so ``machine-a.foo.ts.net`` can write for ``foo.ts.net``) could set a
+#: second cookie of the same name that every sibling broker receives.
+#: SameSite/Secure constrain SENDING, never who else may SET the name.
+CSP_HOSTS_COOKIE_HOST = "__Host-bl_csp_hosts"
+#: Every value under both names is UNIONED (see _csp_cookie_values). Taking
+#: only the first would let a shadowing cookie NARROW the allowlist, and
+#: narrowing is the one thing this design does not tolerate: widening costs
+#: nothing (a token-holder can already write _hosts), but a dropped origin
+#: is a fetch() TypeError that reads exactly like the host being down.
 #: Raw cookie length examined at all. Over this the whole cookie is ignored
 #: (one log line): the client caps itself far below, and a per-response parse
 #: must have a hard ceiling on the work a hostile client can buy.
@@ -2393,6 +2418,43 @@ MAX_CSP_COOKIE_CACHE = 16
 #: against. A leading space: a cookie value can never contain one (and the
 #: lookup key is stripped), so no cookie can ever collide with this slot.
 _CSP_CACHE_STATE_KEY = " state"
+
+
+def _csp_cookie_values(request: Any) -> Optional[str]:
+    """EVERY value sent under either cookie name, joined for the parse.
+
+    Not ``cookies.get(name)``: that returns ONE value, and a duplicate-name
+    cookie set on a parent domain by a sibling host would silently replace
+    the page's own origins instead of adding to them — ordering between two
+    same-name, same-Path cookies is unspecified. A union keeps the property
+    the design rests on (this input may only WIDEN connect-src) and makes
+    the shadowing question moot rather than a race.
+
+    Every value still goes through the same hardened parse, and the joined
+    length is capped exactly as one value is, so N cookies buy no more work
+    than one.
+
+    Both names are asked for even though Sanic already resolves the ``__Host-``
+    prefix onto the bare name AND prefers the prefixed value when both are
+    sent -- which is the behaviour we want (only our own origin can set a
+    ``__Host-`` cookie, so it outranks any shadow) and is pinned by
+    test_the_host_prefixed_value_outranks_an_unprefixed_one. The explicit
+    second lookup is therefore redundant against that framework behaviour,
+    kept as defence in depth if it ever changes; any duplicate it produces is
+    collapsed downstream."""
+    try:
+        cookies = request.cookies
+        values: List[str] = []
+        for name in (CSP_HOSTS_COOKIE_HOST, CSP_HOSTS_COOKIE):
+            getlist = getattr(cookies, "getlist", None)
+            got = getlist(name, None) if callable(getlist) else None
+            if got is None:
+                one = cookies.get(name)
+                got = [one] if isinstance(one, str) else []
+            values.extend(v for v in got if isinstance(v, str) and v)
+    except Exception:            # a malformed Cookie header is not fatal
+        return None
+    return "|".join(values) if values else None
 
 
 def _csp_cookie_fragment(cookie_value: Optional[str]) -> str:
@@ -4372,7 +4434,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # per-response pieces.
         response.headers["Content-Security-Policy-Report-Only"] = \
             _assemble_full_csp(app, request.headers.get("host"),
-                               request.cookies.get(CSP_HOSTS_COOKIE))
+                               _csp_cookie_values(request))
         # The policy now varies per BROWSER (its reported origins ride a
         # cookie), so a shared cache must not hand one browser's connect-src
         # to another — that would read as "this host is down" once the

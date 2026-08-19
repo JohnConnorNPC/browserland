@@ -30,6 +30,8 @@ import pytest
 from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker import ui
 from webterm.broker.app import (create_app, CSP_HOSTS_COOKIE,
+                                MAX_CSP_COOKIE_CACHE, MAX_CSP_HOSTS,
+                                MAX_CSP_HOSTS_FRAGMENT_CHARS,
                                 _assemble_full_csp)
 
 BROKER_DIR = Path(ui.__file__).resolve().parent
@@ -137,12 +139,134 @@ def test_the_response_varies_on_cookie(tmp_path, monkeypatch):
 
 def test_an_existing_vary_is_extended_not_clobbered(tmp_path, monkeypatch):
     """A route that already answers with its own Vary keeps it -- the
-    middleware adds to the header, it never overwrites it."""
-    app = _make_app(tmp_path, monkeypatch)
-    r = _get(app, path="/mod-store")
+    middleware adds to the header, it never overwrites it.
+
+    /help-corpus.json is the route that actually sets one (Vary:
+    Authorization, because it serves two audiences). The first version of
+    this test asked /mod-store, which sets no Vary of its own -- so it
+    passed with the merge replaced by an unconditional assignment, and
+    tested nothing it was named for."""
+    # serve_ui=True: the headless broker does not register this route, and a
+    # 404 carries no Vary of its own -- which would make this test vacuous a
+    # second time.
+    app = _make_app(tmp_path, monkeypatch, serve_ui=True)
+    r = _get(app, path="/help-corpus.json")
+    assert r.status == 200, "the route must actually answer for this to mean anything"
     vary = {v.strip().lower()
             for v in (r.headers.get("Vary") or "").split(",")}
     assert "cookie" in vary
+    assert "authorization" in vary, (
+        "the middleware overwrote the route's own Vary instead of merging")
+
+
+def test_a_duplicate_cookie_adds_origins_it_never_replaces_them(
+        tmp_path, monkeypatch):
+    """Cookies are NOT origin-scoped. Any sibling host under a registrable
+    parent can set a second cookie of the same name that this broker also
+    receives -- `ts.net` is a public suffix, so `machine-a.foo.ts.net` can
+    write for `foo.ts.net`. SameSite and Secure govern SENDING, not who may
+    SET the name, and the order of two same-name same-Path cookies is
+    unspecified.
+
+    Reading only the first value would let such a cookie NARROW the
+    allowlist. Widening costs nothing here (a token-holder can already write
+    _hosts, which this issue concedes), but a dropped origin is a fetch()
+    TypeError indistinguishable from the host being down -- the exact failure
+    the atom exists to prevent, and one no traffic soak would surface."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/", headers={
+        "Host": "dev.example:4445",
+        "Cookie": (f"{CSP_HOSTS_COOKIE}=http://a-one:1; "
+                   f"{CSP_HOSTS_COOKIE}=http://b-two:2"),
+    })
+    cs = _directives(r.headers[REPORT_ONLY])["connect-src"]
+    assert "http://a-one:1" in cs
+    assert "http://b-two:2" in cs, (
+        "a shadowing cookie replaced the page's origins instead of adding")
+
+
+def test_the_host_prefixed_name_is_accepted_too(tmp_path, monkeypatch):
+    """On https the page writes __Host-bl_csp_hosts, whose prefix the BROWSER
+    enforces: no Domain attribute, so it cannot be shadowed at all. The
+    server has to accept both names or https pages report nothing."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/", headers={
+        "Host": "dev.example:4445",
+        "Cookie": "__Host-bl_csp_hosts=https://prefixed.example",
+    })
+    assert "https://prefixed.example" in (
+        _directives(r.headers[REPORT_ONLY])["connect-src"])
+
+
+def test_the_host_prefixed_value_outranks_an_unprefixed_one(
+        tmp_path, monkeypatch):
+    """The security-relevant half of the shadowing story, and it is a
+    FRAMEWORK behaviour we now depend on: Sanic resolves the ``__Host-``
+    prefix onto the bare name and prefers the prefixed value when both are
+    sent.
+
+    That ordering is the one we want. A ``__Host-`` cookie is host-only by
+    construction -- a browser refuses to set one carrying Domain, and sends it
+    only to the exact origin that set it -- so a prefixed value reaching this
+    broker came from this broker's own page. An unprefixed one may have been
+    planted by any sibling under a registrable parent. Pinned here because
+    nothing else would notice if a Sanic upgrade reversed it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _, r = authed(app).get("/", headers={
+        "Host": "dev.example:4445",
+        "Cookie": ("__Host-bl_csp_hosts=https://ours.example; "
+                   "bl_csp_hosts=https://planted.example"),
+    })
+    cs = _directives(r.headers[REPORT_ONLY])["connect-src"]
+    assert "https://ours.example" in cs
+    assert "https://planted.example" not in cs, (
+        "an unprefixed shadow cookie outranked the __Host- one")
+
+
+def test_the_per_cookie_cache_is_bounded(tmp_path, monkeypatch):
+    """The cache is keyed on an ATTACKER-CHOSEN string, so its bound is the
+    only thing between it and unbounded growth: each distinct sub-cap cookie
+    value would otherwise add ~2KB of key, permanently, from a middleware
+    that runs on every response."""
+    app = _make_app(tmp_path, monkeypatch)
+    client = authed(app)
+    for i in range(MAX_CSP_COOKIE_CACHE + 5):
+        client.get("/", headers={
+            "Host": "dev.example:4445",
+            "Cookie": f"{CSP_HOSTS_COOKIE}=http://h{i}.example:1",
+        })
+    assert len(app.ctx.csp_cookie_cache) <= MAX_CSP_COOKIE_CACHE + 1, (
+        "the per-cookie cache grew past its bound")
+
+
+def test_the_union_respects_the_fragment_size_cap(tmp_path, monkeypatch):
+    """The cap lives on the UNION, not only on each source. Without it a
+    cookie doubles connect-src past the ceiling the /state path enforces."""
+    hosts = [{"id": f"h{i}", "url": f"https://state-{i:02d}-{'x' * 40}.example"}
+             for i in range(MAX_CSP_HOSTS)]
+    app = _make_app(tmp_path, monkeypatch, hosts=hosts)
+    cookie = "|".join(f"https://cookie-{i:02d}-{'y' * 40}.example"
+                      for i in range(20))
+    r = _get(app, cookie=cookie)
+    cs = _directives(r.headers[REPORT_ONLY])["connect-src"]
+    assert len(cs) <= MAX_CSP_HOSTS_FRAGMENT_CHARS + 200, (
+        f"connect-src grew to {len(cs)} chars, past the fragment cap")
+
+
+def test_a_bracketed_host_that_is_not_ipv6_is_skipped(tmp_path, monkeypatch):
+    """urlsplit strips brackets without validating what was inside (3.10
+    accepts "[evil.com]" and returns "evil.com"; 3.11+ raises), so an origin
+    that differs from what the value DENOTES could reach the header, and do it
+    differently per interpreter. No privilege is gained -- the writer could
+    send http://evil.com directly -- but a source must mean what it says, and
+    this broker runs on more than one Python."""
+    r = _get(_make_app(tmp_path, monkeypatch), cookie="http://[evil.com]")
+    cs = _directives(r.headers[REPORT_ONLY])["connect-src"]
+    assert "evil.com" not in cs
+    # ...while a real IPv6 literal still works.
+    r2 = _get(_make_app(tmp_path, monkeypatch), cookie="http://[::1]:8080")
+    assert "http://[::1]:8080" in (
+        _directives(r2.headers[REPORT_ONLY])["connect-src"])
 
 
 # ---- the hostile cookie ----------------------------------------------------

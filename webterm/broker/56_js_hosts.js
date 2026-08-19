@@ -77,6 +77,9 @@
         // encoding in a cookie value, so no decoder sits in front of the
         // broker's hardened parse.
         const CSP_HOSTS_COOKIE = 'bl_csp_hosts';
+        // The https-only twin: `__Host-` is a browser-enforced prefix that
+        // forbids a Domain attribute, so no sibling host can shadow it.
+        const CSP_HOSTS_COOKIE_HOST = '__Host-bl_csp_hosts';
         const CSP_COOKIE_MAX_ORIGINS = 32;
         const CSP_COOKIE_MAX_CHARS = 1024;
         //: shape a rebuilt http(s) origin may have (host chars, IPv6 brackets,
@@ -120,9 +123,24 @@
                 // ONLY over https: the dev broker is plain http, where a Secure
                 // cookie is silently never sent — which reads exactly like
                 // the feature not working.
-                let cookie = CSP_HOSTS_COOKIE + '=' + value
+                //
+                // On https the name carries the `__Host-` prefix, which the
+                // BROWSER enforces: it refuses the cookie unless it is Secure,
+                // Path=/ and — the reason it is here — carries NO `Domain`.
+                // Cookies are not origin-scoped, so without this any sibling
+                // host under a registrable parent could set a same-named
+                // cookie every sibling broker receives (`ts.net` is a public
+                // suffix, so `machine-a.foo.ts.net` can write for
+                // `foo.ts.net`). SameSite and Secure govern SENDING, never who
+                // else may SET the name. Over plain http the prefix is not
+                // available (it requires Secure), so the broker also unions
+                // every value it receives — belt and braces, and the union is
+                // what makes a shadowing cookie unable to NARROW the list.
+                const https = window.location.protocol === 'https:';
+                const name = https ? CSP_HOSTS_COOKIE_HOST : CSP_HOSTS_COOKIE;
+                let cookie = name + '=' + value
                     + '; Path=/; SameSite=Strict; Max-Age=31536000';
-                if (window.location.protocol === 'https:') cookie += '; Secure';
+                if (https) cookie += '; Secure';
                 document.cookie = cookie;
             } catch (e) { console.warn('csp hosts cookie write failed:', e); }
         }
