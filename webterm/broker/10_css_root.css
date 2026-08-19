@@ -479,7 +479,15 @@
             .term-window .mcp-btn.mcp-flash-read,
             .term-window .mcp-btn.mcp-flash-write { animation: none; }
         }
-        .term-window .mcp-popover {
+        /* #202: ctx.popover's node joins the EXISTING popover dress rather than
+           getting a second look -- one selector group, one set of declarations.
+           A mod whose node already carries its own class still wins: mod CSS is
+           injected after this block at equal (0,1,0) specificity, so the dress
+           here is a default, not an override. Deliberately no transition and no
+           animation: see 15_css_dialogs.css on why prefers-reduced-motion-gated
+           chrome is broken-or-fine depending on who is testing. */
+        .term-window .mcp-popover,
+        .mod-popover {
             position: absolute;
             z-index: 50;
             min-width: 118px;
@@ -490,6 +498,11 @@
             border-radius: 4px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.5);
         }
+        /* A ctx.popover lives on <body> and is placed in VIEWPORT coordinates
+           (the fragment writes left/top inline from getBoundingClientRect), so
+           it is fixed, not absolute. Above the strip and its windows, below the
+           settings overlay (150000) and every dialog. */
+        .mod-popover { position: fixed; z-index: 140000; }
         .term-window .mcp-popover .mcp-head {
             font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
             color: #999; padding: 3px 8px 4px;

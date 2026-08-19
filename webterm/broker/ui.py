@@ -311,6 +311,36 @@ _ORDERED = [
     # it shares nothing -- either order works. Still before the mod-script
     # splice, since a mod's init reads the finished ctx.
     "86n_js_mod_introspect.js",
+    # #202: ctx.popover.anchor(node, anchorEl, opts) -- the core-owned anchored
+    # popover. Clamping to the viewport (with a FLIP rather than a slide, so the
+    # box never covers the control it points at), outside-click and Escape
+    # dismissal, and removal on mod teardown are all core's -- which is what
+    # retires the hand-rolled offsetLeft/offsetTop anchoring plus per-popover
+    # document capture listeners in mods/git, and the by-hand
+    # `Math.max(6, Math.min(...))` viewport clamp in mods/workspaces. NO
+    # ANIMATION at all: not "animate unless prefers-reduced-motion", which is
+    # the shape 15_css_dialogs.css already argues against for this chrome
+    # ("simply instant for a viewer who has it set"). Its own fragment for the
+    # same split-never-trim reason 86e-86n got one: 86c is at the 2500-line cap.
+    # Ordered AFTER 86c (extender registry + capability map, and extenders run
+    # in THIS list's order); it shares nothing with 86m/86n/86p, so its order
+    # among those is free. Still before the mod-script splice, since a mod's
+    # init reads the finished ctx.
+    "86o_js_mod_popover.js",
+    # #202: ctx.assets.url(name) -- an INSTALLED mod's handle on its own bytes,
+    # '/mods/<id>/<gen>/<name>', built by 86b's _modAssetUrl out of 86b's own
+    # per-page package record. A SHIPPED mod gets `undefined` on purpose: its
+    # files live in the shipped tree, which no route serves per-file, and adding
+    # one would extend FORCED-PUBLIC serving there -- a separate exposure
+    # decision. A name is answered only when it is a key of the package's
+    # `integrity` map, so a traversal, a query string or a file the package does
+    # not ship is unrepresentable rather than defended against. Its own fragment
+    # for the same split-never-trim reason 86e-86n got one: 86c is at the
+    # 2500-line cap. Ordered AFTER 86c (extender registry + capability map) and
+    # after 86b (whose _modAssetUrl and package bag it reads); it shares nothing
+    # with 86m/86n, so its order among those is free. Still before the
+    # mod-script splice, since a mod's init reads the finished ctx.
+    "86p_js_mod_assets.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

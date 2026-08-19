@@ -26477,3 +26477,838 @@ def test_a_disabled_contributors_help_cards_are_gone(introspect_harness):
     assert r["afterTitles"] == []
     # ...and the snapshot the caller already held did not change under it.
     assert r["staleSnapshot"] == ["Patterns"]
+
+
+# ---------------------------------------------------------------------------
+# ctx.assets.url (#202 / A66) -- an installed mod's handle on its own bytes.
+# The behaviour cases below EXECUTE the shipped fragment in node, the way the
+# #194/#197 cases execute the registry: nothing here is a copy of the code.
+# ---------------------------------------------------------------------------
+
+
+def _assets_src():
+    # #202's ctx.assets rides its own fragment for the 2500-line cap reason
+    # 86e-86n each did; 86c had 11 lines spare.
+    return (BROKER_DIR / "86p_js_mod_assets.js").read_text(encoding="utf-8")
+
+
+def test_the_assets_fragment_is_ordered_and_registered():
+    # The fragment and its _ORDERED entry land together -- the drift gate fails
+    # both ways, and an unregistered fragment is bytes nobody serves.
+    assert "86p_js_mod_assets.js" in ui._ORDERED
+    i = ui._ORDERED.index("86p_js_mod_assets.js")
+    # AFTER 86b (whose _modAssetUrl and package bag it reads) and after 86c
+    # (extender registry + capability map); BEFORE the boot fragment, since a
+    # mod's init reads the finished ctx.
+    assert i > ui._ORDERED.index("86b_js_mod_packages.js")
+    assert i > ui._ORDERED.index("86c_js_mod_ctx_ext.js")
+    assert i < ui._ORDERED.index("90_js_mod_boot.js")
+    assert _assets_src() in ui.INDEX_HTML, \
+        "the fragment must actually be in the served page"
+
+
+def test_the_assets_family_registers_its_capability_entry():
+    # ctx.capabilities is a TRUE inventory or it is worthless: a family added by
+    # an extender with no entry makes the map lie by omission. (The generic
+    # drift gate above enforces this for every family; this pins the name.)
+    src = _assets_src()
+    assert ("if (typeof _registerCtxExtender === 'function') {\n"
+            "            _registerCtxExtender(_ctxModAssets);\n"
+            "        }\n") in src
+    assert ("if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('assets', 1);\n"
+            "        }\n") in src
+
+
+def test_the_assets_url_is_built_by_the_loaders_own_builder():
+    # ONE source of truth for a mod asset URL. A hand-rolled concat here could
+    # drift from 86b's (which encodeURIComponent's every segment) and serve a
+    # different URL than the <script src> injection uses.
+    src = _code_only(_assets_src())
+    assert "return _modAssetUrl(modId, gen, name);" in src
+    assert "'/mods/'" not in src, "no second URL builder in this fragment"
+    # ...and the generation comes from the EXISTING per-page package record.
+    assert "const gen = pkg.gen;" in src
+    assert "mods.packages" in src
+
+
+def test_the_assets_doc_forbids_persisting_a_url_and_secrets_in_assets():
+    # Both are silent-failure modes: a cached URL 404s only after an upgrade,
+    # and the serving route is forced-public, so an asset is world-readable.
+    src = _assets_src()
+    assert "NEVER PERSIST A URL" in src
+    assert "FORCED-PUBLIC. NO SECRETS IN ASSETS, EVER" in src
+
+
+_ASSETS_HARNESS = r"""
+'use strict';
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = console.error;
+console.info = function () {};
+
+const window = { __mods: { ctxVersion: 1, packages: Object.create(null) } };
+
+// 86b's URL builder, verbatim -- the fragment under test calls it.
+__ASSET_URL__
+
+__REGISTRY__
+
+__NEEDS__
+
+__ASSETS__
+
+const GEN = 'a'.repeat(64);
+const GEN2 = 'b'.repeat(64);
+function install(id, gen, names) {
+    const integrity = {};
+    for (const n of names) integrity[n] = 'sha256-x';
+    window.__mods.packages[id] = { id: id, gen: gen, integrity: integrity };
+    return window.__mods.packages[id];
+}
+function ctxFor(id) {
+    const ctx = { id: id, ctxVersion: 1, storage: {} };
+    _applyCtxExtenders(ctx, { id: id, unloads: [] });
+    return ctx;
+}
+
+const cases = {
+    installed: function () {
+        install('demo', GEN, ['app.js', 'skin.css']);
+        const ctx = ctxFor('demo');
+        return {
+            js: ctx.assets.url('app.js'),
+            css: ctx.assets.url('skin.css'),
+            frozen: Object.isFrozen(ctx.assets),
+        };
+    },
+    shipped: function () {
+        // No package record at all: a shipped mod was spliced into the page.
+        const ctx = ctxFor('clock');
+        return { url: ctx.assets.url('clock.css'),
+                 hasFamily: typeof ctx.assets.url === 'function' };
+    },
+    refusals: function () {
+        install('demo', GEN, ['app.js']);
+        const ctx = ctxFor('demo');
+        const asked = ['../../etc/passwd', '../app.js', 'sub/app.js',
+                       '/app.js', '/mods/demo/' + GEN + '/app.js',
+                       'missing.js', '', 'app.js?v=2', 'app.js#top',
+                       'help.md', 'mod.json', 'APP.JS', ' app.js', 'app.js ',
+                       'app.js/', '..'];
+        const out = {};
+        for (const n of asked) out[n] = ctx.assets.url(n);
+        const nonStrings = [null, undefined, 42, {}, ['app.js'],
+                            { toString: function () { return 'app.js'; } }]
+            .map(function (v) { return ctx.assets.url(v); });
+        return { out: out, nonStrings: nonStrings,
+                 defined: Object.keys(out).filter(function (k) {
+                     return out[k] !== undefined; }) };
+    },
+    poisoned_map: function () {
+        // The membership set comes off the wire (/info's `mods[].integrity`).
+        // If it were ever poisoned or the server grammar relaxed, a name must
+        // STILL not be able to express a path, a query or a fragment -- this
+        // is the forced-public route, so an escaped directory is the case that
+        // matters. That is what the client-side grammar buys.
+        const pkg = install('demo', GEN, ['app.js']);
+        pkg.integrity['../../../etc/passwd'] = 'sha256-x';
+        pkg.integrity['../other/app.js'] = 'sha256-x';
+        pkg.integrity['app.js?steal=1'] = 'sha256-x';
+        pkg.integrity['secrets.md'] = 'sha256-x';
+        const ctx = ctxFor('demo');
+        const out = {};
+        for (const n of Object.keys(pkg.integrity)) out[n] = ctx.assets.url(n);
+        return { defined: Object.keys(out).filter(function (k) {
+            return out[k] !== undefined; }) };
+    },
+    no_gen: function () {
+        // A catalog row with no usable gen leaves _modPackage's default ''.
+        install('demo', '', ['app.js']);
+        const a = ctxFor('demo').assets.url('app.js');
+        install('demo2', 'not-a-hash', ['app.js']);
+        const b = ctxFor('demo2').assets.url('app.js');
+        return { empty: a, malformed: b };
+    },
+    per_page_load: function () {
+        // The URL is resolved AT CALL TIME off the page's package record --
+        // never captured when the ctx was built, and never memoized.
+        const pkg = install('demo', GEN, ['app.js']);
+        const ctx = ctxFor('demo');
+        const before = ctx.assets.url('app.js');
+        pkg.gen = GEN2;                       // as an upgrade would republish
+        const after = ctx.assets.url('app.js');
+        delete window.__mods.packages['demo'];   // as an uninstall would
+        const gone = ctx.assets.url('app.js');
+        return { before: before, after: after, gone: gone };
+    },
+    capability: function () {
+        install('demo', GEN, ['app.js']);
+        const inst = ctxFor('demo');
+        const ship = ctxFor('clock');
+        return { installed: inst.capabilities.assets,
+                 shipped: ship.capabilities.assets };
+    },
+};
+
+const name = process.argv[2];
+const res = cases[name]();
+console.log(JSON.stringify({ errors: errors, res: res }));
+"""
+
+
+def _assets_harness_text():
+    pkgs = _packages_src()
+    builder = (_frag_fn(pkgs, "function _modAssetUrl(id, gen, name) {")
+               + "\n        }\n")
+    return (_ASSETS_HARNESS
+            .replace("__ASSET_URL__", builder)
+            .replace("__REGISTRY__", _ctx_registry_source())
+            .replace("__NEEDS__", _needs_source())
+            .replace("__ASSETS__", _assets_src()))
+
+
+@pytest.fixture(scope="module")
+def assets_harness(tmp_path_factory):
+    d = tmp_path_factory.mktemp("assets")
+    p = d / "harness.js"
+    p.write_text(_assets_harness_text(), encoding="utf-8")
+    return p
+
+
+def _run_assets(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_installed_mod_gets_the_content_addressed_url(assets_harness):
+    r = _run_assets(assets_harness, "installed")
+    assert r["errors"] == []
+    gen = "a" * 64
+    assert r["res"]["js"] == f"/mods/demo/{gen}/app.js"
+    assert r["res"]["css"] == f"/mods/demo/{gen}/skin.css"
+    assert r["res"]["frozen"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_shipped_mod_gets_undefined_and_can_feature_detect(assets_harness):
+    # Deliberate: the shipped tree has no per-file route, and adding one would
+    # extend forced-public serving to it -- a separate exposure decision.
+    r = _run_assets(assets_harness, "shipped")
+    assert r["errors"] == []
+    # JSON.stringify drops an `undefined` VALUE from an object, so the key
+    # being absent is what "returned undefined" looks like on this wire.
+    assert "url" not in r["res"], "a shipped mod must get undefined, not a URL"
+    # The FAMILY is still there -- no half-family; the detection is on the
+    # return value, not on the build.
+    assert r["res"]["hasFamily"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_nothing_the_route_will_not_serve_gets_a_url(assets_harness):
+    r = _run_assets(assets_harness, "refusals")
+    assert r["errors"] == []
+    assert r["res"]["defined"] == [], (
+        "these must all be undefined: traversal, a leading slash, a name the "
+        "package does not ship, empty, a query/fragment, an unservable suffix")
+    # JSON turns an undefined ARRAY element into null, so this half reads null.
+    assert all(v is None for v in r["res"]["nonStrings"]), \
+        "a non-string name is never coerced into a URL"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_poisoned_membership_map_still_cannot_express_a_path(assets_harness):
+    # The name grammar is belt to the membership braces, and this is what it
+    # buys: even if the set of names came back hostile, nothing that escapes
+    # the package directory (or carries a query) becomes a URL.
+    r = _run_assets(assets_harness, "poisoned_map")
+    assert r["errors"] == []
+    assert r["res"]["defined"] == ["app.js"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_package_without_a_usable_generation_gets_no_url(assets_harness):
+    r = _run_assets(assets_harness, "no_gen")
+    assert r["errors"] == []
+    assert r["res"] == {}, \
+        "never '/mods/demo//app.js', and never a non-sha256 <gen>"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_url_resolves_per_call_off_this_pages_package_record(assets_harness):
+    r = _run_assets(assets_harness, "per_page_load")
+    assert r["errors"] == []
+    assert r["res"]["before"] == "/mods/demo/" + "a" * 64 + "/app.js"
+    # Resolved at CALL time, not captured at ctx construction: this is why a mod
+    # must never persist one -- an upgrade changes the <gen>.
+    assert r["res"]["after"] == "/mods/demo/" + "b" * 64 + "/app.js"
+    assert "gone" not in r["res"], "an uninstalled package answers undefined"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_assets_is_in_the_capability_map_for_every_mod(assets_harness):
+    r = _run_assets(assets_harness, "capability")
+    assert r["errors"] == []
+    # The family exists on both ctxs, so both report it: the shipped/installed
+    # difference is the ANSWER, not the surface.
+    assert r["res"] == {"installed": 1, "shipped": 1}
+
+
+# --------------------------------------------------------------------------- #
+# #202 / A64: ctx.popover -- the core-owned anchored popover.
+# ---------------------------------------------------------------------------
+
+_POPOVER_SLICE_START = "// ---- ctx.popover: the core-owned, anchored"
+_POPOVER_SLICE_END = "// ---- end ctx.popover"
+
+
+def _popover_src():
+    return (BROKER_DIR / "86o_js_mod_popover.js").read_text(encoding="utf-8")
+
+
+def _popover_source():
+    """A64's range in 86o, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node harness below drive the
+    SHIPPED popover instead of a copy of it."""
+    src = _popover_src()
+    start = src.index(_POPOVER_SLICE_START)
+    end = src.index(_POPOVER_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for sym in ("const _MOD_POPOVERS = [];",
+                "function _modPopoverPlace(entry) {",
+                "function _modPopoverClose(entry, why) {",
+                "function _modPopoverTick() {",
+                "function _modPopoverSync() {",
+                "function _modPopoverOutside(e) {",
+                "function _modPopoverKey(e) {",
+                "function _dropModPopovers(rec) {",
+                "function _anchorModPopover(rec, node, anchorEl, opts) {",
+                "function _ctxPopover(ctx, rec) {"):
+        assert sym in body, f"the popover range no longer defines {sym!r}"
+    return body
+
+
+def test_popover_lands_in_its_own_fragment_and_is_registered():
+    # #202: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap and the rule for
+    # that cap is split, never trim -- so ctx.popover gets a NEW ordered
+    # fragment, the precedent 86e-86n set. The drift gate reads BOTH
+    # directions: a file with no registration never reaches the page, a
+    # registration with no file breaks the build.
+    assert "86o_js_mod_popover.js" in ui._ORDERED
+    assert (BROKER_DIR / "86o_js_mod_popover.js").is_file()
+    at = ui._ORDERED.index
+    # After 86c (it uses that fragment's extender registry and capability map);
+    # still before the mod-script splice, since a mod's init reads the finished
+    # ctx.
+    assert at("86c_js_mod_ctx_ext.js") < at("86o_js_mod_popover.js") \
+        < at(ui._MOD_SPLICE_BEFORE)
+    n = len(_popover_src().splitlines())
+    assert n <= ui._MAX_LINES, f"86o is over the cap at {n}"
+    src = _popover_src()
+    for sym in ("function _anchorModPopover(rec, node, anchorEl, opts) {",
+                "function _dropModPopovers(rec) {",
+                "function _ctxPopover(ctx, rec) {"):
+        assert sym in src, f"{sym!r} did not land in 86o"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#202 symbol missing/duplicated in the served page: {sym!r}"
+        assert sym not in _loader_src() and sym not in _ctx_ext_src(), \
+            f"{sym!r} belongs in 86o, not 86c or the loader"
+    # Guarded registrations, for a page assembled without #194's registry.
+    assert "if (typeof _registerCtxExtender === 'function') {" in src
+    assert src.index("if (typeof _registerCtxExtender === 'function') {") \
+        < src.index("_registerCtxExtender(_ctxPopover);")
+    assert ("        if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('popover', 1);\n"
+            "        }\n") in src
+
+
+def test_ctx_popover_owes_a_capability_entry_and_registers_it():
+    # #197's map is per FAMILY, and `popover` is a NEW top-level member -- like
+    # #202's own `dialog`, #198's `signal`, #199's `commands`. It is a family
+    # and not a member of an existing one because it is not ABOUT a window: a
+    # popover anchors to any element on the page (workspaces' preview hangs off
+    # a taskbar dot, with no window anywhere in the chain), and the open list is
+    # page-wide. Without the entry the map would lie by omission.
+    assert "popover" in _ctx_families_added_by_extenders(), \
+        "the extender must put `popover` on the ctx as a top-level member"
+    assert "popover" in _standalone_capability_registrations()
+    assert "popover" not in set(_ctx_family_keys()), \
+        "ctx.popover is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # Additive: a new family does not move the contract version.
+    assert "ctxVersion: 1," in _loader_src()
+
+
+def test_the_popover_has_no_animation_and_no_os_motion_query():
+    # THE TRAP. The failure mode is not "no animation" -- it is animation gated
+    # on the OS `prefers-reduced-motion` query, which is instant for a viewer
+    # who has reduced motion forced on and animated for everyone else, so the
+    # chrome is broken-or-fine depending on who is testing. 15_css_dialogs.css
+    # already makes that argument for the Control Panel dress; this chrome
+    # follows it. There is no app-level motion setting in this repo to gate on
+    # instead (#125's slideScreenMs is the tiled-strip slide RATE, not a motion
+    # preference), so the popover simply has no motion: nothing to gate, and no
+    # OS query anywhere near it.
+    body = _popover_source()
+    # The CODE, not the prose: the range's comments discuss the trap by name.
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    for banned in ("prefers-reduced-motion", "matchMedia", "transition",
+                   "@keyframes", "animate", "opacity", "setTimeout(_modPopoverStep"):
+        assert banned not in code, \
+            f"the popover range must not name {banned!r}: this chrome has no motion"
+    # ...and the same for the dress it joins: the `.mod-popover` rules must add
+    # no transition/animation to the shared popover group.
+    css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
+    assert ".mod-popover" in css, "the popover node's dress must reach the page"
+    assert ".mod-popover" in INDEX_HTML
+    block = css[css.index(".term-window .mcp-popover,"):]
+    block = block[:block.index(".mcp-head")]
+    for banned in ("transition", "animation", "@keyframes"):
+        assert banned not in block, \
+            f"the popover dress must not name {banned!r}"
+    # It JOINS the existing popover selector group rather than inventing a
+    # second look -- one set of declarations for both.
+    assert ".term-window .mcp-popover,\n        .mod-popover {" in css
+
+
+_POPOVER_HARNESS = r"""
+'use strict';
+// E64 runs the SHIPPED code in node: #194's ctx-extender registry, 86's own
+// _runUnloads, and the whole #202 popover range -- driven through a DOM shim
+// that is only as big as those slices touch. Every geometry number below comes
+// out of the shipped _modPopoverPlace, not out of a copy of it.
+const logged = [];
+for (const k of ['log', 'warn', 'error', 'info', 'debug']) {
+    console[k] = function () {
+        logged.push(k + ' ' + Array.prototype.map.call(arguments, String)
+            .join(' '));
+    };
+}
+
+// ---- the DOM these slices touch, and nothing else -------------------------
+function El(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.parentNode = null;
+    this.classes = new Set();
+    this.style = {};
+    this.rect = { left: 0, top: 0, width: 0, height: 0 };
+    this.offsetWidth = 0;
+    this.offsetHeight = 0;
+}
+Object.defineProperty(El.prototype, 'classList', {
+    get: function () {
+        const self = this;
+        return {
+            add: function (c) { self.classes.add(c); },
+            remove: function (c) { self.classes.delete(c); },
+            contains: function (c) { return self.classes.has(c); },
+        };
+    },
+});
+Object.defineProperty(El.prototype, 'isConnected', {
+    get: function () {
+        let n = this;
+        while (n) { if (n === body) return true; n = n.parentNode; }
+        return false;
+    },
+});
+El.prototype.appendChild = function (k) {
+    if (k.parentNode) k.parentNode.removeChild(k);
+    k.parentNode = this; this.children.push(k); return k;
+};
+El.prototype.removeChild = function (k) {
+    const i = this.children.indexOf(k);
+    if (i >= 0) this.children.splice(i, 1);
+    k.parentNode = null;
+    return k;
+};
+El.prototype.contains = function (o) {
+    let n = o;
+    while (n) { if (n === this) return true; n = n.parentNode; }
+    return false;
+};
+El.prototype.getBoundingClientRect = function () {
+    const r = this.rect;
+    return { left: r.left, top: r.top, width: r.width, height: r.height,
+             right: r.left + r.width, bottom: r.top + r.height };
+};
+
+const body = new El('body');
+const docHandlers = Object.create(null);
+const document = {
+    body: body,
+    createElement: function (t) { return new El(t); },
+    addEventListener: function (t, fn, cap) {
+        (docHandlers[t] = docHandlers[t] || []).push(fn);
+    },
+    removeEventListener: function (t, fn, cap) {
+        const a = docHandlers[t] || [];
+        const i = a.indexOf(fn);
+        if (i >= 0) a.splice(i, 1);
+    },
+};
+const window = { innerWidth: 800, innerHeight: 600 };
+
+// rAF as a timer, so a case can advance frames deterministically.
+let rafSeq = 0;
+const rafs = new Map();
+function requestAnimationFrame(fn) {
+    const id = ++rafSeq;
+    rafs.set(id, fn);
+    return id;
+}
+function cancelAnimationFrame(id) { rafs.delete(id); }
+function frame() {
+    const due = Array.from(rafs.entries());
+    rafs.clear();
+    for (const e of due) e[1](0);
+}
+function mousedownOn(el) {
+    for (const fn of (docHandlers.mousedown || []).slice()) fn({ target: el });
+}
+function pressEscape() {
+    let prevented = 0, stopped = 0;
+    for (const fn of (docHandlers.keydown || []).slice()) {
+        fn({ key: 'Escape',
+             preventDefault: function () { prevented++; },
+             stopPropagation: function () { stopped++; } });
+    }
+    return { prevented: prevented, stopped: stopped };
+}
+function bound() {
+    return { mousedown: (docHandlers.mousedown || []).length,
+             keydown: (docHandlers.keydown || []).length,
+             rafs: rafs.size };
+}
+function anchorAt(left, top, w, h) {
+    const a = new El('button');
+    a.rect = { left: left, top: top, width: w, height: h };
+    body.appendChild(a);
+    return a;
+}
+function panel(w, h) {
+    const n = new El('div');
+    n.offsetWidth = w; n.offsetHeight = h;
+    return n;
+}
+function pos(n) { return [n.style.left, n.style.top]; }
+function onBody(n) { return body.children.indexOf(n) >= 0; }
+
+__REGISTRY__
+__UNLOADS__
+__POPOVER__
+
+// ONE ACTIVATION, the way initMod builds one.
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+
+const CASES = {};
+
+// E64 clause: CLAMPING is core's job. Every number here is produced by the
+// shipped placer; the hand-rolled clamps in mods/workspaces are what it makes
+// unnecessary. The vertical axis FLIPS rather than sliding, because sliding a
+// popover up to fit would put it over the control it points at.
+CASES.clamping_is_cores_job = function () {
+    const a = activate('alpha');
+    const out = {};
+    // Runs off the RIGHT edge: clamped to innerWidth - w - 6.
+    const n1 = panel(200, 100);
+    a.ctx.popover.anchor(n1, anchorAt(700, 100, 90, 18), {});
+    out.rightEdge = pos(n1);
+    // Runs off the BOTTOM: flipped ABOVE the anchor, not slid up over it.
+    const n2 = panel(200, 100);
+    a.ctx.popover.anchor(n2, anchorAt(100, 560, 80, 18), {});
+    out.bottomFlip = pos(n2);
+    // top-* that runs off the TOP flips the other way, below the anchor.
+    const n3 = panel(200, 100);
+    a.ctx.popover.anchor(n3, anchorAt(100, 10, 80, 18),
+                         { placement: 'top-start' });
+    out.topFlip = pos(n3);
+    // Left edge and the centred placement.
+    const n4 = panel(200, 100);
+    a.ctx.popover.anchor(n4, anchorAt(-40, 200, 20, 18), { placement: 'bottom' });
+    out.leftEdge = pos(n4);
+    // bottom-end aligns the RIGHT edges.
+    const n5 = panel(120, 40);
+    a.ctx.popover.anchor(n5, anchorAt(300, 200, 80, 18),
+                         { placement: 'bottom-end' });
+    out.endAlign = pos(n5);
+    // Taller than the viewport: the clamp still lands it on screen, never at a
+    // negative offset.
+    const n6 = panel(200, 5000);
+    a.ctx.popover.anchor(n6, anchorAt(100, 300, 80, 18), {});
+    out.tooTall = pos(n6);
+    out.logged = logged;
+    return out;
+};
+
+// E64 clause: OUTSIDE-CLICK DISMISSAL is core's job -- and it is judged per
+// popover, so two mods' popovers open at once behave sanely (the case a
+// hand-rolled pair of document listeners gets wrong).
+CASES.outside_click_two_mods = function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    const closes = [];
+    const na = panel(100, 50), nb = panel(100, 50);
+    const aa = anchorAt(10, 10, 40, 18), ab = anchorAt(300, 10, 40, 18);
+    const pa = a.ctx.popover.anchor(na, aa,
+        { onClose: function (w) { closes.push('a:' + w); } });
+    const pb = b.ctx.popover.anchor(nb, ab,
+        { onClose: function (w) { closes.push('b:' + w); } });
+    const out = { both: [pa.isOpen(), pb.isOpen()], bound: bound() };
+    // A click INSIDE alpha's node closes beta's and leaves alpha's.
+    const inner = new El('span');
+    na.appendChild(inner);
+    mousedownOn(inner);
+    out.afterInsideA = [pa.isOpen(), pb.isOpen()];
+    out.betaRemoved = !onBody(nb);
+    // A click on alpha's OWN ANCHOR is inside too: an anchor is a toggle, and
+    // treating it as outside makes the toggle close-then-reopen forever.
+    mousedownOn(aa);
+    out.afterAnchorClick = pa.isOpen();
+    // A click on neither closes it.
+    mousedownOn(anchorAt(500, 500, 10, 10));
+    out.afterOutside = pa.isOpen();
+    out.alphaRemoved = !onBody(na);
+    out.closes = closes;
+    // Nothing open -> the shared document listeners and the frame loop are gone.
+    out.boundAfter = bound();
+    out.logged = logged;
+    return out;
+};
+
+// Escape peels ONE layer, topmost first, and swallows the key.
+CASES.escape_peels_one = function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    const p1 = a.ctx.popover.anchor(panel(80, 40), anchorAt(10, 10, 20, 18), {});
+    const p2 = b.ctx.popover.anchor(panel(80, 40), anchorAt(60, 10, 20, 18), {});
+    const out = {};
+    const k1 = pressEscape();
+    out.afterFirst = [p1.isOpen(), p2.isOpen()];
+    out.swallowed = (k1.prevented === 1 && k1.stopped === 1);
+    pressEscape();
+    out.afterSecond = [p1.isOpen(), p2.isOpen()];
+    out.boundAfter = bound();
+    out.logged = logged;
+    return out;
+};
+
+// E64 clause: TEARDOWN AUTO-REMOVAL. A disabled mod's popover goes away
+// WITHOUT anything being clicked -- node off the page, handle closed, listeners
+// dropped -- and only that mod's.
+CASES.teardown_removes_the_popover = function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    const closes = [];
+    const na = panel(100, 50), nb = panel(100, 50);
+    const p1 = a.ctx.popover.anchor(na, anchorAt(10, 10, 20, 18),
+        { onClose: function (w) { closes.push('a1:' + w); } });
+    const p2 = a.ctx.popover.anchor(panel(100, 50), anchorAt(40, 10, 20, 18),
+        { onClose: function (w) { closes.push('a2:' + w); } });
+    const pb = b.ctx.popover.anchor(nb, anchorAt(300, 10, 20, 18),
+        { onClose: function (w) { closes.push('b:' + w); } });
+    const out = { before: [p1.isOpen(), p2.isOpen(), pb.isOpen()],
+                  onBodyBefore: [onBody(na), onBody(nb)] };
+    _runUnloads(a.rec);          // the drain a disable / reload / uninstall runs
+    out.after = [p1.isOpen(), p2.isOpen(), pb.isOpen()];
+    out.onBodyAfter = [onBody(na), onBody(nb)];
+    out.closes = closes;
+    out.openCount = _MOD_POPOVERS.length;
+    // Beta is still open, so the shared listeners are still armed -- teardown
+    // must not disarm another mod's popover's dismissal.
+    out.stillBound = bound().mousedown === 1;
+    // An anchor() from an already-dead activation is refused, not queued: a
+    // popover nothing would ever remove is exactly what this clause forbids.
+    const dead = a.ctx.popover.anchor(panel(10, 10), anchorAt(0, 0, 5, 5), {});
+    out.deadOpen = dead.isOpen();
+    out.deadCount = _MOD_POPOVERS.length;
+    out.logged = logged;
+    return out;
+};
+
+// THE STANDING QUESTION, the cases a hand-positioned popover never handled:
+// the anchor leaving the DOM, the anchor MOVING with no scroll/resize event
+// (a window drag), the viewport changing size, and the mod refilling the node
+// after anchoring.
+CASES.the_world_moves_under_it = function () {
+    const a = activate('alpha');
+    const out = {};
+    const node = panel(120, 60);
+    const anchor = anchorAt(100, 100, 40, 18);
+    const closes = [];
+    const p = a.ctx.popover.anchor(node, anchor,
+        { onClose: function (w) { closes.push(w); } });
+    out.initial = pos(node);
+    // A window DRAG: the anchor's rect moves and NOTHING fires -- no scroll,
+    // no resize, no mutation. The per-frame re-measure is what catches it.
+    anchor.rect = { left: 400, top: 300, width: 40, height: 18 };
+    frame();
+    out.afterDrag = pos(node);
+    // The mod refills the node after anchoring: it is re-clamped at its NEW
+    // size, so growth cannot push it off the edge.
+    node.offsetWidth = 500; node.offsetHeight = 400;
+    frame();
+    out.afterGrow = pos(node);
+    // The viewport shrinks (resize): same one pass, no listener.
+    window.innerWidth = 600; window.innerHeight = 500;
+    frame();
+    out.afterResize = pos(node);
+    window.innerWidth = 800; window.innerHeight = 600;
+    // The ANCHOR IS REMOVED from the page while the popover is open. A
+    // hand-positioned popover strands a box pointing at nothing; core closes.
+    out.openBeforeGone = p.isOpen();
+    body.removeChild(anchor);
+    frame();
+    out.openAfterGone = p.isOpen();
+    out.nodeRemoved = !onBody(node);
+    out.closes = closes;
+    // ...and with nothing open the loop and the listeners are disarmed.
+    out.boundAfter = bound();
+    // reposition() on a closed handle is a no-op, not a throw.
+    out.repositionAfterClose = p.reposition();
+    out.logged = logged;
+    return out;
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    process.stdout.write('case threw: ' + ((e && e.stack) || e) + '\n');
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def popover_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("modpopover") / "harness.js"
+    path.write_text(
+        _POPOVER_HARNESS
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__POPOVER__", _popover_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_popover(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_popover_is_clamped_to_the_viewport_by_core(popover_harness):
+    r = _run_popover(popover_harness, "clamping_is_cores_job")
+    # 800x600 viewport, 6px inset. A 200-wide popover on an anchor at x=700
+    # would end at 900; core puts it at 800-200-6.
+    assert r["rightEdge"] == ["594px", "120px"]
+    # Off the bottom -> ABOVE the anchor (560 - 2 - 100), not slid up over it.
+    assert r["bottomFlip"] == ["100px", "458px"]
+    # top-start off the top -> BELOW the anchor (28 + 2).
+    assert r["topFlip"] == ["100px", "30px"]
+    # A negative anchor left is clamped to the inset, not honoured.
+    assert r["leftEdge"] == ["6px", "220px"]
+    # bottom-end aligns right edges: 380 - 120.
+    assert r["endAlign"] == ["260px", "220px"]
+    # Taller than the viewport: on screen at the inset, never negative.
+    assert r["tooTall"] == ["100px", "6px"]
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_outside_click_dismissal_is_per_popover(popover_harness):
+    r = _run_popover(popover_harness, "outside_click_two_mods")
+    assert r["both"] == [True, True]
+    # ONE shared pair of document listeners for the whole page, not a pair per
+    # popover (git installs its own per open).
+    assert r["bound"] == {"mousedown": 1, "keydown": 1, "rafs": 1}
+    # A click inside alpha's node is outside BETA's: beta closes, alpha stays.
+    assert r["afterInsideA"] == [True, False]
+    assert r["betaRemoved"] is True, "a dismissed popover's node must leave the page"
+    # The anchor counts as inside -- otherwise a toggle can never close.
+    assert r["afterAnchorClick"] is True
+    assert r["afterOutside"] is False
+    assert r["alphaRemoved"] is True
+    assert r["closes"] == ["b:outside", "a:outside"]
+    # Nothing open -> nothing armed.
+    assert r["boundAfter"] == {"mousedown": 0, "keydown": 0, "rafs": 0}
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_escape_closes_the_topmost_popover_only(popover_harness):
+    r = _run_popover(popover_harness, "escape_peels_one")
+    assert r["afterFirst"] == [True, False], \
+        "Escape must peel the topmost layer, not every popover on the page"
+    assert r["swallowed"] is True, \
+        "the key must not also reach whatever is behind the popover"
+    assert r["afterSecond"] == [False, False]
+    assert r["boundAfter"] == {"mousedown": 0, "keydown": 0, "rafs": 0}
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_torn_down_mod_takes_its_popovers_with_it(popover_harness):
+    r = _run_popover(popover_harness, "teardown_removes_the_popover")
+    assert r["before"] == [True, True, True]
+    assert r["onBodyBefore"] == [True, True]
+    # THE CLAUSE: nothing was clicked. `ctx.onUnload` (the per-MOD disposer, not
+    # #195's per-WINDOW info.onModTeardown -- a popover need not be owned by a
+    # window at all) removed both of alpha's, and neither of beta's.
+    assert r["after"] == [False, False, True]
+    assert r["onBodyAfter"] == [False, True]
+    assert r["closes"] == ["a1:teardown", "a2:teardown"]
+    assert r["openCount"] == 1
+    assert r["stillBound"] is True, \
+        "one mod's teardown disarmed another mod's dismissal"
+    # An anchor() from a dead activation is refused, closed, and never listed.
+    assert r["deadOpen"] is False
+    assert r["deadCount"] == 1
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_popover_survives_the_world_moving_under_it(popover_harness):
+    r = _run_popover(popover_harness, "the_world_moves_under_it")
+    assert r["initial"] == ["100px", "120px"]
+    # A DRAGGED window fires neither scroll nor resize; the per-frame
+    # re-measure is what keeps the popover on its anchor.
+    assert r["afterDrag"] == ["400px", "320px"]
+    # Refilled after anchoring: re-measured AND re-clamped at the new size
+    # (800-500-6 = 294 across, 600-400-6 = 194 down).
+    assert r["afterGrow"] == ["294px", "194px"]
+    # A smaller viewport re-clamps through the same one pass.
+    assert r["afterResize"] == ["94px", "94px"]
+    # The anchor leaving the DOM closes the popover instead of stranding it.
+    assert r["openBeforeGone"] is True
+    assert r["openAfterGone"] is False
+    assert r["nodeRemoved"] is True
+    assert r["closes"] == ["anchor-gone"]
+    assert r["boundAfter"] == {"mousedown": 0, "keydown": 0, "rafs": 0}
+    assert r["repositionAfterClose"] is False
+    assert r["logged"] == []
