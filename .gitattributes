@@ -4,6 +4,13 @@
 # of core.autocrlf. Never hand-edit it; run `python -m webterm.broker.help_corpus`.
 webterm/broker/help_corpus.json text eol=lf
 
+# Issue #203: the ctx member inventory is the same kind of artifact -- written
+# with LF by webterm/broker/ctx_inventory.py and pinned by a byte-exact
+# regenerate-and-diff test. Without this line core.autocrlf=true hands a fresh
+# clone a CRLF copy and that test fails for a file nobody edited.
+# Never hand-edit it; run `python -m webterm.broker.ctx_inventory`.
+webterm/broker/ctx_inventory.json text eol=lf
+
 # Issue #68: the desktop UI ships as ordered fragments (NN_*.html / *.css /
 # *.js) that ui.py reassembles into a BYTE-IDENTICAL INDEX_HTML. Pin them to LF
 # (like help_corpus.json above) so the on-disk form is deterministic across
