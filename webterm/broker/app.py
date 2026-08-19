@@ -2348,6 +2348,139 @@ def csp_hosts_fragment(app: Sanic) -> str:
     return getattr(app.ctx, "csp_hosts_fragment", "")
 
 
+# ---- the browser-reported origins cookie (OD8) -----------------------------
+# #190 assumed the broker could read the registry out of the /state settings
+# blob. It cannot: ``prefs._hosts`` is deliberately per-browser and never
+# rides /state (52_js_state_sync.js:8-9, 56_js_hosts.js:45,
+# 83_js_broker_identity.js:618 all say so), which left the fragment above
+# EMPTY in production. OD8 resolved that by option (a): the PAGE reports the
+# origins it intends to dial, on the document request, in a cookie the hosts
+# UI writes whenever the registry changes.
+#
+# Why a cookie is an acceptable input to a security header: it grants NOTHING
+# a token-holder could not already obtain. #190's own Problem section concedes
+# the allowlist is self-referential ("_hosts is page-token-writable, so a mod
+# holding the token can write an attacker URL into the registry ... and have
+# it inside connect-src on the next load"), so a browser-supplied origin costs
+# no property this CSP was buying — and it preserves the per-browser semantics
+# that moving _hosts server-side would reverse.
+#
+# It is still attacker-INFLUENCABLE, so it must be able to widen connect-src
+# and nothing else. That is why nothing here parses: the cookie's values are
+# adapted into the same entry shape and pushed through _csp_origin_pair /
+# _compute_csp_hosts_fragment above — the one hardened path (scheme allowlist,
+# control/whitespace/backslash pre-reject, userinfo reject, CSP host grammar,
+# origin REBUILT from parsed parts, default-port dedupe, count/size caps,
+# skip-with-a-log by entry id and never by value). A value that is not a
+# well-formed http(s) origin cannot reach the header at all, so it cannot
+# smuggle a directive, a keyword or a scheme source.
+
+#: The cookie the page writes: ``|``-separated origins ("scheme://host[:port]"
+#: only — never a whole host entry, which carries a token, and never a stored
+#: URL, which can embed userinfo credentials). ``|`` needs no encoding in a
+#: cookie value and cannot appear in an origin, so no decoder sits in front of
+#: the hardened parse.
+CSP_HOSTS_COOKIE = "bl_csp_hosts"
+#: Raw cookie length examined at all. Over this the whole cookie is ignored
+#: (one log line): the client caps itself far below, and a per-response parse
+#: must have a hard ceiling on the work a hostile client can buy.
+MAX_CSP_HOSTS_COOKIE_CHARS = 2048
+#: Entries the per-cookie fragment cache holds before it is dropped wholesale.
+#: Bounds memory when many browsers with distinct registries share a broker;
+#: the steady state (one browser, one cookie) is a dict hit.
+MAX_CSP_COOKIE_CACHE = 16
+#: The cache slot holding the /state fragment the rest of the cache was built
+#: against. A leading space: a cookie value can never contain one (and the
+#: lookup key is stripped), so no cookie can ever collide with this slot.
+_CSP_CACHE_STATE_KEY = " state"
+
+
+def _csp_cookie_fragment(cookie_value: Optional[str]) -> str:
+    """The connect-src sources a BROWSER reported, hardened by exactly the
+    registry path. Pure; the caller caches it."""
+    raw = (cookie_value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > MAX_CSP_HOSTS_COOKIE_CHARS:
+        LOGGER.warning(
+            "csp hosts cookie: %d chars over the %d cap; ignoring the cookie",
+            len(raw), MAX_CSP_HOSTS_COOKIE_CHARS)
+        return ""
+    parts = [piece for piece in raw.split("|") if piece]
+    # Adapted into the registry entry shape so the ONE hardened implementation
+    # does the work. The id is positional — a cookie carries no ids, and the
+    # skip lines must never quote the value.
+    entries = [{"id": f"cookie#{i}", "url": piece}
+               for i, piece in enumerate(parts[:MAX_CSP_HOSTS])]
+    if len(parts) > MAX_CSP_HOSTS:
+        # Belt only: _compute_csp_hosts_fragment enforces the same cap (and
+        # logs it) on whatever it is handed. Slicing here just keeps the
+        # adapter from materializing a hostile 500-element list first, so
+        # removing the slice changes no header — only the work done to build
+        # it.
+        LOGGER.warning(
+            "csp hosts cookie: %d origins over the %d cap skipped",
+            len(parts) - MAX_CSP_HOSTS, MAX_CSP_HOSTS)
+    return _compute_csp_hosts_fragment(entries)
+
+
+def _csp_union_fragment(state_frag: str, cookie_frag: str) -> str:
+    """UNION of the /state-derived fragment and the cookie-derived one, state
+    first, deduplicated and held to the same total size cap.
+
+    The /state path is kept rather than replaced: it is tested, it costs
+    nothing, and if ``_hosts`` ever does become server-side both sources work.
+    Both inputs are already ``origin twin`` pairs from the hardened builder, so
+    dedupe is a token-set test (a twin is a pure function of its origin, so a
+    duplicate origin implies a duplicate twin)."""
+    if not cookie_frag:
+        return state_frag
+    if not state_frag:
+        return cookie_frag
+    seen = set(state_frag.split(" "))
+    pieces: List[str] = []
+    length = len(state_frag)
+    tokens = cookie_frag.split(" ")
+    for i in range(0, len(tokens) - 1, 2):
+        origin, twin = tokens[i], tokens[i + 1]
+        if origin in seen:
+            continue
+        needed = len(origin) + len(twin) + 2
+        if length + needed > MAX_CSP_HOSTS_FRAGMENT_CHARS:
+            break
+        seen.add(origin)
+        pieces.extend((origin, twin))
+        length += needed
+    if not pieces:
+        return state_frag
+    return state_frag + " " + " ".join(pieces)
+
+
+def csp_request_hosts_fragment(app: Sanic,
+                               cookie_value: Optional[str]) -> str:
+    """The seam the header assembler reads: cached /state fragment UNION the
+    browser-reported one. Cached per distinct cookie value (and invalidated
+    when the /state fragment moves), so the steady-state per-response cost is
+    a dict lookup — this runs on every response."""
+    state_frag = csp_hosts_fragment(app)
+    raw = (cookie_value or "").strip()
+    if not raw:
+        return state_frag
+    cache = getattr(app.ctx, "csp_cookie_cache", None)
+    if cache is None or cache.get(_CSP_CACHE_STATE_KEY) != state_frag:
+        cache = {_CSP_CACHE_STATE_KEY: state_frag}
+        app.ctx.csp_cookie_cache = cache
+    hit = cache.get(raw)
+    if hit is not None:
+        return hit
+    if len(cache) > MAX_CSP_COOKIE_CACHE:
+        cache.clear()
+        cache[_CSP_CACHE_STATE_KEY] = state_frag
+    value = _csp_union_fragment(state_frag, _csp_cookie_fragment(raw))
+    cache[raw] = value
+    return value
+
+
 # ---- the FULL #190 policy (served Report-Only until the soak flips it) ----
 # default-src 'self' plus enumerated carve-outs, assembled per response
 # because connect-src's tail varies: the registered-hosts fragment above is
@@ -2456,13 +2589,19 @@ def _csp_self_twins(app: Sanic, host_header: Optional[str]) -> str:
     return twins
 
 
-def _assemble_full_csp(app: Sanic, host_header: Optional[str]) -> str:
+def _assemble_full_csp(app: Sanic, host_header: Optional[str],
+                       cookie_value: Optional[str] = None) -> str:
     """The full #190 policy for ONE response: the precomputed static parts
-    around ``connect-src 'self'`` + the cached registered-hosts fragment +
-    the serving origin's Host-derived ws/wss twins. Pure string work — the
-    reason the concat can live in the response middleware."""
+    around ``connect-src 'self'`` + the registered-hosts fragment (the cached
+    /state one UNION the browser-reported cookie one, OD8) + the serving
+    origin's Host-derived ws/wss twins. Pure string work — the reason the
+    concat can live in the response middleware.
+
+    The cookie can only ever add well-formed http(s) origins and their ws
+    twins INSIDE connect-src: the prefix/suffix around it are precomputed
+    constants, and every source it contributes was rebuilt from a parse."""
     prefix, suffix = app.ctx.csp_full_parts
-    frag = csp_hosts_fragment(app)
+    frag = csp_request_hosts_fragment(app, cookie_value)
     twins = _csp_self_twins(app, host_header)
     extra = " ".join(s for s in (frag, twins) if s)
     if extra:
@@ -4216,18 +4355,35 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # #190 staged rollout: the FULL policy (default-src, dynamic
         # connect-src, form-action/base-uri/frame-src) ships Report-Only on
         # every response the enforced header covers, so the soak gathers
-        # violation evidence while nothing can break. The flip needs TWO
-        # things, not one: (1) a clean soak (done 2026-08-16, zero app
-        # violations over the full sweep), and (2) the OD8 decision — the
-        # production hosts fragment is EMPTY today (no client writes
-        # settings._hosts; hosts are per-browser), so enforcing now would
-        # cut every real remote broker out of connect-src and break
-        # multi-broker pages. Once BOTH hold: make _assemble_full_csp the
-        # enforced value above and delete this line + the legacy
-        # app.ctx.csp. Pure string concat — the Host-derived twins are the
-        # only per-response piece.
+        # violation evidence while nothing can break. The flip needed TWO
+        # things: (1) a clean soak (done 2026-08-16, zero app violations over
+        # the full sweep), and (2) the OD8 decision on where the server-side
+        # allowlist comes from, because the /state-derived hosts fragment is
+        # EMPTY in production (no client writes settings._hosts; hosts are
+        # deliberately per-browser). OD8 is now RESOLVED — option (a): the
+        # page reports its own origins on the document request in the
+        # CSP_HOSTS_COOKIE cookie, unioned with the /state fragment and
+        # hardened by the same parse (see the block above csp_hosts_fragment).
+        # So the ONE remaining precondition is a re-soak in the DEPLOY shape
+        # (https/wss behind the proxy), which the owner runs. Once that is
+        # clean: make _assemble_full_csp the enforced value above and delete
+        # this line + the legacy app.ctx.csp. Pure string concat — the
+        # Host-derived twins and the per-cookie cache lookup are the only
+        # per-response pieces.
         response.headers["Content-Security-Policy-Report-Only"] = \
-            _assemble_full_csp(app, request.headers.get("host"))
+            _assemble_full_csp(app, request.headers.get("host"),
+                               request.cookies.get(CSP_HOSTS_COOKIE))
+        # The policy now varies per BROWSER (its reported origins ride a
+        # cookie), so a shared cache must not hand one browser's connect-src
+        # to another — that would read as "this host is down" once the
+        # policy enforces. Vary is set unconditionally, not only when a cookie
+        # was present: a cookie-less response that omitted it could be stored
+        # and then served to a browser that HAS one.
+        _vary = response.headers.get("Vary")
+        if not _vary:
+            response.headers["Vary"] = "Cookie"
+        elif "cookie" not in _vary.lower():
+            response.headers["Vary"] = _vary + ", Cookie"
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \

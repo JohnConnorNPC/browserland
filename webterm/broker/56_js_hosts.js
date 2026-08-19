@@ -56,6 +56,77 @@
         function hostAddedAfterLoad(id) {
             return typeof id === 'string' && id !== '' && !_hostIdsAtLoad.has(id);
         }
+
+        // #190 / OD8: the broker cannot see this registry — prefs._hosts is
+        // deliberately per-browser and never rides /state (52_js_state_sync.js
+        // excludes it from _stateBlob; 83_js_broker_identity.js persists it
+        // with savePrefsLocal so it can NEVER PUT /state), which left the
+        // server's connect-src fragment EMPTY in production. OD8 chose option
+        // (a): the PAGE reports the origins it intends to dial, in a cookie
+        // read on the document request. It grants nothing a token-holder could
+        // not already get by writing _hosts (#190's own Problem section: "the
+        // allowlist is self-referential"), so it costs no property the CSP was
+        // buying, and it keeps hosts per-browser.
+        //
+        // ORIGINS ONLY, never the entry: a host record carries a `token`, and a
+        // stored URL can embed userinfo credentials — so what goes out is
+        // scheme+host+port rebuilt from a parse, and nothing else. Capped in
+        // count and length here as well as on the server: a cookie over ~4KB is
+        // silently dropped by browsers and would push other cookies out.
+        // Values are '|'-joined: '|' cannot occur in an origin and needs no
+        // encoding in a cookie value, so no decoder sits in front of the
+        // broker's hardened parse.
+        const CSP_HOSTS_COOKIE = 'bl_csp_hosts';
+        const CSP_COOKIE_MAX_ORIGINS = 32;
+        const CSP_COOKIE_MAX_CHARS = 1024;
+        //: shape a rebuilt http(s) origin may have (host chars, IPv6 brackets,
+        //: an optional port) — a last belt over the URL parser's output.
+        const CSP_ORIGIN_RE = /^https?:\/\/(?:[a-z0-9.\-]+|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?$/;
+        function hostOriginsForCsp() {
+            const out = [];
+            const seen = new Set();
+            for (const h of getHosts()) {
+                if (out.length >= CSP_COOKIE_MAX_ORIGINS) break;
+                const raw = (h && typeof h.url === 'string') ? h.url.trim() : '';
+                if (!raw) continue;          // the local host is '' = same-origin
+                let u;
+                try { u = new URL(raw); } catch (e) { continue; }
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+                if (u.username || u.password) continue;   // never credentials
+                // u.host is host[:port] with a default port already dropped.
+                const origin = u.protocol + '//' + u.host;
+                if (!CSP_ORIGIN_RE.test(origin)) continue;
+                if (seen.has(origin)) continue;
+                seen.add(origin);
+                out.push(origin);
+            }
+            return out;
+        }
+        let _cspCookieLast = null;
+        // Idempotent and cheap when nothing moved (a string compare), so it is
+        // safe to call from any repaint the registry triggers.
+        function syncHostOriginsCookie() {
+            let value = hostOriginsForCsp().join('|');
+            while (value.length > CSP_COOKIE_MAX_CHARS) {
+                const cut = value.lastIndexOf('|');
+                if (cut === -1) { value = ''; break; }
+                value = value.slice(0, cut);   // drop whole origins, never split one
+            }
+            if (value === _cspCookieLast) return;
+            _cspCookieLast = value;
+            try {
+                // Path=/ (every route the page dials) + SameSite=Strict (this
+                // cookie has no business riding a cross-site request). Secure
+                // ONLY over https: the dev broker is plain http, where a Secure
+                // cookie is silently never sent — which reads exactly like
+                // the feature not working.
+                let cookie = CSP_HOSTS_COOKIE + '=' + value
+                    + '; Path=/; SameSite=Strict; Max-Age=31536000';
+                if (window.location.protocol === 'https:') cookie += '; Secure';
+                document.cookie = cookie;
+            } catch (e) { console.warn('csp hosts cookie write failed:', e); }
+        }
+        syncHostOriginsCookie();            // once at load, before any edit
         // #107: the host the START (+) button targets. Empty / 'local' / a removed
         // id all fall back to the local broker, so a deleted host never bricks
         // START. Resolution is deferred here (not in normalizeSettings) — same

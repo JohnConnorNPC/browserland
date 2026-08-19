@@ -424,6 +424,12 @@
         }
 
         function renderHostsList() {
+            // #190 / OD8: every registry mutation (add, edit, remove, and the
+            // host-registry apply path) repaints this list, so this is the one
+            // funnel where the browser's reported origins can be refreshed
+            // without hooking each writer. The call is a no-op string compare
+            // when the origins did not move (56_js_hosts.js).
+            syncHostOriginsCookie();
             hostsListEl.textContent = '';
             flushHostPickers();
             const hosts = getHosts();
