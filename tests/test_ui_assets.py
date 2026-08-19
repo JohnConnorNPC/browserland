@@ -28003,3 +28003,479 @@ def test_a_disable_takes_the_warning_row_with_it(degrade_harness):
     # A re-init starts from a clean list -- one activation, one warning, not two.
     assert [w["code"] for w in r["again"]] == ["duplicate_option"]
     assert r["activeAfter"] == ["x-fixture"]
+
+
+# ---- #203 (A69): a settings validator is synchronous, permanently ----------
+
+def test_an_async_validator_is_refused_at_registration():
+    """#203 section 2. The detection lands in 86a (the loader fragment is at
+    the 2500-line cap), on the SAME degraded path section 1 built, and the
+    code it reports is the SAME string the Mods-pane row renders."""
+    text = _text_src()
+    body = _frag_fn(text, "function _modSettingText(rec, key, opts) {")
+    # The seam is called FIRST -- before the suggestions list, before the
+    # fallback, before _controlSection creates a single element. A rejected
+    # control must mount no widget.
+    assert "const vrej = _modSettingValidateReject(rec, key, opts);" in body
+    assert "if (vrej) return vrej;" in body
+    assert body.index("_modSettingValidateReject(rec, key, opts)") \
+        < body.index("_modTextSuggestions(rec, key, opts.options)") \
+        < body.index("_controlSection(rec, opts)"), \
+        "the validate reject must precede the suggestions list AND any element"
+    # FAIL-CLOSED, not validator-stripped: the distinction is the atom, so it
+    # is written down where the decision lives.
+    assert "FAIL-CLOSED, NOT VALIDATOR-STRIPPED" in body
+    assert "#168" in body and "accepts EVERYTHING" in body
+    # It rides section 1's machinery rather than inventing a second shape.
+    seam = _frag_fn(text, "function _modSettingValidateReject(rec, key, opts) {")
+    assert "if (!_modAsyncFunction(opts && opts.validate)) return null;" in seam
+    assert "_modSettingWarn(rec, key, 'async_validator'," in seam
+    assert "return _modDegradedAccessor('async_validator', opts && opts.def);" in seam
+    # Shipped on the page, once each.
+    for sym in ("function _modAsyncFunction(fn) {",
+                "function _modSettingValidateReject(rec, key, opts) {"):
+        assert INDEX_HTML.count(sym) == 1, f"#203 s2 symbol missing/dup: {sym!r}"
+    # The contract is documented where the option is documented.
+    assert "SYNCHRONOUS \u2014 permanently, by" in text
+    assert "(s.error === 'async_validator')" in text
+
+
+def test_why_sync_only_rather_than_await_with_a_timeout_is_written_down():
+    """Not a style note: the three reasons are what stops a later reader from
+    'fixing' this by awaiting the verdict."""
+    text = _text_src()
+    seam = _frag_fn(text, "function _modAsyncFunction(fn) {")
+    head = text[text.index("(\u00a72): a validator is SYNCHRONOUS"):
+                text.index("function _modAsyncFunction(fn) {")]
+    assert "EVERY write attempt" in head
+    assert "400 ms" in head and "pagehide" in head and "blur" in head
+    assert "RACES /state convergence" in head
+    assert "notifyModSettings sets" in head and "entry.last BEFORE" in head
+    # The detection method is named, justified, and its blind spots listed --
+    # which is exactly why the write-time backstop survives.
+    assert "Object.getPrototypeOf(fn).constructor.name" in head
+    assert "toString" in head and "realm" in head
+    assert "transpiled" in head and "bound" in head
+    assert "constructor.name === 'AsyncFunction'" in seam
+    assert "catch (_) { return false; }" in seam, \
+        "a probe on an exotic callable must not kill a registration"
+
+
+def test_the_write_time_thenable_backstop_survives():
+    """Registration detection is best-effort BY NATURE. Deleting the write-time
+    check would leave a transpiled or bound async validator accepting
+    everything -- #168's bug, restored."""
+    body = _frag_fn(_text_src(), "function _modSettingText(rec, key, opts) {")
+    assert "if (r && typeof r.then === 'function') {" in body
+    assert "settings text validate is async (" in body
+    assert body.count("return 'that value could not be checked';") == 2, \
+        "the throw path and the thenable path both fail closed"
+
+
+def test_the_option_list_verdict_still_owns_only_option_shapes():
+    # 'async_validator' is a verdict on a FUNCTION, so it is decided by the
+    # validate seam and never by the option-list verdict -- one code
+    # vocabulary, two independent deciders.
+    fault = _frag_fn(_text_src(), "function _modChoiceFault(options) {")
+    assert "async_validator" not in fault
+    code = [l for l in _text_src().splitlines()
+            if "'async_validator'" in l and not l.lstrip().startswith("//")]
+    assert len(code) == 2, code
+    seam = _frag_fn(_text_src(),
+                    "function _modSettingValidateReject(rec, key, opts) {")
+    assert seam.count("'async_validator'") == 2, \
+        "the code is minted in exactly one seam (the warn and the accessor)"
+
+
+_ASYNCVAL_HARNESS = r"""
+'use strict';
+// #203 section 2 / A69 executed: the SHIPPED _modSettingText, reached through
+// the real registerMod/initMod and a ctx whose `text` member is the loader's
+// own one-liner. The DOM is a shim -- the point is that the primitive builds
+// (or refuses to build) its widget for real, so the CALL-SITE wiring is under
+// test, not a helper called in isolation.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+console.warn = console.error;
+console.info = function () {};
+
+// ---- the smallest DOM that _modSettingText can build a text row in --------
+function El(tag) {
+    this.tagName = tag;
+    this.children = [];
+    this.className = '';
+    this.textContent = '';
+    this.value = '';
+    this.placeholder = '';
+    this.firstChild = null;
+    this._on = Object.create(null);
+    this._cls = {};
+    const cls = this._cls;
+    this.classList = {
+        add: function (c) { cls[c] = true; },
+        remove: function (c) { delete cls[c]; },
+        contains: function (c) { return cls[c] === true; },
+    };
+}
+El.prototype.appendChild = function (c) {
+    this.children.push(c);
+    this.firstChild = this.children[0];
+    return c;
+};
+El.prototype.setAttribute = function (k, v) { this['attr:' + k] = v; };
+El.prototype.addEventListener = function (t, fn) {
+    (this._on[t] = this._on[t] || []).push(fn);
+};
+El.prototype.removeEventListener = function (t, fn) {
+    const l = this._on[t] || [];
+    const i = l.indexOf(fn);
+    if (i !== -1) l.splice(i, 1);
+};
+const document = {
+    createElement: function (t) { return new El(t); },
+    activeElement: null,
+};
+function fire(el, type) {
+    for (const fn of (el._on[type] || []).slice()) fn.call(el, { type: type });
+}
+function find(el, pred) {
+    if (!el) return null;
+    if (pred(el)) return el;
+    for (const kid of el.children) {
+        const hit = find(kid, pred);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+const window = { __mods: {
+    ctxVersion: 1,
+    registered: [],
+    active: new Map(),
+    policy: {},
+    catalog: [],
+    packages: Object.create(null),
+    missingRequires: Object.create(null),
+    cycleState: Object.create(null),
+    settingToggles: [],
+    sorted: false,
+}, addEventListener: function () {}, removeEventListener: function () {} };
+const ENABLED = new Set();
+function _currentPackageId() { return null; }
+function _lateRegister() {}
+function isModEnabled(id) {
+    const pin = _pin(id);
+    if (pin !== null) return pin;
+    return ENABLED.has(id);
+}
+__CONSTANTS__
+
+let PREFS = {};
+let saves = 0;
+function getSettings() { return PREFS; }
+function savePrefs() { saves += 1; }
+function notifyModTheme() {}
+function _trackControl(rec, entry) {
+    window.__mods.settingToggles.push(entry);
+    rec.unloads.push(function () {
+        const l = window.__mods.settingToggles;
+        const i = l.indexOf(entry);
+        if (i !== -1) l.splice(i, 1);
+    });
+}
+// The one DOM function 86a borrows from the loader, shimmed: it is the FIRST
+// element any control creates, so its call count IS the mount count.
+const sections = [];
+function _controlSection(rec, opts) {
+    const sec = new El('div');
+    sec._mod = rec.id;
+    sections.push(sec);
+    return sec;
+}
+
+__LOADER__
+
+__TEXT__
+
+__REGISTRY__
+
+__PACKAGES__
+
+const mounts = [];
+const WIDGETS = Object.create(null);
+function makeCtx(modId, rec) {
+    const ctx = {
+        id: modId,
+        ctxVersion: window.__mods.ctxVersion,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        settings: {
+            // The loader's ctx literal, verbatim: `return _modSettingText(rec,
+            // key, opts);`. Whether a widget appeared is OBSERVED (a new
+            // section), never assumed.
+            text: function (key, opts) {
+                const before = sections.length;
+                const a = _modSettingText(rec, key, opts);
+                if (sections.length > before) {
+                    mounts.push(rec.id + ':' + key);
+                    WIDGETS[key] = sections[sections.length - 1];
+                }
+                return a;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return ctx;
+}
+
+function run(id, init) {
+    registerMod({ id: id, init: init });
+    const reg = window.__mods.registered;
+    ENABLED.add(id);
+    return initMod(reg[reg.length - 1]);
+}
+function row(id) {
+    const entry = window.__mods.registered.find(
+        function (m) { return m.id === id; }) || null;
+    return _modStatusRow(id, null, entry);
+}
+// JSON.stringify DROPS undefined: every probe answers a LABEL, never a hole.
+function probe(s) {
+    return {
+        ok: ('ok' in s) ? s.ok : '<absent>',
+        error: ('error' in s) ? s.error : '<absent>',
+        get: s.get(),
+    };
+}
+// Type into the real <input> and flush it the way `change` (blur / Enter)
+// does: commit() -> accessor.set() -> the shared writer.
+function typeInto(key, v) {
+    const sec = WIDGETS[key];
+    if (!sec) return { missing: true };
+    const input = find(sec, function (e) { return e.tagName === 'input'; });
+    const err = find(sec, function (e) { return e.className === 'set-err'; });
+    input.value = v;
+    fire(input, 'change');
+    return { box: input.value, err: err.textContent,
+             shown: err._cls.show === true };
+}
+
+const CASES = {};
+
+// An `async` validator: refused at registration, degraded control, no widget.
+CASES.async_validator = function () {
+    let fired = 0;
+    let out = null;
+    let unloaded = 0;
+    const res = run('x-fixture', function (ctx) {
+        ctx.onUnload(function () { unloaded += 1; });   // FIRST (#162)
+        const s = ctx.settings.text('nick', {
+            def: 'anon', validate: async function () { return true; },
+        });
+        s.onChange(function () { fired += 1; });
+        s.set('zed');                     // no-op, silently
+        out = probe(s);
+        // the mod carries on, and a SECOND, healthy text control still mounts
+        const t = ctx.settings.text('note', {
+            def: 'hi', validate: function () { return true; },
+        });
+        out.second = probe(t);
+    });
+    const st = row('x-fixture');
+    return { res: res, out: out, fired: fired, prefs: PREFS, saves: saves,
+             mounts: mounts, unloaded: unloaded, state: st.state,
+             warnings: st.warnings, toggles: window.__mods.settingToggles.length,
+             active: Array.from(window.__mods.active.keys()), errors: errors };
+};
+
+// An arrow async validator, and an async validator on a control that ALSO has
+// a malformed suggestions list: the validate verdict wins, one warning.
+CASES.async_shapes = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        out = {
+            arrow: probe(ctx.settings.text('a', {
+                def: 'A', validate: async () => true })),
+            alsoBadList: probe(ctx.settings.text('b', {
+                def: 'B', options: [{ value: 'x' }, { value: 'x' }],
+                validate: async function () {} })),
+            noValidate: probe(ctx.settings.text('c', { def: 'C' })),
+            notAFunction: probe(ctx.settings.text('d', {
+                def: 'D', validate: 'async' })),
+        };
+    });
+    const st = row('x-fixture');
+    return { out: out, mounts: mounts, state: st.state,
+             codes: st.warnings.map(function (w) { return w.key + '=' + w.code; }),
+             errors: errors };
+};
+
+// A SYNCHRONOUS validator is untouched: the widget mounts and it still gates.
+CASES.sync_validator = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        out = probe(ctx.settings.text('nick', {
+            def: 'anon',
+            validate: function (v) { return v === 'bad' ? 'no bad names' : true; },
+        }));
+    });
+    const good = typeInto('nick', 'ok');
+    const goodPrefs = JSON.parse(JSON.stringify(PREFS));
+    const bad = typeInto('nick', 'bad');
+    const st = row('x-fixture');
+    return { out: out, good: good, goodPrefs: goodPrefs, bad: bad,
+             prefs: PREFS, mounts: mounts, state: st.state,
+             warnings: st.warnings, errors: errors };
+};
+
+// THE BACKSTOP: a plain function that RETURNS a Promise. Registration cannot
+// see it (it is a plain Function), so the control mounts -- and the write-time
+// thenable check refuses the write and says why on screen.
+CASES.thenable_backstop = function () {
+    let out = null;
+    run('x-fixture', function (ctx) {
+        out = probe(ctx.settings.text('nick', {
+            def: 'anon',
+            validate: function () { return Promise.resolve(true); },
+        }));
+    });
+    const wrote = typeInto('nick', 'sneaky');
+    const st = row('x-fixture');
+    return { out: out, wrote: wrote, prefs: PREFS, saves: saves,
+             mounts: mounts, state: st.state, warnings: st.warnings,
+             errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def asyncval_harness(tmp_path_factory):
+    loader = _loader_src()
+    pkgs = _packages_src()
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    m = re.search(r"^\s*const MAX_MOD_TEXT_LEN = \d+;$", consts, re.M)
+    assert m, "MAX_MOD_TEXT_LEN moved"
+
+    def whole(src, sig):
+        return _frag_fn(src, sig) + "\n        }\n"
+
+    loader_bits = "\n".join(whole(loader, sig) for sig in (
+        "function ModConflictError(message) {",
+        "function registerMod(decl) {",
+        "function _runUnloads(rec) {",
+        "function _pin(id) {",
+        "function _normChoiceOptions(options) {",
+        "function _valueAccessor(entry, key, read, coerce, valid, unchanged) {",
+        "function initMod(decl, opts) {",
+        "function disableMod(id) {"))
+    pkg_bits = "\n".join(whole(pkgs, sig) for sig in (
+        "function _modBag(name) {",
+        "function _modIsRegistered(id) {",
+        "function _modClamp(v, n) {",
+        "function _modPermissionsView(catRow) {",
+        "function _modSettingWarningsOf(id) {",
+        "function _modStatusRow(id, catRow, decl) {"))
+    path = tmp_path_factory.mktemp("asyncval") / "harness.js"
+    path.write_text(
+        _ASYNCVAL_HARNESS
+        .replace("__CONSTANTS__", m.group(0))
+        .replace("__LOADER__", loader_bits)
+        .replace("__TEXT__", _text_src())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__PACKAGES__", pkg_bits),
+        encoding="utf-8")
+    return path
+
+
+def _run_asyncval(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_async_validator_degrades_the_control_through_the_real_ctx(
+        asyncval_harness):
+    r = _run_asyncval(asyncval_harness, "async_validator")
+    # The mod is UP: this is a degraded control, not a failed mod.
+    assert r["res"] == {"ok": True, "id": "x-fixture"}
+    assert r["active"] == ["x-fixture"] and r["unloaded"] == 0
+    assert r["state"] == "active"
+    # The accessor: section 1's shape, section 2's code.
+    assert r["out"]["ok"] is False
+    assert r["out"]["error"] == "async_validator"
+    assert r["out"]["get"] == "anon", "get() answers the coerced default"
+    assert r["prefs"] == {} and r["saves"] == 0, "set() wrote something"
+    assert r["fired"] == 0
+    # FAIL-CLOSED: no widget for the rejected control, and no tracked entry --
+    # a mounted-but-ungated box is exactly the #168 bug this refuses to ship.
+    assert r["mounts"] == ["x-fixture:note"]
+    assert r["toggles"] == 1, "a rejected control must not be tracked"
+    assert r["out"]["second"] == {"ok": True, "error": "<absent>", "get": "hi"}
+    # The operator sees the same code the mod branched on.
+    assert [w["key"] for w in r["warnings"]] == ["nick"]
+    assert r["warnings"][0]["code"] == "async_validator"
+    assert "synchronous" in r["warnings"][0]["message"]
+    assert len(r["errors"]) == 1 and "async_validator" in r["errors"][0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_every_async_shape_is_caught_and_a_non_function_is_not(asyncval_harness):
+    r = _run_asyncval(asyncval_harness, "async_shapes")
+    assert r["state"] == "active"
+    for name in ("arrow", "alsoBadList"):
+        assert r["out"][name]["ok"] is False, name
+        assert r["out"][name]["error"] == "async_validator", name
+    assert r["out"]["arrow"]["get"] == "A"
+    # A non-function `validate` is ignored by the primitive (it only ever calls
+    # a function), so it is NOT an async_validator rejection.
+    assert r["out"]["noValidate"]["ok"] is True
+    assert r["out"]["notAFunction"]["ok"] is True
+    assert r["mounts"] == ["x-fixture:c", "x-fixture:d"]
+    # The validate verdict comes FIRST, so a control that is bad both ways
+    # warns once, with the code the mod actually got back.
+    assert r["codes"] == ["a=async_validator", "b=async_validator"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_synchronous_validator_still_mounts_and_still_gates(asyncval_harness):
+    r = _run_asyncval(asyncval_harness, "sync_validator")
+    assert r["out"] == {"ok": True, "error": "<absent>", "get": "anon"}
+    assert r["mounts"] == ["x-fixture:nick"]
+    assert r["warnings"] == [] and r["state"] == "active" and r["errors"] == []
+    # It accepts...
+    assert r["goodPrefs"] == {"nick": "ok"}
+    assert r["good"]["err"] == "" and r["good"]["shown"] is False
+    # ...and it still REJECTS, visibly, with the draft kept on screen.
+    assert r["bad"]["err"] == "no bad names" and r["bad"]["shown"] is True
+    assert r["bad"]["box"] == "bad", "the rejected draft is the user's copy"
+    assert r["prefs"] == {"nick": "ok"}, "a rejected write must not store"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_write_time_backstop_still_fires_for_a_plain_promise_validator(
+        asyncval_harness):
+    r = _run_asyncval(asyncval_harness, "thenable_backstop")
+    # Registration CANNOT see this one -- a plain Function that happens to
+    # return a Promise, which is what a transpiled or bound async function
+    # looks like. So the control mounts, healthy, and nothing warns.
+    assert r["out"] == {"ok": True, "error": "<absent>", "get": "anon"}
+    assert r["mounts"] == ["x-fixture:nick"] and r["warnings"] == []
+    # And the SECOND detection point fails the write closed.
+    assert r["wrote"]["err"] == "that value could not be checked"
+    assert r["wrote"]["shown"] is True
+    assert r["wrote"]["box"] == "sneaky"
+    assert r["prefs"] == {} and r["saves"] == 0
+    assert len(r["errors"]) == 1 and "validate is async" in r["errors"][0]

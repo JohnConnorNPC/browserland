@@ -112,16 +112,34 @@
         //   placeholder  shown when the box is empty. Falls back to the label of
         //                an ''-valued option, exactly like combo.
         //   maxLength    clamped into (0, MAX_MOD_TEXT_LEN]
-        //   validate(v)  WRITE-ONLY, and SYNCHRONOUS. Return `false`, or a
-        //                non-empty string, to REJECT (the string is the message
-        //                the user sees); return anything else — `true`, or
-        //                nothing — to accept. A throw, and a thenable (an `async`
-        //                validator, whose Promise is truthy and would otherwise
-        //                sail through as acceptance), both fail CLOSED. It runs
-        //                on every write attempt, and more than once per commit,
-        //                so keep it pure and cheap.
+        //   validate(v)  WRITE-ONLY, and SYNCHRONOUS — permanently, by
+        //                contract (#203 §2). Return `false`, or a non-empty
+        //                string, to REJECT (the string is the message the user
+        //                sees); return anything else — `true`, or nothing —
+        //                to accept. An `async` validator is refused at
+        //                REGISTRATION and the whole control degrades
+        //                (s.error === 'async_validator'); a throw, and a
+        //                thenable that slips past that detection, both fail
+        //                CLOSED at write time. It runs on every write attempt,
+        //                and more than once per commit, so keep it pure and
+        //                cheap.
         function _modSettingText(rec, key, opts) {
             opts = opts || {};
+            // #203 (§2): a validator must be SYNCHRONOUS, and that is now the
+            // CONTRACT rather than a workaround. An `async` one is refused
+            // HERE, at registration, before a single element exists — and the
+            // control goes down §1's degraded path with error
+            // 'async_validator'.
+            //
+            // FAIL-CLOSED, NOT VALIDATOR-STRIPPED. Mounting the box with its
+            // gate quietly removed would reintroduce the exact #168 bug — a
+            // Promise is truthy, so an async validator accepts EVERYTHING —
+            // one layer up, where it is harder to see and nothing says why. A
+            // dead control that announces itself beats a live control that
+            // silently stopped checking.
+            // See _modSettingValidateReject at the foot of this fragment.
+            const vrej = _modSettingValidateReject(rec, key, opts);
+            if (vrej) return vrej;
             // Every piece of mutable state is function-local and initialized
             // BEFORE anything can call the closures below — a hoisted function
             // reading a not-yet-initialized `let` is a TDZ ReferenceError that
@@ -328,6 +346,7 @@
         //
         //   s.ok            false (true on a healthy control)
         //   s.error         'duplicate_option' | 'invalid_options'
+        //                   | 'async_validator' (§2)
         //   s.get()         the coerced def, else '' — never throws
         //   s.set(v)        no-op (the family's existing silent-drop idiom)
         //   s.onChange(fn)  accepted, never fires
@@ -349,8 +368,9 @@
         // STABLE code both `s.error` and the Mods-pane warning row carry. One
         // vocabulary on both sides, so what the operator reads is what the mod
         // branched on. It mirrors _normChoiceOptions' three throws exactly and
-        // never throws itself. ('async_validator' is #203 §2's code and is not
-        // decided here.)
+        // never throws itself. ('async_validator' is #203 §2's code; it is a
+        // verdict on a FUNCTION, not on an option list, so it is decided by
+        // _modSettingValidateReject below and never here.)
         function _modChoiceFault(options) {
             if (!Array.isArray(options) || !options.length) {
                 return 'invalid_options';
@@ -436,4 +456,61 @@
                 return [];
             }
             return _normChoiceOptions(options);
+        }
+        // ---- #203 (§2): a validator is SYNCHRONOUS, permanently ----------
+        // Not "await it with a timeout" — sync-only is the CONTRACT, for three
+        // reasons that no amount of care around an await removes:
+        //
+        //  1. validate runs on EVERY write attempt, and more than once per
+        //     commit (see check() above).
+        //  2. the commit pipeline is synchronous by contract: the 400 ms
+        //     debounce, the `change` flush, the `blur` flush-first ordering and
+        //     the `pagehide` flush cannot await anything — pagehide least of
+        //     all, because the page is already leaving.
+        //  3. an awaited verdict RACES /state convergence: the value it judged
+        //     is stale by the time it would be stored. notifyModSettings sets
+        //     entry.last BEFORE reflecting (#168), which is precisely the
+        //     machinery a mid-pipeline async gap corrupts — one skipped
+        //     reflect masks convergence forever.
+        //
+        // Detection is `Object.getPrototypeOf(fn).constructor.name ===
+        // 'AsyncFunction'`. Chosen over sniffing fn.toString() for /^async\s/,
+        // which a leading comment, a decorator or a minifier can defeat, and
+        // over `fn instanceof AsyncFunction`, which needs a constructor this
+        // scope does not have and which is realm-bound: the constructor NAME is
+        // the same string for an async function that arrived from an iframe or
+        // a worker, so the check crosses realms.
+        //
+        // It is best-effort BY NATURE, which is why the write-time thenable
+        // check in check() stays as the backstop: a transpiled async function
+        // (babel/regenerator) is a plain Function, a bound async function is a
+        // plain Function, and any plain function may simply return a Promise.
+        // Two detection points, deliberately — registration catches the common
+        // case loudly and visibly, the write path catches the rest and fails
+        // closed.
+        function _modAsyncFunction(fn) {
+            if (typeof fn !== 'function') return false;
+            // Total: a Proxy or an exotic callable can make either step throw,
+            // and a settings registration must not die of a probe.
+            try {
+                const proto = Object.getPrototypeOf(fn);
+                return !!(proto && proto.constructor
+                          && proto.constructor.name === 'AsyncFunction');
+            } catch (_) { return false; }
+        }
+
+        // The seam _modSettingText calls FIRST, before any element exists: a
+        // rejected control mounts NO widget. Returns null when the validator is
+        // acceptable (absent, or a plain function — the caller carries on and
+        // builds the real control), else the degraded accessor to hand back.
+        // The code it reports, 'async_validator', is the SAME string the
+        // Mods-pane warning row renders: one vocabulary on both sides, exactly
+        // as the option-list codes above.
+        function _modSettingValidateReject(rec, key, opts) {
+            if (!_modAsyncFunction(opts && opts.validate)) return null;
+            _modSettingWarn(rec, key, 'async_validator',
+                'settings text: validate must be synchronous — an async one '
+                + 'returns a Promise, which is truthy, so it would accept '
+                + 'every value');
+            return _modDegradedAccessor('async_validator', opts && opts.def);
         }
