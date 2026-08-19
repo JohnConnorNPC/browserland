@@ -1960,6 +1960,281 @@ the existing v1 `windows` family and owe no capability entry of their own:
 feature-detect with `typeof info.tapOutput === 'function'`. `ctxVersion` stays
 `1`.
 
+### Queued modal prompts: `ctx.dialog.open` (#202)
+
+```js
+const d = ctx.dialog.open({
+    title: 'Unlock registry',
+    fields: [{ name: 'pass', label: 'Passphrase', type: 'password' }],
+    submitLabel: 'Unlock',          // default 'OK'
+    cancelLabel: 'Not now',         // default 'Cancel'
+});                                 // the handle comes back SYNCHRONOUSLY
+d.replace(spec);                    // re-spec THIS dialog
+d.close();                          // dismiss THIS dialog
+const vals = await d.result;        // {pass: '…'} | null (dismissed)
+```
+
+A field is `{name, label, type, value, placeholder}`. A field with no string
+`name` is skipped. `type: 'select'` renders a `<select>` from `options`
+(`'a'` or `{value, label}`); `type: 'password'` renders a real password input;
+**every other `type` falls back to `text`**, so a spec cannot smuggle an
+arbitrary input type onto the page. `result` resolves to an object of
+`name -> string` on submit, and `null` on cancel, dismissal, or any teardown.
+
+**Mod-facing opens ALWAYS queue.** There is no cancel-the-current-dialog mode
+on this surface at all — not a flag, not an option — which is the whole point:
+one mod can never dismiss another mod's prompt. A second `open()` while one is
+on screen waits its turn and is shown when the first settles. Core's own
+`openDialog` is a singleton that *cancels* whatever is live, and mods that
+prompt through it have to carry single-flight flags (`mods/host-registry`'s
+`_encBusy`) to stop themselves silently dismissing their own first prompt.
+That workaround class is what this surface removes.
+
+**The named limit: core still wins.** `openDialog` is unmodified, so a *core*
+dialog still cancels whatever is live, including a mod's — and that mod's
+caller reads `null`, indistinguishable from a user dismissal. The asymmetry is
+deliberate: core is the application, a mod is a guest. Its consequence is that
+the queue also refuses to show anything while a foreign (core) dialog is up; it
+waits politely rather than cancelling it.
+
+**The handle is returned synchronously, before display**, so `close` and
+`replace` exist for the whole queued life of the dialog and not only once it is
+on screen — and each acts on **this** dialog only. Closing a queued entry drops
+it (it is never shown, and its `result` resolves `null`); closing the shown
+entry finishes only that dialog; `replace` on a queued entry just swaps the
+spec it will eventually be shown with, and on the shown one re-renders it
+without ever releasing its turn, so a `replace` cannot let another mod's queued
+dialog jump in front of it.
+
+**A dead mod never wedges the queue.** On teardown that mod's queued entries
+are dropped and its on-screen dialog is closed, so the next owner's entry is
+shown immediately; every dropped entry resolves `null`, the same value a
+dismissal produces. An `open()` from an already-dead activation is refused
+outright (a handle whose `result` is already `null`) rather than queued, so a
+dead mod's dialog cannot flash on screen.
+
+**Password values reach exactly one place: the caller's `d.result`.** Core
+never logs them, never persists them (no prefs / state write lives on this
+path), never puts them in the help corpus, and drops its own reference to the
+inputs the moment the dialog settles. A commit that races a teardown resolves
+`null` rather than a half-read object.
+
+`dialog` is a **new top-level family** with its own capability entry
+(`dialog`, version 1) — feature-detect with `ctx.dialog`, or declare
+`needs: ['dialog.open']`.
+
+### Introspection: `ctx.mods`, `ctx.settings.describe`, `ctx.helpCards` (#202)
+
+```js
+ctx.mods.list();                    // [{id, active, pin, version, tiers}]
+ctx.mods.isActive('git');           // true | false
+ctx.mods.pinOf('git');              // true | false | null
+ctx.settings.describe('git', 'branchStyle');   // {type, options, default}|null
+ctx.settings.describe('branchStyle');          // own-mod shorthand
+ctx.helpCards.list();               // the sanitized typed-span card DATA
+```
+
+These replace the `window.__mods` scraping that `mods/mod-sync` and `mods/help`
+do today. **`window.__mods` is a test fixture, not a contract** — it is the
+loader's own mutable bag, and it carries live records (unload arrays, control
+`read`/`reflect`/`onChange` closures, live DOM sections). Reading it reaches
+into core's internals and pins every field of them as a de-facto API.
+
+**Everything here returns a fresh, FROZEN clone, built per call out of
+primitives.** Fresh means a caller cannot reach core state through what it got;
+frozen means a mutating write is a visible no-op rather than a local copy that
+silently drifts from the truth. The next call returns a different object graph,
+so nothing is shared between two callers and nothing is cached. **The shapes
+are contract now**: adding a field later is additive, changing or removing one
+is a break — so they are deliberately minimal. No `unloads`, no `section`, no
+closure, no `Map` and no DOM node ever leaves this surface. `mods.list()`
+likewise omits `ctxVersion`, `defaultEnabled`, `requires` and `init`.
+
+**`describe` is two-arg**, `describe(modId, key)`, because the caller must be
+able to name *whose* setting it is asking about — the motivating caller
+describes other mods' settings, never its own. `describe(key)` is the own-mod
+shorthand and is chosen by **argument count** (exactly one), so
+`describe(a, undefined)` is a two-arg call with no key and answers `null`.
+It returns `null` for an unknown key, an unknown mod, or a mod that is **off**
+(a disabled mod has no mounted control, which is also the answer the Control
+Panel gives) — never a throw and never a half-filled object with a made-up
+default.
+
+**A `text` descriptor's `options` are SUGGESTIONS, not a domain.** They are
+reported because the pane renders them; a caller must not use them as a
+validation set. The `type` says which it is: `'text'` is the one kind whose
+options do not bound it. For `radio` / `select` / `combo` the options *are* the
+domain, and `default` is the declared fallback the primitive itself would use.
+
+**Introspection is LOCAL-PAGE ONLY.** It answers about *this* page: the mods
+this build registered, the pins *this* broker resolved at boot, the controls
+mounted in *this* Control Panel. A remote broker's pins still come off the wire
+(`GET /mods/policy`) and must keep doing so — there is no remote form of any of
+this on purpose, because a getter that silently answered about a different host
+is the worst possible shape for a sync tool.
+
+Two limits worth reading twice:
+
+- **`pinOf` returning `null` means "no pin in force", NOT "no such mod".** An
+  unpinned known mod and an id nothing ever registered answer identically, as
+  the loader's own pin lookup does. Existence is `list()`'s question.
+- **An installed-but-not-loaded package is ABSENT from `list()`**, not listed
+  as inactive: `list()` enumerates what actually registered on this page, so a
+  package that 404'd, cycled, or registered the wrong id simply is not there.
+  The union catalog/status model is a different question with a different
+  answer, and a frozen contract may not blur the two.
+
+`list()[i].active` and a later `isActive()` for the same id may disagree —
+both read live state at call time, and a snapshot is a snapshot.
+`helpCards.list()` reads the card registry live, so a card contributed by a mod
+that has since been disabled is gone (`ctx.registerHelpCards` splices its own
+entries out on teardown). Every card is re-coerced to strings on the way out,
+so what you get is structured-cloneable data.
+
+`mods` and `helpCards` are **new top-level families** with their own capability
+entries (version 1 each). `settings.describe` is a new **member** of the
+existing v1 `settings` family and owes no entry of its own — feature-detect
+with `typeof ctx.settings.describe === 'function'`, or declare
+`needs: ['settings.describe']`. `ctxVersion` stays `1`.
+
+### Anchored popovers: `ctx.popover.anchor` (#202)
+
+```js
+const p = ctx.popover.anchor(node, anchorEl, {
+    placement: 'bottom-start',   // | bottom-end | bottom | top-start
+                                 // | top-end | top   (default bottom-start)
+    gap: 2,                      // px between anchor and node, clamped 0..64
+    onClose: function (why) {},  // 'close' | 'outside' | 'escape'
+                                 // | 'anchor-gone' | 'teardown'
+});
+p.close();          // acts on THIS popover only
+p.reposition();     // re-measure now (after a synchronous fill)
+p.isOpen();         // false once anything has dismissed it
+```
+
+Core appends the node to `document.body`, gives it the `mod-popover` class and
+`position: fixed`, measures it off-screen for one frame so it is never painted
+at 0,0, and **removes the node itself** when the popover closes — a mod that is
+gone is in no position to remove anything. The handle comes back synchronously
+and *always*: a refused anchor (dead activation, missing node or anchor)
+answers with an already-closed handle rather than a `null`, so a caller never
+has to branch on whether it got one.
+
+**There is NO motion at all** — no entrance transition, no exit transition, no
+keyframe, and nothing in this range reads `matchMedia`. This is not "animate
+unless `prefers-reduced-motion`", deliberately: anything gated on that query is
+simply *instant* for a viewer who has it set, so it reads as broken-or-fine
+depending on who is testing (the precedent is stated in `15_css_dialogs.css`).
+A popover appears and disappears, identically for everyone.
+
+**It re-measures every frame while at least one popover is open**, which is one
+loop instead of a `resize` listener, a capture-phase `scroll` listener and a
+`ResizeObserver` — three partial answers to the same question. That single pass
+is what covers a window being **dragged** (which fires neither resize nor
+scroll), an inner container scrolling, and a node the mod refilled after
+anchoring. It costs nothing when nothing is open (the loop is not running) and
+nothing in a background tab (rAF does not fire).
+
+Placement **clamps with a FLIP**: a bottom-placed popover that would run off
+the bottom is put *above* the anchor instead (and vice versa), because sliding
+it up would cover the very control it points at; only the remaining overflow is
+clamped, to a 6px viewport inset. The horizontal axis is a pure clamp.
+
+**Dismissal is judged per popover.** Outside-click uses one document listener
+for the whole page and tests each popover against **its own** node — with two
+mods' popovers open, a click inside one closes the *other* and leaves the one it
+landed in. The anchor counts as *inside*, so a toggle button does not
+close-then-reopen and never close. Escape closes the **topmost** popover only
+and swallows the key, so stacked popovers peel one press at a time. An anchor
+that leaves the page closes its popover with `'anchor-gone'` rather than
+leaving a box floating at coordinates that no longer mean anything.
+`anchor()` on a node that is already in an open popover **replaces** that
+entry — two entries would fight over the same `left`/`top` every frame.
+
+Teardown is per **mod activation** (`ctx.onUnload`), not per window: a popover
+is not owned by a window at all — a taskbar-dot preview has no window anywhere
+in the chain — so every popover an activation opened closes on a disable, a
+reload and an uninstall alike, with `why === 'teardown'`.
+
+`popover` is a **new top-level family** with its own capability entry
+(`popover`, version 1) — feature-detect with `ctx.popover`, or declare
+`needs: ['popover.anchor']`.
+
+### A mod's own files: `ctx.assets.url` (#202)
+
+```js
+const u = ctx.assets.url('sprites.css');
+// installed mod: '/mods/<id>/<gen>/sprites.css'
+// shipped mod:   undefined   -- feature-detect the RETURN VALUE
+if (u) { /* fetch it, inject it, hand it to a worker */ }
+```
+
+An installed mod already has a content-addressed serving pipeline behind it —
+`GET /mods/<id>/<gen>/<name>`, the same route the loader uses to inject that
+package's scripts and styles — and until now no handle on its own bytes.
+`ctx.assets.url` is that handle, and it rides the **existing** generation
+machinery: the `<gen>` comes from this page's load record and the URL is built
+by the same builder the `<script src>` injection uses, so a mod's asset URL and
+its script URL can never disagree.
+
+**A shipped mod gets `undefined`, on purpose.** A shipped mod is spliced into
+the one inline `<script>` at assembly time and its files live in the shipped
+tree, which no route serves per file. Adding one would extend forced-public
+serving to the shipped tree — a new exposure decision that gets its own issue,
+not a side effect of this one. Faking it with a relative path would be worse:
+that "works" in a hand test and 404s in the page. **The `assets` family is
+present either way**, for shipped and installed mods alike, so feature-detect
+the **value** and not the family — otherwise every caller writes two detections
+for one fact.
+
+**Never persist a URL across an upgrade.** The `<gen>` segment *is* the
+package's content hash and the route serves `immutable, max-age=31536000`, so
+an upgrade publishes a *different* URL and the old one stops resolving once
+that generation is reaped. A URL stashed in `ctx.prefs`, `ctx.storage` or
+`/state` keeps working right up until the mod is updated and then 404s with no
+error anyone can attribute. Call `url()` at the point of use, every time — it
+is a property read and a string concat, and there is nothing to memoize.
+
+**It answers only names the route will serve.** The rule is **membership**, not
+sanitisation: a name is answered only when it is a key of the package's own
+`integrity` map — which the broker builds from that generation's files filtered
+by content type — so an unservable name is unrepresentable rather than defended
+against. A name grammar (`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, plus a `.js`/`.css`
+suffix) refuses first, before the map is consulted, because the route is
+forced-public and a plausible-looking URL that escapes the package directory is
+the case worth two refusals. Everything below is `undefined`, uniformly, never
+a throw:
+
+- traversal or any embedded slash (`'../../etc/passwd'`, `'a/b.js'`), and a
+  leading slash;
+- a query string or fragment (`'a.js?v=2'`, `'a.js#top'`);
+- an empty name or a non-string — there is **no coercion**, so `url({})` cannot
+  build `'…/%5Bobject%20Object%5D'`;
+- a name the package does not ship, or one it ships that the route cannot serve
+  (`help.md`, `mod.json`);
+- a package with no usable generation.
+
+There is deliberately **no `url(modId, name)` form**: the lookup is keyed by
+the ctx's own id, so a mod can only ask about its own package. One mod
+addressing another's assets is a different feature with a different exposure
+argument.
+
+**The route is forced-public: no secrets in assets, ever.** A `<script src>`
+cannot carry an `Authorization` header, so `/mods/<id>/<gen>/<name>` serves
+without a token by design. Every byte a mod ships there is readable by anyone
+who can reach this broker and knows the id, the gen and the file name — ship
+code and static data, never a credential, a host list, or anything derived from
+one. And because the answer comes from *this* page's boot record, a package
+uninstalled or upgraded mid-session still answers with the generation this page
+loaded (the running code *is* that generation); the bytes may nevertheless be
+gone from the store, so a fetch of a returned URL can 404 at any time — which
+is the other half of why you must not persist one.
+
+`assets` is a **new top-level family** with its own capability entry (`assets`,
+version 1) — but a shipped mod has the family and no URLs, so
+`needs: ['assets.url']` gates on presence, not on usefulness. `ctxVersion`
+stays `1`.
+
 ---
 
 ## 9. Help: `help.md` and the regen you must not skip
