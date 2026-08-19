@@ -22475,3 +22475,265 @@ def test_an_inflight_probe_cannot_relabel_a_repointed_host(hosts_list_harness):
     # asks about the address the record now points at.
     assert r["probed"] == ["https://a.example", "https://b.example"]
     assert r["finalId"] == "BID-B"
+
+
+# --- #201 / A57: the terminal funnel-completeness gate ----------------------
+# Before recorder's term.write / term.resize patches can be declared replaceable
+# by taps (#201), the paths by which a byte reaches a terminal -- or leaves for
+# the wire -- have to be ENUMERATED FROM THE SHIPPED SOURCE, and the enumeration
+# has to keep being re-derived so it cannot rot into a stale hand-written list.
+# docs-terminal-funnels.md is the prose; this is the mechanism.
+#
+# The scan is deliberately broader than "the terminal": every call to a
+# byte-moving method name on ANY receiver in the core fragments is collected and
+# must appear, with its exact count, in _TERM_FUNNEL_EXPECTED below. Add a new
+# .write( / .send( / .resize( / .paste( / .onData( / .onBinary( anywhere in core
+# and this test fails until someone decides whether the new path is tappable.
+
+_FUNNEL_METHODS = ("write", "writeln", "writeUtf8", "paste", "resize",
+                   "input", "onData", "onBinary", "send")
+
+_FUNNEL_CALL_RE = re.compile(
+    r"(?:(?P<recv>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.)?"
+    r"(?P<meth>" + "|".join(_FUNNEL_METHODS) + r")\s*\(")
+
+# (fragment, "receiver.method") -> (count, funnel classification)
+#   "output" / "input" / "resize-apply" / "resize-wire" are terminal funnels;
+#   "not-terminal" is a call that moves no terminal byte.
+_TERM_FUNNEL_EXPECTED = {
+    ("64_js_sessions_poll_control.js", "ws.send"): (1, "not-terminal"),
+    ("64_js_sessions_poll_control.js", "rec.ws.send"): (1, "not-terminal"),
+    ("67_js_window_lifecycle.js", "win.ws.send"): (1, "input"),
+    ("67_js_window_lifecycle.js", "term.paste"): (1, "input"),
+    ("67_js_window_lifecycle.js", "term.onData"): (1, "input"),
+    ("73_js_window_runtime.js", "win.term.write"): (7, "output"),
+    ("73_js_window_runtime.js", "win.term.resize"): (1, "resize-apply"),
+    ("73_js_window_runtime.js", "win.ws.send"): (1, "resize-wire"),
+}
+
+
+def _js_strip_comments_and_strings(src):
+    """Blank out // and /* */ comments and the CONTENTS of string/template
+    literals, preserving line structure and length. Scanning the result keeps a
+    commented-out `term.write(` (67 has several, in prose) from counting as a
+    call site, and keeps a `//` inside a string from eating real code."""
+    bs = chr(92)
+    out, i, n, state = [], 0, len(src), None
+    while i < n:
+        c = src[i]
+        if state is None:
+            if c == "/" and i + 1 < n and src[i + 1] == "/":
+                while i < n and src[i] != "\n":
+                    i += 1
+                continue
+            if c == "/" and i + 1 < n and src[i + 1] == "*":
+                j = src.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+                out.append("\n" * src.count("\n", i, j))
+                i = j
+                continue
+            if c in "\"'`":
+                state = c
+            out.append(c)
+            i += 1
+            continue
+        if c == bs:
+            out.append("  ")
+            i += 2
+            continue
+        if c == state:
+            state = None
+            out.append(c)          # keep the closing quote: the slice has to
+            i += 1                 # stay valid JS, not just line-aligned
+            continue
+        out.append(c if c == "\n" else " ")
+        i += 1
+    return "".join(out)
+
+
+def _core_js_fragments():
+    return [n for n in ui._ORDERED if n.endswith(".js")]
+
+
+def _scan_funnel_call_sites():
+    """Re-derive the enumeration from the fragments on disk.
+
+    Returns {(fragment, "recv.meth"): [(line, call-expression-text), ...]}.
+    The call text is lifted from the STRIPPED source (so it is comment-free and
+    string-contents-free but still syntactically valid JS) -- the node probe
+    below executes exactly that text."""
+    found = {}
+    for name in _core_js_fragments():
+        src = _js_strip_comments_and_strings(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        for m in _FUNNEL_CALL_RE.finditer(src):
+            recv, meth = m.group("recv"), m.group("meth")
+            key = (name, ("%s.%s" % (recv, meth)) if recv else meth)
+            # Balanced-paren slice of the whole call expression.
+            start = m.start()
+            i, depth = src.index("(", m.start("meth")), 0
+            while i < len(src):
+                if src[i] == "(":
+                    depth += 1
+                elif src[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            line = src.count("\n", 0, start) + 1
+            found.setdefault(key, []).append((line, src[start:i + 1]))
+    return found
+
+
+def test_terminal_funnel_enumeration_matches_the_shipped_fragments():
+    # THE GATE. The checked-in table is compared against a fresh scan of the
+    # fragments -- the table is never the input, so it cannot be satisfied by
+    # being out of date. A path added later shows up as an unclassified key (or
+    # a bumped count) and fails here, which is the point: recorder's migration
+    # blocks on this proof, not on hope.
+    scanned = {k: len(v) for k, v in _scan_funnel_call_sites().items()}
+    expected = {k: c for k, (c, _kind) in _TERM_FUNNEL_EXPECTED.items()}
+    assert scanned == expected, (
+        "the core terminal write/input funnels changed. Classify the new call "
+        "site in _TERM_FUNNEL_EXPECTED and in docs-terminal-funnels.md, and say "
+        "whether a tap can hook it.\n"
+        "  added/changed: %s\n"
+        "  gone:          %s" % (
+            sorted(set(scanned.items()) - set(expected.items())),
+            sorted(set(expected.items()) - set(scanned.items()))))
+
+
+def test_the_enumeration_document_ships_with_the_gate():
+    doc = (Path(ui.__file__).resolve().parents[2]
+           / "docs-terminal-funnels.md").read_text(encoding="utf-8")
+    # The named limits are the honest half of #201's precondition: a tap that
+    # silently narrows to the hookable subset is worse than no tap.
+    assert "Named limits" in doc
+    assert "fitAddon.fit()" in doc          # a mod resize core never sees
+    assert "Mod-originated writes" in doc
+    for frag, _m in _TERM_FUNNEL_EXPECTED:
+        assert frag in doc, "%s carries a funnel call site but is undocumented" % frag
+
+
+def test_one_core_terminal_instance_is_the_write_funnel():
+    # Every enumerated write/resize site targets win.term, and win.term comes
+    # from exactly one `new Terminal(` in core -- so ONE per-instance tap point
+    # is sufficient for the whole output direction. (The other `new Terminal(`
+    # sites in the tree are recorder's playback terminals, which are not core.)
+    creates = [n for n in _core_js_fragments()
+               if "new Terminal(" in _js_strip_comments_and_strings(
+                   (BROKER_DIR / n).read_text(encoding="utf-8"))]
+    assert creates == ["67_js_window_lifecycle.js"]
+    src = _js_strip_comments_and_strings(
+        (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8"))
+    assert len(re.findall(r"new Terminal\s*\(", src)) == 1
+    for (frag, expr), (_c, kind) in _TERM_FUNNEL_EXPECTED.items():
+        if kind in ("output", "resize-apply"):
+            assert expr.startswith("win.term."), (frag, expr)
+
+
+def test_core_loads_no_addon_that_writes():
+    # An addon that writes bytes would be invisible to a core call-site hook.
+    # Core loads exactly one (fit) and never drives it -- termfont's fit() call
+    # is a mod, and is recorded as a named limit rather than covered.
+    loads = []
+    for name in _core_js_fragments():
+        src = _js_strip_comments_and_strings(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        loads += [(name, m) for m in re.findall(r"loadAddon\s*\(\s*([\w$.]+)", src)]
+        assert not re.search(r"\.fit\s*\(", src), "%s drives the fit addon" % name
+    assert loads == [("67_js_window_lifecycle.js", "fitAddon")]
+
+
+_FUNNEL_PROBE_HARNESS = r"""
+'use strict';
+// #201/A57: execute each enumerated core call expression -- lifted verbatim
+// from the fragment -- against ONE recording tap installed on win.term /
+// win.ws, and report which sites the tap observed. Free identifiers (host,
+// data, event, ...) resolve to a permissive stub through a `with` scope proxy,
+// so the call runs without dragging in the rest of the fragment.
+function stub() {
+  const t = function () { return stub(); };
+  return new Proxy(t, {
+    get(o, k) {
+      if (k === Symbol.toPrimitive) return function () { return 1; };
+      if (typeof k === 'symbol') return undefined;
+      if (k === 'toJSON' || k === 'then') return undefined;
+      return stub();
+    },
+    has: function () { return true; },
+    ownKeys: function () { return []; },
+    getOwnPropertyDescriptor: function () { return undefined; },
+    apply: function () { return stub(); },
+    construct: function () { return stub(); }
+  });
+}
+var SITES = JSON.parse(process.argv[2]);
+var out = [];
+for (var s = 0; s < SITES.length; s++) {
+  var site = SITES[s];
+  var seen = [];
+  var tap = function (kind) {
+    return function () { seen.push(kind); };
+  };
+  var win = { term: { write: tap('output'), resize: tap('resize-apply'),
+                      paste: tap('input'), onData: tap('input'),
+                      onBinary: tap('input') },
+              ws: { send: tap('wire'), readyState: 1 } };
+  var scope = new Proxy({ win: win, term: win.term, ws: win.ws,
+                          WebSocket: { OPEN: 1 }, JSON: JSON, Math: Math,
+                          Uint8Array: Uint8Array, String: String,
+                          Date: Date, Object: Object },
+    { has: function () { return true; },
+      get: function (o, k) {
+        if (k === Symbol.unscopables) return undefined;
+        if (typeof k === 'symbol') return undefined;
+        return (k in o) ? o[k] : stub();
+      } });
+  var err = null;
+  try {
+    (new Function('S', 'with (S) { ' + site.expr + '; }'))(scope);
+  } catch (e) { err = String((e && e.message) || e); }
+  out.push({ key: site.key, line: site.line, seen: seen, err: err });
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_probe_byte_from_every_enumerated_write_site_reaches_one_tap(tmp_path):
+    # #201's completeness clause, run against the shipped text rather than a
+    # transcription of it: for every enumerated site, the real call expression
+    # is executed and a SINGLE tap on win.term / win.ws observes it. A write
+    # path that reached the terminal some other way would not show up here --
+    # which is why the scan above, not this probe, is what pins the SET.
+    sites = []
+    for key, hits in _scan_funnel_call_sites().items():
+        for line, expr in hits:
+            sites.append({"key": "%s::%s" % key, "line": line, "expr": expr})
+    harness = tmp_path / "funnel_probe.js"
+    harness.write_text(_FUNNEL_PROBE_HARNESS, encoding="utf-8")
+    proc = subprocess.run([NODE, str(harness), json.dumps(sites)],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, "%s\n%s" % (proc.stdout, proc.stderr)
+    results = {(r["key"], r["line"]): r
+               for r in json.loads(proc.stdout.strip().splitlines()[-1])}
+    assert len(results) == len(sites)
+
+    for (frag, expr), (_count, kind) in _TERM_FUNNEL_EXPECTED.items():
+        if kind == "not-terminal":
+            continue
+        rows = [r for k, r in results.items() if k[0] == "%s::%s" % (frag, expr)]
+        assert rows, (frag, expr)
+        for r in rows:
+            assert r["err"] is None, (r["key"], r["line"], r["err"])
+            # Exactly one observation per site: one tap, one probe, no
+            # double-counting and no site that slips past the tap entirely.
+            assert len(r["seen"]) == 1, (r["key"], r["line"], r["seen"])
+            # A wire-bound site is observed at the socket tap whichever
+            # direction it serves (input bytes or a resize request); the
+            # terminal-bound sites are observed on the instance.
+            want = ("wire" if expr.endswith(".send")
+                    else {"output": "output", "input": "input",
+                          "resize-apply": "resize-apply"}[kind])
+            assert r["seen"][0] == want, (r["key"], r["line"], r["seen"])
