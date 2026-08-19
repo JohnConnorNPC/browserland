@@ -67,7 +67,7 @@ Two corollaries that people get wrong:
 | Changing it needs | a broker restart (the page is assembled at import) | a page reload (never a process restart) |
 | Its source is | public (it is in `GET /`) | public (`GET /mods/<id>/<gen>/<file>`) |
 
-Everything in §3–§9 applies to both. §10 is the extra contract an installed mod
+Everything in §3–§10 applies to both. §11 is the extra contract an installed mod
 has to meet.
 
 ---
@@ -143,7 +143,7 @@ Every field at once — no real manifest uses all of them:
   "defaultEnabled": false,          // optional; absent == true
   "requires": ["editor"],           // optional; ids of mods that must be ACTIVE
   "styles": ["notes.css"],          // optional; bare filenames in this mod's dir
-  "permissions": ["file"],          // closed vocabulary; checked only via the install door — see §10.5
+  "permissions": ["file"],          // closed vocabulary; checked only via the install door — see §11.5
   "help": {                         // optional; only meaningful with a help.md
     "slug": "notes", "label": "Notes", "order": 2100, "icon": "📓"
   },
@@ -189,9 +189,9 @@ Field by field:
   `mods_dir` scanner) lints a declaration against the source at the moment it
   is stored, which is why the pane words the two cases differently. The full
   rules — the vocabulary, the refusal, the absent-vs-`[]` distinction — are in
-  §10.5.
+  §11.5.
 - **`help`** — `slug` / `label` / `order` / `icon` for the in-app Help section
-  (§9). All optional; slug defaults to the mod id, label to `title`, order to a
+  (§10). All optional; slug defaults to the mod id, label to `title`, order to a
   computed value after the wiki pages.
 - **`entry`** — **inert.** Every shipped manifest declares it, and the test suite
   pins its value for each one, but **no runtime code reads it.** What actually
@@ -203,7 +203,7 @@ Field by field:
 - **`author`** — **inert.** Every shipped manifest declares it; nothing reads
   it, nothing asserts it, and it is not part of the id namespace. Second-level
   scoping for an installed mod is a convention baked into the *id*
-  (`x-<author>-<name>`), not this field — see §10.
+  (`x-<author>-<name>`), not this field — see §11.
 - Anything else — ignored by the shipped-mod readers, and **rejected** by the
   install validator (`unknown_manifest_key`), so a typo is loud rather than
   silent.
@@ -287,7 +287,7 @@ A few things worth being precise about:
   replace it.
 - **`needs` is not `requires` and not `permissions`.** `requires` cascades
   through pins and take-downs (§6); `permissions` is an install-time,
-  server-side review lint over source text (§10.5). `needs` is client-side,
+  server-side review lint over source text (§11.5). `needs` is client-side,
   checked once at init against the live `ctx` — it asks what a mod can *run
   against here*, not what other mods must be active or what a reviewer
   permits.
@@ -403,7 +403,7 @@ Consequences you will hit:
   build's `ctx` have X" is settled at the commit rather than at runtime — which
   is what makes a feature-detect fallback in an in-tree mod dead code for
   anything already in `ctx` at that commit (see `ctx.visibility`, §8).
-  **An installed package is the opposite case** (§10.2): it is fetched as its
+  **An installed package is the opposite case** (§11.2): it is fetched as its
   own `<script src>` by whichever broker it was installed on, and that broker
   may be older than the package, so a portable mod keeps its detection or
   declares `needs` (§5).
@@ -443,7 +443,7 @@ bumping it.
   migration of their own, not something to copy from.
 
   **The floor stops at the repo.** An installed package is loaded by whatever
-  broker it was installed on (§7, §10.2), and that loader really may predate
+  broker it was installed on (§7, §11.2), and that loader really may predate
   `ctx.visibility` — so portable source keeps the feature detect, or declares
   `needs: ['visibility']` (§5) and blocks visibly instead.
 - **`ctx.signal`** (#198) — one `AbortSignal` per **activation**, aborted at the
@@ -596,6 +596,38 @@ five return `{get, set, onChange}`. `opts` carries `label`, `title`, `def`
 per-host pane, or `'browser'`, beside the Hosts list). Reads are
 **non-destructive**: nothing writes the default back.
 
+**A malformed options list no longer kills the mod (#203).** `radio` /
+`select` / `combo` throwing on an empty, invalid or duplicate-valued options
+list used to disable init, and with it the *whole* mod — a single bad
+computed list nuking a mod's every other feature was disproportionate, and
+`mods/clock/clock.js` shipped its own defensive `zones` dedup for exactly
+this reason (still there today; not removed by this change). Instead the
+accessor comes back **degraded**:
+
+```js
+const s = ctx.settings.select('k', badOptions);
+s.ok            // false — true on a healthy control, ABSENT on an older loader
+s.error         // 'invalid_options' | 'duplicate_option' | 'async_validator'
+s.get()         // the coerced def, or '' — never throws
+s.set(v)        // no-op, the family's existing silent-drop idiom
+s.onChange(fn)  // accepted, never fires
+```
+
+**Feature-detect `s.ok === false`, never `!s.ok`.** `ok` is a #203 addition —
+a loader that predates it has no `ok` field at all, so `!s.ok` reads every
+healthy accessor on an older broker as rejected. `s.error` is the same
+vocabulary the Mods-pane row shows: a rejected control adds a `{key, code,
+message}` entry to that row's additive `warnings` array (`__test.statusOf(id)
+.warnings`), and `code` there is byte-identical to `s.error` — what the
+operator reads in the pane is exactly what the mod branched on. `state`
+itself does not change; a mod with one degraded control is still `active`.
+No widget mounts in the Control Panel for a rejected control — nothing to
+click, nothing to reflect against a broken list. `s.error` is a decision
+input, not a verdict: a fallback default is fine for a cosmetic control and
+wrong for a load-bearing one, and only the mod knows which, so it reads the
+code and chooses to degrade in place or bail out of its own `init()`
+entirely.
+
 `text` is the only primitive that is **not choice-constrained**, and that
 distinction matters — `combo` *looks* free but treats its list as the legal
 domain and refuses anything outside it. `text` takes `options` as
@@ -610,9 +642,35 @@ domain and refuses anything outside it. `text` takes `options` as
    unpaired surrogates → trim → cap.
 3. `validate` is **write-only and its rejection is visible** — the rejected
    draft stays on screen next to a `.set-err` message and the stored value is
-   untouched. It must be **synchronous**: a promise is truthy, so an async
-   validator would accept everything, and the loader logs and rejects if you
-   pass one.
+   untouched.
+
+**`validate` must be synchronous, permanently — this is contract, not a
+temporary limitation (#203).** Two independent checks enforce it. At
+*registration*, an `async function` is detected and the whole control is
+routed down the degraded path above with `s.error === 'async_validator'` —
+**fail-closed, not validator-stripped**: silently mounting the control with
+its gate removed would just reintroduce the #168 bug (a `Promise` is truthy,
+so a stripped-validator control would accept every write) one layer up,
+invisibly. At *write time* the original #168 backstop still runs — a thenable
+return, from a plain function that slipped past the registration check
+(transpiled output and a bound function both read as an ordinary `Function`),
+is rejected exactly as before, with `.set-err` showing an unhelpful "that
+value could not be checked" rather than corrupting the write. Registration
+detection is best-effort; the write-time check is the one that cannot be
+fooled.
+
+The reason this is not "await it, with a timeout" is structural, not a matter
+of taste: `validate` runs on **every write attempt, and more than once per
+commit**, and the commit pipeline that calls it is synchronous by contract —
+the 400 ms debounce, the `change` flush, blur's flush-first ordering, and the
+`pagehide` flush that catches a reload or tab-close mid-debounce cannot await
+anything. `pagehide` in particular has nothing to await *into* — the page is
+gone before a Promise would settle. And even where an await is technically
+possible, an awaited verdict would judge a value that is stale by the time it
+resolves: `entry.last` is set **before** the widget reflects (the #168
+convergence-loop fix), specifically so a skipped or delayed reflect can never
+mask non-convergence — a validator that suspends mid-pipeline reopens exactly
+that gap.
 
 Writes are debounced, and a pending one is flushed on teardown.
 `mods/clock/clock.js` is the worked example: its time-zone box uses `text`
@@ -2253,7 +2311,67 @@ stays `1`.
 
 ---
 
-## 9. Help: `help.md` and the regen you must not skip
+## 9. Testing a mod (#203)
+
+Every ingredient below already ships. This is the recipe, written down once,
+with its traps named — apply it to a shipped mod or an installed one; nothing
+here is install-only.
+
+1. **Start an alt-port broker with `cwd` = repo root, or `PYTHONPATH` pointing
+   at it.** If neither holds, `import webterm` can resolve to a *different*
+   install on `sys.path` — some other checkout, or a package installed into
+   the interpreter — and the broker you just started serves **that** copy's
+   assets. You edit a fragment, reload, see nothing change, and the instinct
+   is to suspect the edit. It is almost always this.
+2. **`INDEX_HTML` is built once, at import** (`ui.py`'s `assemble()`, held at
+   module scope rather than per-request — `ui.py:619`, `INDEX_HTML =
+   assemble()`). A fragment edit on disk is invisible to an already-running
+   broker; it needs a restart. Before debugging anything else, `curl` the
+   page you are testing against and `grep` for the string you just edited —
+   if it is not there, you are looking at stale bytes, not a bug. This one
+   check saves more time than everything after it combined.
+3. **Navigate with the auth token and `?nomods=1`.** The flag makes
+   `loadMods()` return before it fetches or inits a single mod
+   (`86b_js_mod_packages.js:38-43`, `_nomodsRequested`) — zero catalog
+   fetches, zero `registerMod` calls, a clean desktop with nothing riding on
+   load order or another mod's side effects. Start every test page here, not
+   on the real desktop with 19 shipped mods already up.
+4. **Drive the fixture through `window.__mods.__test.run`, not a parallel
+   harness:**
+   ```js
+   const rec = window.__mods.__test.run({
+       id: 'x-fixture',
+       ctxVersion: 1,
+       init(ctx) { /* … */ },
+   });
+   ```
+   `run` is a thin call onto `initMod` (`86_js_mod_loader.js:2432`) — the
+   exact function real boot and a live install both call. There is no
+   separate "test mode" `initMod` to drift out of sync with the real one; a
+   fixture that passes here passes for the reason production code would
+   accept it, not because a stand-in was lenient.
+5. **Assert through the read-only inspectors** — `isActive(id)`,
+   `statusOf(id)` (name it as such; the Mods-pane status/`warnings` shape),
+   `themeSubscribers()` — and tear down with `disable(id)`, then assert the
+   fixture's `onUnload`s actually ran (a dropped subscriber count, a removed
+   DOM node, whatever the fixture registered). **Do not use `run`/`disable`
+   to test persistence or the theme/announcement channel.** Both bypass
+   `setModEnabled` and the post-cascade announcement pass *by design* — they
+   exist to drive `initMod`/`disableMod` in isolation, not to exercise the
+   enable-persistence or notification paths a real toggle goes through
+   (`86_js_mod_loader.js:936-940`). A claim about *persistence* (does the
+   pick survive a reload / sync across tabs) or about the *announcement
+   channel* (does `ctx.theme.onChange` fire, does a subscriber count move)
+   needs `__test.setEnabled(id, on)` or an actual Mods-pane click instead —
+   those ride `setModEnabled`, the path a real operator uses.
+
+`?nomods=1` earns a second mention here for the same reason §11.3 gives it
+one: it is written up elsewhere (§11.3) purely as the rescue hatch for a
+bricked desktop. Steps 3-5 above are what make it a *testing* tool as well —
+the same read-only, never-persisted flag, used deliberately instead of
+stumbled into.
+
+## 10. Help: `help.md` and the regen you must not skip
 
 A mod may ship a `help.md` beside its `mod.json`, in the same wiki Markdown the
 `wiki/` pages use. `help_corpus.build_mod_sections()` parses every mod dir that
@@ -2290,9 +2408,9 @@ That is an authoring judgement, not a rule.
 
 ---
 
-## 10. Publishing an installed mod
+## 11. Publishing an installed mod
 
-### 10.1 The `x-` namespace rule
+### 11.1 The `x-` namespace rule
 
 **An id is reserved for first-party (shipped) mods iff it does *not* start with
 `x-`; an installed mod's id *must*.**
@@ -2339,7 +2457,7 @@ The install response says so — `adopts_existing_state: {mod_store, pin}` — f
 the server-side half; localStorage cannot be inspected server-side and is not
 covered.
 
-### 10.2 The portable-mod contract
+### 11.2 The portable-mod contract
 
 An installed mod is loaded as a **separate classic `<script src>`**, not as an
 `import()` and not spliced into the bundle. Classic (not module) is deliberate:
@@ -2403,7 +2521,7 @@ installable packages unchanged. **Rule 5 is not enforced** — check it yourself
 The lint is a floor, not a proof: it reads source text, so it cannot see a
 call hidden inside `registerMod`'s own argument.
 
-### 10.3 Installing takes effect on the next page load — always
+### 11.3 Installing takes effect on the next page load — always
 
 `POST /mods/install`, `/mods/uninstall` and `/mods/rescan` change what the
 broker serves **immediately** — the catalog, the asset routes and the Help
@@ -2459,7 +2577,7 @@ Related loader behaviour worth knowing:
   way `?token=` is, because replaceState-ing it away would mean a reload
   silently re-enabling the mod you are there to remove.
 
-### 10.4 An installed mod's code and styles are public
+### 11.4 An installed mod's code and styles are public
 
 `GET /mods/<modId>/<gen>/<name>` is **public**, like `GET /` and `/vendor/*`,
 and that is forced rather than chosen: a `<script src>` cannot carry an
@@ -2488,7 +2606,7 @@ installed ids, and the help text with it — not every last bit about a mod
 someone already knows to ask for. A mod whose bytes were never published stays
 unguessable in both segments.
 
-### 10.5 The install API
+### 11.5 The install API
 
 ```jsonc
 POST /mods/install          // browser auth token; NOT lease-gated
@@ -2596,7 +2714,7 @@ manifest to omit the key.
 
 A mention inside a **comment** never counts, for any permission — the scanner
 blanks `//` and `/* */` comments (and regex literals) before it looks for
-anything, the same `blank_js_literals` machinery the portable-mod lint (§10.2)
+anything, the same `blank_js_literals` machinery the portable-mod lint (§11.2)
 uses. For `clipboard` / `egress` / `file` / `session`, a mention inside a
 **string literal** doesn't count either — those four are matched against
 source with string bodies blanked too, so `"call ctx.file to persist"` trips
@@ -2648,7 +2766,7 @@ sweep refuses to run at all in a directory without the `.browserland-mods`
 marker file. Unpacking an archive into a live `mods_dir` is not the recommended
 path; use the API, or stop the broker first.
 
-### 10.6 Status vocabulary
+### 11.6 Status vocabulary
 
 **Control Panel → Mods** is where an operator lives with all of this: it lists
 the union of catalog packages and registered declarations, joined on id, badges
@@ -2669,7 +2787,7 @@ the compile-error case, which still fires `load` on the element) · `wrong-id`.
 
 ---
 
-## 11. Traps that have actually bitten this codebase
+## 12. Traps that have actually bitten this codebase
 
 **TDZ inside `init()` disables the whole mod.** If a hoisted `function` is
 *invoked* before a `const`/`let` it reads has been initialized — typically
@@ -2733,7 +2851,7 @@ promise about what any given browser is running.
 
 ---
 
-## 12. Checklist for a new shipped mod
+## 13. Checklist for a new shipped mod
 
 - [ ] `webterm/broker/mods/<id>/mod.json` — `id` matching the directory *and*
       the `registerMod` call, plus `version`, `ctxVersion`, `title`,
@@ -2746,7 +2864,7 @@ promise about what any given browser is running.
       `registerMod` — a test asserts both directions.
 - [ ] Path appended to `ui._MODS`, **after** anything it `requires`.
 - [ ] Any `.css` listed in `styles`, UTF-8, no BOM, newline-terminated, within
-      `ui._MAX_LINES`, with **prefixed** selectors (§13).
+      `ui._MAX_LINES`, with **prefixed** selectors (§14).
 - [ ] Optional `help.md` + the `help` block — then run
       `python -m webterm.broker.help_corpus`.
 - [ ] `python -m pytest tests -q` clean, and the page loaded in a real browser
@@ -2755,7 +2873,7 @@ promise about what any given browser is running.
 
 ---
 
-## 13. CSS: what you own, what you may use, what is private
+## 14. CSS: what you own, what you may use, what is private
 
 **Prefix everything you own.** A mod's stylesheet is concatenated into the same
 `<style>` zone as core's, so an unprefixed `.row` or `.item` is a page-wide

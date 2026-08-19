@@ -63,7 +63,7 @@
                 return Promise.resolve(helpCorpusEntries);
             if (helpCorpusPromise) return helpCorpusPromise;
             const gen = helpCorpusGen;
-            // ~1060 KB of wiki text — the developer/operator pages roughly
+            // ~1080 KB of wiki text — the developer/operator pages roughly
             // doubled it, and the mod-platform work (#192/#193/#197) has kept
             // adding — and over a tailnet that is a transfer, not a round
             // trip. The default deadline would abort a corpus that was
@@ -119,7 +119,7 @@
         //
         // INVALIDATE, DO NOT CLEAR. Bumping the generation alone retires the
         // memo for fetchHelpCorpus while leaving it renderable, and that
-        // distinction is load-bearing rather than tidy. The refetch is ~1060 KB
+        // distinction is load-bearing rather than tidy. The refetch is ~1080 KB
         // and this same login
         // synchronously drives re-renders that read the memo
         // directly: 63 fires the async notifyModsHostAuth one line BEFORE this,
