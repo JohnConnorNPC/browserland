@@ -369,7 +369,15 @@
                 // (so it has a size) but never painted at 0,0 first.
                 node.style.left = '-10000px';
                 node.style.top = '-10000px';
-                if (!node.parentNode) document.body.appendChild(node);
+                // ADOPTED UNCONDITIONALLY, which is what the docs promise and
+                // what `position: fixed` placement requires: this places in
+                // VIEWPORT coordinates, and only html/body are guaranteed not
+                // to be a containing block for fixed descendants (see
+                // 14_css_dragdrop.css). A node left inside a transformed
+                // ancestor -- an app window mid-drag has one -- would be placed
+                // against the wrong origin. Anchoring hands the node to core;
+                // core removes it again on close, which is the symmetric half.
+                document.body.appendChild(node);
             } catch (e) {
                 try { console.error('[popover] anchor failed:', e); } catch (_) {}
                 entry.closed = true;

@@ -26683,6 +26683,32 @@ const cases = {
         return { defined: Object.keys(out).filter(function (k) {
             return out[k] !== undefined; }) };
     },
+    inherited_name_is_not_membership: function () {
+        // `integrity` is read straight off window.__mods.packages[<id>], a
+        // page-mutable bag, and membership is THE check that decides whether a
+        // forced-public URL gets minted. `name in integrity` would consult the
+        // prototype chain, so anything that lands a `.js`-suffixed key on
+        // Object.prototype -- a mod, an injected script, a pollution gadget --
+        // would mint a real URL for a file the package does not ship. This is
+        // the same defect class as the choice tables: a membership table that
+        // answers for things it does not contain.
+        const pkg = install('demo', GEN, ['app.js']);
+        Object.prototype['pwn.js'] = 'sha256-x';
+        try {
+            const ctx = ctxFor('demo');
+            // JSON.stringify DROPS an undefined value, so an absent key would
+            // read as a pass whatever happened. Label the refusals instead.
+            const lbl = function (v) {
+                return (v === undefined) ? 'REFUSED' : v;
+            };
+            return {
+                shipped: lbl(ctx.assets.url('app.js')),
+                inherited: lbl(ctx.assets.url('pwn.js')),
+                // ...and the ordinary inherited members too
+                ctor: lbl(ctx.assets.url('constructor')),
+            };
+        } finally { delete Object.prototype['pwn.js']; }
+    },
     no_gen: function () {
         // A catalog row with no usable gen leaves _modPackage's default ''.
         install('demo', '', ['app.js']);
@@ -26780,6 +26806,18 @@ def test_nothing_the_route_will_not_serve_gets_a_url(assets_harness):
     # JSON turns an undefined ARRAY element into null, so this half reads null.
     assert all(v is None for v in r["res"]["nonStrings"]), \
         "a non-string name is never coerced into a URL"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_inherited_name_is_not_membership_in_the_integrity_map(assets_harness):
+    # The membership check must be hasOwnProperty-by-call, not `in`. With `in`,
+    # a single write to Object.prototype mints a forced-public URL for a file
+    # the package does not ship.
+    r = _run_assets(assets_harness, "inherited_name_is_not_membership")["res"]
+    assert r["shipped"] == "/mods/demo/" + ("a" * 64) + "/app.js"
+    assert r["inherited"] == "REFUSED", (
+        "a name inherited from Object.prototype was treated as shipped")
+    assert r["ctor"] == "REFUSED"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -27035,18 +27073,21 @@ function mousedownOn(el) {
     for (const fn of (docHandlers.mousedown || []).slice()) fn({ target: el });
 }
 function pressEscape() {
-    let prevented = 0, stopped = 0;
+    let prevented = 0, plain = 0, immediate = 0;
     for (const fn of (docHandlers.keydown || []).slice()) {
         fn({ key: 'Escape',
              preventDefault: function () { prevented++; },
-             stopPropagation: function () { stopped++; },
-             // Escape uses stopImmediatePropagation, because the listeners
-             // that matter are on the SAME document node and
-             // stopPropagation does not stop those. Counted here so the
-             // swallow assertion still means "the key went no further".
-             stopImmediatePropagation: function () { stopped++; } });
+             // Counted SEPARATELY. The two spellings are not
+             // interchangeable here: the listeners that matter are on the
+             // SAME document node (a hand-rolled mod popover's own capture
+             // keydown -- mods/git has one), and stopPropagation does not
+             // stop those. A harness that added both into one counter would
+             // let a simplification back to the ordinary spelling through.
+             stopPropagation: function () { plain++; },
+             stopImmediatePropagation: function () { immediate++; } });
     }
-    return { prevented: prevented, stopped: stopped };
+    return { prevented: prevented, stopped: plain + immediate,
+             plain: plain, immediate: immediate };
 }
 function bound() {
     return { mousedown: (docHandlers.mousedown || []).length,
@@ -27160,6 +27201,29 @@ CASES.outside_click_two_mods = function () {
 };
 
 // Escape peels ONE layer, topmost first, and swallows the key.
+// The node is ADOPTED, wherever it was. Placement is in viewport coordinates
+// (position: fixed), and only html/body are guaranteed not to be a containing
+// block for fixed descendants -- so a node left inside a mod's own window would
+// be placed against the wrong origin the moment that window is transformed.
+// Core inserted it, so core removes it: the pair has to be symmetric or a mod
+// that is gone would be the one expected to clean up.
+CASES.a_parented_node_is_adopted_and_returned_nowhere = function () {
+    const a = activate('alpha');
+    const win = panel(300, 200);
+    body.appendChild(win);
+    const node = panel(100, 50);
+    win.appendChild(node);
+    const p = a.ctx.popover.anchor(node, anchorAt(10, 10, 40, 20), {});
+    frame();
+    const out = { adopted: node.parentNode === body,
+                  leftTheWindow: win.children.indexOf(node) < 0,
+                  placedFixed: node.style.position };
+    p.close();
+    out.removedOnClose = onBody(node);
+    out.parentAfter = node.parentNode === null;
+    return out;
+};
+
 CASES.escape_peels_one = function () {
     const a = activate('alpha');
     const b = activate('beta');
@@ -27169,6 +27233,7 @@ CASES.escape_peels_one = function () {
     const k1 = pressEscape();
     out.afterFirst = [p1.isOpen(), p2.isOpen()];
     out.swallowed = (k1.prevented === 1 && k1.stopped === 1);
+    out.spelling = [k1.immediate, k1.plain];
     pressEscape();
     out.afterSecond = [p1.isOpen(), p2.isOpen()];
     out.boundAfter = bound();
@@ -27343,12 +27408,33 @@ def test_outside_click_dismissal_is_per_popover(popover_harness):
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_parented_node_is_adopted_into_the_body(popover_harness):
+    # An `if (!node.parentNode)` guard here would leave a node that already
+    # lives in a mod window where it is, placed in viewport coordinates against
+    # a possibly-transformed ancestor -- and the docs promise adoption either
+    # way. Insert and remove must be the same story.
+    r = _run_popover(popover_harness, "a_parented_node_is_adopted_and_returned_nowhere")
+    assert r["adopted"] is True, "a node with a parent was not adopted"
+    assert r["leftTheWindow"] is True
+    assert r["placedFixed"] == "fixed"
+    assert r["removedOnClose"] is False, "core must remove what core inserted"
+    assert r["parentAfter"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_escape_closes_the_topmost_popover_only(popover_harness):
     r = _run_popover(popover_harness, "escape_peels_one")
     assert r["afterFirst"] == [True, False], \
         "Escape must peel the topmost layer, not every popover on the page"
     assert r["swallowed"] is True, \
         "the key must not also reach whatever is behind the popover"
+    # ...and by the RIGHT spelling. stopPropagation does not stop listeners
+    # on the same node, and a hand-rolled mod popover's capture keydown is on
+    # the document too -- so the ordinary spelling would let one keypress peel
+    # two layers while the code claims to peel the topmost.
+    assert r["spelling"] == [1, 0], (
+        "Escape must be swallowed with stopImmediatePropagation, not "
+        "stopPropagation")
     assert r["afterSecond"] == [False, False]
     assert r["boundAfter"] == {"mousedown": 0, "keydown": 0, "rafs": 0}
     assert r["logged"] == []

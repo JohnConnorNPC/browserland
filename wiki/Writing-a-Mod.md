@@ -2105,7 +2105,8 @@ const p = ctx.popover.anchor(node, anchorEl, {
                                  // | top-end | top   (default bottom-start)
     gap: 2,                      // px between anchor and node, clamped 0..64
     onClose: function (why) {},  // 'close' | 'outside' | 'escape'
-                                 // | 'anchor-gone' | 'teardown'
+                                 // | 'anchor-gone' | 'node-gone'
+                                 // | 'teardown'
 });
 p.close();          // acts on THIS popover only
 p.reposition();     // re-measure now (after a synchronous fill)
@@ -2115,7 +2116,22 @@ p.isOpen();         // false once anything has dismissed it
 Core appends the node to `document.body`, gives it the `mod-popover` class and
 `position: fixed`, measures it off-screen for one frame so it is never painted
 at 0,0, and **removes the node itself** when the popover closes — a mod that is
-gone is in no position to remove anything. The handle comes back synchronously
+gone is in no position to remove anything.
+
+**Anchoring hands the node to core**, and that is unconditional: a node that
+already lives inside your own window is *moved* to the body, not left where it
+was. This is not tidiness — placement is in **viewport** coordinates, and only
+`html`/`body` are guaranteed not to be a containing block for `position: fixed`
+descendants, so a node left inside a transformed ancestor (an app window
+mid-drag has one) would be positioned against the wrong origin. Build the node
+detached and hand it over; do not expect it back where you put it. The
+symmetric half is that core removes what core inserted.
+
+The popover also closes with `'node-gone'` if **your** node leaves the page
+while the anchor is still on screen. Without that check the entry would be
+immortal — `isOpen()` true, `onClose` never called, the document listeners
+still bound, and the frame loop measuring a detached element for the life of
+the page. The handle comes back synchronously
 and *always*: a refused anchor (dead activation, missing node or anchor)
 answers with an already-closed handle rather than a `null`, so a caller never
 has to branch on whether it got one.
