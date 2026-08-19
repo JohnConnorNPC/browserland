@@ -189,7 +189,20 @@
             }
         }
 
+        // A DEAD activation registers nothing, and this guard is not symmetry
+        // with 86l -- it is the difference between a leak and a PERMANENT one.
+        // _armTermTapRemoval degrades silently for a dead record:
+        // info.onModTeardown refuses on rec.unloading, so it falls through to
+        // rec.unloads.push(off) -- and _runUnloads SPLICES that list and
+        // iterates the snapshot, so an entry pushed during or after the drain
+        // never runs. Only info.onDispose arms, and that fires on WINDOW CLOSE.
+        // So a disabled mod's tapOutput would go on receiving every PTY byte of
+        // every still-open terminal for the life of that window, reachable from
+        // any onUnload callback, ctx.signal abort listener, or in-flight promise
+        // holding a retained info bag. _modOnAppWindowCreate already refuses the
+        // same order for the same reason.
         function _modTermTap(rec, info, kind, fn) {
+            if (rec && rec.unloading) return function () { return false; };
             const off = _addTermTap(info && info.win, kind, fn);
             if (typeof fn === 'function') _armTermTapRemoval(rec, info, off);
             return off;
@@ -240,10 +253,12 @@
 
         // ---- info.onModesChanged (#201) -------------------------------------
         // ONE CORE SAMPLER instead of a poll per mod. xterm exposes `term.modes`
-        // as a GETTER with no change event, so mods/mousemode/mousemode.js:20-34
-        // samples it on `term.onWriteParsed` behind a requestAnimationFrame.
-        // That shape is right and is kept verbatim here — what changes is that
-        // it runs ONCE per terminal for N subscribers instead of once per mod:
+        // as a GETTER with no change event. mods/mousemode/mousemode.js USED TO
+        // sample it itself on `term.onWriteParsed` behind a
+        // requestAnimationFrame; that shape is right and is kept verbatim here,
+        // and the mod now subscribes to this instead of sampling (its own
+        // comment records the migration). What changes is that the sampling
+        // runs ONCE per terminal for N subscribers instead of once per mod:
         //
         //     ctx.windows.onTerminalCreate(function (info) {
         //         info.onModesChanged(function (modes) {
@@ -461,6 +476,11 @@
         function _modTerminalModes(rec, info) {
             if (!info || typeof info !== 'object') return info;
             const member = function (fn) {
+                // Same refusal as the taps above, for the same reason: a dead
+                // activation's subscription would arm only on window close,
+                // because _runUnloads has already spliced the list it would be
+                // pushed onto.
+                if (rec && rec.unloading) return function () { return false; };
                 const off = _addTermModesSub(info && info.win, fn);
                 if (typeof fn === 'function') _armTermTapRemoval(rec, info, off);
                 return off;

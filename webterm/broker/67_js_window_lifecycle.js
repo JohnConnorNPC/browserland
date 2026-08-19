@@ -21,18 +21,18 @@
         // monospace stack and knows NOTHING about the (now mod-owned) terminal-font
         // feature. The termfont mod (mods/termfont/) overrides it PER terminal via
         // ctx.windows.onTerminalCreate when enabled, and resets terminals to THIS
-        // exact family on disable — so this literal MUST stay equal to the mod's
-        // TERM_FONT_DEFAULT (guarded by test_termfont_symbols_removed_from_core_
-        // fragments). When the mod is off, terminals use this baseline.
+        // exact family on disable. When the mod is off, terminals use this
+        // baseline.
         //
         // #201: THIS IS NOW THE SINGLE SOURCE, AND IT IS READABLE. A mod reads
         // it as `ctx.terminals.defaults.fontFamily` (86l_js_mod_terminal_font.js
         // exposes this very const by reference, not a copy of the literal), and
         // sets a per-terminal override through `info.setFont(family)` — which
         // 86l applies and, on that mod's teardown, reverts to the surviving
-        // writer or back to here. The mod's own TERM_FONT_DEFAULT survives one
-        // release for compatibility; the byte-match test now polices that there
-        // is exactly ONE literal in core, not that two copies agree.
+        // writer or back to here. The mod's own copy of this literal is GONE
+        // (it read the baseline through ctx from #201 on), so there is nothing
+        // left to keep in sync: the test now polices that this literal appears
+        // exactly ONCE in core and nowhere in the mod.
         const TERM_FONT_BASELINE = 'Consolas, "Liberation Mono", monospace';
         // Build the per-window context object and hand it to ONE subscriber. Used
         // by both the create-time emit and the replay, so both see an identical

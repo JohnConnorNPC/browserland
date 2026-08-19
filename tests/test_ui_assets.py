@@ -23245,6 +23245,91 @@ CASES.teardown_removes_the_taps = function () {
 // term.write by assignment while a tap is live. Both observe the same bytes,
 // and recorder's "is the method still mine" restore check still passes --
 // which it could not if core had wrapped the instance.
+// THE READ-ONLY BREACH, as a case. Only strings and typed-array views were
+// copied, and the JSON output frame is SERVER-supplied: `{"type":"output",
+// "data":[65]}` reaches win.term.write as an ARRAY, which xterm accepts and
+// holds for its ASYNC write queue. Handed to the taps by reference, one tap
+// could rewrite what a sibling observed AND what the terminal later parsed.
+CASES.an_array_payload_cannot_be_mutated_by_a_tap = function () {
+    const m = modCtx('a'), n = modCtx('b');
+    const win = openTerminal();
+    let second = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { if (Array.isArray(d)) d[0] = 999; });
+    });
+    n.ctx.windows.onTerminalCreate(function (info) {
+        const id = info.win.id;
+        info.tapOutput(function (d) {
+            // Scoped to THIS window: the replay taps every terminal, so the
+            // exotic-payload dispatch below would otherwise overwrite this.
+            if (id !== win.id) return;
+            second = Array.isArray(d) ? d.slice() : d;
+        });
+    });
+    const core = [65];                 // the array core also handed to xterm
+    dispatchTermOut(win, core);
+    // A payload that is neither string, view nor array is not handed over at
+    // all -- a live object reference is what made "observer" false.
+    let exotic = 'UNSET';
+    const w2id = { id: null };
+    const o = modCtx('c');
+    o.ctx.windows.onTerminalCreate(function (info) {
+        const id = info.win.id;
+        info.tapOutput(function (d) { if (id === w2id.id) exotic = d; });
+    });
+    const w2 = openTerminal();
+    w2id.id = w2.id;
+    dispatchTermOut(w2, { live: true });
+    return { core: core, second: second, exotic: exotic, errors: errors };
+};
+
+// DUPLICATE REGISTRATIONS. The lists held bare functions and off() removed by
+// indexOf(fn), so the same handler registered twice meant off2() deleted entry
+// ONE while the second survived the liveness recheck and still fired -- with
+// its own off() spent, so nothing could ever remove it.
+CASES.the_same_handler_registered_twice_unsubscribes_independently = function () {
+    const m = modCtx('a');
+    const win = openTerminal();
+    const seen = [];
+    const shared = function (d) { seen.push(d); };
+    let off1 = null, off2 = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        off1 = info.tapOutput(shared);
+        off2 = info.tapOutput(shared);
+    });
+    dispatchTermOut(win, 'x');          // both registrations fire
+    const afterBoth = seen.length;
+    off2();
+    dispatchTermOut(win, 'y');          // exactly one must remain
+    const afterOne = seen.length;
+    off1();
+    dispatchTermOut(win, 'z');          // none
+    return { afterBoth: afterBoth, afterOne: afterOne, total: seen.length,
+             errors: errors };
+};
+
+// A DEAD activation registers nothing. The removal it would arm degrades
+// silently: onModTeardown refuses a dead record, rec.unloads was already
+// spliced by _runUnloads, and only onDispose is left -- which fires on WINDOW
+// CLOSE. So the tap would have run for the life of the window.
+CASES.a_dead_activation_cannot_register_a_tap = function () {
+    const m = modCtx('a');
+    const win = openTerminal();
+    let bag = null;
+    m.ctx.windows.onTerminalCreate(function (info) { bag = info; });
+    _runUnloads(m.rec);                 // disable the mod, keep the window
+    const late = [];
+    const off = bag.tapOutput(function (d) { late.push(d); });
+    // onModesChanged is a SECOND extender and is not in this harness's slice;
+    // its own refusal is covered by the modes harness.
+    const offModes = (typeof bag.onModesChanged === 'function')
+        ? bag.onModesChanged(function () { late.push('modes'); })
+        : function () { return false; };
+    dispatchTermOut(win, 'after-teardown');
+    return { late: late, offIsFn: typeof off, offModesIsFn: typeof offModes,
+             stillOpen: windows.has(win.id), errors: errors };
+};
+
 CASES.coexists_with_recorder = function () {
     const m = modCtx('observer');
     const tapped = [], recorded = [];
@@ -25017,3 +25102,55 @@ def test_termfont_on_a_ctx_without_the_terminals_family_still_lands_there(
     assert r["hasFamily"] is False
     assert r["applied"] == r["baseline"], \
         "a loader skew changed what termfont applies"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_array_payload_cannot_be_mutated_by_a_tap(taps_harness):
+    # The read-only promise, against the payload shape that broke it. The JSON
+    # output frame is server-supplied, so data.data can be an array -- xterm
+    # takes one, and holds it for an ASYNC write queue while the taps were
+    # handed the same object.
+    r = _run_taps(taps_harness, "an_array_payload_cannot_be_mutated_by_a_tap")
+    assert r["errors"] == []
+    assert r["core"] == [65], (
+        "a tap mutated the array core also handed to xterm -- every observer "
+        "is a transformer")
+    assert r["second"] == [65], "a tap mutated what a sibling observed"
+    # Neither string, view nor array: handed out as null rather than as a live
+    # object reference.
+    assert r["exotic"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_same_handler_registered_twice_unsubscribes_independently(
+        taps_harness):
+    # Identity-by-function made off() ambiguous: off2() removed whichever entry
+    # indexOf found first, so the second registration outlived its own
+    # unsubscribe and could never be removed.
+    r = _run_taps(taps_harness,
+                  "the_same_handler_registered_twice_unsubscribes_independently")
+    assert r["errors"] == []
+    assert r["afterBoth"] == 2, "both registrations should fire"
+    assert r["afterOne"] == 3, (
+        "after off2() exactly one registration must remain -- got "
+        f"{r['afterOne'] - r['afterBoth']} deliveries")
+    assert r["total"] == 3, "a registration survived its own off()"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_activation_cannot_register_a_tap(taps_harness):
+    # Registering from a retained bag after teardown used to succeed, and the
+    # removal it armed was a no-op: onModTeardown refuses a dead record,
+    # rec.unloads has already been spliced by _runUnloads, and onDispose only
+    # fires on window close. The tap then observed every byte until the window
+    # went away.
+    r = _run_taps(taps_harness, "a_dead_activation_cannot_register_a_tap")
+    assert r["errors"] == []
+    assert r["late"] == [], (
+        "a disabled mod's tap received traffic from a still-open terminal")
+    # The refusal is still a callable off(), the posture every other registrar
+    # takes.
+    assert r["offIsFn"] == "function"
+    # (onModesChanged is a separate extender; the taps harness does not
+    # slice it, so this only asserts the tap half here.)
+    assert r["stillOpen"] is True, "the refusal must not close the terminal"

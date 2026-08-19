@@ -1801,6 +1801,165 @@ function selfHostId() {
 `typeof ctx.hosts.list === 'function'`, or declare the finer
 `needs: ['hosts.list']`. `ctxVersion` stays `1`.
 
+### Watching a terminal: `info.tapOutput` / `tapInput` / `onResize` / `onModesChanged` (#201)
+
+These are members of the `info` bag `ctx.windows.onTerminalCreate` hands you.
+They are the **sanctioned replacement for monkey-patching an xterm instance**:
+before them, a mod that wanted to see terminal traffic replaced `term.write` by
+assignment, a scheme whose own comment in `mods/recorder/recorder.js` admits
+two patchers cannot coexist.
+
+```js
+ctx.windows.onTerminalCreate(function (info) {
+    const off = info.tapOutput(function (data) { /* bytes that were written */ });
+    info.tapInput(function (data) { /* bytes that were sent */ });
+    info.onResize(function (d) { d.cols; d.rows; });
+    info.onModesChanged(function (modes) {
+        modes.mouseTracking;   // 'none'|'x10'|'vt200'|'drag'|'any'
+        modes.mouseActive;     // mouseTracking !== 'none'
+        modes.altScreen;       // the alternate buffer is up
+    });
+});
+```
+
+Each registrar returns an idempotent `off()`. A non-function argument is a
+silent no-op that still hands back a callable `off()` — the posture
+`onTerminalCreate` itself takes.
+
+**They are observers, and that is enforced rather than requested.** Every tap
+fires strictly *after* the underlying write or send has been dispatched, and
+the output dispatch sits inside the same `try` as the write — so a write that
+**threw** never reports its bytes as delivered. A mutable payload is copied
+**per tap**, so tap #1 cannot rewrite what tap #2 observes: a typed-array view
+is `slice()`d, and so is an **array**, which is the case that mattered — the
+JSON output frame is server-supplied, so `data.data` can be `[65]`, and xterm
+is still holding that same array for its asynchronous write queue. A payload
+that is neither string, view nor array is handed out as **`null`** rather than
+as a live reference; "I cannot show you this safely" is truthful where a shared
+reference is not. Taps run in registration order over a snapshot with a
+liveness recheck, isolated per callback: a throwing tap loses only the rest of
+its own callback, and the terminal never sees the throw.
+
+**`tapInput` fires per wire frame, after the send.** Input is chunked into
+≤256 Ki-char frames before it goes out, and the tap fires once per frame, so it
+observes what actually left rather than what was about to. That is also what
+makes it cover the hand-bracketed ConPTY paste path (#138), which goes out
+through the same `sendChunked('input', …)` call and not through `term.paste()`.
+
+**No history replay.** `onTerminalCreate` replays over terminals that are
+already open, so a tap registered from that replay sees traffic **from then
+on**. Reconstructing the scrollback that came before stays the recorder's job
+(its serialize-addon keyframes) — do not expect a tap to hand you the past.
+
+**`onResize` is fed from xterm's own resize event**, not from core's
+`term.resize(cols, rows)` call site. Both spellings would cover the
+broker-confirmed resize, but only this one also covers a **mod** calling
+`fitAddon.fit()`, which resizes inside xterm with no core call site involved.
+It fires once per applied resize whichever path drove it, and each tap gets a
+fresh `{cols, rows}`.
+
+**`onModesChanged` replays the current snapshot synchronously on subscribe.**
+Otherwise every subscriber would have to re-invent an initial sample, which
+matters because `onTerminalCreate` replays over terminals already running an
+app that may not write again for minutes. A terminal that has never seen a mode
+reports the real read of xterm's defaults (`'none'` / `false` / `false`). An
+**unreadable** getter replays **nothing at all** — announcing `'none'` for a
+terminal that may well be mouse-active would make the next successful sample
+report a transition out of a state core never observed. A subscription on an
+already-disposed terminal is refused outright.
+
+**It fires on group transitions, not per-flag flips.** xterm's `DECRST` of any
+mouse-tracking mode clears the whole group — the vendored build keeps a single
+active protocol, not independent 1000/1002/1003 flags — so per-flag events are
+not expressible here. `mouseTracking` *is* the group's resolved value:
+`'vt200'` → `'any'` is one event, and any `DECRST` that drops the group is
+exactly one event to `'none'`. It follows for free that `RIS` (which resets the
+mouse service) reports a transition to `'none'` while `DECSTR` (which does not)
+reports nothing — the sampler reads **state** after the parse and never
+interprets the escape bytes.
+
+**The honest limit: it is coalesced, and it is a state notification, not an
+event log.** The sampler only *arms* a `requestAnimationFrame`, so two changes
+inside one frame collapse into a single delivery of the final state; and
+`requestAnimationFrame` does not run in a hidden tab, so any number of changes
+made while the tab is hidden collapse into one delivery when it is shown again.
+The subscriber sees the final state, never the intermediate ones. Because these
+events describe persistent state, a missed intermediate is not a lost fact —
+but **nothing here is a suitable trigger for one-shot side effects.**
+
+**Lifecycle: auto-removed at terminal dispose *and* at mod teardown**, both
+armed at the moment of registration. `win.cleanups` fires only on window
+*close*, so the teardown half is what stops a disabled mod from leaving taps
+running on every terminal that is still open.
+
+**Both mechanisms coexist for one release, deliberately.** Core hooks its **own
+call sites** and nothing here touches `term.*` by assignment — `onModesChanged`
+is a subscription to xterm's public `onWriteParsed`, `onResize` to its public
+resize event. That is a compatibility requirement, not taste: recorder checks
+"is `term.write` still the function I installed" before restoring it, and a
+core wrapper on the instance would make that check false and corrupt its
+restore path. One consequence worth stating: a tap never sees anything a mod
+writes straight to `win.term` (recorder's own playback included), because that
+is not a core call site. `docs-terminal-funnels.md` enumerates the boundary and
+its named limits.
+
+### Cell size and font: `info.cellDims` / `info.setFont` / `ctx.terminals` (#201)
+
+```js
+ctx.windows.onTerminalCreate(function (info) {
+    const d = info.cellDims();          // {width, height} | null
+    info.setFont('Iosevka, monospace');
+    info.setFont(null);                 // drop MY override
+});
+ctx.terminals.defaults.fontFamily;      // the core baseline, frozen
+```
+
+**`cellDims()` returns `null` before the first render, and on a disposed
+terminal.** There is no fallback and there must never be one: the hardcoded
+9×17 that `mods/recorder/recorder.js` falls back to is the anti-pattern this
+replaced — that is not a measurement, it is a number that happens to be close
+on one machine. A zero width or height is *pre-render*, not a reading, and is
+reported as `null` too. A disposed terminal answers `null` even though xterm can
+leave its last dimensions object resident, because a stale measurement
+presented as a current one is the same class of lie. **A caller that needs a
+cell box before anything has rendered has to handle `null`.** Asking is also
+non-destructive: nothing is cached into settings on the way out.
+
+**`setFont` is last-writer-wins *with an owner record*.** Core keeps, per
+terminal, the ordered list of which mod set which family; the last entry is
+what is on screen. Ownership is by **mod id**, so calling `setFont` twice on one
+terminal updates your own entry rather than stacking. The record is the whole
+point — it is what makes the **revert chain** correct:
+
+- disabling the **last** writer reverts the terminal to the **earlier
+  surviving** writer;
+- disabling **all** writers reverts it to `ctx.terminals.defaults.fontFamily`;
+- `setFont(null)` (or any empty / non-string family) is the same code path as a
+  teardown, so a mod cannot get a revert core's own unload does not also get.
+
+A plain "remember the previous value and restore it on unload" scheme — which
+is what a mod can implement for itself — gets both interesting orders wrong:
+two font mods on one terminal either strand a dead mod's font on screen or
+stomp a live mod's font back to the baseline, depending on which one is turned
+off.
+
+**A dead activation cannot take ownership.** `setFont` from a stray callback
+after your mod was disabled is refused, because teardown's release is one-shot:
+re-creating the entry afterwards would leave a live terminal wearing a dead
+mod's font permanently. The release is armed on both ends (dispose *and* mod
+teardown) at the moment the override is set.
+
+Core owns the apply: the family is written to `term.options` and followed by
+core's own refit, once, so the revert path is the same code as the set path and
+cannot drift from it.
+
+`ctx.terminals` is a **new top-level family** and carries its own capability
+entry (`terminals`, version 1) — feature-detect with `ctx.terminals`, or declare
+`needs: ['terminals.defaults']`. The four `info` members above are members of
+the existing v1 `windows` family and owe no capability entry of their own:
+feature-detect with `typeof info.tapOutput === 'function'`. `ctxVersion` stays
+`1`.
+
 ---
 
 ## 9. Help: `help.md` and the regen you must not skip
