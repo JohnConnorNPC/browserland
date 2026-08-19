@@ -49,28 +49,45 @@ def test_packaged_json_in_sync_with_fragments():
 
 
 def _documented_paths(section):
-    """Paths §8 actually names, scoped PER FAMILY.
+    """Paths §8 actually names, attributed to a FAMILY rather than to §8.
 
-    The obvious rule -- "the family appears somewhere, and the member name
-    appears somewhere" -- has a hole exactly where new members land. §8 is
-    108K characters, so a leaf like `list`, `get`, `set`, `open` or `url` is
-    already a word somewhere in it under a DIFFERENT family; an undocumented
-    `ctx.assets.list` would sail through green. Verified: it did.
+    The obvious rule -- "the family appears somewhere, the member appears
+    somewhere" -- has its hole exactly where new members land. §8 is 108K
+    characters, so a leaf like `list`, `get`, `set`, `open` or `url` is
+    already a word there under some OTHER family, and an undocumented
+    `ctx.assets.list` sails through. Verified, not assumed: it did.
 
-    So a member counts only inside a region that also names its family. §8
-    writes members three ways and all three are honoured -- the dotted form
-    (`ctx.storage.get`), the bold bullet (**`closeAll()`**), and the
-    slash-separated list under a family bullet (`ctx.file` -- `read` / `write`
-    / `list`), which is how fifteen of the file members are written.
+    Scoping to families named anywhere in a subsection BODY does not fix it --
+    §8 subsections cross-reference each other constantly, and that rule
+    accepted 595 paths that do not exist. Attribution comes from the two
+    places that say what text is ABOUT: a `### ` heading, and a family bullet
+    (`- **`ctx.file`** -- `read` / `write` / `list`), which is how fifteen of
+    the ctx.file members are written.
+
+    HONEST LIMIT: a heading that names several families at once (§8 has one:
+    "Introspection: `ctx.mods`, `ctx.settings.describe`, `ctx.helpCards`")
+    shares its words among them, so `settings.list` is accepted there because
+    `list()` is documented for `ctx.mods` in the same subsection. This is a
+    NAME-COVERAGE gate, not a proof that the prose is right; 392 paths are
+    accepted where 595 were, with no real member rejected.
     """
     ok = set()
-    # 1. the dotted form, anywhere.
-    for m in re.finditer(r"ctx\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)", section):
+    # 1. the dotted form, anywhere -- unambiguous by construction.
+    #    `info` is a root of its own: the terminal bag is documented as
+    #    `info.tapOutput`, in the same shapes, so it shares this rule.
+    for m in re.finditer(r"(?:ctx|info)\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)", section):
         ok.add(m.group(1) + "." + m.group(2))
-    # 2. bare members, scoped to the ### subsection that names their family.
+    # 1b. `info` is itself the family -- the terminal bag is documented as
+    #     `info.tapOutput`, ONE dot, so rule 1 (which wants two) cannot see it.
+    for m in re.finditer(r"\binfo\.([A-Za-z_$][\w$]*)", section):
+        ok.add("info." + m.group(1))
+    # 2. bare members, scoped to a subsection whose HEADING names the family.
     for sub in re.split(r"\n(?=### )", section):
+        head = sub.split("\n", 1)[0]
         families = {m.group(1) for m
-                    in re.finditer(r"ctx\.([A-Za-z_$][\w$]*)", sub)}
+                    in re.finditer(r"ctx\.([A-Za-z_$][\w$]*)", head)}
+        if re.search(r"\binfo\.", head):
+            families.add("info")   # "`info.tapOutput` / `tapInput` / ..."
         if not families:
             continue
         words = {m.group(1) for m
@@ -78,8 +95,12 @@ def _documented_paths(section):
         for fam in families:
             for w in words:
                 ok.add(fam + "." + w)
+    # 3. family bullets: `- **`ctx.X`** -- `a` / `b` / `c``, to the next bullet.
+    for m in re.finditer(r"^- \*\*`(?:ctx|info)\.([A-Za-z_$][\w$]*)`\*\*(.*?)(?=^- |\Z)",
+                         section, re.M | re.S):
+        for w in re.finditer(r"`([A-Za-z_$][\w$]*)[`(]", m.group(2)):
+            ok.add(m.group(1) + "." + w.group(1))
     return ok
-
 
 def test_every_inventory_path_is_named_in_wiki_section_8():
     # The docs half of the gate. This pins NAME COVERAGE -- exactly what the
@@ -95,10 +116,12 @@ def test_every_inventory_path_is_named_in_wiki_section_8():
             missing.append(path + " (family `ctx.%s` absent)" % family)
         elif "." in path and path not in documented:
             missing.append(path + " (member not named under its family)")
+    # info.* gets the SAME attribution, not a bare whole-section word search:
+    # that is the loose rule this file already proved wrong for ctx, and it was
+    # still shipping here. `info` is the family name in the docs.
     for path in inv["info"]:
-        member = path.split(".")[-1]
-        if not re.search(r"\b%s\b" % re.escape(member), section):
-            missing.append(path + " (info member absent)")
+        if path not in documented:
+            missing.append(path + " (info member not named under `info`)")
     assert not missing, (
         "ctx members not documented in wiki/Writing-a-Mod.md §8: %s" % missing)
 
@@ -204,6 +227,25 @@ def test_extender_without_a_declaration_raises():
     with pytest.raises(ci.CtxScanError):
         ci.scan_extender(src, ci.mask_source(src), "_ctxGhost", "fake.js")
 
+
+def test_shapes_the_scanner_cannot_attribute_are_refused_not_skipped():
+    # The "no members at all" guard cannot catch the realistic regression: ONE
+    # new member on an EXISTING family, written a way the scanner does not
+    # know. The extender still yields its other members and looks healthy, so
+    # the missed member becomes a green build. These are refused instead.
+    base = "function _ctxProbe(ctx, rec) {" + chr(10)
+    base += "  ctx.storage = { get: 1 };" + chr(10)
+    for tail, why in (
+            ("  Object.assign(ctx, { sneaky: 1 });", "Object.assign(ctx"),
+            ("  const st = ctx.storage;" + chr(10)
+             + "  Object.assign(st, { s: 1 });", "Object.assign(<alias>"),
+            ("  ctx[" + chr(39) + "sneaky" + chr(39) + "] = 1;",
+             "computed ctx[...]"),
+    ):
+        src = base + tail + chr(10) + "}" + chr(10)
+        with pytest.raises(ci.CtxScanError) as exc:
+            ci.scan_extender(src, ci.mask_source(src), "_ctxProbe", "probe.js")
+        assert why.split("(")[0] in str(exc.value)
 
 def test_extender_that_installs_nothing_raises():
     src = ("function _ctxQuiet(ctx) {\n"

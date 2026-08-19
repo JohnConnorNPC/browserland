@@ -30,10 +30,22 @@ than no scanner -- it turns a missed member into a green build.
 HONEST LIMITS. This enforces member-NAME coverage over ``ctx`` and ``info.*``
 only -- not prose accuracy, not signatures, not semantics. Nesting is one level
 deep (``settings.text``, not ``settings.text().set``). ``registerMod`` fields
-are explicitly OUT OF SCOPE. A member installed by machinery other than the two
-shapes above (a computed key, or a member added by a helper an extender calls)
-is not seen; the wiki cross-check in the test is the backstop that keeps the
-listing honest for the shapes it does cover.
+are explicitly OUT OF SCOPE.
+
+A member installed by machinery other than the two shapes above is not seen --
+and because the failure mode of a scanner is SILENCE, the ones that can be
+recognized as patterns are now REFUSED rather than skipped: ``Object.assign``
+onto ``ctx`` or onto a known family alias, and a computed ``ctx[...]`` key.
+The 'yields no members at all' guard cannot catch these, since an extender that
+adds one unseen member to an existing family still returns its others and looks
+healthy.
+
+THE ONE SHAPE THAT STILL PASSES SILENTLY is helper delegation: an extender that
+calls ``_install(ctx)`` and writes ``c.storage.newThing`` inside ``_install``.
+It cannot be refused by pattern -- the call looks like any other call --
+and catching it needs call-following, which is a different tool. Assign ctx
+members directly in the extender body and this limit never bites. No shipped
+fragment uses delegation, ``Object.assign`` or a computed key today.
 
 PLATFORM. Fragments are read as UTF-8 with newlines normalized to ``\\n``
 before scanning, so a CRLF working copy (this repo ships ``.gitattributes`` /
@@ -344,6 +356,29 @@ def scan_extender(src: str, mask: str, name: str, where: str) -> list[str]:
                 r"\b%s\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=(?!=)" % re.escape(local),
                 body):
             found.append("%s.%s" % (fam, m.group(1)))
+
+    # FAIL LOUD on shapes that would install a member this scanner cannot see.
+    # The "no members at all" guard below cannot catch the realistic
+    # regression -- ONE new member on an EXISTING family, written a way the
+    # scanner does not know -- because the extender still yields its other
+    # members and looks healthy. The failure mode of a scanner is silence, so
+    # every shape below is refused rather than skipped. None is used today.
+    for pat, what in (
+            (r"Object\.assign\s*\(\s*ctx\b", "Object.assign(ctx, ...)"),
+            (r"\bctx\s*\[", "a computed ctx[...] assignment"),
+            (r"Object\.assign\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,",
+             "Object.assign(<alias>, ...)"),
+    ):
+        m = re.search(pat, body)
+        if not m:
+            continue
+        if what == "Object.assign(<alias>, ...)" and m.group(1) not in aliases:
+            continue
+        raise CtxScanError(
+            "%s: extender %s uses %s, which this scanner cannot attribute to a "
+            "ctx member. Either write it as a plain `ctx.<family>.<member> =` "
+            "assignment or teach the scanner -- refusing to under-report." % (
+                where, name, what))
 
     if not found:
         raise CtxScanError(

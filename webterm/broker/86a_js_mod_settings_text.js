@@ -368,7 +368,20 @@
         // STABLE code both `s.error` and the Mods-pane warning row carry. One
         // vocabulary on both sides, so what the operator reads is what the mod
         // branched on. It mirrors _normChoiceOptions' three throws exactly and
-        // never throws itself. ('async_validator' is #203 §2's code; it is a
+        // never throws itself.
+        //
+        // MIRRORING IS LOAD-BEARING, and it is why _normChoiceOptions' own
+        // `seen` table is Object.create(null) with `=== true` (86:1354). A
+        // plain object inherits constructor/toString/valueOf/hasOwnProperty,
+        // so an option legitimately valued 'constructor' read as already-seen
+        // there and threw a DUPLICATE error for a list containing no duplicate
+        // -- and `seen['__proto__'] = true` is a silent no-op through the
+        // legacy setter, leaving it truthy for the same reason. While the two
+        // disagreed this verdict said 'fine', the seam fell through, and the
+        // normalizer threw out of registration: the mod died for the exact
+        // input #203 exists to make survivable, and for an OPTIONAL
+        // suggestions list it died over a datalist.
+        // ('async_validator' is #203 §2's code; it is a
         // verdict on a FUNCTION, not on an option list, so it is decided by
         // _modSettingValidateReject below and never here.)
         function _modChoiceFault(options) {

@@ -49,7 +49,7 @@ below is done. On a clean checkout:
 5. **Restart the broker.** `INDEX_HTML` is assembled and cached at import, so an
    edit needs a restart, not just a reload — and a *browser* that already has
    the old page keeps the old bundle until it reloads. Mods take effect on the
-   next page load, always (`wiki/Writing-a-Mod.md` §10.3).
+   next page load, always (`wiki/Writing-a-Mod.md` §11.3).
 6. **Expect the mod to come back at its DEFAULT, not at each browser's old
    choice.** `webterm:mods:disabled` stores ids toggled *away* from their
    default, and the loader prunes ids it no longer recognises, so anyone who had
@@ -182,7 +182,7 @@ there is nothing to migrate:
 
 One thing no server-side change can undo: a browser that already has the page
 keeps the old bundle, 📋 button and all, until it reloads. Mods take effect on
-the next page load, always (`wiki/Writing-a-Mod.md` §10.3) — un-shipping is not a
+the next page load, always (`wiki/Writing-a-Mod.md` §11.3) — un-shipping is not a
 runtime revocation.
 
 **Tests.** Two, in `tests/test_ui_assets.py`.
@@ -203,5 +203,5 @@ Re-enabling means pointing both back at `mods/` and restoring the two
 
 **Republishing it as an installable `x-agent-docs` package is a non-goal.** It
 and `editor` call into each other's top-level names, which only works because
-shipped mods share one concatenated script — see `wiki/Writing-a-Mod.md` §10.2. That is
+shipped mods share one concatenated script — see `wiki/Writing-a-Mod.md` §11.2. That is
 a decoupling job, not a move.

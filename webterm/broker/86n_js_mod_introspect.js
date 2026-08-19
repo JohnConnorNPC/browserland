@@ -185,9 +185,19 @@
                 // reports them because the pane renders them, and a caller must
                 // not read them as a validation set. The type says which it is:
                 // 'text' is the one kind whose options do not bound it.
+                // Gated on _modChoiceFault, the PURE verdict -- not on
+                // _normChoiceOptions (which throws) and not on
+                // _modTextSuggestions (which warns, and would warn a second
+                // time for one declaration). Since #203 a malformed
+                // suggestions list costs the datalist and NOTHING else, so the
+                // control is live and describable; calling the throwing
+                // normalizer here left a WORKING control with no descriptor at
+                // all -- the inverse of the ghost above, and just as wrong. A
+                // bad list describes as no suggestions, which is what mounted.
                 const suggestions = (opts.options == null)
                     ? [] : (Array.isArray(opts.options) && !opts.options.length
-                            ? [] : _normChoiceOptions(opts.options));
+                            ? [] : (_modChoiceFault(opts.options)
+                                    ? [] : _normChoiceOptions(opts.options)));
                 const fallback = _modTextCoerce(opts.def, max);
                 return { type: 'text', options: suggestions, def: fallback };
             }
@@ -370,6 +380,16 @@
                 settings[kind] = (function (kind, orig) {
                     return function (key, a, b) {
                         const accessor = orig.apply(this, arguments);
+                        // A DEGRADED control is not a control. Since #203 a bad
+                        // options list or an async validator RETURNS instead of
+                        // throwing, so 'it returned' stopped meaning 'it
+                        // mounted' -- and describe() would report a full
+                        // descriptor for a widget that is not on screen, which
+                        // is exactly the ghost the record ordering exists to
+                        // prevent. `ok === false`, never `!ok`: ok is absent on
+                        // an older loader and the negation would suppress every
+                        // healthy descriptor there.
+                        if (accessor && accessor.ok === false) return accessor;
                         try { _modIntrospectRecord(rec, kind, key, a, b); }
                         catch (_) { /* describe is never worth a broken control */ }
                         return accessor;

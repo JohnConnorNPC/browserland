@@ -1351,14 +1351,14 @@
                 throw new Error('settings radio/select: options must be a '
                     + 'non-empty array of {value,label}');
             }
-            const seen = {};
+            const seen = Object.create(null);   // null proto: see 86a
             const out = [];
             for (const o of options) {
                 if (!o || typeof o.value !== 'string') {
                     throw new Error('settings radio/select: each option needs a '
                         + 'string value');
                 }
-                if (seen[o.value]) {
+                if (seen[o.value] === true) {
                     throw new Error('settings radio/select: duplicate option '
                         + 'value "' + o.value + '"');
                 }

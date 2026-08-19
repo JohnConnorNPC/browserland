@@ -25947,6 +25947,28 @@ def _expr_after(src, marker, start=0):
     return " ".join(src[i + len(marker):j].split())
 
 
+def _norm_tail(expr):
+    """Collapse whichever normalizing tail an expression ends with.
+
+    Whitespace-insensitive on purpose: the two live at different indents, and
+    a pin that breaks on re-wrapping teaches people to delete the pin.
+    """
+    flat = re.sub(r"[ \n]+", " ", expr).strip()
+    flat = flat.replace(
+        "(_modChoiceFault(opts.options) ? [] "
+        ": _normChoiceOptions(opts.options))", "<normalize>")
+    return flat.replace("_modTextSuggestions(rec, key, opts.options)",
+                        "<normalize>")
+
+
+def _modtext_suggestions_gate_is_the_same_verdict():
+    """86a's suggestions path must ask _modChoiceFault, not something else."""
+    src = (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
+        encoding="utf-8")
+    body = _frag_fn(src, "function _modTextSuggestions(rec, key, options) {")
+    return "_modChoiceFault(options)" in body
+
+
 def test_the_describe_fallbacks_do_not_drift_from_the_primitives():
     # THE NAMED LIMIT, policed. describe reports the DECLARED default, which the
     # live control entry does not retain (it keeps a read() closure that has
@@ -25967,16 +25989,20 @@ def test_the_describe_fallbacks_do_not_drift_from_the_primitives():
         == _expr_after(choice, "const fallback = (typeof opts.def")
     # text's maxLength clamp and its suggestion list
     assert _expr_after(declared, "const max =") == _expr_after(text, "const max =")
-    # #203: the two now diverge at the TAIL CALL only -- 86a routes a malformed
-    # suggestions list through _modTextSuggestions (warn, no datalist, never a
-    # throw) while describe keeps calling the throwing _normChoiceOptions, whose
-    # throw _ctxModIntrospect swallows so a rejected control leaves no
-    # describable ghost behind. Everything before that call still has to match
-    # character-for-character.
-    assert _expr_after(declared, "const suggestions =").replace(
-        "_normChoiceOptions(opts.options)", "<normalize>") \
-        == _expr_after(text, "const suggestions =").replace(
-            "_modTextSuggestions(rec, key, opts.options)", "<normalize>")
+    # #203: the two diverge at the TAIL CALL only, and both tails route
+    # through the SAME verdict. 86a calls _modTextSuggestions (which asks
+    # _modChoiceFault, then warns and drops the datalist); describe asks
+    # _modChoiceFault directly, because it must not warn a second time for
+    # one declaration and must not throw -- since #203 a malformed
+    # suggestions list leaves a WORKING control, so it has to stay
+    # describable. Everything before the tail still matches exactly.
+    assert "_modChoiceFault(opts.options)" in _expr_after(
+        declared, "const suggestions ="), (
+        "describe must gate suggestions on the shared verdict, not a throw")
+    assert _modtext_suggestions_gate_is_the_same_verdict(), (
+        "86a stopped asking _modChoiceFault; the two are no longer one rule")
+    assert _norm_tail(_expr_after(declared, "const suggestions =")) == (
+        _norm_tail(_expr_after(text, "const suggestions =")))
     # ...and the normalizers are BORROWED, never re-typed here.
     for owned in ("function _normChoiceOptions(", "function _modTextCoerce(",
                   "MAX_MOD_TEXT_LEN = "):
@@ -26013,6 +26039,8 @@ __PIN__
 __CHOICE__
 
 __TEXT__
+__FAULT__
+__ASYNCFN__
 
 __HELP__
 
@@ -26040,28 +26068,41 @@ function deactivate(rec) {
     _runUnloads(rec);
 }
 // The ctx a mod's init() gets, reduced: `settings` carries the five primitives
-// with their real SIGNATURES and the real option normalizer, but mounts no DOM.
-const accessor = { get: function () {}, set: function () {},
+// with their real SIGNATURES and the real option verdict, but mounts no DOM.
+// SINCE #203 a bad options list does NOT throw out of the primitive: it
+// returns a degraded accessor (ok:false) and the mod carries on. This stand-in
+// reproduces that seam, because a fixture that still throws would test the
+// world as it was and hide the ghost describe() can now record.
+const accessor = { ok: true, get: function () {}, set: function () {},
                    onChange: function () { return accessor; } };
+function degraded(code) {
+    const d = { ok: false, error: code, get: function () { return ''; },
+                set: function () {}, onChange: function () { return d; } };
+    return d;
+}
+function choice(options) {
+    const code = _modChoiceFault(options);
+    return code ? degraded(code) : accessor;
+}
 function makeCtx(rec) {
     const ctx = {
         id: rec.id,
         settings: {
             boolean: function (key, def, opts) { return accessor; },
-            radio: function (key, options, opts) {
-                _normChoiceOptions(options); return accessor;
-            },
-            select: function (key, options, opts) {
-                _normChoiceOptions(options); return accessor;
-            },
-            combo: function (key, options, opts) {
-                _normChoiceOptions(options); return accessor;
-            },
+            radio: function (key, options, opts) { return choice(options); },
+            select: function (key, options, opts) { return choice(options); },
+            combo: function (key, options, opts) { return choice(options); },
             text: function (key, opts) {
+                // text's list is only SUGGESTIONS: a bad one costs the
+                // datalist and leaves the accessor fully functional. An ASYNC
+                // VALIDATOR is the other story -- #203 §2 refuses it at
+                // registration and no widget mounts. That is the case the
+                // recorder's own normalizer cannot catch for it, because
+                // _modIntrospectDeclared never looks at `validate`.
                 opts = opts || {};
-                if (opts.options != null
-                    && !(Array.isArray(opts.options) && !opts.options.length)) {
-                    _normChoiceOptions(opts.options);
+                if (typeof opts.validate === 'function'
+                    && _modAsyncFunction(opts.validate)) {
+                    return degraded('async_validator');
                 }
                 return accessor;
             },
@@ -26241,16 +26282,15 @@ CASES.describe_dies_with_the_mod = function () {
 // records only after the shipped primitive returned.
 CASES.refused_control_leaves_no_ghost = function () {
     const owner = mod('pattern');
-    let threw = null;
-    try {
-        owner.ctx.settings.select('bgPattern',
-            [{ value: 'dup' }, { value: 'dup' }], { def: 'dup' });
-    } catch (e) { threw = String(e && e.message); }
-    let threwEmpty = null;
-    try { owner.ctx.settings.radio('scheme', [], {}); }
-    catch (e) { threwEmpty = String(e && e.message); }
+    // #203: these no longer THROW -- they return a degraded accessor and the
+    // mod survives. The ghost guarantee has to hold for the new shape too,
+    // and it is no longer free: 'it returned' stopped meaning 'it mounted'.
+    const bad = owner.ctx.settings.select('bgPattern',
+        [{ value: 'dup' }, { value: 'dup' }], { def: 'dup' });
+    const empty = owner.ctx.settings.radio('scheme', [], {});
     return {
-        threw: threw, threwEmpty: threwEmpty,
+        badError: (bad && bad.ok === false) ? bad.error : 'NOT-DEGRADED',
+        emptyError: (empty && empty.ok === false) ? empty.error : 'NOT-DEGRADED',
         describedBad: owner.ctx.settings.describe('bgPattern'),
         describedEmpty: owner.ctx.settings.describe('scheme'),
         errors: errors,
@@ -26273,6 +26313,35 @@ CASES.an_inherited_name_is_not_a_valid_default = function () {
     const b = m.ctx.settings.describe('clock', 'two');
     return { first: a ? a.default : null, second: b ? b.default : null,
              firstOpts: a ? a.options.map(function (o) { return o.value; }) : [] };
+};
+
+// #203 changed what 'it returned' means. A degraded control RETURNS an
+// accessor instead of throwing, so recording on return alone would describe a
+// widget that is not on screen -- the ghost the ordering exists to prevent.
+// And the inverse: a text control with a malformed SUGGESTIONS list is alive
+// and working, so it must still be describable.
+CASES.a_degraded_control_leaves_no_ghost = function () {
+    const m = mod('probe');
+    // rejected: a duplicate option -> degraded accessor, no widget
+    const bad = m.ctx.settings.select('mode',
+        [{ value: 'a' }, { value: 'a' }], { def: 'a' });
+    // healthy text whose optional suggestions list is malformed
+    const av = m.ctx.settings.text('nick',
+        { def: 'anon', validate: async function () { return true; } });
+    const soft = m.ctx.settings.text('font',
+        { def: 'Fira', options: [{ value: 'x' }, { value: 'x' }] });
+    return {
+        badOk: (bad && bad.ok === false) ? 'degraded' : 'healthy',
+        ghost: m.ctx.settings.describe('probe', 'mode'),
+        softOk: (soft && soft.ok === false) ? 'degraded' : 'healthy',
+        soft: m.ctx.settings.describe('probe', 'font'),
+        // THE case the recorder's own normalizer cannot catch: nothing about
+        // an async validator is visible to _modIntrospectDeclared, so only
+        // the accessor's own ok:false stops the descriptor being written.
+        asyncOk: (av && av.ok === false) ? 'degraded' : 'healthy',
+        asyncGhost: m.ctx.settings.describe('probe', 'nick'),
+        errors: errors,
+    };
 };
 
 CASES.help_cards_are_clonable_data = function () {
@@ -26363,6 +26432,17 @@ def introspect_harness(tmp_path_factory):
         .replace("__CHOICE__", _frag_fn(
             loader, "function _normChoiceOptions(options) {") + "\n        }\n")
         .replace("__TEXT__", _mod_text_coerce_source())
+        # 86a's PURE options verdict: since #203 describe gates the text
+        # suggestions on it rather than on the throwing normalizer, so the
+        # harness needs the same function the shipped page has in scope.
+        .replace("__ASYNCFN__", _frag_fn(
+            (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
+                encoding="utf-8"),
+            "function _modAsyncFunction(fn) {") + "\n        }\n")
+        .replace("__FAULT__", _frag_fn(
+            (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
+                encoding="utf-8"),
+            "function _modChoiceFault(options) {") + "\n        }\n")
         .replace("__HELP__", (BROKER_DIR / "86d_js_mod_help_cards.js").read_text(
             encoding="utf-8"))
         .replace("__REGISTRY__", _ctx_registry_source())
@@ -26505,10 +26585,12 @@ def test_a_descriptor_lives_exactly_as_long_as_its_control(introspect_harness):
 def test_a_refused_control_leaves_no_describable_ghost(introspect_harness):
     r = _run_introspect(introspect_harness, "refused_control_leaves_no_ghost")
     assert r["errors"] == []
-    # The shipped normalizer still throws (the mod is rolled back by initMod)...
-    assert "duplicate option" in r["threw"]
-    assert "non-empty array" in r["threwEmpty"]
-    # ...and nothing was recorded for a control that never mounted.
+    # #203 replaced the throw with a degraded accessor, so this guarantee
+    # stopped being free: the recorder used to be protected by the exception
+    # never reaching it. Now it has to check.
+    assert r["badError"] == "duplicate_option"
+    assert r["emptyError"] == "invalid_options"
+    # ...and still nothing is recorded for a control that never mounted.
     assert r["describedBad"] is None and r["describedEmpty"] is None
 
 
@@ -26535,6 +26617,32 @@ def test_every_help_card_entry_survives_structured_clone(introspect_harness):
     assert r["frozen"] is True
     # The registry itself is untouched by a reader.
     assert r["registryLen"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_degraded_control_leaves_no_describable_ghost(introspect_harness):
+    # Before #203 this held for free: a bad options list threw, so nothing was
+    # recorded. Softening the throw broke the implication -- 'it returned' no
+    # longer means 'it mounted' -- and describe would have reported a full
+    # descriptor for a control with no widget.
+    r = _run_introspect(introspect_harness, "a_degraded_control_leaves_no_ghost")
+    assert r["badOk"] == "degraded"
+    assert r["ghost"] is None, (
+        "describe reported a control that never mounted")
+    # ...and the inverse: text degrades only its datalist, so that control is
+    # live and MUST stay describable -- with no suggestions, which is what
+    # actually mounted.
+    assert r["softOk"] == "healthy"
+    assert r["soft"] is not None, (
+        "a working text control lost its descriptor over an optional list")
+    assert r["soft"]["options"] == []
+    assert r["soft"]["default"] == "Fira"
+    # An async validator is refused at registration and mounts nothing, and
+    # NOTHING about it is visible to _modIntrospectDeclared -- so the accessor's
+    # own ok:false is the only thing standing between it and a ghost.
+    assert r["asyncOk"] == "degraded"
+    assert r["asyncGhost"] is None, (
+        "describe reported a text control refused for an async validator")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -27831,6 +27939,35 @@ CASES.healthy = function () {
              state: st.state, warnings: st.warnings, errors: errors };
 };
 
+// An option value that is a name Object.prototype already carries. The two
+// membership tables -- 86a's _modChoiceFault and _normChoiceOptions' own
+// `seen` -- have to agree, or the verdict says 'fine', the seam falls through
+// and the normalizer throws out of registration: the mod dies for the exact
+// input this issue exists to make survivable, and for text it dies over an
+// OPTIONAL datalist.
+CASES.prototype_named_option_values = function () {
+    let out = null;
+    const res = run('x-fixture', function (ctx) {
+        out = {
+            // there is no duplicate here at all -- 'constructor' is a value
+            ctor: probe(ctx.settings.select('m',
+                [{ value: 'constructor' }, { value: 'a' }], { def: 'a' })),
+            proto: probe(ctx.settings.select('n',
+                [{ value: '__proto__' }, { value: 'b' }], { def: 'b' })),
+            // ...and a REAL duplicate of such a name still degrades, softly
+            dupCtor: probe(ctx.settings.select('o',
+                [{ value: 'constructor' }, { value: 'constructor' }])),
+            // suggestions: prototype names cost nothing at all
+            sugg: ctx.settings.suggestions('p',
+                [{ value: 'toString' }, { value: 'q' }]),
+        };
+    });
+    const st = row('x-fixture');
+    return { res: res, out: out, state: st.state, mounts: mounts,
+             codes: st.warnings.map(function (w) { return w.key + '=' + w.code; }),
+             active: Array.from(window.__mods.active.keys()), errors: errors };
+};
+
 // text: only its SUGGESTIONS can be malformed, so a bad list costs the datalist
 // and warns -- it never degrades the accessor.
 CASES.text_suggestions = function () {
@@ -27924,6 +28061,25 @@ def _run_degrade(harness, case):
         f"case {case} failed (rc={proc.returncode})\n"
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_prototype_named_option_value_is_an_ordinary_value(degrade_harness):
+    # The two membership tables have to agree. While they did not,
+    # _normChoiceOptions reported a DUPLICATE for a list containing no
+    # duplicate (a plain object inherits 'constructor'), _modChoiceFault said
+    # 'fine', and the throw escaped registration -- killing the mod for exactly
+    # the input #203 makes survivable.
+    r = _run_degrade(degrade_harness, "prototype_named_option_values")
+    assert r["active"] == ["x-fixture"], "the mod did not survive registration"
+    assert r["state"] == "active"
+    assert r["out"]["ctor"]["ok"] is True, (
+        "an option valued 'constructor' was read as a duplicate of nothing")
+    assert r["out"]["proto"]["ok"] is True
+    # ...and a REAL duplicate of such a name still degrades rather than throws.
+    assert r["out"]["dupCtor"]["ok"] is False
+    assert r["out"]["dupCtor"]["error"] == "duplicate_option"
+    assert r["codes"] == ["o=duplicate_option"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

@@ -27,7 +27,7 @@ Security-wise, the model is candid but has three real, actionable exposures: `/s
 ### 2.1 Trust model and distribution shapes
 
 - Mods are **trusted first-party code**, not sandboxed (86:1-9). A same-origin mod already holds the page's auth token; the only real controls are review and the broker's `mods_enabled` master switch.
-- **Two distribution shapes** (Writing-a-Mod §10):
+- **Two distribution shapes** (Writing-a-Mod §11):
   - **Shipped** — spliced by `ui.py` into the single inline `<script>` alongside core fragments; change requires a broker restart.
   - **Installed** (#163) — `x-`-prefixed ids, grammar `[a-z0-9][a-z0-9-]{0,63}`, served as separate classic `<script src>` tags from content-addressed URLs `/mods/<id>/<gen>/<file>` with SRI; installed via `POST /mods/install` (2 MiB cap, in-memory validation, atomic generation commit, one prior gen retained); **applies on next page load** — a JS-semantics constraint, not a missing feature (86b:10-19).
 - `?nomods=1` is the non-sticky rescue hatch (86b:27-43).
@@ -216,7 +216,7 @@ This is the evidence base for §5. The concatenated-script architecture makes co
 - **Proposal:** dynamic CSP header enumerating registered hosts. Low-medium cost.
 
 #### G11. Capability declaration as review tooling, not runtime gate
-- **Evidence:** `tiers` is declared-not-enforced (86:143-152) — worse than nothing, it invites reviewers to trust the label (mod-sync declares `['settings']` while administering other brokers). No signing anywhere; `x-<author>-<name>` scoping has zero validation; installed-but-disabled is not containment (top-level code runs regardless; Writing-a-Mod §10.5).
+- **Evidence:** `tiers` is declared-not-enforced (86:143-152) — worse than nothing, it invites reviewers to trust the label (mod-sync declares `['settings']` while administering other brokers). No signing anywhere; `x-<author>-<name>` scoping has zero validation; installed-but-disabled is not containment (top-level code runs regardless; Writing-a-Mod §11.5).
 - **Proposal:** (a) a declared-capabilities manifest (`needs: ['file','session','egress','clipboard','remote-admin']`) surfaced at install/review time and **statically linted** at install validation (the portable-mod lint already does source-text checks in `modinstall.py`'s orbit) — make `tiers` real as a lint, never pretend it's a runtime boundary; (b) package signing — author keypair, signature in the manifest, broker verifies against a pinned key before install. Signing is the only thing that makes fleet-wide/sync-driven install defensible.
 
 **Explicitly reject:** iframe/worker isolation; runtime ctx capability gates; per-mod `defaultEnabled` as a security control.
