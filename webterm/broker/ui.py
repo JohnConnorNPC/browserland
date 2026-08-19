@@ -285,6 +285,32 @@ _ORDERED = [
     # last-registered simply wraps first. Still before the mod-script splice,
     # since a mod's init reads the finished ctx.
     "86l_js_mod_terminal_font.js",
+    # #202: ctx.dialog -- the mod-facing prompt, which ALWAYS QUEUES (there is
+    # no cancel-the-live-one mode for mods at all, so one mod can never dismiss
+    # another mod's -- or core's -- dialog) and hands its handle back
+    # SYNCHRONOUSLY, so close()/replace() act on THIS dialog for the whole of
+    # its queued life. Core's own openDialog (69) is untouched, singleton and
+    # all; this fragment queues AROUND it. Its own fragment for the same
+    # split-never-trim reason 86e-86l got one: 86c is at the 2500-line cap.
+    # Ordered AFTER 86c (it uses that fragment's extender registry and
+    # capability map, and extenders run in THIS list's order) and after 69,
+    # whose openDialog it calls. Still before the mod-script splice, since a
+    # mod's init reads the finished ctx.
+    "86m_js_mod_dialog.js",
+    # #202: ctx.mods.list/isActive/pinOf, ctx.settings.describe(modId, key) and
+    # ctx.helpCards.list() -- the introspection getters that retire the mod-side
+    # scraping of window.__mods (a TEST FIXTURE, not a contract) and of the
+    # mounted <option> DOM. Every getter answers with a FRESH FROZEN clone of
+    # primitives: no closure, no Map and no DOM node crosses the boundary, and a
+    # caller that mutates what it got cannot reach core. LOCAL-PAGE ONLY -- a
+    # remote broker's pins still come off the wire. Its own fragment for the
+    # same split-never-trim reason 86e-86m got one: 86c is at the 2500-line cap.
+    # Ordered AFTER 86c (it uses that fragment's extender registry and
+    # capability map, and DECORATES the `settings` family makeCtx ships, so the
+    # primitives it wraps must already be on the ctx) and after 86m, with which
+    # it shares nothing -- either order works. Still before the mod-script
+    # splice, since a mod's init reads the finished ctx.
+    "86n_js_mod_introspect.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

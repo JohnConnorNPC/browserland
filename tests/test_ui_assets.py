@@ -25154,3 +25154,1326 @@ def test_a_dead_activation_cannot_register_a_tap(taps_harness):
     # (onModesChanged is a separate extender; the taps harness does not
     # slice it, so this only asserts the tap half here.)
     assert r["stillOpen"] is True, "the refusal must not close the terminal"
+
+
+# ---------------------------------------------------------------------------
+# #202 / A63: ctx.dialog -- the queued, per-dialog-handle prompt.
+# ---------------------------------------------------------------------------
+
+_DIALOG_SLICE_START = "// ---- ctx.dialog: the queued, per-dialog-handle"
+_DIALOG_SLICE_END = "// ---- end ctx.dialog"
+
+
+def _dialog_src():
+    return (BROKER_DIR / "86m_js_mod_dialog.js").read_text(encoding="utf-8")
+
+
+def _dialog_source():
+    """A63's range in 86m, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the node harness below drive the
+    SHIPPED queue instead of a copy of it."""
+    src = _dialog_src()
+    start = src.index(_DIALOG_SLICE_START)
+    end = src.index(_DIALOG_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for sym in ("const _MOD_DIALOG_QUEUE = [];",
+                "function _modDialogForeignLive() {",
+                "function _modDialogSettle(entry, values) {",
+                "function _modDialogBuildFields(wrap, spec) {",
+                "function _modDialogCollect(entry) {",
+                "function _modDialogShow(entry) {",
+                "function _modDialogPump() {",
+                "function _modDialogClose(entry) {",
+                "function _modDialogReplace(entry, spec) {",
+                "function _dropModDialogs(rec) {",
+                "function _openModDialog(rec, spec) {",
+                "function _ctxDialog(ctx, rec) {"):
+        assert sym in body, f"the dialog range no longer defines {sym!r}"
+    return body
+
+
+def _core_open_dialog_source():
+    """69's openDialog + its `_dlgFinish` singleton, verbatim. Sliced rather
+    than stubbed because every claim here is a claim about what happens when
+    the queue meets THAT function: it is the singleton (a new open cancels the
+    live one) the queue exists to stand in front of, and `_dlgFinish` is the
+    per-dialog handle close()/replace() capture."""
+    src = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    a = src.index("        let _dlgFinish = null;")
+    b = src.index("        // Single text field ->", a)
+    body = src[a:b]
+    assert "function openDialog(spec) {" in body
+    assert "if (_dlgFinish) _dlgFinish(null);" in body, \
+        "openDialog is no longer the singleton this queue stands in front of"
+    return body
+
+
+def test_dialog_lands_in_its_own_fragment_and_is_registered():
+    # #202: 86c_js_mod_ctx_ext.js is at the #68 2500-line cap and the rule for
+    # that cap is split, never trim -- so ctx.dialog gets a NEW ordered
+    # fragment, the precedent 86e-86l set. The drift gate reads BOTH
+    # directions: a file with no registration never reaches the page, a
+    # registration with no file breaks the build.
+    assert "86m_js_mod_dialog.js" in ui._ORDERED
+    assert (BROKER_DIR / "86m_js_mod_dialog.js").is_file()
+    at = ui._ORDERED.index
+    # After 86c (it uses that fragment's extender registry and capability map)
+    # and after 69, whose openDialog it calls; still before the mod-script
+    # splice, since a mod's init reads the finished ctx.
+    assert at("69_js_dialog.js") < at("86c_js_mod_ctx_ext.js") \
+        < at("86m_js_mod_dialog.js") < at(ui._MOD_SPLICE_BEFORE)
+    for frag in ("86c_js_mod_ctx_ext.js", "86m_js_mod_dialog.js"):
+        n = len((BROKER_DIR / frag).read_text(encoding="utf-8").splitlines())
+        assert n <= ui._MAX_LINES, f"{frag} is over the cap at {n}"
+    src = _dialog_src()
+    for sym in ("function _openModDialog(rec, spec) {",
+                "function _dropModDialogs(rec) {",
+                "function _ctxDialog(ctx, rec) {"):
+        assert sym in src, f"{sym!r} did not land in 86m"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#202 symbol missing/duplicated in the served page: {sym!r}"
+        assert sym not in _loader_src() and sym not in _ctx_ext_src(), \
+            f"{sym!r} belongs in 86m, not 86c or the loader"
+    # Guarded registrations, for a page assembled without #194's registry.
+    assert "if (typeof _registerCtxExtender === 'function') {" in src
+    assert src.index("if (typeof _registerCtxExtender === 'function') {") \
+        < src.index("_registerCtxExtender(_ctxDialog);")
+    assert ("        if (typeof _registerModCapability === 'function') {\n"
+            "            _registerModCapability('dialog', 1);\n"
+            "        }\n") in src
+
+
+def test_ctx_dialog_owes_a_capability_entry_and_registers_it():
+    # #197's map is per FAMILY, and `dialog` is a NEW top-level member -- like
+    # #198's `signal`, #199's `commands`, #201's `terminals`. It is a family
+    # and not a member of an existing one because it is not ABOUT a window, a
+    # host or a terminal: a mod can prompt with none of those, and the queue is
+    # page-wide. Without the entry the map would lie by omission.
+    assert "dialog" in _ctx_families_added_by_extenders(), \
+        "the extender must put `dialog` on the ctx as a top-level member"
+    assert "dialog" in _standalone_capability_registrations()
+    assert "dialog" not in set(_ctx_family_keys()), \
+        "ctx.dialog is NOT in makeCtx's v1 literal -- it arrives by extender"
+    # Additive: a new family does not move the contract version.
+    assert "ctxVersion: 1," in _loader_src()
+
+
+def test_core_open_dialog_is_untouched_by_the_queue():
+    # The ask-first line: queueing must not change core's own dialog behaviour.
+    # 69 keeps its singleton (a core dialog still cancels whatever is live,
+    # including a mod's -- core is the application, a mod is a guest), and 86m
+    # never assigns to `_dlgFinish` or redefines openDialog.
+    core = (BROKER_DIR / "69_js_dialog.js").read_text(encoding="utf-8")
+    assert "if (_dlgFinish) _dlgFinish(null);   // cancel any live dialog first" \
+        in core
+    frag = _dialog_src()
+    code = "\n".join(ln for ln in frag.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    assert not re.search(r"_dlgFinish\s*=(?!=)", code), \
+        "86m must READ core's live-dialog handle, never write it"
+    assert "function openDialog(" not in code
+
+
+def test_the_dialog_fragment_never_logs_a_collected_value():
+    # The password half, enforced structurally: every console.* call in the
+    # range is a fixed string plus an Error, and no collected value or field
+    # input is ever an argument. A harness can prove the values that DID flow
+    # were not logged; only a source gate stops a log being added later.
+    body = _dialog_source()
+    code = "\n".join(ln for ln in body.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    logs = re.findall(r"console\.\w+\(([^;]*)\);", code)
+    assert logs, "the range no longer logs at all -- update this gate"
+    for call in logs:
+        assert re.fullmatch(r"'\[dialog\][^']*', e", call.strip()), \
+            f"a console call in the dialog range takes a non-fixed argument: {call}"
+    # ...and nothing in the range persists anything: no store, prefs, storage
+    # or network call exists for a password to be written through.
+    for banned in ("localStorage", "sessionStorage", "fetch(", "hostFetch",
+                   "savePrefs", "_modStoreUpdate", "setPref", "JSON.stringify"):
+        assert banned not in code, \
+            f"the dialog range must not name {banned!r}: a prompt persists nothing"
+
+
+_DIALOG_HARNESS = r"""
+'use strict';
+// E63 runs the SHIPPED code in node: #194's ctx-extender registry, 86's own
+// _runUnloads, 69's REAL openDialog (the singleton the queue stands in front
+// of) and the whole #202 range -- driven through a DOM shim that is only as
+// big as those slices touch.
+const logged = [];
+for (const k of ['log', 'warn', 'error', 'info', 'debug']) {
+    console[k] = function () {
+        logged.push(k + ' ' + Array.prototype.map.call(arguments, String)
+            .join(' '));
+    };
+}
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function tick(n) {
+    let p = Promise.resolve();
+    for (let i = 0; i < (n || 6); i++) p = p.then(function () {});
+    return p;
+}
+
+// ---- the DOM these slices touch, and nothing else -------------------------
+function El(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.parentNode = null;
+    this.classes = new Set();
+    this.handlers = Object.create(null);
+    this.textContent = '';
+    this.value = '';
+    this.type = '';
+    this.placeholder = '';
+}
+Object.defineProperty(El.prototype, 'className', {
+    get: function () { return Array.from(this.classes).join(' '); },
+    set: function (v) {
+        this.classes = new Set(String(v).split(/\s+/).filter(Boolean));
+    },
+});
+Object.defineProperty(El.prototype, 'classList', {
+    get: function () {
+        const self = this;
+        return {
+            add: function (c) { self.classes.add(c); },
+            remove: function (c) { self.classes.delete(c); },
+            contains: function (c) { return self.classes.has(c); },
+        };
+    },
+});
+El.prototype.appendChild = function (k) {
+    k.parentNode = this; this.children.push(k); return k;
+};
+El.prototype.removeChild = function (k) {
+    const i = this.children.indexOf(k);
+    if (i >= 0) this.children.splice(i, 1);
+    k.parentNode = null;
+    return k;
+};
+El.prototype.addEventListener = function (t, fn) {
+    (this.handlers[t] = this.handlers[t] || []).push(fn);
+};
+El.prototype.removeEventListener = function (t, fn) {
+    const a = this.handlers[t] || [];
+    const i = a.indexOf(fn);
+    if (i >= 0) a.splice(i, 1);
+};
+El.prototype.focus = function () {};
+El.prototype.select = function () {};
+El.prototype.click = function () {
+    const ev = { target: this, preventDefault: function () {},
+                 stopPropagation: function () {} };
+    for (const fn of (this.handlers.click || []).slice()) fn(ev);
+};
+El.prototype.walk = function (out) {
+    out = out || [];
+    for (const k of this.children) { out.push(k); k.walk(out); }
+    return out;
+};
+El.prototype.querySelector = function (sel) {
+    const m = /^([\w]+)(?:\.([\w-]+))?$/.exec(sel);
+    if (!m) return null;
+    for (const k of this.walk()) {
+        if (k.tag === m[1] && (!m[2] || k.classes.has(m[2]))) return k;
+    }
+    return null;
+};
+El.prototype.text = function () {
+    let s = this.textContent || '';
+    if (this.value) s += ' ' + this.value;
+    for (const k of this.children) s += ' ' + k.text();
+    return s;
+};
+
+const body = new El('body');
+const docHandlers = Object.create(null);
+const document = {
+    body: body,
+    createElement: function (t) { return new El(t); },
+    addEventListener: function (t, fn) {
+        (docHandlers[t] = docHandlers[t] || []).push(fn);
+    },
+    removeEventListener: function (t, fn) {
+        const a = docHandlers[t] || [];
+        const i = a.indexOf(fn);
+        if (i >= 0) a.splice(i, 1);
+    },
+};
+function pressEscape() {
+    for (const fn of (docHandlers.keydown || []).slice()) {
+        fn({ key: 'Escape', target: null, preventDefault: function () {},
+             stopPropagation: function () {} });
+    }
+}
+// What is ON SCREEN: the overlays actually attached to <body>.
+function overlays() {
+    return body.children.filter(function (e) {
+        return e.classes.has('app-dialog-overlay');
+    });
+}
+function shownTitle() {
+    const o = overlays();
+    if (o.length !== 1) return o.length === 0 ? null : '<' + o.length + '>';
+    const head = o[0].querySelector('div.set-head');
+    return head ? head.textContent : '';
+}
+function shownInputs() {
+    const o = overlays()[0];
+    if (!o) return [];
+    return o.walk().filter(function (e) {
+        return e.tag === 'input' || e.tag === 'select';
+    });
+}
+function clickButton(label) {
+    const o = overlays()[0];
+    if (!o) throw new Error('no dialog on screen');
+    for (const e of o.walk()) {
+        if (e.tag === 'button' && e.textContent === label) { e.click(); return; }
+    }
+    throw new Error('no button ' + label);
+}
+function typeInto(name, value) {
+    const ins = shownInputs();
+    for (const e of ins) { if (e.name === name || ins.length === 1) e.value = value; }
+}
+
+__CORE_DIALOG__
+__REGISTRY__
+__UNLOADS__
+__DIALOG__
+
+// ONE ACTIVATION, the way initMod builds one.
+function activate(id) {
+    const rec = { id: id, version: '0', unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { rec: rec, ctx: ctx };
+}
+
+const CASES = {};
+
+// E63 clause: the handle is SYNCHRONOUS (before display), and a second open
+// QUEUES rather than cancelling -- across two different mods, which is the
+// case core's singleton gets wrong.
+CASES.sync_handle_and_always_queue = async function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    const out = {};
+    const d1 = a.ctx.dialog.open({ title: 'T1',
+        fields: [{ name: 'pass', label: 'Passphrase', type: 'password' }] });
+    // Synchronous: every member exists before anything is displayed.
+    out.handle = {
+        result: typeof (d1 && d1.result && d1.result.then),
+        close: typeof (d1 && d1.close),
+        replace: typeof (d1 && d1.replace),
+    };
+    out.shownAtOpenTime = shownTitle();
+    await tick();
+    out.afterTick = shownTitle();
+    // A SECOND mod opens while the first is up. Under core's singleton this
+    // would cancel T1; here it queues.
+    const d2 = b.ctx.dialog.open({ title: 'T2' });
+    await tick();
+    out.afterSecondOpen = shownTitle();
+    out.overlayCount = overlays().length;
+    // Commit the first: its own values come back, and only then is T2 shown.
+    typeInto('pass', 'hunter2');
+    clickButton('OK');
+    out.first = await d1.result;
+    await tick();
+    out.afterFirstSettled = shownTitle();
+    pressEscape();
+    out.second = await d2.result;
+    await tick();
+    out.afterSecondSettled = shownTitle();
+    out.logged = logged;
+    return out;
+};
+
+// E63 clause: close() and replace() act on THIS dialog -- including on entries
+// that have never been shown.
+CASES.close_and_replace_are_per_dialog = async function () {
+    const a = activate('alpha');
+    const seen = [];
+    const d1 = a.ctx.dialog.open({ title: 'A1' });
+    const d2 = a.ctx.dialog.open({ title: 'A2' });   // two from the SAME mod
+    const d3 = a.ctx.dialog.open({ title: 'A3' });
+    // A settled FLAG, not a Promise.race against an already-resolved value --
+    // that race can only ever answer "pending" and would prove nothing.
+    let d1Settled = false;
+    d1.result.then(function () { d1Settled = true; });
+    await tick();
+    seen.push(shownTitle());
+    const out = {};
+    // close() on an entry that has NEVER been shown: it drops, and the dialog
+    // on screen is untouched.
+    out.closeQueued = d2.close();
+    out.queuedResult = await d2.result;
+    seen.push(shownTitle());
+    // replace() on a queued entry: it is shown later with the NEW spec.
+    out.replaceQueued = d3.replace({ title: 'A3b' });
+    seen.push(shownTitle());
+    // replace() on the SHOWN entry: same handle, same slot, new content, and
+    // the result promise is still pending (the swap is not an answer).
+    out.replaceShown = d1.replace({ title: 'A1b',
+        fields: [{ name: 'who', label: 'Who', type: 'text', value: 'me' }] });
+    await tick();
+    seen.push(shownTitle());
+    out.overlayCountAfterReplace = overlays().length;
+    out.pendingAfterReplace = d1Settled ? 'settled' : 'pending';
+    // ...and the replaced dialog commits its NEW fields.
+    typeInto('who', 'you');
+    clickButton('OK');
+    out.first = await d1.result;
+    await tick();
+    seen.push(shownTitle());
+    pressEscape();
+    out.third = await d3.result;
+    await tick();
+    seen.push(shownTitle());
+    out.seen = seen;
+    out.logged = logged;
+    return out;
+};
+
+// E63 clause: a dead mod's entries are dropped and do not wedge the queue --
+// while queued AND while on screen.
+CASES.a_dead_mod_drops_without_wedging = async function () {
+    const a = activate('alpha');
+    const b = activate('beta');
+    const a1 = a.ctx.dialog.open({ title: 'A1' });   // on screen
+    const a2 = a.ctx.dialog.open({ title: 'A2' });   // queued
+    const b1 = b.ctx.dialog.open({ title: 'B1' });   // queued behind both
+    await tick();
+    const out = { beforeDisable: shownTitle() };
+    _runUnloads(a.rec);
+    out.a1 = await a1.result;
+    out.a2 = await a2.result;
+    await tick();
+    // The dead mod's dialog is off screen and beta's is up: the queue moved.
+    out.afterDisable = shownTitle();
+    out.overlayCount = overlays().length;
+    // An open() from the DEAD activation is refused rather than queued, and
+    // never flashes on screen.
+    const late = a.ctx.dialog.open({ title: 'LATE' });
+    out.lateIsHandle = typeof late.close;
+    out.late = await late.result;
+    await tick();
+    out.afterLate = shownTitle();
+    pressEscape();
+    out.b1 = await b1.result;
+    out.logged = logged;
+    return out;
+};
+
+// The pump's OWN dead-entry check, reachable when the teardown disposer never
+// ran: a ctx built without onUnload (an older loader shape -- every extender
+// registration in this tree is guarded for exactly that) has no drop path, so
+// the entry must die at the head of the queue instead of being shown for a mod
+// that is gone.
+CASES.the_pump_refuses_a_dead_entry_it_owns = async function () {
+    const rec = { id: 'alpha', version: '0', unloads: [] };
+    const ctx = { id: 'alpha', ctxVersion: 1 };   // no onUnload at all
+    _applyCtxExtenders(ctx, rec);
+    const b = activate('beta');
+    const a1 = ctx.dialog.open({ title: 'A1' });
+    const b1 = b.ctx.dialog.open({ title: 'B1' });
+    const out = {};
+    rec.unloading = true;            // disabled before its turn ever came
+    await tick();
+    out.a1 = await a1.result;
+    out.shown = shownTitle();
+    pressEscape();
+    out.b1 = await b1.result;
+    out.logged = logged;
+    return out;
+};
+
+// E63 clause / the standing question: core opens its OWN dialog while a mod
+// queue is pending. The queue must not open into it (that would cancel core's
+// prompt through the singleton) and must resume once core's is gone.
+CASES.a_queue_never_cancels_a_core_dialog = async function () {
+    const a = activate('alpha');
+    const out = {};
+    const core = openDialog({ title: 'CORE' });     // core's own call site
+    const d = a.ctx.dialog.open({ title: 'MOD' });
+    let modSettled = false;
+    d.result.then(function () { modSettled = true; });
+    await tick();
+    out.afterOpen = shownTitle();
+    await sleep(400);                               // past the pump's poll
+    out.afterPoll = shownTitle();
+    out.overlayCount = overlays().length;
+    out.modPending = modSettled ? 'settled' : 'pending';
+    pressEscape();                                  // dismiss CORE's
+    out.core = await core;
+    await sleep(400);
+    out.afterCoreGone = shownTitle();
+    pressEscape();
+    out.mod = await d.result;
+    out.logged = logged;
+    return out;
+};
+
+// E63 clause: a password value reaches the caller and nowhere else.
+CASES.password_values_are_not_logged_or_kept = async function () {
+    const SECRET = 'correct-horse-battery-staple';
+    const a = activate('alpha');
+    const d = a.ctx.dialog.open({ title: 'Unlock',
+        fields: [{ name: 'pass', label: 'Passphrase', type: 'password' },
+                 { name: 'scope', label: 'Scope', type: 'select',
+                   options: ['local', 'all'] }] });
+    await tick();
+    const ins = shownInputs();
+    const out = { types: ins.map(function (e) { return e.tag + ':' + e.type; }) };
+    ins[0].value = SECRET;
+    ins[1].value = 'all';
+    clickButton('OK');
+    out.values = await d.result;
+    await tick();
+    out.afterSettle = shownTitle();
+    // Nothing core kept: the queue, the active slot, and the whole page tree.
+    out.queueLen = _MOD_DIALOG_QUEUE.length;
+    out.activeIsNull = _modDialogActive === null;
+    out.retained = JSON.stringify(_MOD_DIALOG_QUEUE.map(function (e) {
+        return { owner: e.owner, settled: e.settled };
+    }));
+    out.secretInRetained = out.retained.indexOf(SECRET) >= 0;
+    out.secretInPage = body.text().indexOf(SECRET) >= 0;
+    out.secretInLog = logged.join('\n').indexOf(SECRET) >= 0;
+    out.logged = logged;
+    return out;
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+Promise.resolve().then(CASES[want]).then(function (out) {
+    process.stdout.write(JSON.stringify(out) + '\n');
+}, function (e) {
+    process.stdout.write('case threw: ' + ((e && e.stack) || e) + '\n');
+    process.exit(3);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def dialog_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("moddialog") / "harness.js"
+    path.write_text(
+        _DIALOG_HARNESS
+        .replace("__CORE_DIALOG__", _core_open_dialog_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__DIALOG__", _dialog_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_dialog(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_handle_is_synchronous_and_a_second_open_queues(dialog_harness):
+    r = _run_dialog(dialog_harness, "sync_handle_and_always_queue")
+    # The handle exists BEFORE display -- that is what makes close()/replace()
+    # valid for a dialog that is still queued.
+    assert r["handle"] == {"result": "function", "close": "function",
+                           "replace": "function"}
+    assert r["shownAtOpenTime"] is None, \
+        "the handle must come back before anything is displayed"
+    assert r["afterTick"] == "T1"
+    # THE POINT: beta's open did not cancel alpha's prompt. Under core's
+    # singleton -- the behaviour host-registry's _encBusy flag exists to dodge
+    # -- T1 would be gone and its caller would read the null as a cancel.
+    assert r["afterSecondOpen"] == "T1"
+    assert r["overlayCount"] == 1, "two dialogs were on screen at once"
+    assert r["first"] == {"pass": "hunter2"}
+    assert r["afterFirstSettled"] == "T2", "the queue did not advance"
+    assert r["second"] is None, "a dismissal must resolve null"
+    assert r["afterSecondSettled"] is None
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_close_and_replace_act_on_this_dialog_only(dialog_harness):
+    r = _run_dialog(dialog_harness, "close_and_replace_are_per_dialog")
+    # A1 up; closing the QUEUED A2 drops it without touching the screen.
+    assert r["seen"][0] == "A1"
+    assert r["closeQueued"] is True
+    assert r["queuedResult"] is None
+    assert r["seen"][1] == "A1", "close() on a queued entry closed the shown one"
+    # replace() on a queued entry only swaps the spec it will be shown with.
+    assert r["seen"][2] == "A1"
+    # replace() on the SHOWN entry swaps content in place: one overlay, same
+    # handle, result still pending.
+    assert r["seen"][3] == "A1b"
+    assert r["overlayCountAfterReplace"] == 1
+    assert r["pendingAfterReplace"] == "pending", \
+        "replace() resolved the caller's result -- a swap is not an answer"
+    assert r["first"] == {"who": "you"}, "the replaced spec's fields committed"
+    # A2 was dropped, so A3 -- with its REPLACED title -- is next.
+    assert r["seen"][4] == "A3b"
+    assert r["third"] is None
+    assert r["seen"][5] is None
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_dead_mods_dialogs_drop_without_wedging_the_queue(dialog_harness):
+    r = _run_dialog(dialog_harness, "a_dead_mod_drops_without_wedging")
+    assert r["beforeDisable"] == "A1"
+    # Both the ON-SCREEN dialog and the QUEUED one resolve null at teardown.
+    assert r["a1"] is None and r["a2"] is None
+    # ...and the next owner's entry is shown: a dead mod cannot wedge a queue
+    # nobody else can drain.
+    assert r["afterDisable"] == "B1"
+    assert r["overlayCount"] == 1
+    # An open() from a dead activation is refused, never queued, never flashed.
+    assert r["lateIsHandle"] == "function"
+    assert r["late"] is None
+    assert r["afterLate"] == "B1"
+    assert r["b1"] is None
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_pending_mod_queue_never_cancels_a_core_dialog(dialog_harness):
+    # The standing-question case with teeth: core keeps its singleton, so if
+    # the pump showed a queued entry while core's prompt was up, openDialog
+    # would cancel CORE'S dialog -- a mod dismissing the application's prompt,
+    # which is the exact defect ctx.dialog exists to remove.
+    r = _run_dialog(dialog_harness, "a_queue_never_cancels_a_core_dialog")
+    assert r["afterOpen"] == "CORE"
+    assert r["afterPoll"] == "CORE", "the mod queue cancelled core's dialog"
+    assert r["overlayCount"] == 1
+    assert r["modPending"] == "pending"
+    assert r["core"] is None
+    assert r["afterCoreGone"] == "MOD", \
+        "the queue never resumed after core's dialog closed"
+    assert r["mod"] is None
+    assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_password_values_reach_the_caller_and_nowhere_else(dialog_harness):
+    r = _run_dialog(dialog_harness, "password_values_are_not_logged_or_kept")
+    # A real password input, and a select that is a select -- the two things
+    # host-registry hand-builds today.
+    assert r["types"] == ["input:password", "select:"]
+    assert r["values"] == {"pass": "correct-horse-battery-staple",
+                           "scope": "all"}
+    # The caller's promise is the ONLY place it went: not the log, not the
+    # queue core kept, not the page (the overlay is gone, values and all).
+    assert r["secretInLog"] is False
+    assert r["secretInRetained"] is False
+    assert r["secretInPage"] is False
+    assert r["logged"] == []
+    assert r["afterSettle"] is None
+    assert r["queueLen"] == 0 and r["activeIsNull"] is True, \
+        "core kept a reference to a settled dialog"
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_pump_drops_a_dead_entry_when_no_disposer_ran(dialog_harness):
+    # The other half of "a dead mod must not wedge the queue": the teardown
+    # disposer is registered through ctx.onUnload, and that registration is
+    # guarded (a ctx without it is the older-loader shape every extension
+    # fragment tolerates). The pump therefore refuses a dead record itself
+    # rather than trusting the disposer to have run.
+    r = _run_dialog(dialog_harness, "the_pump_refuses_a_dead_entry_it_owns")
+    assert r["a1"] is None, "a disabled mod's queued dialog was not dropped"
+    assert r["shown"] == "B1",         "the dead entry was shown (or wedged the queue) at the head"
+    assert r["b1"] is None
+    assert r["logged"] == []
+
+
+# --- #202 / A65: the introspection getters ----------------------------------
+# ctx.mods.list/isActive/pinOf, ctx.settings.describe(modId, key) (+ the own-mod
+# shorthand) and ctx.helpCards.list(). E65 is BEHAVIOUR -- "clones with frozen
+# minimal shapes", and "every helpCards.list() entry survives structuredClone"
+# -- so every case below EXECUTES the shipped fragment: 86n's whole range, the
+# loader's own _pin and _normChoiceOptions, 86a's _modTextCoerce, 86d's help-card
+# sanitizer + registry, #194's extender registry and 86's _runUnloads. Nothing
+# that decides an answer is re-typed here.
+
+_INTROSPECT_SLICE_START = "// ---- ctx.mods / ctx.helpCards / ctx.settings.describe (#202) ---"
+_INTROSPECT_SLICE_END = "// ---- end ctx.mods / ctx.helpCards / ctx.settings.describe ---"
+
+
+def _introspect_src():
+    return (BROKER_DIR / "86n_js_mod_introspect.js").read_text(encoding="utf-8")
+
+
+def _introspect_source():
+    """86n's range, verbatim. Declaration-only apart from the two guarded
+    registration calls, which is what lets the harness run the SHIPPED getters
+    instead of a transcription of them; the markers keep the range honest."""
+    src = _introspect_src()
+    start = src.index(_INTROSPECT_SLICE_START)
+    end = src.index(_INTROSPECT_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _MOD_SETTING_DESCRIPTORS = new Map();",
+                   "function _modIntrospectOptions(options) {",
+                   "function _modIntrospectDescriptor(data) {",
+                   "function _modIntrospectDeclared(kind, a, b) {",
+                   "function _modIntrospectRecord(rec, kind, key, a, b) {",
+                   "function _modIntrospectDescribe(modId, key) {",
+                   "function _modIntrospectIsActive(id) {",
+                   "function _modIntrospectPinOf(id) {",
+                   "function _modIntrospectList() {",
+                   "function _modIntrospectHelpCard(card) {",
+                   "function _modIntrospectHelpCards() {",
+                   "function _ctxModIntrospect(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_the_introspection_getters_land_in_their_own_fragment_and_are_registered():
+    # New ctx surface, so it lands in a NEW ordered fragment: 86c is at the #68
+    # 2500-line cap and the rule there is split, never trim. The registration
+    # rides the SAME change as the file -- ui.py's drift gate fails both ways.
+    assert "86n_js_mod_introspect.js" in ui._ORDERED
+    order = ui._ORDERED.index("86n_js_mod_introspect.js")
+    # AFTER 86c: it uses that fragment's extender registry + capability map, and
+    # DECORATES the `settings` family makeCtx ships (extenders run in _ORDERED
+    # order, so the primitives it wraps must already be on the ctx)...
+    assert order > ui._ORDERED.index("86c_js_mod_ctx_ext.js")
+    # ...and BEFORE the boot fragment, so a mod's init reads the finished ctx.
+    assert order < ui._ORDERED.index("90_js_mod_boot.js")
+    frag = _introspect_src()
+    assert len(frag.splitlines()) <= ui._MAX_LINES, "#68 cap"
+    loader, ext = _loader_src(), _ctx_ext_src()
+    for sym in ("function _modIntrospectList() {",
+                "function _modIntrospectDescribe(modId, key) {",
+                "function _ctxModIntrospect(ctx, rec) {"):
+        assert sym in frag, f"{sym!r} did not land in 86n"
+        assert sym not in loader and sym not in ext, \
+            f"{sym!r} belongs in 86n, not in the loader or 86c"
+    # It reaches the served page exactly once.
+    for sym in ("function _modIntrospectHelpCards() {",
+                "_registerModCapability('mods', 1);",
+                "_registerModCapability('helpCards', 1);"):
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#202 introspection symbol missing/duplicated in the page: {sym!r}"
+    # The registrations are guarded, for a page assembled without #194's
+    # registry or #197's capability map -- a bare call would be a ReferenceError.
+    assert "if (typeof _registerCtxExtender === 'function') {" in frag
+    assert "if (typeof _registerModCapability === 'function') {" in frag
+
+
+def test_the_two_new_families_own_capability_entries_and_describe_does_not():
+    # THE JUDGEMENT, argued in a test rather than in a comment: `mods` and
+    # `helpCards` are TOP-LEVEL families an extender puts on the ctx, so #197's
+    # per-family map owes each an entry -- the drift gate above
+    # (test_capability_seed_is_the_real_ctx_surface_minus_metadata) fails
+    # without them. `settings.describe` is a new MEMBER of an existing family,
+    # which is deliberately NOT a family (a mod needing it asks for the dotted
+    # path, which _modCtxHas resolves against the live ctx), so it owes none.
+    added = _ctx_families_added_by_extenders()
+    assert {"mods", "helpCards"} <= added
+    assert "describe" not in added
+    standalone = _standalone_capability_registrations()
+    assert {"mods", "helpCards"} <= standalone
+    frag = _introspect_src()
+    assert "ctx.settings.describe =" not in frag, \
+        "describe is set on the ctx's OWN settings object, per mod -- never a " \
+        "second top-level family"
+    assert "_registerModCapability('settings'" not in frag
+
+
+def _expr_after(src, marker, start=0):
+    """The whitespace-normalized right-hand side of the first ``marker`` at or
+    after ``start``, up to its terminating semicolon."""
+    i = src.index(marker, start)
+    j = src.index(";", i)
+    return " ".join(src[i + len(marker):j].split())
+
+
+def test_the_describe_fallbacks_do_not_drift_from_the_primitives():
+    # THE NAMED LIMIT, policed. describe reports the DECLARED default, which the
+    # live control entry does not retain (it keeps a read() closure that has
+    # already collapsed the declaration into one effective value) -- so 86n
+    # restates the fallback rules. It borrows the primitives' own normalizers
+    # (_normChoiceOptions / _modTextCoerce / MAX_MOD_TEXT_LEN) rather than
+    # re-implementing them, and the three expressions it does restate are pinned
+    # here character-for-character against their originals. Change one and this
+    # goes red, which is the whole reason the duplication is tolerable.
+    frag = _introspect_src()
+    choice = _frag_fn(_loader_src(),
+                      "function _modSettingChoice(rec, kind, key, options, opts) {")
+    text = _frag_fn((BROKER_DIR / "86a_js_mod_settings_text.js").read_text(
+        encoding="utf-8"), "function _modSettingText(rec, key, opts) {")
+    declared = _introspect_source()
+    # the choice default: opts.def when it names a real option, else the first
+    assert _expr_after(declared, "const fallback = (typeof opts.def") \
+        == _expr_after(choice, "const fallback = (typeof opts.def")
+    # text's maxLength clamp and its suggestion list
+    assert _expr_after(declared, "const max =") == _expr_after(text, "const max =")
+    assert _expr_after(declared, "const suggestions =") \
+        == _expr_after(text, "const suggestions =")
+    # ...and the normalizers are BORROWED, never re-typed here.
+    for owned in ("function _normChoiceOptions(", "function _modTextCoerce(",
+                  "MAX_MOD_TEXT_LEN = "):
+        assert owned not in frag, \
+            f"{owned!r} belongs to the primitive that owns it, not to 86n"
+
+
+_INTROSPECT_HARNESS = r"""
+'use strict';
+// #202/A65: the shipped introspection getters, driven. Everything between the
+// markers is a sliced fragment; the only hand-written code is the FIXTURE half
+// -- window.__mods (the loader's bag, which is exactly what this surface exists
+// to stop mods from reading) and a DOM-free stand-in for the ctx.settings
+// primitives, which calls the SHIPPED _normChoiceOptions so an invalid option
+// list throws where production throws.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+const window = {
+    __mods: {
+        registered: [],
+        active: new Map(),
+        helpCards: [],
+        policy: {},
+    },
+};
+
+__CONSTANTS__
+
+__PIN__
+
+__CHOICE__
+
+__TEXT__
+
+__HELP__
+
+__REGISTRY__
+
+__INTROSPECT__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+function register(id, opts) {
+    opts = opts || {};
+    const entry = { id: id, version: opts.version, tiers: opts.tiers,
+                    requires: [] };
+    window.__mods.registered.push(entry);
+    return entry;
+}
+function record(id) {
+    const rec = { id: id, unloads: [] };
+    window.__mods.active.set(id, rec);
+    return rec;
+}
+function deactivate(rec) {
+    window.__mods.active.delete(rec.id);
+    _runUnloads(rec);
+}
+// The ctx a mod's init() gets, reduced: `settings` carries the five primitives
+// with their real SIGNATURES and the real option normalizer, but mounts no DOM.
+const accessor = { get: function () {}, set: function () {},
+                   onChange: function () { return accessor; } };
+function makeCtx(rec) {
+    const ctx = {
+        id: rec.id,
+        settings: {
+            boolean: function (key, def, opts) { return accessor; },
+            radio: function (key, options, opts) {
+                _normChoiceOptions(options); return accessor;
+            },
+            select: function (key, options, opts) {
+                _normChoiceOptions(options); return accessor;
+            },
+            combo: function (key, options, opts) {
+                _normChoiceOptions(options); return accessor;
+            },
+            text: function (key, opts) {
+                opts = opts || {};
+                if (opts.options != null
+                    && !(Array.isArray(opts.options) && !opts.options.length)) {
+                    _normChoiceOptions(opts.options);
+                }
+                return accessor;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return ctx;
+}
+function mod(id, opts) {
+    register(id, opts || {});
+    const rec = record(id);
+    return { rec: rec, ctx: makeCtx(rec) };
+}
+function cloneable(v) {
+    try { structuredClone(v); return true; }
+    catch (e) { return String(e && e.name) + ': ' + String(e && e.message); }
+}
+
+const CASES = {};
+
+// A snapshot is a FRESH FROZEN clone of primitives, every call. A caller that
+// mutates what it got changes nothing -- not core, not the next call.
+CASES.list_is_a_frozen_clone = function () {
+    const m = mod('alpha', { version: '2.1', tiers: ['settings', 'file'] });
+    register('beta', { version: '0.9', tiers: [] });
+    register('gamma', {});
+    window.__mods.policy = { beta: false, gamma: true };
+    const first = m.ctx.mods.list();
+    let threw = null;
+    try {
+        first.push({ id: 'injected' });
+    } catch (e) { threw = String(e && e.name); }
+    try { first[0].id = 'hijacked'; } catch (e) { threw = String(e && e.name); }
+    try { first[0].tiers.push('root'); } catch (e) { threw = String(e && e.name); }
+    const second = m.ctx.mods.list();
+    return {
+        first: first,
+        second: second,
+        sameObject: first === second,
+        sameEntry: first[0] === second[0],
+        frozen: Object.isFrozen(first) && Object.isFrozen(first[0])
+            && Object.isFrozen(first[0].tiers),
+        keys: Object.keys(second[0]),
+        cloneable: cloneable(second),
+        errors: errors,
+    };
+};
+
+// isActive/pinOf for an id nothing registered. null is "no pin in force" and is
+// NOT an existence answer -- an unpinned known mod says exactly the same thing.
+CASES.unknown_ids = function () {
+    const m = mod('alpha');
+    window.__mods.policy = { alpha: true };
+    return {
+        activeUnknown: m.ctx.mods.isActive('nope'),
+        pinUnknown: m.ctx.mods.pinOf('nope'),
+        pinKnownUnpinned: m.ctx.mods.pinOf('alpha') === true
+            ? 'pinned' : m.ctx.mods.pinOf('alpha'),
+        activeNonString: m.ctx.mods.isActive(null),
+        pinNonString: m.ctx.mods.pinOf(undefined),
+        errors: errors,
+    };
+};
+
+// The snapshot IS a snapshot: state read at call time, never cached.
+CASES.disabled_between_list_and_isactive = function () {
+    const m = mod('alpha');
+    const other = mod('beta');
+    const before = m.ctx.mods.list();
+    const wasActive = m.ctx.mods.isActive('beta');
+    deactivate(other.rec);
+    return {
+        listSaidActive: before.find(function (e) { return e.id === 'beta'; }).active,
+        wasActive: wasActive,
+        nowActive: m.ctx.mods.isActive('beta'),
+        // the stale snapshot is untouched by the change, as a clone must be
+        staleStillSaysActive: before.find(
+            function (e) { return e.id === 'beta'; }).active,
+        relisted: m.ctx.mods.list().find(
+            function (e) { return e.id === 'beta'; }).active,
+        errors: errors,
+    };
+};
+
+// Installed but never loaded: nothing registered, so nothing is listed. "Absent"
+// and "listed as inactive" are different claims and this makes the right one.
+CASES.installed_but_not_loaded = function () {
+    const m = mod('alpha');
+    window.__mods.catalog = [{ id: 'ghost', source: 'installed' }];
+    window.__mods.packages = { ghost: { state: 'fetch-failed' } };
+    const ids = m.ctx.mods.list().map(function (e) { return e.id; });
+    return {
+        ids: ids,
+        ghostListed: ids.indexOf('ghost') !== -1,
+        ghostActive: m.ctx.mods.isActive('ghost'),
+        errors: errors,
+    };
+};
+
+// describe answers with the DECLARATION -- the options the pane renders AND the
+// default, which no amount of DOM reading can recover.
+CASES.describe_matches_the_declaration = function () {
+    const owner = mod('pattern');
+    owner.ctx.settings.select('bgPattern',
+        [{ value: 'none', label: 'None' }, { value: 'dots', label: 'Dots' },
+         { value: 'grid' }],
+        { def: 'dots', label: 'Background' });
+    owner.ctx.settings.boolean('clock', true, { label: 'Clock' });
+    owner.ctx.settings.radio('scheme',
+        [{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }],
+        { def: 'nonsense' });
+    owner.ctx.settings.text('termFont',
+        { def: '  Fira Code  ', maxLength: 9999,
+          options: [{ value: 'Fira Code' }] });
+    // ...asked by a DIFFERENT mod, which is the case the two-arg form exists for
+    const asker = mod('mod-sync');
+    const sel = asker.ctx.settings.describe('pattern', 'bgPattern');
+    let threw = null;
+    try { sel.default = 'hijacked'; } catch (e) { threw = String(e && e.name); }
+    try { sel.options.push({ value: 'x', label: 'x' }); }
+    catch (e) { threw = String(e && e.name); }
+    return {
+        select: sel,
+        selectAgain: asker.ctx.settings.describe('pattern', 'bgPattern'),
+        sameObject: sel === asker.ctx.settings.describe('pattern', 'bgPattern'),
+        frozen: Object.isFrozen(sel) && Object.isFrozen(sel.options)
+            && Object.isFrozen(sel.options[0]),
+        boolean: asker.ctx.settings.describe('pattern', 'clock'),
+        radio: asker.ctx.settings.describe('pattern', 'scheme'),
+        text: asker.ctx.settings.describe('pattern', 'termFont'),
+        cloneable: cloneable(sel),
+        errors: errors,
+    };
+};
+
+// The own-mod shorthand is chosen by ARGUMENT COUNT, and every unknown is null.
+CASES.describe_shorthand_and_unknowns = function () {
+    const owner = mod('pattern');
+    owner.ctx.settings.boolean('clock', false, {});
+    const asker = mod('mod-sync');
+    asker.ctx.settings.boolean('clock', true, {});
+    return {
+        // one arg: MY 'clock' (declared false), not pattern's
+        shorthand: owner.ctx.settings.describe('clock'),
+        askerShorthand: asker.ctx.settings.describe('clock'),
+        // two args naming the other mod
+        crossMod: asker.ctx.settings.describe('pattern', 'clock'),
+        unknownKey: asker.ctx.settings.describe('pattern', 'nope'),
+        unknownMod: asker.ctx.settings.describe('nope', 'clock'),
+        explicitUndefined: asker.ctx.settings.describe('clock', undefined),
+        nonString: asker.ctx.settings.describe(7, 'clock'),
+        noArgs: asker.ctx.settings.describe(),
+        errors: errors,
+    };
+};
+
+// A descriptor lives exactly as long as the control it describes.
+CASES.describe_dies_with_the_mod = function () {
+    const owner = mod('pattern');
+    owner.ctx.settings.select('bgPattern', [{ value: 'none', label: 'None' }], {});
+    const asker = mod('mod-sync');
+    const before = asker.ctx.settings.describe('pattern', 'bgPattern');
+    deactivate(owner.rec);
+    const after = asker.ctx.settings.describe('pattern', 'bgPattern');
+    // ...and a re-enable rebuilds it from the new declaration
+    const again = mod('pattern');
+    again.ctx.settings.select('bgPattern',
+        [{ value: 'grid', label: 'Grid' }], { def: 'grid' });
+    return {
+        before: before, after: after,
+        afterReenable: asker.ctx.settings.describe('pattern', 'bgPattern'),
+        errors: errors,
+    };
+};
+
+// A control that was REFUSED must not leave a describable ghost: the wrapper
+// records only after the shipped primitive returned.
+CASES.refused_control_leaves_no_ghost = function () {
+    const owner = mod('pattern');
+    let threw = null;
+    try {
+        owner.ctx.settings.select('bgPattern',
+            [{ value: 'dup' }, { value: 'dup' }], { def: 'dup' });
+    } catch (e) { threw = String(e && e.message); }
+    let threwEmpty = null;
+    try { owner.ctx.settings.radio('scheme', [], {}); }
+    catch (e) { threwEmpty = String(e && e.message); }
+    return {
+        threw: threw, threwEmpty: threwEmpty,
+        describedBad: owner.ctx.settings.describe('bgPattern'),
+        describedEmpty: owner.ctx.settings.describe('scheme'),
+        errors: errors,
+    };
+};
+
+// THE ISSUE'S OWN ACCEPTANCE: every entry survives structuredClone. The cards
+// are registered through the SHIPPED sanitizer + registry (86d).
+CASES.help_cards_are_clonable_data = function () {
+    const owner = mod('help-contributor');
+    _modRegisterHelpCards(owner.rec, [{
+        title: 'Patterns',
+        section: 'Desktop',
+        keys: 'pattern background',
+        body: [{ t: 'p', spans: [{ t: 'text', v: 'Pick a ' },
+                                 { t: 'code', v: 'bgPattern' }] },
+               { t: 'bullet', spans: [{ t: 'kbd', v: 'Ctrl-K' }] }],
+    }]);
+    // A hostile entry shoved straight onto the bag -- which anybody on the page
+    // can do, and which the getter therefore may not trust.
+    window.__mods.helpCards.push({
+        title: 'Hostile', slug: 'x', section: 'y', keys: '', search: '',
+        bodyFrags: [{ t: 'p', spans: [{ t: 'text', v: 'hi' }] }],
+        onClick: function () {},
+        node: { nodeType: 1, appendChild: function () {} },
+    });
+    const asker = mod('mod-sync');
+    const cards = asker.ctx.helpCards.list();
+    let threw = null;
+    try { cards.push({ title: 'nope' }); } catch (e) { threw = String(e && e.name); }
+    try { cards[0].title = 'hijacked'; } catch (e) { threw = String(e && e.name); }
+    return {
+        cards: cards,
+        count: cards.length,
+        keys: Object.keys(cards[0]),
+        hostileKeys: Object.keys(cards[1]),
+        frozen: Object.isFrozen(cards) && Object.isFrozen(cards[0])
+            && Object.isFrozen(cards[0].bodyFrags[0].spans[0]),
+        cloneable: cloneable(cards),
+        registryLen: window.__mods.helpCards.length,
+        errors: errors,
+    };
+};
+
+// A card registered by a mod that has since been disabled is GONE, because the
+// registry itself drops it (86d's teardown) and the getter reads it live.
+CASES.help_cards_drop_with_the_mod = function () {
+    const owner = mod('help-contributor');
+    _modRegisterHelpCards(owner.rec, [{ title: 'Patterns', body: [] }]);
+    const asker = mod('mod-sync');
+    const before = asker.ctx.helpCards.list();
+    deactivate(owner.rec);
+    return {
+        beforeTitles: before.map(function (c) { return c.title; }),
+        afterTitles: asker.ctx.helpCards.list().map(
+            function (c) { return c.title; }),
+        staleSnapshot: before.map(function (c) { return c.title; }),
+        errors: errors,
+    };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+def _mod_text_coerce_source():
+    """86a's text coercion pair, verbatim -- what `describe` reports as a text
+    default has to be the value the primitive would actually fall back to."""
+    src = (BROKER_DIR / "86a_js_mod_settings_text.js").read_text(encoding="utf-8")
+    body = ""
+    for sig in ("function _modTextPaired(s) {",
+                "function _modTextDropLone(s) {",
+                "function _modTextCoerce(v, max) {"):
+        body += _frag_fn(src, sig) + "\n        }\n"
+    assert "function _modTextCoerce(v, max) {" in body
+    return body
+
+
+@pytest.fixture(scope="module")
+def introspect_harness(tmp_path_factory):
+    loader = _loader_src()
+    consts = (BROKER_DIR / "50_js_constants.js").read_text(encoding="utf-8")
+    m = re.search(r"^\s*const MAX_MOD_TEXT_LEN = \d+;$", consts, re.M)
+    assert m, "MAX_MOD_TEXT_LEN moved"
+    path = tmp_path_factory.mktemp("modintrospect") / "harness.js"
+    path.write_text(
+        _INTROSPECT_HARNESS
+        .replace("__CONSTANTS__", m.group(0))
+        .replace("__PIN__", _frag_fn(loader, "function _pin(id) {") + "\n        }\n")
+        .replace("__CHOICE__", _frag_fn(
+            loader, "function _normChoiceOptions(options) {") + "\n        }\n")
+        .replace("__TEXT__", _mod_text_coerce_source())
+        .replace("__HELP__", (BROKER_DIR / "86d_js_mod_help_cards.js").read_text(
+            encoding="utf-8"))
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__INTROSPECT__", _introspect_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_introspect(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mods_list_is_a_frozen_minimal_clone(introspect_harness):
+    r = _run_introspect(introspect_harness, "list_is_a_frozen_clone")
+    assert r["errors"] == []
+    # THE FROZEN MINIMAL SHAPE, executed. Exactly these five fields, in this
+    # order -- adding one later is additive, changing one is a break.
+    assert r["keys"] == ["id", "active", "pin", "version", "tiers"]
+    assert r["second"] == [
+        {"id": "alpha", "active": True, "pin": None,
+         "version": "2.1", "tiers": ["settings", "file"]},
+        {"id": "beta", "active": False, "pin": False,
+         "version": "0.9", "tiers": []},
+        # a registration with no declared version/tiers still answers the shape
+        {"id": "gamma", "active": False, "pin": True,
+         "version": "0", "tiers": []},
+    ]
+    # A CLONE, not a view: a new array of new entries every call...
+    assert r["sameObject"] is False and r["sameEntry"] is False
+    # ...and frozen, so the mutation attempts above changed nothing.
+    assert r["frozen"] is True
+    assert r["first"] == r["second"], "a mutating caller reached the next call"
+    assert r["cloneable"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_unknown_ids_answer_false_and_null(introspect_harness):
+    r = _run_introspect(introspect_harness, "unknown_ids")
+    assert r["errors"] == []
+    assert r["activeUnknown"] is False
+    # null is "no pin in force" -- NOT an existence answer.
+    assert r["pinUnknown"] is None
+    assert r["pinKnownUnpinned"] == "pinned"
+    assert r["activeNonString"] is False and r["pinNonString"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disable_between_list_and_is_active_is_visible(introspect_harness):
+    r = _run_introspect(introspect_harness, "disabled_between_list_and_isactive")
+    assert r["errors"] == []
+    assert r["listSaidActive"] is True and r["wasActive"] is True
+    # Nothing is cached: the next call sees the new truth...
+    assert r["nowActive"] is False and r["relisted"] is False
+    # ...and the snapshot taken before is untouched, which is what a clone means.
+    assert r["staleStillSaysActive"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_installed_but_unloaded_mod_is_absent_not_inactive(introspect_harness):
+    r = _run_introspect(introspect_harness, "installed_but_not_loaded")
+    assert r["errors"] == []
+    assert r["ids"] == ["alpha"]
+    assert r["ghostListed"] is False, \
+        "list() enumerates what REGISTERED here; the catalog is another question"
+    assert r["ghostActive"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_describe_reports_the_declaration_not_the_rendered_dom(introspect_harness):
+    r = _run_introspect(introspect_harness, "describe_matches_the_declaration")
+    assert r["errors"] == []
+    # The options the pane renders (an omitted label degrades to the value, as
+    # _normChoiceOptions does) AND the declared default, which reading the DOM
+    # back could never recover.
+    assert r["select"] == {
+        "type": "select",
+        "options": [{"value": "none", "label": "None"},
+                    {"value": "dots", "label": "Dots"},
+                    {"value": "grid", "label": "grid"}],
+        "default": "dots",
+    }
+    assert list(r["select"].keys()) == ["type", "options", "default"]
+    assert r["boolean"] == {"type": "boolean", "options": [], "default": True}
+    # a `def` that is not one of the options falls back to the FIRST, exactly as
+    # _modSettingChoice's own read() does
+    assert r["radio"]["default"] == "light"
+    # text: the default is COERCED (trimmed) and maxLength is clamped to the cap,
+    # both through 86a's own helpers
+    assert r["text"] == {
+        "type": "text",
+        "options": [{"value": "Fira Code", "label": "Fira Code"}],
+        "default": "Fira Code",
+    }
+    # A fresh frozen clone per call.
+    assert r["sameObject"] is False and r["frozen"] is True
+    assert r["select"] == r["selectAgain"]
+    assert r["cloneable"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_describe_shorthand_is_own_mod_and_unknowns_are_null(introspect_harness):
+    r = _run_introspect(introspect_harness, "describe_shorthand_and_unknowns")
+    assert r["errors"] == []
+    # One argument = MY key. Both mods own a 'clock' with different defaults, so
+    # a shorthand that leaked into a global key space would be caught here.
+    assert r["shorthand"]["default"] is False
+    assert r["askerShorthand"]["default"] is True
+    assert r["crossMod"]["default"] is False
+    # Every unknown is null -- never a throw, never a half-filled object.
+    assert r["unknownKey"] is None
+    assert r["unknownMod"] is None
+    assert r["nonString"] is None
+    assert r["noArgs"] is None
+    # ...and the shorthand is chosen by ARGUMENT COUNT: an explicit second
+    # argument is a two-arg call with no key, not a shorthand.
+    assert r["explicitUndefined"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_descriptor_lives_exactly_as_long_as_its_control(introspect_harness):
+    r = _run_introspect(introspect_harness, "describe_dies_with_the_mod")
+    assert r["errors"] == []
+    assert r["before"]["options"] == [{"value": "none", "label": "None"}]
+    assert r["after"] is None, "a disabled mod's control still describes"
+    assert r["afterReenable"] == {
+        "type": "select",
+        "options": [{"value": "grid", "label": "Grid"}],
+        "default": "grid",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_refused_control_leaves_no_describable_ghost(introspect_harness):
+    r = _run_introspect(introspect_harness, "refused_control_leaves_no_ghost")
+    assert r["errors"] == []
+    # The shipped normalizer still throws (the mod is rolled back by initMod)...
+    assert "duplicate option" in r["threw"]
+    assert "non-empty array" in r["threwEmpty"]
+    # ...and nothing was recorded for a control that never mounted.
+    assert r["describedBad"] is None and r["describedEmpty"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_every_help_card_entry_survives_structured_clone(introspect_harness):
+    r = _run_introspect(introspect_harness, "help_cards_are_clonable_data")
+    assert r["errors"] == []
+    # THE ISSUE'S OWN ACCEPTANCE.
+    assert r["cloneable"] is True
+    assert r["count"] == 2
+    assert r["keys"] == ["modId", "slug", "section", "title", "bodyFrags",
+                         "keys", "search"]
+    # The sanitized card, as data: typed spans, all strings.
+    assert r["cards"][0]["modId"] == "help-contributor"
+    assert r["cards"][0]["bodyFrags"] == [
+        {"t": "p", "spans": [{"t": "text", "v": "Pick a "},
+                             {"t": "code", "v": "bgPattern"}]},
+        {"t": "bullet", "spans": [{"t": "kbd", "v": "Ctrl-K"}]},
+    ]
+    # The entry shoved straight onto the bag is copied to the SAME shape: the
+    # function and the node-ish object are not carried out, so the promise holds
+    # against the bag rather than merely against 86d's sanitizer.
+    assert r["hostileKeys"] == r["keys"]
+    assert r["frozen"] is True
+    # The registry itself is untouched by a reader.
+    assert r["registryLen"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_disabled_contributors_help_cards_are_gone(introspect_harness):
+    r = _run_introspect(introspect_harness, "help_cards_drop_with_the_mod")
+    assert r["errors"] == []
+    assert r["beforeTitles"] == ["Patterns"]
+    assert r["afterTitles"] == []
+    # ...and the snapshot the caller already held did not change under it.
+    assert r["staleSnapshot"] == ["Patterns"]
