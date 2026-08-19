@@ -78,6 +78,18 @@
             entry.settled = true;
             entry.fin = null;
             entry.spec = null;          // drop core's reference to the spec
+            // BLANK the fields before dropping them. Setting `inputs = null`
+            // drops OUR reference, but a detached input element retained by
+            // anything else still carries the typed password in its .value.
+            // Clearing costs nothing and removes the copy we created by
+            // building the field in the first place. (This is hygiene, not a
+            // boundary: the DOM is shared, so a mod that wants the value while
+            // the dialog is open can read it -- see the header.)
+            if (entry.inputs) {
+                for (const fi of entry.inputs) {
+                    try { if (fi && fi.el) fi.el.value = ''; } catch (_) {}
+                }
+            }
             entry.inputs = null;        // ...and to the live password inputs
             if (_modDialogActive === entry) _modDialogActive = null;
             try { entry.resolve(values); } catch (_) {}
@@ -136,7 +148,12 @@
         // teardown resolve `null` (dismissed) instead of a half-read object.
         function _modDialogCollect(entry) {
             if (!entry || !entry.inputs) return null;
-            const out = {};
+            // Object.create(null): a field legitimately named `__proto__`
+            // assigned through a plain object's legacy setter produces NO own
+            // property at all, so the collected value would go missing while
+            // `values.__proto__` handed back Object.prototype. A null-prototype
+            // target makes the name ordinary.
+            const out = Object.create(null);
             for (const fi of entry.inputs) {
                 let v = '';
                 try { v = fi.el.value; } catch (_) { v = ''; }

@@ -25624,6 +25624,49 @@ CASES.a_queue_never_cancels_a_core_dialog = async function () {
 };
 
 // E63 clause: a password value reaches the caller and nowhere else.
+// A field legitimately named `__proto__` assigned through a PLAIN object's
+// legacy setter produces no own property at all: the collected value goes
+// missing and values.__proto__ hands back Object.prototype instead.
+CASES.a_proto_field_name_is_an_ordinary_name = async function () {
+    const a = activate('alpha');
+    const d = a.ctx.dialog.open({ title: 'T', fields: [
+        { name: '__proto__', label: 'P', type: 'text' },
+        { name: 'ok', label: 'O', type: 'text' },
+    ] });
+    await tick();
+    const ins = shownInputs();
+    ins[0].value = 'VALUE';
+    ins[1].value = 'yes';
+    clickButton('OK');
+    const values = await d.result;
+    return {
+        got: (values && Object.prototype.hasOwnProperty.call(values, '__proto__'))
+            ? values['__proto__'] : 'MISSING',
+        ok: values ? values.ok : null,
+        // ...and it must not have become the prototype.
+        protoIsObject: !!(values && typeof values['__proto__'] === 'object'
+                          && values['__proto__'] !== null
+                          && values['__proto__'] !== undefined
+                          && typeof values['__proto__'] !== 'string'),
+    };
+};
+
+// Settling drops OUR reference to the inputs, but a detached element retained
+// by anything else still carries the typed password in its .value. Blanking
+// removes the copy building the field created.
+CASES.the_fields_are_blanked_when_the_dialog_settles = async function () {
+    const a = activate('alpha');
+    const d = a.ctx.dialog.open({ title: 'T', fields: [
+        { name: 'pw', label: 'P', type: 'password' },
+    ] });
+    await tick();
+    const held = _modDialogActive.inputs[0].el;   // what a retainer would keep
+    typeInto('pw', 'hunter2');
+    clickButton('OK');
+    const values = await d.result;
+    return { toCaller: values ? values.pw : null, retained: held.value };
+};
+
 CASES.password_values_are_not_logged_or_kept = async function () {
     const SECRET = 'correct-horse-battery-staple';
     const a = activate('alpha');
@@ -26207,6 +26250,22 @@ CASES.refused_control_leaves_no_ghost = function () {
 
 // THE ISSUE'S OWN ACCEPTANCE: every entry survives structuredClone. The cards
 // are registered through the SHIPPED sanitizer + registry (86d).
+// A plain object INHERITS constructor/toString/hasOwnProperty, so a membership
+// table built as {} reports `valid['constructor']` truthy -- and describe()
+// would name 'constructor' as the default of a control whose only option is
+// 'safe'. Core's own validator already writes `=== true`, so it would have
+// REJECTED the default it accepted.
+CASES.an_inherited_name_is_not_a_valid_default = function () {
+    const m = mod('clock');
+    m.ctx.settings.select('mode', [{ value: 'safe' }], { def: 'constructor' });
+    m.ctx.settings.select('two', [{ value: 'safe' }, { value: 'other' }],
+                          { def: 'toString' });
+    const a = m.ctx.settings.describe('clock', 'mode');
+    const b = m.ctx.settings.describe('clock', 'two');
+    return { first: a ? a.default : null, second: b ? b.default : null,
+             firstOpts: a ? a.options.map(function (o) { return o.value; }) : [] };
+};
+
 CASES.help_cards_are_clonable_data = function () {
     const owner = mod('help-contributor');
     _modRegisterHelpCards(owner.rec, [{
@@ -26980,7 +27039,12 @@ function pressEscape() {
     for (const fn of (docHandlers.keydown || []).slice()) {
         fn({ key: 'Escape',
              preventDefault: function () { prevented++; },
-             stopPropagation: function () { stopped++; } });
+             stopPropagation: function () { stopped++; },
+             // Escape uses stopImmediatePropagation, because the listeners
+             // that matter are on the SAME document node and
+             // stopPropagation does not stop those. Counted here so the
+             // swallow assertion still means "the key went no further".
+             stopImmediatePropagation: function () { stopped++; } });
     }
     return { prevented: prevented, stopped: stopped };
 }
@@ -27149,6 +27213,24 @@ CASES.teardown_removes_the_popover = function () {
 // the anchor leaving the DOM, the anchor MOVING with no scroll/resize event
 // (a window drag), the viewport changing size, and the mod refilling the node
 // after anchoring.
+// The tick checked only the ANCHOR. A mod removing its own popover node while
+// the anchor stayed on screen left the entry live forever: isOpen() true,
+// onClose never fired, listeners bound, and the frame loop rescheduling itself
+// to measure a detached element for the life of the page.
+CASES.a_removed_node_closes_the_popover = function () {
+    const a = activate('alpha');
+    const node = panel(100, 50);
+    const reasons = [];
+    const p = a.ctx.popover.anchor(node, anchorAt(10, 10, 40, 20),
+                                   { onClose: function (why) { reasons.push(why); } });
+    frame();
+    const openBefore = p.isOpen();
+    node.parentNode.removeChild(node);   // the mod takes its own node away
+    frame();
+    return { openBefore: openBefore, openAfter: p.isOpen(), reasons: reasons,
+             onBody: onBody(node) };
+};
+
 CASES.the_world_moves_under_it = function () {
     const a = activate('alpha');
     const out = {};
@@ -27312,3 +27394,48 @@ def test_the_popover_survives_the_world_moving_under_it(popover_harness):
     assert r["boundAfter"] == {"mousedown": 0, "keydown": 0, "rafs": 0}
     assert r["repositionAfterClose"] is False
     assert r["logged"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_proto_field_name_is_an_ordinary_name(dialog_harness):
+    # Assigning through a plain object's legacy __proto__ setter produces no own
+    # property, so the collected value vanishes and the caller gets the
+    # prototype instead of their string.
+    r = _run_dialog(dialog_harness, "a_proto_field_name_is_an_ordinary_name")
+    assert r["got"] == "VALUE", "a __proto__-named field lost its value"
+    assert r["ok"] == "yes", "the sibling field was collected"
+    assert r["protoIsObject"] is False, "values.__proto__ handed back an object"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_fields_are_blanked_when_the_dialog_settles(dialog_harness):
+    # Hygiene rather than a boundary -- the DOM is shared, so a mod can read a
+    # live field while the dialog is open (the header says so). What this
+    # removes is the copy that outlives the dialog in a retained element.
+    r = _run_dialog(dialog_harness, "the_fields_are_blanked_when_the_dialog_settles")
+    assert r["toCaller"] == "hunter2", "the value must still reach the caller"
+    assert r["retained"] == "", (
+        "a retained input element still carried the password after settlement")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_an_inherited_name_is_not_a_valid_default(introspect_harness):
+    # describe() must match what the pane renders, and core's own validator
+    # writes `=== true` -- so accepting an inherited name as a default meant
+    # core could accept a default its validator rejects.
+    r = _run_introspect(introspect_harness, "an_inherited_name_is_not_a_valid_default")
+    assert r["firstOpts"] == ["safe"]
+    assert r["first"] == "safe", (
+        "'constructor' was accepted as the default of a control that does not "
+        "offer it")
+    assert r["second"] == "safe", "'toString' was accepted as a default"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_removed_node_closes_the_popover(popover_harness):
+    # Otherwise the entry is immortal: open forever, onClose never fired, and a
+    # frame loop measuring a detached element for the life of the page.
+    r = _run_popover(popover_harness, "a_removed_node_closes_the_popover")
+    assert r["openBefore"] is True
+    assert r["openAfter"] is False, "the popover stayed open with no node"
+    assert r["reasons"] == ["node-gone"], "onClose was not told why"

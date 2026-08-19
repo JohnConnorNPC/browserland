@@ -1376,13 +1376,22 @@
         function _modSettingChoice(rec, kind, key, options, opts) {
             opts = opts || {};
             options = _normChoiceOptions(options);
-            const valid = {};
+            // Object.create(null), and `=== true` on every read. A plain
+            // object INHERITS constructor/toString/hasOwnProperty, so a
+            // control declaring def:'constructor' took it as its default even
+            // though 'constructor' is not one of its options -- and the
+            // membership check further down already writes `=== true`, so core
+            // would accept a default its own validator rejects. Same table,
+            // same test, everywhere.
+            const valid = Object.create(null);
             for (const o of options) valid[o.value] = true;
-            const fallback = (typeof opts.def === 'string' && valid[opts.def])
+            const fallback = (typeof opts.def === 'string'
+                    && valid[opts.def] === true)
                 ? opts.def : options[0].value;
             const read = function () {
                 const v = getSettings()[key];
-                return (typeof v === 'string' && valid[v]) ? v : fallback;
+                return (typeof v === 'string' && valid[v] === true)
+                    ? v : fallback;
             };
             const section = _controlSection(rec, opts);
             let reflect, bindChange;

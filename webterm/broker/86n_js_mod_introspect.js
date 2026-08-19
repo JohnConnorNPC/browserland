@@ -193,9 +193,14 @@
             }
             const opts = (b && typeof b === 'object') ? b : {};
             const options = _normChoiceOptions(a);
-            const valid = {};
+            // Object.create(null), not {}: a plain object INHERITS
+            // constructor/toString/hasOwnProperty, so `valid['constructor']`
+            // is truthy and describe() would report 'constructor' as the
+            // default of a control whose only option is 'safe'. The membership
+            // table has to contain only what was declared.
+            const valid = Object.create(null);
             for (const o of options) valid[o.value] = true;
-            const fallback = (typeof opts.def === 'string' && valid[opts.def])
+            const fallback = (typeof opts.def === 'string' && valid[opts.def] === true)
                 ? opts.def : options[0].value;
             return { type: kind, options: options, def: fallback };
         }

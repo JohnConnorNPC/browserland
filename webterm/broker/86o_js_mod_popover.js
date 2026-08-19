@@ -85,6 +85,14 @@
         // leaves a box floating at coordinates that no longer mean anything,
         // pointing at a button that is gone. `isConnected` is the check (never
         // a parentNode walk: a detached subtree still has parents).
+        function _modPopoverNodeLive(entry) {
+            try {
+                const n = entry && entry.node;
+                if (!n) return false;
+                if (typeof n.isConnected === 'boolean') return n.isConnected;
+                return true;            // an engine without isConnected
+            } catch (_) { return false; }
+        }
         function _modPopoverAnchorLive(entry) {
             const a = entry.anchor;
             if (!a) return false;
@@ -190,6 +198,16 @@
             _modPopoverRaf = null;
             for (const entry of _MOD_POPOVERS.slice()) {
                 if (entry.closed) continue;
+                // The NODE is checked as well as the anchor. A mod that removes
+                // its own popover node while the anchor is still on screen
+                // would otherwise leave the entry live forever: isOpen() true,
+                // onClose never fired, the document listeners still bound, and
+                // this loop rescheduling itself for the life of the page to
+                // measure and style a detached element.
+                if (!_modPopoverNodeLive(entry)) {
+                    _modPopoverClose(entry, 'node-gone');
+                    continue;
+                }
                 if (!_modPopoverAnchorLive(entry)) {
                     _modPopoverClose(entry, 'anchor-gone');
                     continue;
@@ -265,7 +283,12 @@
             const entry = _MOD_POPOVERS[_MOD_POPOVERS.length - 1];
             if (!entry) return;
             try { e.preventDefault(); } catch (_) {}
-            try { e.stopPropagation(); } catch (_) {}
+            // stopImmediatePropagation, not stopPropagation: the listeners
+            // that matter here are on the SAME document node (a hand-rolled
+            // mod popover's own capture listener is the case), and
+            // stopPropagation does not stop those -- so Escape would peel
+            // two layers at once while claiming to peel the topmost.
+            try { e.stopImmediatePropagation(); } catch (_) {}
             _modPopoverClose(entry, 'escape');
         }
 
