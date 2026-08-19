@@ -39,9 +39,14 @@
             // EL) — a connected session's scrollback must not carry a stale
             // "connecting…" above its banner. A failed dial keeps it, followed
             // by onclose's "[connection closed]", which reads correctly.
+            // #201: every core write site dispatches the output taps
+            // immediately AFTER the write it just made — inside the same try,
+            // so a write that THREW is not reported as bytes the terminal
+            // received. dispatchTermOut copies per tap and never throws.
             try {
-                win.term.write('connecting to '
-                    + (host.label || host.id) + '…');
+                const _banner = 'connecting to ' + (host.label || host.id) + '…';
+                win.term.write(_banner);
+                dispatchTermOut(win, _banner);
             } catch (_) {}
             // Arm the watchdog: closing a still-CONNECTING socket fires
             // onclose, which runs the EXISTING scheduleReattach backoff (the
@@ -69,7 +74,12 @@
                 win.authFailed = false;
                 win.lastOpenAt = Date.now();
                 // '\r\x1b[2K' rewinds over the "connecting…" line above.
-                try { win.term.write('\r\x1b[2KConnected to webterm (session ' + win.sid + ')\r\n'); } catch (_) {}
+                try {
+                    const _hello = '\r\x1b[2KConnected to webterm (session '
+                        + win.sid + ')\r\n';
+                    win.term.write(_hello);
+                    dispatchTermOut(win, _hello);   // #201
+                } catch (_) {}
                 maybeSendInitialResize(win);
             };
 
@@ -96,12 +106,23 @@
             ws.onmessage = (event) => {
                 if (win.disposed) return;
                 if (event.data instanceof ArrayBuffer) {
-                    win.term.write(new Uint8Array(event.data));
+                    // The PTY byte path. The tap gets its OWN copy of these
+                    // bytes (#201) — xterm's write queue is drained
+                    // asynchronously and is still holding this very array.
+                    const _bytes = new Uint8Array(event.data);
+                    win.term.write(_bytes);
+                    dispatchTermOut(win, _bytes);
                     return;
                 }
                 let data;
                 try { data = JSON.parse(event.data); }
-                catch (_) { try { win.term.write(event.data); } catch (__) {} return; }
+                catch (_) {
+                    try {
+                        win.term.write(event.data);
+                        dispatchTermOut(win, event.data);   // #201
+                    } catch (__) {}
+                    return;
+                }
                 if (data.type === 'error' && data.reason === 'unknown_session') {
                     win.staleSession = true;
                     return;
@@ -179,7 +200,10 @@
                     return;
                 }
                 if (data.type === 'output') {
-                    try { win.term.write(data.data); } catch (_) {}
+                    try {
+                        win.term.write(data.data);
+                        dispatchTermOut(win, data.data);    // #201
+                    } catch (_) {}
                     return;
                 }
                 if (data.type === 'mcp_activity') {
@@ -262,7 +286,10 @@
                     closeWindow(win.id);
                     return;
                 }
-                try { win.term.write('\r\n\r\n[connection closed]\r\n'); } catch (_) {}
+                try {
+                    win.term.write('\r\n\r\n[connection closed]\r\n');
+                    dispatchTermOut(win, '\r\n\r\n[connection closed]\r\n');  // #201
+                } catch (_) {}
                 // Auto-reattach (taskbar poll fires it once the session is
                 // confirmed alive): stable connections retry quickly, flappy
                 // ones back off 2 s * 2^n up to 30 s.
@@ -271,7 +298,10 @@
 
             ws.onerror = () => {
                 if (win.disposed) return;
-                try { win.term.write('\r\n[ws error]\r\n'); } catch (_) {}
+                try {
+                    win.term.write('\r\n[ws error]\r\n');
+                    dispatchTermOut(win, '\r\n[ws error]\r\n');   // #201
+                } catch (_) {}
             };
         }
 

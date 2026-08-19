@@ -22737,3 +22737,679 @@ def test_a_probe_byte_from_every_enumerated_write_site_reaches_one_tap(tmp_path)
                     else {"output": "output", "input": "input",
                           "resize-apply": "resize-apply"}[kind])
             assert r["seen"][0] == want, (r["key"], r["line"], r["seen"])
+
+
+# --- #201 / A58: info.tapOutput / info.tapInput / info.onResize -------------
+# The sanctioned replacement for recorder's term.write / term.resize
+# monkey-patching. E58 is BEHAVIOUR, so the cases below EXECUTE the shipped
+# fragments: 86k whole, #116's per-terminal hook out of 67, A37's onModTeardown
+# range, #194's extender registry, 86's _runUnloads -- plus the two core call
+# sites lifted verbatim out of 67 (sendChunked, the term.onResize subscription)
+# and every write/dispatch PAIR lifted out of 73. Nothing about the funnel is
+# re-typed here.
+
+_TAPS_SLICE_START = "// ---- info.tapOutput / info.tapInput / info.onResize (#201) ---"
+_TAPS_SLICE_END = "// ---- end info.tapOutput / tapInput / onResize ---"
+
+
+def _term_taps_src():
+    return (BROKER_DIR / "86k_js_mod_terminal_taps.js").read_text(encoding="utf-8")
+
+
+def _term_taps_source():
+    """86k's range, verbatim. Declaration-only apart from the guarded
+    _registerCtxExtender call, which is what lets the harness run the SHIPPED
+    hook instead of a transcription of it."""
+    src = _term_taps_src()
+    start = src.index(_TAPS_SLICE_START)
+    end = src.index(_TAPS_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _termTaps = new WeakMap();",
+                   "function _termTapLists(win, create) {",
+                   "function _addTermTap(win, kind, fn) {",
+                   "function _copyTermData(data) {",
+                   "function _dispatchTermTaps(win, kind, make) {",
+                   "function dispatchTermOut(win, data) {",
+                   "function dispatchTermIn(win, data) {",
+                   "function dispatchTermResize(win, dims) {",
+                   "function _modTerminalTaps(rec, info) {",
+                   "function _ctxTerminalTaps(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def _send_chunked_source():
+    """67's sendChunked, verbatim -- the single wire chokepoint the input tap
+    hooks (docs-terminal-funnels.md). Sliced, because "the tap sees exactly the
+    frames that went out" is a claim about THAT function's chunking."""
+    src = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    start = src.index("const CHUNK_CHARS = 262144;")
+    end = src.index("// ---- ConPTY bracketed-paste gap")
+    assert start < end
+    body = src[start:end]
+    assert "if (type === 'input') dispatchTermIn(win, frame);" in body
+    return body
+
+
+def _term_resize_sub_source():
+    """67's xterm-onResize subscription, verbatim -- the whole of info.onResize's
+    feed. It is an EVENT subscription, not a patch, which is why a mod-driven
+    fitAddon.fit() reaches it."""
+    src = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    start = src.index("            const onResizeDisp = term.onResize(")
+    end = src.index("// Track IME composition")
+    assert start < end
+    body = src[start:end]
+    assert "dispatchTermResize(win, d)" in body
+    assert "onResizeDisp.dispose();" in body
+    return body
+
+
+_WRITE_PAIR_RE = re.compile(
+    r"win\.term\.write\((?P<a>[^;]*)\);\s*\n\s*dispatchTermOut\(win, (?P<b>[^;]*)\);")
+
+
+def _write_dispatch_pairs():
+    """Every (write, dispatch) pair in 73, off the comment/string-stripped
+    source the funnel gate scans."""
+    src = _js_strip_comments_and_strings(
+        (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8"))
+    return [(m.group("a").strip(), m.group("b").strip(),
+             src.count("\n", 0, m.start()) + 1,
+             "win.term.write(%s); dispatchTermOut(win, %s);"
+             % (m.group("a").strip(), m.group("b").strip()))
+            for m in _WRITE_PAIR_RE.finditer(src)]
+
+
+def test_the_terminal_taps_land_in_their_own_fragment_and_are_registered():
+    # New ctx surface, so it lands in a NEW ordered fragment: 86c is at the
+    # #68 2500-line cap and the rule there is split, never trim.
+    assert "86k_js_mod_terminal_taps.js" in ui._ORDERED
+    order = ui._ORDERED.index("86k_js_mod_terminal_taps.js")
+    # AFTER 86c (extenders run in _ORDERED order, and a tap arms its removal on
+    # A37's info.onModTeardown, which must already be on the bag)...
+    assert order > ui._ORDERED.index("86c_js_mod_ctx_ext.js")
+    # ...and before the mod-script splice, since a mod's init reads the ctx.
+    assert order < ui._ORDERED.index(ui._MOD_SPLICE_BEFORE)
+    frag = _term_taps_src()
+    assert len(frag.splitlines()) <= ui._MAX_LINES
+    loader, ext = _loader_src(), _ctx_ext_src()
+    for sym in ("function _dispatchTermTaps(win, kind, make) {",
+                "function dispatchTermOut(win, data) {",
+                "function dispatchTermIn(win, data) {",
+                "function dispatchTermResize(win, dims) {",
+                "function _modTerminalTaps(rec, info) {",
+                "function _ctxTerminalTaps(ctx, rec) {"):
+        assert sym in frag, f"{sym!r} did not land in 86k"
+        assert sym not in loader and sym not in ext, \
+            f"{sym!r} belongs in 86k, not in the loader or 86c"
+        assert INDEX_HTML.count(sym) == 1, \
+            f"A58 symbol missing/duplicated in the served page: {sym!r}"
+    _assert_guarded_ctx_registration(frag,
+                                     "_registerCtxExtender(_ctxTerminalTaps);")
+    # MEMBERS of the existing v1 `windows` family, so they owe no capability
+    # entry -- and the contract version does not move.
+    assert "_registerModCapability(" not in frag
+    assert "ctxVersion" not in frag
+    assert "ctxVersion: 1," in loader
+    # WRAPPED, never replaced: the subscription, the replay over open terminals
+    # and the auto-unsubscribe stay core's and the loader's.
+    body = _frag_fn(frag, "function _ctxTerminalTaps(ctx, rec) {")
+    assert "const sub = fam.onTerminalCreate;" in body
+    assert "if (typeof sub !== 'function') return;" in body
+    assert "if (typeof cb !== 'function') return sub.call(this, cb);" in body
+    assert "cb(_modTerminalTaps(rec, info))" in body
+
+
+def test_core_hooks_its_own_call_sites_and_never_wraps_the_terminal():
+    # THE COMPATIBILITY REQUIREMENT. recorder replaces term.write / term.resize
+    # by assignment and restores only if the method it finds is still its own;
+    # a core wrapper on the instance would make that check false and corrupt its
+    # restore path. So core hooks ITS OWN call sites and assigns nothing.
+    frag = _term_taps_src()
+    for bad in ("term.write =", "term.resize =", "win.term.write =",
+                ".write = function", ".resize = function"):
+        assert bad not in frag, f"86k wraps the terminal ({bad!r})"
+    for name in ("73_js_window_runtime.js", "67_js_window_lifecycle.js"):
+        src = _js_strip_comments_and_strings(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        assert not re.search(r"term\.(write|resize)\s*=[^=]", src), \
+            f"{name} assigns over a terminal method"
+    # Every core write site pairs with a dispatch of the SAME expression, and
+    # the pair count is the enumeration's count -- so a new write site added
+    # without a tap dispatch fails here as well as in the funnel gate.
+    pairs = _write_dispatch_pairs()
+    assert len(pairs) == _TERM_FUNNEL_EXPECTED[
+        ("73_js_window_runtime.js", "win.term.write")][0]
+    for a, b, line, _text in pairs:
+        assert a == b, ("the tap is fed something other than the bytes that "
+                        "were written", line, a, b)
+    # The input tap hooks the wire chokepoint (sendChunked), not term.onData:
+    # onData alone misses the hand-bracketed ConPTY paste path.
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "if (type === 'input') dispatchTermIn(win, frame);" in life
+    assert "dispatchTermIn" not in life[:life.index("const CHUNK_CHARS")]
+
+
+def test_on_resize_is_fed_from_xterms_own_event_so_a_mod_fit_is_covered():
+    # THE NAMED LIMIT IN docs-terminal-funnels.md: mods/termfont/termfont.js:87
+    # calls win.fitAddon.fit(), which resizes INSIDE xterm with no core call
+    # site involved. An onResize fed from 73's win.term.resize site would miss
+    # it, so the feed is xterm's own onResize event -- public API on the
+    # vendored 5.3 build (`get onResize(){return this._core.onResize}`), fired
+    # after the grid is applied, once per applied resize whichever path drove
+    # it. Consequence: 73's resize call site gets NO dispatch (it would double-
+    # report the wire path), which this pins.
+    life = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
+    assert "const onResizeDisp = term.onResize(" in life
+    runtime = _js_strip_comments_and_strings(
+        (BROKER_DIR / "73_js_window_runtime.js").read_text(encoding="utf-8"))
+    assert "dispatchTermResize" not in runtime, \
+        "the resize taps must be fed ONCE, from xterm's event"
+    assert "win.term.resize(cols, rows);" in runtime
+    vendor = (BROKER_DIR / "vendor" / "xterm.js").read_text(
+        encoding="utf-8", errors="replace")
+    assert "get onResize()" in vendor, \
+        "the vendored xterm no longer exposes the event onResize is fed from"
+    # ...and the subscription is disposed with the window.
+    assert "onResizeDisp.dispose();" in life
+
+
+_TAPS_HARNESS = r"""
+'use strict';
+// #201/A58: the shipped taps, driven. Everything below the fixtures is either
+// a sliced fragment or a reduced core driver; no tap logic is re-typed.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+function El(cls) { this.className = cls || ''; this.children = []; this.parentNode = null; }
+El.prototype._drop = function (kid) {
+    const i = this.children.indexOf(kid);
+    if (i !== -1) this.children.splice(i, 1);
+    kid.parentNode = null;
+};
+El.prototype.appendChild = function (kid) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    kid.parentNode = this;
+    this.children.push(kid);
+    return kid;
+};
+El.prototype.insertBefore = function (kid, ref) {
+    if (kid.parentNode) kid.parentNode._drop(kid);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.remove = function () { if (this.parentNode) this.parentNode._drop(this); };
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+
+const windows = new Map();
+const desktop = new El('desktop');
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+const WebSocket = { OPEN: 1 };
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+// xterm, reduced to the three members the hooks touch: write (which a mod may
+// still replace by assignment -- recorder does), resize, and the onResize
+// EVENT fired from inside resize. FitAddon.fit() is modelled as what it is: a
+// call to Terminal.resize that no core call site is involved in.
+function FakeTerm() {
+    this.wrote = [];
+    this.cols = 80; this.rows = 24;
+    this._resize = [];
+    this.throwOnWrite = false;
+}
+FakeTerm.prototype.write = function (d) {
+    if (this.throwOnWrite) throw new Error('write blew up');
+    this.wrote.push(d);
+};
+FakeTerm.prototype.resize = function (cols, rows) {
+    this.cols = cols; this.rows = rows;
+    const cbs = this._resize.slice();
+    for (let i = 0; i < cbs.length; i++) cbs[i]({ cols: cols, rows: rows });
+};
+FakeTerm.prototype.onResize = function (fn) {
+    const self = this;
+    this._resize.push(fn);
+    return { dispose: function () {
+        const i = self._resize.indexOf(fn);
+        if (i !== -1) self._resize.splice(i, 1);
+    } };
+};
+function fitAddonFit(term, cols, rows) { term.resize(cols, rows); }
+
+let winSeq = 0;
+function openTerminal() {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const term = new FakeTerm();
+    const wire = [];
+    const win = { id: id, sid: String(winSeq), hostId: 'h1', type: 'term',
+                  dom: dom, term: term, cleanups: [], disposed: false,
+                  wire: wire,
+                  ws: { readyState: 1, send: function (f) { wire.push(f); } } };
+    desktop.appendChild(dom);
+    windows.set(id, win);
+    // --- 67's sendChunked, verbatim ---
+    __SEND_CHUNKED__
+    win.sendChunked = sendChunked;
+    // --- 67's xterm-onResize subscription, verbatim ---
+    __RESIZE_SUB__
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    return win;
+}
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    win.dom.remove();
+    windows.delete(id);
+}
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+// A permissive stub for the free identifiers in a lifted 73 call pair.
+function stub() {
+    const t = function () { return stub(); };
+    return new Proxy(t, {
+        get: function (o, k) {
+            if (k === Symbol.toPrimitive) return function () { return 1; };
+            if (typeof k === 'symbol') return undefined;
+            return stub();
+        },
+        has: function () { return true; },
+        apply: function () { return stub(); },
+        construct: function () { return stub(); }
+    });
+}
+
+const CASES = {};
+
+// E58, the completeness half: EVERY core write site, lifted verbatim from 73,
+// hands the tap exactly what it handed the terminal -- once.
+CASES.every_write_site = function () {
+    const PAIRS = JSON.parse(process.argv[3]);
+    const m = modCtx('observer');
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { seen.push(d); });
+    });
+    const win = openTerminal();
+    const out = [];
+    for (let i = 0; i < PAIRS.length; i++) {
+        const before = seen.length, wroteBefore = win.term.wrote.length;
+        const scope = new Proxy(
+            { win: win, Uint8Array: Uint8Array, JSON: JSON, String: String,
+              dispatchTermOut: dispatchTermOut,   // the SHIPPED dispatcher
+              _bytes: new Uint8Array([1, 2, 3]),
+              _banner: 'connecting to h', _hello: 'hello',
+              event: { data: 'raw frame' }, data: { data: 'pty bytes' } },
+            { has: function () { return true; },
+              get: function (o, k) {
+                  if (k === Symbol.unscopables) return undefined;
+                  if (typeof k === 'symbol') return undefined;
+                  return (k in o) ? o[k] : stub();
+              } });
+        let err = null;
+        try {
+            (new Function('S', 'with (S) { ' + PAIRS[i].text + ' }'))(scope);
+        } catch (e) { err = String((e && e.message) || e); }
+        const wrote = win.term.wrote.slice(wroteBefore);
+        const got = seen.slice(before);
+        out.push({ line: PAIRS[i].line, err: err, taps: got.length,
+                   writes: wrote.length,
+                   equal: got.length === 1 && wrote.length === 1
+                       && (got[0] === wrote[0]
+                           || (ArrayBuffer.isView(got[0])
+                               && ArrayBuffer.isView(wrote[0])
+                               && String(got[0]) === String(wrote[0]))),
+                   copied: (wrote.length === 1 && ArrayBuffer.isView(wrote[0]))
+                       ? got[0] !== wrote[0] : null });
+    }
+    return { sites: out, errors: errors };
+};
+
+// READ-ONLY IS ENFORCED. Two taps on one terminal; the first mutates what it
+// was handed. The second must see the bytes unchanged, and so must xterm.
+CASES.read_only_is_enforced = function () {
+    const m = modCtx('vandal');
+    const first = [], second = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { first.push(String(d)); d[0] = 99; });
+        info.tapOutput(function (d) { second.push(String(d)); });
+    });
+    const win = openTerminal();
+    const bytes = new Uint8Array([1, 2, 3]);
+    win.term.write(bytes);
+    dispatchTermOut(win, bytes);
+    return { first: first, second: second, original: String(bytes),
+             onScreen: String(win.term.wrote[0]), errors: errors };
+};
+
+// Ordered, isolated, and POST-DISPATCH: a throwing tap costs its siblings and
+// the terminal nothing, and the frames the input tap reports are the frames
+// that already went out, in order.
+CASES.ordered_isolated_and_post_dispatch = function () {
+    const m = modCtx('three');
+    const log = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapInput(function (d) { log.push('a:' + d); });
+        info.tapInput(function () { throw new Error('tap boom'); });
+        info.tapInput(function (d) { log.push('c:' + d); });
+    });
+    const win = openTerminal();
+    win.sendChunked('input', 'hi');
+    win.sendChunked('ping', 'not-input');
+    const wire = win.wire.slice();
+    return { log: log, wire: wire, errors: errors };
+};
+
+// The chunker's own framing: the tap sees the FRAMES, never a split surrogate,
+// and never anything the socket did not accept.
+CASES.input_tap_sees_the_wire_frames = function () {
+    const m = modCtx('framer');
+    const frames = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapInput(function (d) { frames.push(d); });
+    });
+    const win = openTerminal();
+    const text = 'x'.repeat(262143) + '😀' + 'y';
+    win.sendChunked('input', text);
+    const sent = win.wire.map(function (f) { return JSON.parse(f).data; });
+    return { equal: JSON.stringify(sent) === JSON.stringify(frames),
+             count: frames.length, rejoined: frames.join('') === text,
+             lens: frames.map(function (f) { return f.length; }),
+             errors: errors };
+};
+
+// THE NAMED LIMIT, closed: a MOD calling fitAddon.fit() resizes inside xterm
+// with no core call site involved, and the tap still fires -- once, after the
+// grid is applied, with a fresh object per tap.
+CASES.resize_from_a_mod_fit = function () {
+    const m = modCtx('fitter');
+    const a = [], b = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.onResize(function (d) { a.push(d); });
+        info.onResize(function (d) { b.push(d); });
+    });
+    const win = openTerminal();
+    fitAddonFit(win.term, 100, 40);   // termfont's call shape: inside xterm
+    win.term.resize(120, 50);         // 73's broker-confirmed grid
+    return { a: a, b: b, shared: a[0] === b[0],
+             applied: { cols: win.term.cols, rows: win.term.rows },
+             errors: errors };
+};
+
+// Auto-removed at DISPOSE: the window closes, win.cleanups drains, and the
+// taps are gone even though the mod is still enabled.
+CASES.dispose_removes_the_taps = function () {
+    const m = modCtx('disposer');
+    const seen = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { seen.push(d); });
+    });
+    const win = openTerminal();
+    dispatchTermOut(win, 'before');
+    closeWindow(win.id);
+    const after = dispatchTermOut(win, 'after');
+    return { seen: seen, afterCount: after, errors: errors };
+};
+
+// Auto-removed at MOD TEARDOWN, which is the half win.cleanups cannot do: the
+// terminals stay OPEN and every one of them loses this mod's taps -- and only
+// this mod's. (git's disposer-Set bug is what this is.)
+CASES.teardown_removes_the_taps = function () {
+    const a = modCtx('a'), b = modCtx('b');
+    const seenA = [], seenB = [];
+    const before = openTerminal();
+    a.ctx.windows.onTerminalCreate(function (info) {    // REPLAY over `before`
+        info.tapOutput(function (d) { seenA.push(info.win.id + ':' + d); });
+    });
+    b.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { seenB.push(info.win.id + ':' + d); });
+    });
+    const after = openTerminal();                       // EMIT
+    dispatchTermOut(before, '1');
+    dispatchTermOut(after, '1');
+    _runUnloads(a.rec);                                 // disable mod a
+    dispatchTermOut(before, '2');
+    dispatchTermOut(after, '2');
+    return { seenA: seenA, seenB: seenB,
+             stillOpen: [windows.has(before.id), windows.has(after.id)],
+             disposed: [before.disposed, after.disposed],
+             errors: errors };
+};
+
+// COEXISTENCE WITH RECORDER, executed: recorder's patch is installed over
+// term.write by assignment while a tap is live. Both observe the same bytes,
+// and recorder's "is the method still mine" restore check still passes --
+// which it could not if core had wrapped the instance.
+CASES.coexists_with_recorder = function () {
+    const m = modCtx('observer');
+    const tapped = [], recorded = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) { tapped.push(String(d)); });
+    });
+    const win = openTerminal();
+    const orig = win.term.write;
+    const patched = function (d) {
+        recorded.push(String(d));
+        return orig.apply(this, arguments);
+    };
+    win.term.write = patched;
+    win.term.write('one');
+    dispatchTermOut(win, 'one');
+    const stillOurs = win.term.write === patched;   // recorder's restore check
+    if (stillOurs) delete win.term.write;
+    win.term.write('two');
+    dispatchTermOut(win, 'two');
+    return { tapped: tapped, recorded: recorded, stillOurs: stillOurs,
+             restored: win.term.write === orig,
+             onScreen: win.term.wrote.map(String), errors: errors };
+};
+
+// A write that THREW delivered no bytes, so no tap is told it did -- and a tap
+// that unsubscribes a sibling mid-dispatch is obeyed within that same dispatch.
+CASES.throwing_write_and_midflight_unsub = function () {
+    const m = modCtx('edge');
+    const seen = [];
+    let offSecond = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        info.tapOutput(function (d) {
+            seen.push('first:' + d);
+            if (offSecond) offSecond();
+        });
+        offSecond = info.tapOutput(function (d) { seen.push('second:' + d); });
+    });
+    const win = openTerminal();
+    // The throwing write, run through 73's own shape: the dispatch sits INSIDE
+    // the try, after the write.
+    win.term.throwOnWrite = true;
+    try { win.term.write('lost'); dispatchTermOut(win, 'lost'); } catch (_) {}
+    win.term.throwOnWrite = false;
+    dispatchTermOut(win, 'kept');
+    return { seen: seen, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def taps_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("termtaps") / "harness.js"
+    path.write_text(
+        _TAPS_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__SEND_CHUNKED__", _send_chunked_source())
+        .replace("__RESIZE_SUB__", _term_resize_sub_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_taps(harness, case, extra=None):
+    argv = [NODE, str(harness), case]
+    if extra is not None:
+        argv.append(extra)
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_every_core_write_site_reaches_a_tap_exactly_once(taps_harness):
+    pairs = json.dumps([{"line": line, "text": text}
+                        for _a, _b, line, text in _write_dispatch_pairs()])
+    r = _run_taps(taps_harness, "every_write_site", pairs)
+    assert r["errors"] == []
+    assert len(r["sites"]) == 7
+    for s in r["sites"]:
+        assert s["err"] is None, s
+        assert s["writes"] == 1 and s["taps"] == 1, s
+        assert s["equal"], ("the tap was fed something other than the bytes "
+                            "that reached the terminal", s)
+        if s["copied"] is not None:
+            assert s["copied"], ("the PTY byte path handed the tap the very "
+                                 "array xterm is still holding", s)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_tap_cannot_transform_what_it_observes(taps_harness):
+    # READ-ONLY ENFORCED, not requested: a shared Uint8Array handed out
+    # pre-write would make every "observer" a silent transformer.
+    r = _run_taps(taps_harness, "read_only_is_enforced")
+    assert r["errors"] == []
+    assert r["first"] == ["1,2,3"]
+    assert r["second"] == ["1,2,3"], "one tap rewrote what the next one saw"
+    assert r["original"] == "1,2,3", "a tap mutated core's buffer"
+    assert r["onScreen"] == "1,2,3", "a tap mutated what the terminal was given"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_taps_are_registration_ordered_isolated_and_post_dispatch(taps_harness):
+    r = _run_taps(taps_harness, "ordered_isolated_and_post_dispatch")
+    assert r["log"] == ["a:hi", "c:hi"], \
+        "a throwing tap cost a sibling its dispatch, or the order moved"
+    assert len(r["errors"]) == 1 and "terminal tap (in)" in r["errors"][0]
+    # The bytes still went out -- the tap sits on the far side of the send --
+    # and a control frame on the same socket is not input.
+    assert [json.loads(f) for f in r["wire"]] == [
+        {"type": "input", "data": "hi"}, {"type": "ping", "data": "not-input"}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_input_tap_sees_exactly_the_frames_that_left(taps_harness):
+    r = _run_taps(taps_harness, "input_tap_sees_the_wire_frames")
+    assert r["errors"] == []
+    assert r["count"] == 2 and r["equal"] and r["rejoined"]
+    # sendChunked never splits a surrogate pair, so the first frame is short by
+    # one -- the tap reports that framing rather than a re-chunking of its own.
+    assert r["lens"] == [262143, 3]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_on_resize_fires_for_a_mod_driven_fit_and_for_the_wire_path(taps_harness):
+    # The named limit in docs-terminal-funnels.md, closed by construction: the
+    # feed is xterm's own event, so a resize driven from INSIDE xterm (what
+    # termfont's fitAddon.fit() does) reaches the tap like the core one.
+    r = _run_taps(taps_harness, "resize_from_a_mod_fit")
+    assert r["errors"] == []
+    assert r["a"] == [{"cols": 100, "rows": 40}, {"cols": 120, "rows": 50}]
+    assert r["b"] == r["a"], "registration order or per-tap delivery is wrong"
+    assert r["shared"] is False, "two taps share one payload object"
+    assert r["applied"] == {"cols": 120, "rows": 50}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_taps_are_removed_at_dispose_and_at_mod_teardown(taps_harness):
+    r = _run_taps(taps_harness, "dispose_removes_the_taps")
+    assert r["errors"] == []
+    assert r["seen"] == ["before"]
+    assert r["afterCount"] == 0, "a closed window kept its taps"
+
+    r = _run_taps(taps_harness, "teardown_removes_the_taps")
+    assert r["errors"] == []
+    # Disabling mod a strips its taps from BOTH live terminals (the replayed one
+    # and the one opened after), and leaves mod b's alone.
+    assert r["seenA"] == ["h1:1:1", "h1:2:1"]
+    assert r["seenB"] == ["h1:1:1", "h1:2:1", "h1:1:2", "h1:2:2"]
+    # A disable is not a close: the terminals belong to core.
+    assert r["stillOpen"] == [True, True]
+    assert r["disposed"] == [False, False]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_tap_coexists_with_recorders_live_patching(taps_harness):
+    # The one-release compatibility clause, executed rather than asserted.
+    r = _run_taps(taps_harness, "coexists_with_recorder")
+    assert r["errors"] == []
+    assert r["tapped"] == ["one", "two"]
+    assert r["recorded"] == ["one"], "recorder's patch missed a write"
+    assert r["stillOurs"], \
+        "core wrapped the instance: recorder's restore check no longer holds"
+    assert r["restored"]
+    assert r["onScreen"] == ["one", "two"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_write_that_threw_is_not_reported_and_a_midflight_unsub_is_obeyed(
+        taps_harness):
+    r = _run_taps(taps_harness, "throwing_write_and_midflight_unsub")
+    assert r["errors"] == []
+    # The throwing write delivered nothing, so no tap was told it did.
+    assert "first:lost" not in r["seen"] and "second:lost" not in r["seen"]
+    # ...and the tap unsubscribed from inside the dispatch does not run in it.
+    assert r["seen"] == ["first:kept"]

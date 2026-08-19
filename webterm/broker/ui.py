@@ -258,6 +258,20 @@ _ORDERED = [
     # script splice, since a mod's init reads the finished ctx. One <script>,
     # one scope.
     "86j_js_mod_hosts_list.js",
+    # #201: info.tapOutput / info.tapInput / info.onResize -- the sanctioned
+    # terminal observation surface, replacing the term.write / term.resize
+    # monkey-patching recorder does today (a scheme under which two patchers
+    # cannot coexist). MEMBERS of the existing v1 `windows` family, added to
+    # #116's onTerminalCreate bag, so they owe no new capability entry. Core
+    # hooks its OWN call sites (73's write sites, 67's sendChunked and xterm's
+    # own onResize event) and never wraps `term.*`, so recorder's
+    # restore-if-still-ours patch keeps working for one release. Its own
+    # fragment for the same split-never-trim reason 86e-86j got one: 86c is at
+    # the 2500-line cap. Ordered AFTER 86c because it DECORATES that fragment's
+    # bag (info.onModTeardown must already be on it when a tap arms its
+    # removal) and extenders run in THIS list's order; still before the mod-
+    # script splice, since a mod's init reads the finished ctx.
+    "86k_js_mod_terminal_taps.js",
     # Single `loadMods();` -- ordered LAST among the JS so every mod has been
     # registered (the mod scripts run between the loader and this).
     "90_js_mod_boot.js",

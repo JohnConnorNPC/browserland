@@ -456,7 +456,13 @@
                     let end = Math.min(i + CHUNK_CHARS, data.length);
                     const cc = data.charCodeAt(end - 1);
                     if (end < data.length && cc >= 0xD800 && cc <= 0xDBFF) end -= 1;
-                    win.ws.send(JSON.stringify({ type, data: data.slice(i, end) }));
+                    const frame = data.slice(i, end);
+                    win.ws.send(JSON.stringify({ type, data: frame }));
+                    // #201: the input taps, fired per WIRE FRAME and strictly
+                    // AFTER the send — an observer of what actually left, not
+                    // of what was about to. Only 'input' carries terminal
+                    // bytes; a control type on this socket is not input.
+                    if (type === 'input') dispatchTermIn(win, frame);
                     i = end;
                 }
             };
@@ -796,6 +802,26 @@
             // onData string, so this path needs the chunking too)
             const onDataDisp = term.onData((data) => sendChunked('input', data));
             win.cleanups.push(() => { try { onDataDisp.dispose(); } catch (_) {} });
+
+            // #201: info.onResize is fed from XTERM'S OWN onResize event, not
+            // from core's `win.term.resize(cols, rows)` call site in 73. Both
+            // spellings would cover the broker-confirmed `resized` frame, but
+            // only this one covers the named limit in docs-terminal-funnels.md:
+            // a MOD calling `win.fitAddon.fit()` (mods/termfont/termfont.js:87)
+            // resizes INSIDE xterm, with no core call site involved. The event
+            // fires after the grid has been applied, so this is post-dispatch
+            // by construction, and it fires ONCE per applied resize whichever
+            // path drove it — so there is deliberately no second dispatch at
+            // 73's resize site, which would double-report the wire path.
+            //
+            // This is a SUBSCRIPTION, not a patch: `term.onResize` is xterm's
+            // public event, so recorder may keep replacing `term.resize` by
+            // assignment (its wrapper calls through to the original, which is
+            // what fires this) and both mechanisms work for one release.
+            const onResizeDisp = term.onResize((d) => dispatchTermResize(win, d));
+            win.cleanups.push(() => {
+                try { onResizeDisp.dispose(); } catch (_) {}
+            });
 
             // Track IME composition so relayout never reparents (and aborts a
             // composition) mid-input. compositionstart/end fire on the textarea

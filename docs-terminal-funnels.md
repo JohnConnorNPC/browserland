@@ -106,10 +106,19 @@ described as covered.
    to the clipboard text at the moment of the paste call.
 
 Consequence for #201: `tapOutput` and `tapInput` can be declared complete for
-core-originated traffic. `onResize` **cannot** be declared complete while a mod
-can drive a resize through the fit addon; either that is documented as a known
-gap for recorder, or A58 must feed `onResize` from something the addon also
-trips. Do not close this by deleting the limit.
+core-originated traffic. `onResize` **could not** be declared complete while a
+mod can drive a resize through the fit addon — and A58 closed that by taking the
+second option rather than the first: `info.onResize` is fed from the vendored
+build's own `Terminal.onResize` event (`vendor/xterm.js` exposes
+`get onResize()`), which fires after the grid is applied *whoever* called
+`resize` — core's call site, the fit addon, or a mod. So core's own
+`win.term.resize` site deliberately dispatches nothing; feeding both would
+double-report the wire path.
+
+Limit 1 is therefore **closed for `onResize`**, and this paragraph records how
+rather than deleting it. What remains is narrower and is the same containment
+boundary as limit 2: a mod that replaces `term.resize` by assignment and never
+calls through fires no event. Limits 2, 3 and 4 stand as written.
 
 ## The gate
 
