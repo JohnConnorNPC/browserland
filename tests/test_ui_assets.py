@@ -2342,29 +2342,36 @@ def test_termfont_symbols_removed_from_core_fragments():
         text = (BROKER_DIR / name).read_text(encoding="utf-8")
         for sym in symbols:
             assert sym not in text, f"{sym!r} should be gone from core fragment {name}"
-    # RETARGETED BY #201/A60. Core's baseline is now the SINGLE SOURCE and it is
-    # READABLE (`ctx.terminals.defaults.fontFamily`, exposed from 86l by
-    # reference), so the duplication this test used to police is on its way out:
-    # the mod's TERM_FONT_DEFAULT survives one release for compatibility (A61
-    # migrates it), and the standing rule -- exactly one literal in core, exposed
-    # rather than copied -- is asserted by
-    # test_the_font_baseline_is_single_source_and_readable. What remains here is
-    # the compatibility half: while the constant still exists in the mod, it must
-    # equal the one source, so a disabled mod's terminals land where a fresh
-    # core-only terminal does. Parse the ACTUAL const assignments (not mere
-    # literal presence) so a dead string / comment can't satisfy the coupling.
+    # RETARGETED BY #201/A60, DISCHARGED BY #201/A61. This used to assert that
+    # core's TERM_FONT_BASELINE and the mod's own TERM_FONT_DEFAULT were the
+    # SAME string literal -- a coupling between two copies, kept because the
+    # mod's teardown resets terminals to its copy and a drift would land a
+    # disabled mod's terminals on a different font than a fresh core-only one.
+    # A60 made the baseline readable (`ctx.terminals.defaults.fontFamily`,
+    # exposed from 86l BY REFERENCE) and A61 retired the mod's copy, so there
+    # is no longer a second literal to keep in sync. The assertion is therefore
+    # NOT deleted, it is inverted into the stronger claim the migration bought:
+    # core still holds a real const, and the mod holds NO copy of it at all.
+    # (The "exactly one literal across core" half lives in
+    # test_the_font_baseline_is_single_source_and_readable; the behaviour --
+    # that what the mod applies IS core's string -- is executed in
+    # test_termfont_applies_the_baseline_it_read_from_ctx.)
     import re
     core67 = (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8")
     assert "fontFamily: TERM_FONT_BASELINE" in core67, \
         "core must construct terminals with the baseline, not a mod symbol"
-    mod_src = (BROKER_DIR / "mods" / "termfont" / "termfont.js").read_text(encoding="utf-8")
     m_core = re.search(r"const\s+TERM_FONT_BASELINE\s*=\s*('[^']*'|\"[^\"]*\");", core67)
-    m_mod = re.search(r"const\s+TERM_FONT_DEFAULT\s*=\s*('[^']*'|\"[^\"]*\");", mod_src)
     assert m_core, "core 67 must assign const TERM_FONT_BASELINE = <string literal>"
-    assert m_mod, "the mod must assign const TERM_FONT_DEFAULT = <string literal>"
-    assert m_core.group(1) == m_mod.group(1) == _TERM_FONT_BASELINE_LITERAL, (
-        "core TERM_FONT_BASELINE and mod TERM_FONT_DEFAULT must be the SAME literal; "
-        f"core={m_core.group(1)!r} mod={m_mod.group(1)!r}")
+    assert m_core.group(1) == _TERM_FONT_BASELINE_LITERAL
+    mod_src = (BROKER_DIR / "mods" / "termfont" / "termfont.js").read_text(encoding="utf-8")
+    # CODE only: the mod's header comment quotes the retired declaration to say
+    # what it replaced, which is documentation, not a second copy.
+    mod_code = "\n".join(l for l in mod_src.splitlines()
+                         if not l.strip().startswith("//"))
+    assert not re.search(r"const\s+TERM_FONT_DEFAULT\s*=", mod_code), \
+        "the mod re-declared the retired constant instead of reading the baseline"
+    assert m_core.group(1)[1:-1] not in mod_src, \
+        "the mod carries a copy of the baseline literal again"
 
 
 def test_termfont_mod_packaged_and_manifest_agrees():
@@ -3428,18 +3435,18 @@ def test_mousemode_mod_packaged_and_manifest_agrees():
     assert "defaultEnabled" not in src
     # The per-terminal hook is feature-detected, like git/termfont.
     assert "if (!ctx.windows) return;" in src
-    # The chip's ONE source of truth is xterm's public modes getter, sampled on
-    # the public onWriteParsed event — not the internal enable-mouse-events class
-    # xterm toggles, and not a per-window timer (#155 rules that out).
-    assert "mouseTrackingMode" in src
-    assert "onWriteParsed" in src
+    # MIGRATED BY #201/A61. The chip's ONE source of truth used to be xterm's
+    # public modes getter, sampled by THIS MOD on the public onWriteParsed event
+    # behind a requestAnimationFrame. That poll is now core's, once per terminal
+    # for every subscriber, and the mod rides `info.onModesChanged` — so what is
+    # asserted here is the subscription, and the DELETION of the poll is asserted
+    # by test_mousemode_deleted_its_poll_and_rides_the_core_surface. The rAF
+    # coalescing that made default-ON defensible did not go away; it moved, and
+    # test_a_flood_costs_one_sample_and_one_event still pins it.
+    assert "info.onModesChanged(paint)" in src
+    # Still not the internal enable-mouse-events class xterm toggles, and still
+    # not a per-window timer (#155 rules that out).
     assert "setInterval" not in src
-    # The modes getter ALLOCATES on every read and a flooding terminal parses
-    # far more writes than it paints, so onWriteParsed only arms one rAF — and
-    # the queued frame is cancelled on teardown, never left to fire onto a
-    # removed node. This is what makes default-ON defensible.
-    assert "requestAnimationFrame(" in src
-    assert "cancelAnimationFrame(" in src
     # No platform sniffing: both gestures are named unconditionally, because
     # navigator.platform is deprecated/spoofable and misreads iPadOS.
     for gone in ("navigator.platform", "userAgentData", "navigator.userAgent"):
@@ -3457,7 +3464,12 @@ def test_mousemode_mod_packaged_and_manifest_agrees():
     # Teardown covers BOTH exits (window close + mod disable), the git idiom.
     assert "info.onDispose(teardown)" in src
     assert "ctx.onUnload(" in src
-    assert "disp.dispose()" in src
+    # ...and the subscription goes with the chip. (Was `disp.dispose()` on the
+    # mod's own onWriteParsed disposable; it is now the off() onModesChanged
+    # returns — core arms the same removal on dispose + teardown, and the mod
+    # still calls it so a node and a live subscription can never outlive
+    # each other.)
+    assert "off();" in src
     # Tooltip text is platform-correct: Shift-drag forces a selection everywhere
     # EXCEPT macOS, where #154's macOptionClickForcesSelection makes it
     # Option-drag. Both spellings must be present, chosen at init.
@@ -23516,9 +23528,12 @@ def test_the_font_baseline_is_single_source_and_readable():
             if bare in (BROKER_DIR / n).read_text(encoding="utf-8")]
     assert hits == ["67_js_window_lifecycle.js"], \
         f"the baseline literal is duplicated across core fragments: {hits}"
-    # The served page also carries the MOD's surviving copy (termfont's
-    # TERM_FONT_DEFAULT, kept for one release and migrated by A61), which is why
-    # this counts the CORE fragments rather than the whole page.
+    # This counts the CORE fragments rather than the whole page because the mods
+    # are appended to the same document. A61 retired the one mod copy that
+    # existed (termfont's TERM_FONT_DEFAULT), so today the literal appears once
+    # on the page too -- but that is a fact about which mods happen to ship, not
+    # a rule, and pinning it here would fail the day a mod legitimately names a
+    # font stack of its own that starts with Consolas.
 
 
 _FONT_HARNESS = r"""
@@ -24465,3 +24480,540 @@ def test_subscriptions_end_at_teardown_and_at_dispose(modes_harness):
     # Closing the window disposes the ONE sampler subscription.
     assert r["parsedBefore"] == 1 and r["parsedAfter"] == 0
     assert r["stillOpen"] is False
+
+
+# ---------------------------------------------------------------------------
+# #201/A61: the REFERENCE MIGRATIONS. mousemode rides info.onModesChanged with
+# its own poll deleted; termfont reads the single-source baseline instead of
+# copying the literal. E61 is BEHAVIOUR, so the cases below execute the SHIPPED
+# MOD SOURCES against the SHIPPED fragments -- the campaign's harness precedent
+# (clipboard / git / help / scratchpad / pattern-theme / recorder).
+# ---------------------------------------------------------------------------
+
+
+def _mod_source(mod_id, entry=None):
+    """One shipped mod file, verbatim. Its whole top level is declarations plus
+    a single registerMod(...) call, so it runs under a harness that defines
+    registerMod -- no transcription anywhere."""
+    name = entry or (mod_id + ".js")
+    return (BROKER_DIR / "mods" / mod_id / name).read_text(encoding="utf-8")
+
+
+def test_mousemode_deleted_its_poll_and_rides_the_core_surface():
+    # THE MIGRATION, statically: the mod no longer owns a sampler at all. Scoped
+    # to CODE, because the header comment narrates the poll it used to have.
+    src = _mod_source("mousemode")
+    # Line-based, like the sibling packaging test: the header comment narrates
+    # the poll BY NAME, and a strip that also ate string literals would make the
+    # positive assertions below vacuous.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    for gone in ("onWriteParsed", "requestAnimationFrame", "cancelAnimationFrame",
+                 "mouseTrackingMode", "term.modes"):
+        assert gone not in code, \
+            f"mousemode still polls: {gone!r} survives in its code"
+    assert "info.onModesChanged(paint)" in code, \
+        "mousemode must subscribe to the core surface"
+    # The feature detect moved to the new surface, and it still bails BEFORE the
+    # chip node exists so a build without it leaves no frozen chip behind.
+    assert "if (typeof info.onModesChanged !== 'function') return;" in code
+    assert code.index("typeof info.onModesChanged") \
+        < code.index("addTitleBarItem"), \
+        "the chip is created before the surface is feature-detected"
+    # Still a pure reader with the both-exits teardown, and still no timer.
+    assert "setInterval" not in code
+    assert "info.onDispose(teardown)" in code
+    assert "ctx.onUnload(" in code
+
+
+def test_termfont_reads_the_baseline_instead_of_copying_it():
+    # THE OTHER MIGRATION. The duplicated constant is retired: the mod carries
+    # no copy of the literal in code OR prose, and reads the exposed surface.
+    src = _mod_source("termfont")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    bare = _TERM_FONT_BASELINE_LITERAL[1:-1]
+    assert bare not in src, \
+        "the termfont mod still carries a copy of the baseline literal"
+    assert "TERM_FONT_DEFAULT" not in code, \
+        "the retired constant is still live code in the mod"
+    assert "ctx.terminals" in code and "defaults" in code, \
+        "termfont must read ctx.terminals.defaults.fontFamily"
+    # Every former use of the constant now goes through the one reader.
+    assert code.count("baselineFontFamily()") >= 3
+
+
+_MIGRATION_HARNESS = r"""
+'use strict';
+// #201/A61: the SHIPPED mousemode and termfont mods, executed against the
+// shipped core fragments. Everything below the fixtures is a sliced fragment,
+// a shipped mod file, or a reduced core driver.
+const errors = [];
+console.error = function () {
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+// A DOM sliver big enough for _emitTerminalCreate's title-bar resolution AND
+// for the chip node mousemode builds (attributes, style, removal).
+function El(cls) {
+    this.className = cls || '';
+    this.children = [];
+    this.parentNode = null;
+    this.attrs = {};
+    this.style = {};
+    this.textContent = '';
+}
+El.prototype.appendChild = function (kid) { kid.parentNode = this; this.children.push(kid); return kid; };
+El.prototype.insertBefore = function (kid, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+El.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+El.prototype.remove = function () {
+    const p = this.parentNode;
+    if (!p) return;
+    const i = p.children.indexOf(this);
+    if (i !== -1) p.children.splice(i, 1);
+    this.parentNode = null;
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+Object.defineProperty(El.prototype, 'title', {
+    get: function () { return this.attrs.title; },
+    set: function (v) { this.attrs.title = String(v); },
+});
+const document = { createElement: function () { return new El(''); } };
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+const windows = new Map();
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__MODES__
+
+__FONT__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+let hidden = false;
+let rafSeq = 0;
+const rafQueue = new Map();
+function requestAnimationFrame(fn) { rafSeq += 1; rafQueue.set(rafSeq, fn); return rafSeq; }
+function cancelAnimationFrame(h) { rafQueue.delete(h); }
+function flushFrames() {
+    if (hidden) return 0;
+    const due = Array.from(rafQueue.entries());
+    rafQueue.clear();
+    for (const [, fn] of due) fn();
+    return due.length;
+}
+
+// xterm reduced to what the CORE sampler reads, with #154's semantics: one
+// resolved mouse protocol (never a per-flag set), so a DECRST of ANY member
+// clears the whole group.
+function FakeTerm() {
+    this.protocol = 'none';
+    this.alt = false;
+    this.options = { fontFamily: TERM_FONT_BASELINE };
+    this._parsed = [];
+    const self = this;
+    Object.defineProperty(this, 'modes', { get: function () {
+        return { mouseTrackingMode: self.protocol, bracketedPasteMode: false };
+    } });
+    Object.defineProperty(this, 'buffer', { get: function () {
+        return { active: { type: self.alt ? 'alternate' : 'normal' } };
+    } });
+}
+FakeTerm.prototype.onWriteParsed = function (fn) {
+    const self = this;
+    this._parsed.push(fn);
+    return { dispose: function () {
+        const i = self._parsed.indexOf(fn);
+        if (i !== -1) self._parsed.splice(i, 1);
+    } };
+};
+FakeTerm.prototype._emitParsed = function () {
+    for (const fn of this._parsed.slice()) fn();
+};
+const DECSET_MOUSE = { 1000: 'vt200', 1002: 'drag', 1003: 'any', 9: 'x10' };
+FakeTerm.prototype.parse = function (op, arg) {
+    if (op === 'decset' && DECSET_MOUSE[arg]) this.protocol = DECSET_MOUSE[arg];
+    else if (op === 'decrst' && DECSET_MOUSE[arg]) this.protocol = 'none';
+    else if (op === 'ris') { this.protocol = 'none'; this.alt = false; }
+    else if (op === 'altscreen') this.alt = !!arg;
+    this._emitParsed();
+};
+
+// The core globals the termfont mod reaches for (one shared page-script scope).
+let refits = 0;
+function isResizable(win) { return !!win && !win.disposed && !win.hiddenBox; }
+function refitSoon(win) { if (win) refits += 1; }
+let SETTINGS = {};
+function getSettings() { return SETTINGS; }
+
+let winSeq = 0;
+function openTerminal(pre) {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const term = new FakeTerm();
+    if (typeof pre === 'function') pre(term);
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const win = { id: id, type: 'term', term: term, dom: dom, hostId: 'h1',
+                  sid: String(winSeq), cleanups: [], disposed: false,
+                  termReady: true, fitAddon: { fit: function () { refits += 1; } } };
+    windows.set(id, win);
+    // #116's emit fires BEFORE the sampler is armed, exactly as in 67.
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    __SAMPLER__
+    return win;
+}
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    windows.delete(id);
+}
+function chipOf(win) {
+    return win.dom.querySelector('.title-bar').querySelector('.mousemode-chip');
+}
+// The chip as a USER sees it: shown/hidden plus the sentence it carries.
+function chipState(win) {
+    const chip = chipOf(win);
+    if (!chip) return null;
+    return { shown: chip.style.display !== 'none',
+             title: chip.attrs.title || null };
+}
+
+// ---- the mod loader, reduced ----------------------------------------------
+const MODS = {};
+function registerMod(def) { MODS[def.id] = def; }
+
+__MOUSEMODE__
+
+__TERMFONT__
+
+// One ctx per mod, with the SHIPPED extenders applied -- the chain that puts
+// onModTeardown (86c), the taps + onModesChanged (86k) and setFont /
+// ctx.terminals (86l) on the create bag.
+function modCtx(id, opts) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        settings: {
+            select: function (key, options, meta) {
+                return { onChange: function (fn) { rec.onChange = fn; },
+                         key: key, options: options, meta: meta };
+            },
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    // A build whose ctx predates 86l: drop the family the extender just added.
+    if (opts && opts.noTerminals) delete ctx.terminals;
+    return { ctx: ctx, rec: rec };
+}
+function enable(id, opts) {
+    const m = modCtx(id, opts);
+    MODS[id].init(m.ctx);
+    return m;
+}
+function fireChange(m) { if (m.rec.onChange) m.rec.onChange(); }
+
+const CASES = {};
+
+// A SUBSCRIBER ON AN ALREADY-MOUSED TERMINAL gets the snapshot replay: the mod
+// is enabled long after the app grabbed the mouse, and the chip is up before
+// enable() returns -- no write, no frame. This is what the deleted initial
+// sample used to do.
+CASES.replay_on_an_already_moused_terminal = function () {
+    const moused = openTerminal(function (t) { t.protocol = 'any'; });
+    const quiet = openTerminal();
+    enable('mousemode');
+    return { moused: chipState(moused), quiet: chipState(quiet),
+             framesPending: rafQueue.size, errors: errors };
+};
+
+// THE CHIP FLIPS on entry and on exit, including a GROUP-CLEARING DECRST: the
+// app enabled 1002/1003 and disables 1000, which clears the whole group (#154).
+CASES.chip_flips_on_entry_and_group_clearing_decrst = function () {
+    enable('mousemode');
+    const win = openTerminal();
+    const seen = [];
+    const step = function (op, arg) {
+        win.term.parse(op, arg);
+        flushFrames();
+        const s = chipState(win);
+        seen.push(s.shown ? s.title : 'hidden');
+    };
+    const atOpen = chipState(win);
+    step('decset', 1002);          // clicks and drags
+    step('decset', 1003);          // -> any, same chip, new sentence
+    step('decrst', 1000);          // a DIFFERENT member: the GROUP goes
+    step('decset', 9);             // x10
+    step('ris');                   // an exiting app's reset
+    return { atOpen: atOpen, seen: seen, errors: errors };
+};
+
+// THE POLL IS GONE. Exactly ONE onWriteParsed subscription exists per terminal
+// -- core's sampler -- however many mods are watching, and enabling mousemode
+// adds none. That is the migration, measured.
+CASES.the_mod_owns_no_sampler = function () {
+    const win = openTerminal();
+    const parsedBefore = win.term._parsed.length;
+    enable('mousemode');
+    const parsedAfterMod = win.term._parsed.length;
+    const fresh = openTerminal();
+    win.term.parse('decset', 1002);
+    flushFrames();
+    return { parsedBefore: parsedBefore, parsedAfterMod: parsedAfterMod,
+             parsedFresh: fresh.term._parsed.length,
+             shown: chipState(win).shown, errors: errors };
+};
+
+// BOTH EXITS still tear the chip down: a mod DISABLE with the terminal still
+// open, and a window close. Neither leaves a node or a live subscription.
+CASES.teardown_covers_both_exits = function () {
+    const m = enable('mousemode');
+    const win = openTerminal();
+    win.term.parse('decset', 1002); flushFrames();
+    const shown = chipState(win).shown;
+    _runUnloads(m.rec);                       // disable: terminal stays up
+    const afterDisable = chipOf(win);
+    const parsedAfterDisable = win.term._parsed.length;
+    // ...and the OTHER exit, on a fresh enable.
+    enable('mousemode');
+    const win2 = openTerminal();
+    win2.term.parse('decset', 1003); flushFrames();
+    const shown2 = chipState(win2).shown;
+    closeWindow(win2.id);
+    return { shown: shown, afterDisable: afterDisable,
+             parsedAfterDisable: parsedAfterDisable, shown2: shown2,
+             chipAfterClose: chipOf(win2), framesPending: rafQueue.size,
+             errors: errors };
+};
+
+// A HIDDEN TAB defers rather than dropping: rAF does not run, so the chip is
+// stale-but-quiet while hidden and correct the moment the tab is shown --
+// mousemode's pre-migration behaviour, unchanged.
+CASES.hidden_tab_defers = function () {
+    enable('mousemode');
+    const win = openTerminal();
+    hidden = true;
+    win.term.parse('decset', 1002);
+    win.term.parse('decset', 1003);
+    flushFrames();
+    const whileHidden = chipState(win).shown;
+    hidden = false;
+    flushFrames();
+    return { whileHidden: whileHidden, afterShow: chipState(win),
+             errors: errors };
+};
+
+// TERMFONT reads the baseline off ctx instead of a copy. With no stored
+// termFont, and with an unknown one, the family it applies is the exact string
+// core constructs terminals with -- by identity, not by a matched literal.
+CASES.termfont_reads_the_baseline = function () {
+    const m = enable('termfont');
+    const win = openTerminal();
+    const fromCtx = m.ctx.terminals.defaults.fontFamily;
+    SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
+    fireChange(m);
+    const picked = win.term.options.fontFamily;
+    // An unknown / hand-edited value falls back to the baseline, non-destructively.
+    SETTINGS = { termFont: 'Comic Sans, cursive' };
+    fireChange(m);
+    const unknown = win.term.options.fontFamily;
+    const storedAfter = SETTINGS.termFont;
+    // A disable resets every live terminal to that same baseline.
+    SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
+    fireChange(m);
+    _runUnloads(m.rec);
+    return { fromCtx: fromCtx, baseline: TERM_FONT_BASELINE,
+             identical: fromCtx === TERM_FONT_BASELINE,
+             picked: picked, unknown: unknown, storedAfter: storedAfter,
+             afterDisable: win.term.options.fontFamily, errors: errors };
+};
+
+// A LOADER SKEW (a ctx that predates ctx.terminals) must not change what the
+// mod applies: it falls back to core's own const, the same single source by
+// another route -- so a terminal created before the mod loaded still lands on
+// the baseline.
+CASES.termfont_survives_a_ctx_without_terminals = function () {
+    const win = openTerminal();          // created BEFORE the mod loads
+    win.term.options.fontFamily = 'something-else';
+    const m = enable('termfont', { noTerminals: true });
+    const hasFamily = !!m.ctx.terminals;
+    SETTINGS = {};
+    fireChange(m);
+    return { hasFamily: hasFamily, applied: win.term.options.fontFamily,
+             baseline: TERM_FONT_BASELINE, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+if (!('errors' in out)) out.errors = errors;
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def migration_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("a61") / "harness.js"
+    path.write_text(
+        _MIGRATION_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__MODES__", _term_modes_source())
+        .replace("__FONT__", _term_font_source())
+        .replace("__UNLOADS__", _run_unloads_source())
+        .replace("__SAMPLER__", _term_modes_sampler_source())
+        .replace("__MOUSEMODE__", _mod_source("mousemode"))
+        .replace("__TERMFONT__", _mod_source("termfont")),
+        encoding="utf-8")
+    return path
+
+
+def _run_migration(harness, case):
+    # The encoding is PINNED. The chip's sentence is not ASCII (an em dash and
+    # three middots), and a Windows pipe read with text=True is decoded by the
+    # machine's locale, which silently mangles every one of them.
+    proc = subprocess.run([NODE, str(harness), case], capture_output=True,
+                          text=True, encoding="utf-8", timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+_MOUSE_TIP = ("Mouse reporting is on — %s go to the program, not the browser. "
+              "Shift-drag selects text anyway (Option-drag on macOS)"
+              " · Shift+scroll scrolls the terminal"
+              " · Ctrl+Shift+C copies the selection")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_subscriber_on_an_already_moused_terminal_gets_the_replay(
+        migration_harness):
+    # E61's replay half, through the SHIPPED mod: enabling mousemode over a
+    # terminal that is already running a moused app raises the chip
+    # synchronously -- the deleted initial sample's job, now the surface's.
+    r = _run_migration(migration_harness, "replay_on_an_already_moused_terminal")
+    assert r["errors"] == []
+    assert r["moused"] == {"shown": True,
+                           "title": _MOUSE_TIP % "clicks, drags and every mouse move"}
+    assert r["quiet"] == {"shown": False, "title": None}
+    assert r["framesPending"] == 0, "the replay went through the rAF path"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_chip_still_flips_on_entry_exit_and_a_group_clearing_decrst(
+        migration_harness):
+    r = _run_migration(migration_harness,
+                       "chip_flips_on_entry_and_group_clearing_decrst")
+    assert r["errors"] == []
+    assert r["atOpen"] == {"shown": False, "title": None}
+    assert r["seen"] == [
+        _MOUSE_TIP % "clicks and drags",
+        _MOUSE_TIP % "clicks, drags and every mouse move",
+        # #154: DECRST of 1000 clears the whole group even though 1003 set it.
+        "hidden",
+        _MOUSE_TIP % "clicks",
+        "hidden",
+    ]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mousemode_adds_no_sampler_of_its_own(migration_harness):
+    # THE DELETION, executed. Core's sampler is the only onWriteParsed
+    # subscriber on a terminal; enabling the mod adds none, and the chip still
+    # works -- which is exactly what "the poll is deleted" has to mean.
+    r = _run_migration(migration_harness, "the_mod_owns_no_sampler")
+    assert r["errors"] == []
+    assert r["parsedBefore"] == 1
+    assert r["parsedAfterMod"] == 1, "mousemode subscribed a poll of its own"
+    assert r["parsedFresh"] == 1
+    assert r["shown"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_chip_goes_on_a_mod_disable_and_on_a_window_close(migration_harness):
+    r = _run_migration(migration_harness, "teardown_covers_both_exits")
+    assert r["errors"] == []
+    assert r["shown"] is True and r["shown2"] is True
+    assert r["afterDisable"] is None, "a disabled mod left its chip on screen"
+    # Core's sampler is NOT the mod's to unsubscribe: the terminal keeps it.
+    assert r["parsedAfterDisable"] == 1
+    assert r["chipAfterClose"] is None
+    assert r["framesPending"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_hidden_tab_still_defers_the_chip_rather_than_dropping_it(
+        migration_harness):
+    r = _run_migration(migration_harness, "hidden_tab_defers")
+    assert r["errors"] == []
+    assert r["whileHidden"] is False, "rAF ran in a hidden tab"
+    assert r["afterShow"] == {"shown": True,
+                              "title": _MOUSE_TIP % "clicks, drags and every mouse move"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_termfont_applies_the_baseline_it_read_from_ctx(migration_harness):
+    # E61's other half: the family the mod falls back to is core's own const,
+    # fetched through ctx.terminals.defaults.fontFamily -- identity, not a
+    # literal that two files happen to agree on.
+    r = _run_migration(migration_harness, "termfont_reads_the_baseline")
+    assert r["errors"] == []
+    assert r["identical"] is True
+    assert r["picked"] == '"Fira Code", Consolas, monospace'
+    assert r["unknown"] == r["baseline"], \
+        "an unknown termFont no longer falls back to the baseline"
+    # ...and reading it did not rewrite the synced blob.
+    assert r["storedAfter"] == "Comic Sans, cursive"
+    assert r["afterDisable"] == r["baseline"], \
+        "a disabled termfont left its font on screen"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_termfont_on_a_ctx_without_the_terminals_family_still_lands_there(
+        migration_harness):
+    r = _run_migration(migration_harness,
+                       "termfont_survives_a_ctx_without_terminals")
+    assert r["errors"] == []
+    assert r["hasFamily"] is False
+    assert r["applied"] == r["baseline"], \
+        "a loader skew changed what termfont applies"

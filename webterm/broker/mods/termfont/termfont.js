@@ -28,22 +28,48 @@
         // /state and the ctx.settings.select read is non-destructive, so enabling the
         // mod restores their font on the next terminal / convergence.
         //
-        // TERM_FONT_DEFAULT / TERM_FONTS / terminalFontFamily / applyTerminalFont are
-        // moved here VERBATIM from core (was 65_js_display_theming.js), declared at
-        // the mod's TOP LEVEL (outside init) — exactly what they were as core symbols
-        // — so the "moved" extraction is byte-for-byte and the diff is a relocation.
+        // TERM_FONTS / terminalFontFamily / applyTerminalFont are (and the retired
+        // TERM_FONT_DEFAULT was) moved here from core (was 65_js_display_theming.js),
+        // declared at the mod's TOP LEVEL (outside init) — exactly what they were as
+        // core symbols — so the "moved" extraction was a relocation.
         // They reach the core globals `windows` / `isResizable` / `refitSoon` /
         // `getSettings` the same way every mod reaches core (one shared page-script
         // scope). Side-effect-free declarations, so they are inert while the mod is
         // disabled (only init() is gated by the loader).
 
-        // TERM_FONT_DEFAULT MUST equal the core-local baseline in 67_js_window_
-        // lifecycle.js (the family core constructs terminals with): the mod's
-        // teardown resets terminals to THIS string, so a drift would leave a disabled
-        // mod's terminals on a different font than a fresh core-only terminal. Guarded
-        // by test_termfont_symbols_removed_from_core_fragments (both must carry the
-        // literal), mirroring the theme mod's `night` == :root coupling.
-        const TERM_FONT_DEFAULT = 'Consolas, "Liberation Mono", monospace';
+        // THE BASELINE IS READ, NOT COPIED (#201). This used to be
+        //     const TERM_FONT_DEFAULT = '<the same literal core has>';
+        // duplicating 67_js_window_lifecycle.js's TERM_FONT_BASELINE (the family
+        // core constructs terminals with), with a test policing the duplication —
+        // because the mod's teardown resets terminals to this string, and a drift
+        // would leave a disabled mod's terminals on a different font than a fresh
+        // core-only terminal. #201 shipped the baseline as READABLE ctx surface
+        // (`ctx.terminals.defaults.fontFamily`, frozen, exposed from 86l BY
+        // REFERENCE to that one const), so the copy is retired: there is now
+        // exactly one literal and no coupling left to police. Nothing about what
+        // the mod applies changed — the value is identical, it is just fetched.
+        //
+        // ctx is only in scope inside init(), so it is stashed on the first init
+        // and read through baselineFontFamily() below. Every caller
+        // (terminalFontFamily / the onChange pass / onUnload) runs after init by
+        // construction, so the stash is always populated when it is read.
+        let _ctx = null;
+        // The fallbacks are for a LOADER SKEW, not for normal operation: a build
+        // whose ctx predates ctx.terminals still has core's own const in the same
+        // shared page-script scope (the route mods/recorder/recorder.js already
+        // takes), and only a build with neither reaches the generic stack. None
+        // of the three is a second copy of the baseline literal.
+        function baselineFontFamily() {
+            const t = _ctx && _ctx.terminals;
+            const fam = t && t.defaults && t.defaults.fontFamily;
+            if (typeof fam === 'string' && fam) return fam;
+            try {
+                if (typeof TERM_FONT_BASELINE === 'string' && TERM_FONT_BASELINE) {
+                    return TERM_FONT_BASELINE;
+                }
+            } catch (_) { /* not declared on this build */ }
+            return 'monospace';
+        }
         // Each entry's `value` is the full CSS font-family stack (so an uninstalled
         // choice falls back to Consolas/monospace); '' = the built-in default.
         const TERM_FONTS = [
@@ -63,9 +89,9 @@
             // falls back to the baseline WITHOUT rewriting the synced blob (non-
             // destructive), preserving the guarantee core's dropped normalizeSettings
             // self-heal used to give. '' (the default option) also yields baseline.
-            if (!f) return TERM_FONT_DEFAULT;
+            if (!f) return baselineFontFamily();
             return TERM_FONTS.some(function (o) { return o.value === f; })
-                ? f : TERM_FONT_DEFAULT;
+                ? f : baselineFontFamily();
         }
         // Push a specific family onto ONE live terminal (no-op for app windows,
         // which have no xterm). Idempotent — a terminal whose family already matches
@@ -110,6 +136,12 @@
                 // is inert (no way to apply the font per terminal), matching how the
                 // git mod feature-detects ctx.windows before using it.
                 if (!ctx.windows) return;
+                // Stash ctx for baselineFontFamily(): the top-level helpers are
+                // core symbols by relocation and have no ctx of their own, and
+                // `ctx.terminals.defaults.fontFamily` is now where the baseline
+                // lives. Set BEFORE anything can read it (the select mount, the
+                // onTerminalCreate replay and onUnload all follow).
+                _ctx = ctx;
 
                 // Mount the Control Panel <select> + own the synced `termFont` key.
                 // The options mirror TERM_FONTS so the widget stays in lockstep with
@@ -149,7 +181,7 @@
                 // (rec.unloads), so no new terminals get restyled after this.
                 ctx.onUnload(function () {
                     for (const [, win] of windows) {
-                        applyTerminalFontToWin(win, TERM_FONT_DEFAULT);
+                        applyTerminalFontToWin(win, baselineFontFamily());
                     }
                 });
             },

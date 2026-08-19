@@ -16,32 +16,56 @@
         // tracking is on. Scope is a chip and a tooltip — no popover, no click
         // action, no settings (a click action would be a separate issue).
         //
-        // SAMPLING. xterm exposes `term.modes` as a GETTER with no change event:
+        // SAMPLING IS CORE'S NOW (#201). xterm exposes `term.modes` as a GETTER
+        // with no change event:
         //     get modes(){ … switch(coreMouseService.activeProtocol){ … }
         //                  return { …, mouseTrackingMode:t, … } }   // 'none'|'x10'|'vt200'|'drag'|'any'
-        // so the chip has to sample it. The trigger is `term.onWriteParsed`,
-        // which fires only when output was actually PARSED — an idle terminal
-        // costs nothing, and every mode change arrives as parsed output by
-        // definition (DECSET/DECRST from the app, the RIS an exiting app leaves
-        // behind, and the mouse modes the agent RE-ASSERTS in a reattach
-        // snapshot's postamble — webterm/agent/agent.py, #154 — so a reload or a
-        // lost-lease rebuild re-derives the chip instead of guessing).
+        // so SOMETHING has to sample it. This mod used to be that something: it
+        // subscribed to `term.onWriteParsed` and read the getter behind a
+        // requestAnimationFrame. #201 moved that exact shape into core as
+        // `info.onModesChanged` (86k_js_mod_terminal_taps.js) — one sampler per
+        // terminal for N subscribers instead of one poll per mod — and this mod
+        // is the reference migration: the poll is DELETED and the chip is driven
+        // by the event. Nothing about what the chip shows changed.
         //
-        // The read is NOT free: the getter allocates a fresh 9-field object every
-        // access, and a flooding terminal parses writes far faster than it
-        // paints. So onWriteParsed only ARMS a requestAnimationFrame — at most
-        // one sample per frame no matter how much output arrives, and the DOM
-        // write lands at paint time. The initial sample is synchronous (see
-        // below) and the pending frame is cancelled on teardown.
+        // What the core surface keeps, verbatim, so the migration is behaviour-
+        // preserving rather than merely tidier:
+        //   · the trigger is still `term.onWriteParsed`, which fires only when
+        //     output was actually PARSED — an idle terminal costs nothing, and
+        //     every mode change arrives as parsed output by definition
+        //     (DECSET/DECRST from the app, the RIS an exiting app leaves behind,
+        //     and the mouse modes the agent RE-ASSERTS in a reattach snapshot's
+        //     postamble — webterm/agent/agent.py, #154 — so a reload or a
+        //     lost-lease rebuild re-derives the chip instead of guessing);
+        //   · the rAF coalescing, because the getter allocates a fresh 9-field
+        //     object every access and a flooding terminal parses writes far
+        //     faster than it paints — at most one sample per frame, and the DOM
+        //     write still lands at paint time;
+        //   · the hidden-tab consequence: rAF does not run in a hidden tab, so a
+        //     mode change made while hidden is delivered, coalesced, when the tab
+        //     comes back. These are STATE notifications, so a skipped
+        //     intermediate is not a lost fact — the chip is right when it is
+        //     visible, which is the only time it can be wrong;
+        //   · the "unreadable getter" posture: a getter that threw reports
+        //     NOTHING, so the chip keeps whatever is on screen instead of
+        //     claiming 'none' and hiding a chip that should be up;
+        //   · the initial sample — subscribing REPLAYS the current snapshot
+        //     synchronously, which is exactly why the mod's own `paint()`-once
+        //     line is gone rather than merely moved. It exists for the same
+        //     reason it always did: onTerminalCreate replays over terminals that
+        //     are already running an app that may not write again for minutes.
+        // The payload names the group's resolved protocol as `mouseTracking`
+        // (#154: xterm keeps ONE activeProtocol, not independent 1000/1002/1003
+        // flags, so a DECRST of any member is one transition to 'none').
         //
-        // Rejected: watching the `enable-mouse-events` class xterm toggles on
-        // term.element — it fires exactly on the transition, but it is an
+        // Rejected, still: watching the `enable-mouse-events` class xterm toggles
+        // on term.element — it fires exactly on the transition, but it is an
         // internal implementation detail, and a renamed class would silently
-        // freeze the chip, whereas both `modes` and `onWriteParsed` are public
-        // API (core already reads `term.modes.bracketedPasteMode` per paste,
-        // #138). Also rejected: a per-window timer, which #155 rules out in
-        // spirit — there is nothing a 1 Hz poll would catch that a parsed write
-        // does not, and it would mask an xterm API skew instead of surfacing it.
+        // freeze the chip, whereas `modes` and `onWriteParsed` (which the core
+        // sampler rides) are public API. Also rejected: a per-window timer, which
+        // #155 rules out in spirit — there is nothing a 1 Hz poll would catch
+        // that a parsed write does not, and it would mask an xterm API skew
+        // instead of surfacing it.
         //
         // Ships default-ON: it is invisible until an app grabs the mouse, so a
         // shell-only user pays one getter read per output frame and sees nothing.
@@ -110,11 +134,12 @@
                     // No term = nothing to sample. App windows never reach this
                     // hook, but a guard keeps the mod honest if that changes.
                     if (!win || !win.term || decorated.has(win)) return;
-                    // onWriteParsed is the whole mechanism: without it the chip
-                    // could only go stale, and #155 rules out a timer. Bail
-                    // BEFORE adding a node so a version skew leaves no dead chip
-                    // pinned to whatever the mode was at open.
-                    if (typeof win.term.onWriteParsed !== 'function') return;
+                    // info.onModesChanged is the whole mechanism: without it the
+                    // chip could only go stale, and #155 rules out a timer. Bail
+                    // BEFORE adding a node so a build that predates the surface
+                    // leaves no dead chip pinned to whatever the mode was at
+                    // open — the same posture the old onWriteParsed guard took.
+                    if (typeof info.onModesChanged !== 'function') return;
                     decorated.add(win);
 
                     // A passive <span>, not a .tb-btn: no click action, and no
@@ -135,20 +160,13 @@
 
                     let last = null;      // last mode PAINTED (null = never)
                     let torn = false;
-                    let frame = 0;        // pending rAF handle (0 = none)
-                    const paint = function () {
+                    // The event carries three fields; the chip is about exactly
+                    // one of them. Keep the mod's OWN change-detection on the
+                    // mode it paints, so an altScreen-only transition (a real
+                    // event on this surface) costs no DOM work here.
+                    const paint = function (modes) {
                         if (torn || win.disposed) return;
-                        let mode;
-                        try {
-                            mode = (win.term.modes
-                                && win.term.modes.mouseTrackingMode) || 'none';
-                        } catch (_) {
-                            // A getter that threw tells us NOTHING about the
-                            // mode. Keep whatever is on screen rather than
-                            // claiming 'none' and hiding a chip that should be
-                            // up — the next parsed write samples again.
-                            return;
-                        }
+                        const mode = (modes && modes.mouseTracking) || 'none';
                         if (mode === last) return;   // change-detected: no DOM work
                         last = mode;
                         if (mode === 'none') {
@@ -164,28 +182,19 @@
                         chip.setAttribute('aria-label', text);
                         chip.style.display = '';
                     };
-                    // Coalesce to one sample per frame: a terminal under flood
-                    // parses far more writes than it paints, and the modes getter
-                    // allocates on every read. Cheap enough to leave armed for
-                    // every terminal, which is what lets the mod ship default-ON.
-                    const onParsed = function () {
-                        if (torn || frame) return;
-                        frame = requestAnimationFrame(function () {
-                            frame = 0;
-                            paint();
-                        });
-                    };
-
-                    // One disposable, disposed on either exit. onWriteParsed
-                    // fires AFTER the chunk is parsed, so the mode read inside
-                    // already reflects any DECSET/DECRST that chunk carried.
-                    let disp = null;
-                    try { disp = win.term.onWriteParsed(onParsed); }
-                    catch (_) { disp = null; }
-                    // Sample once NOW, synchronously: enabling the mod mid-session
-                    // replays this hook over terminals that are already running an
-                    // app, and that app may not write again for minutes.
-                    paint();
+                    // THE SUBSCRIPTION, which is the whole mechanism. It fires
+                    // ONCE SYNCHRONOUSLY right here with the current snapshot —
+                    // that replay IS the old initial sample, so a terminal that
+                    // was already running a moused app when the mod was enabled
+                    // gets its chip before this call returns — and thereafter on
+                    // every mode transition, coalesced to one per frame by core.
+                    // The returned off() is idempotent, and core additionally
+                    // arms it on dispose + mod teardown; the local teardown below
+                    // still calls it so the chip and the subscription always go
+                    // together.
+                    let off = null;
+                    try { off = info.onModesChanged(paint); }
+                    catch (_) { off = null; }
 
                     const teardown = function () {
                         if (torn) return;
@@ -196,15 +205,14 @@
                         // teardownView both discard the win first) a future
                         // create would re-decorate rather than silently skip.
                         decorated.delete(win);
-                        if (disp) {
-                            try { disp.dispose(); } catch (_) {}
-                            disp = null;
+                        if (off) {
+                            try { off(); } catch (_) {}
+                            off = null;
                         }
-                        // A queued frame must not fire after the node is gone.
-                        if (frame) {
-                            try { cancelAnimationFrame(frame); } catch (_) {}
-                            frame = 0;
-                        }
+                        // No pending frame to cancel any more: the rAF belongs
+                        // to core's one-per-terminal sampler, which cancels it in
+                        // win.cleanups. `torn` still guards the window between a
+                        // mod-teardown that ran before core's removal did.
                         try { chip.remove(); } catch (_) {}
                     };
                     disposers.add(teardown);
