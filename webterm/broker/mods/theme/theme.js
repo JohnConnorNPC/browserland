@@ -10,9 +10,29 @@
         // unchanged pull is a cheap no-op (the vars are already set).
         //
         // The palette / labels / apply function are moved here VERBATIM from core
-        // (was 65_js_display_theming.js): `night` reproduces the :root defaults
-        // EXACTLY, so an empty blob looks identical to today and the visual
-        // default survives even before this mod loads (CSS :root is night).
+        // (was 65_js_display_theming.js), with one exception that #223 fixed.
+        //
+        // `night` USED TO BE A SIXTH COPY of the :root defaults -- the same six
+        // hexes as 10_css_root.css, kept equal by nothing but care, so an edit
+        // to either one silently made "the default theme" and "what the page
+        // looks like before this mod loads" two different things. The audit
+        // asked for a readable core default to fold into the theme API; the
+        // cheaper and stronger answer is that CSS ALREADY HAS ONE. `night` is
+        // now the ABSENCE of an override: applying it REMOVES the six inline
+        // properties and lets :root show through, so ":root is night" stops
+        // being a byte-match between two files and becomes the cascade doing
+        // what it is for. There is exactly one copy of those hexes in the tree
+        // and it is the stylesheet.
+        //
+        // Two things fall out of that, both wanted:
+        //   - the mod's boot on a night/empty blob is now a no-op rather than a
+        //     write of the values that were already computing;
+        //   - TEARDOWN IS THE SAME CODE PATH. #223's other half: nothing
+        //     reverted the vars, so disabling the mod left its palette on the
+        //     page for the rest of the session (a Control Panel toggle that
+        //     visibly does nothing). Unloading now removes the six properties,
+        //     which IS "apply night", which IS what the page renders with no
+        //     theme mod at all.
         //
         // PATTERN COUPLING (intentional, do NOT remove): the desktop background
         // pattern is owned by mods/pattern/pattern.js (S3 / #76) and is theme-
@@ -54,11 +74,16 @@
                 // :root. `night` reproduces the current defaults EXACTLY so an
                 // empty settings blob looks identical to today. xterm's terminal
                 // theme is NOT touched here (terminals stay black).
+                //
+                // `night` is null, not an object: it is the DEFAULT, and the
+                // default is what :root already paints (see the header). Every
+                // other entry is a real override of the same six names, so the
+                // set of names lives in ONE place -- VARS below -- rather than
+                // being re-listed per palette for a removal to walk.
+                const VARS = ['--bg', '--bg-2', '--bg-3', '--fg', '--fg-dim',
+                    '--accent-default'];
                 const THEMES = {
-                    night: {   // current dark default — must match :root exactly
-                        '--bg': '#1e1e1e', '--bg-2': '#2a2a2a', '--bg-3': '#3a3a3a',
-                        '--fg': '#ddd', '--fg-dim': '#888', '--accent-default': '#4aa3ff',
-                    },
+                    night: null,   // the :root default, applied by REMOVING the overrides
                     day: {     // light
                         '--bg': '#e8e8e8', '--bg-2': '#d6d6d6', '--bg-3': '#b8b8b8',
                         '--fg': '#1a1a1a', '--fg-dim': '#5a5a5a', '--accent-default': '#1d6fd0',
@@ -81,12 +106,27 @@
                     redmond: 'Redmond (teal)', midnight: 'Midnight Blue',
                     sunday: 'Sunday Orange',
                 };
-                // Write the six vars inline on documentElement; an unknown name
-                // falls back to night. Never throws.
+                // Write the six vars inline on documentElement, or REMOVE them
+                // for night / an unknown name so :root's own defaults show
+                // through. Never throws.
+                //
+                // `Object.prototype.hasOwnProperty.call` and not `THEMES[name]`:
+                // a stored theme literally named 'constructor' or 'toString'
+                // reads a FUNCTION off the prototype chain, which is truthy, and
+                // the loop below would then walk a function's enumerable
+                // properties instead of falling back to the default. The same
+                // prototype-bearing-table trap #203 hit in _normChoiceOptions.
                 function applyTheme(name) {
                     try {
-                        const t = THEMES[name] || THEMES.night;
+                        const known = typeof name === 'string'
+                            && Object.prototype.hasOwnProperty.call(THEMES, name);
+                        const t = known ? THEMES[name] : null;
                         const root = document.documentElement;
+                        if (!t) {
+                            // night, unknown, or teardown: back to :root.
+                            for (const k of VARS) root.style.removeProperty(k);
+                            return;
+                        }
                         for (const k in t) root.style.setProperty(k, t[k]);
                     } catch (_) {}
                 }
@@ -140,5 +180,21 @@
                 // so the saved theme lands on this mod's boot.
                 setting.onChange(apply);
                 apply(setting.get());
+
+                // #223: A DISABLE MUST REVERSE THE MOD. Until now nothing
+                // reverted the vars, so switching the mod off in Control Panel
+                // left its palette on the page until the next reload -- and on
+                // a non-night theme that is the whole visible effect of the mod
+                // persisting after the mod is gone.
+                //
+                // apply(null) rather than a bespoke removal loop: it takes the
+                // same not-a-known-name branch that night takes, so the revert
+                // path IS the set path and cannot drift from it. It also
+                // repaints the pattern off the restored vars through the same
+                // #199 seam -- without that, disabling theme would leave the
+                // desktop pattern drawn in the palette that just went away.
+                // (The pattern mod is a DIFFERENT activation, so the loader's
+                // `unloading` flag on this record does not block consuming it.)
+                ctx.onUnload(function () { apply(null); });
             },
         });

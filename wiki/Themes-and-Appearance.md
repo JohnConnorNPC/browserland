@@ -14,6 +14,8 @@ The **Color scheme** setting (Control Panel → Desktop) picks the desktop's chr
 
 Picking a scheme applies immediately and repaints the background pattern (below) in the new colors too, since the pattern is drawn from the scheme's own tones.
 
+Night (dark) is the desktop's own built-in look rather than something the mod paints over it — so picking Night, and disabling the Color scheme mod altogether, both land on exactly the same desktop. Either way the change is immediate; nothing waits for a reload.
+
 ## Background pattern
 
 The **Background pattern** setting (Control Panel → Desktop) paints a pattern on the desktop, behind the tiling strip and any floating windows. It ships enabled by default, set to **None**.

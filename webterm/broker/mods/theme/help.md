@@ -10,6 +10,12 @@ Find it in **Control Panel → Desktop → Color scheme**. The choice is browser
 - **Midnight Blue**
 - **Sunday Orange**
 
+**Night (dark)** is not a scheme this mod paints — it is the desktop's own built-in look, which the mod simply stops overriding. That is why picking it, and disabling the mod entirely, land in the same place.
+
+## Turning the mod off
+
+Disabling **Color scheme** in Control Panel → Mods puts the desktop back to Night straight away, along with the background pattern if that mod is on. Nothing is left behind waiting for a reload.
+
 ## Background pattern follows along
 
 If the Background pattern mod is also enabled, switching schemes repaints its pattern in the new scheme's colors right away — the two are meant to be used together.

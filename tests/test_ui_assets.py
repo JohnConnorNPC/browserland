@@ -2150,11 +2150,17 @@ def test_status_vars_round_trip_to_the_historical_night_palette():
     # channels (both inputs opaque), which is what this reproduces.
     import re
     css = (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8")
-    theme = (BROKER_DIR / "mods" / "theme" / "theme.js").read_text(encoding="utf-8")
 
-    night = re.search(r"night:.*?'--fg':\s*'(#[0-9a-fA-F]{3,6})'", theme, re.S)
-    assert night, "could not read night's --fg out of the theme mod"
-    fg = _hex_to_rgb(night.group(1))
+    # RETARGETED BY #223. This used to read night's --fg out of the theme mod,
+    # back when `night` was a sixth copy of the :root defaults. It is not any
+    # more: `night` is the ABSENCE of an override, so what the default theme
+    # renders with IS :root's --fg, and that is the value the mix must be
+    # pre-compensated against. Reading it from the mod would now be reading the
+    # wrong file -- and, since the copy is gone, would match some OTHER
+    # palette's --fg and silently check the wrong thing.
+    root = re.search(r"--fg:\s*(#[0-9a-fA-F]{3,6});", css)
+    assert root, "could not read :root's --fg out of 10_css_root.css"
+    fg = _hex_to_rgb(root.group(1))
 
     for role, historical in _STATUS_HISTORICAL.items():
         m = re.search(
@@ -2170,6 +2176,54 @@ def test_status_vars_round_trip_to_the_historical_night_palette():
             assert abs(mixed[i] - want[i]) <= 4, (
                 f"--{role} resolves to {mixed} on night, but the historical color "
                 f"is {want} ({historical}); the default theme would visibly shift")
+
+
+def test_night_is_the_root_default_rather_than_a_copy_of_it():
+    # #223. `night` used to re-list the six :root hexes, kept equal to
+    # 10_css_root.css by nothing but care -- so an edit to either made "the
+    # default theme" and "what the page looks like before the mod loads" two
+    # different things. It is now null, applied by REMOVING the overrides, so
+    # the cascade is the parity check and there is one copy of those hexes in
+    # the tree. Pin it both ways: the marker is there, and the literals are not.
+    import re
+    theme = (BROKER_DIR / "mods" / "theme" / "theme.js").read_text(encoding="utf-8")
+    code = "\n".join(l for l in theme.splitlines()
+                     if not l.strip().startswith("//"))
+    assert re.search(r"night:\s*null", code),         "night must be the absence of an override, not a palette"
+    css = _strip_css_comments(
+        (BROKER_DIR / "10_css_root.css").read_text(encoding="utf-8"))
+    root_vars = {}
+    for var in ("--bg", "--bg-2", "--bg-3", "--fg", "--fg-dim",
+                "--accent-default"):
+        m = re.search(re.escape(var) + r":\s*(#[0-9a-fA-F]{3,6});", css)
+        assert m, f"{var} must be declared on :root"
+        root_vars[var] = m.group(1).lower()
+    # The invariant is that no PALETTE re-lists the whole :root set -- not that
+    # no individual hex is ever repeated. Sharing one value is legitimate and
+    # happens: `midnight` uses night's #4aa3ff accent because it is the right
+    # accent for it, which says nothing about the default being duplicated.
+    for name, body in re.findall(r"(\w+):\s*\{(.*?)\}", code, re.S):
+        got = dict(re.findall(r"'(--[a-z-]+)':\s*'(#[0-9a-fA-F]{3,6})'", body))
+        got = {k: v.lower() for k, v in got.items()}
+        assert got != root_vars, (
+            f"the theme mod's `{name}` palette re-lists all six :root defaults "
+            "-- night is supposed to be the cascade, not a duplicate")
+    # ...and the removal walks a single list of names, so a seventh var cannot
+    # be added to the palettes and forgotten in the revert.
+    assert "root.style.removeProperty(k)" in code,         "applying night / tearing down must remove the inline overrides"
+
+
+def test_theme_reverts_its_vars_on_disable():
+    # #223's other half: nothing reverted the CSS vars, so disabling the mod
+    # left its palette on the page for the rest of the session. The revert
+    # reuses the SET path (apply(null) takes the same not-a-known-name branch
+    # night takes) so it cannot drift from it, and it goes through apply()
+    # rather than applyTheme() so the pattern is repainted off the restored
+    # vars instead of being stranded in the palette that just went away.
+    theme = (BROKER_DIR / "mods" / "theme" / "theme.js").read_text(encoding="utf-8")
+    code = "\n".join(l for l in theme.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "ctx.onUnload(function () { apply(null); });" in code,         "disabling the theme mod must put the page back to :root"
 
 
 def test_status_literals_not_re_hardcoded_in_any_stylesheet():
@@ -19272,18 +19326,34 @@ _PAIR_DRIVER = r"""
 // window factory), the ctx they get is the one _applyCtxExtenders built from
 // the shipped 86g, and the only fixtures are the browser bits node has not got:
 // a #desktop element, computed styles, and core's getSettings().
-const VARS = { '--bg': '#1e1e1e', '--bg-3': '#3a3a3a' };
+// TWO LAYERS, because #223 made the difference load-bearing: `night` is no
+// longer a palette the mod writes, it is the mod writing NOTHING and letting
+// :root show through. A one-object stub could not tell "applied night" from
+// "removed the override" -- they would both just be the night values sitting
+// in the same bag -- so the cascade is modelled: ROOT_CSS is 10_css_root.css's
+// :root block, INLINE is documentElement.style, and a computed read is the
+// inline layer falling back to the root layer.
+const ROOT_CSS = { '--bg': '#1e1e1e', '--bg-3': '#3a3a3a' };
+const INLINE = {};
+function cssVar(k) {
+    return (Object.prototype.hasOwnProperty.call(INLINE, k)
+        ? INLINE[k] : ROOT_CSS[k]) || '';
+}
 const DESK = { style: { backgroundImage: '', backgroundSize: '' } };
 let SETTINGS = { theme: 'night', pattern: 'dots' };
 function getSettings() { return SETTINGS; }
 global.document = {
     getElementById: function (id) { return (id === 'desktop') ? DESK : null; },
     documentElement: {
-        style: { setProperty: function (k, v) { VARS[k] = v; } },
+        style: {
+            setProperty: function (k, v) { INLINE[k] = v; },
+            removeProperty: function (k) { delete INLINE[k]; },
+            getPropertyValue: function (k) { return INLINE[k] || ''; },
+        },
     },
 };
 global.getComputedStyle = function () {
-    return { getPropertyValue: function (k) { return VARS[k] || ''; } };
+    return { getPropertyValue: function (k) { return cssVar(k); } };
 };
 const MODS = {};
 function registerMod(def) { MODS[def.id] = def; }
@@ -19331,12 +19401,43 @@ PAIR.the_pair_still_repaints = function () {
     // in the NEW colors. The pattern select is change-detected and does not fire.
     pickTheme('redmond');
     out.afterThemeChange = paint();
-    out.bg3 = VARS['--bg-3'];
+    out.bg3 = cssVar('--bg-3');
     // The old global is nowhere: nothing declares applyPattern at top level, so
     // `typeof applyPattern === 'function'` -- the probe this replaced -- is now
     // false even while the pattern mod is fully ACTIVE.
     out.globalProbe = (typeof applyPattern);
     out.service = !!theme.ctx.consume('pattern', 'pattern');
+    out.warns = warns; out.errors = errors;
+    return out;
+};
+
+// #223: DISABLING THEME PUTS THE PAGE BACK. Until #223 nothing reverted the
+// six vars, so a Control Panel toggle that switched the mod off left its
+// palette on screen for the rest of the session -- and on a non-night theme
+// that palette IS the whole visible effect of the mod. The revert takes the
+// same branch `night` takes (apply(null) -> not a known name -> removeProperty),
+// and it goes through apply() rather than applyTheme(), so the pattern is
+// repainted off the RESTORED vars instead of being stranded in the palette
+// that just went away.
+PAIR.disabling_theme_restores_root = function () {
+    const pattern = startMod('pattern');
+    const theme = startMod('theme');
+    const out = {};
+    // Night is the DEFAULT, so booting on it must write nothing at all: the
+    // page already computes these values from :root.
+    out.inlineOnNightBoot = Object.keys(INLINE).length;
+    pickTheme('redmond');
+    out.inlineAfterPick = cssVar('--bg-3');
+    out.paintedRedmond = paint().image;
+    disable(theme);
+    // The overrides are GONE, not overwritten with a copy of night.
+    out.inlineAfterDisable = Object.keys(INLINE).length;
+    out.bg3AfterDisable = cssVar('--bg-3');
+    out.rootBg3 = ROOT_CSS['--bg-3'];
+    // ...and the pattern was repainted off the restored vars rather than left
+    // drawn in redmond's grey.
+    out.paintedAfterDisable = paint().image;
+    out.stillHasPattern = paint().image !== '';
     out.warns = warns; out.errors = errors;
     return out;
 };
@@ -19365,7 +19466,7 @@ PAIR.disable_then_reenable = function () {
     out.afterReenable = paint();
     pickTheme('midnight');
     out.afterReenableThemeChange = paint();
-    out.bg3 = VARS['--bg-3'];
+    out.bg3 = cssVar('--bg-3');
     out.warns = warns; out.errors = errors;
     return out;
 };
@@ -19405,6 +19506,24 @@ def _run_pair(harness, case):
         f"pair case {case} failed (rc={proc.returncode})\n"
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_theme_restores_the_root_defaults(pair_harness):
+    # #223. Two claims, both of which were false before it: booting on the
+    # default writes nothing, and disabling the mod reverses it.
+    r = _run_pair(pair_harness, "disabling_theme_restores_root")
+    assert r["errors"] == [] and r["warns"] == []
+    assert r["inlineOnNightBoot"] == 0,         "booting on night wrote inline overrides instead of using :root"
+    assert r["inlineAfterPick"] == "#808080", "redmond did not take effect"
+    assert r["paintedRedmond"] != ""
+    # The revert REMOVES rather than re-writing night's values, which is what
+    # makes ':root is night' a fact of the cascade instead of a byte-match.
+    assert r["inlineAfterDisable"] == 0,         "disabling the theme mod left its palette inline on documentElement"
+    assert r["bg3AfterDisable"] == r["rootBg3"]
+    # The pattern is still painted, and painted in the RESTORED colours.
+    assert r["stillHasPattern"] is True,         "disabling theme wiped the pattern mod's background"
+    assert r["paintedAfterDisable"] != r["paintedRedmond"],         "the pattern was left drawn in the palette that just went away"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
