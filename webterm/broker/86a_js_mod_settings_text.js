@@ -336,8 +336,9 @@
         // Until now _normChoiceOptions THREW on an empty/invalid/duplicate list,
         // the throw escaped registration, and initMod's fault isolation rolled
         // the WHOLE mod back — one duplicate string in a computed list disabled
-        // everything the mod does. clock ships defensive dedup (clock.js:130-134)
-        // against exactly that, which is this platform's bug, not clock's.
+        // everything the mod does. clock shipped defensive dedup
+        // against exactly that, which was this platform's bug and not clock's;
+        // #209 deleted it, so clock now hands its zone list over verbatim.
         //
         // So the shape errors of an OPTION LIST — and only those — stop being
         // fatal. The primitive mounts no widget and hands back a DEGRADED

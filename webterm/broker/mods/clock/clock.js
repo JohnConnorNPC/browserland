@@ -73,16 +73,12 @@
                         chip.style.display = 'inline-flex';
                         render();
                         if (!timer) {
-                            // Feature-detected: a runtime-installed copy of
-                            // this mod can run against an older core with no
-                            // ctx.visibility. Either way `timer` holds a
-                            // {stop}-shaped handle.
-                            timer = ctx.visibility
-                                ? ctx.visibility.pausableInterval(render, 1000)
-                                : (function () {
-                                    const id = setInterval(render, 1000);
-                                    return { stop: function () { clearInterval(id); } };
-                                })();
+                            // #198/#209: ctx.visibility is guaranteed on every
+                            // loader that accepts ctxVersion 1, so the old
+                            // setInterval fallback is gone. The handle it
+                            // returns is {stop}-shaped and self-removes from
+                            // rec.unloads when stopped.
+                            timer = ctx.visibility.pausableInterval(render, 1000);
                         }
                     } else {
                         chip.style.display = 'none';
@@ -127,11 +123,13 @@
                         'Asia/Dubai', 'Asia/Kolkata', 'Asia/Shanghai', 'Asia/Tokyo',
                         'Australia/Sydney', 'Pacific/Auckland'];
                 }
-                // supportedValuesOf is spec'd unique, but a stray duplicate (a
-                // buggy engine, a future fallback typo) would throw in
-                // _normChoiceOptions and disable the whole mod (no chip). Dedup so
-                // a bad zone list can never nuke the clock.
-                zones = Array.from(new Set(zones));
+                // #203/#209: the engine's list is passed through VERBATIM. The
+                // dedup that used to sit here existed because a duplicate option
+                // value threw out of _normChoiceOptions and rolled the whole mod
+                // back (no chip). For text(), a malformed SUGGESTIONS list now
+                // costs the datalist and earns a Mods-pane warning while the
+                // accessor stays healthy -- so guarding against it here was the
+                // mod compensating for a platform bug that no longer exists.
                 const tzOptions = zones.map(function (z) {
                     return { value: z, label: z };   // IANA id as value + label
                 });
