@@ -20,9 +20,11 @@
         // #126: core constructs every terminal with this self-contained baseline
         // monospace stack and knows NOTHING about the (now mod-owned) terminal-font
         // feature. The termfont mod (mods/termfont/) overrides it PER terminal via
-        // ctx.windows.onTerminalCreate when enabled, and resets terminals to THIS
-        // exact family on disable. When the mod is off, terminals use this
-        // baseline.
+        // ctx.windows.onTerminalCreate when enabled. #222: the RESET is no longer
+        // the mod's -- it applies through info.setFont, so core's own owner record
+        // reverts each terminal on disable, to the surviving writer if another mod
+        // is also styling it and otherwise to THIS family. When no mod owns a
+        // terminal, it uses this baseline.
         //
         // #201: THIS IS NOW THE SINGLE SOURCE, AND IT IS READABLE. A mod reads
         // it as `ctx.terminals.defaults.fontFamily` (86l_js_mod_terminal_font.js

@@ -89,10 +89,14 @@ These are recorded, not narrowed away. A tap built on core call sites is
 complete *for core*; each item below is outside that boundary and must not be
 described as covered.
 
-1. **`fitAddon.fit()` called by a mod.** `mods/termfont/termfont.js:87` calls
-   `win.fitAddon.fit()`. FitAddon calls `Terminal.resize` *inside xterm*, so the
-   grid changes with no core call site involved. An `onResize` fed only from
-   core's `win.term.resize` site will not fire for it.
+1. **`fitAddon.fit()` called by a mod.** The `onTerminalCreate` info bag hands
+   mods the concrete `win`, so any mod can call `win.fitAddon.fit()`. FitAddon
+   calls `Terminal.resize` *inside xterm*, so the grid changes with no core call
+   site involved. An `onResize` fed only from core's `win.term.resize` site will
+   not fire for it. (The named caller used to be `mods/termfont/termfont.js`;
+   #222 moved that mod onto `info.setFont`, whose apply uses core's `refitSoon`
+   rather than the addon. The LIMIT is unchanged — it was never about that one
+   mod, and no shipped mod is required for it to apply.)
 2. **Mod-originated writes.** The `onTerminalCreate` info bag hands mods the
    concrete `win`, so any mod can call `win.term.write(...)` directly — recorder's
    playback does exactly this on its own terminals. Core cannot observe those from

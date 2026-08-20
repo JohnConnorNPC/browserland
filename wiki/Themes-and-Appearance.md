@@ -43,7 +43,7 @@ The offered fonts are:
 - Courier New
 - System monospace
 
-Picking a font applies immediately to every open terminal window, and to every terminal you open afterward — no reload needed. A font you pick but don't have installed simply falls back to the default. If you later disable the mod, terminals return to the built-in default font.
+Picking a font applies immediately to every open terminal window, and to every terminal you open afterward — no reload needed. (The letters change at once; the grid of rows and columns is re-measured a moment afterwards, once the far end confirms the new size.) A font you pick but don't have installed simply falls back to the default. If you later disable the mod, terminals return to the built-in default font — or to another installed font mod's font, if one is also styling them.
 
 ## Related pages
 

@@ -1,17 +1,20 @@
         // ---- info.cellDims / info.setFont / ctx.terminals (#201) -----------
         //
-        // A NAMED LIMIT, because the owner record's guarantee is narrower than
-        // it looks: it holds among setFont USERS only. mods/termfont still
-        // writes `win.term.options.fontFamily` directly (#201 asked it to
-        // migrate the baseline READ, not the apply path — moving the apply
-        // changes the reflow from this frame to refitSoon's defer, and changes
-        // its teardown target from the baseline to the surviving writer, so it
-        // is its own atom). The stack never learns about that write. So:
-        // termfont applies Fira, a setFont user is then disabled, the stack
-        // empties, and the revert writes the BASELINE over termfont's live
-        // font — the exact stomp this record exists to prevent, one layer out.
-        // Latent today because nothing in the tree calls setFont; it becomes
-        // real the moment something does, which is #204's problem to finish.
+        // THE LIMIT THIS ONCE NAMED IS CLOSED (#222). The owner record's
+        // guarantee holds among setFont USERS only, and mods/termfont used to
+        // write `win.term.options.fontFamily` directly — #201 asked it to
+        // migrate the baseline READ, not the apply path, because moving the
+        // apply changes the reflow from this frame to refitSoon's defer and
+        // changes its teardown target from the baseline to the surviving
+        // writer, so it was its own atom. While that stood, the stack never
+        // learned about the write: termfont applied Fira, a setFont user was
+        // disabled, the stack emptied, and the revert wrote the BASELINE over
+        // termfont's live font — the exact stomp this record exists to
+        // prevent, one layer out. #222 moved termfont onto setFont, so every
+        // writer in the tree is now in the stack and the record is total.
+        // A DIRECT WRITER IS STILL INVISIBLE HERE: the bag hands out the
+        // concrete `win`, so this guarantee is a contract with mods that use
+        // the surface, not something core can enforce on ones that do not.
         // Two gaps closed together, because they are the same gap: a mod that
         // wants to know how big a cell is, or to change what a terminal is
         // rendered in, has had to reach INTO xterm and guess.

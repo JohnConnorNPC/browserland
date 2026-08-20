@@ -17,7 +17,7 @@
         // involvement. Cross-browser /state sync converges through notifyModSettings()
         // at the end of core applyThemeSettings: a changed `termFont` re-fires
         // onChange -> applyTerminalFont over all live terminals; an unchanged pull is
-        // a cheap no-op (applyTerminalFontToWin is change-detected per terminal).
+        // a cheap no-op (info.setFont is change-detected per terminal, in core).
         //
         // Ships DISABLED by default (registerMod defaultEnabled:false), like
         // aistatus/git/clipboard: enable it in Control Panel → Mods. Because core is
@@ -28,50 +28,54 @@
         // /state and the ctx.settings.select read is non-destructive, so enabling the
         // mod restores their font on the next terminal / convergence.
         //
-        // TERM_FONTS / terminalFontFamily / applyTerminalFont are (and the retired
-        // TERM_FONT_DEFAULT was) moved here from core (was 65_js_display_theming.js),
-        // declared at the mod's TOP LEVEL (outside init) — exactly what they were as
-        // core symbols — so the "moved" extraction was a relocation.
-        // They reach the core globals `windows` / `isResizable` / `refitSoon` /
-        // `getSettings` the same way every mod reaches core (one shared page-script
-        // scope). Side-effect-free declarations, so they are inert while the mod is
-        // disabled (only init() is gated by the loader).
-
-        // THE BASELINE IS READ, NOT COPIED (#201). This used to be
-        //     const TERM_FONT_DEFAULT = '<the same literal core has>';
-        // duplicating 67_js_window_lifecycle.js's TERM_FONT_BASELINE (the family
-        // core constructs terminals with), with a test policing the duplication —
-        // because the mod's teardown resets terminals to this string, and a drift
-        // would leave a disabled mod's terminals on a different font than a fresh
-        // core-only terminal. #201 shipped the baseline as READABLE ctx surface
-        // (`ctx.terminals.defaults.fontFamily`, frozen, exposed from 86l BY
-        // REFERENCE to that one const), so the copy is retired: there is now
-        // exactly one literal and no coupling left to police. Nothing about what
-        // the mod applies changed — the value is identical, it is just fetched.
+        // ---- #222: CORE OWNS THE APPLY, AND THE REVERT ----------------------
+        // This mod used to write `win.term.options.fontFamily` itself, then
+        // `win.fitAddon.fit()` + `refitSoon(win)`, and reset every live terminal
+        // to the baseline from its own ctx.onUnload. #201 shipped
+        // `info.setFont(family)` with a per-terminal OWNER RECORD, and named the
+        // gap this closes: the owner record's guarantee held among setFont USERS
+        // only, so a direct writer was invisible to it. Concretely — termfont
+        // applies Fira, some other setFont user is disabled, its entry leaves the
+        // stack, and the revert writes the BASELINE over termfont's live font.
+        // Latent while nothing else called setFont; real the moment something
+        // does. Adopting setFont is what makes the record total.
         //
-        // ctx is only in scope inside init(), so it is stashed on the first init
-        // and read through baselineFontFamily() below. Every caller
-        // (terminalFontFamily / the onChange pass / onUnload) runs after init by
-        // construction, so the stash is always populated when it is read.
-        let _ctx = null;
-        // The fallbacks are for a LOADER SKEW, not for normal operation: a build
-        // whose ctx predates ctx.terminals still has core's own const in the same
-        // shared page-script scope (the route mods/recorder/recorder.js already
-        // takes), and only a build with neither reaches the generic stack. None
-        // of the three is a second copy of the baseline literal.
-        function baselineFontFamily() {
-            const t = _ctx && _ctx.terminals;
-            const fam = t && t.defaults && t.defaults.fontFamily;
-            if (typeof fam === 'string' && fam) return fam;
-            try {
-                if (typeof TERM_FONT_BASELINE === 'string' && TERM_FONT_BASELINE) {
-                    return TERM_FONT_BASELINE;
-                }
-            } catch (_) { /* not declared on this build */ }
-            return 'monospace';
-        }
+        // Three consequences, all deliberate:
+        //
+        //  1. THE EMPTY VALUE IS A RELEASE, NOT A BASELINE REQUEST. 'Default'
+        //     ('' — also what an unknown / hand-edited / version-skewed value
+        //     reads back as, see below) hands setFont an empty family, which
+        //     drops THIS mod's entry rather than claiming the baseline as an
+        //     override. Claiming it would stomp a surviving writer, which is the
+        //     very bug being fixed, one layer out.
+        //  2. NO ctx.onUnload RESET LOOP. Teardown is core's: setFont arms a
+        //     release on info.onModTeardown (mod disabled, terminal still open)
+        //     and info.onDispose (window closed), and that release re-applies the
+        //     SURVIVING WRITER if one remains, else the baseline. A mod-side loop
+        //     writing the baseline would be exactly the stomp again. The unload
+        //     below only drops this activation's references.
+        //  3. THE REFLOW DEFERS. Core's apply is `term.options.fontFamily` then
+        //     refitSoon(win) — deliberately NOT fitAddon.fit(), because core
+        //     loads exactly one addon and never drives it (a checked-in test pins
+        //     that). So the new grid lands through the existing resize funnel and
+        //     a round trip, not in this frame. That is slower on screen and it is
+        //     the correct trade: the old fit() moved the browser's grid ahead of
+        //     the PTY's, and it was recorded in docs-terminal-funnels.md as a
+        //     named LIMIT precisely because it resized INSIDE xterm where no core
+        //     call site could see it.
+        //
+        // With the apply gone, so are this mod's reads of the core globals
+        // `windows` / `isResizable` / `refitSoon` / `getSettings`, and its read of
+        // `ctx.terminals.defaults.fontFamily` (#201's baseline surface): a mod
+        // that never applies the baseline has no reason to know it. The stored
+        // value now arrives through the accessor's own non-destructive read
+        // (`setting.get()`), which already returns the select's `def` — '' — for
+        // anything not in the offered list, so the mod does not re-implement that
+        // whitelist either.
+
         // Each entry's `value` is the full CSS font-family stack (so an uninstalled
-        // choice falls back to Consolas/monospace); '' = the built-in default.
+        // choice falls back to Consolas/monospace); '' = the built-in default,
+        // which for setFont means "no override from termfont".
         const TERM_FONTS = [
             { label: 'Default (Consolas)', value: '' },
             { label: 'Cascadia Code', value: '"Cascadia Code", "Cascadia Mono", Consolas, monospace' },
@@ -81,46 +85,6 @@
             { label: 'Courier New', value: '"Courier New", Courier, monospace' },
             { label: 'System monospace', value: 'monospace' },
         ];
-        function terminalFontFamily() {
-            const f = (getSettings().termFont || '').trim();
-            // Whitelist to an OFFERED stack before applying — exactly like theme's
-            // applyTheme (THEMES[name] || night) and pattern's applyPattern
-            // (unknown -> none). An unknown / hand-edited / version-skewed value
-            // falls back to the baseline WITHOUT rewriting the synced blob (non-
-            // destructive), preserving the guarantee core's dropped normalizeSettings
-            // self-heal used to give. '' (the default option) also yields baseline.
-            if (!f) return baselineFontFamily();
-            return TERM_FONTS.some(function (o) { return o.value === f; })
-                ? f : baselineFontFamily();
-        }
-        // Push a specific family onto ONE live terminal (no-op for app windows,
-        // which have no xterm). Idempotent — a terminal whose family already matches
-        // is skipped, so the convergence / replay calls are cheap when nothing
-        // changed. This is core's old applyTerminalFont inner-loop body, per window.
-        function applyTerminalFontToWin(win, fam) {
-            if (!win || win.disposed || !win.term) return;
-            if (win.term.options.fontFamily === fam) return;
-            try {
-                win.term.options.fontFamily = fam;
-            } catch (_) { return; }   // assign failed -> don't refit
-            // Re-fit only a ready, VISIBLE terminal: fitAddon.fit() on a hidden/zero-
-            // size element (minimized, parked, other-workspace) clamps it to 2x1 and
-            // corrupts the buffer until it's restored — and restoring already re-fits
-            // it, so the new font lands then. A brand-new terminal is not yet
-            // termReady, so its font is set on options here and the first ready-fit
-            // measures with it (no create-time refit needed).
-            if (win.termReady && isResizable(win)) {
-                try { if (win.fitAddon) win.fitAddon.fit(); } catch (_) {}
-                refitSoon(win);                          // tell the agent
-            }
-        }
-        // Push the configured font onto every live terminal — the onChange target
-        // (fires on a local pick AND on a cross-browser /state convergence). Verbatim
-        // behavior of core's old applyTerminalFont.
-        function applyTerminalFont() {
-            const fam = terminalFontFamily();
-            for (const [, win] of windows) applyTerminalFontToWin(win, fam);
-        }
 
         registerMod({
             id: 'termfont',
@@ -136,21 +100,15 @@
                 // is inert (no way to apply the font per terminal), matching how the
                 // git mod feature-detects ctx.windows before using it.
                 if (!ctx.windows) return;
-                // Stash ctx for baselineFontFamily(): the top-level helpers are
-                // core symbols by relocation and have no ctx of their own, and
-                // `ctx.terminals.defaults.fontFamily` is now where the baseline
-                // lives. Set BEFORE anything can read it (the select mount, the
-                // onTerminalCreate replay and onUnload all follow).
-                _ctx = ctx;
 
                 // Mount the Control Panel <select> + own the synced `termFont` key.
                 // The options mirror TERM_FONTS so the widget stays in lockstep with
-                // applyTerminalFont. isBrowserGlobal => the section hides on remote
-                // host tabs (one browser renders its own terminals), and `def: ''`
-                // pins the built-in-default fallback for an empty/unknown value. The
-                // select's read() is non-destructive (an unknown stored value shows
-                // as the default without rewriting the blob), which is why core no
-                // longer normalizes `termFont` in 55_js_settings_model.js.
+                // what applyTerminalFont pushes. isBrowserGlobal => the section hides
+                // on remote host tabs (one browser renders its own terminals), and
+                // `def: ''` pins the built-in-default fallback for an empty/unknown
+                // value. The select's read() is non-destructive (an unknown stored
+                // value shows as the default without rewriting the blob), which is
+                // why core no longer normalizes `termFont` in 55_js_settings_model.js.
                 const options = TERM_FONTS.map(function (f) {
                     return { value: f.value, label: f.label };
                 });
@@ -161,28 +119,65 @@
                     isBrowserGlobal: true,
                     mount: 'desktop',   // #181: with the rest of the appearance
                 });
-                // onChange fires on a local pick AND on a cross-browser /state
-                // convergence (notifyModSettings, change-detected) — restyle every
-                // live terminal to the new font.
+
+                // THE LIVE POPULATION, ACTIVATION-SCOPED. setFont lives on the
+                // onTerminalCreate bag, but the onChange pass has to reach every
+                // terminal at once, so the bags are kept. A Set declared HERE (not
+                // at the mod's top level) is the shape that matters: a bag retains
+                // the closure that retains this activation's record, so a top-level
+                // map would keep a DISABLED activation's setFont alive for as long
+                // as its terminal stayed open — defeating the arming that core does
+                // one-shot. The replay makes the Set complete on init (every
+                // already-open terminal), and onDispose prunes a closed window.
+                const live = new Set();
+
+                // What THIS mod wants on screen: the stored stack, or '' meaning
+                // "no override of mine". Non-destructive — the accessor never
+                // writes on a read, so an unknown value from a newer peer survives
+                // in the blob while rendering as the default here.
+                function terminalFontFamily() { return setting.get(); }
+
+                // Push the configured font onto ONE terminal. Core does the write,
+                // the change-detection and the refit, and records the ownership, so
+                // this is a hand-off and not an apply. A throw from a stale bag is
+                // swallowed: one dead terminal must not abort the pass over the
+                // others.
+                function applyTerminalFontTo(info) {
+                    try { info.setFont(terminalFontFamily()); } catch (_) {}
+                }
+                // Push it onto every live terminal — the onChange target (fires on
+                // a local pick AND on a cross-browser /state convergence).
+                function applyTerminalFont() {
+                    live.forEach(applyTerminalFontTo);
+                }
                 setting.onChange(applyTerminalFont);
+
                 // Ride the per-terminal-window hook: REPLAYED over every open
                 // terminal now (so enabling the mod restyles them) and fired for
                 // every future one (so a new terminal picks up the chosen font).
-                // applyTerminalFontToWin is idempotent, so the replay + the onChange
+                // setFont is change-detected in core, so the replay + the onChange
                 // pass never double-apply. No decorate-once guard needed.
                 ctx.windows.onTerminalCreate(function (info) {
-                    applyTerminalFontToWin(info.win, terminalFontFamily());
-                });
-                // Clean teardown: a disable() should fully reverse the mod, so reset
-                // every live terminal to the core baseline font (which core
-                // constructs new terminals with) + refit. The select section + its
-                // listener are removed by the ctx primitive that mounted them; the
-                // onTerminalCreate subscription is auto-unsubscribed by the loader
-                // (rec.unloads), so no new terminals get restyled after this.
-                ctx.onUnload(function () {
-                    for (const [, win] of windows) {
-                        applyTerminalFontToWin(win, baselineFontFamily());
+                    // #201's members are additive on ctxVersion 1. Without them
+                    // there is no supported way to style a terminal — reaching
+                    // into win.term is what this migration removed — so the mod
+                    // stays inert for that terminal rather than half-adopting.
+                    if (!info || typeof info.setFont !== 'function') return;
+                    live.add(info);
+                    if (typeof info.onDispose === 'function') {
+                        try {
+                            info.onDispose(function () { live.delete(info); });
+                        } catch (_) { /* a bag without cleanups: the Set dies with the activation */ }
                     }
+                    applyTerminalFontTo(info);
                 });
+
+                // Teardown is CORE'S (see #222 note above): the release armed by
+                // setFont reverts each terminal to the surviving writer, else the
+                // baseline. Nothing to undo here — only references to drop, so a
+                // disabled activation stops holding the bags of terminals that are
+                // still open. The select section and the onTerminalCreate
+                // subscription are removed by the primitives that mounted them.
+                ctx.onUnload(function () { live.clear(); });
             },
         });

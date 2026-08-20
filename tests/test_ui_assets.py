@@ -22912,10 +22912,13 @@ def test_core_hooks_its_own_call_sites_and_never_wraps_the_terminal():
 
 
 def test_on_resize_is_fed_from_xterms_own_event_so_a_mod_fit_is_covered():
-    # THE NAMED LIMIT IN docs-terminal-funnels.md: mods/termfont/termfont.js:87
-    # calls win.fitAddon.fit(), which resizes INSIDE xterm with no core call
-    # site involved. An onResize fed from 73's win.term.resize site would miss
-    # it, so the feed is xterm's own onResize event -- public API on the
+    # THE NAMED LIMIT IN docs-terminal-funnels.md: a mod can call
+    # win.fitAddon.fit() off the create bag, which resizes INSIDE xterm with no
+    # core call site involved. (termfont was the named caller until #222 moved
+    # it onto info.setFont; the limit is about the REACHABILITY of the addon,
+    # not about that mod, so it outlived its example.) An onResize fed from
+    # 73's win.term.resize site would miss it, so the feed is xterm's own
+    # onResize event -- public API on the
     # vendored 5.3 build (`get onResize(){return this._core.onResize}`), fired
     # after the grid is applied, once per applied resize whichever path drove
     # it. Consequence: 73's resize call site gets NO dispatch (it would double-
@@ -24612,21 +24615,30 @@ def test_mousemode_deleted_its_poll_and_rides_the_core_surface():
     assert "ctx.onUnload(" in code
 
 
-def test_termfont_reads_the_baseline_instead_of_copying_it():
-    # THE OTHER MIGRATION. The duplicated constant is retired: the mod carries
-    # no copy of the literal in code OR prose, and reads the exposed surface.
+def test_termfont_hands_the_apply_to_core_instead_of_writing_xterm():
+    # THE OTHER MIGRATION, RETARGETED BY #222. #201 retired the duplicated
+    # baseline constant and had the mod READ the baseline through
+    # ctx.terminals.defaults.fontFamily; #222 finished the job by moving the
+    # APPLY to info.setFont, which retires the read as well -- a mod that never
+    # applies the baseline has no reason to know it. So the assertion is not
+    # deleted, it is tightened: the mod must carry no copy of the literal
+    # (unchanged), AND no direct route to a terminal's font at all.
     src = _mod_source("termfont")
     code = "\n".join(l for l in src.splitlines()
                      if not l.strip().startswith("//"))
     bare = _TERM_FONT_BASELINE_LITERAL[1:-1]
-    assert bare not in src, \
-        "the termfont mod still carries a copy of the baseline literal"
-    assert "TERM_FONT_DEFAULT" not in code, \
-        "the retired constant is still live code in the mod"
-    assert "ctx.terminals" in code and "defaults" in code, \
-        "termfont must read ctx.terminals.defaults.fontFamily"
-    # Every former use of the constant now goes through the one reader.
-    assert code.count("baselineFontFamily()") >= 3
+    assert bare not in src,         "the termfont mod still carries a copy of the baseline literal"
+    assert "TERM_FONT_DEFAULT" not in code,         "the retired constant is still live code in the mod"
+    assert "info.setFont(" in code,         "termfont must apply through the owner-recorded surface (#201)"
+    # The direct writes the owner record could not see, plus the core globals
+    # that only the direct apply needed. Each is pinned by ABSENCE, because
+    # each is a way back to the stomp #222 removed.
+    for gone in ("term.options", "fitAddon", "refitSoon", "isResizable",
+                 "getSettings()", "baselineFontFamily", "ctx.terminals"):
+        assert gone not in code,             f"termfont still reaches past the ctx surface: {gone!r} survives"
+    # The revert belongs to core's armed release. A mod-side loop writing the
+    # baseline over every live terminal is the same stomp in the other order.
+    assert "ctx.onUnload(function () { live.clear(); });" in code,         "termfont's unload must only drop references, not re-apply a font"
 
 
 _MIGRATION_HARNESS = r"""
@@ -24811,9 +24823,27 @@ function modCtx(id, opts) {
             if (typeof fn === 'function') rec.unloads.push(fn);
         },
         settings: {
+            // Modelled on 86's _modSettingChoice + _valueAccessor, because
+            // termfont now READS through the accessor (#222): get() returns
+            // the stored value only when it is one of the offered ones, else
+            // the select's `def` -- which is where 'an unknown termFont
+            // renders as the default' actually lives. A stub returning
+            // SETTINGS[key] raw would make that assertion vacuous.
             select: function (key, options, meta) {
-                return { onChange: function (fn) { rec.onChange = fn; },
-                         key: key, options: options, meta: meta };
+                const valid = Object.create(null);
+                for (const o of options) valid[o.value] = true;
+                const def = (meta && typeof meta.def === 'string'
+                    && valid[meta.def] === true) ? meta.def : options[0].value;
+                return {
+                    ok: true,
+                    get: function () {
+                        const v = SETTINGS[key];
+                        return (typeof v === 'string' && valid[v] === true)
+                            ? v : def;
+                    },
+                    onChange: function (fn) { rec.onChange = fn; },
+                    key: key, options: options, meta: meta,
+                };
             },
         },
         windows: {
@@ -24825,8 +24855,20 @@ function modCtx(id, opts) {
         },
     };
     _applyCtxExtenders(ctx, rec);
-    // A build whose ctx predates 86l: drop the family the extender just added.
-    if (opts && opts.noTerminals) delete ctx.terminals;
+    // A build whose ctx predates 86l: drop the family the extender just added,
+    // and -- what the mod actually feature-detects (#222) -- the members it put
+    // on the create bag, so the mod meets a bag with no setFont/cellDims.
+    if (opts && (opts.noTerminals || opts.noFont)) delete ctx.terminals;
+    if (opts && opts.noFont) {
+        const sub = ctx.windows.onTerminalCreate;
+        ctx.windows.onTerminalCreate = function (cb) {
+            return sub.call(this, function (info) {
+                delete info.setFont;
+                delete info.cellDims;
+                return cb(info);
+            });
+        };
+    }
     return { ctx: ctx, rec: rec };
 }
 function enable(id, opts) {
@@ -24834,6 +24876,18 @@ function enable(id, opts) {
     MODS[id].init(m.ctx);
     return m;
 }
+// A SECOND setFont USER (#222). The owner record only means something with
+// two writers, and until this migration there was exactly one caller in the
+// tree -- so the stomp it fixes could not be staged at all. This is the
+// smallest possible rival: one mod, one family, through the same public bag.
+MODS.rivalfont = {
+    id: 'rivalfont', ctxVersion: 1,
+    init: function (ctx) {
+        ctx.windows.onTerminalCreate(function (info) {
+            info.setFont('"Rival Mono", monospace');
+        });
+    },
+};
 function fireChange(m) { if (m.rec.onChange) m.rec.onChange(); }
 
 const CASES = {};
@@ -24929,40 +24983,94 @@ CASES.hidden_tab_defers = function () {
 // TERMFONT reads the baseline off ctx instead of a copy. With no stored
 // termFont, and with an unknown one, the family it applies is the exact string
 // core constructs terminals with -- by identity, not by a matched literal.
-CASES.termfont_reads_the_baseline = function () {
+CASES.termfont_hands_the_apply_to_core = function () {
     const m = enable('termfont');
     const win = openTerminal();
-    const fromCtx = m.ctx.terminals.defaults.fontFamily;
+    const atOpen = win.term.options.fontFamily;
     SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
     fireChange(m);
     const picked = win.term.options.fontFamily;
-    // An unknown / hand-edited value falls back to the baseline, non-destructively.
+    // An unknown / hand-edited value reads back as the select's def ('') --
+    // which setFont treats as a RELEASE, so the terminal returns to the
+    // baseline here (nobody else owns it) without the blob being rewritten.
     SETTINGS = { termFont: 'Comic Sans, cursive' };
     fireChange(m);
     const unknown = win.term.options.fontFamily;
     const storedAfter = SETTINGS.termFont;
-    // A disable resets every live terminal to that same baseline.
+    // A disable reverts every live terminal -- core's armed release, not a
+    // loop in the mod.
     SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
     fireChange(m);
+    const beforeDisable = win.term.options.fontFamily;
     _runUnloads(m.rec);
-    return { fromCtx: fromCtx, baseline: TERM_FONT_BASELINE,
-             identical: fromCtx === TERM_FONT_BASELINE,
-             picked: picked, unknown: unknown, storedAfter: storedAfter,
+    return { baseline: TERM_FONT_BASELINE, atOpen: atOpen, picked: picked,
+             unknown: unknown, storedAfter: storedAfter,
+             beforeDisable: beforeDisable,
              afterDisable: win.term.options.fontFamily, errors: errors };
 };
 
-// A LOADER SKEW (a ctx that predates ctx.terminals) must not change what the
-// mod applies: it falls back to core's own const, the same single source by
-// another route -- so a terminal created before the mod loaded still lands on
-// the baseline.
-CASES.termfont_survives_a_ctx_without_terminals = function () {
+// THE STOMP #222 FIXES, staged. Two setFont writers on one terminal: whoever
+// wrote last is on screen, and disabling EITHER one must land on the other's
+// font rather than on the baseline. Before the migration termfont wrote
+// term.options directly, so the stack never knew about it: the rival's
+// release wrote the baseline straight over termfont's live font, and
+// termfont's own unload loop wrote the baseline over the rival's.
+CASES.termfont_shares_a_terminal_with_another_writer = function () {
+    const rival = enable('rivalfont');
+    const tf = enable('termfont');
+    SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
+    // Both callbacks run on the create emit, in SUBSCRIPTION order -- rival
+    // first, termfont second -- so termfont is the last writer on a fresh
+    // terminal exactly as it is on an existing one after a pick. That
+    // consistency is worth pinning: per-window last-writer-wins would be a
+    // trap if the winner differed between replayed and freshly opened
+    // terminals for the same pair of mods.
+    const win = openTerminal();
+    const afterOpen = win.term.options.fontFamily;
+    fireChange(tf);                      // termfont writes last -> termfont wins
+    const afterPick = win.term.options.fontFamily;
+    // Disable the RIVAL while the terminal is open: termfont is the surviving
+    // writer, so its font must stay on screen.
+    _runUnloads(rival.rec);
+    const afterRivalOff = win.term.options.fontFamily;
+    // Now disable termfont too: nobody owns the terminal, so the baseline.
+    _runUnloads(tf.rec);
+    return { afterOpen: afterOpen, afterPick: afterPick,
+             afterRivalOff: afterRivalOff,
+             afterBothOff: win.term.options.fontFamily,
+             rivalFamily: '"Rival Mono", monospace',
+             baseline: TERM_FONT_BASELINE, errors: errors };
+};
+
+// ...and the OTHER order, which is the half a mod-side reset loop got wrong:
+// disable TERMFONT first and the rival's font must survive, not be reset to
+// the baseline by a departing mod that never owned it.
+CASES.termfont_leaving_first_does_not_stomp_the_survivor = function () {
+    const rival = enable('rivalfont');
+    const tf = enable('termfont');
+    SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
+    const win = openTerminal();
+    fireChange(tf);
+    const beforeOff = win.term.options.fontFamily;
+    _runUnloads(tf.rec);
+    return { beforeOff: beforeOff, afterTermfontOff: win.term.options.fontFamily,
+             rivalFamily: '"Rival Mono", monospace',
+             baseline: TERM_FONT_BASELINE, errors: errors };
+};
+
+// A LOADER SKEW (a ctx built without 86l) hands the create bag no setFont. The
+// supported apply is the only apply now -- reaching into win.term is what this
+// migration removed -- so the mod stays INERT for that terminal instead of
+// half-adopting: it must not throw, and it must not touch a font it has no
+// sanctioned way to set.
+CASES.termfont_survives_a_ctx_without_setfont = function () {
     const win = openTerminal();          // created BEFORE the mod loads
     win.term.options.fontFamily = 'something-else';
-    const m = enable('termfont', { noTerminals: true });
-    const hasFamily = !!m.ctx.terminals;
-    SETTINGS = {};
+    const m = enable('termfont', { noFont: true });
+    SETTINGS = { termFont: '"Fira Code", Consolas, monospace' };
     fireChange(m);
-    return { hasFamily: hasFamily, applied: win.term.options.fontFamily,
+    _runUnloads(m.rec);
+    return { applied: win.term.options.fontFamily,
              baseline: TERM_FONT_BASELINE, errors: errors };
 };
 
@@ -25078,31 +25186,58 @@ def test_a_hidden_tab_still_defers_the_chip_rather_than_dropping_it(
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_termfont_applies_the_baseline_it_read_from_ctx(migration_harness):
-    # E61's other half: the family the mod falls back to is core's own const,
-    # fetched through ctx.terminals.defaults.fontFamily -- identity, not a
-    # literal that two files happen to agree on.
-    r = _run_migration(migration_harness, "termfont_reads_the_baseline")
+def test_termfont_hands_every_apply_to_core(migration_harness):
+    # #222's behaviour half: what lands on the terminal is core's write, driven
+    # by the mod's choice, and the empty value is a RELEASE rather than a
+    # request for the baseline.
+    r = _run_migration(migration_harness, "termfont_hands_the_apply_to_core")
     assert r["errors"] == []
-    assert r["identical"] is True
+    assert r["atOpen"] == r["baseline"]
     assert r["picked"] == '"Fira Code", Consolas, monospace'
-    assert r["unknown"] == r["baseline"], \
-        "an unknown termFont no longer falls back to the baseline"
+    assert r["unknown"] == r["baseline"],         "an unknown termFont no longer reads back as the default"
     # ...and reading it did not rewrite the synced blob.
     assert r["storedAfter"] == "Comic Sans, cursive"
-    assert r["afterDisable"] == r["baseline"], \
-        "a disabled termfont left its font on screen"
+    assert r["beforeDisable"] == '"Fira Code", Consolas, monospace'
+    assert r["afterDisable"] == r["baseline"],         "a disabled termfont left its font on screen"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_termfont_on_a_ctx_without_the_terminals_family_still_lands_there(
-        migration_harness):
+def test_termfont_no_longer_stomps_a_second_font_writer(migration_harness):
+    # THE BUG #222 EXISTS TO FIX. The owner record's guarantee held among
+    # setFont USERS only; termfont wrote term.options directly, so the stack
+    # never learned about it and a rival's release wrote the BASELINE over
+    # termfont's live font. Now termfont is in the stack, so the rival leaving
+    # reveals termfont, and only the last writer leaving reaches the baseline.
     r = _run_migration(migration_harness,
-                       "termfont_survives_a_ctx_without_terminals")
+                       "termfont_shares_a_terminal_with_another_writer")
     assert r["errors"] == []
-    assert r["hasFamily"] is False
-    assert r["applied"] == r["baseline"], \
-        "a loader skew changed what termfont applies"
+    assert r["afterOpen"] == '"Fira Code", Consolas, monospace',         "termfont subscribed second, so it owns a fresh terminal too"
+    assert r["afterPick"] == '"Fira Code", Consolas, monospace',         "termfont wrote last and must be on screen"
+    assert r["afterRivalOff"] == '"Fira Code", Consolas, monospace',         "disabling the rival stomped termfont's live font back to the baseline"
+    assert r["afterBothOff"] == r["baseline"],         "with no writer left the terminal must return to the baseline"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_termfont_leaving_first_does_not_stomp_the_survivor(migration_harness):
+    # THE OTHER ORDER, which the deleted ctx.onUnload reset loop got wrong: it
+    # wrote the baseline over every live terminal, including ones a surviving
+    # mod owned. Core's armed release re-applies the survivor instead.
+    r = _run_migration(migration_harness,
+                       "termfont_leaving_first_does_not_stomp_the_survivor")
+    assert r["errors"] == []
+    assert r["beforeOff"] == '"Fira Code", Consolas, monospace'
+    assert r["afterTermfontOff"] == r["rivalFamily"],         "termfont's teardown reset a terminal another writer still owned"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_termfont_on_a_bag_without_setfont_stays_inert(migration_harness):
+    # A loader skew: no info.setFont, and no unsanctioned route left to a
+    # terminal's font. The mod must degrade to doing nothing -- not throw, and
+    # not reach into win.term the way this migration stopped doing.
+    r = _run_migration(migration_harness,
+                       "termfont_survives_a_ctx_without_setfont")
+    assert r["errors"] == []
+    assert r["applied"] == "something-else",         "termfont touched a terminal it had no sanctioned way to style"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
