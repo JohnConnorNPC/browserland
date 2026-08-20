@@ -514,9 +514,10 @@
                         fontSize: (win.term.options
                                    && win.term.options.fontSize) || 14,
                         ws: win.ws,
-                        rawWrite: win.term.write,
-                        rawResize: win.term.resize,
-                        wrapWrite: null, wrapResize: null,
+                        // #201/#218: no rawWrite/rawResize/wrapWrite/wrapResize.
+                        // The instance is left exactly as xterm handed it over;
+                        // these three are the tap disposers instead.
+                        offOut: null, offResize: null, offIn: null,
                         inputDisp: null, ticker: null,
                         stopped: false,
                         auto: !!o.auto,
@@ -618,11 +619,40 @@
                         rec.events.push({ t: now(), k: 'o', d: d });
                         maybeRoll(win, rec);
                     };
-                    // Wrap THIS terminal's write. `this`, the optional callback
-                    // and the return value all pass through untouched; restore
-                    // only if the method is still our wrapper (another patcher
-                    // may have stacked on top since).
-                    rec.wrapWrite = function (data, cb) {
+                    // #201/#218: THE TAPS, NOT A MONKEY-PATCH. This mod is why
+                    // 86k exists: it replaced `term.write` and `term.resize` BY
+                    // ASSIGNMENT and un-patched only if the method it found was
+                    // still its own -- a scheme whose own comment admitted two
+                    // patchers cannot coexist ("if ANOTHER patcher stacked on
+                    // top of ours after start, stop can't unhook us"). The
+                    // instance is now left exactly as xterm handed it over, and
+                    // an off() is unconditional: there is no "still ours?" test
+                    // to fail, so a recording can always be stopped.
+                    //
+                    // Three differences from the patch, all of them in this
+                    // recording's favour, and all of them the reason the funnel
+                    // gate had to prove the enumeration complete first:
+                    //
+                    //  · OUTPUT is core-originated traffic. A tap never sees a
+                    //    write a MOD made straight to win.term -- including
+                    //    this mod's own playback, which used to be capturable
+                    //    by its own patch if a playback window were recorded.
+                    //    docs-terminal-funnels.md enumerates that boundary.
+                    //  · RESIZE is fed from xterm's OWN onResize event, so it
+                    //    fires once per APPLIED resize whichever path drove it.
+                    //    The patch only saw calls that went through
+                    //    term.resize, and missed a fit-addon-driven one
+                    //    entirely -- a recording could contain a stretch of
+                    //    output at a grid the events never mention.
+                    //  · INPUT rides the wire chokepoint rather than onData,
+                    //    which is what makes the hand-bracketed ConPTY paste
+                    //    path (#153) visible; onData alone misses it.
+                    //
+                    // The payload is a per-tap COPY, so nothing here can
+                    // rewrite what the screen or another tap sees, and every
+                    // tap fires strictly AFTER the underlying write.
+                    rec.offOut = info.tapOutput(function (data) {
+                        if (rec.stopped) return;
                         try {
                             if (typeof data === 'string') {
                                 if (data) pushOut(encoder.encode(data));
@@ -631,31 +661,25 @@
                                         ? data : new Uint8Array(data));
                             }
                         } catch (_) {}
-                        return rec.rawWrite.call(win.term, data, cb);
-                    };
-                    rec.wrapResize = function (cols, rows) {
-                        // rec.stopped guard (also in pushOut): if ANOTHER
-                        // patcher stacked on top of ours after start, stop
-                        // can't unhook us — the wrapper must at least go
-                        // inert instead of capturing into a dead recording.
+                    });
+                    rec.offResize = info.onResize(function (d) {
+                        // The stopped guard stays (it is in pushOut too): a tap
+                        // dispatched from inside the write that stop() is
+                        // unwinding must not append to a dead recording.
+                        if (rec.stopped) return;
                         try {
-                            if (!rec.stopped) {
-                                rec.events.push({ t: now(), k: 'r',
-                                                  c: cols, r: rows });
-                                // Every append path checks the cap, or the
-                                // event-count ceiling does not actually bound
-                                // the array — a session driven only by resizes
-                                // would grow it with nothing to trip.
-                                maybeRoll(win, rec);
-                            }
+                            rec.events.push({ t: now(), k: 'r',
+                                              c: d && d.cols, r: d && d.rows });
+                            // Every append path checks the cap, or the
+                            // event-count ceiling does not actually bound the
+                            // array — a session driven only by resizes would
+                            // grow it with nothing to trip.
+                            maybeRoll(win, rec);
                         } catch (_) {}
-                        return rec.rawResize.call(win.term, cols, rows);
-                    };
-                    win.term.write = rec.wrapWrite;
-                    win.term.resize = rec.wrapResize;
+                    });
                     // Input MARKERS only: timestamp + byte count, never content
                     // (typed passwords are unechoed — content would leak them).
-                    rec.inputDisp = win.term.onData(function (d) {
+                    rec.offIn = info.tapInput(function (d) {
                         if (rec.stopped) return;
                         rec.events.push({ t: now(), k: 'i',
                                           n: (d && d.length) || 0 });
@@ -752,15 +776,20 @@
                     syncUnloadGuard();
                     if (rec.rollTimer !== null) clearTimeout(rec.rollTimer);
                     if (rec.ticker) clearInterval(rec.ticker);
-                    // Un-patch only if still ours (see wrap note above).
-                    try {
-                        if (win.term && win.term.write === rec.wrapWrite) {
-                            win.term.write = rec.rawWrite;
+                    // #201/#218: unhooking is unconditional now. The old code
+                    // could only restore `term.write` if the method it found
+                    // was STILL its own wrapper, so a second patcher stacking
+                    // on top left this recording's wrapper welded on for the
+                    // life of the terminal -- which is exactly why `rec.stopped`
+                    // had to make it go inert instead. off() removes this tap
+                    // from core's own per-window list and cannot be defeated by
+                    // anyone else's.
+                    for (const off of [rec.offOut, rec.offResize, rec.offIn]) {
+                        if (typeof off === 'function') {
+                            try { off(); } catch (_) {}
                         }
-                        if (win.term && win.term.resize === rec.wrapResize) {
-                            win.term.resize = rec.rawResize;
-                        }
-                    } catch (_) {}
+                    }
+                    rec.offOut = rec.offResize = rec.offIn = null;
                     try { if (rec.inputDisp) rec.inputDisp.dispose(); }
                     catch (_) {}
                     rec.durationMs = Math.max(
@@ -1711,15 +1740,24 @@
                         }
                     }
                     load();
-                    // #46's per-window hook: core fires it on every live window
-                    // after a successful login. Only this recording's broker
-                    // matters — another host authenticating is not a reason to
-                    // retry — and load() self-guards the already-loaded case.
-                    win._onHostAuth = function (hostId) {
-                        if (hostId === recHostId) load();
-                    };
+                    // #195/#218: the BUS, not a field. `win._onHostAuth` was a
+                    // property this mod wrote onto its own window for core to
+                    // invoke BY NAME -- an ad-hoc duck-typed protocol whose
+                    // only documentation was the call site in 63. Only this
+                    // recording's broker matters (another host authenticating
+                    // is not a reason to retry) and load() self-guards the
+                    // already-loaded case, so the filter is unchanged; what
+                    // changed is that the subscription is owned, unsubscribed
+                    // with the window, and dropped automatically on teardown.
+                    let offAuth = null;
+                    if (ctx.events && typeof ctx.events.on === 'function') {
+                        offAuth = ctx.events.on('host:auth', function (p) {
+                            if (p && p.hostId === recHostId) load();
+                        });
+                    }
 
                     win.cleanups.push(function () {
+                        if (offAuth) { try { offAuth(); } catch (_) {} }
                         closed = true;
                         gen++;
                         playing = false;
@@ -2227,12 +2265,20 @@
                         if (bgTimer !== null) clearTimeout(bgTimer);
                         if (libRender === bgRefresh) libRender = null;
                     });
-                    // #46's per-window hook: heal the list in place once a
-                    // broker is signed into, instead of leaving its error row
-                    // up until someone presses Refresh.
-                    win._onHostAuth = function () {
-                        refresh({ prompt: false });
-                    };
+                    // #195/#218: the BUS, not a field (see the player window).
+                    // Heal the list in place once a broker is signed into,
+                    // instead of leaving its error row up until someone presses
+                    // Refresh. ANY broker matters here -- the library lists all
+                    // of them -- so there is no hostId filter, which is why
+                    // this one reads more simply than the player's.
+                    if (ctx.events && typeof ctx.events.on === 'function') {
+                        const offLibAuth = ctx.events.on('host:auth', function () {
+                            refresh({ prompt: false });
+                        });
+                        win.cleanups.push(function () {
+                            try { offLibAuth(); } catch (_) {}
+                        });
+                    }
 
                     refresh({ prompt: true });
                     finishWindowPlacement(win);

@@ -973,7 +973,7 @@ def test_recorder_size_cap_rolls_instead_of_stopping():
     # capture: the pre-#151 `if (rec.bytes > REC_CAP_BYTES) stopRecording(...)`
     # is what an always-on recording cannot survive.
     push = src[src.index("const pushOut = function"):
-               src.index("rec.wrapWrite = function")]
+               src.index("rec.offOut = info.tapOutput(")]
     assert "maybeRoll(win, rec);" in push
     assert "stopRecording" not in push
     # ...and BOTH ceilings feed it: bytes bounds an output-heavy session, the
@@ -1008,7 +1008,7 @@ def test_recorder_files_the_size_it_was_actually_played_at():
     src = (BROKER_DIR / "mods/recorder/recorder.js").read_text(
         encoding="utf-8")
     push = src[src.index("const pushOut = function"):
-               src.index("rec.wrapWrite = function")]
+               src.index("rec.offOut = info.tapOutput(")]
     assert "if (!rec.events.length) adoptGeom();" in push
     geom = src[src.index("const adoptGeom = function"):
                src.index("const pushOut = function")]
@@ -14499,6 +14499,38 @@ def test_the_registry_action_lock_is_not_a_dialog_guard():
     assert "isAppDialogOpen()" in src
 
 
+def test_recorder_captures_through_the_taps_not_a_monkey_patch():
+    """#201/#218. recorder is why 86k exists: it replaced `term.write` and
+    `term.resize` BY ASSIGNMENT and un-patched only if the method it found was
+    still its own -- a scheme whose own comment admitted two patchers cannot
+    coexist ("if ANOTHER patcher stacked on top of ours after start, stop
+    can't unhook us"), which is why the wrapper also had to be able to go
+    inert. The instance is left exactly as xterm handed it over now, and an
+    off() cannot be defeated by anyone else's patch."""
+    src = (BROKER_DIR / "mods" / "recorder" / "recorder.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "rec.offOut = info.tapOutput(" in code
+    assert "rec.offResize = info.onResize(" in code
+    assert "rec.offIn = info.tapInput(" in code
+    # NOTHING assigns to the instance any more, and the restore-if-still-ours
+    # dance is gone with it. Pinned by absence: re-growing either is how the
+    # two-patchers-cannot-coexist bug comes back.
+    for gone in ("win.term.write =", "win.term.resize =",
+                 "rec.wrapWrite", "rec.wrapResize",
+                 "rec.rawWrite", "rec.rawResize"):
+        assert gone not in code,             f"recorder is patching the xterm instance again: {gone!r}"
+    # The unhook is unconditional -- no "is it still mine" test to fail.
+    assert "for (const off of [rec.offOut, rec.offResize, rec.offIn])" in code
+    # The stopped guard STAYS on every tap: a tap dispatched from inside the
+    # write that stop() is unwinding must not append to a dead recording.
+    for tap in ("rec.offOut = info.tapOutput(", "rec.offResize = info.onResize(",
+                "rec.offIn = info.tapInput("):
+        body = code[code.index(tap):]
+        assert "if (rec.stopped) return;" in body[:400],             f"{tap} can append to a stopped recording"
+
+
 def test_workspaces_reads_the_lease_as_an_event_not_a_core_private():
     # #195/#225. adoptUnstampedColumns must not write while another browser
     # holds the HOME lease, and it answered that by reading core's private
@@ -15636,13 +15668,23 @@ def test_the_help_mod_no_longer_writes_the_convention_field():
     auth = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
     assert "try { win._onHostAuth(host.id); } catch (_) {}" in auth
     assert "_emitModEvent('host:auth', { hostId: host.id });" in auth
-    # ...and #204's other three consumers still have theirs.
+    # ...and the consumers not yet migrated still have theirs, so core's
+    # caller cannot be deleted while any of them does. #218 took recorder off
+    # it (both of its windows), leaving these two -- when the list empties,
+    # 63's loop and the field go with it.
     for mod, entry in (("editor", "editor.js"),
-                       ("file-manager", "file-manager.js"),
-                       ("recorder", "recorder.js")):
+                       ("file-manager", "file-manager.js")):
         other = (BROKER_DIR / "mods" / mod / entry).read_text(encoding="utf-8")
         assert "win._onHostAuth =" in other, \
-            f"{mod} was migrated here -- it belongs to #204"
+            f"{mod} was migrated here -- update this list and recheck 63"
+    rec = (BROKER_DIR / "mods" / "recorder" / "recorder.js").read_text(
+        encoding="utf-8")
+    rec_code = "\n".join(l for l in rec.splitlines()
+                         if not l.strip().startswith("//"))
+    assert "win._onHostAuth =" not in rec_code, \
+        "recorder re-grew the duck-typed field (#218 moved it to ctx.events)"
+    assert rec_code.count("ctx.events.on('host:auth'") == 2, \
+        "both recorder windows -- the player and the library -- ride the bus"
     # The subscription reaches the served page.
     assert "ctx.events.on('host:auth', function (p) {" in INDEX_HTML
 
