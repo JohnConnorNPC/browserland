@@ -42,6 +42,50 @@
             // settings: owns wsLabelMode + hideTaskbarOtherWs + hideWsPager.
             tiers: ['window', 'taskbar', 'settings'],
             init: function (ctx) {
+            //: #196/#225: ctx.prefs for this activation, or null. Declared at
+            //: the TOP of init -- above the assignment below and above every
+            //: function that reads it -- because a `let` read before its
+            //: declaration line has run is a TDZ ReferenceError that disables
+            //: the whole mod, and this JS never runs in CI (#162).
+            let wsPrefs = null;
+            //: #195/#225: the HOME lease, mirrored off 'lease:changed'.
+            let _leaseSubscribed = false;
+            let _leaseLost = false;
+            //: "another browser holds the lease, so do not write shared state".
+            //: The event when we have it, core's own private read when this
+            //: build has no event bus at all.
+            function leaseLost() {
+                if (_leaseSubscribed) return _leaseLost;
+                try { return _deactivated === true; } catch (_) { return false; }
+            }
+                // #196/#225: the per-mod prefs store, stashed for floatWsMap.
+                // Null on a build without the extender, which is the branch
+                // that keeps using the reserved prefs._floatWs key.
+                wsPrefs = (ctx.prefs && typeof ctx.prefs.get === 'function')
+                    ? ctx.prefs : null;
+
+                // #195/#225: THE LEASE, AS AN EVENT. This mod read core's
+                // private `_deactivated` to answer "is another browser holding
+                // the HOME lease, so I must not write?". 64 names this mod as
+                // the reason the channel exists, and it also settles the edge
+                // that makes the swap safe rather than merely tidier: the emit
+                // is at the one place core LEARNS the lease, and by the time a
+                // handler runs a LOSS has fully torn the view down
+                // (teardownView is synchronous) and a GAIN has already set
+                // _deactivated=false (bootActiveView and rebuildView both do it
+                // before their first await). So `!active` at handler time is
+                // exactly what the private read answered.
+                //
+                // It is a LEVEL, so subscribing replays the current value at
+                // once -- this mod does not have to guess a starting state, and
+                // `_leaseLost` below is only ever written by the handler.
+                if (ctx.events && typeof ctx.events.on === 'function') {
+                    _leaseSubscribed = true;
+                    ctx.events.on('lease:changed', function (p) {
+                        _leaseLost = !(p && p.active === true);
+                    });
+                }
+
                 // The three settings this mod owns, read through onto the SAME
                 // synced blob they always lived in (no new schema field, the
                 // #126 termfont pattern) -- an upgrading user's stored value is
@@ -256,7 +300,7 @@
                 // saves again -- churn that never converges. Reading is unaffected:
                 // columnWsId() already treats an unstamped column as the active
                 // workspace, so nothing is mis-drawn while we wait.
-                if (_deactivated) return false;
+                if (leaseLost()) return false;
                 const st = wsStore();
                 const live = new Set(st.list.map(function (w) { return w.id; }));
                 let changed = _wsDirty;
@@ -455,7 +499,10 @@
             }
             // ---- workspace preview popover (task 19) --------------------------
             let _wsPreviewEl = null;
+            //: the ctx.popover handle for the box above, or null (#202/#225).
+            let _wsPreviewPop = null;
             function hideWsPreview() {
+                if (_wsPreviewPop) { _wsPreviewPop.close(); return; }
                 if (_wsPreviewEl) { _wsPreviewEl.remove(); _wsPreviewEl = null; }
             }
             function showWsPreview(i, anchor) {
@@ -591,8 +638,35 @@
                     f.textContent = '+ ' + floatN + ' floating';
                     box.appendChild(f);
                 }
+                // #202/#225: CLAMPING AND FLIPPING ARE CORE'S. This used to
+                // append to <body> and place the box by hand -- centre on the
+                // dot, clamp with Math.max(6, Math.min(left, innerWidth - bw
+                // - 6)), and fall to `ar.bottom + 8` when it would run off the
+                // top. ctx.popover.anchor owns all of it, and it FLIPS to the
+                // other side rather than sliding a box over its own anchor,
+                // which the hand-rolled fall-through only did for the vertical
+                // overflow and never for the horizontal one. It also
+                // re-measures every frame while open, so the box follows a dot
+                // that moves -- which the taskbar's own re-render does.
+                _wsPreviewEl = box;
+                if (ctx.popover && typeof ctx.popover.anchor === 'function') {
+                    _wsPreviewPop = ctx.popover.anchor(box, anchor, {
+                        placement: 'top',
+                        gap: 8,
+                        // Fires for every dismissal, this mod's own close()
+                        // included, so it is the one place the refs are
+                        // cleared -- and it is what keeps hideWsPreview
+                        // idempotent across both paths.
+                        onClose: function () {
+                            _wsPreviewEl = null;
+                            _wsPreviewPop = null;
+                        },
+                    });
+                    return;
+                }
+                // No popover family on this build: the hand-rolled placement,
+                // unchanged, so the preview still appears somewhere sensible.
                 document.body.appendChild(box);
-                // Position above the anchoring dot, clamped to the viewport.
                 const ar = anchor.getBoundingClientRect();
                 const bw = box.offsetWidth, bh = box.offsetHeight;
                 let left = ar.left + ar.width / 2 - bw / 2;
@@ -601,7 +675,6 @@
                 if (top < 6) top = ar.bottom + 8;
                 box.style.left = left + 'px';
                 box.style.top = top + 'px';
-                _wsPreviewEl = box;
             }
             // ---- floating windows locked to a workspace (task 8) -------------
             // Membership lives in a single reserved map prefs._floatWs (key -> ws
@@ -610,10 +683,51 @@
             // their creation paths, and stays browser-local (not pushed to /state —
             // per-window placement is per-browser, like floating pixel geometry).
             // Tiled windows are NOT covered: their membership IS their column.
+            // #196/#225: the map lives in ctx.prefs now. The paragraph above
+            // is the argument for why a reserved '_'-prefixed key in core's
+            // prefs was safe -- it survives the prefs GC and stays out of
+            // /state -- and a mod-namespaced record
+            // ('webterm:modprefs:workspaces:floatWs') is outside both by
+            // construction rather than by discipline.
+            //
+            // ONE READ-THROUGH, then it never matters again: an upgrading user
+            // has their float memberships in prefs._floatWs, and silently
+            // scattering every pinned window back to "all workspaces" is a
+            // worse outcome than the few lines that carry them over. The
+            // migration is a COPY, not a move -- nothing deletes the old key,
+            // so a downgrade finds what it left.
+            let _floatWsCache = null;
             function floatWsMap() {
+                if (_floatWsCache) return _floatWsCache;
+                if (wsPrefs) {
+                    const stored = wsPrefs.get('floatWs', null);
+                    if (stored && typeof stored === 'object'
+                            && !Array.isArray(stored)) {
+                        _floatWsCache = stored;
+                        return _floatWsCache;
+                    }
+                    // Nothing stored yet: adopt the legacy map if there is one,
+                    // and write it back under the new key on the next save.
+                    const legacy = prefs._floatWs;
+                    _floatWsCache = (legacy && typeof legacy === 'object'
+                        && !Array.isArray(legacy))
+                        ? Object.assign({}, legacy) : {};
+                    return _floatWsCache;
+                }
+                // No prefs family on this build: the reserved key, unchanged.
                 if (!prefs._floatWs || typeof prefs._floatWs !== 'object'
                     || Array.isArray(prefs._floatWs)) prefs._floatWs = {};
                 return prefs._floatWs;
+            }
+            //: Persist the map. ctx.prefs writes localStorage itself, so the
+            //: savePrefsLocal the legacy path needs is the caller's, exactly
+            //: as before -- see setWindowWs.
+            function saveFloatWsMap() {
+                if (wsPrefs && _floatWsCache) {
+                    wsPrefs.set('floatWs', _floatWsCache);
+                    return true;
+                }
+                return false;
             }
             function keyWsId(key) {
                 const v = floatWsMap()[key];
@@ -624,7 +738,10 @@
             function setWindowWs(win, wsId, render) {
                 if (!win) return;
                 floatWsMap()[win.id] = wsId;
-                savePrefsLocal();                        // per-window, browser-local
+                // ctx.prefs writes localStorage itself; the legacy path still
+                // needs core's browser-local save. Per-window either way, and
+                // never a /state push.
+                if (!saveFloatWsMap()) savePrefsLocal();
                 if (render) { applyWorkspaceVisibility(); applyTaskbarWorkspace(); }
             }
             function setWindowAllWorkspaces(win, all) {
@@ -643,7 +760,7 @@
             function reassignFloatingWs(fromWsId, toWsId) {
                 const m = floatWsMap();
                 for (const k of Object.keys(m)) if (m[k] === fromWsId) m[k] = toWsId;
-                savePrefsLocal();
+                if (!saveFloatWsMap()) savePrefsLocal();
             }
             // ---- placement / activation helpers (#152) -----------------------
             // Does this float belong to a workspace OTHER than the active one?

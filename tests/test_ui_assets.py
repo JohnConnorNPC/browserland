@@ -14499,6 +14499,76 @@ def test_the_registry_action_lock_is_not_a_dialog_guard():
     assert "isAppDialogOpen()" in src
 
 
+def test_workspaces_reads_the_lease_as_an_event_not_a_core_private():
+    # #195/#225. adoptUnstampedColumns must not write while another browser
+    # holds the HOME lease, and it answered that by reading core's private
+    # `_deactivated`. 64 names this mod as the reason 'lease:changed' exists,
+    # and settles the edge that makes the swap safe rather than merely tidier:
+    # the emit sits at the one place core LEARNS the lease, so by handler time
+    # a LOSS has fully torn the view down (teardownView is synchronous) and a
+    # GAIN has already set _deactivated=false (before its first await).
+    src = (BROKER_DIR / "mods" / "workspaces" / "workspaces.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "ctx.events.on('lease:changed'" in code
+    assert "if (leaseLost()) return false;" in code,         "the adopt path must gate on the mirrored lease"
+    # The core private survives ONLY as the no-event-bus fallback, inside the
+    # one reader -- not scattered at the call sites it used to gate.
+    assert code.count("_deactivated") == 1,         "workspaces reads core's private lease flag outside leaseLost()"
+    # The event is a LEVEL, so nothing seeds the mirror by guessing: it is
+    # written by the handler alone, and the replay supplies the first value.
+    assert "let _leaseLost = false;" in code
+
+
+def test_workspaces_float_membership_moved_to_ctx_prefs_without_losing_it():
+    # #196/#225. The map lived in core's reserved prefs._floatWs; a
+    # mod-namespaced record is outside the prefs GC and outside /state by
+    # construction rather than by discipline. The legacy key is COPIED, not
+    # moved: scattering every pinned window back to "all workspaces" on
+    # upgrade is a worse outcome than the few lines that carry them over.
+    src = (BROKER_DIR / "mods" / "workspaces" / "workspaces.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "wsPrefs.get('floatWs', null)" in code
+    assert "wsPrefs.set('floatWs', _floatWsCache)" in code
+    assert "const legacy = prefs._floatWs;" in code,         "the legacy map is no longer adopted -- upgrading users lose their pins"
+    # Nothing DELETES the old key: a downgrade should find what it left.
+    assert "delete prefs._floatWs" not in code
+    # Both writers persist through the same helper, so one of them cannot
+    # quietly keep writing only the legacy key.
+    assert code.count("if (!saveFloatWsMap()) savePrefsLocal();") == 2
+    # ...and it is still browser-local on both paths: never savePrefs().
+    body = code[code.index("function setWindowWs("):]
+    body = body[:body.index("function setWindowAllWorkspaces")]
+    assert "savePrefs()" not in body
+
+
+def test_workspaces_preview_is_placed_by_core_not_hand_clamped():
+    # #202/#225. The preview box hand-placed itself on <body>: centre on the
+    # dot, clamp with Math.max(6, Math.min(left, innerWidth - bw - 6)), and
+    # fall to ar.bottom + 8 when it would run off the top. ctx.popover.anchor
+    # owns clamping AND flips rather than sliding a box over its own anchor --
+    # which the hand-rolled version only ever did vertically, never for the
+    # horizontal overflow it merely slid.
+    src = (BROKER_DIR / "mods" / "workspaces" / "workspaces.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "ctx.popover.anchor(box, anchor, {" in code
+    assert "placement: 'top'," in code
+    # The handle is what hides it, and onClose is the single place both refs
+    # are cleared -- so a dismissal core initiated (outside click, Escape,
+    # the anchor leaving the page, this mod's teardown) leaves no stale ref.
+    assert "if (_wsPreviewPop) { _wsPreviewPop.close(); return; }" in code
+    assert "_wsPreviewEl = null;" in code and "_wsPreviewPop = null;" in code
+    # The hand-rolled clamp survives ONLY as the no-popover-family fallback,
+    # after the anchored path has returned.
+    assert code.count("window.innerWidth - bw - 6") == 1
+    assert code.index("ctx.popover.anchor(box, anchor, {")         < code.index("window.innerWidth - bw - 6"),         "the hand-rolled placement must be the fallback, not the primary path"
+
+
 def test_host_registry_invalidates_a_rotated_token_not_just_a_new_url():
     """#214, and the one bullet on that issue with a security consequence
     rather than a tidiness one.
