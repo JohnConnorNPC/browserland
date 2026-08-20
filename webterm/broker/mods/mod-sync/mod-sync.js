@@ -55,6 +55,26 @@
             tiers: ['settings'],
             init: function (ctx) {
                 const SELF = 'mod-sync';
+                // #202/#215: the two introspection surfaces this mod used to
+                // get at by sniffing loader-private names. Both families are
+                // added by an EXTENDER, and _applyCtxExtenders isolates each
+                // one, so both are feature-detected rather than assumed --
+                // and both callers below degrade to what they did before
+                // rather than failing closed, because a page assembled without
+                // 86n is one where every push would otherwise be refused.
+                const ctxMods = (ctx.mods && typeof ctx.mods === 'object')
+                    ? ctx.mods : null;
+                //: The DECLARED shape of one mod's setting, or null. Two-arg
+                //: on purpose (86n): this mod describes OTHER mods' settings,
+                //: never its own.
+                function describeSetting(entry) {
+                    if (!entry || typeof entry.modId !== 'string'
+                            || typeof entry.key !== 'string') return null;
+                    const d = ctx.settings && ctx.settings.describe;
+                    if (typeof d !== 'function') return null;
+                    try { return d.call(ctx.settings, entry.modId, entry.key); }
+                    catch (_) { return null; }
+                }
                 const MAX_TARGETS = 64;          // cap the fan-out, both ways
                 const KEY_MAX = 128;             // a settings key we will carry
                 const STR_MAX = 4096;            // a settings string value
@@ -102,6 +122,13 @@
                 function acceptedBy(entry, v) {
                     if (!entry) return false;
                     if (entry.kind === 'boolean') return typeof v === 'boolean';
+                    // #202/#215: the DECLARED shape, from the owning mod's own
+                    // registration, instead of scraping rendered <option>s out
+                    // of the section this build happens to have painted. Two
+                    // things the scrape could not answer come back with it: a
+                    // text control's declared maxLength, and the declared
+                    // DEFAULT (which a rendered list simply does not carry).
+                    const decl = describeSetting(entry);
                     if (entry.kind === 'text') {
                         // #168: a text control has NO enumerable option set, so
                         // the DOM scrape below cannot answer for it and the bare
@@ -115,15 +142,28 @@
                         // the loader rather than re-implemented. Guarded like
                         // _localPin: a build without the predicate degrades to
                         // the scalar bound isScalar already applied.
-                        try {
-                            if (typeof _modTextOk === 'function') {
-                                return _modTextOk(v, entry.maxLength);
-                            }
-                        } catch (_) { return false; }
-                        return typeof v === 'string' && v.length <= STR_MAX;
+                        if (typeof v !== 'string') return false;
+                        // The declared cap when the owner told us one, this
+                        // mod's own structural bound otherwise. 86a coerces a
+                        // READ against the same clamp, so a longer value is one
+                        // the owner would not keep -- which is precisely the
+                        // "plant a value read() then ignores" failure this
+                        // function exists to prevent.
+                        const cap = (decl && typeof decl.maxLength === 'number')
+                            ? Math.min(decl.maxLength, STR_MAX) : STR_MAX;
+                        return v.length <= cap;
                     }
                     if (entry.kind === 'select' || entry.kind === 'radio') {
                         if (typeof v !== 'string') return false;
+                        if (decl && Array.isArray(decl.options)) {
+                            return decl.options.some(function (o) {
+                                return o && o.value === v;
+                            });
+                        }
+                        // No describe on this build: the rendered options, as
+                        // before. Kept rather than failing closed, because a
+                        // page assembled without 86n is one where every push
+                        // would otherwise be refused.
                         let opts = [];
                         try {
                             opts = Array.from(entry.section.querySelectorAll(
@@ -171,13 +211,22 @@
                     }
                     return out;
                 }
-                // This broker's pin for one mod, or null. Guarded: _pin is
-                // loader-private and newer than ctxVersion 1, so a build without
-                // it degrades to "nothing is pinned" instead of throwing.
+                // This broker's pin for one mod, or null. #202/#215: through
+                // ctx.mods.pinOf, which is the OWNED reader for exactly this --
+                // 86n says so, and its guard is the same one this used to
+                // hand-roll ("a build without _pin degrades to nothing is
+                // pinned"). What changes is that the mod no longer reaches for
+                // a loader-private name, so the loader is free to rename or
+                // reshape it without silently turning every pin into null here.
+                // The family is feature-detected, not assumed: `mods` is added
+                // by an extender, and _applyCtxExtenders isolates each one.
                 function _localPin(id) {
                     try {
-                        return (typeof _pin === 'function') ? _pin(id) : null;
-                    } catch (_) { return null; }
+                        if (ctxMods && typeof ctxMods.pinOf === 'function') {
+                            return ctxMods.pinOf(id);
+                        }
+                    } catch (_) { /* fall through */ }
+                    return null;
                 }
                 // The mod-owned settings keys in force here: exactly the ones a
                 // live ctx.settings control owns, so every key comes WITH its

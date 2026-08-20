@@ -2022,19 +2022,29 @@ def test_mod_sync_accepts_the_text_kind():
     # #168's mandatory companion: acceptedBy's DOM scrape cannot answer for a
     # kind with no option set, and its default `return true` would plant a value
     # read() then ignores -- the exact failure that function exists to prevent.
-    # The honest answer is read()'s own STRUCTURAL gate, taken from the loader so
-    # the two can never drift, and deliberately domain-free: a zone the sending
-    # engine knows and this one does not must still carry (that IS the bug).
+    # The gate is deliberately domain-free: a zone the sending engine knows and
+    # this one does not must still carry (that IS the bug #168 fixed), so what
+    # is checked is LENGTH, never membership.
+    #
+    # RETARGETED BY #215. The bound used to come from `_modTextOk`, a
+    # loader-private predicate this mod sniffed for by name. It now comes from
+    # the OWNER's own declaration, through ctx.settings.describe -- which #215
+    # taught to report `maxLength` for exactly this caller, since text is the
+    # one kind whose `options` are suggestions rather than a bound.
     src = (BROKER_DIR / "mods" / "mod-sync" / "mod-sync.js").read_text(
         encoding="utf-8")
     code = "\n".join(l for l in src.splitlines()
                      if not l.strip().startswith("//"))
     assert "if (entry.kind === 'text') {" in code
-    assert "return _modTextOk(v, entry.maxLength);" in code
-    # Guarded like _localPin: a build without the predicate degrades to the
-    # scalar bound rather than throwing inside the adopt preview.
-    assert "if (typeof _modTextOk === 'function') {" in code
-    assert "return typeof v === 'string' && v.length <= STR_MAX;" in code
+    assert "typeof decl.maxLength === 'number'" in code
+    # Clamped by this mod's own structural bound as well, so a declared
+    # maxLength cannot widen what mod-sync is willing to carry.
+    assert "Math.min(decl.maxLength, STR_MAX) : STR_MAX;" in code
+    assert "return v.length <= cap;" in code
+    # No loader-private sniffing survives on this path.
+    for gone in ("_modTextOk", "_pin("):
+        assert gone not in code, \
+            f"mod-sync is sniffing a loader-private name again: {gone!r}"
     # And it is answered BEFORE the select/radio scrape, which would return
     # false for every text value (a text section has no <option> of its own
     # unless the mod supplied suggestions).
@@ -27920,11 +27930,18 @@ def test_describe_reports_the_declaration_not_the_rendered_dom(introspect_harnes
     assert r["radio"]["default"] == "light"
     # text: the default is COERCED (trimmed) and maxLength is clamped to the cap,
     # both through 86a's own helpers
+    # #215 added maxLength -- ONLY here, because text is the one kind whose
+    # `options` are suggestions rather than a bound, so a describing caller
+    # that means to WRITE has no other way to know what the owner will keep.
     assert r["text"] == {
         "type": "text",
         "options": [{"value": "Fira Code", "label": "Fira Code"}],
         "default": "Fira Code",
+        "maxLength": 1024,
     }
+    # ...and nowhere else: for a choice kind the options list IS the bound.
+    for kind in ("select", "radio", "boolean"):
+        assert "maxLength" not in r[kind],             f"describe reported a maxLength on a {kind} descriptor"
     # A fresh frozen clone per call.
     assert r["sameObject"] is False and r["frozen"] is True
     assert r["select"] == r["selectAgain"]

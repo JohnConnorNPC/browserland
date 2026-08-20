@@ -153,11 +153,24 @@
         // from the stored data, so two callers never share one object.
         function _modIntrospectDescriptor(data) {
             if (!data) return null;
-            return Object.freeze({
+            const out = {
                 type: data.type,
                 options: _modIntrospectOptions(data.options),
                 default: data.def,
-            });
+            };
+            // #215: `maxLength` ONLY on a text descriptor, and only because it
+            // is the one declared bound this shape did not carry. A describing
+            // caller that means to WRITE has to know it: 86a coerces a read
+            // against the same clamp, so a value longer than the control's
+            // maxLength is one the owner will not keep -- and mod-sync's whole
+            // acceptedBy() exists to refuse planting a value read() then
+            // ignores. Absent for every other kind, because for them the
+            // `options` list IS the bound and a length is meaningless.
+            if (data.type === 'text'
+                    && typeof data.maxLength === 'number') {
+                out.maxLength = data.maxLength;
+            }
+            return Object.freeze(out);
         }
 
         // What one ctx.settings.<kind>(...) call DECLARED, in the shape
@@ -199,7 +212,8 @@
                             ? [] : (_modChoiceFault(opts.options)
                                     ? [] : _normChoiceOptions(opts.options)));
                 const fallback = _modTextCoerce(opts.def, max);
-                return { type: 'text', options: suggestions, def: fallback };
+                return { type: 'text', options: suggestions, def: fallback,
+                         maxLength: max };
             }
             const opts = (b && typeof b === 'object') ? b : {};
             const options = _normChoiceOptions(a);
