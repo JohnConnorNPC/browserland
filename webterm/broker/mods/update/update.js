@@ -1020,23 +1020,29 @@
                     mark('busy', (opts && opts.busyNote)
                         || (wantOn ? 'switching checking on…'
                             : 'switching checking off…'));
-                    let resp;
-                    try {
-                        resp = await updFetch(host.id, '/update/policy', {
-                            method: 'POST',
-                            json: changes,
-                            timeoutMs: 15000,
-                        });
-                    } catch (_) {
+                    // #191/#224: the admin-gated write. policyGatedWrite
+                    // lives in the update-policy.js companion (update.js is at
+                    // the fragment cap) and carries the whole argument for why
+                    // this one route does not ride ctx.http.
+                    const recNow = effectiveRecord(hid);
+                    const gated = await policyGatedWrite(
+                        host, changes, recNow && recNow.admin,
+                        wantOn ? 'switch update checking on'
+                               : 'switch update checking off');
+                    if (gated.outcome === 'error') {
                         mark('failed', 'could not reach that broker to ask');
                         return false;
                     }
-                    if (resp.error) {
-                        mark('failed', 'could not reach that broker to ask');
+                    if (gated.outcome === 'cancelled') {
+                        // NOTHING was sent. Not a failure and not a success --
+                        // the operator declined, so the switch goes back to
+                        // whatever the broker still says.
+                        policyOps.delete(opKey);
+                        renderAll();
                         return false;
                     }
-                    const body = (resp.json && typeof resp.json === 'object')
-                        ? resp.json : null;
+                    const resp = { status: gated.status };
+                    const body = gated.body;
                     // The row this answer belongs to may not exist any more.
                     // Say nothing rather than writing another broker's outcome
                     // into it; the write itself already landed on the machine we

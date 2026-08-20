@@ -835,6 +835,39 @@ def test_recorder_reaches_every_broker_not_just_the_local_one():
     assert "hostId: 'app'" in ext,         "the app-window factory no longer pins hostId to 'app'"
 
 
+def test_the_update_policy_write_goes_through_the_admin_door():
+    """#191/#224. /update/policy is admin-gated server-side
+    (_admin_auth_error), and until #224 this mod only NAMED the refusal -- the
+    words were honest and complete, but the operator had to go and do
+    something else. The write goes through core's shared admin flow now:
+    prompt once, hold the token per host+url, re-prompt once on a stale one,
+    and never send at all on a cancel.
+
+    The helper lives in the update-policy.js COMPANION, not beside its caller:
+    update.js is against the #68 fragment cap, and the rule there has always
+    been split, never trim."""
+    pol = (BROKER_DIR / "mods" / "update" / "update-policy.js").read_text(
+        encoding="utf-8")
+    upd = (BROKER_DIR / "mods" / "update" / "update.js").read_text(
+        encoding="utf-8")
+    assert "async function policyGatedWrite(" in pol
+    assert "adminGatedFetch(host, '/update/policy'" in pol
+    # The cancel is neither a failure nor a success: NOTHING was sent, so the
+    # switch goes back to whatever the broker still says.
+    assert "outcome: 'cancelled'" in pol
+    upd_code = "\n".join(l for l in upd.splitlines()
+                         if not l.strip().startswith("//"))
+    assert "gated.outcome === 'cancelled'" in upd_code
+    assert "policyOps.delete(opKey);" in upd_code
+    # `admin` rides the shared catalog record beside update/restart, so an old
+    # build simply lacks it and takes the byte-for-byte old wire inside the
+    # helper -- absence is the old-build signal, never an error.
+    assert "recNow && recNow.admin" in upd_code
+    # ...and the refusal words stay, for the case where the operator declines
+    # or the realm is discovered after the fact.
+    assert "admin_required" in pol
+
+
 def test_update_check_names_the_broker_it_asks():
     """#182, and the same trap #161 closed for the recorder: a mod that reports
     a VERSION must never be able to report the wrong broker's version.

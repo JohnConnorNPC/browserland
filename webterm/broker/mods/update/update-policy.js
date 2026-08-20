@@ -730,6 +730,56 @@
         // to is display-only machinery; a stale disabled button wearing
         // switched-off words under a row that says self-updating is ON
         // is the bug.
+        // ---- the admin-gated policy write (#191, moved here by #224) ----
+        // /update/policy is admin-gated server-side (_admin_auth_error), and
+        // until #224 this mod only NAMED the refusal -- honestly, but leaving
+        // the operator to go and do something else. adminGatedFetch is core's
+        // shared flow for exactly this: prompt once, hold the token per
+        // host+url, re-prompt once on a stale one, and never send at all on a
+        // cancel.
+        //
+        // IT LIVES HERE, and not beside its caller, for the reason every other
+        // move into this file had: update.js is against the #68 fragment cap,
+        // and the rule for that cap is split, never trim. This is the same
+        // shape as the rest of the file -- it takes what it needs as arguments
+        // and touches none of update.js's closure.
+        //
+        // IT IS THE ONE ROUTE IN THE MOD THAT DOES NOT GO THROUGH ctx.http,
+        // and that is a real tension worth naming rather than hiding: the core
+        // helper is Response-shaped over hostFetch, so this call site does not
+        // get #200's body-covering deadline. It does not need #200's other
+        // half -- the null-host footgun -- because the caller resolves `host`
+        // through updHost immediately before this and refuses a null one.
+        //
+        // `adminInfo` rides the shared catalog record beside update/restart
+        // (#157's shape): an enforcing build publishes it, an old one simply
+        // lacks it, and absence is the old-build signal rather than an error --
+        // so a peer that never heard of the realm takes the byte-for-byte old
+        // wire inside the helper.
+        //
+        // Resolves {outcome, body}:
+        //   outcome 'sent'      -- `body` is the parsed answer (or null)
+        //   outcome 'cancelled' -- the operator declined; NOTHING was sent
+        //   outcome 'error'     -- the request never landed
+        async function policyGatedWrite(host, changes, adminInfo, act) {
+            let gated;
+            try {
+                gated = await adminGatedFetch(host, '/update/policy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(changes),
+                    timeoutMs: 15000,
+                }, adminInfo, act);
+            } catch (_) { return { outcome: 'error', body: null }; }
+            if (gated.aborted === 'cancelled') {
+                return { outcome: 'cancelled', body: null };
+            }
+            if (!gated.res) return { outcome: 'error', body: null };
+            let body = null;
+            try { body = await gated.res.json(); } catch (_) {}
+            return { outcome: 'sent', body: body, status: gated.res.status };
+        }
+
         function restartGateMoved(changes, beforeUpd, afterUpd) {
             if (!changes || typeof changes !== 'object'
                     || typeof changes.restart_enabled !== 'boolean') {

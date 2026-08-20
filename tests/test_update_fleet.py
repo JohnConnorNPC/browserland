@@ -272,6 +272,22 @@ const policyInfoWrote = {};   // hostId -> highest sendIdx written through
 // case, is unchanged. The adapter is the shape 86i promises: it NEVER rejects,
 // an unknown id resolves {status: 0, error: 'host_not_found'} with no request
 // issued, and the body comes back parsed on `.json`.
+// #191/#224: /update/policy goes through core's admin-gated flow now. The
+// harness supplies it in its NON-ENFORCING shape -- no adminInfo means the
+// old wire, byte for byte -- so every scenario below still programs the same
+// POLICY stub and none of them changes meaning. A case that wants the realm
+// can set adminPrompt/adminRefuse; nothing does yet, which is itself the
+// honest state: this build has no admin-configured broker to drive.
+globalThis.adminPrompt = null;      // () => token | null, when a case wants one
+globalThis.adminGatedFetch = async (host, route, opts, adminInfo, act) => {
+    if (!adminInfo) return { res: await hostFetch(host, route, opts), aborted: null };
+    const tok = adminPrompt ? adminPrompt(host, act) : null;
+    if (!tok) return { res: null, aborted: 'cancelled' };
+    const o = Object.assign({}, opts);
+    o.headers = Object.assign({}, o.headers, { 'X-Webterm-Admin': tok });
+    return { res: await hostFetch(host, route, o), aborted: null };
+};
+
 globalThis.ctx = {
     signal: { aborted: false },
     http: {
