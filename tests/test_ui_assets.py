@@ -10369,8 +10369,10 @@ let CLIP_DECL = null;
 let AIS_DECL = null;
 // Two shipped mods are spliced into this one file (#207 added aistatus), so
 // the capture routes by id rather than overwriting whichever ran last.
+let STICKY_DECL = null;
 function registerMod(decl) {
     if (decl && decl.id === 'aistatus') AIS_DECL = decl;
+    else if (decl && decl.id === 'sticky') STICKY_DECL = decl;
     else CLIP_DECL = decl;
 }
 const clipWrites = [];
@@ -10522,6 +10524,130 @@ CLIPCASES.recopy_does_not_echo = function () {
              writesAfterRecopy: writesAfterRecopy };
 };
 
+// ---- the real sticky mod (#220) -------------------------------------------
+// sticky does NOT build its notes through the factory, and deliberately: the
+// note builder it delegates to (openNoteOrEditorWindow) is ALSO core's
+// unknown-kind fallback, which is what makes a note restore identically with
+// this mod disabled. So what is under test here is the #141 taskbar-chip
+// feature -- until #220 it was pinned only by string matches -- and the note
+// builder is a stub, because the chip logic is what this mod owns.
+let noteSeq = 0;
+function openNoteOrEditorWindow(d) {
+    const id = String((d && d.id) || ('app:note:' + (++noteSeq)));
+    const dom = new El('div');
+    dom.className = 'term-window app-window app-note';
+    desktop.appendChild(dom);
+    const win = { id: id, sid: 'note', hostId: 'app', type: 'app',
+                  appKind: 'sticky-note', dom: dom, body: new El('div'),
+                  name: (d && d.title) || 'Note', color: '#4aa3ff',
+                  content: (d && d.content) || '',
+                  minimized: false, disposed: false, cleanups: [] };
+    windows.set(id, win);
+    // The synthetic session an app window carries; the chip is what the MOD
+    // adds on top, which is the whole point of the toggle.
+    sessions.set(id, { key: id, sid: 'note', id: id, title: win.name,
+                       stale: false, kind: 'app', hostId: 'app' });
+    return win;
+}
+function serializeAppWindow(win) { return { id: win.id, appKind: win.appKind }; }
+const restored = [];
+function restoreWindow(id) {
+    restored.push(id);
+    const w = windows.get(id);
+    if (w) w.minimized = false;
+}
+function updateTaskbarActive() { calls.push('updateTaskbarActive'); }
+
+const STICKYCASES = {};
+
+function bootSticky(opts) {
+    opts = opts || {};
+    const m = modCtx('sticky');
+    let on = !!opts.chipsOn;
+    m.ctx.settings = { boolean: function (key, def, meta) {
+        return {
+            get: function () { return on; },
+            set: function (v) { on = !!v; },
+            onChange: function (fn) { m.__chipToggle = fn; },
+        };
+    } };
+    m.__setToggle = function (v) { on = !!v; if (m.__chipToggle) m.__chipToggle(!!v); };
+    STICKY_DECL.init(m.ctx);
+    return m;
+}
+function noteChips() {
+    return chipIds().filter(function (id) { return id.indexOf('note') !== -1; });
+}
+
+// THE RACE, which is the half #220 asked me to check onAppWindowCreate
+// against. A note restored BEFORE this mod inits goes through core's
+// unknown-kind fallback and never touches the mod's factory, so the only
+// thing that can chip it is a catch-up pass at init.
+STICKYCASES.init_chips_notes_that_were_already_open = function () {
+    const early = openNoteOrEditorWindow({ id: 'app:note:early' });
+    const before = noteChips();
+    const m = bootSticky({ chipsOn: true });
+    return { before: before, after: noteChips(), earlyId: early.id };
+};
+
+// ...and with the toggle OFF, init must be side-effect-free: no chip, and
+// nothing to undo.
+STICKYCASES.init_is_quiet_when_the_toggle_is_off = function () {
+    openNoteOrEditorWindow({ id: 'app:note:early' });
+    bootSticky({ chipsOn: false });
+    return { chips: noteChips() };
+};
+
+// A note opened AFTER init goes through the registered factory, which is the
+// one seam every open path funnels through -- (+) launch, restore, a
+// Closed-notes reopen, a chip click on a closed note.
+STICKYCASES.the_factory_chips_a_new_note = function () {
+    const m = bootSticky({ chipsOn: true });
+    const kind = lookupWindowKind('sticky-note');
+    const win = kind.factory({ id: 'app:note:new', content: 'hi' });
+    return { chips: noteChips(), id: win.id, isNote: win.appKind };
+};
+
+// The toggle flips LIVE, in both directions, across every open note -- a
+// cross-browser /state convergence lands here too.
+STICKYCASES.toggling_adds_and_removes_across_live_notes = function () {
+    openNoteOrEditorWindow({ id: 'app:note:a' });
+    openNoteOrEditorWindow({ id: 'app:note:b' });
+    const m = bootSticky({ chipsOn: false });
+    const off = noteChips();
+    m.__setToggle(true);
+    const on = noteChips();
+    m.__setToggle(false);
+    return { off: off, on: on, offAgain: noteChips() };
+};
+
+// THE STRANDED-NOTE TRAP. A note MINIMIZED via its chip has no other
+// affordance: it is invisible on the desktop and it is not in Closed notes
+// (it is still open). So removing its chip must un-minimize it first, or the
+// note is unreachable for the rest of the session.
+STICKYCASES.removing_a_chip_unminimizes_first = function () {
+    const note = openNoteOrEditorWindow({ id: 'app:note:min' });
+    const m = bootSticky({ chipsOn: true });
+    note.minimized = true;
+    m.__setToggle(false);
+    return { restored: restored.slice(), minimized: note.minimized,
+             chips: noteChips() };
+};
+
+// A DISABLE takes the chips (this mod's feature) but leaves the notes open --
+// they always have been, and the kind unregistering is what changes.
+STICKYCASES.disable_takes_the_chips_not_the_notes = function () {
+    const note = openNoteOrEditorWindow({ id: 'app:note:keep' });
+    const m = bootSticky({ chipsOn: true });
+    const before = noteChips();
+    _runUnloads(m.rec);
+    return { before: before, chips: noteChips(),
+             stillOpen: windows.has(note.id) && !note.disposed,
+             kindGone: !lookupWindowKind('sticky-note') };
+};
+
+__STICKY__
+
 // ---- the real aistatus mod (#207) -----------------------------------------
 // Same shape as the clipboard driver above: the SHIPPED mod, the SHIPPED
 // factory, and stubs only for the browser bits node has not got. No provider
@@ -10626,6 +10752,10 @@ AISCASES.aistatus_disable_closes_its_windows = function () {
 
 (function () {
     const want = process.argv[2];
+    if (STICKYCASES[want]) {
+        process.stdout.write(JSON.stringify(STICKYCASES[want]()) + '\n');
+        process.exit(0);
+    }
     if (AISCASES[want]) {
         process.stdout.write(JSON.stringify(AISCASES[want]()) + '\n');
         process.exit(0);
@@ -10635,6 +10765,12 @@ AISCASES.aistatus_disable_closes_its_windows = function () {
     process.stdout.write(JSON.stringify(r) + '\n');
 })();
 """
+
+
+def _sticky_mod_source():
+    """The shipped sticky mod, verbatim (#220)."""
+    return (BROKER_DIR / "mods" / "sticky" / "sticky.js").read_text(
+        encoding="utf-8")
 
 
 def _aistatus_mod_source():
@@ -10673,7 +10809,8 @@ def clipboard_harness(tmp_path_factory):
          .replace("__RESTORE__", _restore_lifecycle_source())
          .replace("__TAKEDOWN__", _loader_takedown_source()))
         + _CLIPBOARD_DRIVER.replace("__CLIPBOARD__", _clipboard_mod_source())
-                           .replace("__AISTATUS__", _aistatus_mod_source()),
+                           .replace("__AISTATUS__", _aistatus_mod_source())
+                           .replace("__STICKY__", _sticky_mod_source()),
         encoding="utf-8")
     return path
 
@@ -11542,6 +11679,77 @@ def test_the_real_clipboard_keeps_its_singleton_semantics(clipboard_harness):
     assert r["same"] is True, "a second launch built a second window"
     assert r["windows"] == 1 and r["chips"] == 1
     assert r["owned"] == ["app:clip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_sticky_chips_notes_that_were_open_before_it_loaded(clipboard_harness):
+    """#141's catch-up pass, executed. Whether any note is already open when
+    this mod inits is a RACE, not an ordering: restoreAppWindows waits on the
+    control-WS lease and the /state adopt, loadMods on GET /info, and nothing
+    sequences the two. A note restored FIRST goes through core's unknown-kind
+    fallback and never touches this mod's factory, so an init-time pass is the
+    only thing that can ever chip it -- and #167's post-loader retry cannot,
+    because it re-attempts only records that built nothing."""
+    r = _run_clip(clipboard_harness, "init_chips_notes_that_were_already_open")
+    assert r["before"] == [], "the note had a chip before the mod loaded"
+    assert r["after"] == [r["earlyId"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_sticky_init_is_side_effect_free_with_the_toggle_off(clipboard_harness):
+    # The pass is add-only for this reason: with the toggle off, init must
+    # touch nothing -- which is also what makes it harmless when it overlaps
+    # with the factory path for a note restored the other way round.
+    r = _run_clip(clipboard_harness, "init_is_quiet_when_the_toggle_is_off")
+    assert r["chips"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_sticky_factory_chips_a_note_opened_after_init(clipboard_harness):
+    # The other half of the race: a note opened later goes through the
+    # registered factory, the one seam every open path funnels through --
+    # (+) launch, restore-on-reload, a Closed-notes reopen, and a chip click
+    # on a closed note.
+    r = _run_clip(clipboard_harness, "the_factory_chips_a_new_note")
+    assert r["isNote"] == "sticky-note"
+    assert r["chips"] == [r["id"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_sticky_toggle_flips_live_in_both_directions(clipboard_harness):
+    # onChange fires on a local toggle AND on a cross-browser /state
+    # convergence, so every browser viewing this broker applies the flip to
+    # its own open notes without a reload.
+    r = _run_clip(clipboard_harness, "toggling_adds_and_removes_across_live_notes")
+    assert r["off"] == []
+    assert r["on"] == ["app:note:a", "app:note:b"]
+    assert r["offAgain"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_removing_a_sticky_chip_unminimizes_the_note_first(clipboard_harness):
+    """THE STRANDED-NOTE TRAP, which is the subtle invariant in this mod and
+    was pinned by nothing. A note MINIMIZED via its chip has no other
+    affordance: it is not on the desktop, and it is not in Closed notes
+    either, because it is still open. So removing its chip has to un-minimize
+    it first, or the note is unreachable for the rest of the session."""
+    r = _run_clip(clipboard_harness, "removing_a_chip_unminimizes_first")
+    assert r["restored"] == ["app:note:min"], \
+        "the chip was removed without restoring the minimized note"
+    assert r["minimized"] is False
+    assert r["chips"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_sticky_takes_the_chips_but_leaves_the_notes(clipboard_harness):
+    # Open notes deliberately stay open on a disable -- they always have, and
+    # what goes away is the kind (retain-on-close, Closed notes, the (+)
+    # entry). The chips are this mod's feature, so they leave with it.
+    r = _run_clip(clipboard_harness, "disable_takes_the_chips_not_the_notes")
+    assert r["before"] == ["app:note:keep"]
+    assert r["chips"] == []
+    assert r["stillOpen"] is True, "a disable closed a note it does not own"
+    assert r["kindGone"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
