@@ -14327,24 +14327,20 @@ def _hosts_ctx_source():
     return body
 
 
-def _host_registry_invalidate_floor():
-    """What host-registry's OWN invalidateHost clears, read out of the mod.
-
-    #195 moves the list to core and says the mod's eight are the FLOOR, so this
-    reads that list instead of re-typing it: if the mod is ever taught a ninth
-    per-host cache, the gate below fails until core registers it too. The mod
-    itself is NOT touched by this atom (its migration is #204) -- this only
-    reads it."""
-    src = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
-        encoding="utf-8")
-    start = src.index("function invalidateHost(id) {")
-    body = src[start:src.index("\n                }\n", start)]
-    caches = set(re.findall(r"try \{ (\w+)\.delete\(id\); \} catch", body))
-    calls = set(re.findall(r"try \{ (\w+)\(id\); \} catch", body))
-    assert len(caches) + len(calls) == 8, (
-        f"host-registry's invalidateHost no longer clears eight things: "
-        f"{sorted(caches)} + {sorted(calls)}")
-    return caches, calls
+#: The eight things "forget this host" means. #195 named host-registry's own
+#: hand-kept list as the FLOOR and derived this set from the mod; #214 retired
+#: that list (the mod delegates to ctx.hosts.invalidate now), so the floor is
+#: written down here instead -- once -- and the gates below check core against
+#: it in both directions. Adding a ninth per-host cache means adding it here
+#: and registering it beside its own declaration.
+_HOST_INVALIDATE_FLOOR = {
+    "hostStateCache", "hostSaveChains", "authPrompted", "hostPolls",
+    "profilesCache", "mcpConfigCache", "profilesConfigCache",
+}
+# The /control socket is not a cache; core registers its clearer under the
+# name 'controlWs' and the mod used to call closeControlWs(id) by hand.
+_HOST_INVALIDATE_FLOOR_REGISTERED = _HOST_INVALIDATE_FLOOR | {"controlWs"}
+_HOST_INVALIDATE_CALLS = {"closeControlWs"}
 
 
 def test_the_invalidation_seam_is_core_owned_and_ordered_first():
@@ -14364,16 +14360,21 @@ def test_the_invalidation_seam_is_core_owned_and_ordered_first():
                 "function invalidateHost(id) {",
                 "function _repaintHostSurfaces() {"):
         assert sym in consts, f"{sym!r} did not land in 50"
-        # At core's own indent: host-registry still carries its own nested
-        # invalidateHost (16 spaces) until #204 retires it.
         assert INDEX_HTML.count("\n        " + sym) == 1, \
             f"#195 symbol missing/duplicated in the served page: {sym!r}"
-    # The mod keeps its own copy until #204 -- this atom must not have touched
-    # it -- and core's is a different, top-level declaration.
+    # #214 retired the mod's hand-kept copy. Its invalidateHost survives as a
+    # NAME -- a one-line feature-detected delegation to ctx.hosts.invalidate --
+    # but it must clear nothing itself, or the stranger's list is back.
     reg = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
         encoding="utf-8")
-    assert "                function invalidateHost(id) {" in reg, \
-        "host-registry's own invalidateHost is #204's to migrate, not A36's"
+    body = reg[reg.index("                function invalidateHost(id) {"):]
+    body = body[:body.index("\n                }\n")]
+    assert "ctx.hosts.invalidate(id)" in body, \
+        "host-registry must delegate to the core-owned invalidation"
+    for name in sorted(_HOST_INVALIDATE_FLOOR | _HOST_INVALIDATE_CALLS):
+        assert name not in body, (
+            f"host-registry is hand-clearing {name} again -- that list is "
+            "core's, and a stranger's copy of it drifts")
 
 
 def test_every_per_host_cache_registers_itself_at_its_declaration_site():
@@ -14399,18 +14400,62 @@ def test_every_per_host_cache_registers_itself_at_its_declaration_site():
         src = (BROKER_DIR / frag).read_text(encoding="utf-8")
         assert "registerHostCache(" not in src or frag == "50_js_constants.js", \
             f"{frag} registers a per-host cache it does not declare"
-    # THE FLOOR. Every cache the mod clears by hand is covered by core now.
-    caches, calls = _host_registry_invalidate_floor()
-    missing = sorted(caches - set(registered))
+    # THE FLOOR, both directions. Every cache in the set is registered, and
+    # nothing else is -- so a cache silently DROPPED from the registry fails
+    # here as loudly as one that was never added.
+    missing = sorted(_HOST_INVALIDATE_FLOOR - set(registered))
     assert not missing, (
-        f"host-registry clears {missing} and core does not: register each "
-        f"beside its own declaration with registerHostCache(...)")
+        f"core does not clear {missing}: register each beside its own "
+        f"declaration with registerHostCache(...)")
+    extra = sorted(set(registered) - _HOST_INVALIDATE_FLOOR_REGISTERED)
+    assert not extra, (
+        f"core registers {extra}, which is not in the floor -- add it to "
+        "_HOST_INVALIDATE_FLOOR deliberately")
     # ...including the one that is not a cache at all: the /control socket.
     joined = "\n".join(s for f in _HOST_CACHE_SITES
                        for s in _host_cache_registrations(f))
-    for call in calls:
+    for call in _HOST_INVALIDATE_CALLS:
         assert f"{call}(id)" in joined, \
-            f"host-registry's {call}(id) has no core clearer"
+            f"{call}(id) has no core clearer"
+
+
+def test_host_registry_invalidates_a_rotated_token_not_just_a_new_url():
+    """#214, and the one bullet on that issue with a security consequence
+    rather than a tidiness one.
+
+    applyRows has two edit arms: a url change (which also clears brokerId) and
+    -- same origin, so it is safe to adopt -- a FRESH TOKEN for the same
+    broker. Invalidation used to be gated on `if (urlChg)`, so the token arm
+    cleared nothing: every per-host cache, and the live /control socket, went
+    on holding the credential that had just been rotated away, until the poll
+    loop happened to re-prime. A credential rotation is precisely the case
+    where forgetting matters most, and it was the one case a url-only test
+    could not see.
+
+    Pinned structurally, because the mod has no executable harness yet (see
+    the note on #214): every touched row is collected and invalidated after
+    the write, and the url-only gate must not come back."""
+    src = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
+        encoding="utf-8")
+    body = src[src.index("function applyRows(rows) {"):]
+    body = body[:body.index("\n                }\n")]
+    code = "\n".join(l for l in body.splitlines()
+                     if not l.strip().startswith("//"))
+    assert "if (urlChg) invalidateHost" not in code, (
+        "invalidation is gated on a url change again -- a token rotation on "
+        "the same origin would leave the old credential cached")
+    # Both arms record the host they touched...
+    assert code.count("touched.push(") == 2, (
+        "each of applyRows' two write arms (new host, edited host) must "
+        "record the host it touched")
+    # ...and every one of them is invalidated, after the write.
+    assert "for (const id of touched) invalidateHost(id);" in code
+    assert code.index("savePrefs();") < code.index("for (const id of touched)"),         "invalidate must follow the write, not precede it"
+    # The four hand-sequenced renders are core's repaint now (invalidate runs
+    # _repaintHostSurfaces), so none of them survives here.
+    for gone in ("renderHostsList()", "renderSettingsTabs()",
+                 "renderHostStatus()", "refreshTaskbar()"):
+        assert gone not in code,             f"applyRows still hand-sequences the repaint: {gone!r}"
 
 
 def test_core_host_edit_and_removal_go_through_the_one_invalidate():

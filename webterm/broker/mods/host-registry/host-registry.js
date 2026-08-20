@@ -797,22 +797,30 @@
                 // ---- per-host cache invalidation ----------------------------
                 // When an apply changes a host's url (or token), drop every per-host
                 // cache the app keeps keyed by host id, so the change takes effect
-                // without a reload. This is a SUPERSET of what core's own edit path
-                // (commitHostForm) clears today (only the first three) — a known
-                // latent gap. Clearing a Map doesn't cancel an in-flight request,
-                // but it drops the stale cache so the NEXT request uses the new
-                // url/token and the poll loop re-primes on its next tick (the same
-                // model core uses for a host edit). closeControlWs is idempotent
-                // (a no-op when no socket is open).
+                // #195/#214: THE LIST IS CORE'S NOW. This used to name eight
+                // caches declared across five core fragments, plus
+                // closeControlWs, and its own comment called that "a SUPERSET
+                // of what core's own edit path clears today — a known latent
+                // gap". That is the honest description of any list a stranger
+                // keeps: right on the day it was written, and nothing makes it
+                // stay right. #195 moved it into core (50's registerHostCache,
+                // where each cache registers ITSELF beside its own
+                // declaration); all eight are registered there, so
+                // ctx.hosts.invalidate clears exactly this set and cannot
+                // drift from it. It REPAINTS too, which is the other half of
+                // what this mod hand-sequenced (see applyRows).
+                //
+                // Feature-detected rather than assumed: `hosts` is a family an
+                // EXTENDER adds, and 86c's extender bails when core's own
+                // invalidateHost is absent, so it can legitimately not be
+                // there. Without it a host edit still lands -- it just does not
+                // drop this page's caches early, which is what core's own edit
+                // path did before #195.
                 function invalidateHost(id) {
-                    try { hostPolls.delete(id); } catch (_) {}
-                    try { profilesCache.delete(id); } catch (_) {}
-                    try { authPrompted.delete(id); } catch (_) {}
-                    try { hostStateCache.delete(id); } catch (_) {}
-                    try { hostSaveChains.delete(id); } catch (_) {}
-                    try { mcpConfigCache.delete(id); } catch (_) {}
-                    try { profilesConfigCache.delete(id); } catch (_) {}
-                    try { closeControlWs(id); } catch (_) {}
+                    if (!id) return;
+                    if (ctx.hosts && typeof ctx.hosts.invalidate === 'function') {
+                        try { ctx.hosts.invalidate(id); } catch (_) {}
+                    }
                 }
 
                 // ---- apply (SYNCHRONOUS) ------------------------------------
@@ -823,6 +831,10 @@
                 function applyRows(rows) {
                     const hosts = getHosts();
                     let added = 0, updated = 0;
+                    // #214: every host this pass TOUCHED, invalidated once each
+                    // after the write. See the note at the bottom of this
+                    // function for why it is not just the url changes.
+                    const touched = [];
                     for (const row of rows) {
                         if (!row.checked || row.kind === 'identical') continue;
                         if (row.kind === 'new') {
@@ -838,6 +850,7 @@
                                          token: row.entry.token || '',
                                          color: row.entry.color,
                                          hidden: row.entry.hidden });
+                            touched.push(hosts[hosts.length - 1].id);
                             added += 1;
                         } else if (row.kind === 'differs' && row.local) {
                             const local = row.local;
@@ -872,20 +885,31 @@
                             local.label = row.entry.label || local.label;
                             local.color = row.entry.color;
                             local.hidden = !!row.entry.hidden;
-                            if (urlChg) invalidateHost(local.id);
+                            touched.push(local.id);
                             updated += 1;
                         }
                     }
                     if (added || updated) {
-                        // removeHost's fuller re-render sequence (the superset of
-                        // the two core writers). renderHostStatus is called
-                        // explicitly: refreshTaskbar coalesces on an in-flight run
-                        // and can no-op. defaultHost (synced) is never touched.
+                        // savePrefs stays -- a mutation belongs to whoever
+                        // mutated -- but the four renders that followed it are
+                        // core's _repaintHostSurfaces, which invalidate runs
+                        // (renderHostsList, renderSettingsTabs,
+                        // renderHostStatus, refreshTaskbar, each isolated so
+                        // one throw cannot skip the rest).
+                        //
+                        // AND IT RUNS FOR EVERY TOUCHED HOST, not only the url
+                        // changes. The edit arm above adopts a FRESH TOKEN for
+                        // the same origin, and that used to clear nothing: the
+                        // per-host caches -- and the live control socket --
+                        // went on holding the credential that had just been
+                        // rotated away, until the poll loop happened to
+                        // re-prime. A credential rotation is the case where
+                        // forgetting matters most, and it was the one case a
+                        // url-only invalidation could not see. A NEW host has
+                        // no caches to clear, so for it the call is simply the
+                        // repaint.
                         savePrefs();
-                        renderHostsList();
-                        renderSettingsTabs();
-                        renderHostStatus();
-                        refreshTaskbar();
+                        for (const id of touched) invalidateHost(id);
                     }
                     return { added: added, updated: updated };
                 }
