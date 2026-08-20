@@ -329,7 +329,19 @@
                 // down by a publish started in the meantime (or by a second click
                 // on itself) — the button guard only covers "a dialog is open
                 // right now", which an await between dialogs is not.
-                let _encBusy = false;
+                // NOT a dialog guard, despite the company it keeps below.
+                // #214 asked whether ctx.dialog's queueing retires this; it does
+                // not, and the old name is why that reads as plausible. The
+                // queue serialises the windows during which a mod's dialog is
+                // ON SCREEN. This serialises an entire registry ACTION --
+                // capability probes, passphrase derivation, encryption, the
+                // publish itself, and every gap between those -- which is a
+                // strictly wider window. Delete it and two Publishes race
+                // whole-document writes, a Publish racing Forget re-adds the
+                // passwords that were just removed, and two actions that both
+                // observe a null passphrase queue two prompts and then publish
+                // under different passphrases. Renamed to say so.
+                let _registryActionBusy = false;
                 // Assigned once the Control Panel control exists (below). A `let`
                 // seeded null, not a const declared later, because the pane's
                 // reflect() runs during registerSettingsPane and would otherwise
@@ -935,7 +947,13 @@
                 // the flag is what survives the next write, this mod's next
                 // version, and a broker restart. Both set() calls below share ONE
                 // opts object precisely so the 409 rebase cannot re-PUT without it.
-                async function publishTo(hid, value, purge, knownCapable) {
+                // `archiveRiskAccepted` is NOT "the broker was proved capable".
+                // doPublish passes the same flag for both of its outcomes: the
+                // capability probe came back clean, OR the operator was shown
+                // the archiving warning and said publish anyway. Naming it
+                // knownCapable invited exactly one misreading -- that a true
+                // here means the ring is safe -- so it says what it means.
+                async function publishTo(hid, value, purge, archiveRiskAccepted) {
                     const host = (hid === 'local') ? localHost() : hostById(hid);
                     const name = (host && host.id === 'local')
                         ? 'this broker' : (host ? host.label : hid);
@@ -948,7 +966,7 @@
                     // history. Asked here, immediately before the PUT, and only
                     // when there is actually a credential to lose.
                     const outCarries = valueHasPlainTokens(got && got.value);
-                    if (outCarries && knownCapable !== true) {
+                    if (outCarries && archiveRiskAccepted !== true) {
                         const cap = await checkNoHistory(hid);
                         if (!cap.capable) {
                             return { hid: hid, name: name, ok: false,
@@ -964,6 +982,33 @@
                     let res = await ctx.serverStore.set(value, rev, opts);
                     if (res && res.status === 409 && res.error === 'conflict'
                             && typeof res.rev === 'number') {
+                        // THE GATE ABOVE JUDGED A VALUE THAT IS NO LONGER
+                        // THERE. It asked "does the value this write REPLACES
+                        // carry a plaintext credential?", and a 409 means
+                        // somebody else replaced it in between -- so the value
+                        // about to be archived is the WINNER's, which nothing
+                        // has looked at. The sequence that bites: an old broker
+                        // holds a token-free value, this publish reads it and
+                        // skips the probe, another browser writes a
+                        // token-bearing value, we take the 409 and retry, and
+                        // the broker files THEIR password into the ring.
+                        // Narrow, and a credential-retention bug all the same.
+                        //
+                        // The 409 body inlines the live value (app.py, the
+                        // modstore PUT: "inline the live value so the client
+                        // rebases in one round trip"), so re-asking costs
+                        // nothing but the capability probe, and only when the
+                        // winner actually carries something to lose.
+                        if (archiveRiskAccepted !== true
+                                && valueHasPlainTokens(res.value)) {
+                            const cap = await checkNoHistory(hid);
+                            if (!cap.capable) {
+                                return { hid: hid, name: name, ok: false,
+                                         skipped: true, archiving: false,
+                                         error: 'would_archive',
+                                         why: cap.why };
+                            }
+                        }
                         // The SAME opts — noHistory included. A retry that rebuilt
                         // them without the flag would land the rebased value on an
                         // unflagged record and quietly resume archiving: the exact
@@ -2043,14 +2088,14 @@
                         // is a singleton and would cancel the first one's prompt.
                         if (typeof isAppDialogOpen === 'function'
                                 && isAppDialogOpen()) return;
-                        if (_encBusy) return;
-                        _encBusy = true;
+                        if (_registryActionBusy) return;
+                        _registryActionBusy = true;
                         Promise.resolve()
                             .then(onClick)
                             .catch(function (err) {
                                 console.error('[host-registry]', err);
                             })
-                            .then(function () { _encBusy = false; });
+                            .then(function () { _registryActionBusy = false; });
                     });
                     return b;
                 }

@@ -14437,6 +14437,68 @@ def test_every_per_host_cache_registers_itself_at_its_declaration_site():
             f"{call}(id) has no core clearer"
 
 
+def test_publish_rechecks_the_409_winner_before_it_archives_a_credential():
+    """#214, found by the adversarial review of the CAS bullet.
+
+    The would-archive gate asks "does the value this write REPLACES carry a
+    plaintext credential?" -- because the modstore ring archives the value
+    being replaced, not the one being sent. A 409 means somebody else replaced
+    it in between, so after the conflict the value about to be archived is the
+    WINNER's, which the gate never saw:
+
+      1. an old broker (no noHistory support) holds a token-free value;
+      2. this publish reads it, sees nothing to lose, skips the probe;
+      3. another browser writes a token-BEARING value;
+      4. this publish takes the 409 and retries;
+      5. the broker files THEIR password into the 50-deep ring.
+
+    Narrow -- it needs a token-free outgoing publish over an initially safe
+    value, a concurrent secret-bearing winner, and a broker that ignores the
+    flag -- and a credential-retention bug all the same. The 409 body inlines
+    the live value, so the re-check costs no extra round trip."""
+    src = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
+        encoding="utf-8")
+    body = src[src.index("async function publishTo("):]
+    body = body[:body.index("\n                }\n")]
+    code = "\n".join(l for l in body.splitlines()
+                     if not l.strip().startswith("//"))
+    # The retry is guarded by a check on the WINNER's inlined value...
+    assert "valueHasPlainTokens(res.value)" in code,         "the 409 winner is retried without asking whether it carries a secret"
+    assert code.index("valueHasPlainTokens(res.value)")         < code.index("ctx.serverStore.set(value, res.rev, opts)"),         "the winner must be judged BEFORE the rebased write, not after"
+    # ...and it refuses the same way the pre-write gate does, rather than
+    # falling through to a write.
+    tail = code[code.index("valueHasPlainTokens(res.value)"):]
+    assert "error: 'would_archive'" in tail[:tail.index(
+        "ctx.serverStore.set(value, res.rev, opts)")]
+    # Both gates honour the operator's explicit "publish anyway" -- and the
+    # flag says what it means now: doPublish passes it for a clean probe AND
+    # for an accepted warning, so `knownCapable` was a misreading waiting to
+    # happen.
+    assert "archiveRiskAccepted" in code and "knownCapable" not in code
+    # The opts object is still shared across both writes (#192): a retry that
+    # rebuilt them would drop noHistory and resume archiving.
+    assert code.count("opts)") >= 2
+
+
+def test_the_registry_action_lock_is_not_a_dialog_guard():
+    # #214 asked whether ctx.dialog's queueing retires `_encBusy`. It does not:
+    # the queue serialises the windows during which a dialog is ON SCREEN,
+    # while this serialises a whole registry ACTION -- probe, derive, encrypt,
+    # publish, and the gaps between them. The old name made the wrong answer
+    # look plausible, so it is renamed rather than deleted.
+    src = (BROKER_DIR / "mods" / "host-registry" / "host-registry.js").read_text(
+        encoding="utf-8")
+    assert "_encBusy" not in src, "the misleading name is back"
+    assert "let _registryActionBusy = false;" in src
+    # Still taken for the WHOLE handler, not just around a prompt.
+    assert "if (_registryActionBusy) return;" in src
+    assert "_registryActionBusy = true;" in src
+    assert "_registryActionBusy = false;" in src
+    # And the separate on-screen-dialog check stays while any path still calls
+    # core's singleton openDialog directly.
+    assert "isAppDialogOpen()" in src
+
+
 def test_host_registry_invalidates_a_rotated_token_not_just_a_new_url():
     """#214, and the one bullet on that issue with a security consequence
     rather than a tidiness one.
