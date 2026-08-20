@@ -46,11 +46,14 @@ def _js_action_labels() -> dict[str, str]:
 
     Core actions live in 78_js_keybindings.js; the workspace ones are
     registered by the workspaces mod, which is exactly why a guard that read
-    only core would miss seven rows.
+    only core would miss seven rows. #213 moved 'toggle-help' the same way --
+    the action is contributed by the help mod now, backed by the 'help:toggle'
+    command, so it comes and goes with the mod that implements it.
     """
     labels: dict[str, str] = {}
     for path in (BROKER / "78_js_keybindings.js",
-                 MODS / "workspaces" / "workspaces.js"):
+                 MODS / "workspaces" / "workspaces.js",
+                 MODS / "help" / "help.js"):
         src = path.read_text(encoding="utf-8")
         for aid, label in re.findall(
                 r"\{\s*id:\s*'([a-z0-9-]+)',\s*label:\s*'([^']+)'", src):

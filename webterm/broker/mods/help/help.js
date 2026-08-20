@@ -66,22 +66,47 @@
         // prefs._settings + prefs._layout, so an own top-level key is unreachable
         // by the sync path even if a future caller reached for savePrefs().
         //
-        // Declared/read as a top-level hoisted function so the rest of the page
-        // can ask (the mod script is one concatenated <script>, and loadMods gates
-        // init() but never parsing — so this answers even with the mod disabled).
+        // #196/#213: THE STORE IS ctx.prefs NOW. The paragraph above is the
+        // argument for why a top-level key in core's `prefs` was safe; ctx.prefs
+        // makes the whole argument unnecessary, because a mod-namespaced record
+        // ('webterm:modprefs:help:...') is not in core's prefs blob at all --
+        // resetLocalView cannot reach it, _stateBlob cannot serialize it, and no
+        // future caller can accidentally savePrefs() it into /state. It is also
+        // browser-local by construction rather than by discipline, which is what
+        // this setting wanted all along.
+        //
+        // THE LEGACY KEY IS STILL READ, ONCE. An upgrading user has their opt-in
+        // in prefs._help.dev, and silently resetting a preference is worse than
+        // the code it takes to carry it over: the read falls back to the old key
+        // and the next write lands in ctx.prefs, after which the fallback never
+        // matters again. Nothing deletes prefs._help -- a downgrade should find
+        // what it left.
         const HELP_PREFS_KEY = '_help';
-        function helpShowDevDocs() {
+        //: set from init(); null with the mod disabled, which is when nothing
+        //: below is reachable anyway (see the commands note in init).
+        let helpPrefs = null;
+        function helpLegacyShowDevDocs() {
             const p = prefs[HELP_PREFS_KEY];
             // === true, not truthy: corrupted storage must not opt somebody in.
             return !!(p && typeof p === 'object' && p.dev === true);
         }
+        function helpShowDevDocs() {
+            if (helpPrefs) {
+                const v = helpPrefs.get('dev', null);
+                if (v !== null && v !== undefined) return v === true;
+            }
+            return helpLegacyShowDevDocs();
+        }
         function helpSetShowDevDocs(on) {
+            if (helpPrefs) { helpPrefs.set('dev', on === true); return; }
+            // No ctx (a build without the prefs extender): the old key, exactly
+            // as before -- browser-local only, never a /state PUT.
             let p = prefs[HELP_PREFS_KEY];
             if (!p || typeof p !== 'object' || Array.isArray(p)) {
                 p = {}; prefs[HELP_PREFS_KEY] = p;
             }
             p.dev = (on === true);
-            savePrefsLocal();   // browser-local only — never a /state PUT
+            savePrefsLocal();
         }
         // #119: paint a section glyph into the rail button / header box. The icon
         // is a TAGGED value: { svg } is a trusted APP_ICON_SVG string (injected as
@@ -189,12 +214,38 @@
         // The Help corpus the window renders: the CORE merge (wiki cards + live
         // keybindings/profiles/MCP, from buildHelpEntries — kept in core because
         // it reads core state) PLUS every mod-contributed card registered through
-        // ctx.registerHelpCards (window.__mods.helpCards). Each contributed card
-        // gets the same lower-cased search haystack the core entries carry. Read
-        // LIVE so a card registered after Help opened appears on the next refresh.
+        // ctx.registerHelpCards. Each contributed card gets the same lower-cased
+        // search haystack the core entries carry. Read LIVE so a card registered
+        // after Help opened appears on the next refresh.
+        //
+        // #202/#213: through ctx.helpCards.list(), not window.__mods.helpCards.
+        // Reading the loader's private registry meant this mod depended on the
+        // SHAPE of a structure it does not own -- an array of raw entries -- and
+        // would have gone on reading it happily if the loader ever normalized or
+        // re-keyed it. list() is the owned surface, and it returns a FROZEN,
+        // sanitized snapshot, so a card cannot be mutated from here either.
+        //: set from init(), like helpPrefs. DECLARED BEFORE the function that
+        //: reads it: a hoisted function reading a later `let` is a TDZ
+        //: ReferenceError that disables the whole mod, and this file's JS never
+        //: runs in CI (#162).
+        let helpCardsApi = null;
+        //: The contributed cards, from the owned surface, with the loader's
+        //: private registry as the fallback ONLY for a build assembled without
+        //: 86n (where ctx.helpCards does not exist at all). Same shape either
+        //: way -- 86n's list() is a sanitized copy of that very registry.
+        function helpCardsList() {
+            if (helpCardsApi && typeof helpCardsApi.list === 'function') {
+                try {
+                    const out = helpCardsApi.list();
+                    if (Array.isArray(out)) return out;
+                } catch (_) { /* fall through to the raw registry */ }
+            }
+            try { return (window.__mods && window.__mods.helpCards) || []; }
+            catch (_) { return []; }
+        }
         function helpEntriesAll() {
             const entries = buildHelpEntries();
-            const cards = (window.__mods && window.__mods.helpCards) || [];
+            const cards = helpCardsList();
             for (const c of cards) {
                 const e = {
                     slug: c.slug, section: c.section, title: c.title,
@@ -643,6 +694,51 @@
                 // restored), matching Help's old core registration. No onUnload closes
                 // a live Help window: it holds no live resource (its render/corpus fns
                 // are hoisted/core), so it closes normally after disable.
+                // #196/#202/#213: the two surfaces the top-level helpers reach.
+                // Stashed rather than threaded because those helpers are still
+                // top-level declarations (see the commands note below), and a
+                // null here is the honest "the mod is not active" answer for
+                // both -- helpShowDevDocs falls back to the legacy key, and
+                // helpCardsList to the loader's registry.
+                if (ctx.prefs) helpPrefs = ctx.prefs;
+                if (ctx.helpCards) helpCardsApi = ctx.helpCards;
+                ctx.onUnload(function () { helpPrefs = null; helpCardsApi = null; });
+
+                // #199/#213: REACHABILITY IS A COMMAND NOW, not a hoisted name.
+                // Three call sites outside this mod used to reach in by
+                // identifier: core's KEY_ACTIONS 'toggle-help' entry called
+                // toggleHelpWindow(), and 86d's _refreshHelpIfOpen called
+                // findHelpWindow()/refreshHelpCorpus() behind a typeof guard.
+                // A typeof guard answers "did a fragment declaring that name
+                // evaluate?", which is TRUE for a mod that was switched off ten
+                // minutes ago -- the same defect #199 fixed for pattern's
+                // applyPattern. These resolve 'inactive' instead, which is a
+                // different sentence from 'absent' and the one an operator can
+                // act on.
+                if (ctx.commands && typeof ctx.commands.register === 'function') {
+                    ctx.commands.register('toggle', {
+                        run: function () { return toggleHelpWindow(); },
+                    });
+                    ctx.commands.register('refresh-corpus', {
+                        run: function () {
+                            const w = findHelpWindow();
+                            if (!w) return false;
+                            refreshHelpCorpus(w);
+                            return true;
+                        },
+                    });
+                }
+                // The key action is this mod's to contribute, so it comes and
+                // goes with the mod (#40 leaves it unbound by default, so it
+                // shows in the keybindings editor as 'unset'). `command:` backs
+                // it with the registration above -- declaring `run:` as well
+                // would throw at init, deliberately.
+                if (typeof ctx.registerKeyActions === 'function') {
+                    ctx.registerKeyActions([{ id: 'toggle-help',
+                                              label: 'Toggle help',
+                                              command: 'help:toggle' }]);
+                }
+
                 ctx.registerWindowKind({
                     appKind: 'help',
                     factory: function (d) { return openHelpWindow(d); },
@@ -686,13 +782,24 @@
                 // has been ADOPTED so it reflects the synced helpHintSeen rather than
                 // pre-pull defaults; capped (~10s) so an offline/auth-blocked broker
                 // still nudges from local prefs instead of hanging forever.
-                let hintTries = 0;
-                function maybeShowHelpHint() {
+                // #195/#213: THE EVENT, NOT A POLL. This used to re-arm a 500ms
+                // setTimeout up to twenty times waiting for core's private
+                // `_stateReady` flag to flip -- reading core state a mod does
+                // not own, and paying up to twenty wakeups to learn something
+                // core already announces. 'state:adopted' is a LEVEL, so a
+                // subscriber that arrives after the adopt is REPLAYED
+                // immediately: the late-mod case the poll's twenty tries were
+                // really covering is the one case the event handles for free.
+                //
+                // The ~10s cap survives, and it is not the same thing as the
+                // poll: it is the offline/auth-blocked broker that never adopts
+                // at all, where the nudge should still fire from local prefs
+                // rather than hang forever. One timer instead of twenty.
+                let hintDone = false;
+                function showHelpHint() {
+                    if (hintDone) return;
+                    hintDone = true;
                     try {
-                        if (!_stateReady && hintTries++ < 20) {
-                            setTimeout(maybeShowHelpHint, 500);
-                            return;
-                        }
                         const s = getSettings();
                         if (s.helpHintSeen) return;
                         showNotice('Tip: click the "?" on the taskbar for the interface guide.', 7000);
@@ -700,8 +807,27 @@
                         savePrefs();
                     } catch (_) {}
                 }
-                const hintTimer = setTimeout(maybeShowHelpHint, 1800);
-                ctx.onUnload(function () { clearTimeout(hintTimer); });
+                let offAdopted = null;
+                //: the nudge is deferred so it reflects the SYNCED helpHintSeen
+                //: rather than pre-pull defaults; whichever of the two fires
+                //: first wins, and showHelpHint is idempotent.
+                const hintTimer = setTimeout(function () {
+                    // The floor: no adopt in ~10s (offline, auth-blocked, a
+                    // broker that never answers) -- nudge from local prefs.
+                    showHelpHint();
+                }, 11800);
+                const hintDelay = setTimeout(function () {
+                    if (ctx.events && typeof ctx.events.on === 'function') {
+                        offAdopted = ctx.events.on('state:adopted', showHelpHint);
+                        return;
+                    }
+                    showHelpHint();   // no bus on this build: local prefs it is
+                }, 1800);
+                ctx.onUnload(function () {
+                    clearTimeout(hintTimer);
+                    clearTimeout(hintDelay);
+                    if (offAdopted) { try { offAdopted(); } catch (_) {} }
+                });
 
                 // #195 REFERENCE MIGRATION: the corpus refetch on a completed
                 // host auth, on the core->mod event bus. It replaces

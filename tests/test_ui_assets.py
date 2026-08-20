@@ -2697,10 +2697,19 @@ def test_help_dev_docs_toggle_is_browser_local_and_survives_reset_local_view():
     css = (BROKER_DIR / "mods" / "help" / "help.css").read_text(encoding="utf-8")
     assert ".app-help .help-dev-check" in css
 
-    # (a) The pref key is UNDERSCORE-prefixed, which is load-bearing: "Reset
-    #     local view" deletes every top-level pref whose key does NOT start with
-    #     '_' (it reads them as per-session window geometry), so a bare 'help'
-    #     key would be wiped by an unrelated recovery action.
+    # (a) THE STORE IS ctx.prefs (#213). It used to be a top-level key in
+    #     core's `prefs`, and the underscore prefix was load-bearing twice over
+    #     -- "Reset local view" deletes every top-level pref whose key does NOT
+    #     start with '_', and _stateBlob serializes only _settings/_layout. A
+    #     mod-namespaced record ('webterm:modprefs:help:...') is in neither, so
+    #     both hazards are gone by construction rather than by discipline.
+    assert "helpPrefs = ctx.prefs" in src, \
+        "the dev-docs opt-in must be stored through ctx.prefs"
+    assert "helpPrefs.set('dev', on === true)" in src
+    #     The LEGACY key is still READ, so an upgrading user keeps their
+    #     opt-in -- and while it is read at all it must stay underscore-safe.
+    assert "return helpLegacyShowDevDocs();" in src, \
+        "the legacy pref is no longer read -- upgrading users lose the opt-in"
     m = re.search(r"const HELP_PREFS_KEY = '([^']+)'", src)
     assert m, "help.js no longer declares HELP_PREFS_KEY"
     key = m.group(1)
@@ -2723,6 +2732,8 @@ def test_help_dev_docs_toggle_is_browser_local_and_survives_reset_local_view():
     #     SYNCED setting; the assertion is scoped to this path on purpose.)
     setter = src[src.index("function helpSetShowDevDocs"):]
     setter = setter[:setter.index("\n        function ")]
+    # The ctx.prefs write is browser-local by construction; the legacy branch
+    # (a build with no prefs extender) keeps savePrefsLocal, never savePrefs.
     assert "savePrefsLocal();" in setter and "savePrefs()" not in setter
     handler = src[src.index("const onDevToggle"):]
     handler = handler[:handler.index("devBox.addEventListener")]
@@ -2733,9 +2744,14 @@ def test_help_dev_docs_toggle_is_browser_local_and_survives_reset_local_view():
 
     # (d) Default UNTICKED, strictly: an absent OR corrupted stored value reads
     #     as false, so the end-user guide stays the default view.
+    legacy = src[src.index("function helpLegacyShowDevDocs"):]
+    legacy = legacy[:legacy.index("\n        function ")]
+    assert "p.dev === true" in legacy
     getter = src[src.index("function helpShowDevDocs"):]
     getter = getter[:getter.index("\n        function ")]
-    assert "p.dev === true" in getter
+    # === true on the ctx.prefs side too: a corrupted record must not opt
+    # somebody in any more than a corrupted legacy one could.
+    assert "return v === true;" in getter
     assert "devBox.checked = helpShowDevDocs();" in src
 
     # (e) The listener is torn down with the window, like every other one here.
@@ -7490,10 +7506,14 @@ _MOD_CROSS_FRAGMENT_CALL_INS = {
     # pattern's init and reaches theme through ctx.provide / ctx.consume, which
     # owns no shipped top-level name at all. The migration this list's own
     # docstring said would shrink it.)
-    # #194 moved the help-card family out of the loader, verbatim, to get 86
-    # back under the fragment cap -- so these two edges now sit in 86d. The
-    # coupling itself is unchanged: same code, same one <script>.
-    ("findHelpWindow", "help", "core:86d_js_mod_help_cards.js"),
+    # (#194 moved the help-card family out of the loader, verbatim, to get 86
+    # back under the fragment cap, so two help edges moved to 86d with it.
+    # #213 then RETIRED all three help edges: 86d executes the
+    # 'help:refresh-corpus' command instead of calling findHelpWindow /
+    # refreshHelpCorpus by name, and 78's 'toggle-help' key action is
+    # contributed by the help mod itself, backed by 'help:toggle'. A typeof
+    # guard cannot tell a disabled mod from an absent one; the command
+    # vocabulary can, which is the whole reason those edges went.)
     ("loadCodeMirror", "editor", "mod:scratchpad/scratchpad.js"),
     # (#177 retired agent-docs, which took two edges with it: `editorFile`
     # (editor) reached in from mods/agent-docs/, and `openAgentDocsWindow`
@@ -7501,8 +7521,6 @@ _MOD_CROSS_FRAGMENT_CALL_INS = {
     # as a `typeof` guard, which owns no shipped name, so it is not an edge.)
     ("openNoteOrEditorWindow", "editor", "core:54_js_app_windows_store.js"),
     ("openNoteOrEditorWindow", "editor", "mod:sticky/sticky.js"),
-    ("refreshHelpCorpus", "help", "core:86d_js_mod_help_cards.js"),
-    ("toggleHelpWindow", "help", "core:78_js_keybindings.js"),
 }
 
 

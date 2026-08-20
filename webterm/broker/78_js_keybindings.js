@@ -83,10 +83,13 @@
               run: () => toggleFullscreen() },
             { id: 'open-control-panel', label: 'Open control panel',
               run: () => toggleControlPanelWindow() },
-            // #40: unbound by default (absent from DEFAULT_KEYBINDINGS) — shows in
-            // the keybindings editor as 'unset' so users can assign their own combo.
-            { id: 'toggle-help',     label: 'Toggle help',
-              run: () => toggleHelpWindow() },
+            // #213 moved 'toggle-help' out of this list: it is contributed by
+            // mods/help through ctx.registerKeyActions, backed by the
+            // 'help:toggle' command, so the action comes and goes with the mod
+            // that implements it instead of being a core entry that calls a
+            // hoisted name which may belong to a disabled mod. (#40's posture
+            // is unchanged — still absent from DEFAULT_KEYBINDINGS, so it shows
+            // in the keybindings editor as 'unset'.)
         ];
         // ---- key-action registry (#148) -----------------------------------
         // KEY_ACTIONS used to be one const array, with its id index built ONCE

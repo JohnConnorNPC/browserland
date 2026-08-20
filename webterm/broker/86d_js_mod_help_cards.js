@@ -73,15 +73,22 @@
                      bodyFrags: bodyFrags, keys: keys, search: search.toLowerCase() };
         }
         // Re-render the live Help window (if any) so newly (un)registered cards
-        // appear without a reopen. findHelpWindow/refreshHelpCorpus are hoisted
-        // from the help mod; typeof-guarded so an absent/disabled help mod is a
-        // clean no-op.
+        // appear without a reopen.
+        //
+        // #199/#213: through the COMMAND, not by hoisted name. This used to
+        // call findHelpWindow()/refreshHelpCorpus() behind a typeof guard --
+        // and a typeof guard answers "did a fragment declaring that name
+        // evaluate?", which is TRUE for a help mod that was switched off ten
+        // minutes ago, so the call landed in a torn-down closure. Executing
+        // 'help:refresh-corpus' resolves 'inactive' for exactly that case and
+        // 'absent' when the mod is not installed at all. execute() never
+        // rejects, so there is no unhandled rejection to leak either; the
+        // typeof guard here is on the DISPATCHER, for a page assembled without
+        // 86h.
         function _refreshHelpIfOpen() {
             try {
-                if (typeof findHelpWindow === 'function'
-                    && typeof refreshHelpCorpus === 'function') {
-                    const w = findHelpWindow();
-                    if (w) refreshHelpCorpus(w);
+                if (typeof _execModCommand === 'function') {
+                    _execModCommand('help:refresh-corpus', null);
                 }
             } catch (_) {}
         }
