@@ -866,13 +866,25 @@ def test_update_check_names_the_broker_it_asks():
     assert "return hostById(hostId || LOCAL_HOST_ID);" in src
     assert "const LOCAL_HOST_ID = 'local';" in src, \
         "the local broker is a literal id, not a position in the host list"
-    # EVERY hostFetch call site passes the resolved object, not an id, not null,
-    # and not a captured record from an outer scope. Enumerated rather than
-    # spot-checked so a second call site added later cannot slip past.
-    firsts = re.findall(r"hostFetch\(\s*([^,\s)]+)", src)
-    assert firsts, "the mod must actually call hostFetch"
-    assert set(firsts) == {"host"}, \
-        f"hostFetch call sites must pass the resolved host: {sorted(set(firsts))}"
+    # RETARGETED BY #224. The bug this test exists for is now impossible by
+    # construction rather than by discipline: every route goes through
+    # ctx.http.fetch, which takes an ID and resolves it itself -- an unknown
+    # one comes back {status: 0, error: 'host_not_found'} with NO request
+    # issued, where hostFetch's null host silently hit the serving origin.
+    # So the enumeration moves from "who is passed as the host object" to
+    # "nothing calls the raw route at all".
+    assert "hostFetch(" not in src, \
+        "the update mod must not call the raw hostFetch; ctx.http.fetch " \
+        "resolves the id and refuses an unknown one without a request"
+    calls = re.findall(r"(?:await|return) updFetch\(\s*([^,\n]+),", src)
+    assert calls, "the mod must actually make its requests"
+    # 'host.id' at the three direct call sites; 'host && host.id' in the
+    # shim that adapts the update-apply companion's Response-shaped deps.
+    # Both name the broker by ID, which is the whole point -- ctx.http
+    # refuses an id it cannot resolve instead of falling through to the
+    # serving origin, so the null-host bug is unrepresentable now.
+    assert set(c.strip() for c in calls) <= {"host.id", "host && host.id"}, \
+        f"every request must name its broker by id: {sorted(set(calls))}"
     # ...and that object is obtained IMMEDIATELY before the request and fails
     # closed on a named state when the id no longer resolves. Falling through
     # to a null host is the one outcome that must be impossible.
@@ -8020,14 +8032,26 @@ def test_ctx_visibility_is_a_floor_for_shipped_mods_and_the_wiki_scopes_it():
         if re.search(r"ctx\.visibility\s*\?",
                      (BROKER_DIR / rel).read_text(encoding="utf-8"))
     }
+    # #224 emptied this set -- update was the last shipped mod carrying the
+    # fallback. So the gate now has two shapes, and the EMPTY one is the
+    # interesting one: the page must say plainly that none is left, because a
+    # roster that quietly lists nothing reads the same as a roster nobody
+    # maintained. If a mod ever grows one back, the first branch returns.
     span = re.search(
         r"(?:still carrying such a fallback|carrying such a fallback)"
         r"(.*?)(?:is|are) a\s+migration", wiki, re.S)
-    assert span, "the wiki no longer names the shipped mods carrying a dead fallback"
-    named = set(re.findall(r"`mods/([a-z0-9-]+)/`", span.group(1)))
-    assert named == carriers, (
-        "wiki/Writing-a-Mod.md names %s as still carrying a ctx.visibility "
-        "fallback, but the shipped set is %s" % (sorted(named), sorted(carriers)))
+    if carriers:
+        assert span,             "the wiki no longer names the shipped mods carrying a dead fallback"
+        named = set(re.findall(r"`mods/([a-z0-9-]+)/`", span.group(1)))
+        assert named == carriers, (
+            "wiki/Writing-a-Mod.md names %s as still carrying a ctx.visibility "
+            "fallback, but the shipped set is %s"
+            % (sorted(named), sorted(carriers)))
+    else:
+        assert "No shipped mod carries such a fallback any more" in wiki,             "no shipped mod carries the fallback; the wiki must say so"
+        assert span is None, (
+            "the wiki still names a carrier roster, but the shipped set is "
+            "empty -- say none is left instead of listing nothing")
 
 
 def test_launch_host_items_and_launch_profile_respect_hidden_hosts():

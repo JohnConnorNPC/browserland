@@ -30,7 +30,17 @@
             ctxVersion: 1,
             defaultEnabled: false,   // #182: ship OFF — no egress until opted in
             tiers: ['taskbar', 'settings', 'window'],
+            // #197: the surfaces this mod cannot run without. `needs` makes a
+            // build lacking them read as "blocked" in the Mods pane instead of
+            // an active mod whose buttons quietly do nothing.
+            needs: ['http.fetch', 'windows.createAppWindow'],
             init: function (ctx) {
+                // #200/#224: every route this mod drives goes through
+                // ctx.http.fetch, so without it there is nothing to show and
+                // nothing to administer. Feature-detected as well as declared
+                // (`needs` below): the gate lives in 86c, so a page assembled
+                // without that fragment has no gate.
+                if (!ctx.http || typeof ctx.http.fetch !== 'function') return;
                 // How often the BROWSER asks. The broker caches for a day, so
                 // most of these are cache hits that never leave the machine;
                 // this interval only governs how quickly a tab notices that the
@@ -190,8 +200,44 @@
                 function updHost(hostId) {
                     return hostById(hostId || LOCAL_HOST_ID);
                 }
+                // #198/#224: ctx.signal, not a hand-rolled flag. Two of these
+                // existed (restartOpDead / applyOpDead), both flipped from
+                // ctx.onUnload so a wait loop already in flight when the mod is
+                // switched off stops touching the DOM and stops polling. That
+                // IS an AbortSignal, and core aborts the real one at the HEAD
+                // of teardown -- before the first unload runs -- so it is true
+                // strictly earlier than a flag an unload had to set.
+                function opDead() {
+                    return !!(ctx.signal && ctx.signal.aborted);
+                }
+
+                // #200/#224: THE ONE HTTP DOOR. Five raw hostFetch routes lived
+                // in this mod, which is the largest RPC surface in the tree,
+                // and both of hostFetch's documented footguns were live here: a
+                // null host silently targets THIS origin (this file writes that
+                // down at :173 and :921 and guards it by hand at every call
+                // site), and its deadline stops at the response HEADERS, so a
+                // broker that answers and then stalls its body hangs the await
+                // past the timeoutMs each of these passes. ctx.http.fetch closes
+                // both -- an unknown id resolves {status: 0, error:
+                // 'host_not_found'} with NO request issued, and the deadline
+                // covers the body read.
+                //
+                // It also never rejects, so the try/catch each site wrapped
+                // becomes a check on `r.error`, and the body arrives parsed as
+                // `r.json` rather than through a second await that could itself
+                // throw. ctx.signal rides every call, so a mod switched off
+                // mid-request drops it rather than resolving into a dead
+                // window.
+                function updFetch(hostId, path, opts) {
+                    const o = Object.assign({}, opts || {});
+                    if (!o.signal && ctx.signal) o.signal = ctx.signal;
+                    return ctx.http.fetch(hostId, path, o);
+                }
+
                 let timer = null;
-                const openWins = new Set();
+                // #194/#224: ctx.windows.list() IS the bookkeeping (it
+                // prunes closed windows on the way past), so no hand-kept set.
 
                 // The issue's own objection to a permanent taskbar chip: this
                 // is consulted twice a month, not continuously. So by default
@@ -576,11 +622,11 @@
                             // and the apply had no fresh sha to act on. The
                             // broker floors and budgets these; a refusal comes
                             // back as a 200 that says so (refreshed:false).
-                            const r = await hostFetch(
-                                host,
+                            const r = await updFetch(host.id,
                                 '/update/check'
                                     + ((opts && opts.refresh) ? '?refresh=1' : ''),
                                 { timeoutMs: 20000 });
+                            if (r.error) throw new Error(r.error);
                             // This broker answered. Anything that goes wrong
                             // from here on is its ANSWER being unusable, not the
                             // trip to it, and the two must not be reported as
@@ -627,10 +673,14 @@
                                 st.error = 'not-opted-in';
                                 st.lastDeploy = null;
                                 st.refreshRefused = null;
-                            } else if (!r.ok) {
+                            } else if (!(r.status >= 200 && r.status < 300)) {
                                 throw new Error('HTTP ' + r.status);
                             } else {
-                                const j = await r.json();
+                                // #200: ctx.http parses the body for us, and
+                                // its deadline covered that read -- where the
+                                // second `await r.json()` this replaces could
+                                // hang past every timeoutMs above.
+                                const j = r.json;
                                 if (!j || !j.ok || !j.check) {
                                     throw new Error('bad-response');
                                 }
@@ -758,14 +808,9 @@
                 function start() {
                     stop();
                     // Feature-detected: a runtime-installed copy of this mod
-                    // can run against an older core with no ctx.visibility.
-                    // Either way `timer` holds a {stop}-shaped handle.
-                    timer = ctx.visibility
-                        ? ctx.visibility.pausableInterval(pollTick, POLL_MS)
-                        : (function () {
-                            const id = setInterval(pollTick, POLL_MS);
-                            return { stop: function () { clearInterval(id); } };
-                        })();
+                    // #198/#224: ctx.visibility is a floor for a shipped mod, so
+                    // the setInterval fallback that used to sit here is gone.
+                    timer = ctx.visibility.pausableInterval(pollTick, POLL_MS);
                 }
                 function stop() {
                     if (timer) { timer.stop(); timer = null; }
@@ -977,18 +1022,21 @@
                             : 'switching checking off…'));
                     let resp;
                     try {
-                        resp = await hostFetch(host, '/update/policy', {
+                        resp = await updFetch(host.id, '/update/policy', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(changes),
+                            json: changes,
                             timeoutMs: 15000,
                         });
                     } catch (_) {
                         mark('failed', 'could not reach that broker to ask');
                         return false;
                     }
-                    let body = null;
-                    try { body = await resp.json(); } catch (_) {}
+                    if (resp.error) {
+                        mark('failed', 'could not reach that broker to ask');
+                        return false;
+                    }
+                    const body = (resp.json && typeof resp.json === 'object')
+                        ? resp.json : null;
                     // The row this answer belongs to may not exist any more.
                     // Say nothing rather than writing another broker's outcome
                     // into it; the write itself already landed on the machine we
@@ -1273,11 +1321,6 @@
                 //                                itself never landed
                 //   { phase:'timeout', note }    the bounded wait ran out
                 let restartOp = null;
-                // Flipped by ctx.onUnload so a wait loop already in flight
-                // when the mod is switched off stops touching the DOM (and
-                // stops polling) rather than running to its own timeout in
-                // the background of a mod that is no longer loaded.
-                let restartOpDead = false;
 
                 function restartSleep(ms) {
                     return new Promise(function (resolve) {
@@ -1304,8 +1347,8 @@
                     restartOp = { phase: 'waiting', note: 'restarting…' };
                     renderAll();
                     const res = await applyFlow.pollBootId(LOCAL_HOST_ID,
-                        beforeBootId, null, () => restartOpDead);
-                    if (restartOpDead || res === 'dead') return;
+                        beforeBootId, null, opDead);
+                    if (opDead() || res === 'dead') return;
                     if (res === 'no-host') {
                         restartOp = { phase: 'failed',
                             note: 'the local broker is no longer '
@@ -1349,15 +1392,15 @@
                     renderAll();
                     let resp;
                     try {
-                        resp = await hostFetch(host, '/restart', {
+                        resp = await updFetch(host.id, '/restart', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({}),
+                            json: {},
                             // Comfortably past the server's own 20s drain
                             // ceiling (RESTART_DRAIN_TIMEOUT) plus room for
                             // the stop that follows a 202.
                             timeoutMs: 30000,
                         });
+                        if (resp.error) throw new Error(resp.error);
                     } catch (e) {
                         // A rejected POST here is NOT the expected
                         // connection-drops-mid-restart case — that applies
@@ -1370,8 +1413,8 @@
                         renderAll();
                         return;
                     }
-                    let body = null;
-                    try { body = await resp.json(); } catch (_) {}
+                    const body = (resp.json && typeof resp.json === 'object')
+                        ? resp.json : null;
                     if (resp.status !== 202) {
                         const code = body && body.reason_code;
                         restartOp = { phase: 'failed',
@@ -1819,12 +1862,34 @@
                 // builds its deps object, once; op state lives per host
                 // inside the factory, so N targets can be busy
                 // independently.
-                let applyOpDead = false;
+                // (the second of the two retired flags -- see opDead above)
                 const applyFlow = makeApplyFlow({
                     localHostId: LOCAL_HOST_ID,
                     updHost: updHost,
                     hostFingerprint: hostFingerprint,
-                    hostFetch: hostFetch,
+                    // #200/#224: the adapter, not the raw route. update-apply
+                    // reads `.ok`/`await .json()`, so it takes the shim below
+                    // rather than being rewritten twice.
+                    hostFetch: function (host, path, opts) {
+                        const o = Object.assign({}, opts || {});
+                        if (o.body != null && o.json === undefined) {
+                            try { o.json = JSON.parse(o.body); } catch (_) {}
+                            delete o.body;
+                        }
+                        delete o.headers;
+                        delete o.cache;
+                        return updFetch(host && host.id, path, o).then(
+                            function (r) {
+                                if (r.error) throw new Error(r.error);
+                                return {
+                                    ok: r.status >= 200 && r.status < 300,
+                                    status: r.status,
+                                    json: function () {
+                                        return Promise.resolve(r.json);
+                                    },
+                                };
+                            });
+                    },
                     renderAll: renderAll,
                     modCatalogCache: modCatalogCache,
                     // Success for the LOCAL broker keeps its fleet-wide
@@ -1836,7 +1901,7 @@
                     },
                     // ONE unload flag stops every host's op at once --
                     // ctx.onUnload below flips it, as it always did.
-                    isDead: function () { return applyOpDead; },
+                    isDead: opDead,
                     sleep: restartSleep,
                     now: function () { return Date.now(); },
                     waitTimeoutMs: RESTART_WAIT_TIMEOUT_MS,
@@ -1996,93 +2061,56 @@
                 }
 
                 // ---- detail window (ephemeral, like task-manager) ----
+                // #194/#224: the ~30-field scaffold is core's. This one also
+                // pays the fragment-cap debt the issue warned about: the
+                // deleted lines are what buy the room for everything else in
+                // this migration (never trim to fit -- the cap is satisfied by
+                // deleting duplication, not prose).
                 function openUpdateWindow(appData) {
-                    const id = String(appData.id);
-                    const title = appData.title || 'Update check';
-                    const geom = clampGeom(appData.geom
-                        || appDefaultGeom('text-editor'));
-                    const color = normalizeHex(appData.color || defaultColor(id));
-                    const locked = appData.locked !== undefined
-                        ? !!appData.locked : true;
-
-                    const chrome = buildAppChrome({
-                        id, appClass: 'app-upd', badge: '#upd',
-                        geom, color, locked, title,
+                    const d = appData || {};
+                    const h = ctx.windows.createAppWindow({
+                        kind: 'update',
+                        id: (d.id != null && String(d.id))
+                            ? String(d.id) : 'app:upd',
+                        singleton: true,
+                        title: d.title || 'Update check',
+                        sid: 'upd',
+                        badge: '#upd',
+                        appClass: 'app-upd',
+                        bodyClass: 'app-upd-body',
+                        geom: d.geom,
+                        color: d.color,
+                        locked: d.locked,
+                        floatGeom: d.floatGeom,
+                        toolbar: function (el, win) {
+                            const refreshBtn = document.createElement('button');
+                            refreshBtn.type = 'button';
+                            refreshBtn.textContent = 'Check now';
+                            refreshBtn.title = 're-ask every configured broker '
+                                + '(each caches its answer for a day)';
+                            el.appendChild(refreshBtn);
+                            const checkedEl = document.createElement('span');
+                            checkedEl.className = 'app-upd-checked';
+                            el.appendChild(checkedEl);
+                            win.checkedEl = checkedEl;
+                            const stopProp = (e) => e.stopPropagation();
+                            const onClick = (e) => {
+                                e.stopPropagation(); recheck();
+                            };
+                            refreshBtn.addEventListener('mousedown', stopProp);
+                            refreshBtn.addEventListener('click', onClick);
+                            win.cleanups.push(function () {
+                                refreshBtn.removeEventListener('mousedown',
+                                                               stopProp);
+                                refreshBtn.removeEventListener('click', onClick);
+                            });
+                        },
+                        body: function (el, win) { renderWindow(win); },
                     });
-                    const { dom, titleText } = chrome;
-
-                    const toolbar = document.createElement('div');
-                    toolbar.className = 'app-toolbar app-upd-toolbar';
-                    const refreshBtn = document.createElement('button');
-                    refreshBtn.type = 'button';
-                    refreshBtn.textContent = 'Check now';
-                    refreshBtn.title = 're-ask every configured broker '
-                        + '(each caches its answer for a day)';
-                    toolbar.appendChild(refreshBtn);
-                    const checkedEl = document.createElement('span');
-                    checkedEl.className = 'app-upd-checked';
-                    toolbar.appendChild(checkedEl);
-
-                    const body = document.createElement('div');
-                    body.className = 'app-upd-body';
-
-                    dom.appendChild(toolbar);
-                    dom.appendChild(body);
-                    addResizeHandles(dom);
-
-                    document.getElementById('desktop').appendChild(dom);
-                    document.getElementById('desktop').classList.remove('empty');
-
-                    const win = {
-                        id, sid: 'upd', hostId: 'app',
-                        type: 'app', appKind: 'update',
-                        dom, body, titleText, checkedEl,
-                        term: null, fitAddon: null,
-                        ws: null, wsOpen: false, termReady: false,
-                        minimized: false, disposed: false,
-                        geom, name: title, color,
-                        resizeTimer: null, lastSentDims: null,
-                        cleanups: [],
-                        tiled: false,
-                        floatGeom: appData.floatGeom
-                            ? Object.assign({}, appData.floatGeom) : null,
-                        locked, dirty: false,
-                    };
-                    windows.set(id, win);
-                    openWins.add(win);
-                    win.cleanups.push(function () { openWins.delete(win); });
-
-                    const stopProp = (e) => e.stopPropagation();
-                    const wireBtn = (btn, fn) => {
-                        const onClick = (e) => { e.stopPropagation(); fn(); };
-                        btn.addEventListener('mousedown', stopProp);
-                        btn.addEventListener('click', onClick);
-                        win.cleanups.push(function () {
-                            btn.removeEventListener('mousedown', stopProp);
-                            btn.removeEventListener('click', onClick);
-                        });
-                    };
-                    wireBtn(refreshBtn, function () { recheck(); });
-
-                    wireAppChrome(win, chrome);
-
-                    const appSess = { key: id, sid: 'upd', id, title,
-                                      stale: false, kind: 'app', hostId: 'app' };
-                    sessions.set(id, appSess);
-                    const itemsHost = document.getElementById('taskbar-items');
-                    if (!itemsHost.querySelector(
-                            '.taskbar-item[data-session-id="'
-                            + cssEscape(id) + '"]')) {
-                        itemsHost.appendChild(buildTaskbarItem(appSess));
-                    }
-                    updateTaskbarColor(id);
-                    updateTaskbarLabel(id);
-                    const emptyMsg = document.getElementById('taskbar-empty');
-                    if (emptyMsg) emptyMsg.remove();
-
-                    renderWindow(win);
-                    finishWindowPlacement(win);
-                    return win;
+                    // THE TRAP: a registered kind's factory return value goes
+                    // straight back to openAppWindow's callers, which want a
+                    // window RECORD. Return h.win, never the handle.
+                    return h.win;
                 }
 
                 // addRow/addNote/addHead moved to
@@ -2372,7 +2400,7 @@
 
                 function renderAll() {
                     renderChip();
-                    for (const w of openWins) renderWindow(w);
+                    for (const wh of ctx.windows.list()) renderWindow(wh.win);
                 }
 
                 function launchUpdate() {
@@ -2406,14 +2434,11 @@
                     // gone, rather than letting it run to its own bounded
                     // timeout in the background of a mod that is no longer
                     // loaded.
-                    restartOpDead = true;
-                    applyOpDead = true;
+                    // No flags to flip (ctx.signal is already aborted) and no
+                    // window loop: the loader stages the factory-owned close
+                    // ahead of the first onUnload, while the kind is still
+                    // registered.
                     stop();
-                    for (const w of Array.from(windows.values())) {
-                        if (w && w.type === 'app' && w.appKind === 'update') {
-                            closeWindow(w.id);
-                        }
-                    }
                 });
 
                 renderChip();

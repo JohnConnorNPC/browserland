@@ -266,6 +266,34 @@ const policyBodies = [];
 let policySendSeq = 0;
 const policyInfoWrote = {};   // hostId -> highest sendIdx written through
 
+// #200/#224: the mod drives every route through ctx.http.fetch now, so the
+// harness supplies that door and routes it onto the SAME hostFetch mock every
+// scenario below already programs -- the stub's behaviour, and therefore every
+// case, is unchanged. The adapter is the shape 86i promises: it NEVER rejects,
+// an unknown id resolves {status: 0, error: 'host_not_found'} with no request
+// issued, and the body comes back parsed on `.json`.
+globalThis.ctx = {
+    signal: { aborted: false },
+    http: {
+        fetch: async (hostId, path, opts) => {
+            const host = hostById(hostId);
+            if (!host) return { status: 0, error: 'host_not_found' };
+            const o = Object.assign({}, opts || {});
+            if (o.json !== undefined) {
+                o.body = JSON.stringify(o.json);
+                o.headers = { 'Content-Type': 'application/json' };
+                delete o.json;
+            }
+            let r;
+            try { r = await hostFetch(host, path, o); }
+            catch (_) { return { status: 0, error: 'transport' }; }
+            let j = null;
+            try { j = await r.json(); } catch (_) { j = null; }
+            return { status: r.status, json: j };
+        },
+    },
+};
+
 globalThis.hostFetch = async (host, path, opts) => {
     // A null host would silently hit the SERVING origin — the exact lie the
     // mod is written to prevent, so it is a hard failure here.
