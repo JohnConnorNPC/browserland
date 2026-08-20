@@ -9122,8 +9122,43 @@ El.prototype.remove = function () {
     if (this.parentNode) this.parentNode.removeChild(this);
     this.detached = true;
 };
-El.prototype.addEventListener = function () {};
-El.prototype.removeEventListener = function () {};
+// #208: listeners are RECORDED rather than discarded, so a case can click a
+// row the shipped render drew. (They were a no-op because no case had needed
+// to fire one; nothing reads the old shape.)
+El.prototype.addEventListener = function (type, fn) {
+    (this._listeners = this._listeners || []).push({ type: type, fn: fn });
+};
+El.prototype.removeEventListener = function (type, fn) {
+    const a = this._listeners || [];
+    for (let i = 0; i < a.length; i++) {
+        if (a[i].type === type && a[i].fn === fn) { a.splice(i, 1); return; }
+    }
+};
+El.prototype.fire = function (type) {
+    for (const L of (this._listeners || []).slice()) {
+        if (L.type !== type) continue;
+        L.fn({ target: this, stopPropagation: function () {},
+               preventDefault: function () {} });
+    }
+};
+// `innerHTML = ''` is how a full re-render clears its container (the
+// clipboard body does exactly this). Only the empty-string clear is
+// modelled -- assigning MARKUP is what 2810's forbidden-sink test exists to
+// prevent, so a harness that quietly parsed it would be modelling a thing
+// the codebase does not do.
+Object.defineProperty(El.prototype, 'innerHTML', {
+    get: function () { return this._html || ''; },
+    set: function (v) {
+        // The only structural effect modelled is the CLEAR, which is what a
+        // full re-render relies on. Assigned markup is remembered opaquely
+        // and never parsed: nothing in this codebase reads innerHTML back
+        // (2810 pins that the untrusted sinks are textContent), so parsing
+        // would be modelling a capability the app does not use.
+        for (const kid of this.children.slice()) kid.parentNode = null;
+        this.children.length = 0;
+        this._html = (v == null) ? '' : v;
+    },
+});
 El.prototype.querySelectorAll = function (sel) {
     const m = /^\.([\w-]+)(?:\[data-session-id="(.*)"\])?$/.exec(sel);
     const out = [];
@@ -10338,6 +10373,19 @@ function appIconSvg() { return document.createElement('svg'); }
 function svgIcon() { return document.createElement('svg'); }
 function toast() {}
 function showNotice() {}
+// NOT a stub: the SHAPE of this one is what the mod's _selfCopy guard rests
+// on (#208). 63_js_clipboard_auth.js calls _notifyClipboard('out', text)
+// SYNCHRONOUSLY at the head of copyTextToClipboard, before the async write --
+// so a flag set around the call brackets the echo exactly. Model that
+// ordering, or the echo case below would pass for the wrong reason. A python
+// assertion beside these cases pins the shipped call to the same shape.
+let CLIP_OBSERVER = null;
+function copyTextToClipboard(text) {
+    if (!text) return Promise.resolve(false);
+    if (CLIP_OBSERVER) CLIP_OBSERVER('out', text);   // 63: sync, at the head
+    clipWrites.push(text);
+    return Promise.resolve(true);                    // ...then the async write
+}
 
 __CLIPBOARD__
 
@@ -10355,7 +10403,11 @@ function bootClipboard() {
         // harness rather than on the mod.
         observe: function (fn) {
             m.__observer = fn;
-            const off = function () { m.__observerOff = true; };
+            CLIP_OBSERVER = fn;            // so copyTextToClipboard echoes
+            const off = function () {
+                m.__observerOff = true;
+                CLIP_OBSERVER = null;
+            };
             m.ctx.onUnload(off);
             return off;
         },
@@ -10426,6 +10478,40 @@ CLIPCASES.disable_is_clean = function () {
         chipOff: !!m.__chipOff,
         desktopEmpty: desktop.classList.contains('empty'),
     };
+};
+
+// The ring as a USER sees it: the rendered rows, newest first.
+function clipRows(win) {
+    return win.body.querySelectorAll('.clip-row').map(function (row) {
+        const dir = row.querySelector('.clip-dir').classes.has('clip-dir-in')
+            ? 'in' : 'out';
+        return dir + ':' + row.querySelector('.clip-text').textContent;
+    });
+}
+
+// #208: RE-COPYING A ROW MUST NOT RECORD ITSELF. Clicking a history row
+// re-copies that entry, which goes out through the same copyTextToClipboard
+// every other copy does -- and therefore straight back in through this mod's
+// own 'out' observer. Without the guard the ring grows an entry every time
+// the window is used, and re-copying an OLD entry would move it to the top:
+// the feature would rewrite the history it exists to preserve.
+CLIPCASES.recopy_does_not_echo = function () {
+    const m = bootClipboard();
+    const win = openAppWindow({ appKind: 'clipboard', id: 'app:clip' });
+    // Two genuine captures, so the ring has an order to disturb.
+    m.__observer('out', 'first');
+    m.__observer('in', 'second');
+    const before = clipRows(win);
+    // Click the OLDEST row -- the case that would reorder the ring.
+    const rows = win.body.querySelectorAll('.clip-row');
+    rows[rows.length - 1].querySelector('.clip-text').parentNode.fire('click');
+    const after = clipRows(win);
+    const writesAfterRecopy = clipWrites.slice();
+    // ...and a genuine copy from somewhere else still records, so the guard is
+    // a bracket around one call rather than a mod that stopped listening.
+    copyTextToClipboard('third');
+    return { before: before, after: after, afterReal: clipRows(win),
+             writesAfterRecopy: writesAfterRecopy };
 };
 
 (function () {
@@ -11333,6 +11419,57 @@ def test_the_real_clipboard_keeps_its_singleton_semantics(clipboard_harness):
     assert r["same"] is True, "a second launch built a second window"
     assert r["windows"] == 1 and r["chips"] == 1
     assert r["owned"] == ["app:clip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_re_copying_a_clipboard_row_does_not_echo_into_the_ring(
+        clipboard_harness):
+    """#208's open question, answered by keeping `_selfCopy` and proving it.
+
+    Clicking a history row re-copies that entry through the SAME
+    copyTextToClipboard every other copy uses, so it comes straight back in
+    through this mod's own 'out' observer. Unguarded, the ring would grow an
+    entry every time the window is used -- and re-copying an OLD entry would
+    move it to the top, so the feature would rewrite the history the mod
+    exists to preserve. Until now `_selfCopy` was pinned by a grep."""
+    r = _run_clip(clipboard_harness, "recopy_does_not_echo")
+    assert r["before"] == ["in:second", "out:first"]
+    # The ring is BYTE-IDENTICAL after the re-copy: no new entry, and no
+    # reordering of the entry that was clicked.
+    assert r["after"] == r["before"], \
+        "re-copying a row echoed back into the ring"
+    # ...but the copy really happened -- the guard suppresses the RECORD, not
+    # the clipboard write.
+    assert r["writesAfterRecopy"] == ["first"]
+    # And the mod is still listening: a genuine copy from elsewhere records.
+    assert r["afterReal"] == ["out:third", "in:second", "out:first"]
+
+
+def test_the_selfcopy_guard_brackets_a_synchronous_notify():
+    # WHY `_selfCopy` is sound, made checkable. The guard is
+    # `flag = true; copyTextToClipboard(t); finally flag = false` -- which
+    # only works because 63 emits the 'out' notify SYNCHRONOUSLY, at the head
+    # of that function, BEFORE the promise-returning write. If the notify ever
+    # moved after an await the flag would be back to false by the time the
+    # observer ran, the echo would land, and nothing else in the suite would
+    # notice. So pin the ordering in the file that owns it.
+    clip = (BROKER_DIR / "63_js_clipboard_auth.js").read_text(encoding="utf-8")
+    body = clip[clip.index("function copyTextToClipboard(text) {"):]
+    body = body[:body.index("function copyTextLegacy")]
+    assert "_notifyClipboard('out', text);" in body
+    # Before every route out -- the modern async write and the legacy one.
+    notify = body.index("_notifyClipboard('out', text);")
+    for later in ("navigator.clipboard.writeText(text)", "copyTextLegacy(text)"):
+        assert notify < body.index(later), (
+            "the clipboard 'out' notify must precede the write; the clipboard "
+            "mod's _selfCopy guard only brackets a SYNCHRONOUS emit")
+    # ...and it is not inside a then/await, which is the same claim spelled
+    # the way a refactor would break it.
+    head = body[:notify]
+    for async_marker in ("await", ".then("):
+        assert async_marker not in head, (
+            f"copyTextToClipboard reaches the notify through {async_marker!r}; "
+            "_selfCopy would be false again by the time the observer ran")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
