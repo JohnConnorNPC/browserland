@@ -20,6 +20,14 @@
             ctxVersion: 1,
             defaultEnabled: false,   // #112: ship OFF — no egress until opted in
             tiers: ['taskbar', 'settings', 'window'],
+            // #194/#197, and DELIBERATE, on clipboard's precedent: the whole
+            // window is built by the core factory now, so on a build without it
+            // the (+) menu entry and the taskbar chip would be dead buttons and
+            // the registered kind's factory would throw on every launch. A
+            // `needs` BLOCKS the mod there and the Mods pane row reads
+            // "blocked (needs windows.createAppWindow)", where a typeof bail
+            // would leave a mod reading "active" while silently doing nothing.
+            needs: ['windows.createAppWindow'],
             init: function (ctx) {
                 // Mirrors the server allowlist (app.py STATUS_ALLOWLIST): id +
                 // display label. Keep in sync — an id the server drops as unknown
@@ -77,7 +85,11 @@
                 let lastDisabled = false;
                 let timer = null;
                 let inFlight = false;
-                const openWins = new Set();   // live aistatus windows to re-render/close
+                // #194/#207: no hand-kept live-window set. ctx.windows.list()
+                // IS this mod's bookkeeping -- it prunes closed windows on the
+                // way past, so a stale one can never be re-rendered, and the
+                // cleanup that had to remove a window from a Set is gone with
+                // the Set.
 
                 // ---- settings (reuse the proven synced primitives, #104 clock) ----
                 // One browser-global boolean per provider (default ON) + a poll
@@ -227,15 +239,12 @@
                     const ms = intervalMs();
                     // A tick must never throw out (unhandled rejection).
                     const tick = function () { try { poll(); } catch (_) {} };
-                    // Feature-detected: a runtime-installed copy of this mod
-                    // can run against an older core with no ctx.visibility.
-                    // Either way `timer` holds a {stop}-shaped handle.
-                    timer = ctx.visibility
-                        ? ctx.visibility.pausableInterval(tick, ms)
-                        : (function () {
-                            const id = setInterval(tick, ms);
-                            return { stop: function () { clearInterval(id); } };
-                        })();
+                    // #198/#207: ctx.visibility is built into makeCtx's own
+                    // object literal and a shipped mod is served in the same
+                    // string as its loader, so the setInterval fallback that
+                    // used to sit here was unreachable. `timer` holds a
+                    // {stop}-shaped handle either way.
+                    timer = ctx.visibility.pausableInterval(tick, ms);
                 }
                 function restart() { if (timer) start(); }
 
@@ -379,96 +388,85 @@
                 }
 
                 // ---- app window (ephemeral, like task-manager) ----
-                function openAistatusWindow(appData) {
-                    const id = String(appData.id);
-                    const title = appData.title || 'AI status';
-                    const geom = clampGeom(appData.geom
-                        || appDefaultGeom('text-editor'));
-                    const color = normalizeHex(appData.color || defaultColor(id));
-                    const locked = appData.locked !== undefined
-                        ? !!appData.locked : true;
-
-                    const chrome = buildAppChrome({
-                        id, appClass: 'app-ais', badge: '#ais',
-                        geom, color, locked, title,
-                    });
-                    const { dom, titleText } = chrome;
-
-                    const toolbar = document.createElement('div');
-                    toolbar.className = 'app-toolbar app-ais-toolbar';
+                // #194 THE SCAFFOLD IS CORE'S. This used to hand-build the
+                // ~30-field app-window record every windowed mod re-typed:
+                // buildAppChrome, addResizeHandles, the desktop insertion and
+                // its `empty` class, the `win` literal pushed into the core
+                // windows Map, the synthetic kind:'app' session, the
+                // hand-appended taskbar chip with its cssEscape'd
+                // querySelector guard, updateTaskbarColor/Label, the
+                // #taskbar-empty removal, wireAppChrome and
+                // finishWindowPlacement. All of it is core-owned now and the
+                // spec below is only what makes this an AI-STATUS window.
+                //
+                // `singleton: true` also retires openOrFocusWindow's hand-rolled
+                // scan of the core windows Map -- and retires it for a case the
+                // scan could not see: core restores an unknown-kind record for
+                // a mod-owned kind BEFORE the mod loads (#167), under whatever
+                // id the stored record carried, and the factory's dedupe is on
+                // KIND over every live window rather than on an id this mod
+                // chose.
+                //
+                // No `geom` is passed: the deleted scaffold asked for
+                // appDefaultGeom('text-editor') where the factory's default is
+                // appDefaultGeom(kind), and that function only special-cases
+                // 'sticky-note' -- the two are the same box.
+                // The el arrives classed 'app-toolbar app-ais-toolbar' -- the
+                // factory derives the second from appClass, which is exactly
+                // what the deleted scaffold wrote by hand.
+                function buildAistatusToolbar(el, win) {
                     const refreshBtn = document.createElement('button');
                     refreshBtn.type = 'button';
                     refreshBtn.textContent = 'Refresh';
                     refreshBtn.title = 're-check all enabled providers now';
-                    toolbar.appendChild(refreshBtn);
+                    el.appendChild(refreshBtn);
                     const checkedEl = document.createElement('span');
                     checkedEl.className = 'app-ais-checked';
-                    toolbar.appendChild(checkedEl);
+                    el.appendChild(checkedEl);
+                    win.checkedEl = checkedEl;
 
-                    const body = document.createElement('div');
-                    body.className = 'app-ais-body';
-
-                    dom.appendChild(toolbar);
-                    dom.appendChild(body);
-                    addResizeHandles(dom);   // last children: hit zones on top
-
-                    document.getElementById('desktop').appendChild(dom);
-                    document.getElementById('desktop').classList.remove('empty');
-
-                    const win = {
-                        id, sid: 'ais', hostId: 'app',
-                        type: 'app', appKind: 'aistatus',
-                        dom, body, titleText, checkedEl,
-                        term: null, fitAddon: null,
-                        ws: null, wsOpen: false, termReady: false,
-                        minimized: false, disposed: false,
-                        geom, name: title, color,
-                        resizeTimer: null, lastSentDims: null,
-                        cleanups: [],
-                        tiled: false,
-                        floatGeom: appData.floatGeom
-                            ? Object.assign({}, appData.floatGeom) : null,
-                        locked, dirty: false,
-                    };
-                    windows.set(id, win);
-                    openWins.add(win);
-                    win.cleanups.push(function () { openWins.delete(win); });
-
+                    // Listener bookkeeping stays the mod's: core owns the
+                    // window, not what this mod hangs inside it. win.cleanups
+                    // is drained by closeWindow either way.
                     const stopProp = (e) => e.stopPropagation();
-                    const wireBtn = (btn, fn) => {
-                        const onClick = (e) => { e.stopPropagation(); fn(); };
-                        btn.addEventListener('mousedown', stopProp);
-                        btn.addEventListener('click', onClick);
-                        win.cleanups.push(function () {
-                            btn.removeEventListener('mousedown', stopProp);
-                            btn.removeEventListener('click', onClick);
-                        });
-                    };
-                    wireBtn(refreshBtn, function () { poll(); });
-
-                    // Raise / minimize / close / drag / 8-way resize / WM menu.
-                    wireAppChrome(win, chrome);
-
-                    // Manual taskbar item — app windows are never poll-managed. The
-                    // synthetic kind:'app' session keeps the poll reaper off it and
-                    // lets formatTitle render it (mirrors openTaskManagerWindow).
-                    const appSess = { key: id, sid: 'ais', id, title,
-                                      stale: false, kind: 'app', hostId: 'app' };
-                    sessions.set(id, appSess);
-                    const itemsHost = document.getElementById('taskbar-items');
-                    if (!itemsHost.querySelector(
-                            '.taskbar-item[data-session-id="'
-                            + cssEscape(id) + '"]')) {
-                        itemsHost.appendChild(buildTaskbarItem(appSess));
-                    }
-                    updateTaskbarColor(id);
-                    updateTaskbarLabel(id);
-                    const emptyMsg = document.getElementById('taskbar-empty');
-                    if (emptyMsg) emptyMsg.remove();
-
-                    renderWindow(win);
-                    finishWindowPlacement(win);
-                    return win;
+                    const onClick = (e) => { e.stopPropagation(); poll(); };
+                    refreshBtn.addEventListener('mousedown', stopProp);
+                    refreshBtn.addEventListener('click', onClick);
+                    win.cleanups.push(function () {
+                        refreshBtn.removeEventListener('mousedown', stopProp);
+                        refreshBtn.removeEventListener('click', onClick);
+                    });
+                }
+                function openAistatusWindow(appData) {
+                    const d = appData || {};
+                    const h = ctx.windows.createAppWindow({
+                        kind: 'aistatus',
+                        // The stored record's own id when core hands one over,
+                        // the stable id otherwise; `singleton` dedupes by kind
+                        // whichever it is, so a restore adopts (#167).
+                        id: (d.id != null && String(d.id)) ? String(d.id) : 'app:ais',
+                        singleton: true,        // one window, however it is launched
+                        title: d.title || 'AI status',
+                        sid: 'ais',             // chip/session short id
+                        badge: '#ais',
+                        appClass: 'app-ais',
+                        // NOT the factory default ('app-aistatus-body'): the
+                        // shipped stylesheet matches `.app-ais .app-ais-body`.
+                        bodyClass: 'app-ais-body',
+                        // Absent fields keep the factory's defaults, which are
+                        // the deleted scaffold's own: clampGeom(appDefaultGeom),
+                        // normalizeHex(defaultColor(id)) and locked:true.
+                        geom: d.geom,
+                        color: d.color,
+                        locked: d.locked,
+                        floatGeom: d.floatGeom,
+                        toolbar: buildAistatusToolbar,
+                        body: function (el, win) { renderWindow(win); },
+                    });
+                    // THE TRAP: openAppWindow hands a registered kind's factory
+                    // return value straight back to its callers, and they want a
+                    // window RECORD. Return h.win, never the handle.
+                    return h.win;
                 }
 
                 // Idempotent: rebuild the body from lastData every call. ALL
@@ -571,23 +569,17 @@
 
                 function renderAll() {
                     renderChip();
-                    for (const w of openWins) renderWindow(w);
+                    for (const h of ctx.windows.list()) renderWindow(h.win);
                 }
 
                 function launchAistatus() {
                     openAppWindow({ id: newAppId('ais'), appKind: 'aistatus' });
                 }
-                function openOrFocusWindow() {
-                    // Focus an existing window (openAppWindow dedups by id) rather
-                    // than stacking a new one on every chip click.
-                    for (const w of windows.values()) {
-                        if (w && w.appKind === 'aistatus' && !w.disposed) {
-                            openAppWindow({ id: w.id, appKind: 'aistatus' });
-                            return;
-                        }
-                    }
-                    launchAistatus();
-                }
+                // #194: no scan of the core windows Map any more. Either route
+                // reaches the factory, whose `singleton` dedupe focuses the
+                // live window instead of building a second one -- so the chip
+                // and the (+) entry can share one launcher.
+                function openOrFocusWindow() { launchAistatus(); }
 
                 // Register the aistatus window kind — EPHEMERAL (no serialize), like
                 // task-manager. A duplicate appKind throws -> initMod rolls back.
@@ -607,11 +599,13 @@
                 // primitives.
                 ctx.onUnload(function () {
                     stop();
-                    for (const w of Array.from(windows.values())) {
-                        if (w && w.type === 'app' && w.appKind === 'aistatus') {
-                            closeWindow(w.id);
-                        }
-                    }
+                    // #194: closeAll() replaces the loop that iterated CORE state
+                    // to find this mod's own windows -- it walks the owned
+                    // registry newest-first and is safe against the live Map
+                    // mutating underneath it. Still registered AFTER
+                    // registerWindowKind so LIFO closes the windows while the
+                    // kind is still registered (ephemeral either way).
+                    ctx.windows.closeAll();
                 });
 
                 // Go: paint the (grey/checking) chip, start the tick, poll now.

@@ -6840,9 +6840,9 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # ctx.windows.createAppWindow, which owns the tail for every mod that
     # migrates onto it (86c calls finishWindowPlacement once, after body()).
     # The remaining eight migrate under #204 and drop out of here as they do.
+    # #207 took aistatus out, for the same reason clipboard left.
     factories = [
         "81_js_control_panel.js",
-        "mods/aistatus/aistatus.js",
         "mods/editor/editor.js",
         "mods/file-manager/file-manager.js",
         "mods/help/help.js",
@@ -7837,13 +7837,15 @@ def test_feature_detected_mods_adopt_pausable_interval():
         "task-manager.js must feature-detect ctx.visibility"
 
     aistatus = (BROKER_DIR / "mods/aistatus/aistatus.js").read_text(encoding="utf-8")
-    # aistatus.js inlines the ternary at the timer site (no separate
-    # wrapper), so pin both branches of it: the pausableInterval call and
-    # the plain-setInterval fallback it degrades to on an older core.
+    # aistatus.js inlines the call at the timer site (no separate wrapper).
+    # #207 deleted the ternary's other branch, on the #198 floor argument, so
+    # the fallback is pinned by ABSENCE now -- the direction that catches it
+    # coming back.
     assert "ctx.visibility.pausableInterval(tick, ms)" in aistatus, \
         "aistatus.js's poll must call ctx.visibility.pausableInterval at its timer site"
-    assert "const id = setInterval(tick, ms);" in aistatus, \
-        "aistatus.js must keep the plain-setInterval fallback branch"
+    assert "setInterval(tick, ms)" not in aistatus.replace(
+        "ctx.visibility.pausableInterval(tick, ms)", ""), \
+        "aistatus.js re-grew a raw setInterval fallback"
 
     clock = (BROKER_DIR / "mods/clock/clock.js").read_text(encoding="utf-8")
     assert "ctx.visibility.pausableInterval(render, 1000)" in clock, \
@@ -10364,7 +10366,13 @@ process.stdout.write(JSON.stringify(out) + '\n');
 _CLIPBOARD_DRIVER = r"""
 // ---- the real clipboard mod (#194's reference migration) -------------------
 let CLIP_DECL = null;
-function registerMod(decl) { CLIP_DECL = decl; }
+let AIS_DECL = null;
+// Two shipped mods are spliced into this one file (#207 added aistatus), so
+// the capture routes by id rather than overwriting whichever ran last.
+function registerMod(decl) {
+    if (decl && decl.id === 'aistatus') AIS_DECL = decl;
+    else CLIP_DECL = decl;
+}
 const clipWrites = [];
 // Core globals the shipped clipboard reaches for that the window-factory
 // harness does not need. Stubs, not behaviour: this case is about the FACTORY
@@ -10514,13 +10522,127 @@ CLIPCASES.recopy_does_not_echo = function () {
              writesAfterRecopy: writesAfterRecopy };
 };
 
+// ---- the real aistatus mod (#207) -----------------------------------------
+// Same shape as the clipboard driver above: the SHIPPED mod, the SHIPPED
+// factory, and stubs only for the browser bits node has not got. No provider
+// is enabled, so poll() takes its own "nothing selected" early return and the
+// case never touches the network -- what is under test is the WINDOW.
+__AISTATUS__
+
+const AISCASES = {};
+
+function bootAistatus() {
+    const m = modCtx('aistatus');
+    m.ctx.taskbar = { addStatusItem: function (el) {
+        m.__chipEl = el;
+        const off = function () { m.__chipOff = true; };
+        m.ctx.onUnload(off);
+        return off;
+    } };
+    // Every provider OFF, which is this mod's shipped default posture and the
+    // one that keeps poll() local.
+    const setting = function (def) {
+        return function () {
+            return { get: function () { return def; }, set: function () {},
+                     onChange: function () {} };
+        };
+    };
+    m.ctx.settings = { boolean: setting(false), combo: setting('60') };
+    m.ctx.visibility = { pausableInterval: function (fn, ms) {
+        m.__timerMs = ms;
+        return { stop: function () { m.__timerStopped = true; } };
+    } };
+    AIS_DECL.init(m.ctx);
+    return m;
+}
+function aisWindows() {
+    return Array.from(windows.values())
+        .filter(function (w) { return w && w.appKind === 'aistatus'; })
+        .map(function (w) { return w.id; });
+}
+
+// THE FIX #207 BOUGHT, and it is user-visible: the (+) menu launcher minted a
+// FRESH id every time (newAppId('ais')), so openAppWindow's id dedupe never
+// matched and the old hand-rolled factory built a SECOND AI status window on
+// top of the first. Only the taskbar chip had an open-or-focus path, and it
+// scanned the core windows Map by hand to get it. `singleton: true` moves the
+// dedupe into the factory, where it is on KIND rather than on an id the
+// caller chose -- so every route in lands on the one window.
+AISCASES.aistatus_launching_twice_focuses_one_window = function () {
+    const m = bootAistatus();
+    const kind = lookupWindowKind('aistatus');
+    const first = kind.menu.launch();
+    const afterFirst = aisWindows();
+    kind.menu.launch();                       // the (+) menu, a second time
+    const afterSecond = aisWindows();
+    // ...and the chip's route, which shares the launcher now.
+    kind.menu.launch();
+    return {
+        registered: !!kind,
+        afterFirst: afterFirst, afterSecond: afterSecond,
+        afterThird: aisWindows(),
+        chips: chipIds().filter(function (id) { return id.indexOf('ais') !== -1; }),
+        owned: Array.from(m.rec.appWindows.keys()),
+        listLen: m.ctx.windows.list().length,
+    };
+};
+
+// It is a REAL factory-built record, with the scaffold core owns -- the same
+// claim clipboard's case makes, because the ~30 fields were re-typed here too.
+AISCASES.aistatus_builds_through_the_factory = function () {
+    const m = bootAistatus();
+    const win = openAppWindow({ appKind: 'aistatus', id: 'app:ais' });
+    return {
+        isRecord: !!(win && win.id && win.type === 'app'),
+        id: win && win.id, appKind: win && win.appKind, sid: win && win.sid,
+        cls: win && win.dom && win.dom.className,
+        bodyCls: win && win.body && win.body.className,
+        toolbarCls: win && win.body && win.body.parentNode
+            ? win.body.parentNode.children[1].className : null,
+        hasChecked: !!(win && win.checkedEl),
+        chips: chipIds(),
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
+// closeAll(): the disable no longer iterates CORE state hunting for windows
+// that happen to carry its appKind.
+AISCASES.aistatus_disable_closes_its_windows = function () {
+    const m = bootAistatus();
+    openAppWindow({ appKind: 'aistatus', id: 'app:ais' });
+    const before = { windows: aisWindows().length, chips: chipIds().length };
+    _runUnloads(m.rec);
+    return {
+        before: before,
+        windows: aisWindows().length, chips: chipIds().length,
+        sessions: sessions.size,
+        store: Object.keys(appStore),
+        kindGone: !lookupWindowKind('aistatus'),
+        timerStopped: !!m.__timerStopped,
+        chipOff: !!m.__chipOff,
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
 (function () {
     const want = process.argv[2];
+    if (AISCASES[want]) {
+        process.stdout.write(JSON.stringify(AISCASES[want]()) + '\n');
+        process.exit(0);
+    }
     if (!CLIPCASES[want]) { console.log('no such clipboard case: ' + want); process.exit(2); }
     const r = CLIPCASES[want]();
     process.stdout.write(JSON.stringify(r) + '\n');
 })();
 """
+
+
+def _aistatus_mod_source():
+    """The shipped aistatus mod, verbatim (#207). Its whole top level is
+    declarations plus a single registerMod(...) call, so it runs under the
+    same harness the clipboard one does -- no transcription anywhere."""
+    return (BROKER_DIR / "mods" / "aistatus" / "aistatus.js").read_text(
+        encoding="utf-8")
 
 
 def _clipboard_mod_source():
@@ -10550,7 +10672,8 @@ def clipboard_harness(tmp_path_factory):
          .replace("__KINDS__", _window_kind_registry_source())
          .replace("__RESTORE__", _restore_lifecycle_source())
          .replace("__TAKEDOWN__", _loader_takedown_source()))
-        + _CLIPBOARD_DRIVER.replace("__CLIPBOARD__", _clipboard_mod_source()),
+        + _CLIPBOARD_DRIVER.replace("__CLIPBOARD__", _clipboard_mod_source())
+                           .replace("__AISTATUS__", _aistatus_mod_source()),
         encoding="utf-8")
     return path
 
@@ -11419,6 +11542,63 @@ def test_the_real_clipboard_keeps_its_singleton_semantics(clipboard_harness):
     assert r["same"] is True, "a second launch built a second window"
     assert r["windows"] == 1 and r["chips"] == 1
     assert r["owned"] == ["app:clip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_launching_aistatus_twice_focuses_the_one_window(clipboard_harness):
+    """#207's user-visible fix. The (+) menu launcher minted a FRESH id every
+    time (newAppId('ais')), so openAppWindow's id dedupe never matched and the
+    old hand-rolled factory built a SECOND AI status window on top of the
+    first. Only the taskbar chip had an open-or-focus path, and it got there by
+    scanning the core windows Map by hand. `singleton: true` moves the dedupe
+    into the factory, where it is on KIND rather than on an id the caller
+    chose, so every route in lands on the one window."""
+    r = _run_clip(clipboard_harness, "aistatus_launching_twice_focuses_one_window")
+    assert r["registered"] is True
+    assert len(r["afterFirst"]) == 1
+    assert r["afterSecond"] == r["afterFirst"], \
+        "a second (+) launch stacked another AI status window"
+    assert r["afterThird"] == r["afterFirst"]
+    # One window, so one taskbar chip and one owned record -- the duplicates
+    # were visible in the taskbar too.
+    assert len(r["chips"]) == 1
+    assert len(r["owned"]) == 1 and r["listLen"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_aistatus_mod_runs_on_the_factory(clipboard_harness):
+    # The ~30-field scaffold was re-typed here too, so the same claim
+    # clipboard's case makes gets made for aistatus: a real factory-built
+    # record, with the classes the shipped stylesheet actually matches.
+    r = _run_clip(clipboard_harness, "aistatus_builds_through_the_factory")
+    assert r["isRecord"] is True
+    assert r["id"] == "app:ais" and r["appKind"] == "aistatus"
+    assert r["sid"] == "ais"
+    assert "app-ais" in r["cls"]
+    # `.term-window.app-ais .app-ais-body` and the toolbar name the deleted
+    # scaffold wrote by hand -- the factory derives the latter from appClass.
+    assert r["bodyCls"] == "app-ais-body"
+    assert r["toolbarCls"] == "app-toolbar app-ais-toolbar"
+    # The mod's own bit of the window survived the move into body()/toolbar().
+    assert r["hasChecked"] is True
+    assert r["chips"] == ["app:ais"]
+    assert r["desktopEmpty"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_aistatus_closes_its_windows_through_close_all(
+        clipboard_harness):
+    # closeAll() replaced a loop that iterated CORE state hunting for windows
+    # carrying this mod's appKind. Still ordered so the windows close while
+    # the kind is registered, so nothing junk is persisted.
+    r = _run_clip(clipboard_harness, "aistatus_disable_closes_its_windows")
+    assert r["before"] == {"windows": 1, "chips": 1}
+    assert r["windows"] == 0 and r["chips"] == 0
+    assert r["sessions"] == 0
+    assert r["store"] == [], "an ephemeral kind persisted a record"
+    assert r["kindGone"] is True
+    assert r["timerStopped"] is True and r["chipOff"] is True
+    assert r["desktopEmpty"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

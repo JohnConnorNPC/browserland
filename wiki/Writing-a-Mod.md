@@ -438,10 +438,10 @@ bumping it.
   `init(ctx)` is running at all, `ctx.visibility` is on that `ctx`; and per §7
   an in-tree mod is served beside the very loader that put it there. A
   `ctx.visibility ? … : setInterval(…)` fallback in a shipped mod is therefore
-  unreachable code. The ones still carrying such a fallback — `mods/aistatus/`,
-  `mods/task-manager/` and `mods/update/` — are a
-  migration of their own, not something to copy from. (`mods/clock/` was the
-  first one migrated out, under #209; `mods/git/` followed under #212.)
+  unreachable code. The ones still carrying such a fallback — `mods/task-manager/` and
+  `mods/update/` — are a migration of their own, not something to copy from.
+  (`mods/clock/` was the first one migrated out, under #209; `mods/git/`
+  followed under #212 and `mods/aistatus/` under #207.)
 
   **The floor stops at the repo.** An installed package is loaded by whatever
   broker it was installed on (§7, §11.2), and that loader really may predate
