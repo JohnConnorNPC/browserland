@@ -57,126 +57,50 @@
         // semantics): '' / 'local' / omitted -> local broker, a known id -> that
         // broker, an UNKNOWN remote id -> {ok:false,error:'host_not_found'} (no
         // request) so a removed host never silently falls back to local.
-        function fmFile() {
-            return fmFile.cap || {
-                read: function (path, opts) {
-                    const body = { path: path };
-                    if (opts && opts.b64 === true) body.b64 = true;
-                    return _modFileApi('/file/read', body, opts);
-                },
-                list: function (path, opts) {
-                    return _modFileApi('/file/list', { path: path || '' }, opts);
-                },
-                'delete': function (path, opts) {
-                    return _modFileApi('/file/delete',
-                        { path: path,
-                          recursive: !!(opts && opts.recursive) }, opts);
-                },
-                upload: function (path, contentB64, opts) {
-                    return _modFileApi('/file/upload',
-                        { path: path, content_b64: contentB64,
-                          overwrite: !!(opts && opts.overwrite) }, opts);
-                },
-                // #108 chunked transfer mirror (mods-off parity with ctx.file):
-                // ranged read + the append-and-atomic-replace upload session the
-                // cross-host transfer + in-app download loops drive.
-                readChunk: function (path, opts) {
-                    const body = { path: path,
-                                   offset: (opts && opts.offset) || 0 };
-                    if (opts && opts.length) body.length = opts.length;
-                    return _modFileApi('/file/read_chunk', body, opts);
-                },
-                // #110: SHA-256 of a file, streamed server-side (bounded, NOT
-                // capped at 5 MiB). A cross-host MOVE hashes the SOURCE with this,
-                // then hands the digest to uploadCommit as expected_sha256 to gate
-                // the source delete. -> {ok,path,sha256,size}.
-                hash: function (path, opts) {
-                    return _modFileApi('/file/hash', { path: path }, opts);
-                },
-                uploadBegin: function (path, opts) {
-                    return _modFileApi('/file/upload_begin',
-                        { path: path,
-                          overwrite: !!(opts && opts.overwrite) }, opts);
-                },
-                uploadChunk: function (uploadId, contentB64, opts) {
-                    return _modFileApi('/file/upload_chunk',
-                        { upload_id: uploadId, content_b64: contentB64,
-                          offset: (opts && opts.offset) || 0 }, opts);
-                },
-                uploadCommit: function (uploadId, opts) {
-                    const body = { upload_id: uploadId };
-                    // #110: a cross-host MOVE passes the source digest so the
-                    // server verifies the dest BEFORE its atomic replace and
-                    // refuses on mismatch. Absent/null (copy) -> field omitted
-                    // -> server skips verification (unchanged fast path).
-                    if (opts && opts.expected_sha256) {
-                        body.expected_sha256 = opts.expected_sha256;
-                    }
-                    return _modFileApi('/file/upload_commit', body, opts);
-                },
-                uploadAbort: function (uploadId, opts) {
-                    return _modFileApi('/file/upload_abort',
-                        { upload_id: uploadId }, opts);
-                },
-                // #72 richer ops mirror (mods-off parity with ctx.file).
-                mkdir: function (path, opts) {
-                    return _modFileApi('/file/mkdir', { path: path }, opts);
-                },
-                copy: function (src, dst, opts) {
-                    return _modFileApi('/file/copy',
-                        { src: src, dst: dst,
-                          overwrite: !!(opts && opts.overwrite) }, opts);
-                },
-                move: function (src, dst, opts) {
-                    return _modFileApi('/file/move',
-                        { src: src, dst: dst,
-                          overwrite: !!(opts && opts.overwrite) }, opts);
-                },
-                zip: function (src, dest, opts) {
-                    return _modFileApi('/file/zip',
-                        { src: src, dest: dest,
-                          overwrite: !!(opts && opts.overwrite) }, opts);
-                },
-                unzip: function (path, dest, opts) {
-                    return _modFileApi('/file/unzip',
-                        { path: path, dest: dest }, opts);
-                },
-                stat: function (path, opts) {
-                    return _modFileApi('/file/stat', { path: path }, opts);
-                },
-                // #96: editable Properties (mods-off mirror of ctx.file.setattr).
-                setattr: function (path, attrs, opts) {
-                    const body = { path: path };
-                    if (attrs && attrs.mode != null) body.mode = attrs.mode;
-                    if (attrs && attrs.attributes) body.attributes = attrs.attributes;
-                    return _modFileApi('/file/setattr', body, opts);
-                },
-            };
-        }
+        // #211: the accessor is gone with the stash. Every /file/* call in
+        // this mod goes through the ctx.file it is HANDED (see
+        // openFileManagerWindow's second parameter): there is no reachable
+        // path on which the builder runs without a ctx, so the mods-off mirror
+        // over the hoisted core _modFileApi had nothing left to serve.
 
         const FM_DRAG_MIME = 'application/x-webterm-file';
         // Chunk size for the streamed cross-host transfer + in-app download (#108).
         // Matches the server's MAX_CHUNK_BYTES (app.py) so a full read fills one
         // chunk; the server clamps anything larger. One chunk (~5.3 MiB base64) is
         // the most a broker or the browser holds in flight.
-        const FM_CHUNK_BYTES = 4 * 1024 * 1024;   // 4 MiB
-        function openFileManagerWindow(appData) {
-            const id = String(appData.id);
-            const title = appData.title || 'Files';
-            const geom = clampGeom(appData.geom || appDefaultGeom('text-editor'));
-            const color = normalizeHex(appData.color || defaultColor(id));
-            const locked = appData.locked !== undefined ? !!appData.locked : true;
+        // #211: NO CLIENT-SIDE CHUNK SIZE. This was `const FM_CHUNK_BYTES =
+        // 4 * 1024 * 1024`, a second copy of app.py's MAX_CHUNK_BYTES kept
+        // equal by nothing -- and the wrong half of the pair to own it, since
+        // the server clamps every ranged read to its own maximum anyway
+        // (`length = min(length, MAX_CHUNK_BYTES)`). Omitting `length`
+        // entirely is what serves it from the API: the route's default IS that
+        // maximum (`body.get("length", MAX_CHUNK_BYTES)`), so the client asks
+        // for "one chunk, whatever that is here" and tracks a broker that
+        // raises or lowers it without a client change. Both call sites already
+        // advance the offset from the bytes they actually got, so nothing
+        // depended on knowing the number in advance.
+        // #194/#211: THE SCAFFOLD IS CORE'S, and `ctx` is a parameter rather
+        // than a function-property stash. The builder has exactly one caller --
+        // the kind's own factory, which only exists while this mod is enabled --
+        // so there is no reachable path on which it runs without one, which is
+        // what let the fmFile() accessor's `.cap` and its _modFileApi fallback
+        // be deleted rather than moved (the same argument #221 made for
+        // task-manager).
+        function openFileManagerWindow(appData, ctx) {
+            const d = appData || {};
+            // The accessor that used to read fmFile.cap, now a plain local
+            // binding to the ctx this builder was handed. Kept as a FUNCTION so
+            // the ~30 call sites below are unchanged, and so the indirection
+            // still reads as "the file API for this activation" rather than a
+            // captured object that could outlive it.
+            const fmFile = () => ctx.file;
+            const id = String(d.id);
+            const title = d.title || 'Files';
+            let dom = null, titleText = null, win = null;
+            let toolbar = null, fmBody = null;
+            let refreshBtn = null, openBtn = null, upBtn = null;
+            let left = null, right = null;
 
-            // Shared chrome (#79): .term-window shell + title bar (_ / ×) + the
-            // eight resize handles, built + wired by the window-runtime factory.
-            const chrome = buildAppChrome({
-                id, appClass: 'app-fm', badge: '#fm', geom, color, locked, title,
-            });
-            const { dom, titleText } = chrome;
-
-            // Toolbar (Refresh / Open / ↑ Up) — same chrome class as the editor.
-            const toolbar = document.createElement('div');
-            toolbar.className = 'app-toolbar app-fm-toolbar';
             const mkBtn = (label, ttl) => {
                 const b = document.createElement('button');
                 b.type = 'button';
@@ -184,19 +108,9 @@
                 if (ttl) b.title = ttl;
                 return b;
             };
-            const refreshBtn = mkBtn('Refresh', 'reload both panes');
-            const openBtn = mkBtn('Open', 'open the selected file in the editor');
-            const upBtn = mkBtn('↑ Up', 'go to the parent of the active pane');
-            toolbar.appendChild(refreshBtn);
-            toolbar.appendChild(openBtn);
-            toolbar.appendChild(upBtn);
-
             // Body: a flex row of two equal panes (left/right), each a path
             // header above a scrollable list. Made focusable (tabIndex 0) so
             // the window can take focus for the Tab-toggles-pane shortcut.
-            const fmBody = document.createElement('div');
-            fmBody.className = 'app-fm-body';
-            fmBody.tabIndex = 0;
             const mkPane = (side) => {
                 const pane = document.createElement('div');
                 pane.className = 'app-fm-pane';
@@ -228,60 +142,70 @@
                 pane.appendChild(list);
                 return { pane, head, path, list, hostBtn, folderBtn };
             };
-            const left = mkPane('left');
-            const right = mkPane('right');
-            fmBody.appendChild(left.pane);
-            fmBody.appendChild(right.pane);
+            const handle = ctx.windows.createAppWindow({
+                kind: 'file-manager',
+                id: id,
+                title: title,
+                sid: 'fm',
+                badge: '#fm',
+                appClass: 'app-fm',
+                // The stylesheet matches '.app-fm-body'; the factory's derived
+                // default would be the same string here, but it is spelled so
+                // a rename of the kind cannot silently move it.
+                bodyClass: 'app-fm-body',
+                geom: d.geom,
+                color: d.color,
+                locked: d.locked,
+                floatGeom: d.floatGeom,
+                toolbar: function (el) {
+                    toolbar = el;
+                    refreshBtn = mkBtn('Refresh', 'reload both panes');
+                    openBtn = mkBtn('Open',
+                                    'open the selected file in the editor');
+                    upBtn = mkBtn('↑ Up',
+                                  'go to the parent of the active pane');
+                    el.appendChild(refreshBtn);
+                    el.appendChild(openBtn);
+                    el.appendChild(upBtn);
+                },
+                body: function (bodyEl, w) {
+                    fmBody = bodyEl;
+                    win = w;
+                    dom = w.dom;
+                    titleText = w.titleText;
+                    // body is the focusable FM root (vs a textarea for
+                    // editors) so bringToFront/focusWin can focus it for the
+                    // Tab shortcut.
+                    bodyEl.tabIndex = 0;
+                    left = mkPane('left');
+                    right = mkPane('right');
+                    bodyEl.appendChild(left.pane);
+                    bodyEl.appendChild(right.pane);
+                },
+            });
+            if (!win) return handle.win;
 
-            dom.appendChild(toolbar);
-            dom.appendChild(fmBody);
-            addResizeHandles(dom);   // last children: edge/corner hit zones on top
-
-            document.getElementById('desktop').appendChild(dom);
-            document.getElementById('desktop').classList.remove('empty');
-
-            const win = {
-                id, sid: 'fm', hostId: 'app',
-                type: 'app', appKind: 'file-manager',
-                // body is the focusable FM root (vs a textarea for editors) so
-                // bringToFront/focusWin can focus it for the Tab shortcut.
-                dom, body: fmBody, titleText,
-                term: null, fitAddon: null,
-                ws: null, wsOpen: false, termReady: false,
-                minimized: false, disposed: false,
-                geom, name: title, color,
-                resizeTimer: null, lastSentDims: null,
-                staleSession: false, authFailed: false,
-                reattachAttempts: 0, reattachAt: 0, lastOpenAt: 0, missingPolls: 0,
-                cleanups: [],
-                tiled: false,
-                floatGeom: appData.floatGeom
-                    ? Object.assign({}, appData.floatGeom) : null,
-                locked,
-                dirty: false,
-                // Legacy single-window host (#35). Kept ONLY so an old record
-                // (written before per-pane host) restores faithfully: each pane
-                // back-fills from it just below. Pane file ops use fmLeftHostId/
-                // fmRightHostId now, and removeHost keys the FM on appKind — so
-                // this is never again consulted for routing or cleanup.
-                fileHostId: appData.fileHostId || 'local',
-                // Per-pane host (#46): split view can straddle two brokers, so
-                // the host is a property of each PANE. An old single-host record
-                // (no fmLeftHostId/fmRightHostId) seeds both panes from the
-                // legacy fileHostId; a brand-new FM seeds both from the launch
-                // host (see launchFileManager).
-                fmLeftHostId: appData.fmLeftHostId
-                    || appData.fileHostId || 'local',
-                fmRightHostId: appData.fmRightHostId
-                    || appData.fileHostId || 'local',
-                // The two panes' current ABSOLUTE dirs ('' = the broker's default
-                // dir on first render, then adopted as the server's absolute cwd).
-                // A legacy root-relative value still resolves under the default
-                // dir, so old windows upgrade themselves to absolute on first list.
-                fmLeft: appData.fmLeft != null ? String(appData.fmLeft) : '',
-                fmRight: appData.fmRight != null ? String(appData.fmRight) : '',
-            };
-            windows.set(id, win);
+            // Only the FM's OWN state is set on the record core built.
+            //
+            // Legacy single-window host (#35). Kept ONLY so an old record
+            // (written before per-pane host) restores faithfully: each pane
+            // back-fills from it just below. Pane file ops use fmLeftHostId/
+            // fmRightHostId now, and removeHost keys the FM on appKind — so
+            // this is never again consulted for routing or cleanup.
+            win.fileHostId = d.fileHostId || 'local';
+            // Per-pane host (#46): split view can straddle two brokers, so the
+            // host is a property of each PANE. An old single-host record (no
+            // fmLeftHostId/fmRightHostId) seeds both panes from the legacy
+            // fileHostId; a brand-new FM seeds both from the launch host (see
+            // launchFileManager).
+            win.fmLeftHostId = d.fmLeftHostId || d.fileHostId || 'local';
+            win.fmRightHostId = d.fmRightHostId || d.fileHostId || 'local';
+            // The two panes' current ABSOLUTE dirs ('' = the broker's default
+            // dir on first render, then adopted as the server's absolute cwd).
+            // A legacy root-relative value still resolves under the default
+            // dir, so old windows upgrade themselves to absolute on first list.
+            win.fmLeft = d.fmLeft != null ? String(d.fmLeft) : '';
+            win.fmRight = d.fmRight != null ? String(d.fmRight) : '';
 
             // stopProp is shared by the toolbar/pane/host/folder button handlers
             // below (the dom-mousedown raise + min/close are wired by wireAppChrome).
@@ -521,7 +445,7 @@
                     // that call has to survive the very cancel that triggered it.
                     const rc = await fmFile().readChunk(srcPath,
                         { host: srcHost.id, offset: offset,
-                          length: FM_CHUNK_BYTES, signal: opts.signal });
+                          signal: opts.signal });
                     if (win.disposed) return await failAbort();
                     // An aborted request surfaces as a plain failure, so check
                     // the signal FIRST or a Cancel reads as "transfer failed".
@@ -1198,7 +1122,6 @@
                             // chunk in flight, not just the one after it.
                             const rc = await fmFile().readChunk(child,
                                 { host: host.id, offset: offset,
-                                  length: FM_CHUNK_BYTES,
                                   signal: progress.signal });
                             if (win.disposed) { await abortWritable(); return; }
                             // Check the cancel BEFORE the error branch: an
@@ -1643,26 +1566,9 @@
             // pane's own '..' row, and separator-correct on every host).
             wireBtn(upBtn, () => sideOf(activeSide).browse.goParent());
 
-            // Raise / minimize / close / drag / 8-way resize / WM context menu.
-            // Issue #11: × discards the file manager (the Closed list keeps only
-            // non-empty sticky notes); its nav state is not retained.
-            wireAppChrome(win, chrome);
-
-            // Manual taskbar item (app windows are never poll-managed), same as
-            // openAppWindow: synthetic session keeps formatTitle happy +
-            // updateTaskbarColor fixes the accent.
-            const appSess = { key: id, sid: 'fm', id, title, stale: false,
-                              kind: 'app', hostId: 'app' };
-            sessions.set(id, appSess);
-            const itemsHost = document.getElementById('taskbar-items');
-            if (!itemsHost.querySelector(
-                    '.taskbar-item[data-session-id="' + cssEscape(id) + '"]')) {
-                itemsHost.appendChild(buildTaskbarItem(appSess));
-            }
-            updateTaskbarColor(id);
-            updateTaskbarLabel(id);
-            const emptyMsg = document.getElementById('taskbar-empty');
-            if (emptyMsg) emptyMsg.remove();
+            // Issue #11: × discards the file manager (the Closed list keeps
+            // only non-empty sticky notes); its nav state is not retained --
+            // which is the factory's default close, so no onClose is passed.
 
             // ---- host lifecycle hooks (#46) ----
             // A removed host resets only the affected pane(s) to local (dir
@@ -1670,7 +1576,16 @@
             // and re-lists — the FM is NEVER force-closed by host removal (it
             // can still browse its other, surviving pane). Returns true so
             // removeHost stops there for this window.
-            win._hostRemoved = (rid) => {
+            // #195/#211: THE BUS, NOT TWO FIELDS. These were properties this
+            // mod wrote onto its own window for core to invoke BY NAME. The
+            // removal handler's `return true` was already dead -- 83 does
+            // `if (win._hostRemoved) win._hostRemoved(id); continue;`, so the
+            // `continue` that keeps a split FM open is the appKind check, not
+            // the return value -- and the timing moves for the better: the
+            // event fires at the END of removeHost, so a handler runs after
+            // the splice, the per-host caches and the lease socket are gone,
+            // where the field ran mid-removal.
+            const onHostRemoved = (rid) => {
                 let touched = false;
                 for (const s of ['left', 'right']) {
                     if (win[hostKey(s)] === rid) {
@@ -1685,21 +1600,32 @@
                     reList('left');
                     reList('right');
                 }
-                return true;
             };
             // Re-list any pane on the host that just authenticated (the auth
             // form keys terminal-healing on win.hostId, which is 'app' here).
-            win._onHostAuth = (hid) => {
+            const onHostAuth = (hid) => {
                 for (const s of ['left', 'right']) {
                     if (win[hostKey(s)] === hid) reList(s);
                 }
             };
+            if (ctx.events && typeof ctx.events.on === 'function') {
+                const offRemoved = ctx.events.on('host:removed', function (p) {
+                    if (p && p.hostId) onHostRemoved(p.hostId);
+                });
+                const offAuth = ctx.events.on('host:auth', function (p) {
+                    if (p && p.hostId) onHostAuth(p.hostId);
+                });
+                win.cleanups.push(function () {
+                    try { offRemoved(); } catch (_) {}
+                    try { offAuth(); } catch (_) {}
+                });
+            }
 
             saveAppWindow(win);
             setActive('left');
             reList('left');
             reList('right');
-            finishWindowPlacement(win);
+            // finishWindowPlacement is the factory's now.
             return win;
         }
 
@@ -1736,8 +1662,9 @@
                 // delete + upload) through the reviewed ctx.file capability (#82);
                 // cleared on teardown so a disabled file-manager mod falls back to
                 // the hoisted _modFileApi (see fmFile()).
-                fmFile.cap = ctx.file;
-                ctx.onUnload(function () { fmFile.cap = null; });
+                // #211: nothing is stashed here any more -- the builder is
+                // handed the ctx it needs (see the factory above), so there is
+                // no function-property to set and none to clear on teardown.
                 // Register the file-manager kind (the #80 built-in spec, moved
                 // here). serialize stays the shared core serializeAppWindow so
                 // webterm:appwindows:v1 persistence is byte-identical; a duplicate
@@ -1745,7 +1672,9 @@
                 // exactly THIS registration.
                 ctx.registerWindowKind({
                     appKind: 'file-manager',
-                    factory: function (d) { return openFileManagerWindow(d); },
+                    factory: function (d) {
+                        return openFileManagerWindow(d, ctx);
+                    },
                     serialize: serializeAppWindow,
                     menu: {
                         label: 'File manager',

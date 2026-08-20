@@ -4580,18 +4580,45 @@ def test_filemanager_mod_packaged_and_manifest_agrees():
     assert "ctx.registerWindowKind(" in src
     assert "appKind: 'file-manager'" in src
     assert "serialize: serializeAppWindow" in src
-    assert "return openFileManagerWindow(d)" in src
+    assert "return openFileManagerWindow(d, ctx)" in src, \
+        "the builder must be handed the ctx it used to stash on a function prop"
     assert "return launchFileManager()" in src
-    # File I/O (incl. the DESTRUCTIVE delete + upload) rides ctx.file (#82): the
-    # mod stashes ctx.file and every /file/* call flows through fmFile() — NO direct
-    # fileApiPost AND no raw upload fetch (hostFetch) survives in the mod.
-    assert "fmFile.cap = ctx.file;" in src
+    # File I/O (incl. the DESTRUCTIVE delete + upload) rides ctx.file (#82):
+    # every /file/* call flows through fmFile() — NO direct fileApiPost AND no
+    # raw upload fetch (hostFetch) survives in the mod. #211 retired the
+    # `.cap` stash and its mods-off _modFileApi mirror: fmFile is a local
+    # binding to the ctx the builder is handed, and the builder's only caller
+    # is the kind's own factory, which exists only while the mod is enabled.
+    fm_code = "\n".join(l for l in src.splitlines()
+                        if not l.strip().startswith("//"))
+    assert "const fmFile = () => ctx.file;" in fm_code
+    for gone in ("fmFile.cap", "_modFileApi"):
+        assert gone not in fm_code, \
+            f"the retired capability stash is still live code: {gone!r}"
     assert "fmFile().list(" in src
     assert "fmFile().read(" in src
     assert "fmFile().delete(" in src
     assert "fmFile().upload(" in src
     assert "fileApiPost(" not in src, "file-manager mod must route I/O through ctx.file"
     assert "hostFetch(" not in src, "the raw upload fetch must be gone"
+    # #194: the ~30-field scaffold is core's, and the two duck-typed window
+    # fields core invoked BY NAME are ctx.events subscriptions (#195). Both
+    # pinned by absence, since re-growing either is the regression.
+    assert "ctx.windows.createAppWindow({" in fm_code
+    for gone in ("buildAppChrome", "addResizeHandles", "wireAppChrome",
+                 "windows.set(", "buildTaskbarItem", "finishWindowPlacement",
+                 "win._hostRemoved", "win._onHostAuth"):
+        assert gone not in fm_code, \
+            f"file-manager re-grew the hand-rolled shape: {gone!r}"
+    assert "ctx.events.on('host:removed'" in fm_code
+    assert "ctx.events.on('host:auth'" in fm_code
+    # #211: the chunk size is the API's. The route defaults `length` to the
+    # server's own MAX_CHUNK_BYTES, so asking for nothing is asking for "one
+    # chunk, whatever that is here" -- and the duplicated constant is gone.
+    assert "FM_CHUNK_BYTES" not in fm_code, \
+        "the client re-grew its own copy of the server's chunk size"
+    assert "length: " not in fm_code.split("readChunk(")[1][:200] \
+        if "readChunk(" in fm_code else True
     # Ships in the served page, AFTER the help mod and BEFORE the editor mod (so the
     # (+) menu lists File manager right after the core built-ins, ahead of the
     # text-editor + sticky-note mods).
@@ -4800,23 +4827,33 @@ def test_no_native_dialogs_in_served_page():
 
 def test_file_capability_richer_ops_present():
     # #72: ctx.file gains mkdir/copy/move/zip/unzip/stat and a recursive flag on
-    # delete; ctxVersion stays 1 (additive). The SAME methods are mirrored in the
-    # file-manager's fmFile() fallback so its I/O is identical mods on or off.
+    # delete; ctxVersion stays 1 (additive).
+    #
+    # RETARGETED BY #211. This used to assert the SAME methods twice -- once in
+    # the loader and once in the file-manager's fmFile() fallback, a mods-off
+    # mirror over the hoisted core _modFileApi that had to be kept in parity by
+    # hand. That mirror is gone: the builder is handed its ctx, and with the
+    # kind unregistered there is no reachable caller for it, so there was
+    # nothing left for a fallback to serve. The parity that mattered is now
+    # structural, and what is left to check is that the ONE implementation has
+    # the methods and that the mod actually calls them.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
         encoding="utf-8")
-    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
-        for sym in ("mkdir: function", "copy: function", "move: function",
-                    "zip: function", "unzip: function", "stat: function",
-                    "setattr: function"):                       # #96
-            assert sym in src, f"{label} missing #72 method: {sym!r}"
-        for route in ("'/file/mkdir'", "'/file/copy'", "'/file/move'",
-                      "'/file/zip'", "'/file/unzip'", "'/file/stat'",
-                      "'/file/setattr'"):                       # #96
-            assert route in src, f"{label} does not wrap route {route!r}"
-        # delete carries the recursive flag.
-        assert "recursive: !!(opts && opts.recursive)" in src, \
-            f"{label} delete missing recursive flag"
+    for sym in ("mkdir: function", "copy: function", "move: function",
+                "zip: function", "unzip: function", "stat: function",
+                "setattr: function"):                           # #96
+        assert sym in loader, f"loader ctx.file missing #72 method: {sym!r}"
+    for route in ("'/file/mkdir'", "'/file/copy'", "'/file/move'",
+                  "'/file/zip'", "'/file/unzip'", "'/file/stat'",
+                  "'/file/setattr'"):                           # #96
+        assert route in loader, f"loader ctx.file does not wrap route {route!r}"
+    assert "recursive: !!(opts && opts.recursive)" in loader, \
+        "loader ctx.file delete missing recursive flag"
+    # The mod reaches every one of them through the one accessor.
+    for call in ("fmFile().mkdir(", "fmFile().copy(", "fmFile().move(",
+                 "fmFile().zip(", "fmFile().unzip(", "fmFile().stat("):
+        assert call in fm, f"file-manager no longer calls {call!r}"
     # ctxVersion unchanged (additive capability).
     assert "ctxVersion: 1" in loader
     # And the new routes reach the served page.
@@ -4828,20 +4865,21 @@ def test_file_capability_richer_ops_present():
 def test_file_capability_chunked_ops_present():
     # #108: ctx.file gains readChunk + the upload-session trio (uploadBegin/
     # uploadChunk/uploadCommit/uploadAbort); ctxVersion stays 1 (additive). The
-    # SAME methods are mirrored in the file-manager fmFile() fallback so its I/O is
-    # identical mods on or off, and the transfer + download rewrites drive them.
+    # RETARGETED BY #211, like its #72 twin above: the fmFile() fallback that
+    # mirrored these by hand is gone with the `.cap` stash, so the methods are
+    # asserted once, where they are implemented, and the mod is checked for
+    # CALLING them (below) rather than for re-declaring them.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
         encoding="utf-8")
-    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
-        for sym in ("readChunk: function", "uploadBegin: function",
-                    "uploadChunk: function", "uploadCommit: function",
-                    "uploadAbort: function"):
-            assert sym in src, f"{label} missing #108 method: {sym!r}"
-        for route in ("'/file/read_chunk'", "'/file/upload_begin'",
-                      "'/file/upload_chunk'", "'/file/upload_commit'",
-                      "'/file/upload_abort'"):
-            assert route in src, f"{label} does not wrap route {route!r}"
+    for sym in ("readChunk: function", "uploadBegin: function",
+                "uploadChunk: function", "uploadCommit: function",
+                "uploadAbort: function"):
+        assert sym in loader, f"loader ctx.file missing #108 method: {sym!r}"
+    for route in ("'/file/read_chunk'", "'/file/upload_begin'",
+                  "'/file/upload_chunk'", "'/file/upload_commit'",
+                  "'/file/upload_abort'"):
+        assert route in loader, f"loader ctx.file does not wrap route {route!r}"
     # ctxVersion unchanged (additive capability).
     assert "ctxVersion: 1" in loader
     # The new routes reach the served page.
@@ -4869,17 +4907,24 @@ def test_checksum_verified_move_present():
     # #110: ctx.file gains hash() and threads expected_sha256 into uploadCommit;
     # the file-manager's cross-host MOVE hashes the source and gates the source-
     # delete on a VERIFIED commit. ctxVersion stays 1 (additive). The capability is
-    # mirrored in the fmFile() fallback so I/O is identical mods on or off.
+    # RETARGETED BY #211 (see the two tests above): the fmFile() fallback
+    # that mirrored the capability by hand is gone with the `.cap` stash, so
+    # hash() is asserted where it is implemented and the MOD is checked for
+    # USING it -- which is the half that actually matters here, since the
+    # point of #110 is that the source-delete is gated on a verified commit.
     loader = (BROKER_DIR / "86_js_mod_loader.js").read_text(encoding="utf-8")
     fm = (BROKER_DIR / "mods" / "file-manager" / "file-manager.js").read_text(
         encoding="utf-8")
-    for src, label in ((loader, "loader ctx.file"), (fm, "fmFile fallback")):
-        assert "hash: function" in src, f"{label} missing hash() method"
-        assert "'/file/hash'" in src, f"{label} does not wrap /file/hash"
-        # expected_sha256 is conditionally threaded into the commit body (not the
-        # old bare {upload_id} literal), matching read/write's field style.
-        assert "expected_sha256" in src, \
-            f"{label} does not thread expected_sha256 into uploadCommit"
+    assert "hash: function" in loader, "loader ctx.file missing hash() method"
+    assert "'/file/hash'" in loader, "loader ctx.file does not wrap /file/hash"
+    # expected_sha256 is conditionally threaded into the commit body (not the
+    # old bare {upload_id} literal), matching read/write's field style.
+    assert "expected_sha256" in loader, \
+        "loader ctx.file does not thread expected_sha256 into uploadCommit"
+    assert "fmFile().hash(" in fm, \
+        "the cross-host move no longer hashes the source"
+    assert "expected_sha256" in fm, \
+        "the mod does not thread expected_sha256 into its commit"
     # ctxVersion unchanged (additive capability).
     assert "ctxVersion: 1" in loader
     # The new route + method reach the served page.
@@ -6875,12 +6920,12 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # ctx.windows.createAppWindow, which owns the tail for every mod that
     # migrates onto it (86c calls finishWindowPlacement once, after body()).
     # The remaining eight migrate under #204 and drop out of here as they do.
-    # #207 took aistatus out, #221 task-manager, #219 scratchpad and #218
-    # recorder (both of its windows), for the same reason clipboard left.
+    # #207 took aistatus out, #221 task-manager, #219 scratchpad, #218
+    # recorder (both of its windows) and #211 file-manager, for the same
+    # reason clipboard left.
     factories = [
         "81_js_control_panel.js",
         "mods/editor/editor.js",
-        "mods/file-manager/file-manager.js",
         "mods/help/help.js",
     ]
     for rel in factories:
@@ -15703,11 +15748,21 @@ def test_the_help_mod_no_longer_writes_the_convention_field():
     # caller cannot be deleted while any of them does. #218 took recorder off
     # it (both of its windows), leaving these two -- when the list empties,
     # 63's loop and the field go with it.
-    for mod, entry in (("editor", "editor.js"),
-                       ("file-manager", "file-manager.js")):
+    for mod, entry in (("editor", "editor.js"),):
         other = (BROKER_DIR / "mods" / mod / entry).read_text(encoding="utf-8")
         assert "win._onHostAuth =" in other, \
             f"{mod} was migrated here -- update this list and recheck 63"
+    # #211 took file-manager off the field too (both of its hooks), so the
+    # list is down to the editor alone -- when it empties, 63's loop and the
+    # field go with it.
+    for mod, entry in (("file-manager", "file-manager.js"),
+                       ("recorder", "recorder.js")):
+        gone_src = (BROKER_DIR / "mods" / mod / entry).read_text(
+            encoding="utf-8")
+        gone_code = "\n".join(l for l in gone_src.splitlines()
+                              if not l.strip().startswith("//"))
+        assert "win._onHostAuth =" not in gone_code, \
+            f"{mod} re-grew the duck-typed field"
     rec = (BROKER_DIR / "mods" / "recorder" / "recorder.js").read_text(
         encoding="utf-8")
     rec_code = "\n".join(l for l in rec.splitlines()
