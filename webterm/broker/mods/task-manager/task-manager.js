@@ -14,64 +14,36 @@
         // issue (the task manager stays a live monitor).
         //
         // SESSION RPC rides ctx.session (#85): every /session/procs +
-        // /session/kill call goes through the tmSession() accessor (below) — the
-        // reviewed, host-aware capability — instead of the old inline fetch, so the
+        // /session/kill call goes through ctx.session directly (#221 retired the
+        // tmSession() accessor) — the reviewed, host-aware capability — instead
+        // of the old inline fetch, so the
         // DESTRUCTIVE kill / session destroy is funneled through one choke point.
         // The wire contract is byte-identical: each call returns { status, json }
         // and the window keeps the exact status branching (401 auth, 409
         // session_gone = SUCCESS, 200 ok:true). Host routing is byte-identical too —
         // every call passes the session's own host id ({ host: sess.hostId }),
-        // which ctx.session / _modSessionApi re-resolve to the SAME host object the
-        // old inline sessionPost used (hostById(sess.hostId)).
+        // which ctx.session re-resolves to the SAME host object the old inline
+        // sessionPost used (hostById(sess.hostId)).
         //
         // mods_enabled=false posture (same as every extracted mod): the task-
         // manager kind is simply not REGISTERED, so the (+) "Task manager" launcher
         // disappears. Nothing persisted to coerce on restore (it's ephemeral), and
-        // openAppWindow returns null for the unregistered 'task-manager' kind. The
-        // builder + launcher stay hoisted top-level `function`s (reachable), and
-        // tmSession() degrades to a literal mirror of ctx.session over the hoisted
-        // core _modSessionApi, so the RPC is identical mods on or off.
+        // openAppWindow returns null for the unregistered 'task-manager' kind --
+        // which is also why #221 could delete the mods-off RPC fallback rather
+        // than move it: with the kind unregistered there is no reachable caller
+        // for the builder, so there is nothing left for a fallback to serve.
 
-        // ---- ctx.session accessor -----------------------------------------
-        // The single choke point every task-manager /session/* call flows through.
-        // init() stashes the per-mod ctx.session on tmSession.cap (a function
-        // property — no TDZ, the window.__mods / fmFile.cap pattern), which the
-        // hoisted builder closures read via tmSession(). With mods off (init never
-        // ran) it degrades to a literal mirror of ctx.session's procs/kill over the
-        // hoisted core _modSessionApi (the SAME plumbing ctx.session wraps,
-        // identical request bodies + fail-closed host-id routing), so the session
-        // RPC is identical mods on or off. opts.host is a host-id (sess.hostId
-        // semantics): '' / 'local' / omitted -> local broker, a known id -> that
-        // broker, an UNKNOWN remote id -> a synthetic no_host result (no request).
-        function tmSession() {
-            return tmSession.cap || {
-                procs: function (id, opts) {
-                    return _modSessionApi('/session/procs', { id: id }, opts);
-                },
-                kill: function (id, pid, opts) {
-                    return _modSessionApi('/session/kill',
-                        { id: id, pid: pid }, opts);
-                },
-            };
-        }
-
-        // ---- ctx.visibility accessor ---------------------------------------
-        // Mirrors tmSession(): openTaskManagerWindow is a hoisted top-level
-        // function outside init()'s closure, so the per-mod ctx.visibility
-        // capability (feature-detected — a runtime-installed copy of this mod
-        // can run against an older core without it) is stashed on
-        // tmPausableInterval.cap the same way ctx.session lands on
-        // tmSession.cap. Falls back to a plain setInterval wrapped in the
-        // same { stop } shape so every call site can just call .stop().
-        function tmPausableInterval(fn, ms) {
-            return tmPausableInterval.cap
-                ? tmPausableInterval.cap(fn, ms)
-                : (function () {
-                    const id = setInterval(fn, ms);
-                    return { stop: function () { clearInterval(id); } };
-                })();
-        }
-
+        // #194/#221: NO `.cap` STASH ANY MORE. openTaskManagerWindow used to
+        // be a hoisted top-level function with no ctx in scope, so init()
+        // parked ctx.session on `tmSession.cap` and ctx.visibility's
+        // pausableInterval on `tmPausableInterval.cap` (the window.__mods /
+        // fmFile.cap idiom), each behind an accessor that fell back to the
+        // hoisted core _modSessionApi or a raw setInterval when the cap was
+        // unset. The builder now takes `ctx` as its second argument -- and it
+        // has exactly ONE caller, the kind's own factory, which only exists
+        // while this mod is enabled. So the caps, the accessors and both
+        // fallbacks are deleted rather than moved: there is no reachable path
+        // on which the builder runs without a ctx.
         // Live "Task manager" app window: lists every real terminal/agent
         // session (sessions with kind !== 'app') across all hosts, each
         // expandable to its child-process tree, with End-process + Destroy-
@@ -81,57 +53,61 @@
         // win record, a manual kind:'app' session entry + taskbar chip, and
         // the same teardown contract (cleanups clears the refresh interval).
         // openAppWindow delegates here for appKind 'task-manager'.
-        function openTaskManagerWindow(appData) {
-            const id = String(appData.id);
-            const title = appData.title || 'Task manager';
-            const geom = clampGeom(appData.geom || appDefaultGeom('text-editor'));
-            const color = normalizeHex(appData.color || defaultColor(id));
-            const locked = appData.locked !== undefined ? !!appData.locked : true;
-
-            // Shared chrome (#79): .term-window shell + title bar (_ / ×) + the
-            // eight resize handles, built + wired by the window-runtime factory.
-            const chrome = buildAppChrome({
-                id, appClass: 'app-tm', badge: '#tm', geom, color, locked, title,
+        function openTaskManagerWindow(appData, ctx) {
+            const d = appData || {};
+            // #194: the ~30-field scaffold is core's. buildAppChrome, the
+            // toolbar/body divs, addResizeHandles, the desktop insertion and
+            // its `empty` class, the win literal, windows.set, wireAppChrome,
+            // the synthetic kind:'app' session, the hand-appended taskbar chip
+            // with its cssEscape'd guard, updateTaskbarColor/Label, the
+            // #taskbar-empty removal and finishWindowPlacement were all
+            // re-typed here; the spec below is only what makes this a TASK
+            // MANAGER window.
+            let refreshBtn = null;
+            const h = ctx.windows.createAppWindow({
+                kind: 'task-manager',
+                id: (d.id != null && String(d.id)) ? String(d.id) : newAppId('tm'),
+                title: d.title || 'Task manager',
+                sid: 'tm',
+                badge: '#tm',
+                appClass: 'app-tm',
+                // NOT the factory default ('app-tm-body'): the shipped
+                // stylesheet matches `.tm-body`.
+                bodyClass: 'tm-body',
+                // Absent fields keep the factory's defaults, which are the
+                // deleted scaffold's own. The old code asked for
+                // appDefaultGeom('text-editor') where the factory asks for
+                // appDefaultGeom(kind); that function only special-cases
+                // 'sticky-note', so the two are the same box.
+                geom: d.geom,
+                color: d.color,
+                locked: d.locked,
+                floatGeom: d.floatGeom,
+                toolbar: function (el) {
+                    refreshBtn = document.createElement('button');
+                    refreshBtn.type = 'button';
+                    refreshBtn.textContent = 'Refresh';
+                    refreshBtn.title =
+                        'reload the session list + expanded process trees';
+                    el.appendChild(refreshBtn);
+                },
+                body: function (tmBody, win) {
+                    buildTaskManagerBody(tmBody, win, refreshBtn, ctx);
+                },
             });
-            const { dom, titleText } = chrome;
+            // THE TRAP: openAppWindow hands a registered kind's factory return
+            // value straight back to its callers, and they want a window
+            // RECORD. Return h.win, never the handle.
+            return h.win;
+        }
 
-            const toolbar = document.createElement('div');
-            toolbar.className = 'app-toolbar app-tm-toolbar';
-            const refreshBtn = document.createElement('button');
-            refreshBtn.type = 'button';
-            refreshBtn.textContent = 'Refresh';
-            refreshBtn.title = 'reload the session list + expanded process trees';
-            toolbar.appendChild(refreshBtn);
-
-            const tmBody = document.createElement('div');
-            tmBody.className = 'tm-body';
-
-            dom.appendChild(toolbar);
-            dom.appendChild(tmBody);
-            addResizeHandles(dom);   // last children: edge/corner hit zones on top
-
-            document.getElementById('desktop').appendChild(dom);
-            document.getElementById('desktop').classList.remove('empty');
-
-            const win = {
-                id, sid: 'tm', hostId: 'app',
-                type: 'app', appKind: 'task-manager',
-                dom, body: tmBody, titleText,
-                term: null, fitAddon: null,
-                ws: null, wsOpen: false, termReady: false,
-                minimized: false, disposed: false,
-                geom, name: title, color,
-                resizeTimer: null, lastSentDims: null,
-                staleSession: false, authFailed: false,
-                reattachAttempts: 0, reattachAt: 0, lastOpenAt: 0, missingPolls: 0,
-                cleanups: [],
-                tiled: false,
-                floatGeom: appData.floatGeom
-                    ? Object.assign({}, appData.floatGeom) : null,
-                locked,
-                dirty: false,
-            };
-            windows.set(id, win);
+        // Everything specific to a task-manager window, against a record core
+        // already built, chipped and inserted. Unindented from the old builder
+        // body; `id` / `title` now come off the record rather than off the
+        // appData the scaffold read.
+        function buildTaskManagerBody(tmBody, win, refreshBtn, ctx) {
+            const id = win.id;
+            const title = win.name;
 
             // stopProp is shared by the toolbar/destroy/kill button handlers below
             // (the dom-mousedown raise + min/close are wired by wireAppChrome).
@@ -154,7 +130,7 @@
             const liveSessions = () => Array.from(sessions.values())
                 .filter(s => s && s.kind !== 'app' && !destroyed.has(s.key));
 
-            // Every /session/* RPC below flows through tmSession() — the reviewed,
+            // Every /session/* RPC below flows through ctx.session — the reviewed,
             // host-aware ctx.session capability (#85) — instead of a raw inline
             // fetch. Each call passes the session's OWN host id ({ host:
             // sess.hostId }) and returns { status, json } (never rejects), so the
@@ -173,7 +149,7 @@
                 procSeq.set(key, seq);
                 let res;
                 try {
-                    res = await tmSession().procs(sess.id, { host: sess.hostId });
+                    res = await ctx.session.procs(sess.id, { host: sess.hostId });
                 } catch (_) {
                     res = { status: 0, json: { ok: false, error: 'error' } };
                 } finally {
@@ -211,7 +187,7 @@
                 render();
                 let res;
                 try {
-                    res = await tmSession().kill(sess.id, sess.pid, { host: sess.hostId });
+                    res = await ctx.session.kill(sess.id, sess.pid, { host: sess.hostId });
                 } finally {
                     busyOps.delete(opKey);
                 }
@@ -249,7 +225,7 @@
                 render();
                 let res;
                 try {
-                    res = await tmSession().kill(sess.id, pid, { host: sess.hostId });
+                    res = await ctx.session.kill(sess.id, pid, { host: sess.hostId });
                 } finally {
                     busyOps.delete(opKey);
                 }
@@ -546,30 +522,11 @@
                 }
             });
 
-            // Raise / minimize / close / drag / 8-way resize / WM context menu.
-            wireAppChrome(win, chrome);
-
-            // Manual taskbar item — app windows are never poll-managed (same as
-            // openFileManagerWindow). The synthetic kind:'app' session keeps the
-            // poll reaper from closing this window + lets formatTitle render it.
-            const appSess = { key: id, sid: 'tm', id, title, stale: false,
-                              kind: 'app', hostId: 'app' };
-            sessions.set(id, appSess);
-            const itemsHost = document.getElementById('taskbar-items');
-            if (!itemsHost.querySelector(
-                    '.taskbar-item[data-session-id="' + cssEscape(id) + '"]')) {
-                itemsHost.appendChild(buildTaskbarItem(appSess));
-            }
-            updateTaskbarColor(id);
-            updateTaskbarLabel(id);
-            const emptyMsg = document.getElementById('taskbar-empty');
-            if (emptyMsg) emptyMsg.remove();
-
             // Periodic refresh (kept off appStore — this is a live monitor). Each
             // tick re-renders the list from `sessions` and re-pulls procs only for
             // EXPANDED sessions whose fetch isn't already in flight / auth-blocked.
             // Interval is cleared via win.cleanups (closeWindow runs them).
-            const timer = tmPausableInterval(() => {
+            const timer = ctx.visibility.pausableInterval(() => {
                 if (win.disposed) return;
                 try {
                     render();
@@ -585,8 +542,6 @@
             win.cleanups.push(() => timer.stop());
 
             render();
-            finishWindowPlacement(win);
-            return win;
         }
 
         // The (+) launcher — moved verbatim from core 76_js_launch_fullscreen.js.
@@ -601,49 +556,37 @@
             ctxVersion: 1,
             tiers: ['session', 'window'],   // #86: destructive session RPC (ctx.session) + a window kind
             init: function (ctx) {
-                // Route every task-manager /session/* op (incl. the DESTRUCTIVE
-                // kill / session destroy) through the reviewed ctx.session
-                // capability (#85); cleared on teardown (below) so a disabled
-                // task-manager mod falls back to the hoisted _modSessionApi the
-                // tmSession() accessor mirrors.
-                tmSession.cap = ctx.session;
-                // Same stash for the visibility-aware timer (feature-detected:
-                // an older core has no ctx.visibility, so cap stays undefined
-                // and tmPausableInterval falls back to a plain setInterval).
-                tmPausableInterval.cap = ctx.visibility
-                    ? ctx.visibility.pausableInterval : null;
+                // #221: nothing is stashed here any more. Every task-manager
+                // /session/* op (incl. the DESTRUCTIVE kill / session destroy)
+                // still goes through the reviewed ctx.session capability (#85)
+                // and the refresh timer still rides ctx.visibility -- but both
+                // reach them through the `ctx` the builder is HANDED, so there
+                // is no function-property stash to set here and none to clear
+                // on teardown.
                 // Register the task-manager kind (the #80 built-in spec, moved
                 // here) with NO serialize — it is EPHEMERAL, never written to the
                 // app store, exactly like the old core built-in. A duplicate
                 // appKind throws -> initMod rolls the mod back.
                 ctx.registerWindowKind({
                     appKind: 'task-manager',
-                    factory: function (d) { return openTaskManagerWindow(d); },
+                    factory: function (d) { return openTaskManagerWindow(d, ctx); },
                     menu: {
                         label: 'Task manager',
                         iconKey: 'task-manager',   // #119: SVG activity bars in the (+) menu
                         launch: function () { return launchTaskManager(); },
                     },
                 });
-                // Teardown — registered AFTER registerWindowKind so it runs FIRST
-                // (LIFO), i.e. BEFORE the registry's deleteWindowKind. Close any
-                // live task-manager window WHILE the kind is still registered:
-                // closeWindow -> saveAppWindow then sees the registered no-serialize
-                // kind and early-returns, so the ephemeral window leaves NO record.
-                // If we tore down after deleteWindowKind, a later saveAppWindow
-                // (e.g. the active-view rebuild on a lease loss, 84) would fall back
-                // to the shared serializer and persist a junk 'task-manager' record
-                // (codex review). Then drop the cap so a stray direct call degrades
-                // to the core fallback.
-                ctx.onUnload(function () {
-                    for (const w of Array.from(windows.values())) {
-                        if (w && w.type === 'app'
-                            && w.appKind === 'task-manager') {
-                            closeWindow(w.id);
-                        }
-                    }
-                    tmSession.cap = null;
-                    tmPausableInterval.cap = null;
-                });
+                // #194/#221: NO TEARDOWN HERE AT ALL. This used to iterate the
+                // CORE windows Map for records carrying its own appKind and
+                // close them, registered AFTER registerWindowKind so LIFO ran
+                // it BEFORE deleteWindowKind -- because a close that reached
+                // saveAppWindow with the kind already gone would fall through
+                // to the shared serializer and persist a junk 'task-manager'
+                // record for an ephemeral window. That ordering is core's now:
+                // the loader STAGES the factory-owned close as a call at the
+                // head of _runUnloads, before the first onUnload, which is to
+                // say while every kind this mod registered is still
+                // registered. The caps that were nulled here are gone with the
+                // accessors (see the top of this file).
             },
         });

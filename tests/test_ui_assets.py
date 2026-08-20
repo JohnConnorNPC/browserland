@@ -5010,27 +5010,39 @@ def test_taskmanager_mod_packaged_and_manifest_agrees():
     assert "ctxVersion: 1" in src
     assert "ctx.registerWindowKind(" in src
     assert "appKind: 'task-manager'" in src
-    assert "return openTaskManagerWindow(d)" in src
+    assert "return openTaskManagerWindow(d, ctx)" in src, \
+        "the builder must be handed the ctx it used to stash on a function prop"
     assert "return launchTaskManager()" in src
     # EPHEMERAL: the kind is registered with NO serialize (never persisted), so
     # there is no `serialize:` key in the spec.
     assert "serialize:" not in src, "task-manager is ephemeral — no serialize key"
     # Session RPC (incl. the DESTRUCTIVE kill / session destroy) rides ctx.session
-    # (#85): the mod stashes ctx.session and EVERY /session/* call flows through
-    # tmSession() carrying the session's own host id — NO raw inline fetch
-    # (hostFetch) and NO surviving inline sessionPost in the mod.
-    assert "tmSession.cap = ctx.session;" in src
-    assert "tmSession().procs(sess.id, { host: sess.hostId })" in src
-    assert "tmSession().kill(sess.id, sess.pid, { host: sess.hostId })" in src
-    assert "tmSession().kill(sess.id, pid, { host: sess.hostId })" in src
+    # (#85): EVERY /session/* call carries the session's own host id — NO raw
+    # inline fetch (hostFetch) and NO surviving inline sessionPost in the mod.
+    # #221 retired the tmSession() accessor and its `.cap` stash: the builder
+    # takes ctx as an argument now, and its only caller is the kind's own
+    # factory, so there is no reachable path on which ctx is missing.
+    assert "await ctx.session.procs(sess.id, { host: sess.hostId })" in src
+    assert "await ctx.session.kill(sess.id, sess.pid, { host: sess.hostId })" in src
+    assert "await ctx.session.kill(sess.id, pid, { host: sess.hostId })" in src
     assert "hostFetch(" not in src, "the raw inline session fetch must be gone"
     assert "sessionPost(" not in src, "the old inline sessionPost must be gone"
-    # Teardown closes any live task-manager window WHILE the kind is still
-    # registered (so saveAppWindow early-returns — no junk record persists), then
-    # drops the cap. The close-on-unload is registered AFTER registerWindowKind so
-    # LIFO teardown runs it BEFORE deleteWindowKind.
-    assert "closeWindow(w.id)" in src
-    assert "tmSession.cap = null;" in src
+    tm_code = "\n".join(l for l in src.splitlines()
+                        if not l.strip().startswith("//"))
+    for gone in ("tmSession", "tmPausableInterval", "_modSessionApi", ".cap"):
+        assert gone not in tm_code, \
+            f"the retired capability stash is still live code: {gone!r}"
+    # The scaffold and the teardown-ordering hack go together (#194/#221): the
+    # window is core-built, and the loader STAGES the factory-owned close ahead
+    # of the first onUnload — while every kind this mod registered is still
+    # registered — so the mod needs no unload of its own at all. Pinned by
+    # absence, because re-growing either is how the junk-record bug comes back.
+    assert "ctx.windows.createAppWindow({" in src
+    for gone in ("buildAppChrome", "addResizeHandles", "wireAppChrome",
+                 "windows.set(", "buildTaskbarItem", "finishWindowPlacement",
+                 "closeWindow(w.id)", "ctx.onUnload("):
+        assert gone not in tm_code, \
+            f"task-manager re-grew the hand-rolled scaffold: {gone!r}"
     # Ships in the served page, AFTER the help mod and BEFORE the file-manager mod
     # (so the (+) menu lists Task manager right after the core built-ins, ahead of
     # the file-manager / editor / sticky mods).
@@ -6840,7 +6852,8 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # ctx.windows.createAppWindow, which owns the tail for every mod that
     # migrates onto it (86c calls finishWindowPlacement once, after body()).
     # The remaining eight migrate under #204 and drop out of here as they do.
-    # #207 took aistatus out, for the same reason clipboard left.
+    # #207 took aistatus out, and #221 task-manager, for the same reason
+    # clipboard left.
     factories = [
         "81_js_control_panel.js",
         "mods/editor/editor.js",
@@ -6848,7 +6861,6 @@ def test_creation_tails_are_factored_through_finish_window_placement():
         "mods/help/help.js",
         "mods/recorder/recorder.js",
         "mods/scratchpad/scratchpad.js",
-        "mods/task-manager/task-manager.js",
     ]
     for rel in factories:
         text = (BROKER_DIR / rel).read_text(encoding="utf-8")
@@ -7819,6 +7831,8 @@ def test_feature_detected_mods_adopt_pausable_interval():
     # the wrapper left behind.
     for rel in ("mods/aistatus/aistatus.js", "mods/git/git.js",
                 "mods/task-manager/task-manager.js", "mods/clock/clock.js"):
+        # (each of these calls pausableInterval at its own timer site; the
+        # shapes differ per mod and are pinned individually below)
         src = (BROKER_DIR / rel).read_text(encoding="utf-8")
         assert "pausableInterval" in src, \
             f"{rel} must feature-detect ctx.visibility.pausableInterval"
@@ -7831,10 +7845,15 @@ def test_feature_detected_mods_adopt_pausable_interval():
         "git.js must feature-detect ctx.visibility"
 
     tm = (BROKER_DIR / "mods/task-manager/task-manager.js").read_text(encoding="utf-8")
-    assert "const timer = tmPausableInterval(" in tm, \
-        "task-manager.js's periodic refresh must call the tmPausableInterval() wrapper at its timer site"
-    assert "ctx.visibility" in tm, \
-        "task-manager.js must feature-detect ctx.visibility"
+    # #221 retired the tmPausableInterval() wrapper along with the `.cap` stash
+    # it existed to read: the builder takes ctx as an argument, so the timer
+    # site calls the capability directly.
+    assert "const timer = ctx.visibility.pausableInterval(" in tm, \
+        "task-manager.js's periodic refresh must ride ctx.visibility at its timer site"
+    tm_code = "\n".join(l for l in tm.splitlines()
+                        if not l.strip().startswith("//"))
+    assert "tmPausableInterval" not in tm_code, \
+        "task-manager.js re-grew the capability-stash wrapper"
 
     aistatus = (BROKER_DIR / "mods/aistatus/aistatus.js").read_text(encoding="utf-8")
     # aistatus.js inlines the call at the timer site (no separate wrapper).
@@ -7923,8 +7942,9 @@ def test_ctx_visibility_is_a_floor_for_shipped_mods_and_the_wiki_scopes_it():
         if re.search(r"ctx\.visibility\s*\?",
                      (BROKER_DIR / rel).read_text(encoding="utf-8"))
     }
-    span = re.search(r"still carrying such a fallback(.*?)are a\s+migration",
-                     wiki, re.S)
+    span = re.search(
+        r"(?:still carrying such a fallback|carrying such a fallback)"
+        r"(.*?)(?:is|are) a\s+migration", wiki, re.S)
     assert span, "the wiki no longer names the shipped mods carrying a dead fallback"
     named = set(re.findall(r"`mods/([a-z0-9-]+)/`", span.group(1)))
     assert named == carriers, (
@@ -10370,9 +10390,11 @@ let AIS_DECL = null;
 // Two shipped mods are spliced into this one file (#207 added aistatus), so
 // the capture routes by id rather than overwriting whichever ran last.
 let STICKY_DECL = null;
+let TM_DECL = null;
 function registerMod(decl) {
     if (decl && decl.id === 'aistatus') AIS_DECL = decl;
     else if (decl && decl.id === 'sticky') STICKY_DECL = decl;
+    else if (decl && decl.id === 'task-manager') TM_DECL = decl;
     else CLIP_DECL = decl;
 }
 const clipWrites = [];
@@ -10523,6 +10545,84 @@ CLIPCASES.recopy_does_not_echo = function () {
     return { before: before, after: after, afterReal: clipRows(win),
              writesAfterRecopy: writesAfterRecopy };
 };
+
+// ---- the real task-manager mod (#221) -------------------------------------
+// What #221 removed is the reason this driver exists: the builder was a
+// hoisted top-level function with no ctx in scope, so the mod parked
+// ctx.session and ctx.visibility on FUNCTION PROPERTIES and read them back
+// through accessors that silently fell back to core plumbing when the stash
+// was empty. A ctx handed in as an argument cannot be half-there.
+const TMCASES = {};
+
+function bootTaskManager(opts) {
+    opts = opts || {};
+    const m = modCtx('task-manager');
+    m.__procs = [];
+    m.__kills = [];
+    m.ctx.session = {
+        procs: function (id, o) {
+            m.__procs.push([id, o && o.host]);
+            return Promise.resolve({ status: 200, json: { ok: true, procs: [] } });
+        },
+        kill: function (id, pid, o) {
+            m.__kills.push([id, pid, o && o.host]);
+            return Promise.resolve({ status: 200, json: { ok: true } });
+        },
+    };
+    m.ctx.visibility = { pausableInterval: function (fn, ms) {
+        m.__tickMs = ms;
+        m.__tick = fn;
+        return { stop: function () { m.__tickStopped = true; } };
+    } };
+    TM_DECL.init(m.ctx);
+    return m;
+}
+
+// It builds through the factory, with the classes the shipped stylesheet
+// matches -- and it reaches ctx.session through the ARGUMENT, so the RPC
+// works with no stash anywhere.
+TMCASES.tm_builds_through_the_factory = function () {
+    const m = bootTaskManager();
+    const kind = lookupWindowKind('task-manager');
+    const win = kind.factory({ id: 'app:tm:1' });
+    return {
+        isRecord: !!(win && win.id && win.type === 'app'),
+        id: win.id, appKind: win.appKind, sid: win.sid,
+        cls: win.dom.className,
+        bodyCls: win.body.className,
+        toolbarCls: win.dom.children[1] ? win.dom.children[1].className : null,
+        chips: chipIds(),
+        owned: Array.from(m.rec.appWindows.keys()),
+        tickMs: m.__tickMs,
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
+// THE ORDERING THE MOD USED TO HAND-ROLL. Its teardown iterated the CORE
+// windows Map for records carrying its own appKind, registered after
+// registerWindowKind so LIFO ran it BEFORE deleteWindowKind -- because a close
+// that reached saveAppWindow with the kind already gone would fall through to
+// the shared serializer and persist a junk record for an EPHEMERAL window.
+// The loader stages that close now, ahead of the first onUnload, so the mod
+// has no unload of its own. Same outcome, and the empty store is the proof.
+TMCASES.tm_disable_leaves_no_junk_record = function () {
+    const m = bootTaskManager();
+    lookupWindowKind('task-manager').factory({ id: 'app:tm:1' });
+    const before = { windows: windows.size, chips: chipIds().length,
+                     unloads: m.rec.unloads.length };
+    _runUnloads(m.rec);
+    return {
+        before: before,
+        windows: windows.size, chips: chipIds().length,
+        sessions: sessions.size,
+        store: Object.keys(appStore),
+        kindGone: !lookupWindowKind('task-manager'),
+        tickStopped: !!m.__tickStopped,
+        desktopEmpty: desktop.classList.contains('empty'),
+    };
+};
+
+__TASKMANAGER__
 
 // ---- the real sticky mod (#220) -------------------------------------------
 // sticky does NOT build its notes through the factory, and deliberately: the
@@ -10752,6 +10852,10 @@ AISCASES.aistatus_disable_closes_its_windows = function () {
 
 (function () {
     const want = process.argv[2];
+    if (TMCASES[want]) {
+        process.stdout.write(JSON.stringify(TMCASES[want]()) + '\n');
+        process.exit(0);
+    }
     if (STICKYCASES[want]) {
         process.stdout.write(JSON.stringify(STICKYCASES[want]()) + '\n');
         process.exit(0);
@@ -10765,6 +10869,12 @@ AISCASES.aistatus_disable_closes_its_windows = function () {
     process.stdout.write(JSON.stringify(r) + '\n');
 })();
 """
+
+
+def _task_manager_mod_source():
+    """The shipped task-manager mod, verbatim (#221)."""
+    return (BROKER_DIR / "mods" / "task-manager" / "task-manager.js").read_text(
+        encoding="utf-8")
 
 
 def _sticky_mod_source():
@@ -10810,7 +10920,8 @@ def clipboard_harness(tmp_path_factory):
          .replace("__TAKEDOWN__", _loader_takedown_source()))
         + _CLIPBOARD_DRIVER.replace("__CLIPBOARD__", _clipboard_mod_source())
                            .replace("__AISTATUS__", _aistatus_mod_source())
-                           .replace("__STICKY__", _sticky_mod_source()),
+                           .replace("__STICKY__", _sticky_mod_source())
+                           .replace("__TASKMANAGER__", _task_manager_mod_source()),
         encoding="utf-8")
     return path
 
@@ -11679,6 +11790,57 @@ def test_the_real_clipboard_keeps_its_singleton_semantics(clipboard_harness):
     assert r["same"] is True, "a second launch built a second window"
     assert r["windows"] == 1 and r["chips"] == 1
     assert r["owned"] == ["app:clip"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_real_task_manager_runs_on_the_factory(clipboard_harness):
+    """#221. The builder used to be a hoisted top-level function with no ctx in
+    scope, so the mod parked ctx.session and ctx.visibility's pausableInterval
+    on FUNCTION PROPERTIES and read them back through accessors that silently
+    fell back to core plumbing when the stash was empty. It takes ctx as an
+    argument now -- and its only caller is the kind's own factory, which only
+    exists while the mod is enabled, so there is no reachable path on which
+    the ctx is missing."""
+    r = _run_clip(clipboard_harness, "tm_builds_through_the_factory")
+    assert r["isRecord"] is True
+    assert r["id"] == "app:tm:1" and r["appKind"] == "task-manager"
+    assert r["sid"] == "tm"
+    assert "app-tm" in r["cls"]
+    # `.tm-body` and `app-toolbar app-tm-toolbar` are what the shipped
+    # stylesheet matches; the factory derives the toolbar name from appClass,
+    # and bodyClass is overridden because the default would be 'app-tm-body'.
+    assert r["bodyCls"] == "tm-body"
+    assert r["toolbarCls"] == "app-toolbar app-tm-toolbar"
+    assert r["chips"] == ["app:tm:1"]
+    assert r["owned"] == ["app:tm:1"], "the factory did not own the window"
+    # The 2.5s live-monitor refresh came through ctx.visibility, off the same
+    # argument -- not off a function property that may or may not be set.
+    assert r["tickMs"] == 2500
+    assert r["desktopEmpty"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_disabling_task_manager_persists_no_junk_record(clipboard_harness):
+    """The ordering hack this mod hand-rolled, now core's. Its teardown
+    iterated the CORE windows Map for records carrying its own appKind, and had
+    to be registered AFTER registerWindowKind so LIFO ran it BEFORE
+    deleteWindowKind -- because a close that reached saveAppWindow with the
+    kind already gone falls through to the shared serializer and persists a
+    junk record for a kind nothing can restore. The loader stages the
+    factory-owned close ahead of the first onUnload now, so the mod registers
+    no unload at all and the ordering cannot be got wrong again."""
+    r = _run_clip(clipboard_harness, "tm_disable_leaves_no_junk_record")
+    assert r["before"]["windows"] == 1 and r["before"]["chips"] == 1
+    # ONE unload, and it is the kind deregistration the loader adds -- the mod
+    # contributes none of its own any more.
+    assert r["before"]["unloads"] == 1, \
+        "task-manager re-grew a teardown whose ordering it has to get right"
+    assert r["windows"] == 0 and r["chips"] == 0 and r["sessions"] == 0
+    assert r["store"] == [], \
+        "an ephemeral task-manager window persisted a record on disable"
+    assert r["kindGone"] is True
+    assert r["tickStopped"] is True
+    assert r["desktopEmpty"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
