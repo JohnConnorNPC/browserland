@@ -2198,6 +2198,30 @@
                 // falls back to the hoisted _modFileApi (see editorFile()).
                 editorFile.cap = ctx.file;
                 ctx.onUnload(function () { editorFile.cap = null; });
+
+                // #199/#210: PUBLISH THE SHARED CodeMirror BUILD. scratchpad
+                // reaches loadCodeMirror() by hoisted name today -- the one
+                // remaining cross-mod call-in the portable-mod lint still
+                // records -- and a name is not a contract: it says nothing
+                // about who owns the cache, and it cannot be revoked when this
+                // mod goes away.
+                //
+                // ONLY `load` is published. The cache, the vendored chunks and
+                // the make-state helpers are this mod's business; what another
+                // mod wants is "give me the shared build, loading it once".
+                //
+                // THIS DOES NOT RETIRE THE HOISTED NAME, and that is not an
+                // oversight. loadCodeMirror is deliberately reachable with this
+                // mod DISABLED, for the same reason openNoteOrEditorWindow is:
+                // core builds a `text-editor` window through the hoisted
+                // builder when the kind is not registered (54's unknown-kind
+                // fallback covers exactly 'sticky-note' and 'text-editor'), and
+                // that window still needs an editor surface. A consumer should
+                // PREFER the service -- it is the live, revocable answer -- and
+                // keep the hoisted call as the mods-off path.
+                if (typeof ctx.provide === 'function') {
+                    ctx.provide('codemirror', { load: loadCodeMirror });
+                }
                 // Register the text-editor kind (the #80 built-in spec, moved
                 // here). serialize stays the shared core serializeAppWindow so
                 // webterm:appwindows:v1 persistence is byte-identical; a duplicate

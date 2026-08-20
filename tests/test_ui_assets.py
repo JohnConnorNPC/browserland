@@ -835,6 +835,43 @@ def test_recorder_reaches_every_broker_not_just_the_local_one():
     assert "hostId: 'app'" in ext,         "the app-window factory no longer pins hostId to 'app'"
 
 
+def test_the_editor_publishes_codemirror_and_scratchpad_prefers_it():
+    """#199/#210. scratchpad reached the shared CodeMirror build by HOISTED
+    NAME -- the one remaining cross-mod call-in the portable-mod lint records
+    -- and a name is not a contract: it says nothing about who owns the cache
+    and cannot be revoked when the editor mod goes away.
+
+    The hoisted name deliberately STAYS reachable, and that is the interesting
+    half. Core builds a `text-editor` window through the same hoisted builder
+    when the kind is not registered (54's unknown-kind fallback covers exactly
+    'sticky-note' and 'text-editor'), so the editor's surface has to work with
+    its own mod disabled. A consumer therefore prefers the service and keeps
+    the hoisted call as the mods-off path -- which is why this migration does
+    NOT cost scratchpad its highlighting whenever the editor is switched off.
+    """
+    ed = (BROKER_DIR / "mods" / "editor" / "editor.js").read_text(
+        encoding="utf-8")
+    sp = (BROKER_DIR / "mods" / "scratchpad" / "scratchpad.js").read_text(
+        encoding="utf-8")
+    assert "ctx.provide('codemirror', { load: loadCodeMirror })" in ed
+    # Only `load` is published: the cache and the vendored chunks stay the
+    # editor's business.
+    ed_code = "\n".join(l for l in ed.splitlines()
+                        if not l.strip().startswith("//"))
+    assert "ctx.provide('codemirror'" in ed_code
+    assert ed_code.count("ctx.provide(") == 1
+    # The consumer prefers the service, per use...
+    assert "ctx.consume('editor', 'codemirror')" in sp
+    sp_code = "\n".join(l for l in sp.splitlines()
+                        if not l.strip().startswith("//"))
+    assert sp_code.index("ctx.consume('editor', 'codemirror')")         < sp_code.index("CM = await loadCodeMirror();"),         "the service must be tried before the hoisted name, not after"
+    # ...and falls back, because the shared build is reachable with the editor
+    # mod off BY DESIGN -- 54 names the two kinds that take that path.
+    assert "CM = await loadCodeMirror();" in sp_code
+    s54 = (BROKER_DIR / "54_js_app_windows_store.js").read_text(encoding="utf-8")
+    assert "ak !== 'sticky-note' && ak !== 'text-editor'" in s54,         "the unknown-kind fallback no longer covers text-editor; recheck the "         "argument for keeping scratchpad's hoisted fallback"
+
+
 def test_the_update_policy_write_goes_through_the_admin_door():
     """#191/#224. /update/policy is admin-gated server-side
     (_admin_auth_error), and until #224 this mod only NAMED the refusal -- the

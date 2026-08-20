@@ -684,7 +684,27 @@
                             Math.min(want, win.scratchTabs.length - 1));
 
                         let CM = null;
-                        try { CM = await loadCodeMirror(); } catch (_) {}
+                        // #199/#210: the SERVICE first, the hoisted name as
+                        // the mods-off path. Consumed PER USE, so an editor mod
+                        // that is absent, not yet loaded, disabled or
+                        // mid-teardown is simply undefined here -- and then the
+                        // hoisted loadCodeMirror still answers, because the
+                        // shared build is deliberately reachable with the
+                        // editor mod off (core builds a text-editor window
+                        // through that same hoisted path when its kind is not
+                        // registered). So this buys the revocable contract
+                        // without buying a scratchpad that loses syntax
+                        // highlighting whenever the editor is switched off.
+                        try {
+                            const cm = (typeof ctx.consume === 'function')
+                                ? ctx.consume('editor', 'codemirror') : null;
+                            if (cm && typeof cm.load === 'function') {
+                                CM = await cm.load();
+                            }
+                        } catch (_) { CM = null; }
+                        if (!CM) {
+                            try { CM = await loadCodeMirror(); } catch (_) {}
+                        }
                         if (win.disposed || !windows.has(id)) return;
                         if (!CM) {
                             body.textContent = 'CodeMirror failed to load — '
