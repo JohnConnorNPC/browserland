@@ -10,6 +10,6 @@ The button is **muted** (dimmed, no label) when the directory is not a git repos
 
 ## The status popover
 
-Click the ⎇ button to open a small popover anchored under it. For a repository it lists the branch (or `detached HEAD`), how far you are **ahead** and **behind** the upstream, and the counts of **staged**, **unstaged**, **untracked**, and **conflicts** entries (conflicts are highlighted), plus whether the tree is clean or dirty. A **Refresh** button re-checks on demand. Click the button again, click outside the popover, or press `Escape` to close it.
+Click the ⎇ button to open a small popover anchored under it. For a repository it lists the branch (or `detached HEAD`), how far you are **ahead** and **behind** the upstream, and the counts of **staged**, **unstaged**, **untracked**, and **conflicts** entries (conflicts are highlighted), plus whether the tree is clean or dirty. A **Refresh** button re-checks on demand. Click the button again, click anywhere outside the popover — including on the branch name beside the button — or press `Escape` to close it. It also closes on its own if the terminal window it belongs to goes away, and it stays put under the button while you drag or resize that window.
 
 The widget refreshes on its own every 15 seconds while a terminal is open, and once more each time you open the popover.

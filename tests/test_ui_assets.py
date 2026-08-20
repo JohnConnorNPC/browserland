@@ -5147,7 +5147,24 @@ def test_git_mod_packaged_and_manifest_agrees():
     assert "info.onDispose(teardown);" in src
     assert "ctx.onUnload(" not in src, \
         "the mod-disable half is core's now (#195), not a set this mod keeps"
-    assert "clearInterval(" in src
+    # #212: the mod owns no raw timer any more -- ctx.visibility is a floor for
+    # a shipped mod (#198), so the setInterval/clearInterval fallback that used
+    # to sit behind the ternary is gone and the poll is the pausable one.
+    assert "clearInterval(" not in src and "setInterval(" not in src, \
+        "git re-grew a raw interval instead of riding ctx.visibility"
+    assert "ctx.visibility.pausableInterval(fn, ms)" in src
+    # ...and the popover is core's (#202): no hand-anchoring off offsetLeft, no
+    # document-level listeners of its own. That capture pair is exactly why
+    # core's Escape uses stopImmediatePropagation rather than stopPropagation.
+    assert "ctx.popover.anchor(pop, gitBtn," in src
+    # CODE only: the header narrates the hand-rolled popover it replaced, by
+    # name, which is documentation rather than a surviving call site.
+    git_code = "\n".join(l for l in src.splitlines()
+                          if not l.strip().startswith("//"))
+    for gone in ("document.addEventListener", "document.removeEventListener",
+                 "offsetLeft", "offsetTop"):
+        assert gone not in git_code, \
+            f"git still hand-rolls its popover: {gone!r} survives"
     # Ships in the served page, AFTER the aistatus mod (appended last in _MODS).
     assert "id: 'git'" in INDEX_HTML
     assert INDEX_HTML.index("id: 'aistatus'") < INDEX_HTML.index("id: 'git'")
@@ -14285,6 +14302,32 @@ GitEl.prototype.contains = function () { return false; };
 GitEl.prototype.types = function () {
     return this.listeners.map(function (L) { return L.type; }).sort();
 };
+// #212: the members the SHIPPED 86o range reads. The git popover is core's
+// now, so this harness drives the real placement code rather than a stub of
+// it -- which means the shim has to answer the three questions that code
+// asks: where is the anchor (getBoundingClientRect), how big is the node
+// (offsetWidth/Height), and is either still on the page (isConnected).
+GitEl.prototype.rect = null;
+GitEl.prototype.getBoundingClientRect = function () {
+    const r = this.rect || { left: 0, top: 0, width: 0, height: 0 };
+    return { left: r.left, top: r.top, width: r.width, height: r.height,
+             right: r.left + r.width, bottom: r.top + r.height };
+};
+GitEl.prototype.contains = function (o) {
+    let n = o;
+    while (n) { if (n === this) return true; n = n.parentNode; }
+    return false;
+};
+Object.defineProperty(GitEl.prototype, 'isConnected', {
+    get: function () {
+        let n = this;
+        while (n) {
+            if (n === body || n === desktop) return true;
+            n = n.parentNode;
+        }
+        return false;
+    },
+});
 GitEl.prototype.fire = function (type) {
     for (const L of this.listeners.slice()) {
         if (L.type !== type) continue;
@@ -14294,9 +14337,25 @@ GitEl.prototype.fire = function (type) {
 };
 
 // document, reduced to what the widget and its popover use. The two capture
-// listeners the popover adds are the orphan-listener claim's evidence.
+// listeners are still the orphan-listener claim's evidence -- but since #212
+// they belong to CORE (86o arms one pair for the whole page while any popover
+// is open and disarms them when the last closes), not to the mod, which is
+// the migration measured.
+const body = new GitEl('body');
+const window = { innerWidth: 1024, innerHeight: 768 };
+let rafSeq = 0;
+const rafs = new Map();
+function requestAnimationFrame(fn) { rafs.set(++rafSeq, fn); return rafSeq; }
+function cancelAnimationFrame(id) { rafs.delete(id); }
+function frame() {
+    const due = Array.from(rafs.values());
+    rafs.clear();
+    for (const fn of due) { try { fn(); } catch (_) {} }
+    return due.length;
+}
 const docListeners = [];
 const document = {
+    body: body,
     createElement: function (tag) { return new GitEl(tag); },
     addEventListener: function (type, fn, cap) {
         docListeners.push({ type: type, fn: fn, cap: !!cap });
@@ -14314,6 +14373,13 @@ const document = {
 function docTypes() {
     return docListeners.map(function (L) { return L.type; }).sort();
 }
+// Every popover node currently parented to <body>, by class -- "the card is
+// on screen" now that core adopts it out of the title bar.
+function popoversOnBody() {
+    return body.children.map(function (el) { return el.className; });
+}
+
+__POPOVER__
 // Shadowed so the mod's 800 ms first fetch is recorded rather than scheduled: a
 // pending node timer would outlive the case and paint a torn-down window.
 const timeouts = [];
@@ -14385,6 +14451,7 @@ GITCASES.disable_removes_the_widget = function () {
     const btn = gitBtnOf(win);
     btn.fire('click');                         // open the status popover
     const opened = { bar: barOf(win), doc: docTypes(), btn: btn.types(),
+                     onBody: popoversOnBody(),
                      intervals: liveIntervals(), posts: gitPosts.length };
     _runUnloads(m.rec);                        // the mod DISABLE
     return {
@@ -14474,6 +14541,7 @@ GITCASES.no_hook_keeps_the_close_half = function () {
     const btn = gitBtnOf(win);
     btn.fire('click');
     const opened = { bar: barOf(win), doc: docTypes(),
+                     onBody: popoversOnBody(),
                      hook: typeof m.ctx.windows.onTerminalCreate };
     _runUnloads(m.rec);                        // a disable this build cannot see
     const afterDisable = { bar: barOf(win), doc: docTypes(),
@@ -14511,7 +14579,8 @@ def gitmod_harness(tmp_path_factory):
          .replace("__REGISTRY__", _ctx_registry_source())
          .replace("__TEARDOWN__", _teardown_source())
          .replace("__UNLOADS__", _run_unloads_source()))
-        + _GIT_DRIVER.replace("__GIT__", _git_mod_source()),
+        + _GIT_DRIVER.replace("__GIT__", _git_mod_source())
+                     .replace("__POPOVER__", _popover_source()),
         encoding="utf-8")
     return path
 
@@ -14536,9 +14605,16 @@ def test_the_real_git_mod_gives_up_its_widget_without_giving_up_the_terminal(
     # Decorated, popover open: the button + label sit left of min/close (the
     # popover anchors inside the title bar), and its two CAPTURE listeners are
     # on the document.
+    # #212: the card is NOT a title-bar child any more. ctx.popover.anchor
+    # adopts it onto <body> and places it in viewport coordinates, so the bar
+    # holds the button and the label and nothing else.
     assert r["opened"]["bar"] == ["tb-btn btn-git muted", "git-label",
-                                  "tb-btn btn-min", "tb-btn btn-close",
-                                  "git-popover"]
+                                  "tb-btn btn-min", "tb-btn btn-close"]
+    assert r["opened"]["onBody"] == ["git-popover mod-popover"], \
+        "the popover was not adopted onto <body> by ctx.popover"
+    # The capture pair is still on the document while it is open -- but it is
+    # CORE's single page-wide pair now, armed by 86o when the first popover
+    # opens, not two listeners this mod installed. That is the migration.
     assert r["opened"]["doc"] == ["keydown", "mousedown"]
     assert r["opened"]["btn"] == ["click", "mousedown"]
     assert r["opened"]["intervals"] == 1 and r["opened"]["posts"] >= 1
@@ -14563,8 +14639,7 @@ def test_the_real_git_mod_tears_down_once_when_the_window_closes_first(
     assert r["errors"] == []
     # The REPLAY decorated a terminal that was already open before init.
     assert r["decorated"] == ["tb-btn btn-git muted", "git-label",
-                              "tb-btn btn-min", "tb-btn btn-close",
-                              "git-popover"]
+                              "tb-btn btn-min", "tb-btn btn-close"]
     assert r["afterClose"]["bar"] == ["tb-btn btn-min", "tb-btn btn-close"]
     assert r["afterClose"]["doc"] == []
     assert r["afterClose"]["stops"] == 1
@@ -14607,10 +14682,13 @@ def test_the_real_git_mod_contributes_no_teardown_bookkeeping_of_its_own(
     assert r["errors"] == []
     # At init, before any terminal: only the loader's own create-hook
     # unsubscribe, and no set at all (a mod that never registers pays nothing).
-    assert r["atInit"] == {"unloads": 1, "set": True}
+    # #212 raised this count by one WITHOUT the mod registering anything: 86o
+    # arms "close every popover this activation opened" from its own extender,
+    # at ctx-build time, which is the same trade the widget made one layer out.
+    assert r["atInit"] == {"unloads": 2, "set": True}
     # The first window arms it: ONE more chain entry, forever.
-    assert r["afterOne"] == {"unloads": 2, "live": 1}
-    assert r["afterTwo"] == {"unloads": 2, "live": 2}, \
+    assert r["afterOne"] == {"unloads": 3, "live": 1}
+    assert r["afterTwo"] == {"unloads": 3, "live": 2}, \
         "a second window added a second entry to the mod's teardown chain"
     # ...and one entry per window on that window's own cleanups.
     assert r["cleanups"] == [1, 1]
@@ -14627,15 +14705,20 @@ def test_the_real_git_mod_degrades_rather_than_leaks_without_the_hook(
     only the DISABLE half, which is what an older build never had."""
     r = _run_gitmod(gitmod_harness, "no_hook_keeps_the_close_half")
     assert r["errors"] == []
+    # #212: on a build with no ctx extenders there is no ctx.popover family,
+    # so the click-to-expand card is simply unavailable -- and the mod says so
+    # by not opening one, rather than throwing out of the click handler. The
+    # ambient half (glyph, branch label, dirty badge, tooltip) is untouched,
+    # which is the difference between a degraded control and a broken mod.
     assert r["opened"]["bar"] == ["tb-btn btn-git muted", "git-label",
-                                  "tb-btn btn-min", "tb-btn btn-close",
-                                  "git-popover"]
-    assert r["opened"]["doc"] == ["keydown", "mousedown"]
+                                  "tb-btn btn-min", "tb-btn btn-close"]
+    assert r["opened"]["onBody"] == []
+    assert r["opened"]["doc"] == [], \
+        "the mod installed document listeners of its own again"
     # A disable on this build cannot reach a live window -- honestly degraded,
     # and no per-mod set was ever built for it either.
     assert r["afterDisable"]["bar"] == ["tb-btn btn-git muted", "git-label",
-                                        "tb-btn btn-min", "tb-btn btn-close",
-                                        "git-popover"]
+                                        "tb-btn btn-min", "tb-btn btn-close"]
     assert r["afterDisable"]["stops"] == 0
     assert r["afterDisable"]["set"] is True
     assert r["afterDisable"]["cleanups"] == 1, \

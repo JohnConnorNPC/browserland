@@ -47,18 +47,14 @@
                 // reach. The bail above is what covers an absent ctx.windows, and
                 // the per-registration check below covers an absent hook.
 
-                // Feature-detected {stop}-shaped interval: a runtime-installed
-                // copy of this mod can run against an older core with no
-                // ctx.visibility, in which case this degrades to a plain
-                // setInterval wrapped in the same { stop } shape so every
-                // teardown site below can call .stop() unconditionally.
+                // #198/#212: ctx.visibility is a floor for a shipped mod (it is
+                // built into makeCtx's object literal, and a shipped mod is
+                // served in the same string as its own loader), so the
+                // setInterval fallback that used to sit here is gone. The
+                // handle is {stop}-shaped, which every teardown site below
+                // calls unconditionally.
                 function pausable(fn, ms) {
-                    return ctx.visibility
-                        ? ctx.visibility.pausableInterval(fn, ms)
-                        : (function () {
-                            const id = setInterval(fn, ms);
-                            return { stop: function () { clearInterval(id); } };
-                        })();
+                    return ctx.visibility.pausableInterval(fn, ms);
                 }
 
                 ctx.windows.onTerminalCreate(function (info) {
@@ -151,8 +147,13 @@
                         gitBtn.title = 'Git: ' + branch
                             + (ab.length ? (' ' + ab.join(' ')) : '')
                             + (st.dirty ? ' (dirty)' : ' (clean)');
-                        // If the popover is open, keep it in sync with the new status.
-                        if (gitPopover) fillGitPopover();
+                        // If the popover is open, keep it in sync with the new
+                        // status -- and re-measure, since a fill can change the
+                        // card's height and core places off the real box.
+                        if (gitPopover) {
+                            fillGitPopover();
+                            if (gitPop) gitPop.reposition();
+                        }
                     };
                     // Fetch + classify. Never throws. 404/no route -> 'unavailable'
                     // (hide forever this session); not_a_repo/no_cwd -> 'norepo'
@@ -247,39 +248,63 @@
                         foot.appendChild(refreshBtn);
                         pop.appendChild(foot);
                     };
+                    // #202/#212: THE POPOVER IS CORE'S NOW. This used to append
+                    // the card into the title bar, position it off
+                    // gitBtn.offsetLeft/offsetTop, and install its OWN
+                    // document-level CAPTURE listeners for mousedown and Escape
+                    // -- which is the very pair 86o cites as the reason core's
+                    // Escape uses stopImmediatePropagation rather than
+                    // stopPropagation (two capture listeners on the same
+                    // document node would otherwise peel two layers at once).
+                    // ctx.popover.anchor owns placement, dismissal and removal,
+                    // and closes on this mod's teardown as well.
+                    //
+                    // ONE BEHAVIOUR CHANGE, NAMED. The hand-rolled
+                    // outside-click treated a click on the branch LABEL as
+                    // inside; core's treats the node and the ANCHOR as inside,
+                    // and the label is neither. So clicking the branch text now
+                    // dismisses the popover the way any other outside click
+                    // does. The special case it replaces was written for the
+                    // toggle problem (a click on the button reading as outside
+                    // makes it close-then-reopen and never close), and core
+                    // solves that half by counting the anchor as inside.
+                    // #202 is additive on ctxVersion 1 and arrives through a
+                    // ctx EXTENDER, so unlike ctx.visibility it is NOT a floor:
+                    // _applyCtxExtenders isolates each one, and a page
+                    // assembled without 86c/86o hands out a ctx with no
+                    // `popover` family at all. Without it the widget keeps its
+                    // whole ambient half -- the glyph, the branch label, the
+                    // dirty badge and the status tooltip -- and only the
+                    // click-to-expand card is unavailable. That is a degraded
+                    // control, not a broken mod, so the button stays.
+                    const canPopover = !!(ctx.popover
+                        && typeof ctx.popover.anchor === 'function');
+                    let gitPop = null;   // the ctx.popover handle, or null
                     const closeGitPopover = function () {
-                        if (!gitPopover) return;
-                        document.removeEventListener('mousedown', onGitOutside, true);
-                        document.removeEventListener('keydown', onGitKey, true);
-                        try { gitPopover.remove(); } catch (_) {}
-                        gitPopover = null;
-                    };
-                    const onGitOutside = function (e) {
-                        // The button + its branch label form one affordance: a click
-                        // on either is "inside" (the button toggles, popover stays).
-                        if (gitPopover && !gitPopover.contains(e.target)
-                            && e.target !== gitBtn && e.target !== gitLabel) {
-                            closeGitPopover();
-                        }
-                    };
-                    const onGitKey = function (e) {
-                        if (e.key === 'Escape') {
-                            e.preventDefault(); e.stopPropagation(); closeGitPopover();
-                        }
+                        if (gitPop) gitPop.close();   // onClose clears both refs
                     };
                     const openGitPopover = function () {
+                        if (!canPopover) return;
                         if (gitPopover) { closeGitPopover(); return; }
                         const pop = document.createElement('div');
                         pop.className = 'git-popover';
-                        titleBar.appendChild(pop);
                         gitPopover = pop;
+                        // Fill BEFORE anchoring so the measuring frame sees the
+                        // real box: core places off the node's actual size, and
+                        // an empty card would be placed as an empty card.
                         fillGitPopover();
-                        // Anchor under the button within the (relative) title bar.
-                        pop.style.left = Math.max(0, gitBtn.offsetLeft) + 'px';
-                        pop.style.top = (gitBtn.offsetTop + gitBtn.offsetHeight + 2) + 'px';
-                        document.addEventListener('mousedown', onGitOutside, true);
-                        document.addEventListener('keydown', onGitKey, true);
+                        gitPop = ctx.popover.anchor(pop, gitBtn, {
+                            placement: 'bottom-start',
+                            gap: 2,
+                            // Fires for every dismissal -- close(), outside,
+                            // Escape, the anchor leaving the page (a window
+                            // closing under it), and this mod's teardown -- so
+                            // it is the one place the refs are cleared.
+                            onClose: function () { gitPopover = null; gitPop = null; },
+                        });
                         // Always refresh on open (cheap, keeps the popover live).
+                        // Its fill runs later and can change the card's height,
+                        // so re-measure when it does (see renderGit).
                         refreshGit();
                     };
                     const onGitClick = function (e) {

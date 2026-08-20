@@ -23,30 +23,37 @@
         }
         .term-window .git-label.git-dirty { color: #d98a00; font-weight: bold; }
         .term-window.dark-accent .git-label.git-dirty { color: #ffc04d; }
-        /* Git status popover: a small absolutely-positioned card anchored under
-           the git button inside the (relative) title bar. */
-        .term-window .git-popover {
-            position: absolute;
-            z-index: 50;
+        /* Git status popover. #212: NOT scoped under .term-window any more.
+           ctx.popover.anchor adopts the node onto <body> and places it in
+           VIEWPORT coordinates, so a `.term-window .git-popover` selector would
+           simply stop matching and the card would render undressed. It carries
+           core's .mod-popover dress (10_css_root.css) and overrides only what
+           makes it a git card -- this file is spliced AFTER that block at equal
+           (0,1,0) specificity, which is exactly the "the dress there is a
+           default, not an override" contract that block states.
+           NOTHING HERE MAY SET `position` OR `z-index`: core pins
+           .mod-popover to fixed/140000 because it writes left/top from
+           getBoundingClientRect, and the old `position: absolute` winning on
+           source order would place the card against the wrong origin. */
+        .git-popover {
             min-width: 150px;
-            background: var(--bg-2, #2a2a2a);
             color: var(--fg, #eee);
-            border: 1px solid var(--bg-3, #555);
+            border-radius: 0;
             box-shadow: 0 4px 14px rgba(0,0,0,0.5);
             padding: 6px 8px;
             font-size: 11px;
             font-family: Consolas, monospace;
             cursor: default;
         }
-        .term-window .git-pop-head {
+        .git-popover .git-pop-head {
             font-weight: bold;
             margin-bottom: 4px;
             white-space: nowrap;
         }
-        .term-window .git-pop-row { line-height: 1.5; white-space: nowrap; }
-        .term-window .git-pop-row.git-dirty { color: #d98a00; }
-        .term-window .git-pop-row.git-bad { color: #e05050; }
-        .term-window .git-pop-foot {
+        .git-popover .git-pop-row { line-height: 1.5; white-space: nowrap; }
+        .git-popover .git-pop-row.git-dirty { color: #d98a00; }
+        .git-popover .git-pop-row.git-bad { color: #e05050; }
+        .git-popover .git-pop-foot {
             margin-top: 5px;
             display: flex;
             justify-content: flex-end;
