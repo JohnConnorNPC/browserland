@@ -45,7 +45,12 @@
             // is the opposite call from help's (#195), and deliberately: help
             // feature-detects because a missing bus costs it ONE feature, while
             // a missing chain costs this mod all of its persistence.
-            needs: ['serverStore.saveChain'],
+            // #219 adds the factory: the whole window is core-built now, so
+            // without it the (+) entry is a dead button and the kind's factory
+            // would throw on every launch -- the same reason clipboard declares
+            // it. `needs` makes that visible in the Mods pane instead of
+            // leaving a mod that reads "active" and does nothing.
+            needs: ['serverStore.saveChain', 'windows.createAppWindow'],
             init: function (ctx) {
                 // The whole point is durable server storage; no-op on an older
                 // loader that predates ctx.serverStore (#124) or the save chain
@@ -61,6 +66,41 @@
                 // fixed id through openAppWindow dedupes + un-minimizes, so a
                 // second launch focuses the existing window (cf. clipboard #118).
                 const SCRATCH_WIN_ID = 'app:scratch';
+
+                // #199/#219: THE SAVE IS A NAMED COMMAND, not a field.
+                // `win._saveToServer = runSave` used to sit on every scratchpad
+                // window, commented "Ctrl+S hook" -- and nothing read it.
+                // Core's only reader (73's unsaved-changes prompt) is gated on
+                // `win.appKind === 'text-editor'`, and no key dispatcher looked
+                // it up either, so the hook was dead on this window from the
+                // day it was written. That is exactly the failure #199 names: a
+                // duck-typed field is unaddressable, so nobody notices when
+                // nothing is reading it.
+                //
+                // One registration, not one per window. The id is namespaced to
+                // 'scratchpad:save' by the registrar, so a second register()
+                // would be a collision rather than a per-window entry; the
+                // focused window's saver is looked up here instead. A WeakMap
+                // and not a field, for the reason above -- and so a closed
+                // window's closure is not held alive by the registry.
+                const scratchSavers = new WeakMap();   // win -> runSave
+                if (ctx.commands && typeof ctx.commands.register === 'function') {
+                    ctx.commands.register('save', {
+                        scope: 'window',
+                        // `when` is the honest gate: window-scoped already
+                        // means "a window is focused", and this narrows it to
+                        // one of OURS that has finished building. A window
+                        // mid-build has no saver yet, and answering 'blocked'
+                        // is the truthful outcome for it.
+                        when: function (where) {
+                            return scratchSavers.has(where.win);
+                        },
+                        run: function (args, where) {
+                            const save = scratchSavers.get(where.win);
+                            return save ? save() : false;
+                        },
+                    });
+                }
                 const SAVE_DEBOUNCE = 800;   // ms of idle before an autosave
                 const MAX_TABS = 20;         // soft cap (v1)
                 const NAME_MAX = 60;         // tab-name length cap
@@ -94,21 +134,68 @@
                 }
 
                 // ---- window builder -------------------------------------------
+                // #194/#219: the ~30-field scaffold is core's. buildAppChrome,
+                // addResizeHandles, the desktop insertion and its `empty`
+                // class, the win literal, windows.set, wireAppChrome, the
+                // synthetic kind:'app' session, the hand-appended taskbar chip
+                // with its cssEscape'd guard, updateTaskbarColor/Label, the
+                // #taskbar-empty removal and finishWindowPlacement were all
+                // re-typed here.
+                //
+                // THE FIVE-CHILD LAYOUT SURVIVES IT. This window is not
+                // toolbar-then-body: it is tabBar, toolbar, roBanner, body,
+                // histPanel. The factory owns the middle two, so body() places
+                // the other three around them -- tabBar before the toolbar it
+                // is handed, roBanner before the body, histPanel appended to
+                // win.dom, which still lands before the resize handles because
+                // those go on after body() returns (86c says so in as many
+                // words, for recorder's below-the-body transport bar).
                 function openScratchWindow(appData) {
-                    const id = String(appData.id);
-                    const title = 'Scratchpad';
-                    const geom = clampGeom(
-                        appData.geom || appDefaultGeom('text-editor'));
-                    const color = normalizeHex(appData.color || defaultColor(id));
-                    const locked = appData.locked !== undefined
-                        ? !!appData.locked : true;
-
-                    const chrome = buildAppChrome({
-                        id, appClass: 'app-scratch', badge: '#notes',
-                        geom, color, locked, title,
+                    const d = appData || {};
+                    const h = ctx.windows.createAppWindow({
+                        kind: 'scratchpad',
+                        id: (d.id != null && String(d.id))
+                            ? String(d.id) : SCRATCH_WIN_ID,
+                        title: 'Scratchpad',
+                        sid: 'notes',
+                        badge: '#notes',
+                        appClass: 'app-scratch',
+                        // The factory would name it 'app-scratchpad-body';
+                        // the shipped stylesheet matches '.app-scratch-body'.
+                        bodyClass: 'app-scratch-body',
+                        // Absent fields keep the factory's defaults, which are
+                        // the deleted scaffold's own. appDefaultGeom only
+                        // special-cases 'sticky-note', so asking for the kind
+                        // is the same box the old 'text-editor' ask gave.
+                        geom: d.geom,
+                        color: d.color,
+                        locked: d.locked,
+                        floatGeom: d.floatGeom,
+                        toolbar: function () { /* filled from body(), see below */ },
+                        // `d` rides along because hydrate() restores the
+                        // ACTIVE TAB from the stored record, and the factory
+                        // does not pass the appData through to body().
+                        body: function (bodyEl, win, handle) {
+                            buildScratchWindow(bodyEl, win, handle, d);
+                        },
                     });
-                    const { dom, titleText } = chrome;
-                    titleText.title = 'Scratchpad — notes stored on this broker';
+                    // THE TRAP: openAppWindow hands a registered kind's factory
+                    // return value straight back to its callers, and they want
+                    // a window RECORD. Return h.win, never the handle.
+                    return h.win;
+                }
+
+                // Everything specific to a scratchpad window, against a record
+                // core already built, chipped and inserted.
+                function buildScratchWindow(body, win, handle, appData) {
+                    const id = win.id;
+                    const title = win.name;
+                    const dom = win.dom;
+                    const titleText = win.titleText;
+                    if (titleText) {
+                        titleText.title =
+                            'Scratchpad — notes stored on this broker';
+                    }
 
                     const stopProp = (e) => e.stopPropagation();
                     const btn = (label, cls, ttl, onClick) => {
@@ -128,8 +215,10 @@
                     // the New-tab and History actions.
                     const tabBar = document.createElement('div');
                     tabBar.className = 'app-tabs';
-                    const toolbar = document.createElement('div');
-                    toolbar.className = 'app-toolbar app-scratch-toolbar';
+                    // The factory built and classed this one ('app-toolbar
+                    // app-scratch-toolbar', derived from appClass -- byte-equal
+                    // to what the deleted line wrote).
+                    const toolbar = handle.toolbar;
                     const addBtn = btn('+', 'app-scratch-add',
                         'new tab', () => addTab());
                     const histBtn = btn('History', 'app-scratch-hist-btn',
@@ -150,73 +239,36 @@
                     roBanner.appendChild(roText);
                     roBanner.appendChild(roRetry);
 
-                    // CM host + the History panel (shown in place of the body).
-                    const body = document.createElement('div');
-                    body.className = 'app-scratch-body';
+                    // CM host (core built it; this is its initial content) +
+                    // the History panel, shown in place of the body.
                     body.textContent = 'loading…';
                     const histPanel = document.createElement('div');
                     histPanel.className = 'app-scratch-history';
                     histPanel.style.display = 'none';
 
-                    dom.appendChild(tabBar);
-                    dom.appendChild(toolbar);
-                    dom.appendChild(roBanner);
-                    dom.appendChild(body);
+                    // The three children the factory does not own, placed
+                    // around the two it does: tabBar above the toolbar,
+                    // roBanner between the toolbar and the body, histPanel
+                    // after the body (and still before the resize handles,
+                    // which are appended once body() returns).
+                    dom.insertBefore(tabBar, toolbar);
+                    dom.insertBefore(roBanner, body);
                     dom.appendChild(histPanel);
-                    addResizeHandles(dom);   // last children: on-top hit zones
 
-                    document.getElementById('desktop').appendChild(dom);
-                    document.getElementById('desktop').classList.remove('empty');
-
-                    const win = {
-                        id, sid: 'notes', hostId: 'app',
-                        type: 'app', appKind: 'scratchpad',
-                        dom, body, titleText,
-                        term: null, fitAddon: null,
-                        ws: null, wsOpen: false, termReady: false,
-                        minimized: false, disposed: false,
-                        geom, name: title, color,
-                        resizeTimer: null, lastSentDims: null,
-                        staleSession: false, authFailed: false,
-                        reattachAttempts: 0, reattachAt: 0, lastOpenAt: 0,
-                        missingPolls: 0,
-                        cleanups: [],
-                        tiled: false,
-                        floatGeom: appData.floatGeom
-                            ? Object.assign({}, appData.floatGeom) : null,
-                        locked,
-                        dirty: false,
-                        // scratchpad state. No baseRev / _saving / _saveAgain /
-                        // _saveTimer: the CAS revision, the single-in-flight
-                        // latch and the debounce all live inside the save chain
-                        // now (#196), and a field nothing updates is worse than
-                        // no field at all.
-                        scratchTabs: [], activeTab: 0,
-                        cmView: null, serverRO: false, _loading: true,
-                        _suppressCm: false, _makeState: null, _histPreview: null,
-                    };
-                    windows.set(id, win);
-
-                    // Raise / minimize / close / drag / 8-way resize / WM menu.
-                    // Default close = closeWindow (no dirty prompt — content is
-                    // autosaved to the server; a pending edit is flushed below).
-                    wireAppChrome(win, chrome);
-
-                    // Synthetic kind:'app' session + taskbar item (keeps the poll
-                    // reaper off this window; lets formatTitle render it) — same
-                    // scaffold as the clipboard / task-manager app windows.
-                    const appSess = { key: id, sid: 'notes', id, title,
-                                      stale: false, kind: 'app', hostId: 'app' };
-                    sessions.set(id, appSess);
-                    const itemsHost = document.getElementById('taskbar-items');
-                    if (!itemsHost.querySelector('.taskbar-item[data-session-id="'
-                            + cssEscape(id) + '"]')) {
-                        itemsHost.appendChild(buildTaskbarItem(appSess));
-                    }
-                    updateTaskbarColor(id);
-                    updateTaskbarLabel(id);
-                    const emptyMsg = document.getElementById('taskbar-empty');
-                    if (emptyMsg) emptyMsg.remove();
+                    // The record is core's. Only the scratchpad-specific
+                    // state is set here -- and no baseRev / _saving /
+                    // _saveAgain / _saveTimer, because the CAS revision, the
+                    // single-in-flight latch and the debounce all live inside
+                    // the save chain (#196), and a field nothing updates is
+                    // worse than no field at all.
+                    win.scratchTabs = [];
+                    win.activeTab = 0;
+                    win.cmView = null;
+                    win.serverRO = false;
+                    win._loading = true;
+                    win._suppressCm = false;
+                    win._makeState = null;
+                    win._histPreview = null;
 
                     // While read-only, a click on the window re-attempts the save —
                     // so once the user takes over the lease it resyncs on the next
@@ -447,7 +499,10 @@
                         chain.save(saveReducer);
                         return chain.flush();
                     }
-                    win._saveToServer = runSave;   // Ctrl+S hook
+                    // Addressable as 'scratchpad:save' (see the registration
+                    // in init). No field on the window: the one it replaced was
+                    // read by nothing.
+                    scratchSavers.set(win, runSave);
                     // The deliberate final flush (#196 trap 6), from the WINDOW
                     // cleanup — which runs on an ordinary close with the mod
                     // still alive, so an edit made in the last SAVE_DEBOUNCE ms
@@ -714,11 +769,10 @@
 
                     hydrate();
 
-                    finishWindowPlacement(win);
-                    // Persist the view-state record so a reload restores the window
-                    // (content then re-hydrates from the server).
+                    // Persist the view-state record so a reload restores the
+                    // window (content then re-hydrates from the server).
+                    // finishWindowPlacement is the factory's now.
                     saveAppWindow(win);
-                    return win;
                 }
 
                 // ---- window-kind registration ---------------------------------
@@ -748,16 +802,13 @@
                     },
                 });
 
-                // Teardown — registered AFTER registerWindowKind so LIFO closes any
-                // live scratchpad window WHILE the kind is still registered (so
-                // saveAppWindow sees the serialize and the record is handled by
-                // closeWindow), same reasoning as the sticky/clipboard mods.
-                ctx.onUnload(function () {
-                    for (const w of Array.from(windows.values())) {
-                        if (w && w.type === 'app' && w.appKind === 'scratchpad') {
-                            closeWindow(w.id);
-                        }
-                    }
-                });
+                // #194/#219: NO TEARDOWN HERE. This used to iterate the CORE
+                // windows Map for records carrying its own appKind, registered
+                // AFTER registerWindowKind so LIFO closed them while the kind
+                // was still registered (so saveAppWindow saw the serialize).
+                // The loader STAGES the factory-owned close ahead of the first
+                // onUnload, which is to say while every kind this mod
+                // registered is still registered -- so the ordering is core's
+                // and cannot be got wrong here again.
             },
         });

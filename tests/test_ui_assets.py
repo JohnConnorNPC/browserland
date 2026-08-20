@@ -6852,15 +6852,14 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # ctx.windows.createAppWindow, which owns the tail for every mod that
     # migrates onto it (86c calls finishWindowPlacement once, after body()).
     # The remaining eight migrate under #204 and drop out of here as they do.
-    # #207 took aistatus out, and #221 task-manager, for the same reason
-    # clipboard left.
+    # #207 took aistatus out, #221 task-manager and #219 scratchpad, for the
+    # same reason clipboard left.
     factories = [
         "81_js_control_panel.js",
         "mods/editor/editor.js",
         "mods/file-manager/file-manager.js",
         "mods/help/help.js",
         "mods/recorder/recorder.js",
-        "mods/scratchpad/scratchpad.js",
     ]
     for rel in factories:
         text = (BROKER_DIR / rel).read_text(encoding="utf-8")
@@ -17852,11 +17851,13 @@ def test_scratchpad_deleted_its_hand_rolled_save_chain():
     # The final flush is a WINDOW cleanup, never an onUnload (#196 trap 6): from
     # an onUnload rec.unloading is already set and 86e drops the batch.
     assert "chain.flush();" in src
-    unload = src.split("ctx.onUnload(function () {")[1]
-    assert "flush" not in unload, "a teardown flush is dropped, not sent"
-    # The surface it cannot run without is declared AND feature-detected: the
+    # #219 made this stronger by accident: the mod registers NO ctx.onUnload at
+    # all any more (the factory-owned close is staged by the loader), so there
+    # is no teardown for a flush to be wrongly attached to.
+    assert "ctx.onUnload(" not in src,         "a teardown reappeared -- a flush from one is dropped, not sent"
+    # The surfaces it cannot run without are declared AND feature-detected: the
     # gate lives in 86c, so a page assembled without that fragment has no gate.
-    assert "needs: ['serverStore.saveChain']," in src
+    assert "needs: ['serverStore.saveChain', 'windows.createAppWindow']," in src
     assert "typeof ctx.serverStore.saveChain !== 'function'" in src
 
 
@@ -18090,9 +18091,16 @@ function activate() {
             return _modRegisterWindowKind(rec, spec);
         },
     };
+    const commands = {};
+    ctx.commands = {
+        register: function (id, spec) {
+            commands[id] = spec;
+            return function () { delete commands[id]; };
+        },
+    };
     _applyCtxExtenders(ctx, rec);
     DECL.init(ctx);
-    return { rec: rec, ctx: ctx };
+    return { rec: rec, ctx: ctx, commands: commands };
 }
 // The launch path core drives: the REAL openAppWindow -> buildAppWindow ->
 // the kind's factory. Then hydrate has to finish (a GET, then the CM build).
@@ -18133,7 +18141,23 @@ SCRATCHCASES.rapid_edits_coalesce = async function () {
                          elapsed: Date.now() - sAt };
     // ...and the flush consumed the queued batch -- nothing trails in later.
     await sleep(900);
+    // #219: THE SAVE IS ADDRESSABLE. `win._saveToServer` was commented "Ctrl+S
+    // hook" and read by nothing -- core's only reader is gated on
+    // appKind === 'text-editor', and Ctrl+S itself comes through CodeMirror's
+    // own Mod-s keymap (pressCtrlS above). It is a named window-scoped command
+    // now, so drive the mod's registered spec: the gate, then run().
+    typeInto(win, 'saved by command');
+    const spec = m.commands.save;
+    const gateOurs = spec.when({ win: win });
+    const gateOther = spec.when({ win: { id: 'someone-elses' } });
+    await spec.run(null, { win: win });
+    await waitFor(function () { return puts().length >= 3; }, 2000);
+    const cmdPuts = puts().length;
+    const cmdText = stored();
     return { loaded: loaded, immediately: immediately, midDebounce: midDebounce,
+             cmdIds: Object.keys(m.commands), cmdScope: spec.scope,
+             gateOurs: gateOurs, gateOther: gateOther,
+             cmdPuts: cmdPuts, cmdText: cmdText,
              afterDebounce: afterDebounce, afterCtrlS: afterCtrlS,
              puts: puts().length, texts: texts(), stored: stored(),
              hasSaveHook: typeof win._saveToServer, banner: banner(win),
@@ -18408,8 +18432,19 @@ def test_the_real_scratchpad_coalesces_rapid_edits_on_the_chain(
     assert r["afterCtrlS"]["elapsed"] < 800, (
         "Ctrl+S waited for the debounce instead of flushing")
     # ...and consumed the batch it flushed: no third write trails in.
-    assert r["puts"] == 2 and r["stored"] == "saved by hand"
-    assert r["hasSaveHook"] == "function"
+    assert r["cmdPuts"] == 3 and r["cmdText"] == "saved by command"
+    # #219: the save is a NAMED window-scoped command now. The field it
+    # replaced was commented "Ctrl+S hook" and read by NOTHING -- core's only
+    # reader is gated on appKind == 'text-editor', and Ctrl+S itself arrives
+    # through CodeMirror's own Mod-s keymap. So it is pinned by absence, and
+    # the command is pinned by behaviour.
+    assert r["hasSaveHook"] == "undefined",         "the dead _saveToServer field came back"
+    assert r["cmdIds"] == ["save"],         "exactly one command, registered once and not per window"
+    assert r["cmdScope"] == "window"
+    # The gate answers for THIS mod's windows only: a window-scoped command
+    # already means "something is focused", and `when` narrows it to one of
+    # ours that has finished building.
+    assert r["gateOurs"] is True and r["gateOther"] is False
     assert r["banner"] == "hidden" and r["serverRO"] is False
 
 
