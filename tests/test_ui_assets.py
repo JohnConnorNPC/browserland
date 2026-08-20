@@ -821,11 +821,18 @@ def test_recorder_reaches_every_broker_not_just_the_local_one():
     # retryable once its broker is signed into.
     assert "refresh({ prompt: false })" in src and \
         "refresh({ prompt: true })" in src
-    assert "win._onHostAuth" in src
+    # #218: the re-auth retry rides ctx.events now, not a field core pokes.
+    assert "ctx.events.on('host:auth'" in src
+    rec_code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("//"))
+    assert "win._onHostAuth" not in rec_code
     # App windows keep hostId 'app' -- core reads win.hostId as the broker a
-    # TERMINAL belongs to and drives masking/reattach off it.
-    assert "hostId: 'app'" in src
+    # TERMINAL belongs to and drives masking/reattach off it. #218 deleted the
+    # hand-built record, so the 'app' half is the FACTORY's guarantee now; what
+    # this mod must still never do is stamp the recording's broker on it.
     assert "hostId: recHostId" not in src
+    ext = (BROKER_DIR / "86c_js_mod_ctx_ext.js").read_text(encoding="utf-8")
+    assert "hostId: 'app'" in ext,         "the app-window factory no longer pins hostId to 'app'"
 
 
 def test_update_check_names_the_broker_it_asks():
@@ -6868,14 +6875,13 @@ def test_creation_tails_are_factored_through_finish_window_placement():
     # ctx.windows.createAppWindow, which owns the tail for every mod that
     # migrates onto it (86c calls finishWindowPlacement once, after body()).
     # The remaining eight migrate under #204 and drop out of here as they do.
-    # #207 took aistatus out, #221 task-manager and #219 scratchpad, for the
-    # same reason clipboard left.
+    # #207 took aistatus out, #221 task-manager, #219 scratchpad and #218
+    # recorder (both of its windows), for the same reason clipboard left.
     factories = [
         "81_js_control_panel.js",
         "mods/editor/editor.js",
         "mods/file-manager/file-manager.js",
         "mods/help/help.js",
-        "mods/recorder/recorder.js",
     ]
     for rel in factories:
         text = (BROKER_DIR / rel).read_text(encoding="utf-8")
@@ -14497,6 +14503,31 @@ def test_the_registry_action_lock_is_not_a_dialog_guard():
     # And the separate on-screen-dialog check stays while any path still calls
     # core's singleton openDialog directly.
     assert "isAppDialogOpen()" in src
+
+
+def test_recorder_builds_both_its_windows_through_the_factory():
+    # #194/#218. Two of the nine hand-built ~30-field records lived in this
+    # one file. The player is the awkward one and 86c names it: its transport
+    # bar goes BELOW the terminal, so it passes no `toolbar` and appends the
+    # bar from body() -- which still lands before the resize handles, because
+    # those go on after body() returns. It is also the `resizable: false`
+    # case, since the recording dictates the window size.
+    src = (BROKER_DIR / "mods" / "recorder" / "recorder.js").read_text(
+        encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.strip().startswith("//"))
+    assert code.count("ctx.windows.createAppWindow({") == 2,         "both recorder windows must be built by the factory"
+    assert "kind: 'recplayer'," in code and "kind: 'recorder'," in code
+    assert "resizable: false," in code,         "the player must still refuse resize handles"
+    # The stylesheet's own class names survive the move: the factory would
+    # have named these 'app-recplay-body' and 'app-reclib-body'.
+    assert "bodyClass: 'recplay-term'," in code
+    assert "bodyClass: 'reclib-body'," in code
+    # ...and nothing re-types the scaffold. Pinned by absence.
+    for gone in ("buildAppChrome", "addResizeHandles", "wireAppChrome",
+                 "windows.set(", "buildTaskbarItem", "finishWindowPlacement",
+                 "getElementById('taskbar-items')"):
+        assert gone not in code,             f"recorder re-grew the hand-rolled scaffold: {gone!r}"
 
 
 def test_recorder_captures_through_the_taps_not_a_monkey_patch():

@@ -1179,62 +1179,47 @@
                         + (meta0.seg > 1 ? (' (part ' + meta0.seg + ')') : '')
                         + (recHostId !== 'local'
                            ? (' · ' + recHostLabel(recHost(recHostId))) : '');
-                    const geom = clampGeom(appData.geom
-                                           || appDefaultGeom('text-editor'));
-                    const color = normalizeHex(appData.color
-                                               || defaultColor(id));
-                    const chrome = buildAppChrome({
-                        id: id, appClass: 'app-recplay', badge: '#rec',
-                        geom: geom, color: color, locked: true, title: title,
+                    // #194/#218: THE SCAFFOLD IS CORE'S. Two of the nine
+                    // hand-built ~30-field records lived in this file; this is
+                    // the first. `resizable: false` is the one spec field this
+                    // window needs that most do not -- the recording dictates
+                    // the size, which is the whole point of same-size playback,
+                    // and 86c lists recorder as the reason that field exists.
+                    //
+                    // The transport bar goes BELOW the terminal, so there is no
+                    // `toolbar` in the spec: body() appends it (and the notes
+                    // strip) to win.dom, which still lands before the resize
+                    // handles -- 86c names this window as the case that shape
+                    // is for.
+                    let termHost = null, bar = null, notesEl = null;
+                    let win = null;
+                    const handle = ctx.windows.createAppWindow({
+                        kind: 'recplayer',
+                        id: id,
+                        title: title,
+                        sid: 'rec',
+                        badge: '#rec',
+                        appClass: 'app-recplay',
+                        // The stylesheet matches '.recplay-term', not the
+                        // factory's 'app-recplay-body'.
+                        bodyClass: 'recplay-term',
+                        geom: appData.geom,
+                        color: appData.color,
+                        locked: true,
+                        resizable: false,
+                        body: function (bodyEl, w) {
+                            termHost = bodyEl;
+                            win = w;
+                            bar = document.createElement('div');
+                            bar.className = 'app-toolbar recplay-bar';
+                            notesEl = document.createElement('div');
+                            notesEl.className = 'recplay-notes';
+                            w.dom.appendChild(bar);
+                            w.dom.appendChild(notesEl);
+                        },
                     });
-                    const dom = chrome.dom;
-
-                    const termHost = document.createElement('div');
-                    termHost.className = 'recplay-term';
-                    const bar = document.createElement('div');
-                    bar.className = 'app-toolbar recplay-bar';
-                    const notesEl = document.createElement('div');
-                    notesEl.className = 'recplay-notes';
-                    dom.appendChild(termHost);
-                    dom.appendChild(bar);
-                    dom.appendChild(notesEl);
-                    // NO resize handles: the recording dictates the window
-                    // size (the whole point of same-size playback).
-                    document.getElementById('desktop').appendChild(dom);
-                    document.getElementById('desktop').classList.remove('empty');
-
-                    const win = {
-                        id: id, sid: 'rec', hostId: 'app',
-                        type: 'app', appKind: 'recplayer',
-                        dom: dom, body: termHost, titleText: chrome.titleText,
-                        term: null, fitAddon: null,
-                        ws: null, wsOpen: false, termReady: false,
-                        minimized: false, disposed: false,
-                        geom: geom, name: title, color: color,
-                        resizeTimer: null, lastSentDims: null,
-                        staleSession: false, authFailed: false,
-                        reattachAttempts: 0, reattachAt: 0,
-                        lastOpenAt: 0, missingPolls: 0,
-                        cleanups: [], tiled: false, floatGeom: null,
-                        locked: true, dirty: false,
-                    };
-                    windows.set(id, win);
-                    wireAppChrome(win, chrome);
-
-                    const appSess = { key: id, sid: 'rec', id: id,
-                                      title: title, stale: false,
-                                      kind: 'app', hostId: 'app' };
-                    sessions.set(id, appSess);
-                    const itemsHost = document.getElementById('taskbar-items');
-                    if (!itemsHost.querySelector(
-                            '.taskbar-item[data-session-id="'
-                            + cssEscape(id) + '"]')) {
-                        itemsHost.appendChild(buildTaskbarItem(appSess));
-                    }
-                    updateTaskbarColor(id);
-                    updateTaskbarLabel(id);
-                    const emptyMsg = document.getElementById('taskbar-empty');
-                    if (emptyMsg) emptyMsg.remove();
+                    if (!win) return handle.win;
+                    const dom = win.dom;
 
                     // ---- transport bar UI ---------------------------------
                     const mkBtn = function (txt, tip) {
@@ -1321,7 +1306,11 @@
                         termHost.style.width = tw + 'px';
                         termHost.style.height = th + 'px';
                         const w = Math.max(tw + 4, 560);
-                        const h = chrome.titleBar.offsetHeight + th
+                        // #194/#218: the factory does not hand back the chrome
+                        // object, so the title bar is read off the window's own
+                        // DOM -- it is buildAppChrome's first child either way.
+                        const tb = dom.querySelector('.title-bar');
+                        const h = ((tb && tb.offsetHeight) || 0) + th
                             + bar.offsetHeight + notesEl.offsetHeight + 12;
                         dom.style.width = w + 'px';
                         dom.style.height = h + 'px';
@@ -1766,6 +1755,10 @@
                         win.term = null;
                     });
 
+                    // finishWindowPlacement and the create-time focus are the
+                    // factory's; this raise is the mod's own, kept because a
+                    // player opened from the library must come to the front
+                    // even when the library window was the one focused.
                     bringToFront(id);
                     return win;
                 }
@@ -1774,18 +1767,33 @@
                 function openLibraryWindow(appData) {
                     const id = String(appData.id);
                     const title = 'Session recordings';
-                    const geom = clampGeom(appData.geom
-                                           || appDefaultGeom('text-editor'));
-                    const color = normalizeHex(appData.color
-                                               || defaultColor(id));
-                    const chrome = buildAppChrome({
-                        id: id, appClass: 'app-reclib', badge: '#rec',
-                        geom: geom, color: color, locked: true, title: title,
+                    // #194/#218: the second of this file's two hand-built
+                    // records. Ordinary shape this time -- toolbar above body --
+                    // so the spec carries both builders and the factory owns
+                    // the order.
+                    let refreshBtn = null, hostSel = null, statusEl = null;
+                    let listEl = null, win = null;
+                    const handle = ctx.windows.createAppWindow({
+                        kind: 'recorder',
+                        id: id,
+                        title: title,
+                        sid: 'rec',
+                        badge: '#rec',
+                        appClass: 'app-reclib',
+                        // The stylesheet matches '.reclib-body'; the factory
+                        // would name it 'app-reclib-body'.
+                        bodyClass: 'reclib-body',
+                        geom: appData.geom,
+                        color: appData.color,
+                        locked: true,
+                        floatGeom: appData.floatGeom,
+                        toolbar: function (el) { buildLibToolbar(el); },
+                        body: function (bodyEl, w) { listEl = bodyEl; win = w; },
                     });
-                    const dom = chrome.dom;
-                    const toolbar = document.createElement('div');
-                    toolbar.className = 'app-toolbar reclib-toolbar';
-                    const refreshBtn = document.createElement('button');
+                    if (!win) return handle.win;
+                    const dom = win.dom;
+                    function buildLibToolbar(toolbar) {
+                    refreshBtn = document.createElement('button');
                     refreshBtn.type = 'button';
                     refreshBtn.textContent = 'Refresh';
                     // #161 broker filter. Hidden entirely while one broker is
@@ -1793,57 +1801,15 @@
                     // is exactly what it was. Options are rebuilt on every
                     // refresh — brokers are added and removed from the Control
                     // Panel while this window is open.
-                    const hostSel = document.createElement('select');
+                    hostSel = document.createElement('select');
                     hostSel.className = 'reclib-hostsel';
                     hostSel.title = 'which broker to list recordings from';
-                    const statusEl = document.createElement('span');
+                    statusEl = document.createElement('span');
                     statusEl.className = 'reclib-status';
                     toolbar.appendChild(refreshBtn);
                     toolbar.appendChild(hostSel);
                     toolbar.appendChild(statusEl);
-                    const listEl = document.createElement('div');
-                    listEl.className = 'reclib-body';
-                    dom.appendChild(toolbar);
-                    dom.appendChild(listEl);
-                    addResizeHandles(dom);
-                    document.getElementById('desktop').appendChild(dom);
-                    document.getElementById('desktop').classList.remove('empty');
-
-                    const win = {
-                        id: id, sid: 'rec', hostId: 'app',
-                        type: 'app', appKind: 'recorder',
-                        dom: dom, body: listEl, titleText: chrome.titleText,
-                        term: null, fitAddon: null,
-                        ws: null, wsOpen: false, termReady: false,
-                        minimized: false, disposed: false,
-                        geom: geom, name: title, color: color,
-                        resizeTimer: null, lastSentDims: null,
-                        staleSession: false, authFailed: false,
-                        reattachAttempts: 0, reattachAt: 0,
-                        lastOpenAt: 0, missingPolls: 0,
-                        cleanups: [],
-                        tiled: false,
-                        floatGeom: appData.floatGeom
-                            ? Object.assign({}, appData.floatGeom) : null,
-                        locked: true, dirty: false,
-                    };
-                    windows.set(id, win);
-                    wireAppChrome(win, chrome);
-
-                    const appSess = { key: id, sid: 'rec', id: id,
-                                      title: title, stale: false,
-                                      kind: 'app', hostId: 'app' };
-                    sessions.set(id, appSess);
-                    const itemsHost = document.getElementById('taskbar-items');
-                    if (!itemsHost.querySelector(
-                            '.taskbar-item[data-session-id="'
-                            + cssEscape(id) + '"]')) {
-                        itemsHost.appendChild(buildTaskbarItem(appSess));
                     }
-                    updateTaskbarColor(id);
-                    updateTaskbarLabel(id);
-                    const emptyMsg = document.getElementById('taskbar-empty');
-                    if (emptyMsg) emptyMsg.remove();
 
                     // Which brokers this window lists. '' = all of them.
                     // Deliberately NOT filtered by hostHidden(): "hidden" is a
@@ -2281,7 +2247,7 @@
                     }
 
                     refresh({ prompt: true });
-                    finishWindowPlacement(win);
+                    // finishWindowPlacement is the factory's now.
                     return win;
                 }
 
