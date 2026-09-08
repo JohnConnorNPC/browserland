@@ -16,6 +16,26 @@ story behind anything named below.
 
 ### Added
 
+- **A terminal can be opened in its own browser window** (#226). *Open in new
+  window* on a terminal's title-bar menu (or the unbound *Open terminal in new
+  window* key action) hands the live session to a popup: nothing restarts, the
+  shell stays put, and the popup becomes the only view attached to the PTY, so
+  it also owns the terminal's size. On the desktop the terminal acts like a
+  minimized window (taskbar entry kept, marked ↗, click focuses the popup) and
+  returns to its column or float when the popup's × is pressed, its menu says
+  *Return to desktop*, or the browser window is closed. Liveness is a Web
+  Lock held by the popup — released by the browser on close, crash, discard or
+  navigation — so a reloaded desktop asks before it restores, and a second
+  popup for the same terminal refuses. The popup runs every mod except
+  Workspaces, never writes the shared layout or the browser's prefs blob, and
+  its × never terminates. Two attached views would both answer a program's
+  terminal queries, which is why the desktop closes its own socket while the
+  terminal is out. Requires popups to be allowed, and an https or localhost
+  page (the lock needs one; elsewhere the item says so and does nothing).
+- **Docs fix:** two tabs of one browser share the single-active lease (the id
+  lives in that browser's local storage); the wiki said a second tab got the
+  *Become active* prompt.
+
 - **`wiki/` is now the single source for every piece of prose in the project.**
   `docs/` — 2,528 lines of developer and operator reference — never rendered in
   the app, was never searchable, and drifted on its own. It has been merged into
