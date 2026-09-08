@@ -2050,7 +2050,7 @@
         // browser-toggled-off + operator pins off => the set's "away from
         // default" entry flips it back ON, which is the opposite of both wishes.
         function isModEnabled(id) {
-            const pin = _pin(id);
+            const pin = _surfacePin(id);   // #226: the detached surface pins some off
             if (pin !== null) return pin;
             const def = _modDefault(id);
             return _modsDisabled().has(id) ? !def : def;

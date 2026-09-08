@@ -226,6 +226,9 @@
             await _stateReadyPromise;
             // Superseded (deactivated, or a later boot/rebuild) mid-boot — abort.
             if (_deactivated || epoch !== _viewEpoch) return;
+            // #226: the detached surface boots one window and none of the
+            // desktop below (no app windows, no deep link, no restore queue).
+            if (isDetachedSurface()) { await bootDetachedView(epoch); return; }
             restoreAppWindows();
             // ?session=<id> deep link: auto-open once it appears in /sessions.
             // A bare numeric id means the local host (links predate multi-host).
@@ -239,6 +242,8 @@
             seedRestoreQueue();
             refreshTaskbar();
             startSlowPoll();
+            // #226: drop records of children that died while this page was away.
+            try { pruneDetachedSet(); } catch (_) {}
         }
 
         // Lost the HOME lease: dispose THIS browser's entire view WITHOUT
@@ -325,6 +330,9 @@
                 _emitModEvent('state:adopted', {});
             }
             try { applyDisplaySettings(); } catch (_) {}
+            // #226: the ordinary rebuild is restore-queue driven and would
+            // reopen nothing on the detached surface.
+            if (isDetachedSurface()) { rebuildDetachedView(); return; }
             restoreAppWindows();
             seedRestoreQueue();
             refreshTaskbar();
@@ -350,5 +358,8 @@
             applyHostVisibilityAll();
             updateTaskbarActive();
             renderHostStatus();
+            // #226: no chip to take it back from on the detached surface —
+            // say what happened instead of showing a blank page.
+            detachedRemoteLeaseNotice(hostId, active);
         }
 

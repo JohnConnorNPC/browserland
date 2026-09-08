@@ -54,6 +54,7 @@ The table below lists every bindable action and its **default** binding. Rebind 
 | Toggle fullscreen | `Ctrl+Alt+f` |
 | Open control panel | `Ctrl+Alt+p` |
 | Toggle help | *(unbound by default)* |
+| Open terminal in new window | *(unbound by default)* |
 <!-- help:ignore-end -->
 
 ## What the actions do
@@ -72,7 +73,7 @@ These seven come from the **Workspaces** mod (enabled by default), so they leave
 
 ### Windows
 
-New terminal launches the **local broker's** default profile. Close focused window and Minimize focused window act on the front window.
+New terminal launches the **local broker's** default profile. Close focused window and Minimize focused window act on the front window. Open terminal in new window moves the front terminal into a browser window of its own (see [[Window-Types]]); it is unbound until you assign it a combo, because browsers only allow a popup from a key press or click.
 
 ### App-wide
 

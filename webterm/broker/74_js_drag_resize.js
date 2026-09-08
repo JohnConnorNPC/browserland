@@ -366,6 +366,8 @@
                 // right-click lands a mousedown too, and it must not kill the
                 // drag it lands in the middle of.
                 if (e.button !== 0) return;
+                // #226: the detached surface's window IS the viewport.
+                if (win.detachedMain) return;
                 // Tiled windows: title-bar drag reorders / consumes / detaches
                 // via the strip engine (overlays during drag, one mutation on
                 // drop). The floating absolute-move below would be a no-op on a

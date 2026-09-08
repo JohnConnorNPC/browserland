@@ -13,6 +13,7 @@
             return L.openTerms;
         }
         function addOpenTerm(key) {
+            if (isDetachedSurface()) return;       // #226: restore set is the desktop's
             key = String(key);
             const arr = getOpenTerms();
             if (arr.indexOf(key) !== -1) return;   // set semantics; no churn
@@ -20,6 +21,7 @@
             savePrefs();
         }
         function removeOpenTerm(key) {
+            if (isDetachedSurface()) return;       // #226: restore set is the desktop's
             key = String(key);
             const arr = getOpenTerms();
             const i = arr.indexOf(key);
@@ -118,6 +120,7 @@
         // Should a window with this key open tiled? Membership wins; else the
         // remembered per-window role; else follow the global desktop mode.
         function decideTiled(key) {
+            if (isDetachedSurface()) return false; // #226: one float, always
             if (findKeyInLayout(key)) return true;
             const role = getPref(key).tiled;
             if (role === true) return true;

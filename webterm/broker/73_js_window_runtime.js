@@ -147,6 +147,9 @@
                     // Tiled windows: flex owns the pixel box, so never snap the
                     // .term-window size to the grid — just accept the grid.
                     if (win.tiled) return;
+                    // #226: the detached surface's window is the viewport; it
+                    // is never snapped to a grid it dictated itself.
+                    if (isDetachedSurface()) return;
                     // Locked clients refuse peer-driven size snaps — the
                     // local pixel area must stay at lockedSize() regardless
                     // of what an unlocked peer dragged to.
@@ -369,7 +372,8 @@
         // zero/near-zero body rect (display:none, detached/parked, or laid
         // out at 0px) must never reach the cols/rows math below.
         function isResizable(win) {
-            if (!win || win.disposed || win.minimized) return false;
+            // #226: a detached window is minimized anyway; belt and braces.
+            if (!win || win.disposed || win.minimized || win.detached) return false;
             let r;
             try { r = win.body.getBoundingClientRect(); } catch (_) { return false; }
             return !!r && r.width >= 2 && r.height >= 2;
@@ -557,6 +561,11 @@
         function restoreWindow(id) {
             const win = windows.get(id);
             if (!win) return;
+            // #226: out in its own browser window. Every un-minimize path
+            // (taskbar chip, revealAndFocusWindow, the Restore menu item,
+            // openWindow on an existing id) lands here, so THIS is the one
+            // place that turns "restore" into "focus the child".
+            if (win.detached) { focusDetachedChild(win); return; }
             win.minimized = false;
             win.dom.classList.remove('minimized');
             // Tiled: reparent back into its retained column before measuring.

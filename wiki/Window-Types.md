@@ -43,6 +43,23 @@ Two more chips can appear in a terminal's title bar, both ambient — neither is
 
 The title bar used to carry a **📋 Agent docs button** that opened that folder's `AGENTS.md` / `CLAUDE.md`. It has been **retired**: the button guessed which folder you meant from the terminal's detected working directory, and when that guess was wrong it opened — and, once you saved, wrote to — a different project's `AGENTS.md`, with no way to tell from the window that it had. `AGENTS.md` and `CLAUDE.md` are ordinary files; open them with the **Text editor** (Open) or the **File manager** as you would any other. Agent-docs windows you already had open still restore and still save.
 
+### Open a terminal in its own browser window
+
+Right-click a terminal's title bar and choose **Open in new window** (or bind the **Open terminal in new window** action, see [[Keyboard-Shortcuts]]). The terminal moves into a browser window of its own — drag that window to another monitor, or keep it above other apps — while the shell stays exactly where it was. Nothing restarts and nothing is copied: the desktop hands the live session over, and the new window becomes the only view that is attached to it, so it also decides the terminal's size.
+
+On the desktop the moved terminal behaves like a **minimized** window: its taskbar entry stays, marked with a small **↗**, and clicking it brings the other browser window to the front instead of restoring the terminal. In tiling mode it drops out of its column just as a minimized window does, and it returns to the same column.
+
+Bringing it back is **Return to desktop**: the title-bar **×** in the popped-out window, its title-bar right-click menu, or simply **closing that browser window**. On the desktop the terminal un-minimizes and re-attaches, and the screen heals from a snapshot as after a reload. The **×** in the popped-out window never terminates the shell, whatever the per-host *terminal close* setting says — the browser window's own close button sits inches away and can only ever hand the terminal back, so the two must not have opposite consequences. **Terminate** is still in that window's title-bar menu, behind the usual confirmation.
+
+A few things worth knowing:
+
+- Popups must be allowed for the site. A blocked popup changes nothing and says so.
+- The popped-out window keeps the last **256 KiB** of output the broker's agent holds (the same replay a reload gets); what scrolled out of that buffer stays on the desktop's copy until it returns.
+- A terminal on a **remote broker** can be popped out too. If another browser takes that broker's lease, the popped-out window says so rather than going blank; take the lease back from the desktop.
+- Each terminal can be open in **one** extra window at a time. Opening the same terminal's link twice shows *already open in another window*.
+- Mods run in the popped-out window as on the desktop, except **Workspaces** (there is no desktop to organize there).
+- Ownership is tracked with a browser lock, which needs an https or localhost page (the [[recommended setup|Hosts-and-Multi-Browser]]). On a plain-http page that is not localhost the feature is unavailable and says so, because nothing there can promise that only one window is typing into the shell.
+
 A new terminal from `Ctrl+Alt+Enter` always runs on the **local broker**; a left-click on the **+** button launches on your **default host** — the local broker unless changed in Control Panel → Hosts. To start one on a specific host, pick its profile from the right-click **+** menu. See [[Hosts-and-Multi-Browser]] for adding hosts and setting the default.
 
 **Pasting images**: paste a screenshot (e.g. `Win+Shift+S`) straight into a terminal with `Ctrl+V`, `Alt+V`, or a right-click. The image itself cannot cross into the remote shell's clipboard, so the desktop uploads it to that terminal's broker host and pastes the resulting **file path** instead — AI agents like Claude Code read a pasted image path just like a drag-and-dropped file. Pasted images are kept for a few hours in the host's temp area and swept automatically. If the clipboard carries both text and an image, the text wins. `Alt+V` and right-click image capture need an https (or localhost) page; `Ctrl+V` image paste works everywhere.

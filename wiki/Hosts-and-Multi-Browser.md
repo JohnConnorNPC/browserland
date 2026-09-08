@@ -146,9 +146,11 @@ Restart is granted the same way as the other two gates above: from the **Allow t
 
 ## Single active browser (the lease)
 
-A broker allows only **one active browser at a time** to be the WRITER of its layout. That permission is a *lease*: the browser holding it owns the window arrangement for that broker. This prevents two open tabs from overwriting each other's layout.
+A broker allows only **one active browser at a time** to be the WRITER of its layout. That permission is a *lease*: the browser holding it owns the window arrangement for that broker. This prevents two browsers from overwriting each other's layout.
 
-If you open the desktop in a second browser (or a second tab) while another already holds the lease, you won't see windows immediately. Instead you get a **Become active** prompt:
+"Browser" here means a browser profile, not a tab: the lease is keyed on an id the desktop keeps in that profile's local storage, so two tabs of the **same** browser share it and are both active at once. That is what lets a terminal be [[opened in its own browser window|Window-Types]] without a takeover — but it also means two full desktop tabs in one browser are not kept apart, so keep one desktop tab per browser.
+
+If you open the desktop in a second browser while another already holds the lease, you won't see windows immediately. Instead you get a **Become active** prompt:
 
 > another browser is active
 >

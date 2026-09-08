@@ -583,3 +583,29 @@
             display: none;
         }
 
+
+        /* ---- #226: "Open in new window" ---------------------------------- */
+        /* A chip whose terminal is out in its own browser window: not merely
+           minimized, and a click focuses that window rather than restoring. */
+        .taskbar-item.detached { opacity: 0.8; border-left-style: double; }
+        .taskbar-item.detached::after {
+            content: '\2197';               /* north-east arrow */
+            font-size: 11px;
+            color: var(--fg-dim);
+        }
+        /* The detached surface: one window, no desktop chrome. The taskbar is
+           display:none (so #desktop's flex:1 takes the whole viewport), the
+           window is pinned to the viewport by 84a and cannot be dragged or
+           resized by hand — the browser window is the handle. */
+        body.detached-surface #taskbar,
+        body.detached-surface #strip,
+        body.detached-surface #strip-scrollbar,
+        body.detached-surface #park { display: none !important; }
+        body.detached-surface #desktop.empty::before { content: ''; }
+        body.detached-surface .term-window.detached-main {
+            border-radius: 0;
+            box-shadow: none;
+        }
+        body.detached-surface .term-window.detached-main .rh,
+        body.detached-surface .term-window.detached-main .btn-min { display: none; }
+        body.detached-surface .term-window.detached-main .title-bar { cursor: default; }

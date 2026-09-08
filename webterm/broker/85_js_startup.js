@@ -7,6 +7,7 @@
         // that the Control Panel toggle is fully in control (a later floating
         // choice sticks because the flag is already set).
         (function applyTilingDefault() {
+            if (isDetachedSurface()) return;   // #226: one float, never saved
             const s = getSettings();
             if (s.tilingDefaultApplied) return;
             s.tilingDefaultApplied = true;

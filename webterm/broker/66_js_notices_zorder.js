@@ -135,6 +135,8 @@
                 const win = windows.get(id);
                 el.classList.toggle('active', !!(win && !win.minimized && id === frontId));
                 el.classList.toggle('minimized', !!(win && win.minimized));
+                // #226: out in its own browser window (a click focuses it).
+                el.classList.toggle('detached', !!(win && win.detached));
             });
         }
 

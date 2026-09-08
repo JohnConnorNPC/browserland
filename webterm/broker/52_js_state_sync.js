@@ -50,6 +50,7 @@
 
         function schedulePush() {
             if (_deactivated) return;            // torn down — never push state
+            if (isDetachedSurface()) return;     // #226: one writer, the desktop
             if (_stateApplying) return;          // don't echo server state back
             if (!_stateReady) { _statePendingPush = true; return; }
             if (_statePushTimer) return;
@@ -61,6 +62,7 @@
 
         async function pushState() {
             if (_deactivated) return;            // torn down — never push state
+            if (isDetachedSurface()) return;     // #226: one writer, the desktop
             if (_statePushInFlight) { _statePushAgain = true; return; }
             const serialized = _stateSerialize();
             if (serialized === _stateLastSerialized) return;  // nothing changed
@@ -121,8 +123,12 @@
             try {
                 prefs._settings = (srv.settings && typeof srv.settings === 'object'
                     && !Array.isArray(srv.settings)) ? srv.settings : {};
-                prefs._layout = (srv.layout && typeof srv.layout === 'object'
-                    && !Array.isArray(srv.layout)) ? srv.layout : {};
+                // #226: the detached surface adopts SETTINGS only; its layout
+                // is the fixed one-float layout 51 installed, never the
+                // desktop's columns (which may well hold the key it shows).
+                prefs._layout = isDetachedSurface() ? { mode: 'floating' }
+                    : (srv.layout && typeof srv.layout === 'object'
+                        && !Array.isArray(srv.layout)) ? srv.layout : {};
                 getSettings();                  // self-heal the adopted blob
                 getLayout();                    // reconcile the adopted layout
                 savePrefsLocal();               // cache, do NOT push

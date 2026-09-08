@@ -165,6 +165,11 @@ _ORDERED = [
     "82_js_settings_keys_hosts.js",
     "83_js_broker_identity.js",
     "84_js_active_view_lifecycle.js",
+    # #226: "Open in new window" -- the detached single-terminal surface
+    # (?detach=<hostId:sid>) and the desktop half that hands a terminal over
+    # to it. After 84 because its boot/rebuild hooks are called from there;
+    # before 85 so its eval-time body class lands before startup paints.
+    "84a_js_detached_view.js",
     "85_js_startup.js",
     # Frontend mod loader (#71): defines registerMod/loadMods/ctx. Ordered after
     # all core JS so a mod's init(ctx) sees the finished desktop, but BEFORE the

@@ -393,7 +393,11 @@
             // min / close
             const onMinDown = stopProp;
             const onCloseDown = stopProp;
-            const onMinClick = (e) => { e.stopPropagation(); minimizeWindow(id); };
+            const onMinClick = (e) => {
+                e.stopPropagation();
+                if (isDetachedSurface()) return;   // #226: nothing to minimize into
+                minimizeWindow(id);
+            };
             // #88: the × button soft-closes (detach the view; the shell keeps
             // running) by default. When terminalCloseTerminates is ON it instead
             // hard-kills the session via terminateWindow → POST /session/kill,
@@ -403,6 +407,11 @@
             // session's own host. The right-click Close stays the soft-close path.
             const onCloseClick = (e) => {
                 e.stopPropagation();
+                // #226: on the detached surface × always means "return to the
+                // desktop" — the OS window's own × sits inches away and can
+                // only ever release, so the two must not have opposite
+                // consequences. Terminate stays in the title-bar menu.
+                if (isDetachedSurface()) { detachedChildReturn(); return; }
                 const st = getSettings();
                 if (st.terminalCloseTerminates) {
                     if (st.terminalCloseConfirm) {
@@ -890,8 +899,16 @@
                 maybeSendInitialResize(win);
             }));
 
-            attachWebSocket(win);
-            bringToFront(id);
+            // #226: on the desktop the attach is gated on who owns the PTY —
+            // a key this browser handed to its own browser window is built
+            // WITHOUT attaching and parked minimized, and every other open
+            // asks the lock right after attaching (84a).
+            if (isDetachedSurface()) {
+                attachWebSocket(win);
+                bringToFront(id);
+            } else {
+                detachGateAttach(win);
+            }
             return win;
         }
 

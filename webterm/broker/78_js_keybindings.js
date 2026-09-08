@@ -83,6 +83,11 @@
               run: () => toggleFullscreen() },
             { id: 'open-control-panel', label: 'Open control panel',
               run: () => toggleControlPanelWindow() },
+            // #226: the focused terminal leaves for a browser window of its
+            // own. Unbound by default (like Toggle help): window.open needs
+            // the keydown's own gesture, which this dispatcher keeps.
+            { id: 'open-in-window', label: 'Open terminal in new window',
+              run: () => { if (frontId) detachWindow(frontId); } },
             // #213 moved 'toggle-help' out of this list: it is contributed by
             // mods/help through ctx.registerKeyActions, backed by the
             // 'help:toggle' command, so the action comes and goes with the mod
@@ -256,6 +261,9 @@
             }
             const act = actionId && keyActionById(actionId);
             if (!act) return;
+            // #226: a page with one window and no desktop has nothing for
+            // these to act on; the combo falls through to the terminal.
+            if (isDetachedSurface() && DETACHED_DENY_ACTIONS.has(act.id)) return;
             e.preventDefault();
             e.stopPropagation();
             try { act.run(); } catch (err) { console.warn('keybinding', actionId, err); }
@@ -466,6 +474,8 @@
         }
 
         function buildWindowMenu(win, x, y) {
+            // #226: the detached surface has its own, much shorter menu.
+            if (isDetachedSurface()) { buildDetachedWindowMenu(win, x, y); return; }
             const items = [];
             if (win.tiled) {
                 const loc = findKeyInLayout(win.id);
@@ -594,6 +604,11 @@
                 }
             }
             items.push({ sep: true });
+            // #226: terminals only — an app doc has no PTY to hand over.
+            if (win.type !== 'app') {
+                items.push({ label: 'Open in new window', enabled: !win.detached,
+                             action: () => detachWindow(win.id) });
+            }
             items.push({ label: win.minimized ? 'Restore' : 'Minimize',
                          enabled: true,
                          action: () => win.minimized

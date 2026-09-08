@@ -47,6 +47,7 @@ Tabbing, splitting, and stacking are all explained on [[Arranging-Windows]]; the
 **On every window:**
 
 - **MCP access** (terminals only) — set this window's agent access to **Off**, **Read**, or **Read-write**. See [[MCP-and-AI-Agents]].
+- **Open in new window** (terminals only) — move the terminal into a browser window of its own; see [[Window-Types]].
 - **Minimize** / **Restore** — hide the window to the taskbar, or bring it back.
 - **Close** — soft close. A terminal's shell keeps running; a non-empty sticky note reopens from *Closed notes* in the **+** menu; a text editor keeps its file on the host (with a save prompt for unsaved changes); a file manager / task manager just closes.
 - **Terminate** (terminals only) — hard-kill the shell process tree (asks to confirm).

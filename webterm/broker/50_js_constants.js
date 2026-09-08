@@ -24,6 +24,20 @@
             }
         }
         const CLIENT_ID = getClientId();
+        // #226: which SURFACE this page is. `?detach=<hostId:sid>` boots a
+        // single-terminal "detached" view (one window in its own browser
+        // window, no desktop chrome, no shared-state writes) instead of the
+        // desktop. Read once, first, so every later fragment can gate on it;
+        // the key keeps openWindow's shape (the FIRST ':' splits host from the
+        // bare wire id). See 84a_js_detached_view.js.
+        const DETACH_KEY = (function () {
+            try {
+                const v = new URLSearchParams(window.location.search).get('detach');
+                return (v && /^[^:\s?#&/\\]+:\d+$/.test(v)) ? v : '';
+            } catch (_) { return ''; }
+        })();
+        const SURFACE = DETACH_KEY ? 'detached' : 'desktop';
+        function isDetachedSurface() { return SURFACE === 'detached'; }
         // 11-color preset palette (#29): one shared set for EVERY window type
         // (terminals, notes, editors). 8 originals + cyan/lime/coral, laid out
         // as the first three rows of the 4x4 picker (the 12th slot is custom).

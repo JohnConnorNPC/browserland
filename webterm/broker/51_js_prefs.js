@@ -11,7 +11,11 @@
             }
         }
         // localStorage write only — the instant offline cache.
+        // #226: the blob is ONE localStorage key written whole, so a second
+        // page of this origin saving its (stale, partial) copy would clobber
+        // the desktop's. The detached surface therefore never writes it.
         function savePrefsLocal() {
+            if (isDetachedSurface()) return;
             try { localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs)); }
             catch (e) { console.warn('prefs save failed:', e); }
         }
@@ -21,6 +25,7 @@
         // broker converge. _hosts and per-session pixel geometry stay
         // browser-local and are NEVER pushed (see _stateBlob).
         function savePrefs() {
+            if (isDetachedSurface()) return;
             savePrefsLocal();
             schedulePush();
         }
@@ -30,6 +35,12 @@
             return prefs[k];
         }
         const prefs = loadPrefs();
+        // #226: the detached surface shows one FLOATING window and nothing
+        // else. The blob it just read is the desktop's (tiling, columns, the
+        // key it is about to open probably among them), so the layout is
+        // replaced in memory before any fragment reads it — and again on every
+        // /state adopt (52). Never saved: see savePrefsLocal.
+        if (isDetachedSurface()) prefs._layout = { mode: 'floating' };
 
         // ---- recent colors (#29) ------------------------------------------
         // The last 4 colors picked from ANY window's color dropdown, global and

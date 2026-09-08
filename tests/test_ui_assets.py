@@ -6564,7 +6564,13 @@ def test_mod_policy_pins_outrank_the_per_browser_toggle():
     enabled = loader[loader.index("function isModEnabled"):
                      loader.index("function _bringUp")]
     # The pin is consulted and returned BEFORE the disabled-set is even read.
-    assert enabled.index("_pin(id)") < enabled.index("_modsDisabled()")
+    # #226: the lookup goes through _surfacePin (84a), which answers "pinned
+    # off" for a mod the detached surface never runs and otherwise IS _pin.
+    assert enabled.index("_surfacePin(id)") < enabled.index("_modsDisabled()")
+    detached = (BROKER_DIR / "84a_js_detached_view.js").read_text(encoding="utf-8")
+    helper = detached[detached.index("function _surfacePin"):
+                      detached.index("function detachLockName")]
+    assert "return _pin(id);" in helper
     setter = loader[loader.index("function setModEnabled"):
                     loader.index("// The boot entry")]
     assert setter.index("_pin(id)") < setter.index("_writeModsDisabled(")
@@ -13319,6 +13325,8 @@ const document = {
     querySelector: function () { return null; },
 };
 
+// #226: every harness is the DESKTOP surface; 50's real predicate is not spliced.
+function isDetachedSurface() { return false; }
 // ---- the lifecycle flags (52) and the transitions core dispatches through --
 let _homeActive = false;
 let _booted = false;
@@ -16533,6 +16541,8 @@ const localStorage = {
     },
 };
 function storeKeys() { return Object.keys(store).sort(); }
+// #226: every harness is the DESKTOP surface; 50's real predicate is not spliced.
+function isDetachedSurface() { return false; }
 
 __REGISTRY__
 __NEEDS__
@@ -30128,3 +30138,161 @@ def test_the_write_time_backstop_still_fires_for_a_plain_promise_validator(
     assert r["wrote"]["box"] == "sneaky"
     assert r["prefs"] == {} and r["saves"] == 0
     assert len(r["errors"]) == 1 and "validate is async" in r["errors"][0]
+
+
+# --------------------------------------------------------------------------- #
+# #226: "Open in new window" -- the detached single-terminal surface
+# --------------------------------------------------------------------------- #
+# The behaviour (handshake, ownership, return, reload, refusal of a second
+# child) is verified out of band with tests/playwright_detach.py against a
+# scratch broker; these are the presence gates for the seams it depends on.
+
+def _src226(name):
+    return (BROKER_DIR / name).read_text(encoding="utf-8")
+
+
+def test_detached_view_fragment_is_ordered_between_lifecycle_and_startup():
+    order = ui._ORDERED
+    i84 = order.index("84_js_active_view_lifecycle.js")
+    i84a = order.index("84a_js_detached_view.js")
+    i85 = order.index("85_js_startup.js")
+    assert i84 < i84a < i85
+
+
+def test_the_surface_is_read_first_and_the_key_keeps_openwindow_shape():
+    consts = _src226("50_js_constants.js")
+    assert "const DETACH_KEY = " in consts
+    assert "const SURFACE = DETACH_KEY ? 'detached' : 'desktop';" in consts
+    assert "function isDetachedSurface()" in consts
+    # host part cannot carry ':' (openWindow splits on the FIRST one) and the
+    # wire id is bare digits.
+    assert r"/^[^:\s?#&/\\]+:\d+$/" in consts
+
+
+def test_the_detached_surface_never_writes_shared_or_browser_state():
+    prefs = _src226("51_js_prefs.js")
+    local = prefs[prefs.index("function savePrefsLocal() {"):
+                  prefs.index("function savePrefs() {")]
+    assert "if (isDetachedSurface()) return;" in local
+    save = prefs[prefs.index("function savePrefs() {"):
+                 prefs.index("function getPref(")]
+    assert "if (isDetachedSurface()) return;" in save
+    # ...and reads the desktop's blob but replaces its layout in memory.
+    assert "if (isDetachedSurface()) prefs._layout = { mode: 'floating' };" in prefs
+    sync = _src226("52_js_state_sync.js")
+    for fn, end in (("function schedulePush() {", "async function pushState() {"),
+                    ("async function pushState() {", "function _applyServerState(")):
+        body = sync[sync.index(fn):sync.index(end)]
+        assert "if (isDetachedSurface()) return;" in body, fn
+    apply = sync[sync.index("function _applyServerState("):
+                 sync.index("async function pullState(")]
+    assert "prefs._layout = isDetachedSurface() ? { mode: 'floating' }" in apply
+    muts = _src226("58_js_layout_mutators.js")
+    for fn in ("function addOpenTerm(key) {", "function removeOpenTerm(key) {"):
+        body = muts[muts.index(fn):muts.index(fn) + 200]
+        assert "if (isDetachedSurface()) return;" in body, fn
+    decide = muts[muts.index("function decideTiled(key) {"):
+                  muts.index("function decideTiled(key) {") + 200]
+    assert "if (isDetachedSurface()) return false;" in decide
+    startup = _src226("85_js_startup.js")
+    assert "if (isDetachedSurface()) return;   // #226" in startup
+
+
+def test_exactly_one_page_is_attached_and_the_desktop_gates_its_attach():
+    detached = _src226("84a_js_detached_view.js")
+    # The child claims BEFORE it opens, and only the `released`/timeout path
+    # sets pendingOpens (the door a ?session= deep link uses).
+    claim = detached[detached.index("function _claimAndOpen()"):
+                     detached.index("function _startDetachEndWatch()")]
+    assert claim.index("_detachPost({ t: 'claim'") > claim.index("pendingOpens.set(DETACH_KEY")
+    assert "const timer = setTimeout(open, " in claim
+    # The desktop closes its own socket on a claim, then answers.
+    yield_ = detached[detached.index("function _yieldToChild(m)"):
+                      detached.index("function _onDetachFrameDesktop(m)")]
+    assert yield_.index("_closeWinSocket(win);") < yield_.index("_detachPost({ t: 'released'")
+    assert "minimizeWindow(key)" in yield_ and "_watchRecord(key)" in yield_
+    # The desktop's attach goes through the ownership gate; the child's does
+    # not (it IS the owner).
+    life = _src226("67_js_window_lifecycle.js")
+    gate = life.index("detachGateAttach(win);")
+    tail = life[life.rindex("if (isDetachedSurface()) {", 0, gate):gate + 40]
+    assert "attachWebSocket(win);" in tail and "detachGateAttach(win);" in tail
+    # Every un-minimize path funnels through restoreWindow, which branches
+    # BEFORE it touches win.minimized.
+    rt = _src226("73_js_window_runtime.js")
+    restore = rt[rt.index("function restoreWindow(id) {"):
+                 rt.index("function closeWindow(id) {")]
+    assert restore.index("if (win.detached) { focusDetachedChild(win); return; }") \
+        < restore.index("win.minimized = false;")
+    assert "win.minimized || win.detached) return false;" in rt
+    # The poll's reattach loop must not re-dial a window the child owns.
+    hosts = _src226("75_js_taskbar_hosts.js")
+    assert "if (win.detached) continue;" in hosts
+
+
+def test_ownership_is_a_web_lock_that_fails_closed():
+    detached = _src226("84a_js_detached_view.js")
+    acquire = detached[detached.index("function _acquireDetachLock()"):
+                       detached.index("function _releaseDetachLock()")]
+    assert "{ ifAvailable: true }" in acquire
+    # an API error is neither ownership nor a free pass
+    assert "catch (_) { settled = true; resolve(false); return; }" in acquire
+    assert "req.catch(() => { if (!settled) { settled = true; resolve(false); } });" in acquire
+    # no locks, no feature -- on both surfaces
+    entry = detached[detached.index("function detachWindow(id)"):
+                     detached.index("function focusDetachedChild(win)")]
+    assert entry.index("if (!_hasWebLocks()) {") < entry.index("window.open(")
+    assert entry.index("if (!proxy) {") < entry.index("win.detachProxy = proxy;")
+    boot = detached[detached.index("async function bootDetachedView(epoch)"):
+                    detached.index("function rebuildDetachedView()")]
+    assert "if (!_hasWebLocks()) {" in boot
+    # the lock is keyed on the BROKER, not the host alias
+    assert "return ((h && h.brokerId) || hid) + ':' + sid;" in detached
+    # a watcher that resolves after its record is gone is a no-op, and an
+    # abort is not a death
+    watch = detached[detached.index("function _watchRecord(key)"):
+                     detached.index("function _unwatchRecord(key)")]
+    assert "if (!_detachedSet()[key]) return;" in watch
+    assert "signal: ctrl.signal" in watch
+    # only the instance the desktop yielded to may hand the terminal back;
+    # a refused/returned child never acts on `return`
+    desk = detached[detached.index("function _onDetachFrameDesktop(m)"):
+                    detached.index("function returnDetached(key)")]
+    assert "win.detached && win.detachInst === m.inst" in desk
+    child = detached[detached.index("function _onDetachFrameChild(m)"):
+                     detached.index("async function bootDetachedView(epoch)")]
+    assert child.index("if (!_detachIsOwner()) return;") < child.index("if (m.t === 'return')")
+    # an explicit Return runs the real close path and stays returned
+    ret = detached[detached.index("function detachedChildReturn()"):
+                   detached.index("function buildDetachedWindowMenu(")]
+    assert "_detachReturned = true;" in ret and "closeWindow(DETACH_KEY)" in ret
+    assert ret.index("_closeWinSocket(win);") < ret.index("_releaseDetachLock();")
+
+
+def test_the_child_surface_keeps_the_desktop_only_actions_and_workspaces_off():
+    detached = _src226("84a_js_detached_view.js")
+    assert "const DETACHED_SKIP_MODS = new Set(['workspaces']);" in detached
+    deny = detached[detached.index("DETACHED_DENY_ACTIONS"):
+                    detached.index("function _surfacePin")]
+    for act in ("new-terminal", "toggle-tiling", "open-control-panel",
+                "minimize-window", "close-window"):
+        assert "'%s'" % act in deny
+    keys = _src226("78_js_keybindings.js")
+    assert "if (isDetachedSurface() && DETACHED_DENY_ACTIONS.has(act.id)) return;" in keys
+    assert "{ id: 'open-in-window', label: 'Open terminal in new window'" in keys
+    assert "label: 'Open in new window', enabled: !win.detached" in keys
+    assert "if (isDetachedSurface()) { buildDetachedWindowMenu(win, x, y); return; }" in keys
+    # unbound by default, like Toggle help
+    store = _src226("54_js_app_windows_store.js")
+    defaults = store[store.index("const DEFAULT_KEYBINDINGS = {"):]
+    defaults = defaults[:defaults.index("};")]
+    assert "'open-in-window'" not in defaults
+    # the child's x is Return, never terminate
+    life = _src226("67_js_window_lifecycle.js")
+    close = life[life.index("const onCloseClick = (e) => {"):
+                 life.index("minBtn.addEventListener('mousedown', onMinDown);")]
+    assert close.index("if (isDetachedSurface()) { detachedChildReturn(); return; }") \
+        < close.index("const st = getSettings();")
+    css = _src226("10_css_root.css")
+    assert ".taskbar-item.detached" in css
+    assert "body.detached-surface #taskbar" in css

@@ -1100,6 +1100,7 @@
             const now = Date.now();
             for (const [key, win] of windows) {
                 if (win.disposed || win.wsOpen) continue;
+                if (win.detached) continue;      // #226: the child owns the PTY
                 if (win.authFailed || win.staleSession) continue;
                 if (!merged.has(key)) continue;
                 const hostSt = hostPolls.get(win.hostId);
