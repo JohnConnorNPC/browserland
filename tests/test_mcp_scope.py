@@ -47,6 +47,14 @@ onto whatever entry holds the id after the write (a hello can land mid-write:
 those cells POST on the test's own loop through ``app.asgi_client``), and the
 pid-0 rules (both fields in every write, the direct set only on the entry
 that was validated).
+
+LAUNCH section (#231): the launcher's pre_spawn hook on a real Launcher with
+the spawn patched out (it runs before the spawn with the id pending; a raising
+hook is prespawn_failed and spawns nothing; the allocator never hands out a
+live or pending id), then /mcp/launch over HTTP. Most of those cells swap
+app.ctx.launcher for a fake that awaits pre_spawn and reads the sidecar where
+the real one would spawn; the real Launcher (spawn patched) carries the 202 +
+restart claim, the failed tag write and the existing-row refusal.
 """
 
 from __future__ import annotations
@@ -1317,8 +1325,9 @@ def test_the_old_producer_claims_a_row_replaced_mid_write(tmp_path,
     """#228, a STATED hazard (reapply's docstring): a mutate that replaces a
     claimed row with a fresh pre-spawn row, while the OLD process's hello
     lands during the await, lets that old pid claim the NEW row through the
-    mirror's wildcard. Pinned so a change to it is deliberate; ruling it out
-    is the launch writer's (#231) job."""
+    mirror's wildcard. Pinned so a change to it is deliberate; the launch
+    writer (#231) rules it out by refusing an id that already has a row
+    (test_a_scoped_launch_refuses_an_id_that_has_a_row)."""
     _write_sidecar(_sidecar(tmp_path), {"9": _row(scope="old", pid=55,
                                                   host="hostA", seen=T - 10)})
     app = _make_app(tmp_path, monkeypatch)
@@ -2605,3 +2614,250 @@ def test_the_allocated_id_is_never_live_or_pending(monkeypatch):
     monkeypatch.setattr(launcher_mod, "secrets",
                         types.SimpleNamespace(randbits=lambda n: next(rolls)))
     assert launcher._allocate_window_id() == fresh
+
+
+LAUNCHED = (1 << 52) | 77
+
+
+class _FakeLauncher:
+    """Stands in for app.ctx.launcher on the HTTP cells. Records each call's
+    kwargs, awaits ``pre_spawn`` with LAUNCHED as the real one does, reads the
+    sidecar where the real one would spawn (what is durable before the agent
+    can exist), then raises ``error`` or answers: with ``hello`` it registers
+    the agent's hello first (a 200), without it answers 202."""
+
+    def __init__(self, app, *, error=None, hello=True, pid=4242):
+        self.app, self.error, self.hello, self.pid = app, error, hello, pid
+        self.calls = []
+        self.row_at_spawn = _ABSENT
+
+    async def launch(self, profile, **kwargs):
+        self.calls.append(dict(kwargs, profile=profile))
+        pre_spawn = kwargs.get("pre_spawn")
+        if pre_spawn is not None:
+            await pre_spawn(LAUNCHED)
+        path = self.app.ctx.mcp_windows_path
+        self.row_at_spawn = (_disk(path).get(str(LAUNCHED))
+                             if path.exists() else None)
+        if self.error is not None:
+            raise self.error
+        if self.hello:
+            await self.app.ctx.registry.register(_WS(),
+                                                 _hello(LAUNCHED, self.pid))
+        return (200 if self.hello else 202), {
+            "ok": True, "id": LAUNCHED, "registered": self.hello,
+            "agent_pid": self.pid}
+
+
+def _launch_app(tmp_path, monkeypatch, **extra):
+    return _make_app(tmp_path, monkeypatch, mcp_allow_launch=True, **extra)
+
+
+def _fake_launcher(app, **kw):
+    fake = _FakeLauncher(app, **kw)
+    app.ctx.launcher = fake
+    return fake
+
+
+def _failing_store_writes(monkeypatch, app, fail_on=lambda n: True):
+    """Make the n-th store write (1-based) raise OSError where ``fail_on(n)``;
+    every other write, and every other path, goes through."""
+    real = app_mod._write_state_atomic
+    store_path = app.ctx.mcp_windows_path
+    count = []
+
+    def writer(path, payload):
+        if Path(path) == store_path:
+            count.append(path)
+            if fail_on(len(count)):
+                raise OSError("disk full")
+        return real(path, payload)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", writer)
+
+
+def test_a_scoped_launch_comes_up_tagged_and_readwrite(tmp_path, monkeypatch):
+    """#231: the row {scope, readwrite, pid null, host null} is ON DISK before
+    the spawn step, the agent's first hello claims it, so the window
+    registers already scoped and drivable: a scoped listing shows it at once
+    (default_mode is off here). The answer adds scope and mode."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={"title": "w"})
+    assert (resp.status, resp.json) == (200, {
+        "ok": True, "id": LAUNCHED, "registered": True, "agent_pid": 4242,
+        "scope": "teamA", "mode": "readwrite"})
+    assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite", seen=T)
+    entry = app.ctx.registry.get(LAUNCHED)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
+    _, listing = _mcp(app, "/mcp/terminals", scope="teamA")
+    assert [(t["id"], t["scope"], t["mode"]) for t in listing.json] == [
+        (LAUNCHED, "teamA", "readwrite")]
+
+
+@pytest.mark.parametrize("sent,expected", [
+    ("read", "read"), ("off", "off"), (None, "readwrite")],
+    ids=["read", "off", "null-is-absent"])
+def test_a_scoped_launch_honours_the_body_mode(tmp_path, monkeypatch, sent,
+                                               expected):
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={"mode": sent})
+    assert resp.json["mode"] == expected
+    assert fake.row_at_spawn["mode"] == expected
+    assert app.ctx.registry.get(LAUNCHED).mcp_mode == expected
+
+
+@pytest.mark.parametrize("scope", ["teamA", _ABSENT],
+                         ids=["scoped", "unscoped"])
+@pytest.mark.parametrize("mode", ["bogus", 5, "READ"])
+def test_an_invalid_launch_mode_is_400_and_spawns_nothing(tmp_path,
+                                                          monkeypatch, scope,
+                                                          mode):
+    """#231: the body's mode is validated on every /mcp/launch, scoped or
+    not, before the launcher is called."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, resp = _mcp(app, "/mcp/launch", scope=scope, body={"mode": mode})
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_mode"})
+    assert fake.calls == []
+    assert not _sidecar(tmp_path).exists()
+
+
+@pytest.mark.parametrize("error", [
+    LaunchError(500, "spawn_failed: boom"),
+    LaunchError(500, "agent_exited_early", returncode=3)],
+    ids=["spawn-failed", "exited-early"])
+def test_a_failed_scoped_launch_takes_its_row_back(tmp_path, monkeypatch,
+                                                   error):
+    """#231: the row was durable before the spawn; a LaunchError after that
+    deletes it again, and the answer is the launcher's own error."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app, error=error)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    assert (resp.status, resp.json) == (error.status, error.payload)
+    assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite", seen=T)
+    assert str(LAUNCHED) not in _disk(_sidecar(tmp_path))
+    assert app.ctx.mcp_windows.get(LAUNCHED) is None
+
+
+def test_a_failed_rollback_still_answers_the_launch_error(tmp_path,
+                                                          monkeypatch,
+                                                          caplog):
+    """#231: the rollback's own write failing is logged and swallowed: the
+    caller still gets the launcher's error, and the unclaimed row stays
+    (prune collects it after 7 days)."""
+    app = _launch_app(tmp_path, monkeypatch)
+    _fake_launcher(app, error=LaunchError(500, "spawn_failed: boom"))
+    _failing_store_writes(monkeypatch, app, fail_on=lambda n: n == 2)
+    with caplog.at_level(logging.ERROR, logger="webterm.broker.app"):
+        _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    assert (resp.status, resp.json) == (500, {"ok": False,
+                                              "error": "spawn_failed: boom"})
+    assert any("/mcp/launch" in r.getMessage() for r in caplog.records)
+    assert _disk(_sidecar(tmp_path))[str(LAUNCHED)]["scope"] == "teamA"
+
+
+def test_a_failed_pre_spawn_write_is_prespawn_failed(tmp_path, monkeypatch):
+    """#231, through the REAL launcher: the tag cannot be written, so the
+    hook raises, the launch is 500 prespawn_failed and nothing is
+    spawned."""
+    calls = _patch_spawn(monkeypatch)
+    app = _launch_app(tmp_path, monkeypatch)
+    _failing_store_writes(monkeypatch, app)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    assert (resp.status, resp.json) == (500, {"ok": False,
+                                              "error": "prespawn_failed"})
+    assert calls == []
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_a_scoped_launch_refuses_an_id_that_has_a_row(tmp_path, monkeypatch):
+    """#231: the allocated id already has a row, here a STALE one (8 days
+    unseen, broker past the grace). Prune would not drop it in the tag's own
+    write because a pending id counts as live, so the refusal is the only
+    thing that keeps a pre-spawn row from replacing it: prespawn_failed,
+    nothing spawned, the row as it was. (The stop flush is stubbed out: it
+    would prune the row once the id is no longer pending.)"""
+    wid = (1 << 52) | 77
+    stale = _row(scope="old", mode="read", pid=55, host="hostA",
+                 seen=T - 8 * DAY)
+    _write_sidecar(_sidecar(tmp_path), {str(wid): stale})
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(launcher_mod, "REGISTER_TIMEOUT", 0.05)
+    monkeypatch.setattr(launcher_mod, "secrets",
+                        types.SimpleNamespace(randbits=lambda n: 77))
+    app = _launch_app(tmp_path, monkeypatch, uptime=601.0)
+
+    async def no_flush():
+        return True
+
+    app.ctx.flush_mcp_windows = no_flush
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    assert (resp.status, resp.json) == (500, {"ok": False,
+                                              "error": "prespawn_failed"})
+    assert calls == []
+    assert _disk(_sidecar(tmp_path)) == {str(wid): stale}
+
+
+def test_a_202_launch_is_claimed_by_a_late_hello_after_a_restart(
+        tmp_path, monkeypatch):
+    """#231, through the REAL launcher: the launch answers 202 before any
+    hello; the broker restarts on the same state dir; the agent's hello, from
+    whatever pid and host, claims the pre-spawn row, so the window is scoped
+    and readwrite."""
+    calls = _patch_spawn(monkeypatch)
+    monkeypatch.setattr(launcher_mod, "REGISTER_TIMEOUT", 0.05)
+    app = _launch_app(tmp_path, monkeypatch)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    wid = resp.json["id"]
+    assert (resp.status, resp.json) == (202, {
+        "ok": True, "id": wid, "registered": False,
+        "agent_pid": _FakeProc.pid, "scope": "teamA", "mode": "readwrite"})
+    assert _argv_id(calls[0]) == wid
+    assert _disk(_sidecar(tmp_path))[str(wid)] == _row(
+        scope="teamA", mode="readwrite", seen=T)
+    again = _launch_app(tmp_path, monkeypatch)
+    _register(again, wid, 9999, host="hostB")
+    entry = again.ctx.registry.get(wid)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
+    _, listing = _mcp(again, "/mcp/terminals", scope="teamA")
+    assert [t["id"] for t in listing.json] == [wid]
+
+
+@pytest.mark.parametrize("body", [{}, {"mode": "read"}],
+                         ids=["no-mode", "mode-ignored"])
+def test_an_unscoped_launch_writes_no_row(tmp_path, monkeypatch, writes,
+                                          body):
+    """#231: an unscoped /mcp/launch is the launcher's answer as is: no hook,
+    no store write, the window inherits default_mode, even when the body
+    names a (valid) mode."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, resp = _mcp(app, "/mcp/launch", body=body)
+    assert (resp.status, resp.json) == (200, {
+        "ok": True, "id": LAUNCHED, "registered": True, "agent_pid": 4242})
+    assert "pre_spawn" not in fake.calls[0]
+    assert _store_writes(writes, app) == []
+    assert app.ctx.registry.get(LAUNCHED).mcp_mode is None
+
+
+def test_the_browser_launch_ignores_mode_and_passes_no_hook(tmp_path,
+                                                            monkeypatch,
+                                                            writes):
+    """#231: /launch never reads ``mode`` (an invalid one answers the same
+    bytes as none) nor the scope header, and never hands the launcher a
+    pre_spawn hook (read off the call's kwargs: a no-op hook would leave the
+    bytes the same)."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, plain = authed(app).post("/launch", json={"title": "w"})
+    _, moded = authed(app).post("/launch", json={"title": "w",
+                                                 "mode": "bogus"},
+                                headers={SCOPE_HEADER: "teamA"})
+    assert plain.status == 200
+    assert (moded.status, moded.body) == (plain.status, plain.body)
+    assert len(fake.calls) == 2
+    assert all("pre_spawn" not in call for call in fake.calls)
+    assert _store_writes(writes, app) == []

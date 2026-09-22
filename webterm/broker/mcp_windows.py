@@ -308,9 +308,10 @@ class McpWindowStore:
 
         * If the in-flight mutate REPLACED a claimed row with a fresh
           pre-spawn row (null pid), the OLD process's hello landing during
-          the await claims the new row through the wildcard. Replacing a
-          claimed row with a pre-spawn one is the launch writer's (#231)
-          territory to rule out.
+          the await claims the new row through the wildcard. No writer does
+          that: the only pre-spawn writer (#231, app.py's _mcp_launch)
+          refuses an id that already has a row, and /session/mcp always
+          writes the live entry's own pid.
         * If the mutate deleted the row, or prune dropped it, the touch is
           lost with it."""
         now = self.clock()

@@ -4844,10 +4844,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             "os": "windows" if os.name == "nt" else "posix",
         })
 
-    async def _parse_launch_body(request: Request):
+    async def _parse_launch_body(request: Request, *, mcp: bool = False):
         """Parse + validate a launch request body, shared by /launch and
         /mcp/launch. Returns ``(params, None)`` where params is the kwargs for
         ``launcher.launch``, or ``(None, error_response)``.
+
+        ``mcp`` (#231, /mcp/launch only): also read an optional ``mode``, the
+        launched window's MCP mode (null = absent), which must be in
+        MCP_MODES (else 400 bad_mode) and comes back as ``params["mode"]``
+        for the caller to use, never as a launcher kwarg. The browser's
+        /launch leaves it False and never reads the key, so its answers do
+        not depend on it.
 
         ``cwd`` is the only client-supplied parameter that is more than dims/
         title — but it is DATA (the shell's cwd), never a command. It is
@@ -4885,6 +4892,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         except (TypeError, ValueError):
             return None, sanic_json({"ok": False, "error": "bad_dims"},
                                     status=400)
+        mode = body.get("mode") if mcp else None
+        if mode is not None and mode not in MCP_MODES:
+            return None, sanic_json({"ok": False, "error": "bad_mode"},
+                                    status=400)
         title = body.get("title")
         if title is not None:
             title = str(title)[:256]
@@ -4916,8 +4927,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                                             status=400)
             else:
                 cwd = None
-        return {"profile": body.get("profile"), "cols": cols, "rows": rows,
-                "title": title, "cwd": cwd}, None
+        params = {"profile": body.get("profile"), "cols": cols, "rows": rows,
+                  "title": title, "cwd": cwd}
+        if mcp:
+            params["mode"] = mode
+        return params, None
 
     async def _launch(request: Request):
         err = _gated_auth_error(request, "/launch")
@@ -6971,21 +6985,87 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         })
 
     async def _mcp_launch(request: Request):
+        """POST /mcp/launch. An UNSCOPED launch is the launcher's answer as
+        is: no per-window row, and the window inherits default_mode (a
+        valid body ``mode`` is ignored; an invalid one is still 400).
+
+        A SCOPED launch (#231) tags the window before it exists: the
+        launcher's pre_spawn hook writes the row {scope, mode, pid null,
+        host null} through the shared writer before anything is spawned, and
+        the agent's first hello claims it (McpWindowStore.apply), so the
+        window registers already scoped, including after a 202 whose hello
+        lands on a restarted broker. ``mode`` defaults to readwrite, not
+        default_mode: a worker its launcher cannot drive is useless, and
+        allow_launch is already its own opt-in. A LaunchError after the row
+        landed deletes it again while it is still unclaimed; a failing
+        rollback is logged and the launcher's error is still the answer.
+        Success adds ``scope`` and ``mode`` to the launcher's payload.
+
+        The pre-spawn write REFUSES an id that already has a row (the hook
+        raises, so prespawn_failed; the client's retry rolls a new id). The
+        id is fresh (never live or pending), but a row can outlive its
+        window for 7 days, and prune cannot drop it here because a pending
+        id counts as live. Replacing it would hand a claimed row's id to a
+        pre-spawn row, and a hello from that row's old producer landing
+        during the write would then claim the NEW row (the hazard
+        McpWindowStore.reapply names). So that replacement never happens.
+
+        A client that disconnects during the shielded pre-spawn write can
+        leave an unclaimed row on an id nothing was spawned for: it tags no
+        window, it is pruned after 7 days, and a launch that rolls its id
+        meanwhile is refused as above."""
         err = _mcp_auth_error(request)
         if err is not None:
             return err
         if not app.ctx.mcp_cfg["allow_launch"]:
             return sanic_json({"error": "launch_disabled"}, status=403)
-        params, perr = await _parse_launch_body(request)
+        params, perr = await _parse_launch_body(request, mcp=True)
         if perr is not None:
             return perr
+        launch_kwargs = {"cols": params["cols"], "rows": params["rows"],
+                         "title": params["title"], "cwd": params["cwd"]}
+        scope = _mcp_scope(request)
+        if scope is None:
+            try:
+                status, payload = await app.ctx.launcher.launch(
+                    params["profile"], **launch_kwargs)
+            except LaunchError as exc:
+                return sanic_json(exc.payload, status=exc.status)
+            return sanic_json(payload, status=status)
+        mode = params["mode"] or "readwrite"
+        tagged: List[int] = []
+
+        async def _tag(wid: int) -> None:
+            def _write(work):
+                if work.get(wid) is not None:
+                    raise RuntimeError(f"window {wid} already has a stored "
+                                       "MCP row; not replacing it")
+                work.set(wid, scope=scope, mode=mode, now=work.clock())
+            await app.ctx.persist_mcp_windows(_write)
+            tagged.append(wid)
+
+        async def _untag(wid: int) -> None:
+            def _write(work):
+                row = work.get(wid)
+                if (row is not None and row["pid"] is None
+                        and row["host"] is None):
+                    work.set(wid, scope=None, mode=None, now=work.clock())
+            try:
+                await app.ctx.persist_mcp_windows(_write)
+            except Exception:
+                LOGGER.exception("/mcp/launch: removing window %d's "
+                                 "pre-spawn MCP row after a failed launch "
+                                 "failed; prune drops it after 7 days", wid)
+
         try:
             status, payload = await app.ctx.launcher.launch(
-                params["profile"], cols=params["cols"], rows=params["rows"],
-                title=params["title"], cwd=params["cwd"])
+                params["profile"], pre_spawn=_tag, **launch_kwargs)
         except LaunchError as exc:
+            if tagged:
+                await _untag(tagged[0])
             return sanic_json(exc.payload, status=exc.status)
-        return sanic_json(payload, status=status)
+        return sanic_json(dict(payload, scope=scope, mode=mode),
+                          status=status)
 
     # ---- MCP config (browser-facing, auth_token-gated) -------------------
     # The Control Panel reads/writes the MCP token + knobs here. Gated by the
