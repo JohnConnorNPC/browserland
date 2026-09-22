@@ -277,7 +277,10 @@
         /* #123: the title is the SOLE shrink/ellipsis element (0 1 auto), so
            trailing tokens (e.g. [pid]) stay adjacent to it; host/pid keep their
            intrinsic width (0 0 auto), like .ti-id above. A very long hostname
-           therefore clips without ellipsis — only the title ellipsizes. */
+           therefore clips without ellipsis — only the title ellipsizes.
+           ONE EXCEPTION (#234): on a chip carrying an MCP scope badge the id
+           gives way too (the :has rule below), or a 16-digit id plus the host
+           would push the scope and workspace badges out of a 280px chip. */
         .taskbar-item .ti-host,
         .taskbar-item .ti-pid { flex: 0 0 auto; }
         .taskbar-item .ti-title {
@@ -304,6 +307,14 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+        /* The #123 exception above: measured, a 16-digit id is 122px and the
+           host 71px of a 280px chip, which left room for one badge only. */
+        .taskbar-item:has(> .ti-scope) .ti-id {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         body.hide-ids .ti-id,
         body.hide-ids .ti-id-badge { display: none; }

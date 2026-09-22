@@ -31159,3 +31159,24 @@ process.stdout.write(JSON.stringify([
                  "local"]
     for name in r:
         assert name and ":" not in name
+
+
+def test_a_scoped_chip_lets_its_id_give_way():
+    """#234 (L4 ruling): with a 16-digit id and the host shown, a 280px chip
+    had room for one badge only. On a chip carrying a scope badge the id
+    ellipsizes instead, by a rule more specific than the base `.ti-id` one
+    and placed after it; #123's "title is the SOLE shrink element" comment
+    names the exception. The layout itself is measured live (both badges
+    inside the chip at 280px and 229px)."""
+    css = _src237("10_css_root.css")
+    sel = ".taskbar-item:has(> .ti-scope) .ti-id {"
+    rule = css[css.index(sel):]
+    rule = rule[:rule.index("}")]
+    for decl in ("flex: 0 1 auto;", "min-width: 0;", "overflow: hidden;",
+                 "text-overflow: ellipsis;"):
+        assert decl in rule, f"the scoped-chip id rule is missing {decl!r}"
+    assert css.index(".taskbar-item .ti-id { color") < css.index(sel)
+    c123 = css[css.index("/* #123: the title is the SOLE"):]
+    c123 = c123[:c123.index("*/")]
+    assert "ONE EXCEPTION (#234)" in c123 and "the :has rule below" in c123
+    assert sel in INDEX_HTML
