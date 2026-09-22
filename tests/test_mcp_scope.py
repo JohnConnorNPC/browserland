@@ -60,18 +60,21 @@ import os
 import re
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 import webterm.broker.app as app_mod
+import webterm.broker.launcher as launcher_mod
 import webterm.broker.mcp_windows as mw
 import webterm.broker.registry as registry_mod
 import webterm.protocol as protocol
 from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         PRUNE_GRACE_S, SCOPE_HEADER,
                                         SEEN_REFRESH_S, McpWindowStore)
-from webterm.broker.registry import WindowEntry
+from webterm.broker.launcher import LaunchError
+from webterm.broker.registry import BrokerRegistry, WindowEntry
 
 from .auth_helpers import TEST_TOKEN, authed, with_token
 
@@ -2497,3 +2500,108 @@ def test_a_field_left_out_comes_from_the_row_when_it_merges(tmp_path,
                          "scope": "teamA"}
     assert _disk(_sidecar(tmp_path))["5"]["scope"] == "teamA"
     assert app.ctx.registry.get(5).mcp_scope == "teamA"
+
+
+# =============================================================================
+# LAUNCH section: the pre-spawn hook and the scoped /mcp/launch (#231)
+# =============================================================================
+
+class _FakeProc:
+    """A spawned agent as launch() sees it: a pid, and a poll() that says it
+    is still running."""
+
+    pid = 40001
+
+    def poll(self):
+        return None
+
+
+def _patch_spawn(monkeypatch, events=None, error=None):
+    """Replace the real spawn (and spawn_env's registry read) with a recorder:
+    each call's argv is returned in the list; ``events`` gets "spawn"; with
+    ``error`` set the spawn raises OSError(error) as CreateProcess would."""
+    calls = []
+
+    def fake_spawn(argv, cwd, env):
+        calls.append(list(argv))
+        if events is not None:
+            events.append("spawn")
+        if error is not None:
+            raise OSError(error)
+        return launcher_mod.SpawnResult(_FakeProc(),
+                                        launcher_mod.CONTINUITY_GUARANTEED)
+
+    monkeypatch.setattr(launcher_mod, "_spawn_detached", fake_spawn)
+    monkeypatch.setattr(launcher_mod, "spawn_env", lambda: {"PATH": ""})
+    return calls
+
+
+def _argv_id(argv):
+    return int(argv[argv.index("--window-id") + 1])
+
+
+def _unit_launcher():
+    registry = BrokerRegistry()
+    launcher = launcher_mod.Launcher(
+        registry, {"profiles": {"p": {"command": ["noop"], "title": "t"}},
+                   "default_profile": "p"}, 4444, None)
+    return registry, launcher
+
+
+def test_pre_spawn_runs_before_the_spawn_with_the_id_pending(monkeypatch):
+    """#231: the hook gets the very id the agent's argv then carries, BEFORE
+    the spawn, while that id is already pending (so no concurrent launch can
+    allocate it) and not live."""
+    events = []
+    calls = _patch_spawn(monkeypatch, events)
+    monkeypatch.setattr(launcher_mod, "REGISTER_TIMEOUT", 0.05)
+    registry, launcher = _unit_launcher()
+    seen = {}
+
+    async def hook(wid):
+        events.append("hook")
+        seen.update(wid=wid, pending=registry.is_pending(wid),
+                    live=wid in registry, count=launcher._pending)
+
+    status, payload = asyncio.run(launcher.launch("p", pre_spawn=hook))
+    assert events == ["hook", "spawn"]
+    assert _argv_id(calls[0]) == seen["wid"] == payload["id"]
+    assert (seen["pending"], seen["live"], seen["count"]) == (True, False, 1)
+    assert status == 202
+
+
+def test_a_raising_pre_spawn_hook_spawns_nothing(monkeypatch, caplog):
+    """#231: a hook that raises is prespawn_failed (never spawn_failed), the
+    spawn is never called, and the id and the pending count are released
+    as after any failed launch."""
+    calls = _patch_spawn(monkeypatch)
+    registry, launcher = _unit_launcher()
+    got = {}
+
+    async def hook(wid):
+        got["wid"] = wid
+        raise RuntimeError("store down")
+
+    with caplog.at_level(logging.ERROR, logger="webterm.broker.launcher"):
+        with pytest.raises(LaunchError) as failure:
+            asyncio.run(launcher.launch("p", pre_spawn=hook))
+    assert failure.value.status == 500
+    assert failure.value.payload == {"ok": False, "error": "prespawn_failed"}
+    assert calls == []
+    assert launcher._pending == 0
+    assert registry.is_pending(got["wid"]) is False
+    assert any("pre-spawn" in r.getMessage() for r in caplog.records)
+
+
+def test_the_allocated_id_is_never_live_or_pending(monkeypatch):
+    """#231: what lets the pre-spawn row be written for a fresh id: the
+    allocator re-rolls past an id that is live and one that is pending."""
+    registry, launcher = _unit_launcher()
+    live_id, pending_id, fresh = ((1 << 52) | 1, (1 << 52) | 2,
+                                  (1 << 52) | 3)
+    asyncio.run(registry.register(_WS(), _hello(live_id, 7)))
+    registry.add_waiter(pending_id)
+    rolls = iter([1, 2, 3])
+    monkeypatch.setattr(launcher_mod, "secrets",
+                        types.SimpleNamespace(randbits=lambda n: next(rolls)))
+    assert launcher._allocate_window_id() == fresh

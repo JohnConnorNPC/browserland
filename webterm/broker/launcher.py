@@ -27,7 +27,8 @@ import os
 import secrets
 import subprocess
 import sys
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import (Any, Awaitable, Callable, Dict, List, NamedTuple, Optional,
+                    Tuple)
 
 from ..agent.config import BROKER_URL_ENV
 from ..agent.env_util import spawn_env
@@ -154,13 +155,25 @@ class Launcher:
         rows: int = 24,
         title: Optional[str] = None,
         cwd: Optional[str] = None,
+        pre_spawn: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         """Returns (http_status, response_payload).
 
         ``cwd`` (todo2 task 7) is the client-chosen starting directory for the
         spawned shell. It MUST already be validated (existing dir) and gated by
         the caller — it is passed through to the agent as ``--cwd`` (data, not a
-        command), which sets the shell's working dir."""
+        command), which sets the shell's working dir.
+
+        ``pre_spawn`` (#231) is awaited with the new window id BEFORE anything
+        is spawned, so a caller can make a per-window fact durable before the
+        agent (and its hello) can exist: the scoped /mcp/launch writes the
+        window's scope row here. The id is fresh (``_allocate_window_id``
+        skips live and pending ids) and is already registered as pending when
+        the hook runs, so no concurrent launch can allocate it during the
+        await. A hook that raises fails the launch with
+        ``LaunchError(500, "prespawn_failed")`` and nothing is spawned; the
+        waiter and the pending count are released as for any other failure.
+        The browser's /launch never passes one."""
         # Snapshot the live profile set once (#70 live-swap): set_profiles
         # rebinds self._profiles / self._default_profile to fresh objects, so
         # read them into locals here and use only the locals below. The one
@@ -235,6 +248,17 @@ class Launcher:
         waiter = self._registry.add_waiter(window_id)
         self._pending += 1
         try:
+            # #231: the pre-spawn hook runs here, after the id is pending (a
+            # hook awaited before the bump would let a concurrent launch roll
+            # the same id meanwhile) and outside the spawn's own try, so its
+            # failure is prespawn_failed, never spawn_failed.
+            if pre_spawn is not None:
+                try:
+                    await pre_spawn(window_id)
+                except Exception:
+                    LOGGER.exception("pre-spawn hook failed for window %d; "
+                                     "nothing was spawned", window_id)
+                    raise LaunchError(500, "prespawn_failed")
             try:
                 # No wait_for: a running executor future is not cancellable, so
                 # a deadline here would 504 the request and still leave the
@@ -276,7 +300,8 @@ class Launcher:
 
     def _allocate_window_id(self) -> int:
         """Above any HWND/XID (>= 2**52), below 2**53 so the picker's JS
-        compares it exactly. Re-roll on the unlikely collision."""
+        compares it exactly. Re-roll on the unlikely collision: never a live
+        or a pending id, which is what launch()'s pre_spawn hook relies on."""
         while True:
             window_id = (1 << 52) | secrets.randbits(32)
             if window_id not in self._registry and \
