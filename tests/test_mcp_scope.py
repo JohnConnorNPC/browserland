@@ -528,6 +528,7 @@ def _make_app(tmp_path, monkeypatch, *, uptime=0.0, now=T, **extra):
     booted, inside prune's grace)."""
     global _app_seq
     _app_seq += 1
+    # Env would override config; clear both so the cfg token/enable are honored.
     monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
     monkeypatch.delenv("WEB_TERMINAL_MCP_TOKEN", raising=False)
     cfg = {
