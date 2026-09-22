@@ -374,9 +374,10 @@ class BrokerRegistry:
         ``mcp_scope`` over from ``old`` when both hellos report the same host
         and the same nonzero pid (``same_producer``), so a producer
         reconnecting over a half-open socket keeps its override (readwrite
-        included) instead of falling back to the broker default. The host+pid check guards against an accidental
-        id collision; it is not security (both are self-reported, and public on
-        /sessions; the producer token is the boundary). An agent pinned with
+        included) instead of falling back to the broker default. The host+pid
+        check guards against an accidental id collision; it is not security
+        (both are self-reported, and public on /sessions; the producer token
+        is the boundary). An agent pinned with
         ``--window-id`` relaunches under the same id with a new shell pid, and
         two hosts pinning one id are different producers even with equal pids:
         neither may inherit the other's access. A hello that omits or blanks

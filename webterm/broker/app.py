@@ -6438,7 +6438,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # per-window store); None default = inherit the broker default. Resets
         # on broker restart / agent relaunch, but a same-host, same-nonzero-pid
         # reconnect over a half-open socket keeps it: that is the fallback
-        # carry-over in McpWindowStore.apply (mcp_windows.py).
+        # carry-over in McpWindowStore.apply (mcp_windows.py), unless a stored
+        # row matches, which wins (test_a_matching_row_beats_the_fallback).
         err = _gated_auth_error(request, "/session/mcp")
         if err is not None:
             return err

@@ -400,13 +400,13 @@ class McpWindowStore:
           ``same_producer(row, entry)`` (an unrelated producer on a reused id
           does not keep an orphan row alive) or when its id is a pending
           launch (``is_pending``), the launcher's own rule in
-          ``_prune_continuity``: the waiter exists from before the spawn
-          until the hello, so a just-spawned window is never collected out
-          from under itself.
+          ``_prune_continuity`` (launcher.py): the waiter exists from before
+          the spawn until the hello, so a just-spawned window is never
+          collected out from under itself.
         * Rows that are not live and whose ``now - seen`` exceeds
           ``PRUNE_AGE_S`` are dropped. A pre-spawn row is protected by
           RECENCY (it was written seconds ago), not by the grace: a broker
-          is past the grace for all but its first ten minutes.
+          is past PRUNE_GRACE_S for almost all of its life.
         * Then, while more than ``MAX_ROWS`` remain, the oldest non-live rows
           by ``(seen, wid)`` go. Live rows are never dropped."""
         if uptime_s < PRUNE_GRACE_S:
