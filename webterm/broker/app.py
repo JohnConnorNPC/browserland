@@ -6531,9 +6531,17 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return entry.mcp_mode or app.ctx.mcp_cfg["default_mode"]
 
     def _mcp_entry(request: Request):
-        """Resolve {id} to a live entry whose effective mode != off. Returns
+        """Resolve {id} to a live entry whose effective mode != off and, when
+        the caller declared a scope, whose tag is that scope. Returns
         ``(entry, mode, None)`` or ``(None, None, error_response)`` (404
-        unknown_or_off / 400 bad body)."""
+        unknown_or_off / 400 bad body).
+
+        #230: a window outside the caller's scope (another tag, or untagged)
+        answers the SAME 404 unknown_or_off as a missing or off one, status
+        and body byte for byte: a distinct answer would let a scoped caller
+        probe which ids exist outside its scope. It is refused here, before
+        any route's own checks, so a read-only window outside the scope is a
+        404 too, never a 403 read_only."""
         body = _json_object_body(request)
         if body is None:
             return None, None, sanic_json({"error": "bad_json"}, status=400)
@@ -6543,7 +6551,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return None, None, sanic_json({"error": "bad_id"}, status=400)
         entry = app.ctx.registry.get(sid)
         mode = _mcp_effective_mode(entry) if entry is not None else "off"
-        if entry is None or mode == "off":
+        scope = _mcp_scope(request)
+        if (entry is None or mode == "off"
+                or (scope is not None and entry.mcp_scope != scope)):
             return None, None, sanic_json({"error": "unknown_or_off"},
                                           status=404)
         return entry, mode, None

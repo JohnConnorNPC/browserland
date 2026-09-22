@@ -23,7 +23,10 @@ registry (tagged by setting ``mcp_scope``) and a producer double that answers
 the correlated round-trips and records every frame it was sent. It pins the
 400 bad_scope refusal on every token route (an invalid name or a repeated
 header), the order of the gate's checks, the empty value's unscoped meaning,
-and the /mcp/terminals filter with its per-row ``scope`` field.
+the /mcp/terminals filter with its per-row ``scope`` field, and the
+_mcp_entry chokepoint: a window outside the declared scope answers byte for
+byte what a missing id answers, while an in-scope or unscoped caller still
+drives it.
 """
 
 from __future__ import annotations
@@ -1720,3 +1723,90 @@ def test_an_off_window_stays_hidden_from_its_own_scope(tmp_path, monkeypatch):
     _window(app, 6, scope="a")
     assert _listing(app, scope="a") == {6: "a"}
     assert _listing(app) == {6: "a"}
+
+
+#: The routes that resolve their window through _mcp_entry.
+CHOKEPOINT_ROUTES = ["/mcp/read", "/mcp/input", "/mcp/reset", "/mcp/flush",
+                     "/mcp/pace"]
+#: Windows a caller declaring scope a must not reach: another tag in either
+#: mode (a read-mode one would otherwise answer 403 read_only on the write
+#: routes) and an untagged one.
+OUT_OF_SCOPE = {"tag-b-readwrite": ("b", None), "tag-b-read": ("b", "read"),
+                "untagged": (None, None)}
+
+
+def _wire(resp):
+    """What a caller can observe of an answer: status, body bytes, and the
+    two headers that describe the body."""
+    return (resp.status, resp.body, resp.headers.get("content-type"),
+            resp.headers.get("content-length"))
+
+
+def _body_for(path, wid):
+    return {**MCP_TOKEN_ROUTES[path][1], "id": wid}
+
+
+@pytest.mark.parametrize("arm", sorted(OUT_OF_SCOPE))
+@pytest.mark.parametrize("path", CHOKEPOINT_ROUTES)
+def test_out_of_scope_is_byte_identical_to_missing(tmp_path, monkeypatch,
+                                                   path, arm):
+    """#230: for a caller declaring scope a, a window outside it answers
+    exactly what the same call against an id that does not exist answers
+    (404 unknown_or_off), so nothing tells the two apart, and the call has
+    no effect: the producer is sent nothing and the pace is untouched."""
+    app = _wire_app(tmp_path, monkeypatch)
+    tag, mode = OUT_OF_SCOPE[arm]
+    entry = _window(app, 5, scope=tag, mcp_mode=mode)
+    _, out_of_scope = _mcp(app, path, scope="a", body=_body_for(path, 5))
+    _, missing = _mcp(app, path, scope="a", body=_body_for(path, 999))
+    assert _wire(missing)[:2] == (404, b'{"error":"unknown_or_off"}')
+    assert _wire(out_of_scope) == _wire(missing)
+    assert entry.ws.sent == [] and entry.pace_ms == 0
+
+
+@pytest.mark.parametrize("path", CHOKEPOINT_ROUTES)
+def test_a_scoped_caller_drives_a_window_in_its_scope(tmp_path, monkeypatch,
+                                                      path):
+    """#230, the positive arm: scope a on the window tagged a gets through
+    _mcp_entry and the route does its work (the producer double answers
+    the round-trips)."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope="a")
+    assert resp.status == 200 and resp.json["ok"] is True
+
+
+@pytest.mark.parametrize("path", [p for p in CHOKEPOINT_ROUTES
+                                  if p != "/mcp/read"])
+def test_a_read_mode_window_in_scope_is_past_the_gate(tmp_path, monkeypatch,
+                                                      path):
+    """#230: on a read-mode broker the write routes answer 403 read_only for
+    the in-scope window, which only a window _mcp_entry admitted can reach
+    (the out-of-scope arm above gets 404 for the same call)."""
+    app = _wire_app(tmp_path, monkeypatch, mode="read")
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope="a")
+    assert (resp.status, resp.json) == (403, {"error": "read_only"})
+
+
+@pytest.mark.parametrize("path", CHOKEPOINT_ROUTES)
+def test_an_unscoped_caller_drives_a_tagged_window(tmp_path, monkeypatch,
+                                                   path):
+    """#230: no header is the unscoped view, which still reaches a tagged
+    window."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, path)
+    assert resp.status == 200 and resp.json["ok"] is True
+
+
+@pytest.mark.parametrize("path", CHOKEPOINT_ROUTES)
+def test_an_empty_scope_header_drives_an_untagged_window(tmp_path,
+                                                         monkeypatch, path):
+    """#230: an empty value is unscoped on the chokepoint too, so _mcp_entry
+    must derive the scope through _mcp_scope: reading the raw header would
+    turn "" into a scope no window carries."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5)
+    _, resp = _mcp(app, path, scope="")
+    assert resp.status == 200 and resp.json["ok"] is True
