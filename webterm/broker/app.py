@@ -58,6 +58,7 @@ import errno
 import functools
 import gzip
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -4317,10 +4318,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
 
         Inside _shielded_region(mcp_windows_lock), whose acquire stays
         cancellable OUTSIDE the shield: take a working copy of the store,
-        run ``mutate(work)`` EXACTLY ONCE (sync; it must not await), prune
-        the copy, serialise it, write it through the executor ONLY if that
-        payload differs from the last one written or loaded, then swap memory
-        to the copy. Memory never changes before the write lands: a raising
+        run ``mutate(work)`` EXACTLY ONCE (sync; an ``async def`` mutate is
+        logged, closed and raises TypeError), prune the copy, serialise it,
+        write it through the executor ONLY if that payload differs from the
+        last one written or loaded, then swap memory to the copy. Memory never changes before the write lands: a raising
         mutate or write propagates with memory untouched, and a failure after
         a cancelled caller left is logged by _shielded_region.
 
@@ -4349,11 +4350,24 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             store.inflight = work
             try:
                 result = mutate(work)
+                if inspect.iscoroutine(result):
+                    # An ``async def`` mutate changed nothing yet and would
+                    # hand its caller a truthy coroutine: a programming error
+                    # at the call site, so say so and raise (as
+                    # _run_on_register does for a hook, logged first).
+                    LOGGER.error("_persist_mcp_windows: mutate returned a "
+                                 "coroutine; it must be synchronous, so the "
+                                 "writer is closing it unawaited")
+                    try:
+                        result.close()
+                    finally:
+                        raise TypeError("_persist_mcp_windows: mutate must "
+                                        "be synchronous")
                 work.prune(registry.entries(), store.clock(),
                            app.ctx.mcp_windows_uptime(),
                            is_pending=registry.is_pending)
                 payload = work.to_persist()
-                if work.dirty:
+                if work.needs_write(payload):
                     await asyncio.get_running_loop().run_in_executor(
                         None, _write_state_atomic, app.ctx.mcp_windows_path,
                         payload)
@@ -4417,8 +4431,9 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # server's own loop. A NAMED task on app.ctx rather than an entry in
         # app.ctx.bg_tasks, whose members are fire-and-forget pulses that
         # remove themselves when done; nothing would ever remove this one.
+        # Started through app.ctx so that attribute is the one real seam.
         app_.ctx.mcp_windows_task = asyncio.ensure_future(
-            _mcp_windows_ticker())
+            app_.ctx.mcp_windows_ticker())
 
     @app.before_server_stop
     async def _stop_mcp_windows_ticker(app_, loop):
@@ -4426,16 +4441,23 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # tick is not lost. Awaited here, never scheduled: Sanic destroys
         # tasks still pending at shutdown (see the restart drain notes). A
         # write the cancelled ticker had in flight finishes in its shield,
-        # and the final pass queues behind it on the lock.
+        # and the final pass queues behind it on the lock. The final pass is
+        # in a finally: a ticker that already died of an exception (a bad
+        # injected interval, say) must not also cost the last flush.
         task = app_.ctx.mcp_windows_task
         app_.ctx.mcp_windows_task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        await _flush_mcp_windows()
+        try:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    LOGGER.exception("mcp windows: the flush ticker had "
+                                     "died; flushing once more anyway")
+        finally:
+            await _flush_mcp_windows()
     # #182/#183: WHO decided what this broker may do to itself -- reach
     # github.com to CHECK (update_check_enabled), download-and-execute an
     # APPLY (update_apply_enabled), restart the process (restart_enabled).

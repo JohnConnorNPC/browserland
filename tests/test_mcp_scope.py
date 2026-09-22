@@ -21,6 +21,7 @@ app's listeners were measured firing during a later test's request.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import math
@@ -28,6 +29,7 @@ import os
 import re
 import threading
 import time
+import warnings
 from pathlib import Path
 
 import pytest
@@ -119,12 +121,14 @@ def test_load_missing_file_is_empty_and_clean(tmp_path, caplog):
 
 @pytest.mark.parametrize("raw", [
     b"{not json", b"[]", b'{"windows": []}', b'{"other": {}}', b"\xff\xfe",
+    b"[" * 50_000 + b"]" * 50_000,
 ], ids=["bad-json", "top-level-list", "windows-list", "no-windows",
-        "not-utf8"])
+        "not-utf8", "deep-nesting"])
 def test_load_unreadable_or_wrong_schema_boots_empty(tmp_path, caplog, raw):
     """#228: a corrupt or wrong-schema sidecar boots an EMPTY store with exactly
     one WARNING naming the path and the consequence. It is clean (the empty
-    payload), so nothing rewrites the file until a real change does."""
+    payload), so nothing rewrites the file until a real change does. A deeply
+    nested value makes json raise RecursionError, which must not escape."""
     caplog.set_level(logging.INFO, logger=STORE_LOGGER)
     path = tmp_path / "webterm_mcp_windows.json"
     path.write_bytes(raw)
@@ -138,6 +142,26 @@ def test_load_unreadable_or_wrong_schema_boots_empty(tmp_path, caplog, raw):
     assert str(path) in msg
     assert "starting with no per-window rows" in msg
     assert "next change replaces the file" in msg
+
+
+def test_load_caps_the_bytes_it_reads(tmp_path, caplog):
+    """#228: load() reads at most MAX_FILE_BYTES, capped BEFORE the parse. A
+    VALID sidecar padded one byte past the cap boots empty with one WARNING
+    naming the path; the same file padded to exactly the cap loads."""
+    assert mw.MAX_FILE_BYTES == 8 * 2**20
+    caplog.set_level(logging.INFO, logger=STORE_LOGGER)
+    path = tmp_path / "webterm_mcp_windows.json"
+    body = json.dumps({"windows": {"5": _row(scope="a", pid=1,
+                                             host="h")}}).encode("utf-8")
+    path.write_bytes(body + b" " * (mw.MAX_FILE_BYTES + 1 - len(body)))
+    over = McpWindowStore.load(path)
+    recs = _store_records(caplog)
+    assert len(over) == 0
+    assert [r.levelno for r in recs] == [logging.WARNING]
+    assert str(path) in recs[0].getMessage()
+    assert "is over" in recs[0].getMessage()
+    path.write_bytes(body + b" " * (mw.MAX_FILE_BYTES - len(body)))
+    assert McpWindowStore.load(path).get(5) is not None
 
 
 def test_load_drops_malformed_rows_and_keeps_valid_ones(tmp_path, caplog):
@@ -296,6 +320,17 @@ def test_set_replaces_a_row_written_for_another_producer():
                                 seen=T + 1)
 
 
+def test_set_never_merges_on_an_unknown_pid_zero():
+    """#228: only a NULL pid is a wildcard. 0 is unknown (as in same_producer),
+    so a write for a pid-0 producer on a row another pid-0 producer left
+    REPLACES it: the recycled id does not inherit the old readwrite."""
+    store = McpWindowStore()
+    store.set(5, scope="teamA", mode="readwrite", pid=0, host="h", now=T)
+    assert store.set(5, scope="teamB", pid=0, host="h", now=T + 1) is True
+    assert store.get(5) == _row(scope="teamB", mode=None, pid=0, host="h",
+                                seen=T + 1)
+
+
 def test_set_merges_into_a_pre_spawn_row_and_records_the_identity():
     """#228: a pre-spawn row (null pid/host) is compatible with any producer:
     the next write merges into it and records the identity passed."""
@@ -367,14 +402,15 @@ def test_apply_does_not_reapply_to_another_producer(tmp_path, row_pid,
                                                     row_host, hello_pid,
                                                     hello_host):
     """#228: id reuse. A different pid, the same pid from another host, or an
-    unknown pid (0 on both sides) is not the row's producer: the entry stays
-    clean and the row is untouched (seen included)."""
+    unknown pid (0 on both sides) is not the row's producer: the entry keeps
+    what it had (seeded, so a miss that CLEARED it would show) and the row is
+    untouched (seen included)."""
     original = _row(scope="teamA", mode="readwrite", pid=row_pid,
                     host=row_host, seen=T - DAY)
     store = _loaded(tmp_path, {"5": original})
-    entry = _entry(5, hello_pid, host=hello_host)
+    entry = _entry(5, hello_pid, host=hello_host, scope="keep", mode="off")
     store.apply(entry, None)
-    assert (entry.mcp_scope, entry.mcp_mode) == (None, None)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("keep", "off")
     assert store.get(5) == original
     assert store.dirty is False
 
@@ -682,6 +718,21 @@ def test_corrupt_sidecar_boots_empty_logs_and_the_next_write_replaces_it(
                                                    host="h", seen=T)}
 
 
+def test_a_deeply_nested_sidecar_does_not_stop_the_broker(tmp_path,
+                                                          monkeypatch,
+                                                          caplog):
+    """#228: 2 KB of nested brackets makes json raise RecursionError; the
+    broker still boots, with an empty store and one WARNING naming the
+    file."""
+    caplog.set_level(logging.INFO, logger=STORE_LOGGER)
+    _sidecar(tmp_path).write_bytes(b"[" * 1000 + b"]" * 1000)
+    app = _make_app(tmp_path, monkeypatch)
+    assert len(app.ctx.mcp_windows) == 0
+    recs = _store_records(caplog)
+    assert [r.levelno for r in recs] == [logging.WARNING]
+    assert str(app.ctx.mcp_windows_path) in recs[0].getMessage()
+
+
 def test_no_prune_at_load(tmp_path, monkeypatch, writes):
     """#228: boot never prunes and never writes: an 8-day-old non-live row
     survives create_app with the file's bytes and file id (st_ino) intact,
@@ -974,6 +1025,31 @@ def test_a_raising_mutate_leaves_memory_untouched(tmp_path, monkeypatch,
     assert _store_writes(writes, app) == []
 
 
+def test_an_async_mutate_is_rejected(tmp_path, monkeypatch, writes, caplog):
+    """#228: an ``async def`` mutate would change nothing and hand its caller a
+    truthy coroutine. The writer logs an ERROR naming itself, closes the
+    coroutine (no "never awaited" warning) and raises TypeError; memory and
+    disk are untouched and ``inflight`` is cleared."""
+    app = _make_app(tmp_path, monkeypatch)
+
+    async def mutate(w):
+        w.set(7, scope="a", pid=1, host="h", now=T)
+
+    caplog.set_level(logging.ERROR, logger=APP_LOGGER)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(TypeError):
+            _persist(app, mutate)
+        gc.collect()
+    assert not [w for w in caught if "never awaited" in str(w.message)]
+    assert any(r.levelno == logging.ERROR
+               and "_persist_mcp_windows" in r.getMessage()
+               for r in caplog.records if r.name == APP_LOGGER)
+    assert app.ctx.mcp_windows.get(7) is None
+    assert app.ctx.mcp_windows.inflight is None
+    assert _store_writes(writes, app) == []
+
+
 def test_two_overlapping_writes_both_land(tmp_path, monkeypatch):
     """#228: the lock serialises the writers. With the first write parked in
     the executor, a second write queues on the lock and copies memory only
@@ -1258,6 +1334,42 @@ def test_the_server_listeners_start_the_ticker_and_flush_at_stop(
     assert app.ctx.mcp_windows_task is None
     app.test_client.get("/sessions", headers=headers)
     assert len(_store_writes(writes, app)) == 1
+
+
+def test_the_stop_flush_survives_a_ticker_that_died(tmp_path, monkeypatch,
+                                                    writes, caplog):
+    """#228: a ticker that already died of an exception (here a non-number
+    interval makes the real asyncio.sleep raise TypeError) is logged at stop,
+    and the final flush still runs: the pending seen bump lands, once."""
+    _claimed_rows(tmp_path, w9=55)
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    app.ctx.mcp_windows_flush_s = "not a number"
+    _register(app, 9, 55)
+    caplog.set_level(logging.ERROR, logger=APP_LOGGER)
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+    _, resp = app.test_client.get("/sessions", headers=headers)
+    assert resp.status == 200
+    assert any("the flush ticker had died" in r.getMessage()
+               for r in caplog.records if r.name == APP_LOGGER)
+    assert len(_store_writes(writes, app)) == 1
+    assert _disk(_sidecar(tmp_path))["9"]["seen"] == T
+
+
+def test_the_start_listener_starts_the_ctx_ticker(tmp_path, monkeypatch):
+    """#228: after_server_start starts ``app.ctx.mcp_windows_ticker`` looked up
+    at start time, so replacing that attribute replaces the ticker."""
+    app = _make_app(tmp_path, monkeypatch)
+    started = []
+
+    async def mine():
+        started.append("mine")
+        await asyncio.Event().wait()
+
+    app.ctx.mcp_windows_ticker = mine
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+    _, resp = app.test_client.get("/sessions", headers=headers)
+    assert resp.status == 200
+    assert started == ["mine"]
 
 
 def test_a_failing_flush_logs_once_then_debug_then_recovery(

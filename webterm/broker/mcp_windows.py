@@ -61,6 +61,10 @@ PRUNE_AGE_S = 7 * 86400
 #: Then, while there are more rows than this, the oldest non-live rows go. A
 #: live row is never dropped, so the cap is soft.
 MAX_ROWS = 1000
+#: load() reads at most this many bytes. Far above MAX_ROWS rows of any
+#: realistic size; a bigger file boots empty (logged) instead of being pulled
+#: whole into memory at startup.
+MAX_FILE_BYTES = 8 * 2**20
 
 _UNSET = object()
 _FIELDS = ("scope", "mode", "pid", "host", "seen")
@@ -149,10 +153,14 @@ class McpWindowStore:
     @classmethod
     def load(cls, path: Path, *,
              clock: Callable[[], float] = time.time) -> "McpWindowStore":
-        """The store persisted at ``path``. PROTECTIVE: a missing, unreadable
-        or wrong-schema file boots an empty store, and a malformed row is
-        dropped while its valid siblings load. Logs exactly one line. Never
-        prunes: a row whose window has not reconnected yet must survive boot.
+        """The store persisted at ``path``. PROTECTIVE: a missing, unreadable,
+        oversized (over MAX_FILE_BYTES, capped BEFORE the parse) or
+        wrong-schema file boots an empty store, and a malformed row is
+        dropped while its valid siblings load. ``RecursionError`` is caught
+        too: it is what a deeply nested JSON value raises, and it is not an
+        ``Exception`` subclass most callers remember to name (modinstall's
+        reasoning). Logs exactly one line. Never prunes: a row whose window
+        has not reconnected yet must survive boot.
 
         WARNING, not the update policy's ERROR: that sidecar must fail CLOSED
         because a damaged file could resurrect a revoked permission, while an
@@ -162,12 +170,19 @@ class McpWindowStore:
         path = Path(path)
         store = cls(clock=clock)
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
+            with open(path, "rb") as fh:
+                raw = fh.read(MAX_FILE_BYTES + 1)
+            if len(raw) > MAX_FILE_BYTES:
+                LOGGER.warning("mcp windows %s is over %d bytes; starting "
+                               "with no per-window rows, and the next change "
+                               "replaces the file", path, MAX_FILE_BYTES)
+                return store
+            data = json.loads(raw.decode("utf-8"))
         except FileNotFoundError:
             LOGGER.info("mcp windows: %s (0 rows)", path)
             return store
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
+        except (OSError, json.JSONDecodeError, ValueError,
+                RecursionError) as exc:
             LOGGER.warning("mcp windows %s is unreadable (%s); starting with "
                            "no per-window rows, and the next change replaces "
                            "the file", path, exc)
@@ -216,12 +231,18 @@ class McpWindowStore:
         return {"windows": {str(wid): {field: row[field] for field in _FIELDS}
                             for wid, row in sorted(self._rows.items())}}
 
+    def needs_write(self, payload: Dict[str, Any]) -> bool:
+        """Whether ``payload`` (a to_persist() result) differs from the
+        payload last written or loaded, i.e. whether writing it would change
+        the file."""
+        return payload != self._persisted
+
     @property
     def dirty(self) -> bool:
         """Whether memory differs from the payload last written or loaded.
         Derived by comparing the payloads themselves, never a flag, so it
         cannot disagree with what a write would put on disk."""
-        return self.to_persist() != self._persisted
+        return self.needs_write(self.to_persist())
 
     def known_scopes(self, live_entries: Iterable[Any]) -> List[str]:
         """Sorted, deduplicated union of the scopes on the live windows
@@ -317,10 +338,10 @@ class McpWindowStore:
         writer, which makes it durable.
 
         * The existing row is merged into when its identity is compatible
-          (each of its pid/host is null or equal to the one passed);
-          otherwise the write REPLACES it and every field not passed starts
-          at None, so a reused id never inherits a stale producer's
-          override.
+          (each of its pid/host is null or equal to the one passed, and an
+          equal pid is not 0); otherwise the write REPLACES it and every
+          field not passed starts at None, so a reused id never inherits a
+          stale producer's override.
         * The passed pid/host are recorded (None = not spawned yet: the first
           hello from the right producer claims it).
         * ``mode=None`` stores null (inherit). A field not passed is left as
@@ -328,7 +349,10 @@ class McpWindowStore:
         * A row left with neither a scope nor a mode carries nothing and would
           only block apply()'s fallback carry-over, so it is DELETED whatever
           its pid/host. No reservation-only row is needed: the launch writer
-          (#231) always writes a scope.
+          (#231) always writes a scope. Only a NULL pid is a wildcard: a pid
+          of 0 is unknown, as in same_producer, so 0 == 0 never merges and
+          each write for a pid-0 producer replaces its row (such a row is
+          never re-applied at register anyway).
         * A no-op returns False and leaves the row as it was, ``seen``
           included; a change sets ``seen = now``.
 
@@ -345,7 +369,7 @@ class McpWindowStore:
             raise ValueError("bad now")
         old = self._rows.get(wid)
         compatible = old is not None and (
-            (old["pid"] is None or old["pid"] == pid)
+            (old["pid"] is None or (old["pid"] == pid and pid != 0))
             and (old["host"] is None or old["host"] == host))
         base = old if compatible else {"scope": None, "mode": None}
         new = {"scope": base["scope"] if scope is _UNSET else scope,
