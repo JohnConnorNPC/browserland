@@ -290,11 +290,15 @@
             const host = hostById(win.hostId);
             if (!host) return;
             // Persist the choice as DESIRED policy up front (durable, synced),
-            // independent of the POST: the re-assert pass enforces it until the
-            // broker reflects it, so a dropped POST or a failed /state PUT can
-            // never leave a broker override with no recorded pin (or vice
-            // versa). Add the key to _mcpAsserting so a concurrent re-assert
-            // tick won't fire a competing POST for the same window.
+            // independent of the POST. On a broker that predates #229 the
+            // re-assert pass (75) enforces it until the broker reflects it, so
+            // a dropped POST or a failed /state PUT can never leave a broker
+            // override with no recorded pin (or vice versa). A broker that
+            // advertises mcp_scopes persists the POSTed override itself, and
+            // there the pin is only the menu's first-paint check mark
+            // (mcpMenuMode); a dropped POST shows as the broker's own mode on
+            // the next poll. Add the key to _mcpAsserting so a concurrent
+            // re-assert tick won't fire a competing POST for the same window.
             setMcpMode(win.id, mode);
             _mcpAsserting.add(win.id);
             // Site-owned deadline (timeoutMs: 0 opts out of hostFetch's, which

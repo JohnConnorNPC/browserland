@@ -234,9 +234,13 @@
         // getMcpMode returns the saved DESIRED mode for a window key, or null =
         // "no pin, inherit this broker's live default". setMcpMode records the
         // pin and persists it through the SAME savePrefs() the Control Panel
-        // uses (localStorage + debounced /state push). The re-assert pass in
-        // refreshTaskbarInner enforces a pin against the window's OWN broker, so
-        // the choice survives refresh / another browser / a same-id reconnect.
+        // uses (localStorage + debounced /state push). On a broker that
+        // predates #229, the re-assert pass in refreshTaskbarInner enforces a
+        // pin against the window's OWN broker, so the choice survives refresh /
+        // another browser / a same-id reconnect. A broker that advertises /info
+        // `mcp_scopes` stores the override itself; there the pass stands down
+        // and the pin only paints the menu's check mark before the first poll
+        // (mcpMenuMode, 78).
         function getMcpMode(key) {
             const v = getSettings().mcpModes[key];
             return (v === 'off' || v === 'read' || v === 'readwrite') ? v : null;

@@ -720,7 +720,7 @@
                     opt.addEventListener('mousedown', stopProp);
                     opt.addEventListener('click', (e) => {
                         e.stopPropagation();
-                        setWindowMcpMode(win, val);   // persist + POST + re-assert
+                        setWindowMcpMode(win, val);   // pin + POST (re-asserted on an older broker)
                         refresh();
                         closePop();
                     });

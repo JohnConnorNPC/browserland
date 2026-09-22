@@ -227,7 +227,8 @@
         // its `finally` only clears the mutex when it still owns it.
         let refreshSeq = 0;
         // Per-window MCP-pin re-assertions in flight (by window key). The 2s
-        // re-assert pass never fires a duplicate POST for a key it is already
+        // re-assert pass (which runs only for a broker without /info
+        // `mcp_scopes`, #233) never fires a duplicate POST for a key it is already
         // driving, and a user-initiated mode change serialises against it via
         // the same set. A hung POST is bounded by FETCH_TIMEOUT_MS, which frees
         // the key so a still-mismatched pin retries on the next tick.
