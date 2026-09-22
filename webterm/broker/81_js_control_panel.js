@@ -908,6 +908,22 @@
             } catch (_) { /* leave 'unreachable' */ }
             modCatalogCache.set(host.id, rec);
         }
+        // One /info read of `host` into modCatalogCache, de-duplicated on
+        // modCatalogFetching, then a repaint of the Mods section if it is
+        // showing THAT host when the read lands (never another's: a late answer
+        // must not paint one broker's mods under another's name). Both readers
+        // go through here: this section's own first read, and the taskbar's
+        // capability prime (75). Either one's in-flight read therefore repaints
+        // for the other, instead of leaving "reading this broker's mods…" on
+        // screen until the tab is clicked again.
+        function primeModCatalog(host) {
+            if (!host || modCatalogFetching.has(host.id)) return;
+            modCatalogFetching.add(host.id);
+            fetchModCatalog(host).then(() => {
+                modCatalogFetching.delete(host.id);
+                if (currentSettingsTab === host.id) renderModPolicy();
+            }).catch(() => { modCatalogFetching.delete(host.id); });
+        }
         // The well-shaped {modId: bool} subset of whatever a peer sent — the twin
         // of the broker's own _sanitize_mod_policy. A peer is not trusted to bound
         // our DOM: only real booleans on mod-id-shaped keys survive, capped.
@@ -1096,16 +1112,7 @@
             const rec = modCatalogCache.get(host.id);
             if (!rec) {
                 hint.textContent = 'reading this broker’s mods…';
-                if (!modCatalogFetching.has(host.id)) {
-                    modCatalogFetching.add(host.id);
-                    const wantTab = tabId;
-                    fetchModCatalog(host).then(() => {
-                        modCatalogFetching.delete(host.id);
-                        // Repaint ONLY if this is still the open tab, so a late
-                        // answer can never paint one broker's mods under another's.
-                        if (currentSettingsTab === wantTab) renderModPolicy();
-                    }).catch(() => { modCatalogFetching.delete(host.id); });
-                }
+                primeModCatalog(host);    // repaints this section when it lands
                 return;
             }
             const isLocal = (host.id === 'local');

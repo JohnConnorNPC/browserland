@@ -950,11 +950,12 @@
             // re-asserted, because on a capable broker that POST would clobber
             // the truth; a fresh remote host's first ticks are held even when it
             // turns out to be an older build. The serving broker answers from
-            // the page's own boot /info. A peer is primed here, ONCE, by the
-            // Control Panel's fetchModCatalog (81) into the modCatalogCache that
-            // panel owns (and the update and mod-sync mods read), and only while
-            // that host's poll answers: one GET /info per peer per page load,
-            // failures cached, never a retry loop.
+            // the page's own boot /info. A peer is primed here, ONCE, through
+            // the Control Panel's primeModCatalog (81) into the modCatalogCache
+            // that panel owns (and the update and mod-sync mods read), and only
+            // while that host's poll answers: one GET /info per peer per page
+            // load, failures cached, never a retry loop. The same helper
+            // repaints the panel's Mods section if it is showing that host.
             // Guards: skip pre-MCP brokers (mcpKnown false) so we never hammer
             // an old broker that can't honour it; lease-gate (a remote broker
             // another browser owns is leaseInactive — only its active browser
@@ -970,12 +971,8 @@
                 if (!host) continue;
                 const storesMode = hostMcpScopes(host.id);
                 if (storesMode === null && host.id !== 'local'
-                        && pollStateFor(host.id).ok
-                        && !modCatalogFetching.has(host.id)) {
-                    modCatalogFetching.add(host.id);
-                    fetchModCatalog(host).catch(() => {}).finally(() => {
-                        modCatalogFetching.delete(host.id);
-                    });
+                        && pollStateFor(host.id).ok) {
+                    primeModCatalog(host);
                 }
                 if (storesMode !== false) continue;    // capable, or not known yet
                 if (_mcpAsserting.has(key)) continue;  // already driving this key

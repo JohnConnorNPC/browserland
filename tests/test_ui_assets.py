@@ -30991,6 +30991,8 @@ const _mcpAsserting = new Set();
 const modCatalogFetching = new Set();
 const posts = [], primes = [];
 let pendingPrime = null;
+let currentSettingsTab = null, repaints = 0;
+function renderModPolicy() { repaints++; }
 function hostById(id) { return hosts[id] || null; }
 function hostMcpScopes(id) { return caps[id]; }
 function pollStateFor(id) { return {ok: pollOk[id] !== false, leaseInactive: false}; }
@@ -31006,6 +31008,7 @@ function hostFetch(host, path, opts) {
 function tick(merged) {
 """ + loop + r"""
 }
+""" + _fn237("81_js_control_panel.js", "function primeModCatalog(host)") + r"""
 const sess = (hostId, sid, mcp, extra) => Object.assign(
     {hostId, sid, mcp, mcpKnown: true}, extra || {});
 (async function () {
@@ -31028,12 +31031,20 @@ const sess = (hostId, sid, mcp, extra) => Object.assign(
     out.fetchingDuring = modCatalogFetching.has('r1');
     run([['r1:2', sess('r1', '2', 'read')]]);
     out.primesWhileInFlight = primes.length;
+    currentSettingsTab = 'r1';       // the Control Panel is showing r1's tab
     pendingPrime(); await new Promise(res => setTimeout(res, 0));
     out.fetchingAfter = modCatalogFetching.has('r1');
+    out.repaintsOwnTab = repaints;
     // a peer whose poll is failing is not primed
     primes.length = 0; caps = {r2: null}; pollOk = {r2: false};
     out.downHeld = run([['r2:3', sess('r2', '3', 'read')]]);
     out.downPrimes = primes.length;
+    // a prime that lands while ANOTHER host's tab is open repaints nothing
+    pollOk = {}; currentSettingsTab = 'r1';
+    run([['r2:3', sess('r2', '3', 'read')]]);
+    pendingPrime(); await new Promise(res => setTimeout(res, 0));
+    out.repaintsOtherTab = repaints - out.repaintsOwnTab;
+    primes.length = 0;
     // a settled false with nothing to fix, and a pre-MCP broker: nothing
     caps = {r1: false}; pollOk = {};
     out.inSync = run([['r1:2', sess('r1', '2', 'readwrite')]]);
@@ -31049,9 +31060,16 @@ const sess = (hostId, sid, mcp, extra) => Object.assign(
     assert r["primed"] == [{"isObject": True, "id": "r1", "url": "http://r1"}]
     assert r["fetchingDuring"] is True and r["primesWhileInFlight"] == 1
     assert r["fetchingAfter"] is False
+    assert r["repaintsOwnTab"] == 1, "a prime landing on the shown tab repaints it"
+    assert r["repaintsOtherTab"] == 0
     assert r["downHeld"] == [] and r["downPrimes"] == 0
     assert r["inSync"] == [] and r["preMcp"] == []
     assert "const storesMode = hostMcpScopes(host.id);" in INDEX_HTML
+    # The Mods section's own first read goes through the same helper, so it
+    # holds no second copy of the fetch-and-repaint block.
+    render = _fn237("81_js_control_panel.js", "function renderModPolicy()")
+    assert "primeModCatalog(host);" in render
+    assert "fetchModCatalog(" not in render
 
 
 def test_the_copy_mcp_json_row_is_wired():
