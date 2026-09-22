@@ -6613,7 +6613,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # server's client-side send_keys pacer to read. A mutating knob (it
         # changes how writes are delivered to every MCP caller of this window),
         # so it needs readwrite — like /mcp/input. The value is EPHEMERAL
-        # per-connection (WindowEntry), so it resets on agent relaunch.
+        # per-connection (WindowEntry), so it resets on agent reconnect or
+        # relaunch (every re-register; unlike the MCP mode, never carried).
         err = _mcp_auth_error(request)
         if err is not None:
             return err
