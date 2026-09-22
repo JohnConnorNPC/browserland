@@ -30954,3 +30954,97 @@ def test_the_robot_popover_scope_field_wiring():
                    ".mcp-popover .mcp-scope-input"):
         assert needle in INDEX_HTML, needle
     assert "mcpScopeInputOk" in src
+
+
+def _reassert_loop237():
+    """The re-assert pass's loop, verbatim: from its first statement to the
+    close of the `for` at the poll body's indent."""
+    src = _src237("75_js_taskbar_hosts.js")
+    start = src.index("            for (const [key, sess] of merged) {\n"
+                      "                if (!windows.has(key)) continue;"
+                      "       // only attached windows")
+    end = src.index("\n            }\n", start) + len("\n            }\n")
+    return src[start:end]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_mode_reassert_stands_down_on_a_broker_that_stores_the_mode(
+        tmp_path):
+    """#233 (an owner veto item on #237): the browser's mode re-assert runs
+    only for a host whose capability read is a settled false. A capable host
+    (true) is never POSTed, a host not yet known (null) is HELD, and a remote
+    one is primed ONCE, with the host OBJECT (fetchModCatalog does
+    hostFetch(host, ...): an id would resolve against our own origin), and
+    only while its poll answers. The serving broker is never primed."""
+    loop = _reassert_loop237()
+    r = _node237(tmp_path, r"""
+const FETCH_TIMEOUT_MS = 3000;
+const hosts = {local: {id: 'local'}, r1: {id: 'r1', url: 'http://r1'},
+               r2: {id: 'r2', url: 'http://r2'}};
+let caps = {}, pollOk = {}, pins = {};
+const windows = new Set();
+const _mcpAsserting = new Set();
+const modCatalogFetching = new Set();
+const posts = [], primes = [];
+let pendingPrime = null;
+function hostById(id) { return hosts[id] || null; }
+function hostMcpScopes(id) { return caps[id]; }
+function pollStateFor(id) { return {ok: pollOk[id] !== false, leaseInactive: false}; }
+function getMcpMode(k) { return pins[k] || null; }
+function fetchModCatalog(host) {
+    primes.push(host);
+    return new Promise(res => { pendingPrime = res; });
+}
+function hostFetch(host, path, opts) {
+    posts.push({host: host.id, path, body: JSON.parse(opts.body)});
+    return Promise.resolve({json: () => Promise.resolve({ok: true})});
+}
+function tick(merged) {
+""" + loop + r"""
+}
+const sess = (hostId, sid, mcp, extra) => Object.assign(
+    {hostId, sid, mcp, mcpKnown: true}, extra || {});
+(async function () {
+    const out = {};
+    const run = (entries) => { posts.length = 0; tick(new Map(entries)); return posts.slice(); };
+    windows.add('local:1'); windows.add('r1:2'); windows.add('r2:3');
+    pins = {'local:1': 'readwrite', 'r1:2': 'readwrite', 'r2:3': 'readwrite'};
+    caps = {local: true, r1: false, r2: true};
+    out.mixed = run([['local:1', sess('local', '1', 'read')],
+                     ['r1:2', sess('r1', '2', 'read')],
+                     ['r2:3', sess('r2', '3', 'read')]]);
+    out.primesAfterMixed = primes.length;
+    await new Promise(res => setTimeout(res, 0));
+    _mcpAsserting.clear();
+    // not known yet: held; the remote one is primed once, the local never
+    caps = {local: null, r1: null};
+    out.held = run([['local:1', sess('local', '1', 'read')],
+                    ['r1:2', sess('r1', '2', 'read')]]);
+    out.primed = primes.map(h => ({isObject: typeof h === 'object', id: h.id, url: h.url}));
+    out.fetchingDuring = modCatalogFetching.has('r1');
+    run([['r1:2', sess('r1', '2', 'read')]]);
+    out.primesWhileInFlight = primes.length;
+    pendingPrime(); await new Promise(res => setTimeout(res, 0));
+    out.fetchingAfter = modCatalogFetching.has('r1');
+    // a peer whose poll is failing is not primed
+    primes.length = 0; caps = {r2: null}; pollOk = {r2: false};
+    out.downHeld = run([['r2:3', sess('r2', '3', 'read')]]);
+    out.downPrimes = primes.length;
+    // a settled false with nothing to fix, and a pre-MCP broker: nothing
+    caps = {r1: false}; pollOk = {};
+    out.inSync = run([['r1:2', sess('r1', '2', 'readwrite')]]);
+    out.preMcp = run([['r1:2', sess('r1', '2', 'read', {mcpKnown: false})]]);
+    process.stdout.write(JSON.stringify(out) + '\n');
+})();
+""")
+    assert r["mixed"] == [{"host": "r1", "path": "/session/mcp",
+                           "body": {"id": "2", "mode": "readwrite"}}], \
+        "only the settled-false host is re-asserted"
+    assert r["primesAfterMixed"] == 0
+    assert r["held"] == []
+    assert r["primed"] == [{"isObject": True, "id": "r1", "url": "http://r1"}]
+    assert r["fetchingDuring"] is True and r["primesWhileInFlight"] == 1
+    assert r["fetchingAfter"] is False
+    assert r["downHeld"] == [] and r["downPrimes"] == 0
+    assert r["inSync"] == [] and r["preMcp"] == []
+    assert "const storesMode = hostMcpScopes(host.id);" in INDEX_HTML

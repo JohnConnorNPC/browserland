@@ -931,8 +931,30 @@
             // POST /session/mcp to its OWN broker (mirrors setWindowMcpMode's
             // host resolution). Mismatch-gated so it clears the moment the
             // broker reflects the pin, and so an UNTOUCHED window (no pin) keeps
-            // inheriting the live broker default. This restores the mode after a
-            // refresh, a cross-browser move, or a same-id broker reconnect.
+            // inheriting the live broker default. On a broker that predates
+            // #229 this restores the mode after a refresh, a cross-browser move,
+            // or a same-id broker reconnect.
+            // #233: a broker that advertises /info `mcp_scopes` persists each
+            // window's raw mode override itself (webterm_mcp_windows.json) and
+            // re-applies it, so there the pin would be a second authority
+            // fighting the first: the pass stands down, and the pin is only a
+            // first-paint cache for the menu's check mark (mcpMenuMode, 78).
+            // hostMcpScopes (78) answers three ways. true: stand down. false: a
+            // SETTLED answer without the flag (an older build, or an /info that
+            // failed), so today's loop runs, unchanged; a capable broker whose
+            // /info failed is re-asserted too until that record is dropped
+            // (the update mod drops one once it has proved a restart, and a
+            // Control Panel tab click drops an 'unreachable' one), which makes
+            // it null again and primes it afresh.
+            // null: not known yet, so the window is HELD this tick, never
+            // re-asserted, because on a capable broker that POST would clobber
+            // the truth; a fresh remote host's first ticks are held even when it
+            // turns out to be an older build. The serving broker answers from
+            // the page's own boot /info. A peer is primed here, ONCE, by the
+            // Control Panel's fetchModCatalog (81) into the modCatalogCache that
+            // panel owns (and the update and mod-sync mods read), and only while
+            // that host's poll answers: one GET /info per peer per page load,
+            // failures cached, never a retry loop.
             // Guards: skip pre-MCP brokers (mcpKnown false) so we never hammer
             // an old broker that can't honour it; lease-gate (a remote broker
             // another browser owns is leaseInactive — only its active browser
@@ -944,12 +966,22 @@
             for (const [key, sess] of merged) {
                 if (!windows.has(key)) continue;       // only attached windows
                 if (!sess.mcpKnown) continue;          // pre-MCP broker
+                const host = hostById(sess.hostId);
+                if (!host) continue;
+                const storesMode = hostMcpScopes(host.id);
+                if (storesMode === null && host.id !== 'local'
+                        && pollStateFor(host.id).ok
+                        && !modCatalogFetching.has(host.id)) {
+                    modCatalogFetching.add(host.id);
+                    fetchModCatalog(host).catch(() => {}).finally(() => {
+                        modCatalogFetching.delete(host.id);
+                    });
+                }
+                if (storesMode !== false) continue;    // capable, or not known yet
                 if (_mcpAsserting.has(key)) continue;  // already driving this key
                 const want = getMcpMode(key);
                 if (!want || want === sess.mcp) continue;
                 if (pollStateFor(sess.hostId).leaseInactive) continue;
-                const host = hostById(sess.hostId);
-                if (!host) continue;
                 _mcpAsserting.add(key);
                 // Site-owned deadline (timeoutMs: 0 opts out of hostFetch's,
                 // which ends at the response headers): this one is only cleared
