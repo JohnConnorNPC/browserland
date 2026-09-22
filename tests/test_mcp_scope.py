@@ -1574,7 +1574,8 @@ def _wire_app(tmp_path, monkeypatch, mode="readwrite", **extra):
 
 def _window(app, wid, scope=None, mcp_mode=None):
     """A live producer entry tagged ``scope`` (None = untagged), injected
-    straight into the registry like test_mcp_pace does."""
+    straight into the registry like test_mcp_pace does (constructed with no
+    running loop, so its send-lock binds lazily to the request's loop)."""
     ws = _Producer()
     entry = WindowEntry(wid, 111, "t", 80, 24, ws, kind="agent")
     entry.mcp_scope = scope
