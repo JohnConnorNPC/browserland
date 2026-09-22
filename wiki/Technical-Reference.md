@@ -502,7 +502,7 @@ otherwise the broker-wide `default_mode`:
 
 | Mode | Effect |
 |---|---|
-| `off` | hidden from `/mcp/terminals`; `/mcp/read` + `/mcp/input` → **404 `unknown_or_off`** |
+| `off` | hidden from `/mcp/terminals`; `/mcp/read` + `/mcp/input` → **404 `unknown_or_off`** (the same answer as a window outside the caller's declared scope) |
 | `read` | visible + `/mcp/read`; `/mcp/input` → **403 `read_only`** |
 | `readwrite` | read **and** `/mcp/input` |
 
@@ -534,16 +534,19 @@ effective mode to permit them.
 | `POST /mcp/launch` | `allow_launch` | spawn a terminal |
 
 **`GET /mcp/info`** →
-`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e"}`.
+`{"ok":true,"allow_launch":false,"default_mode":"off","version":"0.8.0+ba4b62e",
+"scope":null}`.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
 detection (#22).
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
-omitted. `agent` is the detected foreground-agent name (`""` when none), `kind`
-the producer kind (`"agent"` vs a non-agent `"terminal"`), `mode` the effective
-access mode. `version` is the producer's reported build id (`""` for a pre-#22
-agent / a non-agent producer); for **agent** producers a `stale` boolean flags a
+omitted, and so are windows outside the caller's declared scope. `agent` is the
+detected foreground-agent name (`""` when none), `kind` the producer kind
+(`"agent"` vs a non-agent `"terminal"`), `mode` the effective access mode,
+`scope` the window's scope tag (`null` when untagged). `version` is the
+producer's reported build id (`""` for a pre-#22 agent / a non-agent producer);
+for **agent** producers a `stale` boolean flags a
 build differing from this broker's (a deploy predating a fix — reliable when
 builds carry a git hash). `app_cursor` is the cached DECCKM (application-cursor
 mode) the MCP `send_keys` reads to pick CSI vs SS3 arrows (#23); `pace_ms` is the
@@ -556,7 +559,7 @@ dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repa
 
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
-  "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read",
+  "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read","scope":null,
   "version":"0.8.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
   "pyte":true}]
 ```
@@ -673,7 +676,9 @@ launcher's:
 ```
 
 **200** when the agent registered within 10 s, **202** when it spawned but had
-not said `hello` yet (`"registered":false`).
+not said `hello` yet (`"registered":false`). A launch does not yet tag the new
+window with the caller's declared scope, so a scoped caller cannot list or
+drive the window it launched until that window is tagged (#231).
 
 ### Error reference
 
@@ -681,9 +686,10 @@ not said `hello` yet (`"registered":false`).
 |---|---|---|
 | 403 | `mcp_disabled` | feature disabled or no token configured |
 | 401 | `auth_required` | missing/invalid MCP token |
+| 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after the token. An empty value is not refused: it means unscoped, which sees every window its mode allows |
 | 400 | `bad_json` | body is not a JSON object |
 | 400 | `bad_id` | `id` missing or not an integer |
-| 404 | `unknown_or_off` | no such window, or its effective mode is `off` |
+| 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope |
 | 400 | `bad_data` | `/mcp/input` `data` is not a string |
 | 403 | `read_only` | `/mcp/input` on a window not in `readwrite` |
 | 413 | `too_large` | `/mcp/input` payload > 256 KiB |
@@ -706,7 +712,8 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 
 **`GET /mcp/config`** →
 `{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
-"token_env_pinned":false}` (`token` is the live secret, `""` when unset).
+"token_env_pinned":false,"known_scopes":[]}` (`token` is the live secret, `""`
+when unset).
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
 (`off`/`read`/`readwrite`), `allow_launch`, `token`, or `generate:true` (mint a
