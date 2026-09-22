@@ -4395,10 +4395,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # contract forbids it to write), so a background ticker makes those bumps
     # durable: at most one write per interval however many windows registered,
     # plus a final flush at shutdown. Every tick runs the shared writer with a
-    # no-op mutate, which prunes the copy and skips the disk write when the
-    # payload is unchanged, so pruning also happens on a quiet broker. The
-    # interval and the sleep are read from app.ctx on every iteration (and
-    # the uptime inside the writer), so tests can inject them.
+    # mutate that changes nothing but the daily re-stamp of rows whose
+    # producer is still connected (McpWindowStore.refresh_seen, #229); the
+    # writer then prunes the copy and skips the disk write when the payload
+    # is unchanged, so pruning also happens on a quiet broker. The interval
+    # and the sleep are read from app.ctx on every iteration (and the uptime
+    # inside the writer), so tests can inject them.
     app.ctx.mcp_windows_flush_s = 60.0
     app.ctx.mcp_windows_sleep = asyncio.sleep
     app.ctx.mcp_windows_task = None
@@ -4411,8 +4413,12 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         its traceback, DEBUG for each repeat, and one INFO once a pass
         succeeds again."""
         nonlocal flush_failing
+
+        def _refresh(work):
+            work.refresh_seen(app.ctx.registry.entries(), work.clock())
+
         try:
-            await app.ctx.persist_mcp_windows(lambda work: None)
+            await app.ctx.persist_mcp_windows(_refresh)
         except Exception:
             if flush_failing:
                 LOGGER.debug("mcp windows: flushing %s still fails",

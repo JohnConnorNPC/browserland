@@ -22,7 +22,9 @@ Schema (explicit; nothing else is ever persisted)::
   the first hello that claims the row: a row written before its window's
   process existed has both null.
 * ``seen`` is wall-clock epoch seconds (it spans restarts), bumped whenever a
-  hello re-applies or claims the row and whenever a write changes it.
+  hello re-applies or claims the row, whenever a write changes it, and once a
+  day while its producer stays connected (:meth:`McpWindowStore.
+  refresh_seen`).
 """
 
 from __future__ import annotations
@@ -61,6 +63,12 @@ PRUNE_AGE_S = 7 * 86400
 #: Then, while there are more rows than this, the oldest non-live rows go. A
 #: live row is never dropped, so the cap is soft.
 MAX_ROWS = 1000
+#: create_app's coalesced writer re-stamps a row whose own producer is live
+#: once its ``seen`` is more than this old (:meth:`McpWindowStore.
+#: refresh_seen`), so a window connected for days without re-registering is
+#: not judged stale in the gap of its next reconnect. At most one write a day
+#: per such row.
+SEEN_REFRESH_S = 86400
 #: load() reads at most this many bytes. Far above MAX_ROWS rows of any
 #: realistic size; a bigger file boots empty (logged) instead of being pulled
 #: whole into memory at startup.
@@ -447,6 +455,28 @@ class McpWindowStore:
         for wid in doomed:
             del self._rows[wid]
         return len(doomed)
+
+    def refresh_seen(self, live_entries: Iterable[Any], now: float) -> int:
+        """Set ``seen = now`` on every row whose own producer is live (a live
+        entry with its id passes ``same_producer(row, entry)``, prune's rule)
+        and whose ``seen`` is more than SEEN_REFRESH_S old; returns how many.
+        Only ever called from inside create_app's shared writer, on its
+        working copy: the coalesced writer's pass.
+
+        prune() never drops a live row, but it judges liveness at the moment
+        it runs, and a reconnect briefly leaves the window unregistered. apply()
+        bumps ``seen`` on every hello, so only a window connected longer than
+        PRUNE_AGE_S without one is at risk; this keeps its row fresh while it
+        stays connected."""
+        by_id = {entry.id: entry for entry in live_entries}
+        refreshed = 0
+        for wid, row in self._rows.items():
+            entry = by_id.get(wid)
+            if (entry is not None and _registry.same_producer(row, entry)
+                    and now - row["seen"] > SEEN_REFRESH_S):
+                row["seen"] = now
+                refreshed += 1
+        return refreshed
 
     # -- create_app's writer ------------------------------------------------
 

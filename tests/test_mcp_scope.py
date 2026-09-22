@@ -70,7 +70,7 @@ import webterm.broker.registry as registry_mod
 import webterm.protocol as protocol
 from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         PRUNE_GRACE_S, SCOPE_HEADER,
-                                        McpWindowStore)
+                                        SEEN_REFRESH_S, McpWindowStore)
 from webterm.broker.registry import WindowEntry
 
 from .auth_helpers import TEST_TOKEN, authed, with_token
@@ -626,6 +626,29 @@ def test_prune_cap_drops_the_oldest_non_live_rows_never_a_live_one(tmp_path):
     assert store.get(1) is not None
     assert store.get(2) is None and store.get(3) is None
     assert store.get(4) is not None
+
+
+# -- refresh_seen (#229) -------------------------------------------------------
+
+def test_refresh_seen_restamps_only_long_lived_live_rows(tmp_path):
+    """#229: only a row whose OWN producer is live and whose seen is MORE than
+    a day old is re-stamped: not a younger row, not one exactly a day old,
+    not one whose id is held by another producer, not a row nobody holds,
+    not an unclaimed pre-spawn row."""
+    assert SEEN_REFRESH_S == DAY
+    old = T - 25 * 3600
+    store = _loaded(tmp_path, {
+        5: _row(scope="a", pid=55, host="hostA", seen=old),
+        6: _row(scope="a", pid=56, host="hostA", seen=T - 23 * 3600),
+        7: _row(scope="a", pid=57, host="hostA", seen=T - DAY),
+        8: _row(scope="a", pid=58, host="hostA", seen=old),
+        9: _row(scope="a", pid=59, host="hostA", seen=old),
+        10: _row(scope="a", seen=old)})
+    live = [_entry(5, 55), _entry(6, 56), _entry(7, 57), _entry(8, 99),
+            _entry(10, 60)]
+    assert store.refresh_seen(live, T) == 1
+    assert {wid: store.get(wid)["seen"] for wid in range(5, 11)} == {
+        5: T, 6: T - 23 * 3600, 7: T - DAY, 8: old, 9: old, 10: old}
 
 
 # =============================================================================
@@ -1428,6 +1451,54 @@ def test_a_quiet_tick_still_prunes(tmp_path, monkeypatch, writes):
     assert _disk(_sidecar(tmp_path)) == {}
 
 
+def _two_ticks(app):
+    """Run the real ticker through exactly two passes."""
+    async def scenario():
+        ticks = _Ticks()
+        app.ctx.mcp_windows_sleep = ticks.sleep
+        ticker = asyncio.ensure_future(app.ctx.mcp_windows_ticker())
+        try:
+            for n in (1, 2):
+                await ticks.parked(n)
+                ticks.release(n)
+            await ticks.parked(3)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+def test_the_ticker_restamps_a_long_lived_live_row_once(tmp_path, monkeypatch,
+                                                        writes):
+    """#229: a window connected for more than a day without a hello (injected
+    live, so apply() never bumped it) gets its row re-stamped by the ticker:
+    ONE write with seen = now, and nothing on the next tick."""
+    _write_sidecar(_sidecar(tmp_path), {
+        "5": _row(scope="a", pid=55, host="hostA", seen=T - 25 * 3600)})
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    _inject_live(app, 5, 55)
+    _two_ticks(app)
+    landed = _store_writes(writes, app)
+    assert len(landed) == 1
+    assert landed[0]["windows"]["5"]["seen"] == T
+    assert _disk(_sidecar(tmp_path))["5"]["seen"] == T
+
+
+def test_the_ticker_leaves_young_foreign_and_orphan_rows_alone(
+        tmp_path, monkeypatch, writes):
+    """#229: a live row under a day old, a row whose id another producer now
+    holds, and a row nobody holds: two ticks, no write."""
+    _write_sidecar(_sidecar(tmp_path), {
+        "5": _row(scope="a", pid=55, host="hostA", seen=T - 23 * 3600),
+        "6": _row(scope="a", pid=56, host="hostA", seen=T - 25 * 3600),
+        "7": _row(scope="a", pid=57, host="hostA", seen=T - 25 * 3600)})
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    _inject_live(app, 5, 55)
+    _inject_live(app, 6, 99)
+    _two_ticks(app)
+    assert _store_writes(writes, app) == []
+
+
 def test_the_server_listeners_start_the_ticker_and_flush_at_stop(
         tmp_path, monkeypatch, writes):
     """#228: through the real listeners (app.test_client runs a server per
@@ -1545,18 +1616,21 @@ def test_the_ticker_flushes_through_app_ctx(tmp_path, monkeypatch):
 
 def test_the_flush_writes_through_app_ctx(tmp_path, monkeypatch):
     """#228: the flush calls ``app.ctx.persist_mcp_windows`` looked up at call
-    time, with a no-op mutate."""
+    time, with a mutate that changes nothing on a store with no long-lived
+    live row (its only job is refresh_seen, #229)."""
     app = _make_app(tmp_path, monkeypatch)
     mutates = []
 
     async def mine(mutate):
         mutates.append(mutate)
-        return mutate(None)
+        return mutate(app.ctx.mcp_windows.copy())
 
     app.ctx.persist_mcp_windows = mine
     assert asyncio.run(app.ctx.flush_mcp_windows()) is True
     assert len(mutates) == 1
-    assert mutates[0](None) is None
+    work = app.ctx.mcp_windows.copy()
+    assert mutates[0](work) is None
+    assert work.to_persist() == app.ctx.mcp_windows.to_persist()
 
 
 def test_a_failing_flush_logs_once_then_debug_then_recovery(
