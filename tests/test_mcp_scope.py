@@ -20,17 +20,22 @@ app's listeners were measured firing during a later test's request.
 WIRE section (#230): the /mcp/* token routes honouring ``X-Browserland-Scope``
 on the same app template, with live windows injected straight into the
 registry (tagged by setting ``mcp_scope``) and a producer double that answers
-the correlated round-trips and records every frame it was sent. It pins the
-400 bad_scope refusal on every token route (an invalid name or a repeated
-header), the order of the gate's checks, the empty value's unscoped meaning,
-the /mcp/terminals filter with its per-row ``scope`` field, and the
-_mcp_entry chokepoint: a window outside the declared scope answers byte for
-byte what a missing id answers, while an in-scope or unscoped caller still
-drives it; /mcp/info's echo of the declared scope (null when unscoped); and
-GET /mcp/config's known_scopes, which the header can never add to. The
-/mcp/config cells use the browser token (authed), that route's realm. Last,
-the header's CORS and caching surface: the preflight allows it with no admin
-realm configured, and every /mcp/* answer (only those) names it in Vary.
+the correlated round-trips and records every frame it was sent. It pins:
+
+* the gate: 400 bad_scope on every token route (an invalid name or a
+  repeated header), the order of its checks, and the empty value's unscoped
+  meaning;
+* the /mcp/terminals filter and its per-row ``scope`` field;
+* the _mcp_entry chokepoint: a window outside the declared scope answers
+  byte for byte what a missing id answers, while an in-scope or unscoped
+  caller still drives it;
+* /mcp/info's echo of the declared scope (null when unscoped), and
+  /mcp/profiles, which a scope leaves alone (profiles are global);
+* GET /mcp/config's known_scopes, which the header can never add to. These
+  cells use the browser token (authed), that route's realm;
+* the header's CORS and caching surface: the preflight allows it with no
+  admin realm configured, and every /mcp/* answer (only those) names it in
+  Vary.
 """
 
 from __future__ import annotations
@@ -1954,3 +1959,14 @@ def test_a_browser_realm_response_does_not_vary_on_the_scope_header(
     _, resp = authed(app).get("/info")
     assert resp.status == 200
     assert _tokens(resp.headers.get("Vary")) == ["Cookie"]
+
+
+def test_mcp_profiles_ignore_a_valid_scope(tmp_path, monkeypatch):
+    """#230: profiles are global. A scoped caller gets the very bytes an
+    unscoped one does (a scoped caller may launch any profile)."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, plain = _mcp(app, "/mcp/profiles")
+    _, scoped = _mcp(app, "/mcp/profiles", scope="a")
+    assert plain.status == 200 and plain.json["profiles"]
+    assert scoped.body == plain.body
