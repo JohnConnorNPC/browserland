@@ -25,7 +25,8 @@ the correlated round-trips and records every frame it was sent. It pins:
 * the gate: 400 bad_scope on every token route (an invalid name or a
   repeated header), the order of its checks, and the empty value's unscoped
   meaning;
-* the /mcp/terminals filter and its per-row ``scope`` field;
+* the /mcp/terminals filter (whatever the header name's case) and its
+  per-row ``scope`` field;
 * the _mcp_entry chokepoint: a window outside the declared scope answers
   byte for byte what a missing id answers, while an in-scope or unscoped
   caller still drives it;
@@ -1622,7 +1623,9 @@ def test_a_bad_scope_is_refused_on_every_mcp_route(tmp_path, monkeypatch,
                                                    path, scope):
     """#230: a present-but-invalid scope is 400 bad_scope on every token
     route, from the gate, before the route does anything: the producer is
-    sent nothing and the pace is untouched."""
+    sent nothing and the pace is untouched. That side-effect arm means
+    something only on the five chokepoint routes, the ones that resolve
+    window 5; the others never touch it."""
     app = _wire_app(tmp_path, monkeypatch)
     entry = _window(app, 5, scope="a")
     _, resp = _mcp(app, path, scope=scope)
@@ -1733,6 +1736,19 @@ def test_an_off_window_stays_hidden_from_its_own_scope(tmp_path, monkeypatch):
     _window(app, 6, scope="a")
     assert _listing(app, scope="a") == {6: "a"}
     assert _listing(app) == {6: "a"}
+
+
+def test_a_lowercase_header_name_narrows_the_listing(tmp_path, monkeypatch):
+    """#230: header names are case-insensitive (HTTP/2 always sends them
+    lowercase). The request really carries the lowercase name on the wire,
+    and the listing still narrows to scope a."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _three_windows(app)
+    request, resp = _mcp(app, "/mcp/terminals",
+                         extra_headers=[(SCOPE_HEADER.lower(), "a")])
+    assert b"x-browserland-scope: a" in request.raw_headers
+    assert resp.status == 200
+    assert {row["id"]: row["scope"] for row in resp.json} == {5: "a"}
 
 
 #: The routes that resolve their window through _mcp_entry.
@@ -1952,7 +1968,16 @@ def test_mcp_responses_vary_on_the_scope_header(tmp_path, monkeypatch):
         assert "Cookie" in vary and SCOPE_HEADER in vary
 
 
-def test_a_browser_realm_response_does_not_vary_on_the_scope_header(
+def test_mcp_config_varies_on_the_scope_header(tmp_path, monkeypatch):
+    """#230: /mcp/config ignores the header, but the Vary rule covers the
+    whole /mcp/* prefix (a little cache precision, never correctness), so
+    its answer names the header too."""
+    app = _wire_app(tmp_path, monkeypatch)
+    vary = _tokens(_config(app).headers.get("Vary"))
+    assert "Cookie" in vary and SCOPE_HEADER in vary
+
+
+def test_a_response_outside_mcp_does_not_vary_on_the_scope_header(
         tmp_path, monkeypatch):
     """#230: outside /mcp/* nothing reads the header, so Vary stays as it
     was (Cookie only)."""
