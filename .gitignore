@@ -49,6 +49,13 @@ webterm_mcp.json
 # profile editor persists here, seeded from broker_config's agent.profiles.
 webterm_profiles.json
 
+# Mod policy pins (/mods/policy, #157) — sibling of the state store
+webterm_mod_policy.json
+
+# Per-window MCP scope + mode override store (#228) — sibling of the state
+# store; written from the first per-window MCP change on.
+webterm_mcp_windows.json
+
 # Claude Code project MCP config (embeds the MCP bearer token)
 .mcp.json
 

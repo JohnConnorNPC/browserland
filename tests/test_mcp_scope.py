@@ -798,6 +798,25 @@ def test_mcp_windows_path_config_key_is_honoured(tmp_path, monkeypatch):
     assert not _sidecar(tmp_path).exists()
 
 
+def test_every_default_sidecar_name_is_gitignored():
+    """#229: a broker whose state path defaults to the repo root writes its
+    sidecars there, so each default sidecar name app.py derives from the
+    state path (``state_path.parent / "webterm_*.json"``) must be an exact
+    .gitignore line. The names are read from app.py, so a new sidecar is
+    covered without editing this test; the floor (7 names today) and the two
+    named members make a changed code shape fail instead of passing on an
+    empty list."""
+    src = Path(app_mod.__file__).read_text(encoding="utf-8")
+    names = set(re.findall(r'state_path\.parent / "(webterm_[a-z_]+\.json)"',
+                           src))
+    assert len(names) >= 7, sorted(names)
+    assert {"webterm_mcp_windows.json", "webterm_mod_policy.json"} <= names
+    gitignore = Path(app_mod.__file__).resolve().parents[2] / ".gitignore"
+    lines = {line.strip() for line in
+             gitignore.read_text(encoding="utf-8").splitlines()}
+    assert sorted(names - lines) == []
+
+
 # -- re-apply through the real register() -------------------------------------
 
 def test_restart_reapplies_a_row_with_a_matching_pid(tmp_path, monkeypatch):
