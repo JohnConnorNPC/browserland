@@ -8,6 +8,11 @@ a persistent :class:`httpx.Client`.
 Non-2xx responses carry a ``{"error": "<code>"}`` body; :meth:`BrowserlandClient`
 parses that and raises :class:`BrowserlandError` with a human-readable message so an
 MCP client surfaces a readable tool error instead of a raw stack trace.
+
+A client built with a ``scope`` (#232) declares it on every request
+(``X-Browserland-Scope``) and FAILS CLOSED: it trusts nothing from the broker
+until ``/mcp/info`` has echoed that scope back (see
+:meth:`BrowserlandClient._check_scope`).
 """
 
 from __future__ import annotations
@@ -15,6 +20,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+# The header name comes from the dependency-free protocol module, never from
+# webterm.broker: this package is the optional `mcp` extra and must not pull
+# in the broker (and sanic with it).
+from ..protocol import SCOPE_HEADER
 
 # Broker error codes -> human-readable messages. Source of truth is the error
 # table in wiki/Technical-Reference.md ("MCP HTTP interface" error reference). Codes not
@@ -44,6 +54,16 @@ _ERROR_MESSAGES = {
     "too_many_pending_launches": "Broker is busy with too many pending launches; retry shortly.",
     "spawn_failed": "Broker failed to spawn the agent.",
     "agent_exited_early": "The spawned agent exited before registering.",
+    "bad_mode": "Invalid 'mode' (use off, read or readwrite).",
+    "prespawn_failed": "The broker could not record the new window's scope, "
+                       "so it spawned nothing; retry the launch.",
+    "bad_scope": "The broker refused this server's scope name (a scope is "
+                 "1-64 characters of A-Z a-z 0-9 . _ -, starting with a letter "
+                 "or digit, sent once).",
+    # Raised by this client, never sent by a broker: see _check_scope.
+    "scope_unsupported": "The broker did not confirm this server's scope, so "
+                         "its answers could include windows outside it; every "
+                         "call to this host is refused.",
 }
 
 
@@ -65,17 +85,29 @@ class BrowserlandClient:
 
     def __init__(self, base: str = "http://127.0.0.1:4445", token: str = "",
                  timeout: float = 10.0, read_timeout: float = 30.0,
-                 transport: Optional[httpx.BaseTransport] = None):
+                 transport: Optional[httpx.BaseTransport] = None,
+                 scope: Optional[str] = None, name: Optional[str] = None):
         self.base = base.rstrip("/")
+        #: The scope this client declares (#232), or None. An empty string is
+        #: unscoped, exactly as the broker reads an empty header.
+        self.scope = scope or None
+        #: What error messages call this host: its configured name, else the
+        #: base URL.
+        self.name = name or self.base
         # `read` does a producer round-trip on the broker, so it gets a longer
         # timeout (applied per-request in read_screen); everything else uses the
         # short default so a stalled broker doesn't hang a tool call for 30s.
         self._read_timeout = read_timeout
+        headers = {"Authorization": f"Bearer {token}"}
+        if self.scope:
+            headers[SCOPE_HEADER] = self.scope
+        # Set once /mcp/info has echoed our scope; see _check_scope.
+        self._scope_confirmed = False
         # `transport` is an injection seam for tests (httpx.MockTransport); in
         # production it stays None and httpx uses its default network transport.
         self._client = httpx.Client(
             timeout=timeout,
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
             transport=transport,
         )
 
@@ -109,19 +141,78 @@ class BrowserlandClient:
 
     def _request(self, method: str, path: str, *, json_body: Any = None,
                  timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
+        if self.scope and not self._scope_confirmed:
+            self._check_scope()
+        return self._send(method, path, json_body=json_body, timeout=timeout)
+
+    def _send(self, method: str, path: str, *, json_body: Any = None,
+              timeout: Any = httpx.USE_CLIENT_DEFAULT) -> Any:
         # A connection refused / DNS / TLS / timeout error never produces an
         # HTTP response, so it can't carry a broker `error` code — translate it
         # into a BrowserlandError too, so callers only ever see BrowserlandError.
+        #
+        # Either kind of failure that can mean "the broker behind this URL
+        # went away" forgets a confirmed scope, because whatever answers next
+        # may be a different build: connection_error, and a non-2xx carrying
+        # no broker error code (code is None: what a proxy answers while the
+        # broker behind it restarts). An answer with a code came from a broker
+        # that is still there, and keeps it.
         try:
             r = self._client.request(method, self.base + path,
                                      json=json_body, timeout=timeout)
         except httpx.RequestError as exc:
+            self._scope_confirmed = False
             raise BrowserlandError(
                 0, "connection_error",
                 f"Cannot reach the Browserland broker at {self.base}: {exc}",
             ) from exc
-        self._raise_for_status(r)
+        try:
+            self._raise_for_status(r)
+        except BrowserlandError as exc:
+            if exc.code is None:
+                self._scope_confirmed = False
+            raise
         return r.json()
+
+    def _check_scope(self) -> Dict[str, Any]:
+        """The fail-closed probe of a scoped client (#232); returns the
+        ``/mcp/info`` body it read.
+
+        A broker that ignores the scope answers a scoped client with EVERY
+        window its modes allow, the leak scopes exist to prevent, and it
+        looks exactly like a correct answer. So before any other request, and
+        again after the broker may have changed (see _send), a scoped client
+        GETs /mcp/info and requires it to echo the scope it declared. No
+        ``scope`` key means a broker that predates scopes; null means the
+        header never reached it (a proxy dropped it); another value means it
+        was rewritten. Each raises ``scope_unsupported`` naming the host and
+        the reason, and nothing else is sent. A probe that fails for another
+        reason (the broker unreachable, a bad token) raises that error
+        instead.
+
+        Only a match is remembered. A refused host is probed again on every
+        call, one GET each, so an upgraded broker or a fixed proxy is picked
+        up without restarting this server. Two concurrent first calls may
+        both probe; that is harmless."""
+        info = self._send("GET", "/mcp/info")
+        if not isinstance(info, dict) or "scope" not in info:
+            reason = ("its /mcp/info carries no 'scope': the broker predates "
+                      "scopes (upgrade it)")
+        elif info["scope"] is None:
+            reason = ("the broker saw no scope: something between here and "
+                      f"the broker (a proxy?) dropped the {SCOPE_HEADER} "
+                      "header")
+        elif info["scope"] != self.scope:
+            reason = (f"the broker echoed scope {info['scope']!r}: something "
+                      f"between here and the broker rewrote the {SCOPE_HEADER} "
+                      "header")
+        else:
+            self._scope_confirmed = True
+            return info
+        raise BrowserlandError(
+            0, "scope_unsupported",
+            f"{_ERROR_MESSAGES['scope_unsupported']} Host {self.name!r} "
+            f"declared scope {self.scope!r}, but {reason}.")
 
     def _get(self, path: str) -> Any:
         return self._request("GET", path)
@@ -132,7 +223,12 @@ class BrowserlandClient:
 
     # --- one method per endpoint; each maps 1:1 to an MCP tool ------------
     def info(self) -> Dict[str, Any]:
-        """Feature flags: ``allow_launch`` + ``default_mode``."""
+        """Feature flags: ``allow_launch`` + ``default_mode``, plus ``scope``,
+        the scope this client declared as the broker saw it. On a scoped
+        client that has not confirmed its scope yet this call IS the probe:
+        one GET."""
+        if self.scope and not self._scope_confirmed:
+            return self._check_scope()
         return self._get("/mcp/info")
 
     def list_terminals(self) -> List[Dict[str, Any]]:
@@ -240,10 +336,15 @@ class BrowserlandClient:
 
     def launch_terminal(self, profile: Optional[str] = None, cols: int = 80,
                         rows: int = 24, title: Optional[str] = None,
-                        cwd: Optional[str] = None) -> Dict[str, Any]:
-        """Spawn a new terminal from a profile. Requires ``allow_launch``."""
+                        cwd: Optional[str] = None,
+                        mode: Optional[str] = None) -> Dict[str, Any]:
+        """Spawn a new terminal from a profile. Requires ``allow_launch``.
+        ``mode`` (off/read/readwrite, sent only when given) is the new
+        window's MCP mode: a scoped launch comes up in it, or readwrite
+        without it; an unscoped launch ignores it."""
         body: Dict[str, Any] = {"cols": cols, "rows": rows}
-        for k, v in (("profile", profile), ("title", title), ("cwd", cwd)):
+        for k, v in (("profile", profile), ("title", title), ("cwd", cwd),
+                     ("mode", mode)):
             if v is not None:
                 body[k] = v
         return self._post("/mcp/launch", body)

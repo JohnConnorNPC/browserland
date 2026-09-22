@@ -17,6 +17,7 @@ pytest.importorskip("mcp")
 import httpx
 
 from webterm.mcptool import BrowserlandClient, BrowserlandError
+from webterm.protocol import SCOPE_HEADER
 
 
 # ---- client unit tests (httpx.MockTransport, no real broker) -------------
@@ -972,6 +973,224 @@ def test_connection_error_becomes_browserland_error():
     assert ei.value.status == 0
     assert ei.value.code == "connection_error"
     assert "broker" in str(ei.value)
+
+
+# ---- #232: the scope header and the fail-closed /mcp/info probe ------------
+
+_ECHO = object()      # /mcp/info echoes the request's header, like a broker
+_OMIT = object()      # /mcp/info has no "scope" key: a broker before scopes
+
+
+class _ScopeBroker:
+    """MockTransport handler for one broker. Records every request.
+    /mcp/info answers with ``echo`` as its ``scope`` (_ECHO: whatever header
+    arrived, null when none, as the real broker does; _OMIT: no key; else
+    that value); ``faults`` maps a path to a queue consumed one entry per
+    request to it (None: answer normally; an httpx exception class: raise
+    it; an httpx.Response: return it); every other request answers
+    ``{"ok": true}`` (a list for /mcp/terminals)."""
+
+    def __init__(self, echo=_ECHO, terminals=None, faults=None):
+        self.echo = echo
+        self.terminals = terminals if terminals is not None else []
+        self.faults = faults or {}
+        self.requests = []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        path = request.url.path
+        queue = self.faults.get(path)
+        fault = queue.pop(0) if queue else None
+        if isinstance(fault, httpx.Response):
+            return fault
+        if fault is not None:
+            raise fault("injected", request=request)
+        if path == "/mcp/info":
+            body = {"ok": True, "allow_launch": True, "default_mode": "off"}
+            if self.echo is _ECHO:
+                body["scope"] = request.headers.get(SCOPE_HEADER) or None
+            elif self.echo is not _OMIT:
+                body["scope"] = self.echo
+            return httpx.Response(200, json=body)
+        if path == "/mcp/terminals":
+            return httpx.Response(200, json=self.terminals)
+        return httpx.Response(200, json={"ok": True})
+
+    def count(self, path):
+        return sum(1 for r in self.requests if r.url.path == path)
+
+
+def _scoped(broker, scope="teamA", name="local"):
+    return BrowserlandClient(base="http://broker:4445", token="t",
+                             scope=scope, name=name,
+                             transport=httpx.MockTransport(broker))
+
+
+#: One call per client method, each a (label, callable) on a client.
+_EVERY_CALL = [
+    ("info", lambda c: c.info()),
+    ("list_terminals", lambda c: c.list_terminals()),
+    ("list_profiles", lambda c: c.list_profiles()),
+    ("read_screen", lambda c: c.read_screen(5)),
+    ("send_input", lambda c: c.send_input(5, "x")),
+    ("reset_terminal", lambda c: c.reset_terminal(5)),
+    ("flush_input", lambda c: c.flush_input(5)),
+    ("set_pace", lambda c: c.set_pace(5, 10)),
+    ("launch_terminal", lambda c: c.launch_terminal()),
+]
+
+
+def test_a_scoped_client_sends_its_scope_on_every_request():
+    """#232: the header rides EVERY request, the probe included."""
+    broker = _ScopeBroker()
+    with _scoped(broker) as c:
+        for _label, call in _EVERY_CALL:
+            call(c)
+    assert len(broker.requests) == len(_EVERY_CALL)
+    assert [r.headers.get(SCOPE_HEADER) for r in broker.requests] == [
+        "teamA"] * len(_EVERY_CALL)
+
+
+@pytest.mark.parametrize("scope", [None, ""], ids=["none", "empty"])
+def test_an_unscoped_client_never_sends_the_header_or_probes(scope):
+    """#232: no scope (or an empty one, which the broker reads as none): no
+    header on any request, and no /mcp/info beyond the explicit info()."""
+    broker = _ScopeBroker()
+    with _scoped(broker, scope=scope) as c:
+        for _label, call in _EVERY_CALL:
+            call(c)
+    assert all(SCOPE_HEADER not in r.headers for r in broker.requests)
+    assert broker.count("/mcp/info") == 1
+    assert len(broker.requests) == len(_EVERY_CALL)
+
+
+@pytest.mark.parametrize("echo,reason", [
+    (_OMIT, "predates scopes"), (None, "dropped"), ("teamB", "'teamB'")],
+    ids=["no-key", "null", "other-scope"])
+@pytest.mark.parametrize("label,call", _EVERY_CALL,
+                         ids=[label for label, _ in _EVERY_CALL])
+def test_an_unconfirmed_scope_fails_closed(echo, reason, label, call):
+    """#232: a broker that does not echo the declared scope gets NOTHING but
+    the probe: every call raises scope_unsupported, naming the host, the
+    scope and why."""
+    broker = _ScopeBroker(echo=echo)
+    with _scoped(broker) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            call(c)
+    assert ei.value.code == "scope_unsupported"
+    message = str(ei.value)
+    assert "'local'" in message and "'teamA'" in message and reason in message
+    assert [r.url.path for r in broker.requests] == ["/mcp/info"]
+
+
+def test_a_confirmed_scope_is_probed_once():
+    broker = _ScopeBroker()
+    with _scoped(broker) as c:
+        c.list_terminals()
+        c.list_terminals()
+    assert (broker.count("/mcp/info"), broker.count("/mcp/terminals")) == (1, 2)
+
+
+def test_scoped_info_is_its_own_probe():
+    """#232: info() on an unconfirmed scoped client is ONE GET, the probe
+    itself; later calls are plain GETs."""
+    broker = _ScopeBroker()
+    with _scoped(broker) as c:
+        assert c.info()["scope"] == "teamA"
+        c.info()
+    assert broker.count("/mcp/info") == 2
+
+
+def test_an_unreachable_broker_is_probed_again():
+    """#232: connection_error forgets the confirmation (the broker may come
+    back as another build), so the next call probes first."""
+    broker = _ScopeBroker(faults={"/mcp/terminals": [None, httpx.ConnectError]})
+    with _scoped(broker) as c:
+        c.list_terminals()
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+        assert ei.value.code == "connection_error"
+        c.list_terminals()
+    assert broker.count("/mcp/info") == 2
+
+
+def test_a_codeless_error_is_probed_again_and_a_coded_one_is_not():
+    """#232: a non-2xx with no broker error code (a proxy's 502 while the
+    broker restarts) forgets the confirmation like connection_error does; a
+    broker's own coded error (unknown_or_off) does not."""
+    broker = _ScopeBroker(faults={"/mcp/terminals": [
+        httpx.Response(404, json={"error": "unknown_or_off"}),
+        httpx.Response(502, text="Bad Gateway")]})
+    with _scoped(broker) as c:
+        c.info()                                             # probe 1
+        with pytest.raises(BrowserlandError) as coded:
+            c.list_terminals()
+        assert coded.value.code == "unknown_or_off"
+        with pytest.raises(BrowserlandError) as codeless:
+            c.list_terminals()                               # still confirmed
+        assert codeless.value.code is None
+        assert broker.count("/mcp/info") == 1
+        c.list_terminals()                                   # probe 2
+    assert broker.count("/mcp/info") == 2
+
+
+def test_a_refused_scope_is_probed_again_on_the_next_call():
+    """#232: only a match is remembered, so a broker upgraded (or a proxy
+    fixed) between two calls is picked up without a restart."""
+    broker = _ScopeBroker(echo=_OMIT)
+    with _scoped(broker) as c:
+        with pytest.raises(BrowserlandError):
+            c.list_terminals()
+        broker.echo = _ECHO
+        assert c.list_terminals() == []
+    assert broker.count("/mcp/info") == 2
+
+
+def test_a_probe_failing_for_another_reason_raises_that_error():
+    """#232: a probe that cannot read /mcp/info (here a bad token) raises
+    the broker's own error, not scope_unsupported, and confirms nothing."""
+    broker = _ScopeBroker(faults={"/mcp/info": [
+        httpx.Response(401, json={"error": "auth_required"})]})
+    with _scoped(broker) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+        assert ei.value.code == "auth_required"
+        c.list_terminals()
+    assert broker.count("/mcp/info") == 2
+    assert broker.count("/mcp/terminals") == 1
+
+
+def test_bad_scope_surfaces_with_its_message():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad_scope"})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.list_terminals()
+    assert ei.value.code == "bad_scope"
+    assert "scope name" in str(ei.value) and "(HTTP 400)" in str(ei.value)
+
+
+@pytest.mark.parametrize("code,fragment", [
+    ("bad_mode", "'mode'"), ("prespawn_failed", "spawned nothing")])
+def test_the_launch_errors_surface_with_their_messages(code, fragment):
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": code})
+
+    with _client(handler) as c:
+        with pytest.raises(BrowserlandError) as ei:
+            c.launch_terminal()
+    assert fragment in str(ei.value)
+
+
+def test_launch_sends_mode_only_when_given():
+    broker = _ScopeBroker()
+    with _scoped(broker, scope=None) as c:
+        c.launch_terminal(mode="read")
+        c.launch_terminal()
+    bodies = [json.loads(r.content) for r in broker.requests]
+    assert bodies[0]["mode"] == "read"
+    assert "mode" not in bodies[1]
 
 
 # ---- token / config resolution (__main__) --------------------------------
