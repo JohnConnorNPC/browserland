@@ -511,7 +511,8 @@ otherwise the broker-wide `default_mode`:
 * **per-window override** — set from the window title-bar **MCP access** menu or
   `POST /session/mcp`; **in-memory only**: it resets on broker restart or agent
   relaunch, and carries over only when an agent reconnects while the broker
-  still holds its old connection (same window id, host and process id).
+  still holds its old connection (same window id, host and nonzero process
+  id).
 * **`allow_launch`** (global, default `false`) — independent flag gating
   `/mcp/launch` only.
 
@@ -716,7 +717,9 @@ token stays the env value). Errors: `bad_json` (400), `bad_mode` (400),
 
 **`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"}`
 → `{"ok":true,"id":<int>,"mode":<str>}`. Sets the **in-memory** per-window
-override (resets on restart / relaunch). `bad_mode` (400) on an invalid mode.
+override (resets on restart / relaunch, except across a reconnect that replaces
+a still-registered entry whose host and nonzero pid match; see Access modes).
+`bad_mode` (400) on an invalid mode.
 
 **Sidecar `webterm_mcp.json`** — the durable MCP config, written atomically next
 to the `/state` store (default `<state_path dir>/webterm_mcp.json`; override with
