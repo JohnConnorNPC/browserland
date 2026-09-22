@@ -13,12 +13,13 @@
         //
         // openDialog(spec) -> Promise<{value,fields}|null>
         //   spec = { title, body?(container), fields?:[{key,label,value,
-        //            placeholder,validate}], buttons?:[{label,value,primary,
-        //            danger}], initialFocus }
+        //            placeholder,validate,maxLength}], buttons?:[{label,value,
+        //            primary,danger}], initialFocus }
         //   Resolves to {value:<clicked button.value>, fields:{<key>:<string>}}
         //   on a button click, or null on Escape / backdrop click. Primary-button
         //   commits run every field's validate(value) first: a truthy return is
-        //   shown as the error and the dialog stays open.
+        //   shown as the error and the dialog stays open. A field's maxLength
+        //   (a positive integer) caps what can be typed into it.
         let _dlgFinish = null;
         function openDialog(spec) {
             if (_dlgFinish) _dlgFinish(null);   // cancel any live dialog first
@@ -57,6 +58,9 @@
                     input.type = 'text';
                     input.value = (f.value != null) ? String(f.value) : '';
                     if (f.placeholder) input.placeholder = f.placeholder;
+                    if (Number.isInteger(f.maxLength) && f.maxLength > 0) {
+                        input.maxLength = f.maxLength;
+                    }
                     row.appendChild(input);
                     modal.appendChild(row);
                     fieldInputs.push({ key: f.key, input: input,
@@ -165,6 +169,7 @@
                     value: opts.value || '',
                     placeholder: opts.placeholder || '',
                     validate: opts.validate,
+                    maxLength: opts.maxLength,
                 }],
                 buttons: [
                     { label: opts.okLabel || 'OK', value: true, primary: true },

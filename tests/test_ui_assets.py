@@ -30472,3 +30472,18 @@ process.stdout.write(JSON.stringify(out) + '\n');
     assert r["bare"] == parts + ["ti-scope=projA"]
     assert r["bareThenWs"] == parts + ["ti-scope=projA", "ti-ws=ws2"]
     assert r["unscoped"] == parts
+
+
+def test_a_dialog_field_can_cap_its_length():
+    """#233: openTextPrompt forwards maxLength to its one field and openDialog
+    applies a positive integer maxLength to that field's input, so `Set
+    scope...` cannot take more than a scope's 64 characters. A field without
+    one is uncapped, as before."""
+    dialog = _fn237("69_js_dialog.js", "function openDialog(spec)")
+    assert re.search(r"if \(Number\.isInteger\(f\.maxLength\) && "
+                     r"f\.maxLength > 0\) \{\s*input\.maxLength = f\.maxLength;",
+                     dialog), "openDialog must apply a field's maxLength"
+    prompt = _fn237("69_js_dialog.js", "function openTextPrompt(opts)")
+    assert "maxLength: opts.maxLength," in prompt, \
+        "openTextPrompt must forward opts.maxLength to its field"
+    assert "input.maxLength = f.maxLength;" in INDEX_HTML
