@@ -24,6 +24,10 @@ webterm_identity.json
 # must never be committable.
 webterm_token.json
 
+# Update-policy gates set from the UI — per-install runtime state beside the
+# state store, not source.
+webterm_update_policy.json
+
 # Session recordings (#140) — durable user data beside the state store
 webterm_recordings/
 
