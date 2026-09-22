@@ -5,8 +5,9 @@ it; junk values collapse to "".
 
 It also pins the registry's per-window MCP facts (#227): ``mcp_scope`` in
 summary(), the ``on_register`` hook's contract (args, ordering, lock, failure
-handling), and the pid-gated default carry-over of ``mcp_mode``/``mcp_scope``
-across a same-id replacement when no hook is installed."""
+handling), and the host+pid-gated default carry-over of
+``mcp_mode``/``mcp_scope`` across a same-id replacement when no hook is
+installed."""
 
 from __future__ import annotations
 
@@ -607,7 +608,8 @@ def test_replacement_without_hook_carries_mcp_field(field, value):
 def test_installed_hook_replaces_the_default_carry_over():
     """#227: with a hook installed there is NO default carry-over — the hook
     (the per-window store) is the authority, so a hook that applies nothing
-    leaves a same-id, same-pid replacement at None for both fields."""
+    leaves a same-id, same-host, same-pid replacement at None for both
+    fields."""
     async def scenario():
         reg = BrokerRegistry()
         reg.on_register = lambda new, old: None
@@ -623,8 +625,9 @@ def test_installed_hook_replaces_the_default_carry_over():
 
 
 def test_replacement_does_not_carry_pace_ms():
-    """#227: pace_ms stays EPHEMERAL — a same-id, same-pid replacement (the
-    path that carries mcp_mode/mcp_scope) still starts it at 0."""
+    """#227: pace_ms stays EPHEMERAL — a same-id, same-host, same-pid
+    replacement (the path that carries mcp_mode/mcp_scope) still starts it
+    at 0."""
     async def scenario():
         reg = BrokerRegistry()
         first = await reg.register(FeedWS(), _hello(43, pid=77))
@@ -666,7 +669,7 @@ def test_replacement_without_a_matching_host_and_pid_does_not_carry(first,
 
 def test_half_open_reconnect_carry_survives_the_old_socket_closing():
     """#227 end to end through run_producer_session: a second hello (same id,
-    same pid) on a new socket while the first is still open replaces the entry
+    host and pid) on a new socket while the first is still open replaces the entry
     and carries mcp_mode. When the first socket finally closes, its `finally`
     deregister must leave the NEW entry in place (deregister only removes the
     entry it registered)."""
