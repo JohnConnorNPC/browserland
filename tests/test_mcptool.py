@@ -2123,3 +2123,22 @@ def test_the_mcp_server_never_imports_the_broker(tmp_path):
                          env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["[]", "True"]
+
+
+def test_the_readme_documents_scopes():
+    """#232: the README is the user-facing contract for the flag, the env,
+    the Scopes section and launch_terminal's mode."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "webterm" / "mcptool"
+              / "README.md").read_text(encoding="utf-8").splitlines()
+    section = readme[readme.index("## Configure"):
+                     readme.index("### Multi-host (#24)")]
+    config_rows = [line for line in section if line.startswith("| ")]
+    assert len(config_rows) >= 6                  # header, rule, 4+ settings
+    assert any("`--scope NAME`" in row and "`BROWSERLAND_MCP_SCOPE`" in row
+               for row in config_rows)
+    assert "### Scopes (#232)" in readme
+    launch = next(line for line in readme
+                  if line.startswith("| `launch_terminal("))
+    assert "mode?)" in launch and "`readwrite`" in launch

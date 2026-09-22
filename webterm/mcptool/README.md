@@ -35,6 +35,7 @@ Config resolves **flag > env > default**:
 | MCP token | `--token` | `BROWSERLAND_MCP_TOKEN` (or `WEB_TERMINAL_MCP_TOKEN`) | — (required) |
 | Token from sidecar | `--token-file PATH` | — | — |
 | Multiple brokers | `--hosts JSON` | `BROWSERLAND_MCP_HOSTS` | — (single-host) |
+| Scope (see **Scopes**) | `--scope NAME` | `BROWSERLAND_MCP_SCOPE` | — (unscoped) |
 
 `--token-file` reads the `token` field from a `webterm_mcp.json` sidecar (a local
 convenience; the file holds `null` when the broker pins its token via env, in
@@ -65,6 +66,72 @@ config is just one host named **`default`** — its ids look like `"default:1234
 
 A missing token exits with a clear stderr message (no traceback).
 
+### Scopes (#232)
+
+Several MCP clients often share one broker and one token: for example a
+Claude Code session per project folder, each with its own `.mcp.json`. A
+**scope** keeps them apart. A server started with a scope sees and drives
+**only** the windows tagged with that scope. A window gets its tag when this
+server launches it (`launch_terminal`), or through the broker's browser-realm
+`POST /session/mcp` (see the Technical Reference).
+
+```bash
+browserland-mcp --scope projA            # or BROWSERLAND_MCP_SCOPE=projA
+```
+
+- A scope name is 1–64 characters of `A-Z a-z 0-9 . _ -`, starting with a
+  letter or digit. An invalid one exits with status 2 before the server starts.
+- `--scope` beats `$BROWSERLAND_MCP_SCOPE`. An **empty** value means
+  **unscoped**. An unscoped server keeps the old view: every window its access
+  mode allows, whatever its tag. It is the admin view.
+- Each `--hosts` entry may carry its own `"scope"`. An empty or absent one
+  inherits `--scope`:
+
+  ```bash
+  browserland-mcp --scope projA --hosts '[
+    {"name": "local",  "url": "http://127.0.0.1:4445",     "token": "abc…"},
+    {"name": "remote", "url": "https://host2.ts.net:4445", "token": "xyz…",
+     "scope": "projA-remote"}
+  ]'
+  ```
+
+- A window started by hand has no tag, so a scoped server cannot see it until
+  it is tagged (`POST /session/mcp`). That is by design, not a bug.
+- A window launched by a scoped server is tagged before it starts and comes
+  up in `readwrite` (or the `mode` you pass to `launch_terminal`), so its
+  launcher can drive it at once.
+- **Fail closed.** Before its first call to a scoped host, the server checks
+  that the broker's `/mcp/info` echoes the scope back. An old broker (no
+  `scope` field), or a proxy that dropped or rewrote the
+  `X-Browserland-Scope` header, would otherwise show this server every window.
+  Instead, every call to that host fails with `scope_unsupported`, naming the
+  host and the reason. The check runs again after the broker has been
+  unreachable, and a refused host is checked again on every call. A reverse
+  proxy in front of the broker must forward `X-Browserland-Scope` untouched,
+  and only once: a duplicated header is `400 bad_scope`.
+- A scope is a **convention, not security**. Every client holds the same
+  bearer token and can declare any scope, or none.
+
+A project's `.mcp.json` pins its scope like this:
+
+```json
+{
+  "mcpServers": {
+    "browserland": {
+      "command": "python",
+      "args": ["-m", "webterm.mcptool"],
+      "env": {
+        "BROWSERLAND_MCP_URL": "http://127.0.0.1:4445",
+        "BROWSERLAND_MCP_TOKEN": "…",
+        "BROWSERLAND_MCP_SCOPE": "projA"
+      }
+    }
+  }
+}
+```
+
+(The file holds the bearer token: keep it out of version control.)
+
 ## Run
 
 ```bash
@@ -93,8 +160,8 @@ on the host prefix:
 
 | Tool | Endpoint | Notes |
 |---|---|---|
-| `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version`. Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
-| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), and `pace_ms` (the default `send_keys` pacing, `0` = single-burst) |
+| `mcp_info(host?)` | `GET /mcp/info` | feature flags (`allow_launch`, `default_mode`) + broker `version` + `scope` (the scope this server declared, as the broker saw it). Omit `host` → dict keyed by host name (per-host `{"error":…}` if unreachable) |
+| `list_terminals` | `GET /mcp/terminals` | `{"terminals":[…], "errors":{host:msg}}`: all hosts merged, each terminal's `host` set to the config name (the broker's machine hostname preserved as `machine_host`) + namespaced `id`; a down host lands in `errors` without suppressing the rest. Each terminal carries a build `version` (agents also a `stale` flag), `app_cursor` (cached DECCKM), `pace_ms` (the default `send_keys` pacing, `0` = single-burst) and `scope` (its tag, `null` when untagged). A scoped host lists only its own windows (see **Scopes**); one that does not confirm the scope, or lists a window with another tag, lands in `errors` with `scope_unsupported` |
 | `list_profiles(host?)` | `GET /mcp/profiles` | launchable profile names + default. Omit `host` → dict keyed by host name |
 | `read_screen(id, view?, lines?, wait_for_change?, wait_for_text?, wait_for_regex?, wait_absent?, wait_for_idle?, timeout_ms?, since?, attrs?)` | `POST /mcp/read` | screen rendered as a bounded plain-text grid (pyte, or a dependency-free fallback) + `alt_screen`/`cursor`/`content_hash`, plus `stable_hash` (the same digest with the hardware-cursor cell masked — a cursor blink in place doesn't change it, a move does) and `idle_ms` (best-effort ms since the last PTY output; absent from older agents); `view="scrollback"` adds history. One wait mode (exclusive): `wait_for_change` holds until the hash changes (#26); `wait_for_text`/`wait_for_regex` (+`wait_absent` to invert) hold until that content appears/disappears and return `matched` (#51) — better on a busy TUI where the hash changes every frame; `wait_for_idle=<ms>` holds until the screen has stopped changing for that many ms (measured on `stable_hash`) and returns `matched` (#135) — pass a `timeout_ms` comfortably larger than the idle window, and note a perpetually-animating app (Dwarf Fortress) never settles. All bounded by `timeout_ms` (≤15000). `since=<prior content_hash>` requests a **delta** (#52): the reply drops `text` and returns `delta=true` + `changed_rows` (only the rows that differ) when the agent can diff it, else a full grid with `delta=false`. `attrs=true` adds `attr_runs` — the styled fg/bg/reverse/bold/underscore cell runs — so a menu selection the plain text drops (marked by color, reverse-video, bold, or underline alone) is visible (#128, #136) |
 | `send_input(id, data)` | `POST /mcp/input` | target window must be in **`readwrite`** mode |
@@ -102,7 +169,7 @@ on the host prefix:
 | `set_pace(id, pace_ms)` | `POST /mcp/pace` | **`readwrite`**; set a per-terminal DEFAULT `send_keys` pacing (ms, capped 1000, `0` disables) so multi-key sends auto-pace without passing `delay_ms` (#133). Broker-local + ephemeral (resets on agent reconnect) |
 | `reset_terminal(id)` | `POST /mcp/reset` | **`readwrite`**; correlated round-trip that wipes the agent's screen-render buffer so the next `read_screen` starts clean (**502** on a non-agent producer) |
 | `flush_input(id)` | `POST /mcp/flush` | **`readwrite`**; correlated round-trip that discards keystrokes queued to the app but not yet consumed — the input-side mirror of reset (**502** on a non-agent producer; a no-op on a Windows/ConPTY agent) |
-| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced |
+| `launch_terminal(profile?, cols=80, rows=24, title?, cwd?, host?, mode?)` | `POST /mcp/launch` | broker must have **`allow_launch`** enabled; `host` is required when multiple hosts are configured (optional with one). The returned `id` is namespaced. A scoped launch is tagged before it starts and comes up in `mode` (`off`/`read`/`readwrite`), or `readwrite` without one; the result adds `scope` and `mode`. An unscoped launch ignores `mode` |
 
 Broker errors (`read_only`, `launch_disabled`, `mcp_disabled`, `auth_required`,
 …) surface as a readable tool error (a `BrowserlandError`), not a raw stack
