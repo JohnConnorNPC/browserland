@@ -674,19 +674,33 @@ are global: a declared scope never changes this list, and a scoped caller may
 launch any of them.
 
 **`POST /mcp/launch`** — requires `allow_launch` (else **403 `launch_disabled`**).
-Body reuses the `/launch` shape: `{"profile": <str>, "cols": 80, "rows": 24,
-"title": <str>, "cwd": <str>}`, all optional (dims default 80×24, `profile`
-defaults to the broker default; `cwd` must be an existing dir). Response is the
-launcher's:
+Body reuses the `/launch` shape plus an MCP-only `mode`: `{"profile": <str>,
+"cols": 80, "rows": 24, "title": <str>, "cwd": <str>,
+"mode": "off"|"read"|"readwrite"}`, all optional (dims default 80×24, `profile`
+defaults to the broker default; `cwd` must be an existing dir; an invalid
+`mode` is **400 `bad_mode`**, scoped or not, and `null` counts as absent).
+Response is the launcher's:
 
 ```json
 {"ok":true,"id":4503603655475937,"registered":true,"agent_pid":12345}
 ```
 
 **200** when the agent registered within 10 s, **202** when it spawned but had
-not said `hello` yet (`"registered":false`). A launch does not yet tag the new
-window with the caller's declared scope, so a scoped caller cannot list or
-drive the window it launched until that window is tagged (#231).
+not said `hello` yet (`"registered":false`).
+
+A **scoped** launch (the caller declared `X-Browserland-Scope`) tags the new
+window before its agent is spawned: the window's row in
+`webterm_mcp_windows.json` is written with a `null` pid and host, and the
+agent's first `hello` claims it, even a `hello` that reaches a restarted broker
+after a 202. The window comes up in the body's `mode`, or in **`readwrite`**
+when there is none (not `default_mode`: a launched worker is meant to be driven
+by its launcher, and `allow_launch` is already its own opt-in). The response
+adds `"scope"` and `"mode"`. If the launch fails after that, the row is removed
+again. A launch whose new window id already has a stored row is refused with
+**500 `prespawn_failed`** (a retry gets a new id), as is one whose row cannot be
+written; nothing is spawned either way. An **unscoped** launch writes no row:
+the window inherits `default_mode`, and a valid `mode` in the body is ignored.
+The browser's `/launch` never reads `mode`.
 
 ### Error reference
 
@@ -709,7 +723,9 @@ drive the window it launched until that window is tagged (#231).
 | 400 | `unknown_profile` | `/mcp/launch` profile not in config |
 | 400 | `bad_dims` / `bad_cwd` / `cwd_not_dir` | `/mcp/launch` bad `cols`/`rows`/`cwd` |
 | 429 | `too_many_pending_launches` | `/mcp/launch` backpressure |
+| 400 | `bad_mode` | `/mcp/launch` `mode` is not `off`/`read`/`readwrite` (or `null`) |
 | 500 | `spawn_failed` / `agent_exited_early` | `/mcp/launch` agent failed to start |
+| 500 | `prespawn_failed` | scoped `/mcp/launch`: the new window's row could not be written, or its id already has one; nothing was spawned |
 
 ### Admin surface (browser `auth_token`-gated)
 
@@ -777,7 +793,8 @@ neither a scope nor a mode is deleted. `pid` (an int or `null`) and `host` name
 the producer the row was written for. Window ids are reused (an OS window
 handle is recycled), so a row is re-applied only to a hello from the same host
 with the same nonzero pid; a `null` pid or host is a wildcard, claimed by the
-first hello with a nonzero pid that matches the rest. `seen` (epoch seconds)
+first hello with a nonzero pid that matches the rest (a scoped `/mcp/launch`
+writes its row that way, before the agent exists). `seen` (epoch seconds)
 moves whenever a hello re-applies the row or a write changes it, and once a day
 while the window stays connected; the hello bumps reach disk through a
 coalesced writer, at most once a minute. Rows are never pruned at load, nor
