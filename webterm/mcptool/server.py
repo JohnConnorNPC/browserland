@@ -686,7 +686,8 @@ def launch_terminal(profile: Optional[str] = None, cols: int = 80,
     with the scope before it starts (so you can see it at once) and comes up
     in `mode` ('off', 'read' or 'readwrite'), or 'readwrite' when `mode` is
     omitted; the result then carries `scope` and `mode`. Without a scope the
-    window gets the broker's default mode and `mode` is ignored."""
+    window gets the broker's default mode and a valid `mode` is ignored (an
+    invalid value is still refused: 400 bad_mode)."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
         profile=profile, cols=cols, rows=rows, title=title, cwd=cwd,

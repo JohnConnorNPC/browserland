@@ -358,7 +358,8 @@ class BrowserlandClient:
         """Spawn a new terminal from a profile. Requires ``allow_launch``.
         ``mode`` (off/read/readwrite, sent only when given) is the new
         window's MCP mode: a scoped launch comes up in it, or readwrite
-        without it; an unscoped launch ignores it."""
+        without it; an unscoped launch ignores a valid one (an invalid value
+        is still refused: 400 bad_mode)."""
         body: Dict[str, Any] = {"cols": cols, "rows": rows}
         for k, v in (("profile", profile), ("title", title), ("cwd", cwd),
                      ("mode", mode)):
