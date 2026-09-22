@@ -2109,6 +2109,8 @@ def test_the_mcp_server_never_imports_the_broker(tmp_path):
     import sys
     from pathlib import Path
 
+    # PYTHONPATH makes the fresh interpreter import THIS checkout; cwd keeps
+    # anything it might write out of the repo.
     repo = Path(__file__).resolve().parents[1]
     code = ("import sys\n"
             "import webterm.mcptool.__main__, webterm.mcptool.server\n"
@@ -2123,6 +2125,18 @@ def test_the_mcp_server_never_imports_the_broker(tmp_path):
                          env=env, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["[]", "True"]
+
+
+def test_the_mcp_server_uses_the_protocol_scope_names():
+    """#232: the grammar the MCP server validates with and the header it
+    sends are webterm.protocol's own objects, the ones the broker re-exports,
+    so the two ends cannot drift apart."""
+    import webterm.protocol as protocol
+    from webterm.mcptool import __main__ as m
+    from webterm.mcptool import client
+
+    assert m.SCOPE_RE is protocol.SCOPE_RE
+    assert client.SCOPE_HEADER is protocol.SCOPE_HEADER
 
 
 def test_the_readme_documents_scopes():

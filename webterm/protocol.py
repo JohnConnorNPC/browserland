@@ -57,7 +57,8 @@ from typing import Any, Dict, Optional
 
 #: A scope name. Always ``fullmatch``: no ``:`` (MCP window ids are
 #: ``host:int``), no whitespace, 1-64 characters. The broker validates the
-#: header against it; an MCP client can validate its own scope with it.
+#: header against it; the MCP server (webterm.mcptool) validates its own
+#: configured scopes with it.
 SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 #: The request header an MCP client declares its scope on (#230). The broker

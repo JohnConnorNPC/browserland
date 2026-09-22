@@ -147,9 +147,11 @@ def test_scope_re_is_the_umbrella_grammar(scope, ok):
 
 def test_scope_names_are_one_object_across_modules():
     """#232: the scope grammar and header are DEFINED once, in the
-    dependency-free webterm.protocol (which the MCP server can import without
-    importing the broker); mcp_windows re-exports those very objects, so the
-    broker and a client importing protocol cannot drift apart."""
+    dependency-free webterm.protocol (the MCP server imports them from there
+    without importing the broker:
+    test_mcptool.py::test_the_mcp_server_never_imports_the_broker);
+    mcp_windows re-exports those very objects, so the broker and the MCP
+    server cannot drift apart."""
     assert mw.SCOPE_RE is protocol.SCOPE_RE
     assert mw.SCOPE_HEADER is protocol.SCOPE_HEADER
     assert protocol.SCOPE_HEADER == "X-Browserland-Scope"

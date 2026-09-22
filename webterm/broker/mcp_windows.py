@@ -37,8 +37,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 # SCOPE_RE (#237's scope grammar) and SCOPE_HEADER (#230's request header) are
-# defined in webterm.protocol, which the MCP server can import without pulling
-# in the broker, and re-exported here for the broker's own importers.
+# defined in webterm.protocol, which the MCP server imports them from without
+# pulling in the broker, and re-exported here for the broker's own importers.
 from ..protocol import SCOPE_HEADER as SCOPE_HEADER
 from ..protocol import SCOPE_RE as SCOPE_RE
 from . import registry as _registry
