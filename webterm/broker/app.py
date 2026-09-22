@@ -7079,25 +7079,45 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # live token — it would drift from what the env pins on next restart.
         return bool(os.environ.get(auth.MCP_TOKEN_ENV))
 
-    def _mcp_cfg_public(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def _mcp_cfg_public(cfg: Dict[str, Any],
+                        request: Request) -> Dict[str, Any]:
         # known_scopes (#230): every scope a window carries, live (any mode,
         # off included) or only in the per-window store, sorted and
         # deduplicated, for the Control Panel's scope picker. Nothing a
         # caller merely declared on SCOPE_HEADER is ever recorded, so a
         # client cannot add names to this list by asking for them.
+        #
+        # python, pythonpath and local_url (#235) are what the Control
+        # Panel's "Copy .mcp.json" needs to hand a client on THIS machine a
+        # file that works: the interpreter running this broker, so
+        # `-m webterm.mcptool` resolves in the same environment; the
+        # directory holding the webterm package this broker runs, for the
+        # file's PYTHONPATH (from a project folder `webterm` may resolve to
+        # another copy, and an older mcptool ignores a per-host scope and
+        # sees every window); and a loopback URL on the port this request
+        # arrived on (the page's own origin may be a proxy or tailnet name a
+        # stdio process cannot or should not reach). They are absolute
+        # server paths, shown only to a holder of the browser token.
+        bound = request.conn_info.server_port if request.conn_info else 0
+        # 0 under the ASGI client, which has no socket: fall back to
+        # create_app's `port` PARAMETER, read through this closure (it is
+        # not on app.ctx), the port the worker binds.
         return {"ok": True, "enabled": bool(cfg["enabled"]),
                 "token": cfg["token"] or "",
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
                 "token_env_pinned": _mcp_token_env_pinned(),
                 "known_scopes": app.ctx.mcp_windows.known_scopes(
-                    app.ctx.registry.entries())}
+                    app.ctx.registry.entries()),
+                "python": sys.executable,
+                "pythonpath": str(Path(__file__).resolve().parents[2]),
+                "local_url": f"http://127.0.0.1:{bound or port}"}
 
     async def _mcp_config_get(request: Request):
         err = _gated_auth_error(request, "/mcp/config")
         if err is not None:
             return err
-        return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg))
+        return sanic_json(_mcp_cfg_public(app.ctx.mcp_cfg, request))
 
     async def _mcp_config_post(request: Request):
         err = _gated_auth_error(request, "/mcp/config")
@@ -7160,7 +7180,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             # known_scopes() and registry.entries() are sync and lock-free,
             # and the per-window store has a lock of its own this never
             # touches.
-            return sanic_json(_mcp_cfg_public(cfg))
+            return sanic_json(_mcp_cfg_public(cfg, request))
 
         return await _shielded_region(app.ctx.mcp_lock, _locked_write)
 

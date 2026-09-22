@@ -69,6 +69,7 @@ import re
 import threading
 import time
 import types
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -672,10 +673,12 @@ MCP_TOKEN = "scope-store-token"
 _app_seq = 0
 
 
-def _make_app(tmp_path, monkeypatch, *, uptime=0.0, now=T, **extra):
+def _make_app(tmp_path, monkeypatch, *, uptime=0.0, now=T, port=None,
+              **extra):
     """A broker app on the test_mcp_pace template with the store's wall clock
     pinned at ``now`` and its process uptime pinned at ``uptime`` (0 = just
-    booted, inside prune's grace)."""
+    booted, inside prune's grace). ``port`` is create_app's own parameter
+    (its default when None)."""
     global _app_seq
     _app_seq += 1
     # Env would override config; clear both so the cfg token/enable are honored.
@@ -690,7 +693,8 @@ def _make_app(tmp_path, monkeypatch, *, uptime=0.0, now=T, **extra):
         "mcp_default_mode": "off",
     }
     cfg.update(extra)
-    app = app_mod.create_app(cfg, name=f"webterm-mcp-scope-{_app_seq}")
+    app = app_mod.create_app(cfg, name=f"webterm-mcp-scope-{_app_seq}",
+                             **({} if port is None else {"port": port}))
     app.ctx.mcp_windows.clock = lambda: now
     app.ctx.mcp_windows_uptime = lambda: uptime
     return app
@@ -2082,6 +2086,57 @@ def test_post_mcp_config_answers_the_same_known_scopes(tmp_path,
     _, resp = authed(app).post("/mcp/config", json={"allow_launch": False})
     assert resp.status == 200
     assert resp.json["known_scopes"] == ["a", "side"]
+
+
+def test_mcp_config_hands_the_copy_button_this_machines_python_and_port(
+        tmp_path, monkeypatch):
+    """#235: GET /mcp/config carries what Copy .mcp.json needs for a client
+    on this machine: the interpreter running the broker, the directory that
+    holds the webterm package it runs (this checkout), and a loopback URL on
+    the port the request ARRIVED on. app.test_client serves on an ephemeral
+    port, so a URL built from create_app's configured port cannot pass."""
+    import sys
+    app = _wire_app(tmp_path, monkeypatch)
+    request, resp = authed(app).get("/mcp/config")
+    assert resp.status == 200
+    bound = urllib.parse.urlsplit(request.url).port
+    assert bound and bound != app_mod.DEFAULT_PORT
+    assert resp.json["local_url"] == f"http://127.0.0.1:{bound}"
+    assert resp.json["python"] == sys.executable
+    root = Path(__file__).resolve().parents[1]
+    assert resp.json["pythonpath"] == str(root)
+    assert (Path(resp.json["pythonpath"]) / "webterm" / "mcptool"
+            / "__main__.py").is_file()
+
+
+def test_post_mcp_config_answers_the_same_machine_fields(tmp_path,
+                                                        monkeypatch):
+    """#235: POST /mcp/config answers the GET shape, the three new keys
+    included, so a save never strands the Copy button on stale values."""
+    import sys
+    app = _wire_app(tmp_path, monkeypatch)
+    request, resp = authed(app).post("/mcp/config",
+                                     json={"allow_launch": False})
+    assert resp.status == 200
+    bound = urllib.parse.urlsplit(request.url).port
+    assert resp.json["local_url"] == f"http://127.0.0.1:{bound}"
+    assert resp.json["python"] == sys.executable
+    assert resp.json["pythonpath"] == str(Path(__file__).resolve().parents[1])
+
+
+def test_mcp_config_local_url_falls_back_to_the_configured_port(tmp_path,
+                                                               monkeypatch):
+    """#235: with no socket to read (the ASGI client reports port 0), the
+    loopback URL uses create_app's own port."""
+    app = _make_app(tmp_path, monkeypatch, port=4999)
+    url = with_token("/mcp/config", app.ctx.auth_token)
+
+    async def get():
+        return await app.asgi_client.get(url)
+    request, resp = asyncio.run(get())
+    assert resp.status == 200
+    assert request.conn_info.server_port == 0
+    assert resp.json["local_url"] == "http://127.0.0.1:4999"
 
 
 def test_mcp_config_ignores_the_scope_header(tmp_path, monkeypatch):
