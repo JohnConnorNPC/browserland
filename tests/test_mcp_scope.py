@@ -21,7 +21,7 @@ app's listeners were measured firing during a later test's request.
 from __future__ import annotations
 
 import asyncio
-import gc
+import inspect
 import json
 import logging
 import math
@@ -29,7 +29,6 @@ import os
 import re
 import threading
 import time
-import warnings
 from pathlib import Path
 
 import pytest
@@ -145,22 +144,22 @@ def test_load_unreadable_or_wrong_schema_boots_empty(tmp_path, caplog, raw):
 
 
 def test_load_caps_the_bytes_it_reads(tmp_path, caplog):
-    """#228: load() reads at most MAX_FILE_BYTES, capped BEFORE the parse. A
-    VALID sidecar padded one byte past the cap boots empty with one WARNING
+    """#228: load() reads at most MAX_SIDECAR_BYTES, capped BEFORE the parse.
+    A VALID sidecar padded one byte past the cap boots empty with one WARNING
     naming the path; the same file padded to exactly the cap loads."""
-    assert mw.MAX_FILE_BYTES == 8 * 2**20
+    assert mw.MAX_SIDECAR_BYTES == 8 * 2**20
     caplog.set_level(logging.INFO, logger=STORE_LOGGER)
     path = tmp_path / "webterm_mcp_windows.json"
     body = json.dumps({"windows": {"5": _row(scope="a", pid=1,
                                              host="h")}}).encode("utf-8")
-    path.write_bytes(body + b" " * (mw.MAX_FILE_BYTES + 1 - len(body)))
+    path.write_bytes(body + b" " * (mw.MAX_SIDECAR_BYTES + 1 - len(body)))
     over = McpWindowStore.load(path)
     recs = _store_records(caplog)
     assert len(over) == 0
     assert [r.levelno for r in recs] == [logging.WARNING]
     assert str(path) in recs[0].getMessage()
     assert "is over" in recs[0].getMessage()
-    path.write_bytes(body + b" " * (mw.MAX_FILE_BYTES - len(body)))
+    path.write_bytes(body + b" " * (mw.MAX_SIDECAR_BYTES - len(body)))
     assert McpWindowStore.load(path).get(5) is not None
 
 
@@ -721,16 +720,20 @@ def test_corrupt_sidecar_boots_empty_logs_and_the_next_write_replaces_it(
 def test_a_deeply_nested_sidecar_does_not_stop_the_broker(tmp_path,
                                                           monkeypatch,
                                                           caplog):
-    """#228: 2 KB of nested brackets makes json raise RecursionError; the
-    broker still boots, with an empty store and one WARNING naming the
-    file."""
+    """#228: deeply nested brackets make json raise RecursionError; the broker
+    still boots, with an empty store and one WARNING naming the file. Depth
+    50_000, not 1_000: pytest raises the recursion limit to 3000, so 1_000
+    parses fine and would land in the wrong-schema branch instead. The
+    "is unreadable" wording pins the branch itself."""
     caplog.set_level(logging.INFO, logger=STORE_LOGGER)
-    _sidecar(tmp_path).write_bytes(b"[" * 1000 + b"]" * 1000)
+    _sidecar(tmp_path).write_bytes(b"[" * 50_000 + b"]" * 50_000)
     app = _make_app(tmp_path, monkeypatch)
     assert len(app.ctx.mcp_windows) == 0
     recs = _store_records(caplog)
     assert [r.levelno for r in recs] == [logging.WARNING]
-    assert str(app.ctx.mcp_windows_path) in recs[0].getMessage()
+    msg = recs[0].getMessage()
+    assert str(app.ctx.mcp_windows_path) in msg
+    assert "is unreadable" in msg
 
 
 def test_no_prune_at_load(tmp_path, monkeypatch, writes):
@@ -1027,25 +1030,47 @@ def test_a_raising_mutate_leaves_memory_untouched(tmp_path, monkeypatch,
 
 def test_an_async_mutate_is_rejected(tmp_path, monkeypatch, writes, caplog):
     """#228: an ``async def`` mutate would change nothing and hand its caller a
-    truthy coroutine. The writer logs an ERROR naming itself, closes the
-    coroutine (no "never awaited" warning) and raises TypeError; memory and
-    disk are untouched and ``inflight`` is cleared."""
+    truthy coroutine. The writer logs one ERROR naming itself, CLOSES the
+    coroutine and raises TypeError; memory and disk are untouched and
+    ``inflight`` is cleared. The coroutine is built here and its state read
+    directly, so the close is observed without relying on refcounting to
+    trigger a "never awaited" warning."""
     app = _make_app(tmp_path, monkeypatch)
 
     async def mutate(w):
         w.set(7, scope="a", pid=1, host="h", now=T)
 
+    co = mutate(None)
     caplog.set_level(logging.ERROR, logger=APP_LOGGER)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(TypeError):
-            _persist(app, mutate)
-        gc.collect()
-    assert not [w for w in caught if "never awaited" in str(w.message)]
-    assert any(r.levelno == logging.ERROR
-               and "_persist_mcp_windows" in r.getMessage()
-               for r in caplog.records if r.name == APP_LOGGER)
+    with pytest.raises(TypeError):
+        _persist(app, lambda w: co)
+    assert inspect.getcoroutinestate(co) == "CORO_CLOSED"
+    assert [r.levelno for r in caplog.records if r.name == APP_LOGGER
+            and "_persist_mcp_windows" in r.getMessage()] == [logging.ERROR]
     assert app.ctx.mcp_windows.get(7) is None
+    assert app.ctx.mcp_windows.inflight is None
+    assert _store_writes(writes, app) == []
+
+
+def test_a_mutate_returning_a_future_is_rejected(tmp_path, monkeypatch,
+                                                 writes, caplog):
+    """#228: a mutate that returns a Task/Future deferred its work past the
+    write. The writer logs one ERROR naming itself and raises TypeError; it
+    never closes or cancels an awaitable that is not its own, writes nothing
+    and clears ``inflight``."""
+    app = _make_app(tmp_path, monkeypatch)
+    caplog.set_level(logging.ERROR, logger=APP_LOGGER)
+
+    async def scenario():
+        future = asyncio.get_running_loop().create_future()
+        with pytest.raises(TypeError):
+            await app.ctx.persist_mcp_windows(lambda w: future)
+        return future
+
+    future = asyncio.run(scenario())
+    assert not future.cancelled() and not future.done()
+    assert [r.levelno for r in caplog.records if r.name == APP_LOGGER
+            and "_persist_mcp_windows" in r.getMessage()] == [logging.ERROR]
     assert app.ctx.mcp_windows.inflight is None
     assert _store_writes(writes, app) == []
 
@@ -1349,8 +1374,10 @@ def test_the_stop_flush_survives_a_ticker_that_died(tmp_path, monkeypatch,
     headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
     _, resp = app.test_client.get("/sessions", headers=headers)
     assert resp.status == 200
-    assert any("the flush ticker had died" in r.getMessage()
-               for r in caplog.records if r.name == APP_LOGGER)
+    assert [(r.levelno, r.exc_info is not None) for r in caplog.records
+            if r.name == APP_LOGGER
+            and "the flush ticker had died" in r.getMessage()] == [
+                (logging.ERROR, True)]
     assert len(_store_writes(writes, app)) == 1
     assert _disk(_sidecar(tmp_path))["9"]["seen"] == T
 
@@ -1370,6 +1397,68 @@ def test_the_start_listener_starts_the_ctx_ticker(tmp_path, monkeypatch):
     _, resp = app.test_client.get("/sessions", headers=headers)
     assert resp.status == 200
     assert started == ["mine"]
+
+
+def test_the_stop_listener_flushes_through_app_ctx(tmp_path, monkeypatch):
+    """#228: before_server_stop calls ``app.ctx.flush_mcp_windows`` looked up
+    at call time, so replacing that attribute before a request replaces the
+    final flush."""
+    app = _make_app(tmp_path, monkeypatch)
+    calls = []
+
+    async def mine():
+        calls.append("mine")
+        return True
+
+    app.ctx.flush_mcp_windows = mine
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+    _, resp = app.test_client.get("/sessions", headers=headers)
+    assert resp.status == 200
+    assert calls == ["mine"]
+
+
+def test_the_ticker_flushes_through_app_ctx(tmp_path, monkeypatch):
+    """#228: each tick calls ``app.ctx.flush_mcp_windows`` looked up at call
+    time."""
+    app = _make_app(tmp_path, monkeypatch)
+    calls = []
+
+    async def mine():
+        calls.append("mine")
+        return True
+
+    app.ctx.flush_mcp_windows = mine
+
+    async def scenario():
+        ticks = _Ticks()
+        app.ctx.mcp_windows_sleep = ticks.sleep
+        ticker = asyncio.ensure_future(app.ctx.mcp_windows_ticker())
+        try:
+            await ticks.parked(1)
+            ticks.release(1)
+            await ticks.parked(2)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert calls == ["mine"]
+
+
+def test_the_flush_writes_through_app_ctx(tmp_path, monkeypatch):
+    """#228: the flush calls ``app.ctx.persist_mcp_windows`` looked up at call
+    time, with a no-op mutate."""
+    app = _make_app(tmp_path, monkeypatch)
+    mutates = []
+
+    async def mine(mutate):
+        mutates.append(mutate)
+        return mutate(None)
+
+    app.ctx.persist_mcp_windows = mine
+    assert asyncio.run(app.ctx.flush_mcp_windows()) is True
+    assert len(mutates) == 1
+    assert mutates[0](None) is None
 
 
 def test_a_failing_flush_logs_once_then_debug_then_recovery(

@@ -4317,13 +4317,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         place McpWindowStore.prune runs.
 
         Inside _shielded_region(mcp_windows_lock), whose acquire stays
-        cancellable OUTSIDE the shield: take a working copy of the store,
-        run ``mutate(work)`` EXACTLY ONCE (sync; an ``async def`` mutate is
-        logged, closed and raises TypeError), prune the copy, serialise it,
-        write it through the executor ONLY if that payload differs from the
-        last one written or loaded, then swap memory to the copy. Memory never changes before the write lands: a raising
-        mutate or write propagates with memory untouched, and a failure after
-        a cancelled caller left is logged by _shielded_region.
+        cancellable OUTSIDE the shield: take a working copy of the store, run
+        ``mutate(work)`` EXACTLY ONCE (sync: a coroutine it returns is logged,
+        closed and raises TypeError, any other awaitable is logged and raises
+        TypeError), prune the copy, serialise it, write it through the
+        executor ONLY if that payload differs from the last one written or
+        loaded, then swap memory to the copy. Memory never changes before the
+        write lands: a raising mutate or write propagates with memory
+        untouched, and a failure after a cancelled caller left is logged by
+        _shielded_region.
 
         apply() runs under the registry lock, not this one, so a hello can
         land during the executor await. The copy is exposed as
@@ -4350,19 +4352,28 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             store.inflight = work
             try:
                 result = mutate(work)
+                # An ``async def`` mutate changed nothing yet and would hand
+                # its caller a truthy coroutine; one returning a Task/Future
+                # deferred its work past this write. Either is a programming
+                # error at the call site, so say so and raise TypeError before
+                # anything is written. As in _run_on_register, a coroutine is
+                # closed (in a finally, so a raising logger cannot skip it)
+                # and any other awaitable is left alone: not ours to close.
                 if inspect.iscoroutine(result):
-                    # An ``async def`` mutate changed nothing yet and would
-                    # hand its caller a truthy coroutine: a programming error
-                    # at the call site, so say so and raise (as
-                    # _run_on_register does for a hook, logged first).
-                    LOGGER.error("_persist_mcp_windows: mutate returned a "
-                                 "coroutine; it must be synchronous, so the "
-                                 "writer is closing it unawaited")
                     try:
-                        result.close()
+                        LOGGER.error("_persist_mcp_windows: mutate returned a "
+                                     "coroutine; it must be synchronous, so "
+                                     "the writer is closing it unawaited")
                     finally:
-                        raise TypeError("_persist_mcp_windows: mutate must "
-                                        "be synchronous")
+                        result.close()
+                    raise TypeError("_persist_mcp_windows: mutate must be "
+                                    "synchronous")
+                elif inspect.isawaitable(result):
+                    LOGGER.error("_persist_mcp_windows: mutate returned an "
+                                 "awaitable; it must be synchronous, and the "
+                                 "writer never awaits or cancels it")
+                    raise TypeError("_persist_mcp_windows: mutate must be "
+                                    "synchronous")
                 work.prune(registry.entries(), store.clock(),
                            app.ctx.mcp_windows_uptime(),
                            is_pending=registry.is_pending)
@@ -4400,7 +4411,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         succeeds again."""
         nonlocal flush_failing
         try:
-            await _persist_mcp_windows(lambda work: None)
+            await app.ctx.persist_mcp_windows(lambda work: None)
         except Exception:
             if flush_failing:
                 LOGGER.debug("mcp windows: flushing %s still fails",
@@ -4420,8 +4431,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _mcp_windows_ticker():
         while True:
             await app.ctx.mcp_windows_sleep(app.ctx.mcp_windows_flush_s)
-            await _flush_mcp_windows()
+            await app.ctx.flush_mcp_windows()
 
+    # These two and app.ctx.persist_mcp_windows above are what the ticker,
+    # the listeners and the flush actually call (through app.ctx, looked up
+    # at call time), so replacing one replaces it everywhere.
     app.ctx.flush_mcp_windows = _flush_mcp_windows
     app.ctx.mcp_windows_ticker = _mcp_windows_ticker
 
@@ -4443,7 +4457,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # write the cancelled ticker had in flight finishes in its shield,
         # and the final pass queues behind it on the lock. The final pass is
         # in a finally: a ticker that already died of an exception (a bad
-        # injected interval, say) must not also cost the last flush.
+        # injected interval, say) must not also cost the last flush. The
+        # finally also covers what the except cannot: a BaseException out of
+        # the ticker other than its cancellation, and a logger that raises
+        # inside the except. That part is deliberate defence in depth, not
+        # testable as such.
         task = app_.ctx.mcp_windows_task
         app_.ctx.mcp_windows_task = None
         try:
@@ -4457,7 +4475,7 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                     LOGGER.exception("mcp windows: the flush ticker had "
                                      "died; flushing once more anyway")
         finally:
-            await _flush_mcp_windows()
+            await app_.ctx.flush_mcp_windows()
     # #182/#183: WHO decided what this broker may do to itself -- reach
     # github.com to CHECK (update_check_enabled), download-and-execute an
     # APPLY (update_apply_enabled), restart the process (restart_enabled).

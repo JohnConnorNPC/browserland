@@ -64,7 +64,7 @@ MAX_ROWS = 1000
 #: load() reads at most this many bytes. Far above MAX_ROWS rows of any
 #: realistic size; a bigger file boots empty (logged) instead of being pulled
 #: whole into memory at startup.
-MAX_FILE_BYTES = 8 * 2**20
+MAX_SIDECAR_BYTES = 8 * 2**20
 
 _UNSET = object()
 _FIELDS = ("scope", "mode", "pid", "host", "seen")
@@ -137,7 +137,8 @@ class McpWindowStore:
 
     def __init__(self, rows: Optional[Dict[int, Dict[str, Any]]] = None, *,
                  clock: Callable[[], float] = time.time) -> None:
-        self._rows: Dict[int, Dict[str, Any]] = rows if rows is not None else {}
+        self._rows: Dict[int, Dict[str, Any]] = (
+            rows if rows is not None else {})
         #: Wall clock for ``seen`` and prune's ``now`` (injectable).
         self.clock = clock
         # The payload on disk as far as this store knows: what load() read
@@ -154,7 +155,7 @@ class McpWindowStore:
     def load(cls, path: Path, *,
              clock: Callable[[], float] = time.time) -> "McpWindowStore":
         """The store persisted at ``path``. PROTECTIVE: a missing, unreadable,
-        oversized (over MAX_FILE_BYTES, capped BEFORE the parse) or
+        oversized (over MAX_SIDECAR_BYTES, capped BEFORE the parse) or
         wrong-schema file boots an empty store, and a malformed row is
         dropped while its valid siblings load. ``RecursionError`` is caught
         too: it is what a deeply nested JSON value raises, and it is not an
@@ -171,13 +172,14 @@ class McpWindowStore:
         store = cls(clock=clock)
         try:
             with open(path, "rb") as fh:
-                raw = fh.read(MAX_FILE_BYTES + 1)
-            if len(raw) > MAX_FILE_BYTES:
+                blob = fh.read(MAX_SIDECAR_BYTES + 1)
+            if len(blob) > MAX_SIDECAR_BYTES:
                 LOGGER.warning("mcp windows %s is over %d bytes; starting "
                                "with no per-window rows, and the next change "
-                               "replaces the file", path, MAX_FILE_BYTES)
+                               "replaces the file", path,
+                               MAX_SIDECAR_BYTES)
                 return store
-            data = json.loads(raw.decode("utf-8"))
+            data = json.loads(blob.decode("utf-8"))
         except FileNotFoundError:
             LOGGER.info("mcp windows: %s (0 rows)", path)
             return store
@@ -436,8 +438,9 @@ class McpWindowStore:
     def copy(self) -> "McpWindowStore":
         """A working copy for one write: independent row dicts, the same
         clock and the same last-persisted payload."""
-        work = McpWindowStore({wid: dict(row) for wid, row in self._rows.items()},
-                              clock=self.clock)
+        work = McpWindowStore(
+            {wid: dict(row) for wid, row in self._rows.items()},
+            clock=self.clock)
         work._persisted = self._persisted
         return work
 
