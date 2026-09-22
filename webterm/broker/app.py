@@ -6494,7 +6494,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         unscoped. The ONLY reader of that header: _mcp_auth_error calls it to
         validate (a ValueError is its 400 bad_scope), and _mcp_terminals,
         _mcp_entry and _mcp_info call it again after that gate passed, so all
-        of them derive the same value from one parse.
+        of them derive the same value from one parser, re-run per call;
+        nothing is memoised on the request.
 
         * Absent, or sent with an EMPTY value: None, i.e. unscoped, which
           sees every window its mode allows. That is the fail-OPEN direction,
