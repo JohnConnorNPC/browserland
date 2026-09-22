@@ -16,6 +16,24 @@ story behind anything named below.
 
 ### Added
 
+- **MCP scopes: several MCP clients can share one broker without seeing each
+  other's windows** (#237: #227–#236). A client declares a scope (`--scope`,
+  `BROWSERLAND_MCP_SCOPE`, or a per-host `"scope"`; sent as the
+  `X-Browserland-Scope` header) and then sees and drives only the windows
+  tagged with it; a client with no scope keeps the old view of every window.
+  A window a scoped client launches is tagged for it and starts in
+  `readwrite` unless the launch passes a `mode`; a hand-started window is
+  tagged from its robot button or its title-bar menu (**MCP scope**), and the
+  taskbar shows the tag as a badge. **Control Panel → Access → MCP access →
+  Copy .mcp.json** writes a ready-to-save client file for a scope, naming the
+  broker's own Python and checkout. The MCP server fails closed
+  (`scope_unsupported`) against a broker or proxy that does not honour the
+  scope. Scopes are a convention, not security: every client holds the same
+  token. **Behaviour change:** a window's per-window MCP mode is now durable,
+  stored by the broker with its scope (`webterm_mcp_windows.json`) and
+  re-applied across broker restarts and agent reconnects, so a restart no
+  longer resets modes; on such a broker the desktop stops re-asserting its own
+  synced copy of the mode.
 - **A terminal can be opened in its own browser window** (#226). *Open in new
   window* on a terminal's title-bar menu (or the unbound *Open terminal in new
   window* key action) hands the live session to a popup: nothing restarts, the
