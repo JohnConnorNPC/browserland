@@ -761,6 +761,10 @@
                         profile: s.profile || '', // #115: launch profile (old brokers: '')
                         mcp: s.mcp || 'off',    // effective MCP mode (old brokers: off)
                         mcpKnown: ('mcp' in s), // broker reports MCP at all?
+                        // #234: the window's MCP scope tag (untagged and old
+                        // brokers: null)
+                        mcp_scope: (typeof s.mcp_scope === 'string'
+                                    && s.mcp_scope) ? s.mcp_scope : null,
                         stale,
                         hostId: host.id,
                         hostLabel: host.label,

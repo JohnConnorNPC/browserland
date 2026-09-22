@@ -30296,3 +30296,60 @@ def test_the_child_surface_keeps_the_desktop_only_actions_and_workspaces_off():
     css = _src226("10_css_root.css")
     assert ".taskbar-item.detached" in css
     assert "body.detached-surface #taskbar" in css
+
+
+# --------------------------------------------------------------------------- #
+# MCP scopes in the desktop (#233, #234, #235 under umbrella #237)
+# --------------------------------------------------------------------------- #
+
+def _src237(name):
+    return (BROKER_DIR / name).read_text(encoding="utf-8")
+
+
+def _fn237(name, sig):
+    """A top-level fragment function, closing brace included, ready to eval."""
+    return _frag_fn(_src237(name), sig) + "\n        }\n"
+
+
+def _node237(tmp_path, script):
+    """Run ``script`` in node; its last stdout line is the JSON result."""
+    path = tmp_path / "harness237.js"
+    path.write_text(script, encoding="utf-8")
+    # utf-8, not the locale's code page: the results carry `·` and `—`.
+    proc = subprocess.run([NODE, str(path)], capture_output=True,
+                          encoding="utf-8", timeout=120)
+    assert proc.returncode == 0, (
+        f"harness failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_the_poll_merge_carries_mcp_scope():
+    """#234: refreshTaskbarInner builds each session from a literal that copies
+    /sessions fields BY NAME, so a field the broker sends but the literal does
+    not name never reaches the chip."""
+    src = _src237("75_js_taskbar_hosts.js")
+    merge = src[src.index("merged.set(key, {"):]
+    merge = merge[:merge.index("});")]
+    assert re.search(r"mcp_scope: \(typeof s\.mcp_scope === 'string'\s*"
+                     r"&& s\.mcp_scope\) \? s\.mcp_scope : null,", merge), \
+        "the poll merge must copy a non-empty string mcp_scope (else null)"
+    assert "mcp_scope: (typeof s.mcp_scope === 'string'" in INDEX_HTML
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_chip_tooltip_names_the_scope(tmp_path):
+    """#234: formatTooltip lists `scope X` for a tagged window, and says
+    nothing about scopes for an untagged one."""
+    fn = _fn237("64_js_sessions_poll_control.js", "function formatTooltip(sess)")
+    r = _node237(tmp_path, "function getHosts() { return [{}]; }\n" + fn + """
+const base = {id: 7, title: 't', pid: 42, host: 'h', kind: 'agent'};
+process.stdout.write(JSON.stringify({
+    scoped: formatTooltip(Object.assign({mcp_scope: 'projA'}, base)),
+    none: formatTooltip(Object.assign({mcp_scope: null}, base)),
+    absent: formatTooltip(base),
+}) + '\\n');
+""")
+    assert r["scoped"] == "#7 · pid 42 · host h · agent · scope projA — t"
+    assert r["none"] == "#7 · pid 42 · host h · agent — t"
+    assert r["absent"] == r["none"]

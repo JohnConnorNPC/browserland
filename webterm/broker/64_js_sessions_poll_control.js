@@ -111,7 +111,10 @@
         // ---- shared state -------------------------------------------------
         // key -> merged session object (built in refreshTaskbarInner):
         //   {key, id (real numeric), sid (String(id)), title, cols, rows,
-        //    host, pid, kind, stale, hostId, hostLabel}
+        //    host, pid, kind, agent, cwd, profile, mcp, mcpKnown, mcp_scope,
+        //    stale, hostId, hostLabel}
+        // The merge copies those fields BY NAME, so a new /sessions field
+        // reaches the page only once it is added there too.
         // Keys are host-qualified '<hostId>:<windowId>' (window ids are
         // only unique per broker) and opaque everywhere downstream; `sid`
         // stays the bare wire id.
@@ -171,6 +174,8 @@
             if (sess && sess.pid) parts.push('pid ' + sess.pid);
             if (sess && sess.host) parts.push('host ' + String(sess.host).trim());
             if (sess && sess.kind === 'agent') parts.push('agent');
+            // #234: the window's MCP scope tag, when it has one.
+            if (sess && sess.mcp_scope) parts.push('scope ' + sess.mcp_scope);
             // Which broker it lives on — only interesting with >1 of them.
             if (sess && sess.hostLabel && getHosts().length > 1) {
                 parts.push('on ' + sess.hostLabel);
