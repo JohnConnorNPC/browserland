@@ -267,6 +267,35 @@ def test_summary_includes_pace_ms_default_zero():
     asyncio.run(scenario())
 
 
+def test_summary_carries_mcp_scope_raw():
+    """#227: summary() carries mcp_scope as a bare str|None — None (unscoped) by
+    default, the set value when set, and NEVER defaulted from mcp_default the
+    way the effective ``mcp`` mode is. ``mcp`` and ``pace_ms`` are unchanged."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws = FeedWS()
+        entry = await reg.register(ws, {
+            "type": "hello", "window_id": 13, "pid": 1, "title": "t",
+            "cols": 80, "rows": 24, "kind": "agent"})
+        s = entry.summary()
+        assert "mcp_scope" in s
+        assert s["mcp_scope"] is None
+        # The broker default feeds ``mcp`` only, never the scope.
+        s = entry.summary("readwrite")
+        assert s["mcp_scope"] is None
+        assert s["mcp"] == "readwrite"
+        assert s["pace_ms"] == 0
+
+        entry.mcp_scope = "teamA"
+        entry.mcp_mode = "read"
+        s = entry.summary("readwrite")
+        assert s["mcp_scope"] == "teamA"
+        assert s["mcp"] == "read"                # the override still wins
+        assert s["pace_ms"] == 0
+
+    asyncio.run(scenario())
+
+
 def test_whitelist_agent_helper():
     assert _whitelist_agent("claude") == "claude"
     assert _whitelist_agent("GROK") == "grok"

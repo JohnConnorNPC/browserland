@@ -113,6 +113,11 @@ class WindowEntry:
         # a live per-window override). WindowEntry stays ignorant of app.ctx:
         # the effective mode is resolved by the handlers that know the default.
         self.mcp_mode: Optional[str] = None
+        # Per-window MCP scope (#237): the MCP-client partition this window
+        # belongs to, or None = unscoped. A bare str|None fact: nothing here
+        # validates or defaults it (summary() reports it raw), and it lives
+        # exactly as long as mcp_mode above.
+        self.mcp_scope: Optional[str] = None
         # Per-terminal DEFAULT inter-key pacing for send_keys (#133): the ms an
         # MCP send_keys with no explicit delay_ms auto-paces at, so a frame-
         # polling raw-input TUI (e.g. Dwarf Fortress) auto-paces once an agent
@@ -139,6 +144,9 @@ class WindowEntry:
     def summary(self, mcp_default: str = "off") -> Dict[str, Any]:
         # ``mcp`` is the EFFECTIVE access mode (per-window override or the
         # broker default), so a /sessions consumer sees what MCP would honor.
+        # ``mcp_scope`` is the RAW scope (None = unscoped), never defaulted. It
+        # reaches GET /sessions through this dict, but NOT /mcp/terminals, which
+        # rebuilds its rows field by field.
         return {
             "id": self.id,
             "pid": self.pid,
@@ -155,6 +163,7 @@ class WindowEntry:
             "app_cursor": self.app_cursor,
             "pace_ms": self.pace_ms,
             "mcp": self.mcp_mode or mcp_default,
+            "mcp_scope": self.mcp_scope,
         }
 
     async def send_to_producer(self, text: str) -> None:
