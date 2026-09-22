@@ -2626,10 +2626,14 @@ class _FakeLauncher:
     kwargs, awaits ``pre_spawn`` with LAUNCHED as the real one does, reads the
     sidecar where the real one would spawn (what is durable before the agent
     can exist), then raises ``error`` or answers: with ``hello`` it registers
-    the agent's hello first (a 200), without it answers 202."""
+    the agent's hello first (a 200), without it answers 202. With
+    ``claim_first`` it registers the hello (claiming the row) and THEN
+    raises ``error``: a launch that fails after its agent said hello."""
 
-    def __init__(self, app, *, error=None, hello=True, pid=4242):
+    def __init__(self, app, *, error=None, hello=True, pid=4242,
+                 claim_first=False):
         self.app, self.error, self.hello, self.pid = app, error, hello, pid
+        self.claim_first = claim_first
         self.calls = []
         self.row_at_spawn = _ABSENT
 
@@ -2641,6 +2645,9 @@ class _FakeLauncher:
         path = self.app.ctx.mcp_windows_path
         self.row_at_spawn = (_disk(path).get(str(LAUNCHED))
                              if path.exists() else None)
+        if self.claim_first:
+            await self.app.ctx.registry.register(_WS(),
+                                                 _hello(LAUNCHED, self.pid))
         if self.error is not None:
             raise self.error
         if self.hello:
@@ -2742,6 +2749,39 @@ def test_a_failed_scoped_launch_takes_its_row_back(tmp_path, monkeypatch,
     assert fake.row_at_spawn == _row(scope="teamA", mode="readwrite", seen=T)
     assert str(LAUNCHED) not in _disk(_sidecar(tmp_path))
     assert app.ctx.mcp_windows.get(LAUNCHED) is None
+
+
+def test_a_launch_failing_after_the_hello_keeps_the_claimed_row(tmp_path,
+                                                                monkeypatch):
+    """#231: the rollback removes the row only while it is still UNCLAIMED.
+    Here the agent's hello claimed it before the launch failed, so the row
+    stays on disk (now carrying the hello's pid and host) and the live
+    window keeps its scope and readwrite: a working window is never
+    stripped of its tag."""
+    app = _launch_app(tmp_path, monkeypatch)
+    _fake_launcher(app, error=LaunchError(500, "agent_exited_early",
+                                          returncode=3),
+                   claim_first=True)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA", body={})
+    assert (resp.status, resp.json["error"]) == (500, "agent_exited_early")
+    assert _disk(_sidecar(tmp_path))[str(LAUNCHED)] == _row(
+        scope="teamA", mode="readwrite", pid=4242, host="hostA", seen=T)
+    entry = app.ctx.registry.get(LAUNCHED)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
+
+
+def test_an_invalid_launch_mode_is_refused_before_the_cwd_is_checked(
+        tmp_path, monkeypatch):
+    """#231: the mode is validated before the (off-loop) cwd check, so a
+    body bad in both ways answers bad_mode and touches no filesystem path
+    first."""
+    app = _launch_app(tmp_path, monkeypatch)
+    fake = _fake_launcher(app)
+    _, resp = _mcp(app, "/mcp/launch", scope="teamA",
+                   body={"mode": "bogus", "cwd": str(tmp_path / "nope")})
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_mode"})
+    assert fake.calls == []
 
 
 def test_a_failed_rollback_still_answers_the_launch_error(tmp_path,
