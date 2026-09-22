@@ -394,10 +394,10 @@ def test_on_register_runs_under_the_registry_lock():
 
 def test_raising_on_register_hook_is_harmless(caplog):
     """#227: a hook that raises an Exception never fails registration — the
-    entry is still inserted and visible, and the failure is logged (with its traceback) under
-    the window id. A hook that raises before applying anything leaves both MCP
-    facts at None: no fallback to the default carry-over, even on a same-host,
-    same-pid replacement whose old entry had them set."""
+    entry is still inserted and visible, and the failure is logged (with its
+    traceback) under the window id. A hook that raises before applying anything
+    leaves both MCP facts at None: no fallback to the default carry-over, even
+    on a same-host, same-pid replacement whose old entry had them set."""
     caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
 
     def hook(new, old):
@@ -423,11 +423,29 @@ def test_raising_on_register_hook_is_harmless(caplog):
         assert record.exc_info[0] is RuntimeError
 
 
+def test_base_exception_from_on_register_hook_propagates():
+    """#227: only an Exception is swallowed. A BaseException from the hook
+    (here KeyboardInterrupt) deliberately escapes register() before the
+    insertion: nothing is registered and the registry lock is released."""
+    def hook(new, old):
+        raise KeyboardInterrupt
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        with pytest.raises(KeyboardInterrupt):
+            await reg.register(FeedWS(), _hello(46))
+        assert reg.get(46) is None
+        assert not reg._lock.locked()
+
+    asyncio.run(scenario())
+
+
 def test_async_on_register_hook_is_closed_and_logged(caplog):
     """#227: an accidentally ``async def`` hook returns a coroutine without
     running its body. register() must not await it (the hook is sync by
-    contract): it closes the coroutine — so no 'never awaited' RuntimeWarning
-    escapes — logs an ERROR under the window id, and still registers."""
+    contract): it logs an ERROR under the window id, then closes the coroutine
+    — so no 'never awaited' RuntimeWarning escapes — and still registers."""
     caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
     ran = []
 

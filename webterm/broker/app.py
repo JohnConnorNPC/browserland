@@ -6270,8 +6270,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # auth_token (this is the UI editing policy), NOT the MCP token. Sets
         # the in-memory per-window override; None default = inherit the broker
         # default. Resets on broker restart / agent relaunch by design, but a
-        # same-host, same-pid reconnect over a half-open socket keeps it: the
-        # lifetime contract is BrokerRegistry.register's docstring.
+        # same-host, same-nonzero-pid reconnect over a half-open socket keeps
+        # it: the lifetime contract is BrokerRegistry.register's docstring.
         err = _gated_auth_error(request, "/session/mcp")
         if err is not None:
             return err

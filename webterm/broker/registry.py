@@ -348,14 +348,14 @@ class BrokerRegistry:
         /sessions; the producer token is the boundary). An agent pinned with
         ``--window-id`` relaunches under the same id with a new shell pid, and
         two hosts pinning one id are different producers even with equal pids:
-        neither may inherit the other's access. A hello that omits ``host`` is
-        recorded as the broker's own hostname, so two such producers collide
-        on host: this is a collision guard, not an identity. The host match is
-        byte-exact after the parse-time strip (no case folding), and a pid of
-        0 (unknown) never matches. The carry-over only reaches that half-open
-        window: a clean close or an exit frame deregisters the old entry
-        first, so that reconnect is a fresh register and starts at None. With
-        a hook installed there is no default carry-over: the hook (the
+        neither may inherit the other's access. A hello that omits or blanks
+        ``host`` is recorded as the broker's own hostname, so two such producers
+        collide on host: this is a collision guard, not an identity. The host
+        match is byte-exact after the parse-time strip (no case folding), and a
+        pid of 0 (unknown) never matches. The carry-over only reaches that
+        half-open window: a clean close or an exit frame deregisters the old
+        entry first, so that reconnect is a fresh register and starts at None.
+        With a hook installed there is no default carry-over: the hook (the
         per-window store) is the authority, so one that raises before applying
         anything leaves both at None.
         """
