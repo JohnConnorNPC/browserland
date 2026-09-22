@@ -7265,11 +7265,20 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 # PUT that would discover this has already filed the previous
                 # plaintext into that broker's ring — the write meant to stop
                 # the archiving WOULD BE the leak. Published (like `admin`
-                # above and `remote_writable` in update_policy_view) only by a
+                # below and `remote_writable` in update_policy_view) only by a
                 # build that actually implements it, so a client feature-
                 # detects on PRESENCE and reads absence as "old build, still
                 # archiving" rather than probing with a write.
-                "modstore": {"noHistory": True}}
+                "modstore": {"noHistory": True},
+                # #229 (#237): the MCP-scopes capability, the flag a client
+                # gates its scope UI on. Unconditional, unlike `admin` below:
+                # every build that carries it implements the whole contract
+                # -- /mcp/* partitions on SCOPE_HEADER, POST /session/mcp
+                # sets a window's scope, and a window's scope and RAW mode
+                # override are durable (the per-window store). A broker
+                # without the key predates all three, so a client reads its
+                # absence as "no scopes here", never probes with a write.
+                "mcp_scopes": True}
         # #191: the admin-class advertisement. e1ca8e6-style capability
         # reporting -- published ONLY by a build that actually enforces the
         # class (app.ctx.admin_token set), so an old/non-enforcing peer never

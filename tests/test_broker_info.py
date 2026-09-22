@@ -277,3 +277,26 @@ def test_info_admin_advertised_when_configured(tmp_path, monkeypatch):
     assert response.status == 200
     assert response.json["admin"] == {"required": True,
                                       "routes": list(ADMIN_ROUTES)}
+
+
+# ---- /info MCP-scopes capability (#229) ------------------------------------
+
+@pytest.mark.parametrize("admin_token", [None, "admin-secret-0123456789abcdef"])
+def test_info_advertises_mcp_scopes_unconditionally(tmp_path, monkeypatch,
+                                                    admin_token):
+    # The flag a client gates its scope UI on. Unlike `admin` it depends on no
+    # config: every build that carries it implements scopes, so it is the
+    # literal True with or without an admin realm.
+    app = _make_app(tmp_path, monkeypatch, token=None, admin_token=admin_token)
+    _, response = authed(app).get("/info")
+    assert response.status == 200
+    assert response.json["mcp_scopes"] is True
+
+
+def test_info_mcp_scopes_stays_behind_the_browser_token(tmp_path, monkeypatch):
+    # The capability rides /info's own gate: no token, no flag. RAW client on
+    # purpose (authed() would add the token).
+    app = _make_app(tmp_path, monkeypatch, token="sekrit")
+    _, response = app.test_client.get("/info")
+    assert response.status == 401
+    assert "mcp_scopes" not in response.json
