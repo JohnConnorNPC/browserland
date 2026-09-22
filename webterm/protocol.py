@@ -36,12 +36,33 @@ Browser -> broker (text JSON): input / paste / resize (mouse ignored).
 text through xterm's paste() and sends plain ``input`` frames; the relay keeps
 accepting ``paste`` verbatim only so tabs served before the change keep
 working until they reload.
+
+MCP client -> broker (HTTP, #237): the scope grammar and the header a client
+declares its scope on (``SCOPE_RE``, ``SCOPE_HEADER`` below). They live here,
+not in the broker, because this module imports nothing beyond the standard
+library and the MCP server (``webterm.mcptool``) must not import
+``webterm.broker``.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# MCP client -> broker (HTTP): scopes (#237)
+# ---------------------------------------------------------------------------
+
+#: A scope name. Always ``fullmatch``: no ``:`` (MCP window ids are
+#: ``host:int``), no whitespace, 1-64 characters. The broker validates the
+#: header against it; an MCP client can validate its own scope with it.
+SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+#: The request header an MCP client declares its scope on (#230). The broker
+#: reads it in exactly one place, app.py's ``_mcp_scope``.
+SCOPE_HEADER = "X-Browserland-Scope"
 
 
 # ---------------------------------------------------------------------------

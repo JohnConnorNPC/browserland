@@ -30,11 +30,15 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+# SCOPE_RE (#237's scope grammar) and SCOPE_HEADER (#230's request header) are
+# defined in webterm.protocol, which the MCP server can import without pulling
+# in the broker, and re-exported here for the broker's own importers.
+from ..protocol import SCOPE_HEADER as SCOPE_HEADER
+from ..protocol import SCOPE_RE as SCOPE_RE
 from . import registry as _registry
 
 LOGGER = logging.getLogger(__name__)
@@ -46,14 +50,6 @@ LOGGER = logging.getLogger(__name__)
 #: ``tests/test_mcp_scope.py::test_mcp_modes_do_not_drift_from_the_js_menu``
 #: enforces it.
 MCP_MODES = ("off", "read", "readwrite")
-
-#: A scope name (#237). Always ``fullmatch``: no ``:`` (ids are ``host:int``),
-#: no whitespace, 1-64 characters.
-SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-
-#: The request header an MCP client declares its scope on (#230). The broker
-#: reads it in exactly one place, app.py's ``_mcp_scope``.
-SCOPE_HEADER = "X-Browserland-Scope"
 
 #: :meth:`McpWindowStore.prune` is a no-op until the PROCESS has been up this
 #: long, so a restart gives every window this long to reconnect before any

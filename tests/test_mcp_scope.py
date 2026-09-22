@@ -57,6 +57,7 @@ import pytest
 import webterm.broker.app as app_mod
 import webterm.broker.mcp_windows as mw
 import webterm.broker.registry as registry_mod
+import webterm.protocol as protocol
 from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         PRUNE_GRACE_S, SCOPE_HEADER,
                                         McpWindowStore)
@@ -121,6 +122,16 @@ def test_scope_re_is_the_umbrella_grammar(scope, ok):
     """#228: SCOPE_RE is #237's grammar, always fullmatch'd: 1-64 chars, an
     alphanumeric first char, then [A-Za-z0-9._-]; no ':' or whitespace."""
     assert (mw.SCOPE_RE.fullmatch(scope) is not None) is ok
+
+
+def test_scope_names_are_one_object_across_modules():
+    """#232: the scope grammar and header are DEFINED once, in the
+    dependency-free webterm.protocol (which the MCP server can import without
+    importing the broker); mcp_windows re-exports those very objects, so the
+    broker and a client importing protocol cannot drift apart."""
+    assert mw.SCOPE_RE is protocol.SCOPE_RE
+    assert mw.SCOPE_HEADER is protocol.SCOPE_HEADER
+    assert protocol.SCOPE_HEADER == "X-Browserland-Scope"
 
 
 # -- load ----------------------------------------------------------------------
