@@ -301,11 +301,14 @@ def _keys_to_text(keys: List[str], app_cursor: bool = False) -> str:
 
 @mcp.tool()
 def mcp_info(host: Optional[str] = None) -> Dict[str, Any]:
-    """Get Browserland broker MCP feature flags (allow_launch, default_mode).
+    """Get Browserland broker MCP feature flags (allow_launch, default_mode),
+    plus `scope`: the scope this server declared to that host, as the broker
+    saw it (null when unscoped).
 
     With `host` set, returns that one host's flags. Omit `host` (or pass "") to
     get a dict keyed by host name — each value is that host's flags, or
-    `{"ok": false, "error": ...}` if the host is unreachable."""
+    `{"ok": false, "error": ...}` if the host is unreachable (or, for a scoped
+    host, did not confirm the scope)."""
     if host:
         return _named_client(host).info()
     return _aggregate("info")
@@ -321,7 +324,14 @@ def list_terminals() -> Dict[str, Any]:
     to the namespaced `"<host>:<int>"` form the other tools expect; the broker's
     own per-terminal `host` (the producer's machine hostname) is preserved under
     `machine_host`. A host that can't be reached is reported in `errors` and does
-    not suppress the other hosts' terminals."""
+    not suppress the other hosts' terminals.
+
+    Each terminal's `scope` is its tag (null when untagged). When this server
+    declares a scope for a host (--scope, BROWSERLAND_MCP_SCOPE, or that host's
+    own "scope"), it sees ONLY the windows tagged with that scope there:
+    windows started by hand stay invisible until someone tags them. A scoped
+    host that does not confirm the scope lists nothing and reports
+    `scope_unsupported` in `errors` instead."""
     terminals: List[Dict[str, Any]] = []
     errors: Dict[str, str] = {}
     for name in _host_configs:
@@ -665,14 +675,22 @@ def flush_input(id: str) -> Dict[str, Any]:
 def launch_terminal(profile: Optional[str] = None, cols: int = 80,
                     rows: int = 24, title: Optional[str] = None,
                     cwd: Optional[str] = None,
-                    host: Optional[str] = None) -> Dict[str, Any]:
+                    host: Optional[str] = None,
+                    mode: Optional[str] = None) -> Dict[str, Any]:
     """Spawn a new terminal from a profile. The broker must have 'allow_launch'
     enabled. With multiple hosts configured, `host` is required to choose which
     broker; with a single host it's optional. The returned `id` is namespaced
-    ("<host>:<int>") so it can be passed straight to the other tools."""
+    ("<host>:<int>") so it can be passed straight to the other tools.
+
+    When this server declares a scope for that host, the new window is tagged
+    with the scope before it starts (so you can see it at once) and comes up
+    in `mode` ('off', 'read' or 'readwrite'), or 'readwrite' when `mode` is
+    omitted; the result then carries `scope` and `mode`. Without a scope the
+    window gets the broker's default mode and `mode` is ignored."""
     client, name = _launch_target(host)
     result = client.launch_terminal(
-        profile=profile, cols=cols, rows=rows, title=title, cwd=cwd)
+        profile=profile, cols=cols, rows=rows, title=title, cwd=cwd,
+        mode=mode or None)
     if isinstance(result, dict) and "id" in result:
         result = dict(result)
         result["id"] = f"{name}:{result['id']}"

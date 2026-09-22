@@ -1946,3 +1946,180 @@ def test_set_pace_tool_routes_to_wire():
     assert seen["path"] == "/mcp/pace"
     assert seen["body"] == {"id": 5, "pace_ms": 40}   # namespaced id -> bare int
     assert out == {"ok": True, "id": 5, "pace_ms": 40}
+
+
+# ---- #232: scoped hosts through the tools -----------------------------------
+
+def _install_hosts(hosts):
+    """Install prebuilt clients: ``hosts`` maps a name to ``(broker, scope)``
+    (a _ScopeBroker handler and that host's scope, None = unscoped), built
+    the way configure()'s _get_client builds them."""
+    from webterm.mcptool import server
+    server._host_configs = {n: (f"http://{n}:4445", "t", scope)
+                            for n, (_broker, scope) in hosts.items()}
+    server._clients = {n: BrowserlandClient(
+        base=f"http://{n}:4445", token="t", scope=scope, name=n,
+        transport=httpx.MockTransport(broker))
+        for n, (broker, scope) in hosts.items()}
+    return server
+
+
+def test_a_host_that_fails_its_probe_is_isolated():
+    """#232: a scoped host that does not echo its scope contributes no
+    terminals and a scope_unsupported error naming it; the other host's
+    terminals still arrive."""
+    good = _ScopeBroker(terminals=[{"id": 1, "scope": None}])
+    bad = _ScopeBroker(echo=_OMIT, terminals=[{"id": 2, "scope": None}])
+    server = _install_hosts({"good": (good, None), "bad": (bad, "teamA")})
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert [t["id"] for t in out["terminals"]] == ["good:1"]
+    assert list(out["errors"]) == ["bad"]
+    assert "did not confirm" in out["errors"]["bad"]
+    assert "'bad'" in out["errors"]["bad"]
+    assert bad.count("/mcp/terminals") == 0
+
+
+def test_a_scoped_host_is_probed_once_across_tool_calls():
+    broker = _ScopeBroker(terminals=[{"id": 1, "scope": "teamA"}])
+    server = _install_hosts({"h": (broker, "teamA")})
+    try:
+        server.list_terminals()
+        server.send_input("h:1", "x")
+    finally:
+        _reset_server()
+    assert broker.count("/mcp/info") == 1
+    assert (broker.count("/mcp/terminals"), broker.count("/mcp/input")) == (1,
+                                                                          1)
+
+
+def test_an_unscoped_host_is_never_probed():
+    broker = _ScopeBroker(terminals=[{"id": 1, "scope": "teamA"}])
+    server = _install_hosts({"h": (broker, None)})
+    try:
+        server.list_terminals()
+        server.send_input("h:1", "x")
+        server.read_screen("h:1")
+    finally:
+        _reset_server()
+    assert broker.count("/mcp/info") == 0
+    assert all(SCOPE_HEADER not in r.headers for r in broker.requests)
+
+
+def test_a_scoped_host_is_probed_again_after_it_was_unreachable():
+    broker = _ScopeBroker(faults={"/mcp/input": [None, httpx.ConnectError]})
+    server = _install_hosts({"h": (broker, "teamA")})
+    try:
+        server.send_input("h:1", "x")
+        with pytest.raises(BrowserlandError) as ei:
+            server.send_input("h:1", "x")
+        assert ei.value.code == "connection_error"
+        server.send_input("h:1", "x")
+    finally:
+        _reset_server()
+    assert broker.count("/mcp/info") == 2
+
+
+def test_configure_hands_each_host_its_scope_and_name():
+    """#232: _get_client builds each host's client with that host's scope
+    (header + probe) and its configured name (for messages)."""
+    from webterm.mcptool import server
+    server.configure([("a", "http://a:4445", "t", "teamA"),
+                      ("b", "http://b:4445", "t", None)])
+    try:
+        a, b = server._get_client("a"), server._get_client("b")
+        assert (a.scope, a.name, b.scope, b.name) == ("teamA", "a", None, "b")
+    finally:
+        server.configure([])
+
+
+def test_list_terminals_passes_each_rows_scope_through():
+    scoped = _ScopeBroker(terminals=[{"id": 1, "scope": "teamA"}])
+    open_ = _ScopeBroker(terminals=[{"id": 2, "scope": None},
+                                    {"id": 3, "scope": "teamB"}])
+    server = _install_hosts({"s": (scoped, "teamA"), "o": (open_, None)})
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert [(t["id"], t["scope"]) for t in out["terminals"]] == [
+        ("s:1", "teamA"), ("o:2", None), ("o:3", "teamB")]
+    assert out["errors"] == {}
+
+
+@pytest.mark.parametrize("row", [{"id": 9, "scope": "teamB"}, {"id": 9},
+                                 {"id": 9, "scope": None}],
+                         ids=["other-scope", "no-key", "untagged"])
+def test_a_scoped_listing_with_a_foreign_row_fails_closed(row):
+    """#232: the broker confirmed the scope but listed a window without that
+    tag: its filter disagrees with its echo, so the whole listing is refused
+    rather than leaking that row."""
+    broker = _ScopeBroker(terminals=[{"id": 1, "scope": "teamA"}, row])
+    server = _install_hosts({"h": (broker, "teamA")})
+    try:
+        out = server.list_terminals()
+    finally:
+        _reset_server()
+    assert out["terminals"] == []
+    assert "listed window 9" in out["errors"]["h"]
+
+
+def test_the_launch_tool_passes_mode_through():
+    broker = _ScopeBroker()
+    server = _install_hosts({"h": (broker, None)})
+    try:
+        server.launch_terminal(mode="read")
+        server.launch_terminal(mode="")
+    finally:
+        _reset_server()
+    bodies = [json.loads(r.content) for r in broker.requests]
+    assert bodies[0]["mode"] == "read"
+    assert "mode" not in bodies[1]
+
+
+async def test_the_tool_descriptions_explain_scopes():
+    """#232: the descriptions are what the model reads: a scoped server sees
+    only its own windows (hand-started ones stay invisible), a scoped launch
+    comes up readwrite unless `mode` is given, and mcp_info shows the
+    scope."""
+    from webterm.mcptool import server
+
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+
+    def text(name):                    # docstring line wraps flattened
+        return " ".join(tools[name].description.split())
+
+    assert "sees ONLY the windows tagged with that scope" in text(
+        "list_terminals")
+    assert "started by hand stay invisible" in text("list_terminals")
+    assert "or 'readwrite' when `mode` is omitted" in text("launch_terminal")
+    assert "mode" in tools["launch_terminal"].inputSchema["properties"]
+    assert "the scope this server declared" in text("mcp_info")
+
+
+def test_the_mcp_server_never_imports_the_broker(tmp_path):
+    """#232: the MCP server is the optional `mcp` extra and must not pull in
+    webterm.broker (and sanic with it). A FRESH interpreter, because this
+    test process imported the broker long ago; it also proves the scope
+    names really came from webterm.protocol."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    code = ("import sys\n"
+            "import webterm.mcptool.__main__, webterm.mcptool.server\n"
+            "import webterm.mcptool.client\n"
+            "print(sorted(m for m in sys.modules\n"
+            "             if m == 'webterm.broker'\n"
+            "             or m.startswith('webterm.broker.')))\n"
+            "print('webterm.protocol' in sys.modules)\n")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo) + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path),
+                         env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["[]", "True"]

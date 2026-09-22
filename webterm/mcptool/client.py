@@ -232,8 +232,25 @@ class BrowserlandClient:
         return self._get("/mcp/info")
 
     def list_terminals(self) -> List[Dict[str, Any]]:
-        """MCP-visible terminals (windows in ``off`` mode are omitted)."""
-        return self._get("/mcp/terminals")
+        """MCP-visible terminals (windows in ``off`` mode are omitted), each
+        with its ``scope`` tag. A scoped client also checks the rows
+        themselves (#232): a broker that confirmed the scope on /mcp/info must
+        list only windows tagged with it, so any other row means its filter
+        disagrees with its echo, and the whole listing is refused with
+        ``scope_unsupported`` rather than handed on."""
+        rows = self._get("/mcp/terminals")
+        if self.scope:
+            for row in rows:
+                tag = row.get("scope") if isinstance(row, dict) else None
+                if tag != self.scope:
+                    ident = row.get("id") if isinstance(row, dict) else row
+                    raise BrowserlandError(
+                        0, "scope_unsupported",
+                        f"{_ERROR_MESSAGES['scope_unsupported']} Host "
+                        f"{self.name!r} declared scope {self.scope!r}, but "
+                        f"its /mcp/terminals listed window {ident!r} tagged "
+                        f"{tag!r}.")
+        return rows
 
     def list_profiles(self) -> Dict[str, Any]:
         """Launchable profile names + the broker default."""
