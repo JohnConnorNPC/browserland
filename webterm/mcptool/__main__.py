@@ -1,6 +1,6 @@
 """Entry point: ``python -m webterm.mcptool`` (and the ``browserland-mcp`` script).
 
-Resolves the broker URL + MCP token (flag > env > default), wires the
+Resolves the broker URL + MCP token + scope (flag > env > default), wires the
 :class:`BrowserlandClient` config into the FastMCP server, and runs it over stdio.
 """
 
@@ -11,6 +11,10 @@ import json
 import os
 import sys
 from typing import Optional
+
+# The broker's scope grammar, from the dependency-free protocol module (this
+# package must not import webterm.broker).
+from ..protocol import SCOPE_RE
 
 DEFAULT_URL = "http://127.0.0.1:4445"
 
@@ -23,6 +27,11 @@ TOKEN_ENV_ALT = "WEB_TERMINAL_MCP_TOKEN"
 # Multi-host (#24): a JSON array of {name,url,token} host descriptors. When set
 # (flag or env) it supersedes the single-host --broker-url/--token shorthand.
 HOSTS_ENV = "BROWSERLAND_MCP_HOSTS"
+# #232: the scope this server declares to every host (a --hosts entry's own
+# "scope" overrides it for that host). Empty = unscoped.
+SCOPE_ENV = "BROWSERLAND_MCP_SCOPE"
+_SCOPE_RULE = ("1-64 characters of A-Z a-z 0-9 . _ -, starting with a letter "
+               "or digit")
 
 
 def _token_from_file(path: str) -> Optional[str]:
@@ -55,13 +64,34 @@ def _resolve_token(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
-def _parse_hosts(raw: str) -> list:
+def _resolve_scope(args: argparse.Namespace) -> Optional[str]:
+    """The process-wide scope: ``--scope``, whose default is
+    ``$BROWSERLAND_MCP_SCOPE`` (so the flag beats the env), or None when it
+    is empty. Raises :class:`ValueError` on a name outside the broker's
+    grammar; the message names both sources, since the flag's default cannot
+    say which one supplied the value."""
+    value = args.scope
+    if not value:
+        return None
+    if SCOPE_RE.fullmatch(value) is None:
+        raise ValueError(f"--scope/${SCOPE_ENV} {value!r} is not a valid "
+                         f"scope name ({_SCOPE_RULE})")
+    return value
+
+
+def _parse_hosts(raw: str, scope: Optional[str] = None) -> list:
     """Parse the ``--hosts`` / ``$BROWSERLAND_MCP_HOSTS`` JSON into an ordered
-    list of ``(name, url, token)`` host descriptors.
+    list of ``(name, url, token, scope)`` host descriptors.
+
+    An entry's optional ``"scope"`` (#232) is that host's declared scope; an
+    empty or absent one inherits ``scope``, the process-wide value (None =
+    unscoped).
 
     Raises :class:`ValueError` with a precise message on anything malformed: not
     a JSON array, an empty array, a non-object entry, a missing/empty field, a
-    name containing ``':'`` (the namespaced-id separator), or a duplicate name."""
+    name containing ``':'`` (the namespaced-id separator), a duplicate name, or
+    a ``"scope"`` that is not a string or not a valid scope name (the message
+    names the host)."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -88,21 +118,31 @@ def _parse_hosts(raw: str) -> list:
         if name in seen:
             raise ValueError(f"--hosts has a duplicate host name {name!r}")
         seen.add(name)
-        hosts.append((name, url, token))
+        host_scope = item.get("scope", "")
+        if not isinstance(host_scope, str):
+            raise ValueError(f"--hosts[{i}] ({name!r}) 'scope' must be a "
+                             "string (empty or absent inherits --scope)")
+        if host_scope and SCOPE_RE.fullmatch(host_scope) is None:
+            raise ValueError(f"--hosts[{i}] ({name!r}) scope {host_scope!r} "
+                             f"is not a valid scope name ({_SCOPE_RULE})")
+        hosts.append((name, url, token, host_scope or scope))
     return hosts
 
 
 def _resolve_hosts(args: argparse.Namespace) -> Optional[list]:
-    """Resolve the host map. With ``--hosts``/env set, parse it (multi-host).
-    Otherwise fall back to the single-host ``--broker-url``/``--token`` shorthand
-    under the name ``"default"``. Returns ``None`` when single-host mode has no
+    """Resolve the host map as ``(name, url, token, scope)`` tuples. With
+    ``--hosts``/env set, parse it (multi-host). Otherwise fall back to the
+    single-host ``--broker-url``/``--token`` shorthand under the name
+    ``"default"``. Every host inherits the process-wide ``--scope`` unless
+    its own entry names one. Returns ``None`` when single-host mode has no
     resolvable token (so the caller can print the token help and exit)."""
+    scope = _resolve_scope(args)
     if args.hosts:
-        return _parse_hosts(args.hosts)
+        return _parse_hosts(args.hosts, scope)
     token = _resolve_token(args)
     if not token:
         return None
-    return [("default", args.broker_url, token)]
+    return [("default", args.broker_url, token, scope)]
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -130,7 +170,16 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
              "e.g. "
              '\'[{"name":"local","url":"http://127.0.0.1:4445","token":"…"}]\' '
              f"(default ${HOSTS_ENV}). When set, supersedes --broker-url/--token; "
-             "window ids become namespaced '<host>:<int>'.",
+             "window ids become namespaced '<host>:<int>'. An entry may add "
+             '"scope" to declare its own scope for that host.',
+    )
+    p.add_argument(
+        "--scope", default=os.environ.get(SCOPE_ENV, ""),
+        help=f"Declare an MCP scope (default ${SCOPE_ENV}): this server then "
+             "sees and drives only the windows tagged with it, and a host "
+             "that does not echo it back on /mcp/info is refused. A --hosts "
+             'entry\'s own "scope" overrides it for that host. Empty = '
+             "unscoped (every window its access mode allows).",
     )
     return p.parse_args(argv)
 

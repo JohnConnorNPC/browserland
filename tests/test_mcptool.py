@@ -43,7 +43,8 @@ def _install(handlers):
     """Install one host per (name -> handler) entry, returning the server module.
     `handlers` order is preserved (it drives list_terminals merge order)."""
     from webterm.mcptool import server
-    server._host_configs = {n: (f"http://{n}:4445", "t") for n in handlers}
+    server._host_configs = {n: (f"http://{n}:4445", "t", None)
+                            for n in handlers}
     server._clients = {n: _mock_client(h, base=f"http://{n}:4445")
                        for n, h in handlers.items()}
     return server
@@ -55,6 +56,13 @@ def _reset_server():
         c.close()
     server._host_configs = {}
     server._clients = {}
+
+
+@pytest.fixture(autouse=True)
+def _no_scope_env(monkeypatch):
+    """#232: --scope defaults from $BROWSERLAND_MCP_SCOPE, so a value in the
+    developer's shell must not leak into any argument-parsing cell."""
+    monkeypatch.delenv("BROWSERLAND_MCP_SCOPE", raising=False)
 
 
 def test_info_get():
@@ -1268,8 +1276,8 @@ def test_parse_hosts_valid():
     from webterm.mcptool import __main__ as m
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t1"},
                       {"name": "b", "url": "https://y:4445", "token": "t2"}])
-    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1"),
-                                   ("b", "https://y:4445", "t2")]
+    assert m._parse_hosts(raw) == [("a", "http://x:4445", "t1", None),
+                                   ("b", "https://y:4445", "t2", None)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1296,7 +1304,7 @@ def test_resolve_hosts_single_default(monkeypatch):
     from webterm.mcptool import __main__ as m
     monkeypatch.delenv(m.HOSTS_ENV, raising=False)
     args = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
-    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t")]
+    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t", None)]
 
 
 def test_resolve_hosts_multi_from_env(monkeypatch):
@@ -1304,7 +1312,7 @@ def test_resolve_hosts_multi_from_env(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "t"}])
     monkeypatch.setenv(m.HOSTS_ENV, raw)
     args = m._parse_args([])                       # --hosts defaults from env
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t")]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "t", None)]
 
 
 def test_resolve_hosts_flag_beats_single_host(monkeypatch):
@@ -1313,7 +1321,105 @@ def test_resolve_hosts_flag_beats_single_host(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"}])
     args = m._parse_args(["--hosts", raw, "--token", "ignored",
                           "--broker-url", "http://ignored:4445"])
-    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta")]
+    assert m._resolve_hosts(args) == [("a", "http://x:4445", "ta", None)]
+
+
+def _hosts_json(*entries):
+    """A --hosts value: each entry gets url http://<name>:4445 and token t
+    unless it names its own."""
+    return json.dumps([dict({"url": f"http://{e['name']}:4445", "token": "t"},
+                            **e) for e in entries])
+
+
+def test_parse_hosts_reads_a_per_host_scope():
+    from webterm.mcptool import __main__ as m
+    raw = _hosts_json({"name": "a", "scope": "teamA"}, {"name": "b"})
+    assert m._parse_hosts(raw) == [("a", "http://a:4445", "t", "teamA"),
+                                   ("b", "http://b:4445", "t", None)]
+
+
+@pytest.mark.parametrize("entry", [{"name": "b"}, {"name": "b", "scope": ""}],
+                         ids=["absent", "empty"])
+def test_an_absent_or_empty_host_scope_inherits(entry):
+    from webterm.mcptool import __main__ as m
+    raw = _hosts_json({"name": "a", "scope": "teamA"}, entry)
+    assert m._parse_hosts(raw, "proc") == [
+        ("a", "http://a:4445", "t", "teamA"), ("b", "http://b:4445", "t",
+                                               "proc")]
+
+
+@pytest.mark.parametrize("bad", ["a b", "a:b", "x" * 65, "-lead", 5, None,
+                                 ["a"]],
+                         ids=["space", "colon", "too-long", "lead-dash",
+                              "int", "null", "list"])
+def test_a_bad_host_scope_exits_2_naming_the_host(capsys, bad):
+    """#232: a per-host scope must be a string in the broker's grammar
+    ("" or absent inherits); anything else stops startup and says which
+    host."""
+    from webterm.mcptool import __main__ as m
+    raw = _hosts_json({"name": "a"}, {"name": "second", "scope": bad})
+    assert m.main(["--hosts", raw]) == 2
+    err = capsys.readouterr().err
+    assert "--hosts[1] ('second')" in err and "scope" in err
+
+
+def test_the_scope_env_applies_to_every_host(monkeypatch):
+    from webterm.mcptool import __main__ as m
+    monkeypatch.setenv(m.SCOPE_ENV, "envscope")
+    multi = m._parse_args(["--hosts", _hosts_json({"name": "a"},
+                                                  {"name": "b"})])
+    assert [h[3] for h in m._resolve_hosts(multi)] == ["envscope",
+                                                       "envscope"]
+    single = m._parse_args(["--token", "t", "--broker-url", "http://h:4445"])
+    assert m._resolve_hosts(single) == [("default", "http://h:4445", "t",
+                                         "envscope")]
+
+
+def test_a_host_scope_beats_the_env(monkeypatch):
+    from webterm.mcptool import __main__ as m
+    monkeypatch.setenv(m.SCOPE_ENV, "envscope")
+    args = m._parse_args(["--hosts", _hosts_json({"name": "a", "scope": "mine"},
+                                                 {"name": "b"})])
+    assert [h[3] for h in m._resolve_hosts(args)] == ["mine", "envscope"]
+
+
+def test_the_scope_flag_beats_the_env(monkeypatch):
+    from webterm.mcptool import __main__ as m
+    monkeypatch.setenv(m.SCOPE_ENV, "envscope")
+    args = m._parse_args(["--scope", "flagscope", "--token", "t",
+                          "--broker-url", "http://h:4445"])
+    assert m._resolve_hosts(args) == [("default", "http://h:4445", "t",
+                                       "flagscope")]
+
+
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_an_invalid_process_scope_exits_2_naming_both_sources(
+        monkeypatch, capsys, source):
+    """#232: --scope takes its default from the env, so one message names
+    both places the value may have come from."""
+    from webterm.mcptool import __main__ as m
+    argv = ["--token", "t"]
+    if source == "flag":
+        argv += ["--scope", "a b"]
+    else:
+        monkeypatch.setenv(m.SCOPE_ENV, "a b")
+    assert m.main(argv) == 2
+    assert ("--scope/$BROWSERLAND_MCP_SCOPE 'a b' is not a valid scope name"
+            in capsys.readouterr().err)
+
+
+def test_main_wires_scopes_into_configure(monkeypatch):
+    from webterm.mcptool import __main__ as m
+    from webterm.mcptool import server
+
+    captured = {}
+    monkeypatch.setattr(server, "configure",
+                        lambda hosts: captured.__setitem__("hosts", list(hosts)))
+    monkeypatch.setattr(server.mcp, "run", lambda: None)
+    raw = _hosts_json({"name": "a"}, {"name": "b", "scope": "teamB"})
+    assert m.main(["--scope", "teamA", "--hosts", raw]) == 0
+    assert captured["hosts"] == [("a", "http://a:4445", "t", "teamA"),
+                                 ("b", "http://b:4445", "t", "teamB")]
 
 
 def test_resolve_hosts_single_no_token_returns_none(monkeypatch):
@@ -1671,7 +1777,7 @@ def test_configure_builds_clients_lazily_and_routes(monkeypatch):
 
     built = []
 
-    def factory(base, token):
+    def factory(base, token, **kwargs):
         built.append(base)
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -1681,8 +1787,8 @@ def test_configure_builds_clients_lazily_and_routes(monkeypatch):
                                  transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(server, "BrowserlandClient", factory)
-    server.configure([("local", "http://local:4445", "t"),
-                      ("remote", "http://remote:4445", "t")])
+    server.configure([("local", "http://local:4445", "t", None),
+                      ("remote", "http://remote:4445", "t", None)])
     try:
         assert built == []                              # lazy: nothing built yet
         server.send_input("remote:5", "hi\n")           # builds only the routed host
@@ -1704,10 +1810,10 @@ def test_configure_closes_old_clients_on_reconfigure():
             self.closed = True
 
     spy = SpyClient()
-    server._host_configs = {"old": ("http://old:4445", "t")}
+    server._host_configs = {"old": ("http://old:4445", "t", None)}
     server._clients = {"old": spy}
     try:
-        server.configure([("new", "http://new:4445", "t")])
+        server.configure([("new", "http://new:4445", "t", None)])
         assert spy.closed is True                       # old client was closed
         assert set(server._host_configs) == {"new"}     # map rebuilt
         assert server._clients == {}                    # new clients are lazy
@@ -1728,8 +1834,8 @@ def test_main_wires_multi_host_into_configure(monkeypatch):
     raw = json.dumps([{"name": "a", "url": "http://x:4445", "token": "ta"},
                       {"name": "b", "url": "http://y:4445", "token": "tb"}])
     assert m.main(["--hosts", raw]) == 0
-    assert captured["hosts"] == [("a", "http://x:4445", "ta"),
-                                 ("b", "http://y:4445", "tb")]
+    assert captured["hosts"] == [("a", "http://x:4445", "ta", None),
+                                 ("b", "http://y:4445", "tb", None)]
 
 
 # ---- tool smoke test (FastMCP server wired to a MockTransport) -----------

@@ -22,13 +22,15 @@ from .client import BrowserlandClient, BrowserlandError
 
 mcp = FastMCP("browserland")
 
-# Multi-host config (#24). configure() stores an ordered ``name -> (base, token)``
-# map; the per-host BrowserlandClient is built lazily on first use, so importing
-# this module has no side effects and stdio startup never blocks on a probe.
-# Window ids in every tool are namespaced ``"<host>:<int>"`` and :func:`_route`
-# splits one back to a ``(client, int_id)`` pair. A plain ``--broker-url``/
-# ``--token`` config is just a single host named ``"default"``.
-_host_configs: Dict[str, Tuple[str, str]] = {}   # name -> (base, token), ordered
+# Multi-host config (#24). configure() stores an ordered
+# ``name -> (base, token, scope)`` map; the per-host BrowserlandClient is built
+# lazily on first use, so importing this module has no side effects and stdio
+# startup never blocks on a probe (a scoped host's /mcp/info check, #232, runs
+# on its first call). Window ids in every tool are namespaced ``"<host>:<int>"``
+# and :func:`_route` splits one back to a ``(client, int_id)`` pair. A plain
+# ``--broker-url``/``--token`` config is just a single host named ``"default"``.
+# name -> (base, token, scope or None), ordered
+_host_configs: Dict[str, Tuple[str, str, Optional[str]]] = {}
 _clients: Dict[str, BrowserlandClient] = {}       # name -> client (lazy)
 # Guards the lazy build in _get_client: FastMCP dispatches sync tools on a thread
 # pool, so two concurrent first-calls for one host could otherwise each construct
@@ -37,9 +39,10 @@ _clients_lock = threading.Lock()
 
 
 def configure(hosts) -> None:
-    """Install the host map from an ordered iterable of ``(name, base, token)``
-    descriptors. Closes any previously-built clients so their sockets aren't
-    leaked; the new clients are built lazily on first use."""
+    """Install the host map from an ordered iterable of
+    ``(name, base, token, scope)`` descriptors (scope None = unscoped). Closes
+    any previously-built clients so their sockets aren't leaked; the new
+    clients are built lazily on first use."""
     global _host_configs, _clients
     with _clients_lock:
         for client in _clients.values():
@@ -48,20 +51,23 @@ def configure(hosts) -> None:
             except Exception:  # a flaky close must not abort reconfiguration
                 pass
         _clients = {}
-        _host_configs = {name: (base, token) for name, base, token in hosts}
+        _host_configs = {name: (base, token, scope)
+                         for name, base, token, scope in hosts}
 
 
 def _get_client(name: str) -> BrowserlandClient:
     """Return the (lazily-built) client for an already-validated host name.
-    Double-checked locking keeps concurrent first-calls from leaking a client."""
+    Double-checked locking keeps concurrent first-calls from leaking a client.
+    The client carries the host's scope (its header and its fail-closed
+    probe, #232) and its name for error messages."""
     client = _clients.get(name)
     if client is not None:
         return client
     with _clients_lock:
         client = _clients.get(name)
         if client is None:
-            base, token = _host_configs[name]
-            client = BrowserlandClient(base, token)
+            base, token, scope = _host_configs[name]
+            client = BrowserlandClient(base, token, scope=scope, name=name)
             _clients[name] = client
         return client
 
