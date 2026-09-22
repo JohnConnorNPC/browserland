@@ -538,7 +538,10 @@ effective mode to permit them.
 "scope":null}`.
 `version` is this broker's build id (`webterm.build_version()` — package version +
 git short hash, or the bare package version off a checkout) for stale-deploy
-detection (#22).
+detection (#22). `scope` is the caller's own declared scope echoed back: `null`
+when it declared none or a proxy stripped the header, and absent from a broker
+that predates scopes. A client that declared a scope checks it here to fail
+closed (#230).
 
 **`GET /mcp/terminals`** → an array; windows whose effective mode is `off` are
 omitted, and so are windows outside the caller's declared scope. `agent` is the
@@ -663,7 +666,9 @@ the window registers again (agent reconnect or relaunch). Unlike a per-window
 mode override, it never carries over a reconnect.
 
 **`GET /mcp/profiles`** → `{"default":"cmd","profiles":["cmd","powershell"]}`
-(the broker's configured `agent.profiles`; `bash`/`sh` on Linux).
+(the broker's configured `agent.profiles`; `bash`/`sh` on Linux). Profiles
+are global: a declared scope never changes this list, and a scoped caller may
+launch any of them.
 
 **`POST /mcp/launch`** — requires `allow_launch` (else **403 `launch_disabled`**).
 Body reuses the `/launch` shape: `{"profile": <str>, "cols": 80, "rows": 24,
@@ -686,7 +691,7 @@ drive the window it launched until that window is tagged (#231).
 |---|---|---|
 | 403 | `mcp_disabled` | feature disabled or no token configured |
 | 401 | `auth_required` | missing/invalid MCP token |
-| 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after the token. An empty value is not refused: it means unscoped, which sees every window its mode allows |
+| 400 | `bad_scope` | `X-Browserland-Scope` is not a valid scope name, or is sent more than once (so a proxy that adds its own copy makes every call a 400); every token route, checked after mcp_disabled and the token. An empty value is not refused: it means unscoped, which sees every window its mode allows |
 | 400 | `bad_json` | body is not a JSON object |
 | 400 | `bad_id` | `id` missing or not an integer |
 | 404 | `unknown_or_off` | no such window, or its effective mode is `off`, or it is outside the caller's declared scope |
@@ -713,7 +718,9 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 **`GET /mcp/config`** →
 `{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
 "token_env_pinned":false,"known_scopes":[]}` (`token` is the live secret, `""`
-when unset).
+when unset). `known_scopes` lists the scopes on live windows (any mode) and on
+stored per-window rows, sorted; a name a caller only declared on the header
+never appears.
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
 (`off`/`read`/`readwrite`), `allow_launch`, `token`, or `generate:true` (mint a
