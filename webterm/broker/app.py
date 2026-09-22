@@ -4365,6 +4365,77 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return await _shielded_region(app.ctx.mcp_windows_lock, _locked_write)
 
     app.ctx.persist_mcp_windows = _persist_mcp_windows
+    # The coalesced writer. apply() bumps rows in memory only (the on_register
+    # contract forbids it to write), so a background ticker makes those bumps
+    # durable: at most one write per interval however many windows registered,
+    # plus a final flush at shutdown. Every tick runs the shared writer with a
+    # no-op mutate, which prunes the copy and skips the disk write when the
+    # payload is unchanged, so pruning also happens on a quiet broker. The
+    # interval and the sleep are read from app.ctx on every iteration (and
+    # the uptime inside the writer), so tests can inject them.
+    app.ctx.mcp_windows_flush_s = 60.0
+    app.ctx.mcp_windows_sleep = asyncio.sleep
+    app.ctx.mcp_windows_task = None
+    flush_failing = False
+
+    async def _flush_mcp_windows() -> bool:
+        """One pass of the coalesced writer; returns whether it succeeded and
+        never raises an Exception. A failure streak (a bad mcp_windows_path
+        fails every interval for the life of the process) logs ONE ERROR with
+        its traceback, DEBUG for each repeat, and one INFO once a pass
+        succeeds again."""
+        nonlocal flush_failing
+        try:
+            await _persist_mcp_windows(lambda work: None)
+        except Exception:
+            if flush_failing:
+                LOGGER.debug("mcp windows: flushing %s still fails",
+                             app.ctx.mcp_windows_path, exc_info=True)
+            else:
+                flush_failing = True
+                LOGGER.exception("mcp windows: flushing %s failed; retrying "
+                                 "every interval, repeats logged at DEBUG",
+                                 app.ctx.mcp_windows_path)
+            return False
+        if flush_failing:
+            flush_failing = False
+            LOGGER.info("mcp windows: flushing %s works again",
+                        app.ctx.mcp_windows_path)
+        return True
+
+    async def _mcp_windows_ticker():
+        while True:
+            await app.ctx.mcp_windows_sleep(app.ctx.mcp_windows_flush_s)
+            await _flush_mcp_windows()
+
+    app.ctx.flush_mcp_windows = _flush_mcp_windows
+    app.ctx.mcp_windows_ticker = _mcp_windows_ticker
+
+    @app.after_server_start
+    async def _start_mcp_windows_ticker(app_, loop):
+        # app.py's first after_server_start listener: the ticker needs the
+        # server's own loop. A NAMED task on app.ctx rather than an entry in
+        # app.ctx.bg_tasks, whose members are fire-and-forget pulses that
+        # remove themselves when done; nothing would ever remove this one.
+        app_.ctx.mcp_windows_task = asyncio.ensure_future(
+            _mcp_windows_ticker())
+
+    @app.before_server_stop
+    async def _stop_mcp_windows_ticker(app_, loop):
+        # Stop the ticker, then one last pass so a bump made since the last
+        # tick is not lost. Awaited here, never scheduled: Sanic destroys
+        # tasks still pending at shutdown (see the restart drain notes). A
+        # write the cancelled ticker had in flight finishes in its shield,
+        # and the final pass queues behind it on the lock.
+        task = app_.ctx.mcp_windows_task
+        app_.ctx.mcp_windows_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await _flush_mcp_windows()
     # #182/#183: WHO decided what this broker may do to itself -- reach
     # github.com to CHECK (update_check_enabled), download-and-execute an
     # APPLY (update_apply_enabled), restart the process (restart_enabled).

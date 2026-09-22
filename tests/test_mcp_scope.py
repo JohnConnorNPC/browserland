@@ -1119,3 +1119,175 @@ def test_a_row_deleted_mid_write_loses_the_touch(tmp_path, monkeypatch):
         lambda: app.ctx.registry.register(_WS(), _hello(9, 55)))
     assert entry.mcp_scope == "s"
     assert app.ctx.mcp_windows.get(9) is None
+
+
+# -- the coalesced seen writer -------------------------------------------------
+
+APP_LOGGER = "webterm.broker.app"
+
+
+def _claimed_rows(tmp_path, **pids):
+    """Rows already claimed by producer ``pid`` on host hostA, last seen 100 s
+    before T, so a hello at T re-applies them and bumps seen."""
+    _write_sidecar(_sidecar(tmp_path), {
+        wid.lstrip("w"): _row(scope=f"s{wid}", pid=pid, host="hostA",
+                              seen=T - 100)
+        for wid, pid in pids.items()})
+
+
+class _Ticks:
+    """A fake ``app.ctx.mcp_windows_sleep``: every call records its interval
+    and parks until the test releases it, so ticks are stepped by hand and no
+    test sleeps. Build it inside the running loop."""
+
+    def __init__(self):
+        self.calls = []                       # [(interval, Event)]
+        self.arrived = asyncio.Queue()
+
+    async def sleep(self, seconds):
+        event = asyncio.Event()
+        self.calls.append((seconds, event))
+        self.arrived.put_nowait(len(self.calls))
+        await event.wait()
+
+    async def parked(self, n):
+        """Wait until the ticker is parked in its ``n``-th sleep, i.e. every
+        flush before it has finished."""
+        assert await asyncio.wait_for(self.arrived.get(), 10) == n
+
+    def release(self, n):
+        self.calls[n - 1][1].set()
+
+    @property
+    def intervals(self):
+        return [seconds for seconds, _event in self.calls]
+
+
+def test_the_ticker_coalesces_registers_into_one_write_per_tick(
+        tmp_path, monkeypatch, writes):
+    """#228: two re-applying hellos between two ticks produce exactly ONE
+    counted write, carrying both seen bumps; registering alone writes nothing;
+    a tick with nothing new writes nothing. The interval is re-read from
+    app.ctx on every iteration."""
+    _claimed_rows(tmp_path, w9=55, w10=56)
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    app.ctx.mcp_windows_flush_s = 7.5
+
+    async def scenario():
+        ticks = _Ticks()
+        app.ctx.mcp_windows_sleep = ticks.sleep
+        ticker = asyncio.ensure_future(app.ctx.mcp_windows_ticker())
+        try:
+            await ticks.parked(1)
+            await app.ctx.registry.register(_WS(), _hello(9, 55))
+            await app.ctx.registry.register(_WS(), _hello(10, 56))
+            assert _store_writes(writes, app) == []
+            ticks.release(1)
+            await ticks.parked(2)
+            landed = _store_writes(writes, app)
+            assert len(landed) == 1
+            assert (landed[0]["windows"]["9"]["seen"],
+                    landed[0]["windows"]["10"]["seen"]) == (T, T)
+            ticks.release(2)
+            await ticks.parked(3)
+            assert len(_store_writes(writes, app)) == 1
+            app.ctx.mcp_windows_flush_s = 9.0
+            ticks.release(3)
+            await ticks.parked(4)
+            assert ticks.intervals == [7.5, 7.5, 7.5, 9.0]
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_quiet_tick_still_prunes(tmp_path, monkeypatch, writes):
+    """#228: prune is not gated behind a dirty store. With nothing registered,
+    a tick past the grace still runs the writer, which drops an 8-day-old
+    non-live row and writes once."""
+    _write_sidecar(_sidecar(tmp_path), {
+        "5": _row(scope="a", pid=1, host="h", seen=T - 8 * DAY)})
+    app = _make_app(tmp_path, monkeypatch, uptime=601.0, now=T)
+    assert app.ctx.mcp_windows.dirty is False
+
+    async def scenario():
+        ticks = _Ticks()
+        app.ctx.mcp_windows_sleep = ticks.sleep
+        ticker = asyncio.ensure_future(app.ctx.mcp_windows_ticker())
+        try:
+            await ticks.parked(1)
+            ticks.release(1)
+            await ticks.parked(2)
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert len(_store_writes(writes, app)) == 1
+    assert _disk(_sidecar(tmp_path)) == {}
+
+
+def test_the_server_listeners_start_the_ticker_and_flush_at_stop(
+        tmp_path, monkeypatch, writes):
+    """#228: through the real listeners (app.test_client runs a server per
+    request): after_server_start starts the ticker (its first sleep sees the
+    injected interval), and before_server_stop cancels it and flushes the
+    pending seen bump, exactly one write. A second request with nothing new
+    writes nothing."""
+    _claimed_rows(tmp_path, w9=55)
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    app.ctx.mcp_windows_flush_s = 4.25
+    intervals = []
+
+    async def forever(seconds):
+        intervals.append(seconds)
+        await asyncio.Event().wait()
+
+    app.ctx.mcp_windows_sleep = forever
+    _register(app, 9, 55)
+    assert app.ctx.mcp_windows.dirty is True
+    headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+    _, resp = app.test_client.get("/sessions", headers=headers)
+    assert resp.status == 200
+    assert intervals == [4.25]
+    assert len(_store_writes(writes, app)) == 1
+    assert _disk(_sidecar(tmp_path))["9"]["seen"] == T
+    assert app.ctx.mcp_windows.dirty is False
+    assert app.ctx.mcp_windows_task is None
+    app.test_client.get("/sessions", headers=headers)
+    assert len(_store_writes(writes, app)) == 1
+
+
+def test_a_failing_flush_logs_once_then_debug_then_recovery(
+        tmp_path, monkeypatch, caplog):
+    """#228: a flush failure is never swallowed silently and never spams: the
+    first failure of a streak is one ERROR with the traceback, repeats are
+    DEBUG, the store stays dirty throughout, and the first success after it
+    logs one INFO and lands the bump."""
+    _claimed_rows(tmp_path, w9=55)
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    _register(app, 9, 55)
+    real = app_mod._write_state_atomic
+
+    def failing(path, payload):
+        if Path(path) == app.ctx.mcp_windows_path:
+            raise OSError("no such directory")
+        return real(path, payload)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", failing)
+    caplog.set_level(logging.DEBUG, logger=APP_LOGGER)
+
+    def flush_records():
+        return [(r.levelno, r.exc_info is not None) for r in caplog.records
+                if r.name == APP_LOGGER and "flushing" in r.getMessage()]
+
+    assert asyncio.run(app.ctx.flush_mcp_windows()) is False
+    assert asyncio.run(app.ctx.flush_mcp_windows()) is False
+    assert flush_records() == [(logging.ERROR, True), (logging.DEBUG, True)]
+    assert app.ctx.mcp_windows.dirty is True
+    monkeypatch.setattr(app_mod, "_write_state_atomic", real)
+    assert asyncio.run(app.ctx.flush_mcp_windows()) is True
+    assert flush_records()[2:] == [(logging.INFO, False)]
+    assert app.ctx.mcp_windows.dirty is False
+    assert _disk(_sidecar(tmp_path))["9"]["seen"] == T
