@@ -30513,3 +30513,219 @@ process.stdout.write(JSON.stringify(out) + '\n');
 """)
     assert r == {"str": "projA", "empty": None, "num": None, "nul": None,
                  "missing": None}
+
+
+_SCOPE_CORPUS_237 = [
+    "a", "A1", "x.y_z-1", "a" * 64, "constructor", "toString", "0", "Z.",
+    "", "-a", ".a", "_a", "__proto__", "a" * 65, "a:b", "a b", " a", "a ",
+    "ä", "a\n", "aä", "a/b", "a\\b",
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_valid_mcp_scope_matches_the_broker_grammar_both_ways(tmp_path):
+    """#233: the page's scope check is the broker's SCOPE_RE (webterm.protocol,
+    a fullmatch), verdict for verdict, over names it must accept and names it
+    must refuse; and the literal is that pattern, anchored, so the two cannot
+    drift apart without this failing."""
+    from webterm.protocol import SCOPE_RE
+    fn = _fn237("78_js_keybindings.js", "function validMcpScope(s)")
+    assert "/^" + SCOPE_RE.pattern + "$/" in fn, \
+        "validMcpScope must use SCOPE_RE's own pattern, anchored"
+    r = _node237(tmp_path, fn + "\nconst corpus = " + json.dumps(
+        _SCOPE_CORPUS_237) + r""";
+process.stdout.write(JSON.stringify({
+    verdicts: corpus.map(validMcpScope),
+    nonString: [null, undefined, 7, ['a'], {}].map(validMcpScope),
+}) + '\n');
+""")
+    want = [SCOPE_RE.fullmatch(s) is not None for s in _SCOPE_CORPUS_237]
+    assert r["verdicts"] == want
+    assert True in want and False in want
+    assert r["nonString"] == [False] * 5
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_host_mcp_scopes_is_true_false_or_not_yet_known(tmp_path):
+    """#233: the capability read is tri-state. The serving broker's answer is
+    localInfo()'s memo, read off localInfo._p, so a pending boot /info is null,
+    a refetch is read again, and a failed one settles false. A peer's is the
+    Control Panel's cached record: none is null. Only a literal true counts,
+    on both sides."""
+    fn = _fn237("78_js_keybindings.js", "function hostMcpScopes(hostId)")
+    r = _node237(tmp_path, r"""
+function localInfo() { throw new Error('hostMcpScopes must never call localInfo()'); }
+const modCatalogCache = new Map();
+""" + fn + r"""
+const tick = () => new Promise(res => setTimeout(res, 0));
+(async function () {
+    const out = {};
+    out.noMemo = hostMcpScopes('local');
+    let resolve;
+    localInfo._p = new Promise(res => { resolve = res; });
+    out.pending = hostMcpScopes('local');
+    resolve({mcp_scopes: true}); await tick();
+    out.capable = hostMcpScopes('local');
+    for (const [name, j] of [['empty', {}], ['str', {mcp_scopes: 'true'}],
+                             ['one', {mcp_scopes: 1}], ['failed', null]]) {
+        localInfo._p = Promise.resolve(j);
+        out[name + 'Pending'] = hostMcpScopes('local');
+        await tick();
+        out[name] = hostMcpScopes('local');
+    }
+    localInfo._p = Promise.reject(new Error('down'));
+    hostMcpScopes('local'); await tick();
+    out.rejected = hostMcpScopes('local');
+    out.peerNone = hostMcpScopes('peer');
+    for (const [name, v] of [['peerTrue', true], ['peerFalse', false],
+                             ['peerStr', 'true'], ['peerOne', 1]]) {
+        modCatalogCache.set('peer', {state: 'ok', mcpScopes: v});
+        out[name] = hostMcpScopes('peer');
+    }
+    modCatalogCache.set('peer', {state: 'ok'});
+    out.peerMissing = hostMcpScopes('peer');
+    process.stdout.write(JSON.stringify(out) + '\n');
+})();
+""")
+    assert r["noMemo"] is None
+    assert r["pending"] is None and r["capable"] is True
+    for name in ("empty", "str", "one", "failed"):
+        assert r[name + "Pending"] is None, f"a new memo ({name}) reads null first"
+        assert r[name] is False, name
+    assert r["rejected"] is False
+    assert r["peerNone"] is None
+    assert r["peerTrue"] is True
+    assert r["peerFalse"] is False and r["peerStr"] is False
+    assert r["peerOne"] is False and r["peerMissing"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_known_scopes_is_the_hosts_tags_and_stored_rows_sorted(tmp_path):
+    """#233: the picker offers this host's live tags plus its cached
+    /mcp/config known_scopes: another host's tags stay out, names are
+    de-duplicated and sorted, and anything that is not a valid scope name
+    (from either source) is dropped."""
+    fn = (_fn237("78_js_keybindings.js", "function validMcpScope(s)")
+          + _fn237("78_js_keybindings.js", "function knownScopes(hostId)"))
+    r = _node237(tmp_path, r"""
+const sessions = new Map();
+const mcpConfigCache = new Map();
+""" + fn + r"""
+const out = {};
+sessions.set('h:1', {hostId: 'h', mcp_scope: 'zeta'});
+sessions.set('h:2', {hostId: 'h', mcp_scope: 'alpha'});
+sessions.set('h:3', {hostId: 'h', mcp_scope: null});
+sessions.set('h:4', {hostId: 'h', mcp_scope: 'a:b'});
+sessions.set('o:1', {hostId: 'o', mcp_scope: 'other'});
+out.noCfg = knownScopes('h');
+mcpConfigCache.set('h', {known_scopes: ['mid', 'alpha', 7, '', '__proto__', 'x y']});
+out.withCfg = knownScopes('h');
+mcpConfigCache.set('h', {known_scopes: 'mid'});
+out.badCfg = knownScopes('h');
+out.other = knownScopes('o');
+out.nobody = knownScopes('none');
+process.stdout.write(JSON.stringify(out) + '\n');
+""")
+    assert r["noCfg"] == ["alpha", "zeta"]
+    assert r["withCfg"] == ["alpha", "mid", "zeta"]
+    assert r["badCfg"] == ["alpha", "zeta"]
+    assert r["other"] == ["other"]
+    assert r["nobody"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_set_window_mcp_scope_posts_the_scope_and_adopts_the_brokers_answer(
+        tmp_path):
+    """#233: the setter POSTs {id: <bare wire id>, scope} and nothing else (an
+    empty tag goes as null), adopts the broker's echoed scope only on ok, and
+    says so when the broker refuses or does not answer."""
+    fn = _fn237("78_js_keybindings.js", "function setWindowMcpScope(win, scope)")
+    r = _node237(tmp_path, r"""
+const FETCH_TIMEOUT_MS = 3000;
+const sessions = new Map();
+const notices = [], posts = [], labels = [];
+let answer = null, calls = 0;
+function hostById(id) { return id === 'h' ? {id: 'h'} : null; }
+function hostFetch(host, path, opts) {
+    calls++;
+    posts.push({host: host.id, path, method: opts.method,
+                body: JSON.parse(opts.body)});
+    if (answer === 'throw') return Promise.reject(new Error('down'));
+    const a = answer;
+    return Promise.resolve({status: a.status,
+        json: () => a.body === undefined ? Promise.reject(new Error('x'))
+                                         : Promise.resolve(a.body)});
+}
+function showNotice(t) { notices.push(t); }
+function updateTaskbarLabel(k) { labels.push(k); }
+""" + fn + r"""
+(async function () {
+    const win = {id: 'h:9', sid: '9', hostId: 'h',
+                 refreshMcpBtn() { labels.push('btn'); }};
+    const out = {};
+    sessions.set('h:9', {mcp_scope: 'old'});
+    answer = {status: 200, body: {ok: true, id: 9, mode: null, scope: 'projA'}};
+    out.set = await setWindowMcpScope(win, 'projA');
+    out.afterSet = sessions.get('h:9').mcp_scope;
+    answer = {status: 200, body: {ok: true, id: 9, mode: null, scope: null}};
+    out.cleared = await setWindowMcpScope(win, '');
+    out.afterClear = sessions.get('h:9').mcp_scope;
+    sessions.get('h:9').mcp_scope = 'keep';
+    answer = {status: 400, body: {ok: false, error: 'bad_scope'}};
+    out.refused = await setWindowMcpScope(win, 'projB');
+    answer = {status: 502, body: undefined};
+    out.noJson = await setWindowMcpScope(win, 'projB');
+    answer = 'throw';
+    out.thrown = await setWindowMcpScope(win, 'projB');
+    out.afterFail = sessions.get('h:9').mcp_scope;
+    out.noHost = await setWindowMcpScope({id: 'x:1', sid: '1', hostId: 'x'}, 'a');
+    out.posts = posts; out.notices = notices; out.labels = labels;
+    out.calls = calls;
+    process.stdout.write(JSON.stringify(out) + '\n');
+})();
+""")
+    assert r["set"] is True and r["afterSet"] == "projA"
+    assert r["cleared"] is True and r["afterClear"] is None
+    assert [p["body"] for p in r["posts"]] == [
+        {"id": "9", "scope": "projA"}, {"id": "9", "scope": None},
+        {"id": "9", "scope": "projB"}, {"id": "9", "scope": "projB"},
+        {"id": "9", "scope": "projB"}]
+    assert {(p["path"], p["method"]) for p in r["posts"]} == {
+        ("/session/mcp", "POST")}
+    assert r["refused"] is False and r["noJson"] is False
+    assert r["thrown"] is False and r["afterFail"] == "keep"
+    assert r["notices"] == ["MCP scope not set: bad_scope",
+                            "MCP scope not set: HTTP 502",
+                            "MCP scope not set: the broker did not answer"]
+    assert r["labels"] == ["h:9", "btn", "h:9", "btn"], \
+        "only a stored tag repaints the chip and the robot"
+    assert r["noHost"] is False and r["calls"] == 5
+
+
+def test_the_mcp_scopes_capability_is_carried_into_the_catalog_record():
+    """#233: fetchModCatalog copies /info `mcp_scopes` onto the record the
+    taskbar and the menus read (hostMcpScopes, 78). Every record starts at
+    false (a record at all is a settled answer), and the copy counts only a
+    literal true."""
+    fetch = _fn237("81_js_control_panel.js",
+                   "async function fetchModCatalog(host)")
+    assert "admin: null, mcpScopes: false };" in fetch
+    assert "rec.mcpScopes = (j.mcp_scopes === true);" in fetch
+    assert "rec.mcpScopes = (j.mcp_scopes === true);" in INDEX_HTML
+    cap = _fn237("78_js_keybindings.js", "function hostMcpScopes(hostId)")
+    assert "return rec.mcpScopes === true;" in cap
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_scope_field_accepts_empty_or_a_valid_name(tmp_path):
+    """#233: mcpScopeInputOk is what a scope FIELD may hold: nothing (untag)
+    or a valid name, surrounding blanks ignored. Anything else is refused."""
+    fn = (_fn237("78_js_keybindings.js", "function validMcpScope(s)")
+          + _fn237("78_js_keybindings.js", "function mcpScopeInputOk(v)"))
+    r = _node237(tmp_path, fn + r"""
+const vals = ['', '   ', null, undefined, 'projA', '  projA ', 'a:b', '-a',
+              'a b', 'x'.repeat(65)];
+process.stdout.write(JSON.stringify(vals.map(mcpScopeInputOk)) + '\n');
+""")
+    assert r == [True, True, True, True, True, True,
+                 False, False, False, False]

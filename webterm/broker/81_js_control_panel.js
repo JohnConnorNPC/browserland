@@ -715,7 +715,7 @@
         // below: a render must never re-fetch after a failed fetch, or a sleeping
         // broker turns the section into a hot retry loop. Re-selecting the tab is
         // the retry, and it is a deliberate one.
-        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart, admin}
+        const modCatalogCache = new Map();      // hostId -> {state, mods, modsEnabled, policy, update, restart, admin, mcpScopes}
         const modCatalogFetching = new Set();   // hostIds with an in-flight GET
         // Fetch one host's catalog + pins. Resolves to nothing; the outcome lands
         // in modCatalogCache ALWAYS (a failure is a cached outcome, not an
@@ -733,9 +733,13 @@
             if (rec && rec.state === 'unreachable') modCatalogCache.delete(hostId);
         }
         async function fetchModCatalog(host) {
+            // mcpScopes starts FALSE where admin starts null. Having a record
+            // at all is what makes the capability "known" to hostMcpScopes
+            // (78), so every record, a failed read's included, is a settled
+            // answer and must say no; null there means "no record yet".
             const rec = { state: 'unreachable', mods: [], modsEnabled: true,
                           policy: {}, update: null, restart: null,
-                          admin: null };
+                          admin: null, mcpScopes: false };
             try {
                 const r = await hostFetch(host, '/info', { cache: 'no-store' });
                 if (r.status === 401 || r.status === 403) {
@@ -743,6 +747,13 @@
                 } else if (r.ok) {
                     let j = null;
                     try { j = await r.json(); } catch (_) { j = null; }
+                    // #233: whether that broker stores each window's MCP scope
+                    // and raw mode override itself (/info `mcp_scopes`, #229).
+                    // Not tied to `mods`: it answers for the MCP surface, not the
+                    // catalog. Only a literal true counts.
+                    if (j && typeof j === 'object') {
+                        rec.mcpScopes = (j.mcp_scopes === true);
+                    }
                     if (j && typeof j === 'object' && Array.isArray(j.mods)) {
                         rec.mods = j.mods;
                         rec.modsEnabled = (j.mods_enabled !== false);

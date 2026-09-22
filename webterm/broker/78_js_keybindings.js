@@ -311,6 +311,121 @@
             });
         }
 
+        // ---- MCP scopes (#233, umbrella #237) -------------------------------
+        // A window's scope tag decides which MCP clients see it. The BROKER owns
+        // it: the tag lives in its per-window store, rides /sessions as
+        // mcp_scope, and changes only through POST /session/mcp. Unlike the
+        // mode, nothing here pins it in the browser.
+        //
+        // The broker's own grammar (webterm.protocol SCOPE_RE, a fullmatch).
+        function validMcpScope(s) {
+            return typeof s === 'string'
+                && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s);
+        }
+        // What a scope FIELD may hold: a valid name, or nothing at all (which
+        // untags the window). The one predicate both the menu's `Set scope...`
+        // prompt and the robot popover's field check, so the two cannot
+        // disagree about the untag-by-empty rule.
+        function mcpScopeInputOk(v) {
+            const s = String(v == null ? '' : v).trim();
+            return s === '' || validMcpScope(s);
+        }
+        // Does this host's broker advertise /info `mcp_scopes` (#229)? Three
+        // answers, and every caller must tell them apart:
+        //   true  - it does: it persists each window's scope and raw mode
+        //           override itself, so the scope UI shows and the browser's
+        //           mode re-assert stands down (75)
+        //   false - a SETTLED answer without it: an older build, or an /info
+        //           that failed (unreachable, unauthorized, unsupported)
+        //   null  - not known yet: the serving broker's boot /info is still in
+        //           flight, or no record of that peer's /info exists
+        // It never fetches. The serving broker's answer is localInfo()'s memo
+        // (86_js_mod_loader.js), keyed on the promise in localInfo._p so a
+        // localInfo(true) refetch is read again; a peer's is the Control
+        // Panel's modCatalogCache record (81, fetchModCatalog), which the
+        // taskbar poll primes (75). Only a literal `true` counts.
+        function hostMcpScopes(hostId) {
+            if (hostId === 'local') {
+                const m = hostMcpScopes;
+                const p = localInfo._p;
+                if (!p) return null;
+                if (m._p !== p) {
+                    m._p = p;
+                    m._local = null;
+                    p.then(function (j) {
+                        if (m._p === p) m._local = !!(j && j.mcp_scopes === true);
+                    }, function () {
+                        if (m._p === p) m._local = false;
+                    });
+                }
+                return m._local;
+            }
+            const rec = modCatalogCache.get(hostId);
+            if (!rec) return null;
+            return rec.mcpScopes === true;
+        }
+        // The scope names worth offering for a window on hostId: every tag on
+        // this host's polled sessions, plus the stored rows' tags from its cached
+        // GET /mcp/config (`known_scopes`, #230; cached once the Control Panel's
+        // MCP section has read it). Valid names only (a peer is not trusted to
+        // shape the picker), de-duplicated, sorted.
+        function knownScopes(hostId) {
+            const seen = new Set();
+            for (const s of sessions.values()) {
+                if (s && s.hostId === hostId && validMcpScope(s.mcp_scope)) {
+                    seen.add(s.mcp_scope);
+                }
+            }
+            const cfg = mcpConfigCache.get(hostId);
+            if (cfg && Array.isArray(cfg.known_scopes)) {
+                for (const k of cfg.known_scopes) {
+                    if (validMcpScope(k)) seen.add(k);
+                }
+            }
+            return Array.from(seen).sort();
+        }
+        // Tag a window (or untag it: '' / null) on its own broker. POSTs the
+        // BARE wire id and `scope` alone, so the mode override is untouched. On
+        // success the cached session adopts the BROKER's answer (its canonical
+        // form: an empty tag is null), so the chip and the robot's title repaint
+        // before the next poll. A refusal is said out loud: this is a click, and
+        // a silent failure would read as success. Resolves true once the broker
+        // has stored the tag.
+        function setWindowMcpScope(win, scope) {
+            const host = hostById(win.hostId);
+            if (!host) return Promise.resolve(false);
+            // Site-owned deadline, as setWindowMcpMode's: freed only once the
+            // json() read has settled.
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+            return hostFetch(host, '/session/mcp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: win.sid, scope: scope || null }),
+                signal: ctrl.signal,
+                timeoutMs: 0,
+            }).then(r => r.json().catch(() => ({ ok: false,
+                                                 error: 'HTTP ' + r.status })))
+            .then(j => {
+                if (!(j && j.ok)) {
+                    showNotice('MCP scope not set: '
+                        + ((j && j.error) ? j.error : 'no answer'));
+                    return false;
+                }
+                const sess = sessions.get(win.id);
+                if (sess) {
+                    sess.mcp_scope = (typeof j.scope === 'string' && j.scope)
+                        ? j.scope : null;
+                }
+                updateTaskbarLabel(win.id);
+                if (win.refreshMcpBtn) win.refreshMcpBtn();
+                return true;
+            }).catch(() => {
+                showNotice('MCP scope not set: the broker did not answer');
+                return false;
+            }).finally(() => clearTimeout(timer));
+        }
+
         // POST /session/kill to one host record and normalize the result. A
         // network/CORS throw becomes status 0; a 409 session_gone counts as
         // success (the kill raced the agent's ACK). Shared by terminateWindow's
