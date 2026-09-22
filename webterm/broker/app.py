@@ -6530,9 +6530,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         # fields cleared is gone. A same-id replacement gets nothing (for pid
         # 0 who holds the id is unknowable; the row is on disk either way).
         live = app.ctx.registry.get(wid)
-        if live is not None and not store.reapply(live) and live is entry:
-            entry.mcp_scope = scope
-            entry.mcp_mode = mode
+        applied = live is not None and store.reapply(live)
+        if not applied and live is entry:
+            live.mcp_scope = scope
+            live.mcp_mode = mode
         return sanic_json({"ok": True, "id": wid, "mode": mode,
                            "scope": scope})
 
