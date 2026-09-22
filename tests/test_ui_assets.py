@@ -30896,6 +30896,8 @@ function press(target) {
 process.stdout.write(JSON.stringify({
     registered: captured.map(c => [c.t, c.cap]),
     field: press(el('mcp-scope-input')),
+    // the Control Panel's #set-mcp-scope carries the class outside any popover
+    controlPanelField: press({ id: 'set-mcp-scope', classList: { contains: c => c === 'mcp-scope-input' } }),
     elsewhere: press(el('xterm-helper-textarea')),
     noTarget: press(null),
 }) + '\n');
@@ -30903,6 +30905,7 @@ process.stdout.write(JSON.stringify({
     assert r["registered"] == [["keydown", True]], \
         "the dispatcher is a capture listener: that is why it needs the bail"
     assert r["field"] == {"ran": 0, "pd": False, "sp": False}
+    assert r["controlPanelField"] == {"ran": 0, "pd": False, "sp": False}
     assert r["elsewhere"] == {"ran": 1, "pd": True, "sp": True}
     assert r["noTarget"] == {"ran": 1, "pd": True, "sp": True}
 
@@ -31082,7 +31085,8 @@ def test_the_copy_mcp_json_row_is_wired():
     body = _src237("40_body.html")
     mcp = body[body.index('<div class="set-title">MCP access</div>'):]
     mcp = mcp[:mcp.index("<!-- #157:")]
-    assert re.search(r'<input type="text" id="set-mcp-scope" maxlength="64"\s+'
+    assert re.search(r'<input type="text" id="set-mcp-scope" '
+                     r'class="mcp-scope-input" maxlength="64"\s+'
                      r'placeholder="\(none: sees everything\)"', mcp)
     assert '<button type="button" id="set-mcp-copy-json" disabled>' \
            'Copy .mcp.json</button>' in mcp
@@ -31092,8 +31096,12 @@ def test_the_copy_mcp_json_row_is_wired():
                   "<code>PYTHONPATH</code>", "<code>url</code>",
                   "for a client on another machine"):
         assert words in hint, f"the hint must say {words!r}"
+    # the dispatcher's field bail keys on the class, so this field needs it too
+    assert re.search(r'<input type="text" id="set-mcp-scope" '
+                     r'class="mcp-scope-input"', mcp)
     cp = _src237("81_js_control_panel.js")
     assert "document.getElementById('set-mcp-scope')" in cp
+    assert "if (setMcpCopyJson && setMcpScopeEl && setMcpCopyErr) {" in cp
     assert "document.getElementById('set-mcp-copy-json')" in cp
     render = _fn237("81_js_control_panel.js", "function renderMcpConfig()")
     assert "if (setMcpCopyJson) setMcpCopyJson.disabled = true;" in render

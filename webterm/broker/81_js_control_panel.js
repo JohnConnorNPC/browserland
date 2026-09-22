@@ -709,7 +709,7 @@
                 buttons: [{ label: 'Close', value: true, primary: true }],
             });
         }
-        if (setMcpCopyJson) {
+        if (setMcpCopyJson && setMcpScopeEl && setMcpCopyErr) {
             const copyLabel = setMcpCopyJson.textContent;
             let copyTimer = null;
             const flashCopy = (text) => {

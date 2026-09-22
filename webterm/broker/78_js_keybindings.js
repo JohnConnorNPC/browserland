@@ -216,10 +216,12 @@
             return parts.join('+');
         }
 
-        // #233: is this keydown typed into the robot popover's scope field
-        // (65)? That field owns its keys. The dispatcher below listens in
-        // CAPTURE, ahead of the popover's own stopPropagation, so without this
-        // a bound combo pressed mid-edit is swallowed and runs its action.
+        // #233: is this keydown typed into an MCP scope field (the robot
+        // popover's, 65, or the Control Panel's #set-mcp-scope, 40: both carry
+        // .mcp-scope-input)? Such a field owns its keys. The dispatcher below
+        // listens in CAPTURE, ahead of the popover's own stopPropagation, so
+        // without this a bound combo pressed mid-edit is swallowed and runs
+        // its action.
         function keyInMcpScopeField(e) {
             const t = e && e.target;
             return !!(t && t.classList && t.classList.contains('mcp-scope-input'));
