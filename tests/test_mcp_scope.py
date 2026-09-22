@@ -37,6 +37,16 @@ the correlated round-trips and records every frame it was sent. It pins:
 * the header's CORS and caching surface: the preflight allows it with no
   admin realm configured, and every /mcp/* answer (only those) names it in
   Vary.
+
+SESSION section (#229): POST /session/mcp, the browser-realm setter, driven
+over HTTP against windows registered through the real hook. It pins the body
+rules (absent key vs explicit null, the error codes and their order), that
+every change is ONE counted store write for the entry's pid and host that
+lands before the response and before the live entry changes, the re-apply
+onto whatever entry holds the id after the write (a hello can land mid-write:
+those cells POST on the test's own loop through ``app.asgi_client``), and the
+pid-0 rules (both fields in every write, the direct set only on the entry
+that was validated).
 """
 
 from __future__ import annotations
@@ -63,7 +73,7 @@ from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         McpWindowStore)
 from webterm.broker.registry import WindowEntry
 
-from .auth_helpers import TEST_TOKEN, authed
+from .auth_helpers import TEST_TOKEN, authed, with_token
 
 T = 2_000_000_000.0            # an epoch-shaped wall clock reading
 DAY = 86400.0
@@ -364,14 +374,50 @@ def test_set_never_merges_on_an_unknown_pid_zero():
 
 
 def test_set_merges_into_a_pre_spawn_row_and_records_the_identity():
-    """#228: a pre-spawn row (null pid/host) is compatible with any producer:
-    the next write merges into it and records the identity passed."""
+    """#228: a pre-spawn row (null pid/host) is compatible with any producer
+    whose pid is known: the next write merges into it and records the
+    identity passed."""
     store = McpWindowStore()
     store.set(5, scope="teamA", now=T)
     assert store.get(5) == _row(scope="teamA", seen=T)
     assert store.set(5, mode="read", pid=77, host="h", now=T + 1) is True
     assert store.get(5) == _row(scope="teamA", mode="read", pid=77, host="h",
                                 seen=T + 1)
+
+
+def test_set_never_merges_a_pid_zero_write_into_a_pre_spawn_row():
+    """#229: a pid-0 write REPLACES even a pre-spawn row. Merging would stamp
+    pid 0 onto the null pid, and a row with pid 0 is claimed by no hello, so
+    the launch's tag would be lost for good; replacing keeps the rule that
+    each write for a pid-0 producer replaces its row."""
+    store = McpWindowStore()
+    store.set(5, scope="teamA", mode="readwrite", now=T)
+    assert store.set(5, mode="read", pid=0, host="h", now=T + 1) is True
+    assert store.get(5) == _row(mode="read", pid=0, host="h", seen=T + 1)
+
+
+@pytest.mark.parametrize("row,pid,host,merges", [
+    (None, 77, "h", False),                                 # no row
+    (_row(scope="a", pid=77, host="h"), 77, "h", True),     # same producer
+    (_row(scope="a", pid=77, host="h"), 78, "h", False),    # other pid
+    (_row(scope="a", pid=77, host="h"), 77, "g", False),    # other host
+    (_row(scope="a", pid=0, host="h"), 0, "h", False),      # pid 0 == 0
+    (_row(scope="a"), 77, "h", True),                       # pre-spawn row
+    (_row(scope="a"), 0, "h", False),                       # pid 0 on it
+    (_row(scope="a"), None, None, True),                    # pre-spawn again
+], ids=["no-row", "same", "other-pid", "other-host", "pid0-pid0",
+        "pre-spawn", "pre-spawn-pid0", "pre-spawn-null"])
+def test_merges_says_whether_set_keeps_the_other_field(tmp_path, row, pid,
+                                                       host, merges):
+    """#229: merges() is set()'s own predicate, asked by the /session/mcp
+    writer before it decides whether a write must carry both fields. Each
+    answer is checked against what set() then actually does with a mode-only
+    write: the scope survives exactly when merges() said True."""
+    store = _loaded(tmp_path, {} if row is None else {5: row})
+    assert store.merges(5, pid=pid, host=host) is merges
+    store.set(5, mode="read", pid=pid, host=host, now=T + 1)
+    kept = store.get(5)["scope"] == "a"
+    assert kept is merges
 
 
 def test_set_with_no_override_leaves_no_row():
@@ -2026,3 +2072,354 @@ def test_mcp_profiles_ignore_a_valid_scope(tmp_path, monkeypatch):
     _, scoped = _mcp(app, "/mcp/profiles", scope="a")
     assert plain.status == 200 and plain.json["profiles"]
     assert scoped.body == plain.body
+
+
+# =============================================================================
+# SESSION section: POST /session/mcp writes the per-window store (#229)
+# =============================================================================
+
+def _set_mcp(app, body):
+    """One POST /session/mcp through app.test_client (a server per request, so
+    the stop listener's flush has run by the time this returns)."""
+    _, resp = authed(app).post("/session/mcp", json=body)
+    return resp
+
+
+def _summary(app, wid):
+    _, resp = authed(app).get("/sessions")
+    assert resp.status == 200
+    return next(s for s in resp.json if s["id"] == wid)
+
+
+def _post_mid_write(app, gate, body, during):
+    """POST ``body`` on the test's own loop (app.asgi_client), run
+    ``during()`` once the store write is parked in the gate, then let it
+    land. Returns the response."""
+    url = with_token("/session/mcp", app.ctx.auth_token)
+
+    async def scenario():
+        post = asyncio.ensure_future(app.asgi_client.post(url, json=body))
+        try:
+            await gate.wait_entered()
+            await during()
+        finally:
+            gate.release.set()
+        _, resp = await post
+        return resp
+    return asyncio.run(scenario())
+
+
+def test_session_mcp_sets_the_mode_durably(tmp_path, monkeypatch, writes):
+    """#229: a mode lands in ONE store write carrying the RAW override and the
+    producer's pid and host, before the response; /sessions then reports it
+    and the answer names the raw mode and the (null) scope."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "mode": "read"})
+    assert (resp.status, resp.json) == (200, {"ok": True, "id": 5,
+                                              "mode": "read", "scope": None})
+    landed = _store_writes(writes, app)
+    assert len(landed) == 1
+    assert landed[0]["windows"]["5"] == _row(mode="read", pid=55,
+                                             host="hostA", seen=T)
+    assert _summary(app, 5)["mcp"] == "read"
+
+
+def test_a_scope_only_post_never_materialises_the_default(tmp_path,
+                                                          monkeypatch):
+    """#229: a scope-only change tags the window and leaves the row's mode
+    null: the broker default (read here) is inherited, never frozen in."""
+    app = _make_app(tmp_path, monkeypatch, mcp_default_mode="read")
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "scope": "teamA"})
+    assert resp.json == {"ok": True, "id": 5, "mode": None, "scope": "teamA"}
+    assert _disk(_sidecar(tmp_path))["5"] == _row(scope="teamA", pid=55,
+                                                  host="hostA", seen=T)
+    summary = _summary(app, 5)
+    assert (summary["mcp"], summary["mcp_scope"]) == ("read", "teamA")
+    assert app.ctx.registry.get(5).mcp_mode is None
+
+
+def test_both_fields_land_in_one_write(tmp_path, monkeypatch, writes):
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "mode": "readwrite", "scope": "teamA"})
+    assert resp.json == {"ok": True, "id": 5, "mode": "readwrite",
+                         "scope": "teamA"}
+    landed = _store_writes(writes, app)
+    assert len(landed) == 1
+    assert landed[0]["windows"]["5"] == _row(scope="teamA", mode="readwrite",
+                                             pid=55, host="hostA", seen=T)
+
+
+def test_mode_null_restores_inheritance(tmp_path, monkeypatch):
+    """#229: an explicit null clears the override: /sessions reports the
+    broker default again, the row keeps the scope with "mode": null."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _set_mcp(app, {"id": 5, "mode": "readwrite", "scope": "teamA"})
+    resp = _set_mcp(app, {"id": 5, "mode": None})
+    assert resp.json == {"ok": True, "id": 5, "mode": None, "scope": "teamA"}
+    assert _summary(app, 5)["mcp"] == "off"
+    assert _disk(_sidecar(tmp_path))["5"]["mode"] is None
+    assert _disk(_sidecar(tmp_path))["5"]["scope"] == "teamA"
+
+
+@pytest.mark.parametrize("cleared", [None, ""], ids=["null", "empty"])
+def test_a_null_or_empty_scope_untags_the_window(tmp_path, monkeypatch,
+                                                 cleared):
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _set_mcp(app, {"id": 5, "mode": "read", "scope": "teamA"})
+    resp = _set_mcp(app, {"id": 5, "scope": cleared})
+    assert resp.json == {"ok": True, "id": 5, "mode": "read", "scope": None}
+    assert app.ctx.registry.get(5).mcp_scope is None
+    assert _disk(_sidecar(tmp_path))["5"] == _row(mode="read", pid=55,
+                                                  host="hostA", seen=T)
+
+
+def test_clearing_the_last_field_deletes_the_row(tmp_path, monkeypatch):
+    """#229: with both fields null the row carries nothing and is deleted, so
+    no row is left to re-apply; the live entry is cleared directly."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _set_mcp(app, {"id": 5, "mode": "read"})
+    resp = _set_mcp(app, {"id": 5, "mode": None})
+    assert resp.json == {"ok": True, "id": 5, "mode": None, "scope": None}
+    assert _disk(_sidecar(tmp_path)) == {}
+    entry = app.ctx.registry.get(5)
+    assert (entry.mcp_mode, entry.mcp_scope) == (None, None)
+
+
+def test_an_absent_key_leaves_its_field_alone(tmp_path, monkeypatch):
+    """#229: a key LEFT OUT is not a null. A scope-only POST keeps the mode
+    in the row and on the entry, and a mode-only POST keeps the scope."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _set_mcp(app, {"id": 5, "mode": "read"})
+    _set_mcp(app, {"id": 5, "scope": "teamA"})
+    assert _disk(_sidecar(tmp_path))["5"]["mode"] == "read"
+    assert app.ctx.registry.get(5).mcp_mode == "read"
+    _set_mcp(app, {"id": 5, "mode": "readwrite"})
+    assert _disk(_sidecar(tmp_path))["5"]["scope"] == "teamA"
+    assert app.ctx.registry.get(5).mcp_scope == "teamA"
+
+
+@pytest.mark.parametrize("scope", BAD_SCOPES + [5, True, ["a"]])
+def test_a_bad_scope_is_refused_before_any_write(tmp_path, monkeypatch,
+                                                  writes, scope):
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "mode": "read", "scope": scope})
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_scope"})
+    assert _store_writes(writes, app) == []
+    entry = app.ctx.registry.get(5)
+    assert (entry.mcp_mode, entry.mcp_scope) == (None, None)
+
+
+@pytest.mark.parametrize("mode", ["bogus", 5, "READ", "", True])
+def test_a_bad_mode_is_refused_before_any_write(tmp_path, monkeypatch, writes,
+                                                mode):
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "mode": mode, "scope": "teamA"})
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_mode"})
+    assert _store_writes(writes, app) == []
+    assert app.ctx.registry.get(5).mcp_scope is None
+
+
+@pytest.mark.parametrize("body", [{"id": 5}, {"id": 5, "other": "read"}],
+                         ids=["id-only", "unknown-key"])
+def test_neither_key_keeps_the_old_bad_mode(tmp_path, monkeypatch, writes,
+                                            body):
+    """#229: a body with neither mode nor scope answers the pre-#229 error
+    for a missing mode, so an old caller sees the same code."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, body)
+    assert (resp.status, resp.json) == (400, {"ok": False,
+                                              "error": "bad_mode"})
+    assert _store_writes(writes, app) == []
+
+
+def test_a_bad_mode_outranks_a_bad_scope(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    resp = _set_mcp(app, {"id": 5, "mode": "bogus", "scope": "a b"})
+    assert resp.json == {"ok": False, "error": "bad_mode"}
+
+
+def test_an_unknown_window_is_404_and_writes_nothing(tmp_path, monkeypatch,
+                                                     writes):
+    app = _make_app(tmp_path, monkeypatch)
+    resp = _set_mcp(app, {"id": 5, "mode": "read", "scope": "teamA"})
+    assert (resp.status, resp.json["error"]) == (404, "unknown_session")
+    assert _store_writes(writes, app) == []
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_a_repeated_post_writes_once(tmp_path, monkeypatch, writes):
+    """#229: the browser re-POSTs the same mode (its re-assert loop); an
+    identical POST changes no row, so it writes nothing (counted calls, not
+    the file's mtime), and still answers ok."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    body = {"id": 5, "mode": "read", "scope": "teamA"}
+    first = _set_mcp(app, body)
+    second = _set_mcp(app, body)
+    assert first.json == second.json == {"ok": True, "id": 5, "mode": "read",
+                                         "scope": "teamA"}
+    assert len(_store_writes(writes, app)) == 1
+
+
+def test_the_sidecar_reflects_each_change_at_once(tmp_path, monkeypatch,
+                                                  writes):
+    """#229: each change is its own write, on disk when the response is, with
+    no wait on the coalesced ticker."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    steps = [({"mode": "read"}, ("read", None)),
+             ({"scope": "teamA"}, ("read", "teamA")),
+             ({"mode": "readwrite", "scope": "teamB"}, ("readwrite", "teamB")),
+             ({"scope": None}, ("readwrite", None))]
+    for n, (change, (mode, scope)) in enumerate(steps, 1):
+        _set_mcp(app, dict(change, id=5))
+        assert len(_store_writes(writes, app)) == n
+        row = _disk(_sidecar(tmp_path))["5"]
+        assert (row["mode"], row["scope"]) == (mode, scope)
+
+
+def test_the_row_is_written_for_the_entry_pid_and_host(tmp_path, monkeypatch,
+                                                       writes):
+    """#229: the POST's own write records the producer (asserted on that
+    write's payload: the stop flush later persists the hello's claim anyway),
+    so after a restart only a hello from that pid on that host gets it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55, host="hostA")
+    _set_mcp(app, {"id": 5, "mode": "read"})
+    first = _store_writes(writes, app)[0]["windows"]["5"]
+    assert (first["pid"], first["host"]) == (55, "hostA")
+    for pid, host, applied in ((56, "hostA", False), (55, "hostB", False),
+                               (55, "hostA", True)):
+        again = _make_app(tmp_path, monkeypatch)
+        _register(again, 5, pid, host=host)
+        mode = again.ctx.registry.get(5).mcp_mode
+        assert (mode == "read") is applied, (pid, host, mode)
+
+
+def test_a_failed_write_changes_nothing(tmp_path, monkeypatch, caplog):
+    """#229: memory never runs ahead of disk. A store write that raises
+    answers 500 write_failed; the live entry and the file are as before."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _set_mcp(app, {"id": 5, "mode": "read"})
+    before = _sidecar(tmp_path).read_bytes()
+    real = app_mod._write_state_atomic
+    store_path = app.ctx.mcp_windows_path
+
+    def failing(path, payload):
+        if Path(path) == store_path:
+            raise OSError("disk full")
+        return real(path, payload)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", failing)
+    with caplog.at_level(logging.ERROR, logger="webterm.broker.app"):
+        resp = _set_mcp(app, {"id": 5, "mode": "readwrite", "scope": "teamA"})
+    assert (resp.status, resp.json) == (500, {"ok": False,
+                                              "error": "write_failed"})
+    entry = app.ctx.registry.get(5)
+    assert (entry.mcp_mode, entry.mcp_scope) == ("read", None)
+    assert _sidecar(tmp_path).read_bytes() == before
+    assert any("/session/mcp" in r.getMessage() for r in caplog.records)
+
+
+def test_a_hello_landing_mid_write_gets_the_new_row(tmp_path, monkeypatch):
+    """#229: the same producer re-registers while the POST's write is in
+    flight (a reconnect over a half-open socket), so the entry holding the id
+    afterwards is a NEW object that got the pre-write row. The handler
+    re-applies onto whatever holds the id now, not the object it
+    validated."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    validated = app.ctx.registry.get(5)
+    gate = _Gate(monkeypatch, app)
+
+    async def reconnect():
+        await app.ctx.registry.register(_WS(), _hello(5, 55))
+
+    resp = _post_mid_write(app, gate, {"id": 5, "mode": "read"}, reconnect)
+    assert resp.status == 200
+    live = app.ctx.registry.get(5)
+    assert live is not validated
+    assert live.mcp_mode == "read"
+
+
+def test_a_pid_zero_window_keeps_both_fields(tmp_path, monkeypatch, writes):
+    """#229: a pid-0 producer's row is never re-applied and each of its
+    writes REPLACES the row, so each write must carry both fields (the one
+    left out comes from the live entry) and the entry is set directly."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 0)
+    _set_mcp(app, {"id": 5, "scope": "teamA"})
+    resp = _set_mcp(app, {"id": 5, "mode": "read"})
+    assert resp.json == {"ok": True, "id": 5, "mode": "read",
+                         "scope": "teamA"}
+    assert _store_writes(writes, app)[-1]["windows"]["5"] == _row(
+        scope="teamA", mode="read", pid=0, host="hostA", seen=T)
+    entry = app.ctx.registry.get(5)
+    assert (entry.mcp_mode, entry.mcp_scope) == ("read", "teamA")
+
+
+def test_a_pid_zero_write_replaces_a_pre_spawn_row(tmp_path, monkeypatch):
+    """#229: a pid-0 producer cannot claim a pre-spawn row, and its write
+    REPLACES that row rather than stamping pid 0 onto the wildcard: the
+    launch's scope does not leak into it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(5, scope="launched", mode="readwrite",
+                                  now=T))
+    _register(app, 5, 0)
+    assert app.ctx.registry.get(5).mcp_scope is None
+    resp = _set_mcp(app, {"id": 5, "mode": "read"})
+    assert resp.json == {"ok": True, "id": 5, "mode": "read", "scope": None}
+    assert _disk(_sidecar(tmp_path))["5"] == _row(mode="read", pid=0,
+                                                  host="hostA", seen=T)
+
+
+def test_a_same_id_replacement_mid_write_is_left_alone(tmp_path,
+                                                       monkeypatch):
+    """#229: for pid 0 nothing re-applies, so the handler sets the fields
+    directly, but ONLY on the entry it validated. Another pid-0 hello that
+    replaced it during the write could be anyone: it gets nothing, and the
+    row is on disk regardless."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 0)
+    gate = _Gate(monkeypatch, app)
+
+    async def replace():
+        await app.ctx.registry.register(_WS(), _hello(5, 0))
+
+    resp = _post_mid_write(app, gate, {"id": 5, "mode": "read"}, replace)
+    assert resp.status == 200
+    live = app.ctx.registry.get(5)
+    assert (live.mcp_mode, live.mcp_scope) == (None, None)
+    assert _disk(_sidecar(tmp_path))["5"]["mode"] == "read"
+
+
+def test_a_field_left_out_comes_from_the_row_when_it_merges(tmp_path,
+                                                            monkeypatch):
+    """#229: when the write merges into this producer's row, a field the body
+    left out is kept FROM THE ROW, read under the writer's lock, not from the
+    live entry, which can lag the row while another write is in flight. Built
+    here by writing the row without re-applying it."""
+    app = _make_app(tmp_path, monkeypatch)
+    _register(app, 5, 55)
+    _persist(app, lambda w: w.set(5, scope="teamA", pid=55, host="hostA",
+                                  now=T))
+    assert app.ctx.registry.get(5).mcp_scope is None     # the entry lags
+    resp = _set_mcp(app, {"id": 5, "mode": "read"})
+    assert resp.json == {"ok": True, "id": 5, "mode": "read",
+                         "scope": "teamA"}
+    assert _disk(_sidecar(tmp_path))["5"]["scope"] == "teamA"
+    assert app.ctx.registry.get(5).mcp_scope == "teamA"

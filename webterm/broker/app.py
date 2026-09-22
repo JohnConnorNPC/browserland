@@ -6459,14 +6459,15 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json(payload)
 
     async def _session_mcp(request: Request):
-        # Browser-facing per-window MCP-mode setter. Gated by the BROWSER
-        # auth_token (this is the UI editing policy), NOT the MCP token. Sets
-        # the in-memory per-window override only (it does not write the
-        # per-window store); None default = inherit the broker default. Resets
-        # on broker restart / agent relaunch, but a same-host, same-nonzero-pid
-        # reconnect over a half-open socket keeps it: that is the fallback
-        # carry-over in McpWindowStore.apply (mcp_windows.py), unless a stored
-        # row matches, which wins (test_a_matching_row_beats_the_fallback).
+        # Browser-facing per-window MCP setter (#229): a window's RAW mode
+        # override (null = inherit the broker default) and its scope (null or
+        # "" = untagged). Gated by the BROWSER auth_token (this is the UI
+        # editing policy), NOT the MCP token. Every change is DURABLE: it goes
+        # through the per-window store's one shared writer (mcp_windows.py)
+        # BEFORE the live entry changes, and the store re-applies the row
+        # whenever the same producer (same host, same nonzero pid) registers
+        # again, across a reconnect or a broker restart. Another producer on
+        # the id (a relaunch; OS window ids are reused) starts clean.
         err = _gated_auth_error(request, "/session/mcp")
         if err is not None:
             return err
@@ -6474,11 +6475,66 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         if resp is not None:
             return resp
         entry, body = resolved
-        mode = body.get("mode")
-        if mode not in MCP_MODES:
+        # A key that is ABSENT leaves that field alone while an explicit null
+        # clears it, so the test is `in body`, never body.get(). Everything
+        # is validated before the store is touched: mode first (a bad value,
+        # or neither key, keeps the pre-#229 bad_mode), then scope.
+        fields: Dict[str, Any] = {}
+        if "mode" in body:
+            if body["mode"] is not None and body["mode"] not in MCP_MODES:
+                return sanic_json({"ok": False, "error": "bad_mode"},
+                                  status=400)
+            fields["mode"] = body["mode"]
+        if "scope" in body:
+            scope = body["scope"]
+            if scope is not None and not (
+                    isinstance(scope, str)
+                    and (scope == "" or SCOPE_RE.fullmatch(scope))):
+                return sanic_json({"ok": False, "error": "bad_scope"},
+                                  status=400)
+            fields["scope"] = scope or None
+        if not fields:
             return sanic_json({"ok": False, "error": "bad_mode"}, status=400)
-        entry.mcp_mode = mode
-        return sanic_json({"ok": True, "id": entry.id, "mode": mode})
+        store = app.ctx.mcp_windows
+        wid, pid, host = entry.id, entry.pid, entry.host
+
+        def _write(work):
+            # ONE set() carrying BOTH fields for this producer. A field the
+            # body left out comes from the row when set() merges into it
+            # (read under the writer's lock, so two POSTs cannot lose each
+            # other's field), else from the live entry, i.e. what /sessions
+            # shows: a write that REPLACES the row (always, for pid 0) must
+            # not drop the other field. That value is the RAW override, so a
+            # scope-only change never materialises the default mode.
+            want = dict(fields)
+            if not work.merges(wid, pid=pid, host=host):
+                want.setdefault("scope", entry.mcp_scope)
+                want.setdefault("mode", entry.mcp_mode)
+            work.set(wid, pid=pid, host=host, now=work.clock(), **want)
+            row = work.get(wid)
+            return ((row["scope"], row["mode"]) if row is not None
+                    else (None, None))
+
+        try:
+            scope, mode = await app.ctx.persist_mcp_windows(_write)
+        except Exception:
+            LOGGER.exception("/session/mcp: persisting window %d's MCP "
+                             "settings failed; nothing changed", wid)
+            return sanic_json({"ok": False, "error": "write_failed"},
+                              status=500)
+        # Only now does the live entry change, re-applied from the row on
+        # whatever entry holds the id NOW: one that registered while the
+        # write was in flight got the pre-write row. When nothing applies,
+        # set the fields directly, but only on the very entry validated
+        # above: a pid-0 producer's row never passes the gate, and a row both
+        # fields cleared is gone. A same-id replacement gets nothing (for pid
+        # 0 who holds the id is unknowable; the row is on disk either way).
+        live = app.ctx.registry.get(wid)
+        if live is not None and not store.reapply(live) and live is entry:
+            entry.mcp_scope = scope
+            entry.mcp_mode = mode
+        return sanic_json({"ok": True, "id": wid, "mode": mode,
+                           "scope": scope})
 
     # ---- MCP HTTP interface (/mcp/*) -------------------------------------
     # Consumed by an EXTERNAL MCP server against a documented contract. Gated

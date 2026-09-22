@@ -331,6 +331,23 @@ class McpWindowStore:
 
     # -- mutation (inside create_app's writer only) ------------------------
 
+    def merges(self, wid: int, *, pid: Optional[int],
+               host: Optional[str]) -> bool:
+        """Whether :meth:`set` for the producer ``(pid, host)`` on ``wid``
+        would MERGE into the existing row (keep the fields it is not passed)
+        rather than replace it: there is a row, the pid passed is not 0, and
+        each of the row's pid/host is null or equal to the one passed.
+
+        A pid of 0 is unknown, as in same_producer, so a pid-0 write never
+        merges: not into another pid-0 row, and not into a pre-spawn row
+        either, whose null pid would otherwise take the 0 and stop being a
+        wildcard any hello can claim. The /session/mcp writer asks this
+        first, because a write that replaces must carry both fields."""
+        old = self._rows.get(wid)
+        return old is not None and pid != 0 and (
+            (old["pid"] is None or old["pid"] == pid)
+            and (old["host"] is None or old["host"] == host))
+
     def set(self, wid: int, *, scope: Any = _UNSET, mode: Any = _UNSET,
             pid: Optional[int] = None, host: Optional[str] = None,
             now: float) -> bool:
@@ -339,11 +356,11 @@ class McpWindowStore:
         changed. Call it only on the working copy inside create_app's shared
         writer, which makes it durable.
 
-        * The existing row is merged into when its identity is compatible
-          (each of its pid/host is null or equal to the one passed, and an
-          equal pid is not 0); otherwise the write REPLACES it and every
-          field not passed starts at None, so a reused id never inherits a
-          stale producer's override.
+        * The existing row is merged into when :meth:`merges` says so (each
+          of its pid/host is null or equal to the one passed, and the pid
+          passed is not 0); otherwise the write REPLACES it and every field
+          not passed starts at None, so a reused id never inherits a stale
+          producer's override.
         * The passed pid/host are recorded (None = not spawned yet: the first
           hello from the right producer claims it).
         * ``mode=None`` stores null (inherit). A field not passed is left as
@@ -352,8 +369,8 @@ class McpWindowStore:
           only block apply()'s fallback carry-over, so it is DELETED whatever
           its pid/host. No reservation-only row is needed: the launch writer
           (#231) always writes a scope. Only a NULL pid is a wildcard: a pid
-          of 0 is unknown, as in same_producer, so 0 == 0 never merges and
-          each write for a pid-0 producer replaces its row (such a row is
+          of 0 is unknown, as in same_producer, so a pid-0 write never merges
+          and each write for a pid-0 producer replaces its row (such a row is
           never re-applied at register anyway).
         * A no-op returns False and leaves the row as it was, ``seen``
           included; a change sets ``seen = now``.
@@ -370,10 +387,8 @@ class McpWindowStore:
         if not _valid_seen(now):
             raise ValueError("bad now")
         old = self._rows.get(wid)
-        compatible = old is not None and (
-            (old["pid"] is None or (old["pid"] == pid and pid != 0))
-            and (old["host"] is None or old["host"] == host))
-        base = old if compatible else {"scope": None, "mode": None}
+        base = (old if self.merges(wid, pid=pid, host=host)
+                else {"scope": None, "mode": None})
         new = {"scope": base["scope"] if scope is _UNSET else scope,
                "mode": base["mode"] if mode is _UNSET else mode,
                "pid": pid, "host": host}
