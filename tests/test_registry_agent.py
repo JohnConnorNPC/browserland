@@ -7,7 +7,8 @@ It also pins the registry's per-window MCP facts (#227): ``mcp_scope`` in
 summary(), the ``on_register`` hook's contract (args, ordering, lock, failure
 handling), and the host+pid-gated default carry-over of
 ``mcp_mode``/``mcp_scope`` across a same-id replacement when no hook is
-installed."""
+installed. #228 adds the one gate behind that carry-over, ``same_producer``,
+and the ``entries()`` snapshot."""
 
 from __future__ import annotations
 
@@ -19,8 +20,10 @@ import warnings
 
 import pytest
 
-from webterm.broker.registry import (BrokerRegistry, _whitelist_agent,
-                                      run_producer_session)
+import webterm.broker.registry as registry_mod
+from webterm.broker.registry import (BrokerRegistry, WindowEntry,
+                                      _whitelist_agent, run_producer_session,
+                                      same_producer)
 
 
 class FeedWS:
@@ -771,6 +774,77 @@ def test_reconnect_after_a_clean_close_starts_at_none():
 
         ws2.feed(None)
         await asyncio.wait_for(task2, 5)
+
+    asyncio.run(scenario())
+
+
+def _producer(pid, host):
+    return WindowEntry(1, pid, "t", 80, 24, None, host=host)
+
+
+@pytest.mark.parametrize("a,b,expected", [
+    (_producer(77, "hostA"), _producer(77, "hostA"), True),
+    (_producer(77, "hostA"), _producer(78, "hostA"), False),
+    (_producer(0, "hostA"), _producer(0, "hostA"), False),
+    (_producer(77, "hostA"), _producer(77, "hostB"), False),
+    (_producer(77, "HOSTA"), _producer(77, "hostA"), False),
+    ({"host": "hostA", "pid": 77}, _producer(77, "hostA"), True),
+    ({"host": "hostA", "pid": 77}, _producer(78, "hostA"), False),
+    ({"host": "hostA", "pid": None}, {"host": "hostA", "pid": None}, False),
+], ids=["same", "pid-changed", "pid-unknown", "host-changed", "host-case",
+        "row-vs-entry", "row-vs-entry-pid-changed", "row-pid-none"])
+def test_same_producer_truth_table(a, b, expected):
+    """#228: the one gate. Same byte-exact host AND the same known pid; 0 and
+    None are unknown and never match, not even each other. A mapping (a store
+    row) and an entry compare on the same two fields."""
+    assert same_producer(a, b) is expected
+
+
+def test_register_without_hook_consults_same_producer(monkeypatch):
+    """#228: register()'s no-hook carry-over asks registry.same_producer and
+    nothing else. A spy forced to False stops a same-id, same-host, same-pid
+    replacement from carrying, and it saw exactly (old, new) once. A copy of
+    the predicate forked back into register() would ignore the spy."""
+    calls = []
+
+    def spy(a, b):
+        calls.append((a, b))
+        return False
+
+    monkeypatch.setattr(registry_mod, "same_producer", spy)
+
+    async def scenario():
+        reg = BrokerRegistry()
+        first = await reg.register(FeedWS(), _hello(46, pid=77))
+        first.mcp_mode = "readwrite"
+        first.mcp_scope = "teamA"
+        second = await reg.register(FeedWS(), _hello(46, pid=77))
+        assert second.mcp_mode is None
+        assert second.mcp_scope is None
+        assert calls == [(first, second)]
+
+    asyncio.run(scenario())
+
+
+def test_entries_is_a_snapshot_list_of_the_live_entries():
+    """#228: entries() returns the live WindowEntry objects in a NEW list:
+    clearing it leaves the registry intact. Inside an on_register hook it
+    sees the replaced entry, never the one being registered."""
+    async def scenario():
+        reg = BrokerRegistry()
+        a = await reg.register(FeedWS(), _hello(47, pid=1))
+        b = await reg.register(FeedWS(), _hello(48, pid=2))
+        snap = reg.entries()
+        assert isinstance(snap, list)
+        assert set(map(id, snap)) == {id(a), id(b)}
+        snap.clear()
+        assert {e.id for e in reg.entries()} == {47, 48}
+        seen = []
+        reg.on_register = lambda new, old: seen.append(
+            [e for e in reg.entries() if e.id == 47])
+        c = await reg.register(FeedWS(), _hello(47, pid=1))
+        assert seen == [[a]]
+        assert c in reg.entries() and a not in reg.entries()
 
     asyncio.run(scenario())
 

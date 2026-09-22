@@ -24,7 +24,7 @@ import inspect
 import json
 import logging
 import socket
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set
 
 from .. import protocol
 
@@ -296,6 +296,32 @@ def _run_on_register(hook: Callable[[WindowEntry, Optional[WindowEntry]], None],
                          "registering it anyway", entry.id)
 
 
+def _producer_key(producer: Any):
+    """``(host, pid)`` off a WindowEntry-like object or a mapping (a store row
+    is a dict), so one gate serves both shapes."""
+    if isinstance(producer, Mapping):
+        return producer.get("host"), producer.get("pid")
+    return producer.host, producer.pid
+
+
+def same_producer(a: Any, b: Any) -> bool:
+    """Whether ``a`` and ``b`` report the same producer: the same host and the
+    same known pid. The ONE gate behind every MCP carry-over and re-apply:
+    register()'s no-hook carry-over below, and the per-window store's row
+    gate and fallback (mcp_windows.py), which call it as
+    ``registry.same_producer`` so the three can never drift apart.
+
+    Each side is a WindowEntry-like object (``.host``/``.pid``) or a mapping
+    with "host"/"pid" keys. The host match is byte-exact (register() has
+    already stripped it; no case folding). A pid of 0 or None is unknown and
+    never matches, not even another unknown pid. A collision guard, not
+    security: both halves are self-reported."""
+    a_host, a_pid = _producer_key(a)
+    b_host, b_pid = _producer_key(b)
+    return (a_pid is not None and a_pid != 0 and a_pid == b_pid
+            and a_host == b_host)
+
+
 class BrokerRegistry:
     """Process-wide map id -> WindowEntry, plus launch waiters."""
 
@@ -326,13 +352,14 @@ class BrokerRegistry:
         * It runs before ``old.fail_all_rpc`` and before old's subscribers get
           their 1012 close, so ``old`` still has live subscribers and pending
           RPCs: read it, don't drive it.
-        * Every sync registry read (get, __contains__, session_summaries,
-          live_cwds, is_pending) is lock-free and safe inside the hook, and sees
-          ``old`` or nothing, never ``new_entry``. register/deregister must not
-          be called: scheduling one with create_task from the hook is a bug, as
-          it runs after the lock and can delete the entry just inserted. The
-          sync add_waiter/remove_waiter must not be touched either (a pending
-          launcher spawn is parked on its waiter).
+        * Every sync registry read (get, __contains__, entries,
+          session_summaries, live_cwds, is_pending) is lock-free and safe
+          inside the hook, and sees ``old`` or nothing, never ``new_entry``.
+          register/deregister must not be called: scheduling one with
+          create_task from the hook is a bug, as it runs after the lock and can
+          delete the entry just inserted. The sync add_waiter/remove_waiter
+          must not be touched either (a pending launcher spawn is parked on its
+          waiter).
         * Any Exception raised by the hook, or by closing a coroutine it
           returned, is logged with the window id and swallowed, and the entry
           is inserted as the hook left it (a partial apply is not rolled
@@ -341,9 +368,9 @@ class BrokerRegistry:
 
         With NO hook installed, a same-id replacement carries ``mcp_mode`` and
         ``mcp_scope`` over from ``old`` when both hellos report the same host
-        and the same nonzero pid, so a producer reconnecting over a half-open
-        socket keeps its override (readwrite included) instead of falling back
-        to the broker default. The host+pid check guards against an accidental
+        and the same nonzero pid (``same_producer``), so a producer
+        reconnecting over a half-open socket keeps its override (readwrite
+        included) instead of falling back to the broker default. The host+pid check guards against an accidental
         id collision; it is not security (both are self-reported, and public on
         /sessions; the producer token is the boundary). An agent pinned with
         ``--window-id`` relaunches under the same id with a new shell pid, and
@@ -391,11 +418,9 @@ class BrokerRegistry:
             hook = self.on_register
             if hook is not None:
                 _run_on_register(hook, entry, old)
-            elif (old is not None and old.host == entry.host
-                  and old.pid == entry.pid != 0):
+            elif old is not None and same_producer(old, entry):
                 # No hook: keep the MCP facts across the replacement (see the
-                # docstring for the host+pid gate and its reach). The pid test
-                # is chained: old.pid == entry.pid and entry.pid != 0.
+                # docstring for the host+pid gate and its reach).
                 entry.mcp_mode = old.mcp_mode
                 entry.mcp_scope = old.mcp_scope
             self._entries[window_id] = entry
@@ -435,6 +460,13 @@ class BrokerRegistry:
 
     def __contains__(self, window_id: int) -> bool:
         return int(window_id) in self._entries
+
+    def entries(self) -> List[WindowEntry]:
+        """A snapshot list of the live entries (a new list; the entries are
+        the live objects). Lock-free and sync like get()/session_summaries(),
+        so it is safe inside an on_register hook, where it sees the replaced
+        entry or nothing, never the one being registered."""
+        return list(self._entries.values())
 
     def session_summaries(self, mcp_default: str = "off") -> List[Dict[str, Any]]:
         return [e.summary(mcp_default) for e in self._entries.values()]
