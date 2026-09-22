@@ -509,10 +509,13 @@ otherwise the broker-wide `default_mode`:
 * **`default_mode`** (global, default `off`) — applies to every window without an
   override; change it live in Control Panel → MCP access or `POST /mcp/config`.
 * **per-window override** — set from the window title-bar **MCP access** menu or
-  `POST /session/mcp`; **in-memory only**: it resets on broker restart or agent
-  relaunch, and carries over only when an agent reconnects while the broker
-  still holds its old connection (same window id, host and nonzero process
-  id).
+  `POST /session/mcp`, where `"mode": null` clears it so the window inherits
+  `default_mode` again. **Durable**: it is stored with the window's scope in
+  `webterm_mcp_windows.json` (see the admin surface below) and re-applied
+  whenever the same producer registers again, across an agent reconnect or a
+  broker restart: same window id, same host, same nonzero process id. An agent
+  relaunched under the same window id is a new process, so it starts back at
+  `default_mode`, and so does a reconnecting producer that reports process id 0.
 * **`allow_launch`** (global, default `false`) — independent flag gating
   `/mcp/launch` only.
 
@@ -729,11 +732,21 @@ While the env pins the token, `token`/`generate` edits are **ignored** (the live
 token stays the env value). Errors: `bad_json` (400), `bad_mode` (400),
 `bad_token` (400, non-string `token`).
 
-**`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"}`
-→ `{"ok":true,"id":<int>,"mode":<str>}`. Sets the **in-memory** per-window
-override (resets on restart / relaunch, except across a reconnect that replaces
-a still-registered entry whose host and nonzero pid match; see Access modes).
-`bad_mode` (400) on an invalid mode.
+**`POST /session/mcp`** — body `{"id": <int>, "mode": "off"|"read"|"readwrite"|null,
+"scope": <str>|null}`, both keys optional →
+`{"ok":true,"id":<int>,"mode":<str|null>,"scope":<str|null>}`. Sets the
+window's per-window mode override, its scope, or both; a key left out leaves
+that field as it was. `"mode": null` clears the override (the window inherits
+`default_mode`); `"scope": null` or `""` untags the window; a scope name matches
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. The response carries the stored values: `mode`
+is the RAW override (`null` while inheriting), never the effective mode. Every
+change is written to `webterm_mcp_windows.json` before it takes effect, so it
+survives a broker restart (see Access modes), and an identical repeat writes
+nothing. Errors, in the order they are checked: `bad_json` / `bad_id` (400),
+`unknown_session` (404, no live window with that id; nothing is stored),
+`bad_mode` (400, an invalid mode, or neither `mode` nor `scope` given),
+`bad_scope` (400), `write_failed` (500, the store could not be written; nothing
+changed).
 
 **Sidecar `webterm_mcp.json`** — the durable MCP config, written atomically next
 to the `/state` store (default `<state_path dir>/webterm_mcp.json`; override with
@@ -745,8 +758,36 @@ config `mcp_state_path`). Schema:
 ```
 
 `token` is `null` when the env pins it (the secret stays off disk). The file
-self-heals if hand-edited or truncated. **Per-window modes are not persisted** —
-only these broker-wide knobs are.
+self-heals if hand-edited or truncated. It holds only these broker-wide knobs:
+per-window modes and scopes live in `webterm_mcp_windows.json`, below.
+
+**Sidecar `webterm_mcp_windows.json`** — the durable per-window MCP store,
+written atomically next to the `/state` store (default
+`<state_path dir>/webterm_mcp_windows.json`; override with config
+`mcp_windows_path`). One row per window id:
+
+```json
+{"windows": {"<window id>": {"scope": "<str or null>", "mode": "<str or null>",
+                             "pid": 12345, "host": "<str or null>",
+                             "seen": 1790000000}}}
+```
+
+`mode` is the RAW override (`null` = inherit `default_mode`), and a row with
+neither a scope nor a mode is deleted. `pid` (an int or `null`) and `host` name
+the producer the row was written for. Window ids are reused (an OS window
+handle is recycled), so a row is re-applied only to a hello from the same host
+with the same nonzero pid; a `null` pid or host is a wildcard, claimed by the
+first hello with a nonzero pid that matches the rest. `seen` (epoch seconds)
+moves whenever a hello re-applies the row or a write changes it, and once a day
+while the window stays connected; the hello bumps reach disk through a
+coalesced writer, at most once a minute. Rows are never pruned at load, nor
+during the first 10 minutes after the broker starts (every window gets that
+long to reconnect). After that, each write drops rows whose window is not
+connected and that were not seen for 7 days, then, while more than 1000 rows
+remain, the oldest rows whose window is not connected (a connected window's
+row is never dropped). A missing, unreadable or wrong-shaped file starts the
+store empty and a malformed row is dropped, both logged; the next change
+rewrites the file.
 
 **Precedence.** Token: env `WEB_TERMINAL_MCP_TOKEN` > sidecar `token` > config
 `mcp_token`. Effective mode: per-window override > global `default_mode`.
