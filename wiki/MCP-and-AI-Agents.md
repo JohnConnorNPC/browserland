@@ -24,7 +24,7 @@ Every terminal window has a **robot button** that sets that window's MCP access 
 
 When an agent reads the screen or types into a terminal, that window's **robot icon briefly flashes**, so you can see at a glance when a harness is touching a session.
 
-You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below).
+You can also set per-window access from a window's right-click menu (see [[Context-Menus]]). New windows start in the host's global **default mode** (configured below), except a window a scoped MCP client launches: that one starts in **Read-write** unless the launch asks for another mode. A mode set on a window is stored by the broker and kept across broker restarts (see **Scopes** below).
 
 On a broker that supports scopes, the robot button also holds the window's **scope**: see **Scopes** below.
 
@@ -35,7 +35,7 @@ The robot button is specific to **terminals**. For the full list of window types
 MCP is configured per host in **Control Panel → Access → MCP access**:
 
 - **Enable MCP access** — the master switch for that host. While it is off, every MCP call is refused.
-- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with.
+- **default mode** — the per-window access (`off` / `read` / `readwrite`) that new terminals start with. A window a scoped MCP client launches starts in `readwrite` instead, unless the launch passes a `mode`, and a mode set on a window is kept across broker restarts (see **Scopes**).
 - **Allow MCP to launch terminals** — an optional, separate gate that lets agents create new terminals (not just drive existing ones).
 - **token** — a secret that authenticates the agent (set it yourself or hit **generate**). This is a **bearer secret distinct from the browser/UI password** you use to log in; granting MCP access does not hand out your login.
 
@@ -48,7 +48,7 @@ The in-app guide also shows a live **MCP status (this host)** entry — whether 
 Access is layered and **off by default** — you opt in at every level:
 
 - **Master enable is OFF by default.** While it is off, every MCP call returns `403 mcp_disabled`.
-- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows. `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
+- **Per-window mode** is `off` / `read` / `readwrite`, with a global `default_mode` for new windows (a scoped MCP launch starts in `readwrite` unless it passes a `mode`, and a mode set on a window survives broker restarts). `off` hides the window, `read` allows observation, and `readwrite` additionally allows typing.
 - **`allow_launch`** is a separate gate — turning MCP on does not, by itself, let agents spawn terminals.
 - **The MCP token** is a separate bearer secret from your browser auth/UI password.
 
@@ -61,7 +61,7 @@ Several MCP clients often share one broker: for example a "manager" and a "worke
 - **What a scope is.** A name of 1–64 characters from `A-Z a-z 0-9 . _ -`, starting with a letter or digit. A window carries at most one.
 - **Who sees what.** A client that declares a scope sees only the windows tagged with it, each still only as far as its access mode allows. A client that declares **no** scope sees every window its mode allows, tagged or not: that is the admin view, and any `.mcp.json` without a scope gets it. An untagged window is hidden from every scoped client.
 - **Where a client's scope is set.** On the MCP server: `--scope`, or the `BROWSERLAND_MCP_SCOPE` environment variable (the flag wins, and an empty value means no scope), or a `"scope"` on one host of `BROWSERLAND_MCP_HOSTS`. The easiest way is the **Copy .mcp.json** button (below).
-- **How a window gets its tag.** A window launched by a scoped client (`launch_terminal`) is tagged before it starts and comes up in **Read-write** unless the launch asks for another `mode`, so its launcher can drive it at once. A window you started yourself has no tag: give it one from its robot button (type a scope in the **Scope** field and press Enter; Escape cancels; an empty field removes the tag) or from its title-bar right-click menu (**MCP scope**, see [[Context-Menus]]). A scoped client cannot see or find an untagged window until you tag it; that is by design. Both controls appear only on a broker that supports scopes.
+- **How a window gets its tag.** A window launched by a scoped client (`launch_terminal`) is tagged before it starts and comes up in **Read-write** unless the launch asks for another `mode`, so its launcher can drive it at once. A window you started yourself has no tag: give it one from its robot button (type a scope in the **Scope** field and press Enter; clicking away from the popover or choosing a mode saves it too, and only Escape discards it; an empty field removes the tag, and a value that is not a valid scope when the popover closes is dropped without a notice) or from its title-bar right-click menu (**MCP scope**, see [[Context-Menus]]). A scoped client cannot see or find an untagged window until you tag it; that is by design. Both controls appear only on a broker that supports scopes.
 - **Seeing it.** A tagged window's taskbar button shows the scope as a small blue badge, its tooltip names it (`scope <name>`), and so does the robot button's tooltip.
 - **It is kept.** The broker stores each window's scope and its MCP access mode (in `webterm_mcp_windows.json`), so both survive a broker restart and an agent reconnect: the per-window mode no longer resets when the broker restarts. They are re-applied only to the same process on the same host: when a window id is reused by a different process, that window starts untagged at the default mode. A stored entry whose window is gone is dropped after 7 days.
 - **A convention, not security.** Every client holds the same MCP token and can declare any scope, or none. A scope keeps well-behaved clients out of each other's windows; it does not stop one that wants to look.

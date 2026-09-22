@@ -305,7 +305,9 @@ Access is layered and opt-in — nothing is reachable until you turn it on:
 - **Master enable** is **off by default**; while off, every `/mcp/*` call returns
   `403 mcp_disabled`.
 - **Per-window mode** is `off` / `read` / `readwrite`, with a global
-  `default_mode` for new windows. `off` hides a window entirely; `read` allows
+  `default_mode` for new windows (a scoped `launch_terminal` starts in
+  `readwrite` unless it passes a `mode`, and a mode set on a window survives
+  broker restarts). `off` hides a window entirely; `read` allows
   observation; `readwrite` additionally allows `send_input`.
 - **`allow_launch`** is a separate gate for `launch_terminal`.
 - The **MCP token** is a bearer secret distinct from the browser `auth_token`

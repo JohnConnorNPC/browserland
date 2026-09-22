@@ -290,7 +290,9 @@
                         Allow MCP to launch terminals</label>
                     <div class="set-hint">lets an external MCP server read (and,
                         per-window, type into) your terminals. Requires a token AND
-                        the enable box; new windows start in "default mode", and each
+                        the enable box; new windows start in "default mode" (one a
+                        scoped MCP client launches starts read-write; a mode set on
+                        a window survives broker restarts), and each
                         window's mode is overridable from its title-bar menu. Connect
                         URL: <code id="set-mcp-url">&mdash;</code></div>
                     <!-- #235: a ready-to-save .mcp.json for one MCP client

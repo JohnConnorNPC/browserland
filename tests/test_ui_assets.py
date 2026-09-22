@@ -31206,3 +31206,15 @@ def test_a_scoped_chip_lets_its_id_give_way():
     c123 = c123[:c123.index("*/")]
     assert "ONE EXCEPTION (#234)" in c123 and "the :has rule below" in c123
     assert sel in INDEX_HTML
+
+
+def test_the_mcp_hint_names_the_scoped_launch_exception():
+    """#236: the Control Panel's MCP hint says new windows start in "default
+    mode", which a scoped MCP launch does not, and a mode set on a window is
+    stored and survives a broker restart: the hint names both."""
+    body = _src237("40_body.html")
+    hint = body[body.index("lets an external MCP server read"):]
+    hint = re.sub(r"\s+", " ", hint[:hint.index("</div>")])
+    assert 'new windows start in "default mode" (one a scoped MCP client ' \
+           'launches starts read-write; a mode set on a window survives ' \
+           'broker restarts)' in hint

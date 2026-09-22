@@ -217,6 +217,7 @@ def _tr_paragraph(tr: str, head: str) -> str:
     start = tr.index(head)
     ends = [i for i in (tr.find("\n\n**`", start + 1), tr.find("\n### ", start))
             if i != -1]
+    assert ends, f"no paragraph end after {head!r} in the Technical Reference"
     return tr[start:min(ends)]
 
 
@@ -277,9 +278,42 @@ def test_the_user_pages_explain_scopes():
                   "Profiles are global", "`scope_unsupported`",
                   "An empty header value counts as no scope",
                   "keep `.mcp.json` out of git", "`PYTHONPATH`",
-                  "only to someone already signed in"):
+                  "only to someone already signed in",
+                  "only Escape discards it", "dropped without a notice"):
         assert words in section, f"the Scopes section must say {words!r}"
     menus = (WIKI / "Context-Menus.md").read_text(encoding="utf-8")
     assert "**MCP scope**" in menus and "**Set scope...**" in menus
     taskbar = (WIKI / "Taskbar.md").read_text(encoding="utf-8")
     assert "### MCP scope badge" in taskbar
+
+
+def test_every_default_mode_claim_names_the_scoped_launch():
+    """#236 (and #231's owner item): "new windows start in default mode" is
+    not true of a window a scoped MCP client launches (it starts in
+    `readwrite` unless the launch passes a `mode`), and a mode set on a window
+    is stored and survives broker restarts. Every such claim on the MCP page
+    and in the root README, read a paragraph or bullet at a time (the README
+    wraps), names both. The status entry that only
+    lists what the Help window reports is not a claim about new windows."""
+    claim = re.compile(r"new (windows|terminals) start|for new windows", re.I)
+    found = []
+    for rel in ("wiki/MCP-and-AI-Agents.md", "README.md"):
+        text = (REPO / rel).read_text(encoding="utf-8").replace("\r\n", "\n")
+        for chunk in re.split(r"\n\s*\n|\n(?=\s*[-*|] )", text):
+            flat = " ".join(chunk.split())
+            if claim.search(flat) and "MCP status (this host)" not in flat:
+                found.append((rel, flat))
+    assert len(found) >= 4, f"expected the known claims, found {len(found)}: unmeasured"
+    missing = [f"{rel}: {flat[:90]}" for rel, flat in found
+               if "scoped" not in flat or "restart" not in flat]
+    assert missing == []
+
+
+def test_tr_paragraph_says_when_a_heading_has_no_end():
+    """The paragraph slicer, both ways: a heading followed by another bold
+    route heading yields its own paragraph, and a heading with nothing after
+    it fails with a message naming it, not a bare ValueError from min([])."""
+    tr = "intro\n\n**`GET /a`** body\n\n**`GET /b`** tail"
+    assert _tr_paragraph(tr, "**`GET /a`**") == "**`GET /a`** body"
+    with pytest.raises(AssertionError, match="GET /b"):
+        _tr_paragraph(tr, "**`GET /b`**")
