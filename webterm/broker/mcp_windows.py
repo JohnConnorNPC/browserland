@@ -52,8 +52,8 @@ MCP_MODES = ("off", "read", "readwrite")
 SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 #: :meth:`McpWindowStore.prune` is a no-op until the PROCESS has been up this
-#: long, so a restart never deletes a row whose window simply has not
-#: reconnected yet.
+#: long, so a restart gives every window this long to reconnect before any
+#: row can be judged stale.
 PRUNE_GRACE_S = 600
 #: After the grace, a row whose window is not live and that has not been seen
 #: for longer than this is dropped.

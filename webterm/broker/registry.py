@@ -115,10 +115,11 @@ class WindowEntry:
         # mcp_mode and mcp_scope (below) are owned by the broker's per-window
         # store (mcp_windows.McpWindowStore), which create_app installs as
         # BrokerRegistry.on_register: when a window registers, a stored row
-        # whose host and pid match the hello re-applies both; failing that,
-        # both carry over from a replaced same-id entry reporting the same host
-        # and the same nonzero pid (registry.same_producer, the gate register()
-        # itself applies when no hook is installed). Everything else starts at
+        # whose host and pid match the hello (a null one is claimed by the
+        # first hello) re-applies both; failing that, both carry over from a
+        # replaced same-id entry reporting the same host and the same nonzero
+        # pid (registry.same_producer, the gate register() itself applies
+        # when no hook is installed). Everything else starts at
         # None — a broker restart with no matching row, a reconnect after the
         # old entry was already deregistered, a relaunch (launcher ids are
         # fresh per launch; an agent pinned with --window-id comes back under
@@ -310,8 +311,9 @@ def same_producer(a: Any, b: Any) -> bool:
     """Whether ``a`` and ``b`` report the same producer: the same host and the
     same known pid. The ONE gate behind every MCP carry-over and re-apply:
     register()'s no-hook carry-over below, and the per-window store's row
-    gate and fallback (mcp_windows.py), which call it as
-    ``registry.same_producer`` so the three can never drift apart.
+    gate, fallback carry-over and prune liveness test (mcp_windows.py),
+    which call it as ``registry.same_producer`` so none of them can drift
+    from the others.
 
     Each side is a WindowEntry-like object (``.host``/``.pid``) or a mapping
     with "host"/"pid" keys. The host match is byte-exact (register() has
