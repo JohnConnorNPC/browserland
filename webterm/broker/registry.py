@@ -112,14 +112,15 @@ class WindowEntry:
         # override. WindowEntry stays ignorant of app.ctx: the effective mode is
         # resolved by the handlers that know the default.
         #
-        # mcp_mode and mcp_scope (below) are owned by the broker's per-window
-        # store, re-applied through BrokerRegistry.on_register when a window
-        # registers. Until a hook is installed they live in memory: register()
-        # carries both across a same-id replacement whose hellos report the
-        # same nonzero pid, and everything else starts at None — a broker
-        # restart, a reconnect after the old entry was already deregistered, a
-        # relaunch (launcher ids are fresh per launch; an agent pinned with
-        # --window-id comes back under the same id with a new shell pid).
+        # mcp_mode and mcp_scope (below) will be owned by the broker's
+        # per-window store (#228), re-applied through BrokerRegistry.on_register
+        # when a window registers. Until a hook is installed they live in
+        # memory: register() carries both across a same-id replacement whose
+        # hellos report the same host and the same nonzero pid, and everything
+        # else starts at None — a broker restart, a reconnect after the old
+        # entry was already deregistered, a relaunch (launcher ids are fresh
+        # per launch; an agent pinned with --window-id comes back under the
+        # same id with a new shell pid).
         self.mcp_mode: Optional[str] = None
         # Per-window MCP scope (#237): the MCP-client partition this window
         # belongs to, or None = unscoped. A bare str|None fact: nothing here
@@ -267,24 +268,30 @@ class WindowEntry:
 
 def _run_on_register(hook: Callable[[WindowEntry, Optional[WindowEntry]], None],
                      entry: WindowEntry, old: Optional[WindowEntry]) -> None:
-    """Call an on_register hook under register()'s contract: an exception or an
-    accidental coroutine is logged with the window id, never raised and never
-    awaited."""
+    """Call an on_register hook under register()'s contract: an exception, a
+    returned coroutine or any other returned awaitable is logged with the
+    window id, never raised and never awaited."""
     try:
         result = hook(entry, old)
+        if inspect.iscoroutine(result):
+            # An ``async def`` hook handed back a coroutine without running
+            # its body. Close it (no "never awaited" warning) and say so:
+            # dropped silently it would pass for a hook with nothing to apply.
+            # Inside the try: a coroutine the hook itself started can raise
+            # from close(), and that must not fail the registration either.
+            result.close()
+            LOGGER.error("on_register hook for window %s returned a coroutine;"
+                         " it must be synchronous, so the registry closed it"
+                         " unawaited", entry.id)
+        elif inspect.isawaitable(result):
+            # A Task/Future/other awaitable: not ours to close or cancel (a
+            # Task is already scheduled), so only say it is ignored.
+            LOGGER.error("on_register hook for window %s returned an awaitable;"
+                         " it must be synchronous, and the registry never"
+                         " awaits it", entry.id)
     except Exception:
         LOGGER.exception("on_register hook failed for window %s; "
                          "registering it anyway", entry.id)
-        return
-    if inspect.isawaitable(result):
-        # An ``async def`` hook handed back a coroutine without running its
-        # body. Close it (no "never awaited" warning) and say so: dropped
-        # silently it would pass for a hook that had nothing to re-apply.
-        close = getattr(result, "close", None)
-        if close is not None:
-            close()
-        LOGGER.error("on_register hook for window %s returned a coroutine; "
-                     "it must be synchronous, and its body never ran", entry.id)
 
 
 class BrokerRegistry:
@@ -309,32 +316,38 @@ class BrokerRegistry:
         anything can observe the entry. ``old`` is the replaced same-id entry,
         or None on a fresh register. The contract:
 
-        * Synchronous and memory-only. It must not await (an ``async def`` hook
-          is closed unrun and logged, never awaited) and must not take any other
-          lock, the sidecar store's in particular: the store's durable writes
-          are its own separately scheduled job.
+        * Synchronous and memory-only. It must not await (an ``async def``
+          hook's coroutine is closed unawaited and logged; any other awaitable
+          it returns is logged and ignored) and must not take any other lock,
+          the sidecar store's in particular: the store's durable writes are its
+          own separately scheduled job.
         * It runs before ``old.fail_all_rpc`` and before old's subscribers get
           their 1012 close, so ``old`` still has live subscribers and pending
           RPCs: read it, don't drive it.
         * Every sync registry read (get, __contains__, session_summaries,
           live_cwds, is_pending) is lock-free and safe inside the hook, and sees
-          ``old`` or nothing, never ``new_entry``. register/deregister are async
-          and cannot be called from it.
+          ``old`` or nothing, never ``new_entry``. register/deregister must not
+          be called: scheduling one with create_task from the hook is a bug, as
+          it runs after the lock and can delete the entry just inserted. The
+          sync add_waiter/remove_waiter must not be touched either (a pending
+          launcher spawn is parked on its waiter).
         * Any exception is logged with the window id and swallowed: registration
           never fails because of the hook, and the entry is inserted as the hook
           left it (a partial apply is not rolled back).
 
         With NO hook installed, a same-id replacement carries ``mcp_mode`` and
-        ``mcp_scope`` over from ``old`` when both hellos report the same nonzero
-        pid, so a producer reconnecting over a half-open socket keeps its
-        override (readwrite included) instead of falling back to the broker
-        default. The pid check guards against an accidental id collision; it
-        is not security (the pid is self-reported and public on /sessions). An
-        agent pinned with ``--window-id`` relaunches under the same id with a
-        new shell pid and must not inherit the old shell's access, and a pid of
-        0 (unknown) never matches. The carry-over only reaches that half-open
-        window: a clean close or an exit frame deregisters the old entry first,
-        so that reconnect is a fresh register and starts at None. With a hook
+        ``mcp_scope`` over from ``old`` when both hellos report the same host
+        and the same nonzero pid, so a producer reconnecting over a half-open
+        socket keeps its override (readwrite included) instead of falling back
+        to the broker default. The host+pid check guards against an accidental
+        id collision; it is not security (both are self-reported, and public on
+        /sessions; the producer token is the boundary). An agent pinned with
+        ``--window-id`` relaunches under the same id with a new shell pid, and
+        two hosts pinning one id are different producers even with equal pids:
+        neither may inherit the other's access. A pid of 0 (unknown) never
+        matches. The carry-over only reaches that half-open window: a clean
+        close or an exit frame deregisters the old entry first, so that
+        reconnect is a fresh register and starts at None. With a hook
         installed there is no default carry-over: the hook (the per-window
         store) is the authority, so one that raises before applying anything
         leaves both at None.
@@ -371,9 +384,11 @@ class BrokerRegistry:
             hook = self.on_register
             if hook is not None:
                 _run_on_register(hook, entry, old)
-            elif old is not None and old.pid == entry.pid != 0:
+            elif (old is not None and old.host == entry.host
+                  and old.pid == entry.pid != 0):
                 # No hook: keep the MCP facts across the replacement (see the
-                # docstring for the pid gate and its reach).
+                # docstring for the host+pid gate and its reach). The pid test
+                # is chained: old.pid == entry.pid and entry.pid != 0.
                 entry.mcp_mode = old.mcp_mode
                 entry.mcp_scope = old.mcp_scope
             self._entries[window_id] = entry

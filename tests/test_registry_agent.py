@@ -56,6 +56,17 @@ class CaptureWS:
         pass
 
 
+class ClosingWS(CaptureWS):
+    """Attached browser that also records the close codes it is sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.closed = []
+
+    async def close(self, *a, code=None, **k):
+        self.closed.append(code)
+
+
 async def _wait(pred, tries=200):
     for _ in range(tries):
         if pred():
@@ -64,9 +75,12 @@ async def _wait(pred, tries=200):
     return False
 
 
-def _hello(window_id, pid=1):
-    return {"type": "hello", "window_id": window_id, "pid": pid, "title": "t",
-            "cols": 80, "rows": 24, "kind": "agent"}
+def _hello(window_id, pid=1, host=None):
+    hello = {"type": "hello", "window_id": window_id, "pid": pid, "title": "t",
+             "cols": 80, "rows": 24, "kind": "agent"}
+    if host is not None:
+        hello["host"] = host
+    return hello
 
 
 def _hook_records(caplog, window_id, text):
@@ -278,8 +292,8 @@ def test_flush_input_done_reply_resolves_pending_rpc():
 def test_summary_includes_pace_ms_default_zero():
     """#133: WindowEntry.summary() carries pace_ms (the per-terminal default
     send_keys pacing), defaulting to 0 (single-burst). It is EPHEMERAL
-    per-connection like app_cursor — set directly, not via a hello, and never
-    carried across a re-register (unlike mcp_mode/mcp_scope, #227)."""
+    per-connection like app_cursor — set directly, not via a hello. That a
+    re-register resets it is pinned by test_replacement_does_not_carry_pace_ms."""
     async def scenario():
         reg = BrokerRegistry()
         ws = FeedWS()
@@ -301,10 +315,7 @@ def test_summary_carries_mcp_scope_raw():
     way the effective ``mcp`` mode is. ``mcp`` and ``pace_ms`` are unchanged."""
     async def scenario():
         reg = BrokerRegistry()
-        ws = FeedWS()
-        entry = await reg.register(ws, {
-            "type": "hello", "window_id": 13, "pid": 1, "title": "t",
-            "cols": 80, "rows": 24, "kind": "agent"})
+        entry = await reg.register(FeedWS(), _hello(13))
         s = entry.summary()
         assert "mcp_scope" in s
         assert s["mcp_scope"] is None
@@ -324,9 +335,12 @@ def test_summary_carries_mcp_scope_raw():
     asyncio.run(scenario())
 
 
-def test_on_register_gets_old_entry_or_none():
+def test_on_register_gets_old_entry_or_none(caplog):
     """#227: the hook is called as (new_entry, old) — old is None on a fresh
-    register and the replaced entry (by identity) on a same-id re-register."""
+    register and the replaced entry (by identity) on a same-id re-register. A
+    well-behaved sync hook produces no on_register ERROR record at all."""
+    caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
+
     async def scenario():
         reg = BrokerRegistry()
         calls = []
@@ -342,6 +356,7 @@ def test_on_register_gets_old_entry_or_none():
         assert calls[1][1] is first
 
     asyncio.run(scenario())
+    assert _hook_records(caplog, 31, "") == []
 
 
 def test_on_register_runs_before_the_entry_is_visible():
@@ -379,7 +394,9 @@ def test_on_register_runs_under_the_registry_lock():
 def test_raising_on_register_hook_is_harmless(caplog):
     """#227: a hook that raises never fails registration — the entry is still
     inserted and visible, and the failure is logged (with its traceback) under
-    the window id."""
+    the window id. A hook that raises before applying anything leaves both MCP
+    facts at None: no fallback to the default carry-over, even on a same-host,
+    same-pid replacement whose old entry had them set."""
     caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
 
     def hook(new, old):
@@ -390,8 +407,12 @@ def test_raising_on_register_hook_is_harmless(caplog):
         reg.on_register = hook
         entry = await reg.register(FeedWS(), _hello(34))
         assert reg.get(34) is entry
+        entry.mcp_mode = "readwrite"
+        entry.mcp_scope = "teamA"
         again = await reg.register(FeedWS(), _hello(34))
         assert reg.get(34) is again
+        assert again.mcp_mode is None
+        assert again.mcp_scope is None
 
     asyncio.run(scenario())
     records = _hook_records(caplog, 34, "failed")
@@ -431,11 +452,141 @@ def test_async_on_register_hook_is_closed_and_logged(caplog):
     assert len(records) == 1
 
 
+def test_on_register_coroutine_whose_close_raises_is_harmless(caplog):
+    """#227: the coroutine's close() runs inside the hook's try. A coroutine the
+    hook itself started, and that ignores GeneratorExit, makes close() raise
+    RuntimeError — and that still must not fail the registration."""
+    caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
+    state = {"stubborn": True}
+
+    async def stubborn():
+        while True:
+            try:
+                await asyncio.sleep(0)
+            except GeneratorExit:
+                if state["stubborn"]:
+                    continue
+                raise
+
+    started = []
+
+    def hook(new, old):
+        coro = stubborn()
+        coro.send(None)                  # started: suspended at its first await
+        started.append(coro)
+        return coro
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        entry = await reg.register(FeedWS(), _hello(37))
+        assert reg.get(37) is entry
+
+    asyncio.run(scenario())
+    records = _hook_records(caplog, 37, "failed")
+    assert len(records) == 1
+    assert records[0].exc_info[0] is RuntimeError
+    # Let the coroutine finish so its finalizer has nothing left to raise.
+    state["stubborn"] = False
+    started[0].close()
+
+
+@pytest.mark.parametrize("kind", ["future", "await-object"])
+def test_on_register_other_awaitable_is_logged_not_closed(caplog, kind):
+    """#227: a returned awaitable that is not a coroutine (a Future, or any
+    object with __await__) is logged and ignored: the registry never awaits it,
+    never calls a close() on it (a raising close is never reached), and does
+    not claim a body 'never ran' — a Task's body may well run later."""
+    caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
+    closes = []
+    returned = []
+
+    class AwaitObject:
+        def __await__(self):
+            yield
+
+        def close(self):
+            closes.append(True)
+            raise RuntimeError("close must not be called")
+
+    def hook(new, old):
+        if kind == "future":
+            obj = asyncio.get_running_loop().create_future()
+        else:
+            obj = AwaitObject()
+        returned.append(obj)
+        return obj
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        entry = await reg.register(FeedWS(), _hello(38))
+        assert reg.get(38) is entry
+        if kind == "future":
+            assert not returned[0].done()    # never awaited, never resolved
+
+    asyncio.run(scenario())
+    assert closes == []
+    assert len(_hook_records(caplog, 38, "awaitable")) == 1
+    assert _hook_records(caplog, 38, "coroutine") == []
+    assert _hook_records(caplog, 38, "failed") == []
+
+
+def test_on_register_hook_is_the_authority_on_a_fresh_register():
+    """#227: what the hook applies is what gets registered. On a FRESH register
+    (old is None) a hook that sets mcp_mode/mcp_scope makes both visible through
+    reg.get and summary(); nothing after the hook resets them."""
+    def hook(new, old):
+        new.mcp_mode = "readwrite"
+        new.mcp_scope = "teamA"
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        await reg.register(FeedWS(), _hello(39))
+        entry = reg.get(39)
+        assert entry.mcp_mode == "readwrite"
+        assert entry.mcp_scope == "teamA"
+        s = entry.summary("off")
+        assert s["mcp"] == "readwrite"
+        assert s["mcp_scope"] == "teamA"
+
+    asyncio.run(scenario())
+
+
+def test_on_register_sees_the_old_entry_still_live():
+    """#227: the hook runs BEFORE the replaced entry is torn down — old still
+    holds its pending RPC and its subscriber has not had the 1012 close yet;
+    both happen after the hook, once the lock is released. (A 1012 close does
+    not remove the subscriber from old.subscribers, so the close is observed on
+    the socket itself.)"""
+    async def scenario():
+        reg = BrokerRegistry()
+        first = await reg.register(FeedWS(), _hello(36))
+        sub = ClosingWS()
+        first.add_subscriber(sub)
+        allocated = first.new_rpc("procs")
+        assert allocated is not None
+        _req, future = allocated
+        seen = []
+        reg.on_register = lambda new, old: seen.append(
+            (len(old.pending_rpc), future.done(), list(sub.closed)))
+        await reg.register(FeedWS(), _hello(36))
+        assert seen == [(1, False, [])]
+        # ...and the teardown did happen afterwards.
+        assert first.pending_rpc == {}
+        assert isinstance(future.exception(), ConnectionError)
+        assert sub.closed == [1012]
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("field,value", [("mcp_mode", "readwrite"),
                                          ("mcp_scope", "teamA")])
 def test_replacement_without_hook_carries_mcp_field(field, value):
     """#227: with no hook installed, a same-id re-register whose hello reports
-    the same nonzero pid carries mcp_mode and mcp_scope from the replaced entry.
+    the same host and the same nonzero pid carries mcp_mode and mcp_scope from
+    the replaced entry.
     Both fields are set on the old entry in every cell and each cell asserts
     only its own, so dropping either copy reds exactly that field's cell. The
     fresh-register arm is a sanity check only: the constructor defaults None."""
@@ -485,24 +636,30 @@ def test_replacement_does_not_carry_pace_ms():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("first_pid,second_pid", [(77, 78), (0, 0)],
-                         ids=["pid-changed", "pid-unknown"])
-def test_replacement_without_a_matching_pid_does_not_carry(first_pid,
-                                                           second_pid):
-    """#227: the default carry-over needs the SAME NONZERO pid. An agent pinned
-    with --window-id relaunches under the same id with a new shell pid and must
-    not inherit the old shell's mode/scope; two pid-less hellos (0 = unknown)
-    are no evidence of one producer. A collision guard, not security: the pid
-    is self-reported."""
+@pytest.mark.parametrize("first,second", [
+    ((77, "hostA"), (78, "hostA")),
+    ((0, "hostA"), (0, "hostA")),
+    ((77, "hostA"), (77, "hostB")),
+], ids=["pid-changed", "pid-unknown", "host-changed"])
+def test_replacement_without_a_matching_host_and_pid_does_not_carry(first,
+                                                                    second):
+    """#227: the default carry-over needs the SAME host and the SAME NONZERO pid.
+    An agent pinned with --window-id relaunches under the same id with a new
+    shell pid; two hosts pinning one id are different producers even with equal
+    pids; two pid-less hellos (0 = unknown) are no evidence of one producer.
+    None of them may inherit the old entry's mode/scope. A collision guard, not
+    security: host and pid are self-reported."""
     async def scenario():
         reg = BrokerRegistry()
-        first = await reg.register(FeedWS(), _hello(44, pid=first_pid))
-        first.mcp_mode = "readwrite"
-        first.mcp_scope = "teamA"
-        second = await reg.register(FeedWS(), _hello(44, pid=second_pid))
-        assert second is not first
-        assert second.mcp_mode is None
-        assert second.mcp_scope is None
+        old = await reg.register(FeedWS(),
+                                 _hello(44, pid=first[0], host=first[1]))
+        old.mcp_mode = "readwrite"
+        old.mcp_scope = "teamA"
+        new = await reg.register(FeedWS(),
+                                 _hello(44, pid=second[0], host=second[1]))
+        assert new is not old
+        assert new.mcp_mode is None
+        assert new.mcp_scope is None
 
     asyncio.run(scenario())
 
@@ -527,6 +684,7 @@ def test_half_open_reconnect_carry_survives_the_old_socket_closing():
         task2 = asyncio.create_task(run_producer_session(ws2, reg))
         assert await _wait(lambda: reg.get(51) is not first)
         second = reg.get(51)
+        assert second is not None                # the wait also passes on None
         assert second.mcp_mode == "readwrite"
 
         ws1.feed(None)                           # the stale socket closes
