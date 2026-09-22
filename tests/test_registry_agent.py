@@ -4,8 +4,9 @@ re-broadcast to attached browsers. The hello's optional 'agent' field seeds
 it; junk values collapse to "".
 
 It also pins the registry's per-window MCP facts (#227): ``mcp_scope`` in
-summary() and the ``on_register`` hook's contract (args, ordering, lock,
-failure handling)."""
+summary(), the ``on_register`` hook's contract (args, ordering, lock, failure
+handling), and the pid-gated default carry-over of ``mcp_mode``/``mcp_scope``
+across a same-id replacement when no hook is installed."""
 
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ import gc
 import json
 import logging
 import warnings
+
+import pytest
 
 from webterm.broker.registry import (BrokerRegistry, _whitelist_agent,
                                       run_producer_session)
@@ -275,7 +278,8 @@ def test_flush_input_done_reply_resolves_pending_rpc():
 def test_summary_includes_pace_ms_default_zero():
     """#133: WindowEntry.summary() carries pace_ms (the per-terminal default
     send_keys pacing), defaulting to 0 (single-burst). It is EPHEMERAL
-    per-connection like app_cursor/mcp_mode — set directly, not via a hello."""
+    per-connection like app_cursor — set directly, not via a hello, and never
+    carried across a re-register (unlike mcp_mode/mcp_scope, #227)."""
     async def scenario():
         reg = BrokerRegistry()
         ws = FeedWS()
@@ -425,6 +429,148 @@ def test_async_on_register_hook_is_closed_and_logged(caplog):
                 and "never awaited" in str(w.message)]
     records = _hook_records(caplog, 35, "coroutine")
     assert len(records) == 1
+
+
+@pytest.mark.parametrize("field,value", [("mcp_mode", "readwrite"),
+                                         ("mcp_scope", "teamA")])
+def test_replacement_without_hook_carries_mcp_field(field, value):
+    """#227: with no hook installed, a same-id re-register whose hello reports
+    the same nonzero pid carries mcp_mode and mcp_scope from the replaced entry.
+    Both fields are set on the old entry in every cell and each cell asserts
+    only its own, so dropping either copy reds exactly that field's cell. The
+    fresh-register arm is a sanity check only: the constructor defaults None."""
+    async def scenario():
+        reg = BrokerRegistry()
+        first = await reg.register(FeedWS(), _hello(41, pid=77))
+        assert getattr(first, field) is None
+        first.mcp_mode = "readwrite"
+        first.mcp_scope = "teamA"
+        second = await reg.register(FeedWS(), _hello(41, pid=77))
+        assert second is not first
+        assert reg.get(41) is second
+        assert getattr(second, field) == value
+
+    asyncio.run(scenario())
+
+
+def test_installed_hook_replaces_the_default_carry_over():
+    """#227: with a hook installed there is NO default carry-over — the hook
+    (the per-window store) is the authority, so a hook that applies nothing
+    leaves a same-id, same-pid replacement at None for both fields."""
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = lambda new, old: None
+        first = await reg.register(FeedWS(), _hello(42, pid=77))
+        first.mcp_mode = "readwrite"
+        first.mcp_scope = "teamA"
+        second = await reg.register(FeedWS(), _hello(42, pid=77))
+        assert second is not first
+        assert second.mcp_mode is None
+        assert second.mcp_scope is None
+
+    asyncio.run(scenario())
+
+
+def test_replacement_does_not_carry_pace_ms():
+    """#227: pace_ms stays EPHEMERAL — a same-id, same-pid replacement (the
+    path that carries mcp_mode/mcp_scope) still starts it at 0."""
+    async def scenario():
+        reg = BrokerRegistry()
+        first = await reg.register(FeedWS(), _hello(43, pid=77))
+        first.pace_ms = 60
+        second = await reg.register(FeedWS(), _hello(43, pid=77))
+        assert second is not first
+        assert second.pace_ms == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("first_pid,second_pid", [(77, 78), (0, 0)],
+                         ids=["pid-changed", "pid-unknown"])
+def test_replacement_without_a_matching_pid_does_not_carry(first_pid,
+                                                           second_pid):
+    """#227: the default carry-over needs the SAME NONZERO pid. An agent pinned
+    with --window-id relaunches under the same id with a new shell pid and must
+    not inherit the old shell's mode/scope; two pid-less hellos (0 = unknown)
+    are no evidence of one producer. A collision guard, not security: the pid
+    is self-reported."""
+    async def scenario():
+        reg = BrokerRegistry()
+        first = await reg.register(FeedWS(), _hello(44, pid=first_pid))
+        first.mcp_mode = "readwrite"
+        first.mcp_scope = "teamA"
+        second = await reg.register(FeedWS(), _hello(44, pid=second_pid))
+        assert second is not first
+        assert second.mcp_mode is None
+        assert second.mcp_scope is None
+
+    asyncio.run(scenario())
+
+
+def test_half_open_reconnect_carry_survives_the_old_socket_closing():
+    """#227 end to end through run_producer_session: a second hello (same id,
+    same pid) on a new socket while the first is still open replaces the entry
+    and carries mcp_mode. When the first socket finally closes, its `finally`
+    deregister must leave the NEW entry in place (deregister only removes the
+    entry it registered)."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws1 = FeedWS()
+        ws1.feed(json.dumps(_hello(51, pid=77)))
+        task1 = asyncio.create_task(run_producer_session(ws1, reg))
+        assert await _wait(lambda: reg.get(51) is not None)
+        first = reg.get(51)
+        first.mcp_mode = "readwrite"
+
+        ws2 = FeedWS()
+        ws2.feed(json.dumps(_hello(51, pid=77)))
+        task2 = asyncio.create_task(run_producer_session(ws2, reg))
+        assert await _wait(lambda: reg.get(51) is not first)
+        second = reg.get(51)
+        assert second.mcp_mode == "readwrite"
+
+        ws1.feed(None)                           # the stale socket closes
+        await asyncio.wait_for(task1, 5)
+        assert reg.get(51) is second
+        assert reg.get(51).mcp_mode == "readwrite"
+
+        ws2.feed(None)
+        await asyncio.wait_for(task2, 5)
+        assert reg.get(51) is None
+
+    asyncio.run(scenario())
+
+
+def test_reconnect_after_a_clean_close_starts_at_none():
+    """#227 control: the carry-over is confined to the half-open window. A
+    clean close deregisters the entry first, so the next hello on the same id
+    and pid is a fresh register and comes back with mcp_mode/mcp_scope None."""
+    async def scenario():
+        reg = BrokerRegistry()
+        ws1 = FeedWS()
+        ws1.feed(json.dumps(_hello(52, pid=77)))
+        task1 = asyncio.create_task(run_producer_session(ws1, reg))
+        assert await _wait(lambda: reg.get(52) is not None)
+        first = reg.get(52)
+        first.mcp_mode = "readwrite"
+        first.mcp_scope = "teamA"
+        ws1.feed(None)
+        await asyncio.wait_for(task1, 5)
+        assert reg.get(52) is None
+
+        ws2 = FeedWS()
+        ws2.feed(json.dumps(_hello(52, pid=77)))
+        task2 = asyncio.create_task(run_producer_session(ws2, reg))
+        assert await _wait(lambda: reg.get(52) is not None)
+        second = reg.get(52)
+        assert second is not first
+        assert second.mcp_mode is None
+        assert second.mcp_scope is None
+
+        ws2.feed(None)
+        await asyncio.wait_for(task2, 5)
+
+    asyncio.run(scenario())
 
 
 def test_whitelist_agent_helper():

@@ -109,15 +109,22 @@ class WindowEntry:
         self.app_cursor = False
         # Per-window MCP access mode: None = inherit the broker default
         # (mcp_cfg.default_mode), else an explicit "off"/"read"/"readwrite"
-        # override. In-memory only — resets to the default on broker restart
-        # or agent relaunch (the durable policy is the global default; this is
-        # a live per-window override). WindowEntry stays ignorant of app.ctx:
-        # the effective mode is resolved by the handlers that know the default.
+        # override. WindowEntry stays ignorant of app.ctx: the effective mode is
+        # resolved by the handlers that know the default.
+        #
+        # mcp_mode and mcp_scope (below) are owned by the broker's per-window
+        # store, re-applied through BrokerRegistry.on_register when a window
+        # registers. Until a hook is installed they live in memory: register()
+        # carries both across a same-id replacement whose hellos report the
+        # same nonzero pid, and everything else starts at None — a broker
+        # restart, a reconnect after the old entry was already deregistered, a
+        # relaunch (launcher ids are fresh per launch; an agent pinned with
+        # --window-id comes back under the same id with a new shell pid).
         self.mcp_mode: Optional[str] = None
         # Per-window MCP scope (#237): the MCP-client partition this window
         # belongs to, or None = unscoped. A bare str|None fact: nothing here
-        # validates or defaults it (summary() reports it raw), and it lives
-        # exactly as long as mcp_mode above.
+        # validates or defaults it (summary() reports it raw). Same ownership
+        # and lifetime as mcp_mode above.
         self.mcp_scope: Optional[str] = None
         # Per-terminal DEFAULT inter-key pacing for send_keys (#133): the ms an
         # MCP send_keys with no explicit delay_ms auto-paces at, so a frame-
@@ -125,8 +132,10 @@ class WindowEntry:
         # sets it, instead of every call passing delay_ms. 0 = single-burst (the
         # default, back-compat). Set via POST /mcp/pace and surfaced by
         # /mcp/terminals; the pacing itself is done client-side in the MCP
-        # server. EPHEMERAL per-connection like app_cursor/mcp_mode above — it
-        # resets if the agent reconnects (acceptable for v1; no persistence).
+        # server. EPHEMERAL per-connection like app_cursor above, and unlike
+        # mcp_mode/mcp_scope it has no store and is never carried over or
+        # re-applied: it resets whenever the window registers again
+        # (acceptable for v1; no persistence).
         self.pace_ms = 0
         self.subscribers: Set[Any] = set()
         # Parallel map subscriber-ws -> the browser clientId that opened it (""
@@ -314,6 +323,21 @@ class BrokerRegistry:
         * Any exception is logged with the window id and swallowed: registration
           never fails because of the hook, and the entry is inserted as the hook
           left it (a partial apply is not rolled back).
+
+        With NO hook installed, a same-id replacement carries ``mcp_mode`` and
+        ``mcp_scope`` over from ``old`` when both hellos report the same nonzero
+        pid, so a producer reconnecting over a half-open socket keeps its
+        override (readwrite included) instead of falling back to the broker
+        default. The pid check guards against an accidental id collision; it
+        is not security (the pid is self-reported and public on /sessions). An
+        agent pinned with ``--window-id`` relaunches under the same id with a
+        new shell pid and must not inherit the old shell's access, and a pid of
+        0 (unknown) never matches. The carry-over only reaches that half-open
+        window: a clean close or an exit frame deregisters the old entry first,
+        so that reconnect is a fresh register and starts at None. With a hook
+        installed there is no default carry-over: the hook (the per-window
+        store) is the authority, so one that raises before applying anything
+        leaves both at None.
         """
         window_id = int(hello.get("window_id"))
         pid = int(hello.get("pid", 0))
@@ -347,6 +371,11 @@ class BrokerRegistry:
             hook = self.on_register
             if hook is not None:
                 _run_on_register(hook, entry, old)
+            elif old is not None and old.pid == entry.pid != 0:
+                # No hook: keep the MCP facts across the replacement (see the
+                # docstring for the pid gate and its reach).
+                entry.mcp_mode = old.mcp_mode
+                entry.mcp_scope = old.mcp_scope
             self._entries[window_id] = entry
             waiter = self._waiters.get(window_id)
         if old is not None:
