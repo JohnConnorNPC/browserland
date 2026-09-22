@@ -6566,7 +6566,14 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return sanic_json({"ok": True,
                            "allow_launch": bool(cfg["allow_launch"]),
                            "default_mode": cfg["default_mode"],
-                           "version": app.ctx.version})
+                           "version": app.ctx.version,
+                           # #230: the scope this call declared, null when
+                           # unscoped. A client that declared one reads it
+                           # back here to fail closed: a broker predating
+                           # scopes, or a proxy that dropped the header,
+                           # answers without it or with null, and would
+                           # otherwise hand it the unscoped view silently.
+                           "scope": _mcp_scope(request)})
 
     async def _mcp_terminals(request: Request):
         err = _mcp_auth_error(request)
@@ -6593,7 +6600,8 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                          # `scope` on the MCP wire, as `mcp` is renamed `mode`
                          # here: /sessions keeps the `mcp_` prefix because its
                          # rows carry other domains' fields, while every
-                         # field here is already MCP's.
+                         # field here is already MCP's (/mcp/info echoes the
+                         # caller's declared scope under the same name).
                          "scope": s["mcp_scope"],
                          "version": version,
                          # DECCKM, cached from the agent's `mode` pushes (#23);

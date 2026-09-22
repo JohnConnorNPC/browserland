@@ -26,7 +26,7 @@ header), the order of the gate's checks, the empty value's unscoped meaning,
 the /mcp/terminals filter with its per-row ``scope`` field, and the
 _mcp_entry chokepoint: a window outside the declared scope answers byte for
 byte what a missing id answers, while an in-scope or unscoped caller still
-drives it.
+drives it; and /mcp/info's echo of the declared scope (null when unscoped).
 """
 
 from __future__ import annotations
@@ -1810,3 +1810,22 @@ def test_an_empty_scope_header_drives_an_untagged_window(tmp_path,
     _window(app, 5)
     _, resp = _mcp(app, path, scope="")
     assert resp.status == 200 and resp.json["ok"] is True
+
+
+@pytest.mark.parametrize("scope", ["a", "zzz"])
+def test_mcp_info_echoes_the_declared_scope(tmp_path, monkeypatch, scope):
+    """#230: /mcp/info echoes the declared scope whether or not any window
+    carries it (zzz: none does); it is what a client reads to fail closed."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, "/mcp/info", scope=scope)
+    assert resp.status == 200 and resp.json["scope"] == scope
+
+
+@pytest.mark.parametrize("scope", [_ABSENT, ""], ids=["absent", "empty"])
+def test_mcp_info_echoes_null_when_unscoped(tmp_path, monkeypatch, scope):
+    """#230: no header, or an empty one, echoes an explicit null."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _, resp = _mcp(app, "/mcp/info", scope=scope)
+    assert resp.status == 200
+    assert "scope" in resp.json and resp.json["scope"] is None
