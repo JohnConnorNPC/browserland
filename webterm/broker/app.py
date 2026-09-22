@@ -6497,8 +6497,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         entry, body = resolved
         # A key that is ABSENT leaves that field alone while an explicit null
         # clears it, so the test is `in body`, never body.get(). Everything
-        # is validated before the store is touched: mode first (a bad value,
-        # or neither key, keeps the pre-#229 bad_mode), then scope.
+        # is validated before the store is touched, in this order: neither
+        # key, then a bad mode (both keep the pre-#229 bad_mode), then a bad
+        # scope.
+        if "mode" not in body and "scope" not in body:
+            return sanic_json({"ok": False, "error": "bad_mode"}, status=400)
         fields: Dict[str, Any] = {}
         if "mode" in body:
             if body["mode"] is not None and body["mode"] not in MCP_MODES:
@@ -6513,8 +6516,6 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": "bad_scope"},
                                   status=400)
             fields["scope"] = scope or None
-        if not fields:
-            return sanic_json({"ok": False, "error": "bad_mode"}, status=400)
         store = app.ctx.mcp_windows
         wid, pid, host = entry.id, entry.pid, entry.host
 
