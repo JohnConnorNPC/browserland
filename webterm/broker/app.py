@@ -6927,11 +6927,18 @@ def create_app(config: Optional[Dict[str, Any]] = None,
         return bool(os.environ.get(auth.MCP_TOKEN_ENV))
 
     def _mcp_cfg_public(cfg: Dict[str, Any]) -> Dict[str, Any]:
+        # known_scopes (#230): every scope a window carries, live (any mode,
+        # off included) or only in the per-window store, sorted and
+        # deduplicated, for the Control Panel's scope picker. Nothing a
+        # caller merely declared on SCOPE_HEADER is ever recorded, so a
+        # client cannot add names to this list by asking for them.
         return {"ok": True, "enabled": bool(cfg["enabled"]),
                 "token": cfg["token"] or "",
                 "default_mode": cfg["default_mode"],
                 "allow_launch": bool(cfg["allow_launch"]),
-                "token_env_pinned": _mcp_token_env_pinned()}
+                "token_env_pinned": _mcp_token_env_pinned(),
+                "known_scopes": app.ctx.mcp_windows.known_scopes(
+                    app.ctx.registry.entries())}
 
     async def _mcp_config_get(request: Request):
         err = _gated_auth_error(request, "/mcp/config")
@@ -6996,6 +7003,10 @@ def create_app(config: Optional[Dict[str, Any]] = None,
                 return sanic_json({"ok": False, "error": str(exc)},
                                   status=500)
             app.ctx.mcp_cfg = cfg
+            # Built inside the mcp_lock region, which is safe:
+            # known_scopes() and registry.entries() are sync and lock-free,
+            # and the per-window store has a lock of its own this never
+            # touches.
             return sanic_json(_mcp_cfg_public(cfg))
 
         return await _shielded_region(app.ctx.mcp_lock, _locked_write)

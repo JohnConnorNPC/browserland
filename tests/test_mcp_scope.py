@@ -26,7 +26,9 @@ header), the order of the gate's checks, the empty value's unscoped meaning,
 the /mcp/terminals filter with its per-row ``scope`` field, and the
 _mcp_entry chokepoint: a window outside the declared scope answers byte for
 byte what a missing id answers, while an in-scope or unscoped caller still
-drives it; and /mcp/info's echo of the declared scope (null when unscoped).
+drives it; /mcp/info's echo of the declared scope (null when unscoped); and
+GET /mcp/config's known_scopes, which the header can never add to. The
+/mcp/config cells use the browser token (authed), that route's realm.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         McpWindowStore)
 from webterm.broker.registry import WindowEntry
 
-from .auth_helpers import TEST_TOKEN
+from .auth_helpers import TEST_TOKEN, authed
 
 T = 2_000_000_000.0            # an epoch-shaped wall clock reading
 DAY = 86400.0
@@ -1829,3 +1831,77 @@ def test_mcp_info_echoes_null_when_unscoped(tmp_path, monkeypatch, scope):
     _, resp = _mcp(app, "/mcp/info", scope=scope)
     assert resp.status == 200
     assert "scope" in resp.json and resp.json["scope"] is None
+
+
+# /mcp/config is the BROWSER realm (_gated_auth_error), so everything below
+# authenticates with the page token (authed: ?token=), never the MCP bearer:
+# a bearer call would 401 and pass a "the header is ignored" cell for the
+# wrong reason.
+
+def _seed_rows(app, **scopes):
+    """Per-window store rows ``{wid: scope}`` through the one shared writer,
+    for windows that are not live (the sidecar-only case)."""
+    def mutate(work):
+        for key, scope in scopes.items():
+            work.set(int(key[1:]), scope=scope, now=T)
+    _persist(app, mutate)
+
+
+def _config(app, headers=()):
+    _, resp = authed(app).get("/mcp/config", headers=list(headers))
+    assert resp.status == 200
+    return resp
+
+
+def test_known_scopes_unions_live_windows_and_stored_rows(tmp_path,
+                                                          monkeypatch):
+    """#230: GET /mcp/config's known_scopes is the sorted, deduplicated union
+    of the tags on live windows (an off one included: known means tagged,
+    not visible) and the scopes on stored rows whose window is gone."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _seed_rows(app, w900="side", w901="both")
+    _window(app, 5, scope="live")
+    _window(app, 6, scope="both")
+    _window(app, 7, scope="offscope", mcp_mode="off")
+    _window(app, 8)
+    assert app.ctx.registry.get(900) is None
+    assert app.ctx.mcp_windows.get(900)["scope"] == "side"
+    assert _config(app).json["known_scopes"] == ["both", "live", "offscope",
+                                                 "side"]
+
+
+def test_a_declared_scope_is_never_recorded(tmp_path, monkeypatch):
+    """#230: declaring a scope nobody carries, on the listing, the echo and a
+    chokepoint route, adds it nowhere: not to known_scopes, not to the
+    store, not to disk."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    assert _mcp(app, "/mcp/terminals", scope="zzz")[1].status == 200
+    assert _mcp(app, "/mcp/info", scope="zzz")[1].status == 200
+    assert _mcp(app, "/mcp/read", scope="zzz")[1].status == 404
+    assert _config(app).json["known_scopes"] == ["a"]
+    assert len(app.ctx.mcp_windows) == 0
+    assert not _sidecar(tmp_path).exists()
+
+
+def test_post_mcp_config_answers_the_same_known_scopes(tmp_path,
+                                                       monkeypatch):
+    """#230: POST /mcp/config still answers the GET shape, known_scopes
+    included."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _seed_rows(app, w900="side")
+    _window(app, 5, scope="a")
+    _, resp = authed(app).post("/mcp/config", json={"allow_launch": False})
+    assert resp.status == 200
+    assert resp.json["known_scopes"] == ["a", "side"]
+
+
+def test_mcp_config_ignores_the_scope_header(tmp_path, monkeypatch):
+    """#230: /mcp/config is not an MCP token route, and the browser never
+    sends the header: an invalid scope there changes nothing, byte for
+    byte."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    plain = _config(app)
+    with_bad_scope = _config(app, headers=[(SCOPE_HEADER, "a:b")])
+    assert with_bad_scope.body == plain.body
