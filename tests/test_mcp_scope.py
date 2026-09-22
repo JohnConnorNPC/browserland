@@ -7,22 +7,39 @@ load's protective parsing and its single log line, set()'s raw-override and
 identity rules, apply()'s row gate, claim and fallback, prune()'s grace, age,
 liveness and cap rules, the explicit schema, known_scopes() and the derived
 ``dirty``.
+
+CREATE_APP section: the store wired into a real broker app on the
+test_mcp_pace template (unique app names, everything under tmp_path) and
+driven through the one shared writer (``app.ctx.persist_mcp_windows``) and the
+real ``registry.register`` hook path. Writes are observed by wrapping
+``app._write_state_atomic`` and filtering on the store's own path; a blocking
+variant holds the first store write open so a hello can land mid-write. Only
+``app.test_client`` is used here, never ReusableClient: a ReusableClient
+app's listeners were measured firing during a later test's request.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+import os
 import re
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
+import webterm.broker.app as app_mod
 import webterm.broker.mcp_windows as mw
+import webterm.broker.registry as registry_mod
 from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
                                         PRUNE_GRACE_S, McpWindowStore)
 from webterm.broker.registry import WindowEntry
+
+from .auth_helpers import TEST_TOKEN
 
 T = 2_000_000_000.0            # an epoch-shaped wall clock reading
 DAY = 86400.0
@@ -495,3 +512,610 @@ def test_prune_cap_drops_the_oldest_non_live_rows_never_a_live_one(tmp_path):
     assert store.get(1) is not None
     assert store.get(2) is None and store.get(3) is None
     assert store.get(4) is not None
+
+
+# =============================================================================
+# CREATE_APP section: the store inside a real broker app
+# =============================================================================
+
+MCP_TOKEN = "scope-store-token"
+_app_seq = 0
+
+
+def _make_app(tmp_path, monkeypatch, *, uptime=0.0, now=T, **extra):
+    """A broker app on the test_mcp_pace template with the store's wall clock
+    pinned at ``now`` and its process uptime pinned at ``uptime`` (0 = just
+    booted, inside prune's grace)."""
+    global _app_seq
+    _app_seq += 1
+    monkeypatch.delenv("WEB_TERMINAL_TOKEN", raising=False)
+    monkeypatch.delenv("WEB_TERMINAL_MCP_TOKEN", raising=False)
+    cfg = {
+        "state_path": str(tmp_path / "webterm_state.json"),
+        "mcp_state_path": str(tmp_path / "webterm_mcp.json"),
+        "auth_token": TEST_TOKEN,
+        "mcp_enabled": True,
+        "mcp_token": MCP_TOKEN,
+        "mcp_default_mode": "off",
+    }
+    cfg.update(extra)
+    app = app_mod.create_app(cfg, name=f"webterm-mcp-scope-{_app_seq}")
+    app.ctx.mcp_windows.clock = lambda: now
+    app.ctx.mcp_windows_uptime = lambda: uptime
+    return app
+
+
+def _sidecar(tmp_path) -> Path:
+    return tmp_path / "webterm_mcp_windows.json"
+
+
+def _disk(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))["windows"]
+
+
+def _persist(app, mutate):
+    return asyncio.run(app.ctx.persist_mcp_windows(mutate))
+
+
+def _hello(wid, pid, host="hostA"):
+    return {"type": "hello", "window_id": wid, "pid": pid, "title": "t",
+            "cols": 80, "rows": 24, "host": host, "kind": "agent"}
+
+
+class _WS:
+    """Producer WS double: register() only needs send/close."""
+
+    async def send(self, payload):
+        pass
+
+    async def close(self, *a, **k):
+        pass
+
+
+def _register(app, wid, pid, host="hostA"):
+    return asyncio.run(app.ctx.registry.register(_WS(), _hello(wid, pid,
+                                                               host)))
+
+
+def _inject_live(app, wid, pid, host="hostA"):
+    """A live entry that did NOT go through register(), so apply() never ran
+    and its row's seen is left exactly as the test wrote it."""
+    entry = WindowEntry(wid, pid, "t", 80, 24, _WS(), host=host)
+    app.ctx.registry._entries[wid] = entry
+    return entry
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Every _write_state_atomic call as ``(path, payload)``, delegating to the
+    real one. Callers filter on the store's path (see _store_writes)."""
+    calls = []
+    real = app_mod._write_state_atomic
+
+    def counting(path, payload):
+        calls.append((Path(path), payload))
+        return real(path, payload)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", counting)
+    return calls
+
+
+def _store_writes(calls, app):
+    return [payload for path, payload in calls
+            if path == app.ctx.mcp_windows_path]
+
+
+class _Gate:
+    """Holds the FIRST store write open in its executor thread until
+    ``release`` is set; later writes (and other paths) pass straight
+    through."""
+
+    def __init__(self, monkeypatch, app):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = []
+        real = app_mod._write_state_atomic
+        store_path = app.ctx.mcp_windows_path
+
+        def blocking(path, payload):
+            if Path(path) == store_path:
+                self.calls.append(payload)
+                if len(self.calls) == 1:
+                    self.entered.set()
+                    self.release.wait(10)
+            return real(path, payload)
+
+        monkeypatch.setattr(app_mod, "_write_state_atomic", blocking)
+
+    async def wait_entered(self):
+        assert await asyncio.to_thread(self.entered.wait, 10)
+
+
+def _mid_write(app, gate, mutate, during):
+    """Run ``mutate`` through the shared writer; once its write is parked in
+    the executor, run ``during()`` on the loop (awaiting it if it returns a
+    coroutine: the hellos), then let the write land. Returns (mutate's result,
+    during's result)."""
+    async def scenario():
+        task = asyncio.ensure_future(app.ctx.persist_mcp_windows(mutate))
+        try:
+            await gate.wait_entered()
+            inner = during()
+            got = await inner if asyncio.iscoroutine(inner) else inner
+        finally:
+            gate.release.set()
+        return await task, got
+    return asyncio.run(scenario())
+
+
+# -- round trip / corrupt / load ----------------------------------------------
+
+def test_round_trip_across_two_create_apps(tmp_path, monkeypatch):
+    """#228: a row written through the shared writer lands in the default
+    sidecar next to the state file and is back, identical, in a second
+    create_app on the same tmp_path."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(7, scope="teamA", mode="readwrite", pid=77,
+                                  host="hostA", now=T))
+    assert _sidecar(tmp_path).exists()
+    again = _make_app(tmp_path, monkeypatch)
+    assert again.ctx.mcp_windows.get(7) == _row(
+        scope="teamA", mode="readwrite", pid=77, host="hostA", seen=T)
+
+
+def test_corrupt_sidecar_boots_empty_logs_and_the_next_write_replaces_it(
+        tmp_path, monkeypatch, caplog):
+    """#228: a corrupt sidecar never stops the broker: it boots with an empty
+    store and one WARNING naming the file, and the next write replaces the
+    file with valid JSON holding the new row."""
+    caplog.set_level(logging.INFO, logger=STORE_LOGGER)
+    _sidecar(tmp_path).write_bytes(b"{not json")
+    app = _make_app(tmp_path, monkeypatch)
+    warnings = [r for r in _store_records(caplog)
+                if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert str(app.ctx.mcp_windows_path) in warnings[0].getMessage()
+    assert len(app.ctx.mcp_windows) == 0
+    _persist(app, lambda w: w.set(3, scope="s", pid=1, host="h", now=T))
+    assert _disk(_sidecar(tmp_path)) == {"3": _row(scope="s", pid=1,
+                                                   host="h", seen=T)}
+
+
+def test_no_prune_at_load(tmp_path, monkeypatch, writes):
+    """#228: boot never prunes and never writes: an 8-day-old non-live row
+    survives create_app with the file's bytes and file id (st_ino) intact,
+    even past the grace. 8 days before the REAL clock (and so before T too),
+    because boot runs before any test can pin the store's clock."""
+    _write_sidecar(_sidecar(tmp_path), {"5": _row(
+        scope="a", pid=1, host="h", seen=time.time() - 8 * DAY)})
+    before = (_sidecar(tmp_path).read_bytes(),
+              os.stat(_sidecar(tmp_path)).st_ino)
+    app = _make_app(tmp_path, monkeypatch, uptime=10_000.0)
+    assert app.ctx.mcp_windows.get(5) is not None
+    assert (_sidecar(tmp_path).read_bytes(),
+            os.stat(_sidecar(tmp_path)).st_ino) == before
+    assert _store_writes(writes, app) == []
+
+
+def test_mcp_windows_path_config_key_is_honoured(tmp_path, monkeypatch):
+    """#228: ``mcp_windows_path`` overrides the default location. ABSOLUTE on
+    purpose: a relative one resolves against the CWD, which under pytest is
+    the repo root."""
+    custom = tmp_path / "elsewhere" / "custom_windows.json"
+    custom.parent.mkdir()
+    app = _make_app(tmp_path, monkeypatch, mcp_windows_path=str(custom))
+    assert app.ctx.mcp_windows_path == custom.resolve()
+    _persist(app, lambda w: w.set(3, scope="s", pid=1, host="h", now=T))
+    assert "3" in _disk(custom)
+    assert not _sidecar(tmp_path).exists()
+
+
+# -- re-apply through the real register() -------------------------------------
+
+def test_restart_reapplies_a_row_with_a_matching_pid(tmp_path, monkeypatch):
+    """#228: after a restart, a hello carrying the row's pid and host lands
+    with the scope and the RAW mode already on the entry (so /sessions shows
+    them), through create_app's on_register hook."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(7, scope="teamA", mode="readwrite", pid=77,
+                                  host="hostA", now=T))
+    again = _make_app(tmp_path, monkeypatch)
+    assert again.ctx.registry.on_register == again.ctx.mcp_windows.apply
+    entry = _register(again, 7, 77)
+    assert (entry.mcp_scope, entry.mcp_mode) == ("teamA", "readwrite")
+    summary = entry.summary("off")
+    assert (summary["mcp_scope"], summary["mcp"]) == ("teamA", "readwrite")
+
+
+def test_a_mismatched_pid_does_not_reapply_and_the_next_write_replaces_it(
+        tmp_path, monkeypatch):
+    """#228: id reuse. A hello on the row's id with a different pid gets a
+    clean entry, and the next write for that live producer REPLACES the row
+    on disk: the stale producer's mode is gone."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(7, scope="teamA", mode="readwrite", pid=77,
+                                  host="hostA", now=T))
+    again = _make_app(tmp_path, monkeypatch, now=T + 5)
+    entry = _register(again, 7, 78)
+    assert (entry.mcp_scope, entry.mcp_mode) == (None, None)
+    _persist(again, lambda w: w.set(7, scope="teamB", pid=entry.pid,
+                                    host=entry.host, now=T + 5))
+    assert _disk(_sidecar(tmp_path)) == {"7": _row(
+        scope="teamB", mode=None, pid=78, host="hostA", seen=T + 5)}
+
+
+def test_a_pid_null_row_is_claimed_by_the_first_hello(tmp_path, monkeypatch):
+    """#228: a pre-spawn row (no pid yet) is claimed by the first hello on its
+    id, which fills in its pid and host; a flush makes that durable, and a
+    later hello from another pid no longer matches."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(9, scope="teamS", now=T))
+    assert _disk(_sidecar(tmp_path))["9"]["pid"] is None
+    again = _make_app(tmp_path, monkeypatch, now=T + 5)
+    entry = _register(again, 9, 55)
+    assert entry.mcp_scope == "teamS"
+    assert again.ctx.mcp_windows.dirty is True
+    _persist(again, lambda w: None)
+    assert _disk(_sidecar(tmp_path))["9"] == _row(scope="teamS", pid=55,
+                                                  host="hostA", seen=T + 5)
+    asyncio.run(again.ctx.registry.deregister(9))
+    assert _register(again, 9, 56).mcp_scope is None
+
+
+def test_mode_null_round_trips_as_null(tmp_path, monkeypatch):
+    """#228: ``mode: null`` is stored as a JSON null and re-applied as None, so
+    the window inherits the broker default (readwrite here) instead of the
+    default being baked into the row."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(7, scope="a", mode=None, pid=77,
+                                  host="hostA", now=T))
+    assert _disk(_sidecar(tmp_path))["7"]["mode"] is None
+    assert '"mode": null' in _sidecar(tmp_path).read_text(encoding="utf-8")
+    again = _make_app(tmp_path, monkeypatch, mcp_default_mode="readwrite")
+    entry = _register(again, 7, 77)
+    assert entry.mcp_scope == "a"
+    assert entry.mcp_mode is None
+    assert entry.summary(again.ctx.mcp_cfg["default_mode"])["mcp"] == \
+        "readwrite"
+    assert again.ctx.mcp_windows.get(7)["mode"] is None
+
+
+def test_the_hook_replaces_the_registry_carry_over_with_the_shared_gate(
+        tmp_path, monkeypatch):
+    """#228: with create_app's hook installed the registry's own carry-over is
+    skipped and the store's fallback carries instead, through the ONE gate:
+    a delegating spy on registry.same_producer sees exactly one call (old,
+    new) for a same-id, same-pid replacement with no row. A forked copy in
+    apply() would make it 0, both carry-overs running would make it 2."""
+    calls = []
+    real = registry_mod.same_producer
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(registry_mod, "same_producer", spy)
+    app = _make_app(tmp_path, monkeypatch)
+    old = _register(app, 5, 77)
+    old.mcp_mode = "readwrite"                 # as POST /session/mcp sets it
+    new = _register(app, 5, 77)
+    assert new is not old
+    assert new.mcp_mode == "readwrite"
+    assert calls == [(old, new)]
+
+
+def test_the_row_gate_and_the_fallback_both_ask_the_shared_gate(
+        tmp_path, monkeypatch):
+    """#228: a same_producer forced to False stops BOTH the row re-apply (a
+    matching row stays unapplied) and the fallback carry-over, so neither
+    path has a private copy of the predicate."""
+    app = _make_app(tmp_path, monkeypatch)
+    _persist(app, lambda w: w.set(7, scope="teamA", mode="read", pid=77,
+                                  host="hostA", now=T))
+    monkeypatch.setattr(registry_mod, "same_producer", lambda a, b: False)
+    row_hit = _register(app, 7, 77)
+    assert (row_hit.mcp_scope, row_hit.mcp_mode) == (None, None)
+    old = _register(app, 8, 77)
+    old.mcp_mode = "readwrite"
+    new = _register(app, 8, 77)
+    assert new.mcp_mode is None
+
+
+def test_a_raising_apply_still_registers_and_is_logged(tmp_path, monkeypatch,
+                                                       caplog):
+    """#228: apply() is now the broker's only carry-over path, so its failure
+    mode matters: an Exception inside it is logged by the registry's hook
+    runner and the window registers anyway."""
+    app = _make_app(tmp_path, monkeypatch)
+
+    def boom(self, entry):
+        raise KeyError("injected")
+
+    monkeypatch.setattr(McpWindowStore, "reapply", boom)
+    caplog.set_level(logging.ERROR, logger="webterm.broker.registry")
+    entry = _register(app, 12, 77)
+    assert app.ctx.registry.get(12) is entry
+    assert any("on_register hook failed for window 12" in r.getMessage()
+               for r in caplog.records)
+
+
+# -- prune inside a write ------------------------------------------------------
+
+def test_prune_inside_a_write_after_the_grace(tmp_path, monkeypatch):
+    """#228: past the grace, a write drops an 8-day-old non-live row and keeps
+    a LIVE row of the same age, in memory and on disk."""
+    _write_sidecar(_sidecar(tmp_path), {
+        "1": _row(scope="a", pid=1, host="h", seen=T - 8 * DAY),
+        "2": _row(scope="a", pid=2, host="hostA", seen=T - 8 * DAY),
+    })
+    app = _make_app(tmp_path, monkeypatch, uptime=601.0)
+    _inject_live(app, 2, 2)
+    _persist(app, lambda w: w.set(3, scope="s", pid=3, host="h", now=T))
+    assert app.ctx.mcp_windows.get(1) is None
+    assert app.ctx.mcp_windows.get(2) is not None
+    assert sorted(_disk(_sidecar(tmp_path))) == ["2", "3"]
+
+
+def test_no_prune_inside_a_write_before_the_grace(tmp_path, monkeypatch):
+    """#228: at 599 s of uptime the same write prunes nothing."""
+    _write_sidecar(_sidecar(tmp_path), {
+        "1": _row(scope="a", pid=1, host="h", seen=T - 8 * DAY),
+        "2": _row(scope="a", pid=2, host="hostA", seen=T - 8 * DAY),
+    })
+    app = _make_app(tmp_path, monkeypatch, uptime=599.0)
+    _inject_live(app, 2, 2)
+    _persist(app, lambda w: w.set(3, scope="s", pid=3, host="h", now=T))
+    assert sorted(_disk(_sidecar(tmp_path))) == ["1", "2", "3"]
+
+
+def test_prune_uses_the_store_wall_clock(tmp_path, monkeypatch):
+    """#228: ``seen`` is wall-clock epoch, so prune's ``now`` must be the
+    store's wall clock too; a monotonic reading (small, per-boot) would make
+    every row look fresh and silently disable pruning."""
+    seen_now = []
+    real = McpWindowStore.prune
+
+    def spy(self, live, now, uptime_s, is_pending=None):
+        seen_now.append(now)
+        return real(self, live, now, uptime_s, is_pending)
+
+    monkeypatch.setattr(McpWindowStore, "prune", spy)
+    _write_sidecar(_sidecar(tmp_path), {
+        "1": _row(scope="a", pid=1, host="h", seen=T - 8 * DAY)})
+    app = _make_app(tmp_path, monkeypatch, uptime=601.0, now=T)
+    _persist(app, lambda w: None)
+    assert seen_now == [T]
+    assert app.ctx.mcp_windows.get(1) is None
+
+
+def test_the_cap_holds_through_the_writer(tmp_path, monkeypatch):
+    """#228: 1002 fresh rows, one write past the grace: MAX_ROWS (1000)
+    remain on disk and the two oldest go."""
+    windows = {str(i): _row(scope="a", pid=i, host="h", seen=T - 2000 + i)
+               for i in range(1, 1003)}
+    _write_sidecar(_sidecar(tmp_path), windows)
+    app = _make_app(tmp_path, monkeypatch, uptime=10_000.0)
+    _persist(app, lambda w: None)
+    disk = _disk(_sidecar(tmp_path))
+    assert len(disk) == 1000
+    assert "1" not in disk and "2" not in disk and "3" in disk
+
+
+# -- the writer itself ---------------------------------------------------------
+
+def test_a_no_op_set_does_not_write(tmp_path, monkeypatch, writes):
+    """#228: a set() that changes nothing makes no write at all: the counted
+    executor writes on the store path, the file's bytes and its file id
+    (st_ino: os.replace swaps in a new file) are all unchanged. mtime is NOT
+    a usable signal: two back-to-back writes were measured with identical
+    st_mtime_ns."""
+    app = _make_app(tmp_path, monkeypatch)
+
+    def mutate(w):
+        return w.set(7, scope="a", mode="read", pid=77, host="hostA", now=T)
+
+    assert _persist(app, mutate) is True
+    path = _sidecar(tmp_path)
+    before = (len(_store_writes(writes, app)), path.read_bytes(),
+              os.stat(path).st_ino)
+    assert before[0] == 1
+    assert _persist(app, mutate) is False
+    assert (len(_store_writes(writes, app)), path.read_bytes(),
+            os.stat(path).st_ino) == before
+
+
+def test_the_writer_returns_mutate_result_via_app_ctx(tmp_path, monkeypatch):
+    """#228: the shared writer is reachable as app.ctx.persist_mcp_windows and
+    hands back whatever mutate returned."""
+    app = _make_app(tmp_path, monkeypatch)
+    sentinel = object()
+    assert _persist(app, lambda w: sentinel) is sentinel
+
+
+def test_a_failed_write_leaves_memory_and_disk_untouched(tmp_path,
+                                                         monkeypatch):
+    """#228: memory never changes before the write lands. A write raising
+    OSError propagates with the row absent from memory and disk, and the
+    lock is released (the next write succeeds)."""
+    app = _make_app(tmp_path, monkeypatch)
+    real = app_mod._write_state_atomic
+
+    def failing(path, payload):
+        if Path(path) == app.ctx.mcp_windows_path:
+            raise OSError("disk full")
+        return real(path, payload)
+
+    monkeypatch.setattr(app_mod, "_write_state_atomic", failing)
+    with pytest.raises(OSError):
+        _persist(app, lambda w: w.set(7, scope="a", pid=1, host="h", now=T))
+    assert app.ctx.mcp_windows.get(7) is None
+    assert not _sidecar(tmp_path).exists()
+    assert app.ctx.mcp_windows.inflight is None
+    monkeypatch.setattr(app_mod, "_write_state_atomic", real)
+    _persist(app, lambda w: w.set(7, scope="a", pid=1, host="h", now=T))
+    assert app.ctx.mcp_windows.get(7) is not None
+
+
+def test_a_raising_mutate_leaves_memory_untouched(tmp_path, monkeypatch,
+                                                  writes):
+    """#228: mutate runs on the working copy, so one that raises part-way
+    leaves memory as it was, writes nothing and clears ``inflight``."""
+    app = _make_app(tmp_path, monkeypatch)
+
+    def mutate(w):
+        w.set(7, scope="a", pid=1, host="h", now=T)
+        raise ZeroDivisionError
+
+    with pytest.raises(ZeroDivisionError):
+        _persist(app, mutate)
+    assert app.ctx.mcp_windows.get(7) is None
+    assert app.ctx.mcp_windows.inflight is None
+    assert _store_writes(writes, app) == []
+
+
+def test_two_overlapping_writes_both_land(tmp_path, monkeypatch):
+    """#228: the lock serialises the writers. With the first write parked in
+    the executor, a second write queues on the lock and copies memory only
+    after the first committed, so neither update is lost."""
+    app = _make_app(tmp_path, monkeypatch)
+    gate = _Gate(monkeypatch, app)
+
+    async def scenario():
+        first = asyncio.ensure_future(app.ctx.persist_mcp_windows(
+            lambda w: w.set(7, scope="a", pid=1, host="h", now=T)))
+        try:
+            await gate.wait_entered()
+            second = asyncio.ensure_future(app.ctx.persist_mcp_windows(
+                lambda w: w.set(8, scope="b", pid=2, host="h", now=T)))
+            await asyncio.sleep(0)            # let it reach the lock
+        finally:
+            gate.release.set()
+        await first
+        await second
+
+    asyncio.run(scenario())
+    assert app.ctx.mcp_windows.get(7) is not None
+    assert app.ctx.mcp_windows.get(8) is not None
+    assert sorted(_disk(_sidecar(tmp_path))) == ["7", "8"]
+
+
+# -- F1: hellos landing while a write is in flight -----------------------------
+
+def _pre_spawn_rows(tmp_path, *wids):
+    _write_sidecar(_sidecar(tmp_path),
+                   {str(w): _row(scope=f"s{w}", seen=T - 10) for w in wids})
+
+
+def test_a_claim_during_a_write_survives_the_swap(tmp_path, monkeypatch):
+    """#228 F1: a hello claims a pre-spawn row while an unrelated write is
+    parked in the executor. The swap must keep the claimed pid (memory still
+    has it, and it is not on disk yet, so the store is dirty) and the next
+    flush persists it. Without the in-flight mirror the swap silently reverts
+    the row to pid null AND leaves the store clean, so nothing repairs it."""
+    _pre_spawn_rows(tmp_path, 9)
+    app = _make_app(tmp_path, monkeypatch, now=T)
+    gate = _Gate(monkeypatch, app)
+    store = app.ctx.mcp_windows
+    _mid_write(app, gate,
+               lambda w: w.set(7, scope="x", pid=1, host="h", now=T),
+               lambda: app.ctx.registry.register(_WS(), _hello(9, 55)))
+    assert (store.get(9)["pid"], store.dirty) == (55, True)
+    _persist(app, lambda w: None)
+    assert _disk(_sidecar(tmp_path))["9"]["pid"] == 55
+
+
+def test_two_windows_claimed_during_one_write_both_survive(tmp_path,
+                                                          monkeypatch):
+    """#228 F1: two different pre-spawn rows claimed during the same write's
+    await both keep their claim across the swap."""
+    _pre_spawn_rows(tmp_path, 9, 10)
+    app = _make_app(tmp_path, monkeypatch)
+    gate = _Gate(monkeypatch, app)
+
+    async def hellos():
+        await app.ctx.registry.register(_WS(), _hello(9, 55))
+        await app.ctx.registry.register(_WS(), _hello(10, 56))
+
+    _mid_write(app, gate,
+               lambda w: w.set(7, scope="x", pid=1, host="h", now=T), hellos)
+    store = app.ctx.mcp_windows
+    assert (store.get(9)["pid"], store.get(10)["pid"]) == (55, 56)
+    _persist(app, lambda w: None)
+    disk = _disk(_sidecar(tmp_path))
+    assert (disk["9"]["pid"], disk["10"]["pid"]) == (55, 56)
+
+
+def test_one_window_registering_twice_during_one_write(tmp_path, monkeypatch):
+    """#228 F1: a claim and then a half-open re-register of the same producer,
+    both during one await: both entries get the scope, and the row keeps the
+    claim with the LATER seen."""
+    _pre_spawn_rows(tmp_path, 9)
+    app = _make_app(tmp_path, monkeypatch)
+    gate = _Gate(monkeypatch, app)
+    clock = [T]
+    app.ctx.mcp_windows.clock = lambda: clock[0]
+
+    async def hellos():
+        first = await app.ctx.registry.register(_WS(), _hello(9, 55))
+        clock[0] = T + 30
+        second = await app.ctx.registry.register(_WS(), _hello(9, 55))
+        return first, second
+
+    _, (first, second) = _mid_write(
+        app, gate, lambda w: w.set(7, scope="x", pid=1, host="h", now=T),
+        hellos)
+    assert (first.mcp_scope, second.mcp_scope) == ("s9", "s9")
+    assert app.ctx.mcp_windows.get(9) == _row(scope="s9", pid=55,
+                                              host="hostA", seen=T + 30)
+
+
+def test_a_fallback_carry_during_a_write_is_memory_only(tmp_path,
+                                                        monkeypatch):
+    """#228 F1: with no row, a half-open re-register during a write carries the
+    in-memory override through apply()'s fallback; the swap neither loses it
+    (it lives on the entry) nor persists anything for it."""
+    app = _make_app(tmp_path, monkeypatch)
+    old = _register(app, 11, 60)
+    old.mcp_mode = "readwrite"
+    gate = _Gate(monkeypatch, app)
+    _, new = _mid_write(
+        app, gate, lambda w: w.set(7, scope="x", pid=1, host="h", now=T),
+        lambda: app.ctx.registry.register(_WS(), _hello(11, 60)))
+    assert new is not old and new.mcp_mode == "readwrite"
+    assert app.ctx.mcp_windows.get(11) is None
+    assert app.ctx.mcp_windows.dirty is False
+
+
+def test_the_old_producer_claims_a_row_replaced_mid_write(tmp_path,
+                                                          monkeypatch):
+    """#228, a STATED hazard (reapply's docstring): a mutate that replaces a
+    claimed row with a fresh pre-spawn row, while the OLD process's hello
+    lands during the await, lets that old pid claim the NEW row through the
+    mirror's wildcard. Pinned so a change to it is deliberate; ruling it out
+    is the launch writer's (#231) job."""
+    _write_sidecar(_sidecar(tmp_path), {"9": _row(scope="old", pid=55,
+                                                  host="hostA", seen=T - 10)})
+    app = _make_app(tmp_path, monkeypatch)
+    gate = _Gate(monkeypatch, app)
+    _, entry = _mid_write(
+        app, gate, lambda w: w.set(9, scope="fresh", now=T),
+        lambda: app.ctx.registry.register(_WS(), _hello(9, 55)))
+    assert entry.mcp_scope == "old"
+    assert app.ctx.mcp_windows.get(9) == _row(scope="fresh", pid=55,
+                                              host="hostA", seen=T)
+
+
+def test_a_row_deleted_mid_write_loses_the_touch(tmp_path, monkeypatch):
+    """#228, stated and accepted (reapply's docstring): a row the in-flight
+    mutate deletes stays deleted even if its producer's hello touched it
+    during the await; the entry keeps what it was given."""
+    _write_sidecar(_sidecar(tmp_path), {"9": _row(scope="s", pid=55,
+                                                  host="hostA", seen=T - 10)})
+    app = _make_app(tmp_path, monkeypatch)
+    gate = _Gate(monkeypatch, app)
+    _, entry = _mid_write(
+        app, gate,
+        lambda w: w.set(9, scope=None, pid=55, host="hostA", now=T),
+        lambda: app.ctx.registry.register(_WS(), _hello(9, 55)))
+    assert entry.mcp_scope == "s"
+    assert app.ctx.mcp_windows.get(9) is None

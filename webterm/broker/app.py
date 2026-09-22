@@ -86,9 +86,9 @@ from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 from .. import build_version, protocol
 from . import auth, modinstall, relay, supervise, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
-# Valid per-window / default MCP access modes; defined beside the per-window
-# store that validates them (#228).
-from .mcp_windows import MCP_MODES
+# MCP_MODES (valid per-window / default MCP access modes) is defined beside
+# the per-window store that validates them (#228).
+from .mcp_windows import MCP_MODES, McpWindowStore
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
@@ -4292,6 +4292,79 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     ).resolve()
     app.ctx.mod_policy = _load_mod_policy(app.ctx.mod_policy_path)
     app.ctx.mod_policy_lock = asyncio.Lock()
+    # #228: the durable per-window MCP store -- each window's scope and RAW
+    # mode override, keyed by window id and re-applied when the window
+    # registers (schema, pid+host gate and prune policy: mcp_windows.py). Same
+    # sidecar shape as the two above: its own path override
+    # ("mcp_windows_path") and its own lock, which only _persist_mcp_windows
+    # takes. The hook goes on the registry HERE, before the server can accept
+    # a hello, so no window ever registers without it.
+    app.ctx.mcp_windows_path = Path(
+        config.get("mcp_windows_path")
+        or (app.ctx.state_path.parent / "webterm_mcp_windows.json")
+    ).resolve()
+    app.ctx.mcp_windows = McpWindowStore.load(app.ctx.mcp_windows_path)
+    app.ctx.mcp_windows_lock = asyncio.Lock()
+    app.ctx.registry.on_register = app.ctx.mcp_windows.apply
+    # Process uptime for prune's grace: monotonic seconds since BOOT_TIME, the
+    # basis the restart cooldown uses. Read at call time; injectable.
+    app.ctx.mcp_windows_uptime = lambda: time.monotonic() - BOOT_TIME
+
+    async def _persist_mcp_windows(mutate):
+        """The ONE durable writer for the per-window store; returns
+        ``mutate``'s result. Every writer goes through it, and it is the only
+        place McpWindowStore.prune runs.
+
+        Inside _shielded_region(mcp_windows_lock), whose acquire stays
+        cancellable OUTSIDE the shield: take a working copy of the store,
+        run ``mutate(work)`` EXACTLY ONCE (sync; it must not await), prune
+        the copy, serialise it, write it through the executor ONLY if that
+        payload differs from the last one written or loaded, then swap memory
+        to the copy. Memory never changes before the write lands: a raising
+        mutate or write propagates with memory untouched, and a failure after
+        a cancelled caller left is logged by _shielded_region.
+
+        apply() runs under the registry lock, not this one, so a hello can
+        land during the executor await. The copy is exposed as
+        ``store.inflight`` for that window and apply() mirrors its touch onto
+        it (McpWindowStore.reapply); unmirrored, the swap would revert a
+        CLAIMED row to pid null, re-opening the id-reuse hole the pid rule
+        closes, and leave the store clean. The mirror rather than a
+        merge-on-swap here, because a merge needs a hand-kept list of the
+        fields apply() touches, and that list drifts from apply().
+
+        The swap changes rows only. An entry that registered during the write
+        got the pre-write row, so a writer that changed a live window's row
+        calls ``store.reapply(registry.get(id))`` after this returns.
+
+        Tests count these writes by wrapping ``_write_state_atomic`` and
+        filtering on ``mcp_windows_path``: every sidecar write shares that
+        function, including a stale test app's listeners, so the path filter
+        is load-bearing."""
+        store = app.ctx.mcp_windows
+        registry = app.ctx.registry
+
+        async def _locked_write():
+            work = store.copy()
+            store.inflight = work
+            try:
+                result = mutate(work)
+                work.prune(registry.entries(), store.clock(),
+                           app.ctx.mcp_windows_uptime(),
+                           is_pending=registry.is_pending)
+                payload = work.to_persist()
+                if work.dirty:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, _write_state_atomic, app.ctx.mcp_windows_path,
+                        payload)
+                store.commit(work, payload)
+                return result
+            finally:
+                store.inflight = None
+
+        return await _shielded_region(app.ctx.mcp_windows_lock, _locked_write)
+
+    app.ctx.persist_mcp_windows = _persist_mcp_windows
     # #182/#183: WHO decided what this broker may do to itself -- reach
     # github.com to CHECK (update_check_enabled), download-and-execute an
     # APPLY (update_apply_enabled), restart the process (restart_enabled).
@@ -6268,10 +6341,11 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     async def _session_mcp(request: Request):
         # Browser-facing per-window MCP-mode setter. Gated by the BROWSER
         # auth_token (this is the UI editing policy), NOT the MCP token. Sets
-        # the in-memory per-window override; None default = inherit the broker
-        # default. Resets on broker restart / agent relaunch by design, but a
-        # same-host, same-nonzero-pid reconnect over a half-open socket keeps
-        # it: the lifetime contract is BrokerRegistry.register's docstring.
+        # the in-memory per-window override only (it does not write the
+        # per-window store); None default = inherit the broker default. Resets
+        # on broker restart / agent relaunch, but a same-host, same-nonzero-pid
+        # reconnect over a half-open socket keeps it: that is the fallback
+        # carry-over in McpWindowStore.apply (mcp_windows.py).
         err = _gated_auth_error(request, "/session/mcp")
         if err is not None:
             return err

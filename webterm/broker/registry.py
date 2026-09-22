@@ -112,15 +112,17 @@ class WindowEntry:
         # override. WindowEntry stays ignorant of app.ctx: the effective mode is
         # resolved by the handlers that know the default.
         #
-        # mcp_mode and mcp_scope (below) will be owned by the broker's
-        # per-window store (#228), re-applied through BrokerRegistry.on_register
-        # when a window registers. Until a hook is installed they live in
-        # memory: register() carries both across a same-id replacement whose
-        # hellos report the same host and the same nonzero pid, and everything
-        # else starts at None — a broker restart, a reconnect after the old
-        # entry was already deregistered, a relaunch (launcher ids are fresh
-        # per launch; an agent pinned with --window-id comes back under the
-        # same id with a new shell pid).
+        # mcp_mode and mcp_scope (below) are owned by the broker's per-window
+        # store (mcp_windows.McpWindowStore), which create_app installs as
+        # BrokerRegistry.on_register: when a window registers, a stored row
+        # whose host and pid match the hello re-applies both; failing that,
+        # both carry over from a replaced same-id entry reporting the same host
+        # and the same nonzero pid (registry.same_producer, the gate register()
+        # itself applies when no hook is installed). Everything else starts at
+        # None — a broker restart with no matching row, a reconnect after the
+        # old entry was already deregistered, a relaunch (launcher ids are
+        # fresh per launch; an agent pinned with --window-id comes back under
+        # the same id with a new shell pid).
         self.mcp_mode: Optional[str] = None
         # Per-window MCP scope (#237): the MCP-client partition this window
         # belongs to, or None = unscoped. A bare str|None fact: nothing here
@@ -384,7 +386,9 @@ class BrokerRegistry:
         entry first, so that reconnect is a fresh register and starts at None.
         With a hook installed there is no default carry-over: the hook (the
         per-window store) is the authority, so one that raises before applying
-        anything leaves both at None.
+        anything leaves both at None. The broker's hook is
+        ``McpWindowStore.apply`` (mcp_windows.py), whose fallback re-applies
+        this same carry-over through ``same_producer``.
         """
         window_id = int(hello.get("window_id"))
         pid = int(hello.get("pid", 0))
