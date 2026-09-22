@@ -5,7 +5,7 @@ window, which means a wrong sentence there is wrong in two places at once. The
 regenerate-and-diff guard in ``test_help_corpus.py`` already pins the corpus to
 the wiki's bytes; these guards pin the wiki's *claims* to the code.
 
-Three of them:
+Four of them:
 
 * **The default-keybinding table.** ``wiki/Keyboard-Shortcuts.md`` wraps it in
   ``help:ignore`` precisely BECAUSE Help injects the user's live bindings
@@ -16,6 +16,9 @@ Three of them:
   reintroduced ``docs/*.md`` link points at nothing.
 * **Mod help coverage.** Every shipped mod dir carries a ``help.md``, so a new
   feature arrives with documentation instead of a year later.
+* **The MCP scopes contract** (#236). Every scope name a client or operator has
+  to get right is findable in the Technical Reference, and no page still calls
+  the per-window MCP mode ephemeral.
 """
 
 import re
@@ -202,3 +205,81 @@ def test_the_help_allowlist_stays_justified(allowed):
         "entry from _NO_HELP_ALLOWED" % allowed)
     assert not (mod / "help.md").is_file(), (
         "%r now ships a help.md, so its _NO_HELP_ALLOWED entry is obsolete" % allowed)
+
+
+# --------------------------------------------------------------------------- #
+# 4. the MCP scopes contract (#236, umbrella #237)
+# --------------------------------------------------------------------------- #
+
+def _tr_paragraph(tr: str, head: str) -> str:
+    """The Technical Reference paragraph that opens with ``head``, up to the
+    next bold route heading or section."""
+    start = tr.index(head)
+    ends = [i for i in (tr.find("\n\n**`", start + 1), tr.find("\n### ", start))
+            if i != -1]
+    return tr[start:min(ends)]
+
+
+def test_the_mcp_scope_contract_is_named_in_the_technical_reference():
+    """Every scope name a client or operator has to get right is findable in
+    the Technical Reference, each in the paragraph that owns it: the header
+    and its grammar (webterm.protocol's own), bad_scope, the /info
+    capability, the /mcp/terminals and /mcp/info fields, /session/mcp's
+    `mode: null`, /mcp/launch's `mode`, and the per-window sidecar's keys and
+    path override. The keys a LIVE /mcp/config answers are checked against a
+    running broker in tests/test_mcp_scope.py."""
+    from webterm.protocol import SCOPE_HEADER, SCOPE_RE
+    tr = (WIKI / "Technical-Reference.md").read_text(encoding="utf-8")
+    scopes = tr[tr.index("### Scopes (`X-Browserland-Scope`)"):]
+    scopes = scopes[:scopes.index("\n### ", 1)]
+    assert f"`{SCOPE_HEADER}: <name>`" in scopes
+    assert f"`{SCOPE_RE.pattern}`" in scopes
+    assert "**400 `bad_scope`**" in scopes
+    assert '`"mcp_scopes": true`' in scopes
+    assert "**404 `unknown_or_off`**" in scopes
+    terminals = _tr_paragraph(tr, "**`GET /mcp/terminals`**")
+    assert "`scope` the window's scope tag (`null` when untagged)" in terminals
+    info = _tr_paragraph(tr, "**`GET /mcp/info`**")
+    assert '"scope":null' in info
+    assert "`scope` is the caller's own declared scope echoed back" in info
+    session = _tr_paragraph(tr, "**`POST /session/mcp`**")
+    assert '"mode": "off"|"read"|"readwrite"|null' in session
+    assert '`"mode": null` clears the override' in session
+    launch = _tr_paragraph(tr, "**`POST /mcp/launch`**")
+    assert '"mode": "off"|"read"|"readwrite"' in launch
+    sidecar = _tr_paragraph(tr, "**Sidecar `webterm_mcp_windows.json`**")
+    assert "`mcp_windows_path`" in sidecar
+    schema = sidecar[sidecar.index("```json"):sidecar.index("```", sidecar.index("```json") + 7)]
+    for key in ("scope", "mode", "pid", "host", "seen"):
+        assert f'"{key}":' in schema, f"the sidecar schema must show {key!r}"
+
+
+def test_the_wiki_no_longer_calls_the_mcp_mode_ephemeral():
+    """#236 acceptance: the per-window MCP mode is durable now (#229), so no
+    page may still say it is not persisted or lives in memory only."""
+    stale = re.compile(r"not persisted|in-memory only", re.I)
+    hits = [f"{page.name}:{n}" for page in sorted(WIKI.glob("*.md"))
+            for n, line in enumerate(
+                page.read_text(encoding="utf-8").splitlines(), 1)
+            if stale.search(line)]
+    assert sorted(WIKI.glob("*.md")), "no wiki pages found: unmeasured"
+    assert hits == []
+
+
+def test_the_user_pages_explain_scopes():
+    """#236: the MCP page carries the Scopes section and the Copy .mcp.json
+    help (its secret and git warning included), the window menu page names
+    the MCP scope rows, and the taskbar page names the badge."""
+    mcp = (WIKI / "MCP-and-AI-Agents.md").read_text(encoding="utf-8")
+    assert "\n## Scopes\n" in mcp and "\n### Copy .mcp.json\n" in mcp
+    section = mcp[mcp.index("\n## Scopes\n"):mcp.index("\n## Tools overview\n")]
+    for words in ("admin view", "by design", "7 days", "convention, not security",
+                  "Profiles are global", "`scope_unsupported`",
+                  "An empty header value counts as no scope",
+                  "keep `.mcp.json` out of git", "`PYTHONPATH`",
+                  "only to someone already signed in"):
+        assert words in section, f"the Scopes section must say {words!r}"
+    menus = (WIKI / "Context-Menus.md").read_text(encoding="utf-8")
+    assert "**MCP scope**" in menus and "**Set scope...**" in menus
+    taskbar = (WIKI / "Taskbar.md").read_text(encoding="utf-8")
+    assert "### MCP scope badge" in taskbar

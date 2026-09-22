@@ -48,6 +48,10 @@ By default the label reads **`#id host: title [pid]`** with the pid hidden — f
 
 To change it, open **Control Panel → Windows → Taskbar / title labels**. Each component has a checkbox to show or hide it, and the rows can be reordered — drag a row, or use its ↑/↓ buttons — so the label follows the order you choose. At least one component always stays ticked (you cannot hide them all), and a ticked component that has no value for a given window (for example the host on an app window that has none) is simply left out — if that would leave the label empty, the title is shown instead, so the label is never blank. The hover tooltip always lists everything regardless of these settings. Like the other display toggles, this preference is stored per broker host and shared with your other browsers viewing that host.
 
+### MCP scope badge
+
+A terminal tagged with an MCP scope (see [[MCP-and-AI-Agents]]) shows the scope as a small blue badge after its label, ahead of any workspace badge. A long scope is cut short with `…`; the hover tooltip names it in full (`scope <name>`).
+
 ### Items for other workspaces
 
 By default, buttons for windows on other workspaces still appear (dimmed) so you can jump to them. To show only the active workspace's windows in the taskbar, turn on **Hide taskbar items from other workspaces** under Control Panel → Windows → Workspaces. This setting governs your browser.

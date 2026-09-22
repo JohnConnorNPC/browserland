@@ -132,6 +132,29 @@ A project's `.mcp.json` pins its scope like this:
 
 (The file holds the bearer token: keep it out of version control.)
 
+The Control Panel writes one for you: **Access → MCP access → Copy .mcp.json**
+(#235) copies it in the `BROWSERLAND_MCP_HOSTS` form, with the host's `scope`
+when you typed one, the broker's own Python as `command`, and a `PYTHONPATH`
+naming the broker's own checkout, so the server it starts is that broker's
+`webterm.mcptool`. From a project folder `webterm` may otherwise resolve to
+another copy on the machine, and a copy older than scopes ignores `"scope"` and
+serves the unscoped view. For example:
+
+```json
+{
+  "mcpServers": {
+    "browserland": {
+      "command": "C:\\Python310\\python.exe",
+      "args": ["-m", "webterm.mcptool"],
+      "env": {
+        "BROWSERLAND_MCP_HOSTS": "[{\"name\":\"local\",\"url\":\"http://127.0.0.1:4445\",\"token\":\"…\",\"scope\":\"projA\"}]",
+        "PYTHONPATH": "C:\\src\\browserland"
+      }
+    }
+  }
+}
+```
+
 ## Run
 
 ```bash

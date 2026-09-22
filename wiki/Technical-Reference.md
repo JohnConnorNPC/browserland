@@ -519,6 +519,44 @@ otherwise the broker-wide `default_mode`:
 * **`allow_launch`** (global, default `false`) — independent flag gating
   `/mcp/launch` only.
 
+### Scopes (`X-Browserland-Scope`)
+
+A client may declare a **scope** on any `/mcp/*` request with the header
+`X-Browserland-Scope: <name>` (#230). The name must fullmatch
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`: no `:` (window ids are `host:int`) and no
+whitespace. A missing header or an empty value means **unscoped**. A value
+outside the grammar, or the header sent more than once, is **400 `bad_scope`**
+on every token route, checked after `mcp_disabled` and the token, so a caller
+without the token cannot probe names.
+
+* **Unscoped** sees every window its mode allows, tagged or not: the
+  legacy/admin view.
+* **Scoped `S`** sees only windows tagged `S`. `/mcp/terminals` omits the rest,
+  and every id-taking route answers an out-of-scope window with the same
+  **404 `unknown_or_off`** bytes as a missing one, so existence does not leak.
+  An untagged window is invisible to every scoped caller.
+* `/mcp/terminals` rows carry `scope` (the window's tag, `null` when untagged)
+  and `/mcp/info` echoes the caller's declared `scope`. `/mcp/profiles` ignores
+  the scope.
+* CORS preflights allow the header unconditionally, and every `/mcp/*`
+  response lists it in `Vary`.
+* A window's tag is set by a scoped `/mcp/launch` (below) or by the
+  browser-realm `POST /session/mcp` (admin surface), and stored with its mode
+  override in `webterm_mcp_windows.json`, so both survive a broker restart.
+* **`GET /info`** (browser token) carries `"mcp_scopes": true` on every broker
+  that implements all of this: the partition, `/session/mcp`'s `scope`, and a
+  durable scope and raw mode override. A client feature-detects on it; a broker
+  without the key predates all three. The desktop shows its scope controls only
+  for a broker that says so, and there it stops re-asserting its own synced copy
+  of each window's mode: the broker's stored override is the one authority.
+* A scope is a convention, not a credential: every client holds the same MCP
+  token and may declare any scope, or none.
+
+The shipped MCP server (`webterm.mcptool`) fails closed: before its first call to
+a scoped host it reads `/mcp/info`, and it refuses every call to that host with
+`scope_unsupported` when the `scope` echo is absent (an older broker) or differs
+(a proxy dropped or rewrote the header).
+
 ### Endpoints (MCP-token-gated)
 
 All require a valid MCP token; `read`/`input` additionally require the target's
@@ -736,10 +774,16 @@ the browser **`auth_token`** (the same mandatory-token gate as `/state` and
 
 **`GET /mcp/config`** →
 `{"ok":true,"enabled":false,"token":"","default_mode":"off","allow_launch":false,
-"token_env_pinned":false,"known_scopes":[]}` (`token` is the live secret, `""`
-when unset). `known_scopes` lists the scopes on live windows (any mode) and on
-stored per-window rows, sorted; a name a caller only declared on the header
-never appears.
+"token_env_pinned":false,"known_scopes":[],"python":"/usr/bin/python3",
+"pythonpath":"/opt/browserland","local_url":"http://127.0.0.1:4445"}` (`token`
+is the live secret, `""` when unset). `known_scopes` lists the scopes on live
+windows (any mode) and on stored per-window rows, sorted; a name a caller only
+declared on the header never appears. `python` is the interpreter running this
+broker (`sys.executable`), `pythonpath` the directory holding the `webterm`
+package it runs, and `local_url` a loopback URL on the port this request
+arrived on (the configured port when there is no socket to read); the Control
+Panel's **Copy .mcp.json** builds a client file from them (#235). They are
+absolute server paths, shown only to a holder of the browser token.
 
 **`POST /mcp/config`** — partial update of any of `enabled`, `default_mode`
 (`off`/`read`/`readwrite`), `allow_launch`, `token`, or `generate:true` (mint a

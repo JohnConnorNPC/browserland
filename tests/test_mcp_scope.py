@@ -2139,6 +2139,29 @@ def test_mcp_config_local_url_falls_back_to_the_configured_port(tmp_path,
     assert resp.json["local_url"] == "http://127.0.0.1:4999"
 
 
+def test_every_live_mcp_config_key_and_the_info_flag_is_documented(
+        tmp_path, monkeypatch):
+    """#236: derived from a RUNNING broker, not a hand list: every key GET
+    /mcp/config answers appears, as `"key":`, in the Technical Reference's
+    GET /mcp/config paragraph, and /info's scope capability is named as the
+    value it really has. A key added to the payload without its docs fails
+    here."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _, cfg = authed(app).get("/mcp/config")
+    _, info = authed(app).get("/info")
+    assert cfg.status == 200 and info.status == 200
+    tr = (Path(__file__).resolve().parents[1] / "wiki"
+          / "Technical-Reference.md").read_text(encoding="utf-8")
+    start = tr.index("**`GET /mcp/config`**")
+    para = tr[start:tr.index("\n\n", start)]
+    keys = sorted(cfg.json)
+    assert {"python", "pythonpath", "local_url", "known_scopes"} <= set(keys)
+    missing = [k for k in keys if f'"{k}":' not in para]
+    assert missing == [], f"undocumented /mcp/config keys: {missing}"
+    assert info.json["mcp_scopes"] is True
+    assert '`"mcp_scopes": true`' in tr
+
+
 def test_mcp_config_ignores_the_scope_header(tmp_path, monkeypatch):
     """#230: /mcp/config is not an MCP token route, and the browser never
     sends the header: an invalid scope there changes nothing, byte for

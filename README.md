@@ -281,6 +281,17 @@ every id-taking tool routes on the `"<host>:…"` prefix. The single
 `--broker-url`/`--token` form is the one-host shorthand (`default`). See
 [`webterm/mcptool/README.md`](webterm/mcptool/README.md) for details.
 
+**Scopes.** Several MCP clients can share one broker without seeing each other's
+windows: a server started with `--scope projA` (or `BROWSERLAND_MCP_SCOPE`, or a
+per-host `"scope"`) sees only the windows tagged `projA`, while a server with no
+scope keeps the admin view of everything. A window that server launches is
+tagged for it and starts in `readwrite`; tag a hand-started one from its robot
+button or title-bar menu. **Control Panel → Access → MCP access → Copy
+.mcp.json** writes a ready-to-save client file for a scope. A scope is a
+convention, not security (every client holds the same token), and a window's
+scope and MCP mode now survive a broker restart. See
+[wiki/MCP-and-AI-Agents.md](wiki/MCP-and-AI-Agents.md#scopes).
+
 > The `send_input` **tool** maps newlines in `data` to a carriage return — the
 > byte a real Enter key sends — so a line submits on PowerShell/PSReadLine (which
 > treats a bare line-feed as a soft continuation) and on a Unix shell alike. The
