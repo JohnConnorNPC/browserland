@@ -159,8 +159,9 @@ class WindowEntry:
         # ``mcp`` is the EFFECTIVE access mode (per-window override or the
         # broker default), so a /sessions consumer sees what MCP would honor.
         # ``mcp_scope`` is the RAW scope (None = unscoped), never defaulted. It
-        # reaches GET /sessions through this dict, but NOT /mcp/terminals, which
-        # rebuilds its rows field by field.
+        # reaches GET /sessions through this dict as is; /mcp/terminals
+        # rebuilds its rows field by field, filters on it and publishes it as
+        # ``scope``.
         return {
             "id": self.id,
             "pid": self.pid,

@@ -22,8 +22,8 @@ on the same app template, with live windows injected straight into the
 registry (tagged by setting ``mcp_scope``) and a producer double that answers
 the correlated round-trips and records every frame it was sent. It pins the
 400 bad_scope refusal on every token route (an invalid name or a repeated
-header), the order of the gate's checks, and the empty value's unscoped
-meaning.
+header), the order of the gate's checks, the empty value's unscoped meaning,
+and the /mcp/terminals filter with its per-row ``scope`` field.
 """
 
 from __future__ import annotations
@@ -1669,3 +1669,54 @@ def test_an_empty_scope_header_is_unscoped(tmp_path, monkeypatch):
     assert request.headers.getall(SCOPE_HEADER) == [""]
     assert resp.status == 200
     assert sorted(row["id"] for row in resp.json) == [5, 6]
+
+
+def _listing(app, **kw):
+    """/mcp/terminals as ``{id: scope}``. Indexing ``row["scope"]`` means a
+    row without the field fails here rather than reading as untagged."""
+    _, resp = _mcp(app, "/mcp/terminals", **kw)
+    assert resp.status == 200
+    return {row["id"]: row["scope"] for row in resp.json}
+
+
+def _three_windows(app):
+    _window(app, 5, scope="a")
+    _window(app, 6, scope="b")
+    _window(app, 7)
+
+
+def test_a_scoped_caller_lists_only_its_scope(tmp_path, monkeypatch):
+    """#230: windows tagged a and b plus an untagged one; a caller declaring
+    a sees only the a window, b only the b window."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _three_windows(app)
+    assert _listing(app, scope="a") == {5: "a"}
+    assert _listing(app, scope="b") == {6: "b"}
+
+
+def test_an_unscoped_caller_lists_every_window_with_its_scope(tmp_path,
+                                                              monkeypatch):
+    """#230: no header lists all three, as before, each row carrying its
+    raw tag in ``scope`` (null for the untagged window)."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _three_windows(app)
+    assert _listing(app) == {5: "a", 6: "b", 7: None}
+
+
+def test_a_scope_nobody_uses_lists_nothing(tmp_path, monkeypatch):
+    """#230: a valid scope no window carries is an empty 200 list, not an
+    error."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _three_windows(app)
+    _, resp = _mcp(app, "/mcp/terminals", scope="zzz")
+    assert (resp.status, resp.json) == (200, [])
+
+
+def test_an_off_window_stays_hidden_from_its_own_scope(tmp_path, monkeypatch):
+    """#230: the scope narrows, it never widens: an off window tagged a is
+    hidden from scope a exactly as it is from an unscoped caller."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a", mcp_mode="off")
+    _window(app, 6, scope="a")
+    assert _listing(app, scope="a") == {6: "a"}
+    assert _listing(app) == {6: "a"}

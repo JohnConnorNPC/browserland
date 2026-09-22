@@ -6564,15 +6564,27 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             return err
         default_mode = app.ctx.mcp_cfg["default_mode"]
         broker_version = app.ctx.version
+        # #230: a caller that declared a scope sees only the windows tagged
+        # with it; an unscoped caller sees every window, as before. The mode
+        # still applies either way: an off window is never listed.
+        scope = _mcp_scope(request)
         out = []
         for s in app.ctx.registry.session_summaries(default_mode):
             mode = s.get("mcp", "off")
             if mode == "off":
                 continue
+            if scope is not None and s["mcp_scope"] != scope:
+                continue
             version = s.get("version", "") or ""
             entry_out = {"id": s["id"], "title": s["title"], "host": s["host"],
                          "cwd": s["cwd"], "agent": s["agent"], "kind": s["kind"],
                          "cols": s["cols"], "rows": s["rows"], "mode": mode,
+                         # The window's RAW tag, null when untagged. Named
+                         # `scope` on the MCP wire, as `mcp` is renamed `mode`
+                         # here: /sessions keeps the `mcp_` prefix because its
+                         # rows carry other domains' fields, while every
+                         # field here is already MCP's.
+                         "scope": s["mcp_scope"],
                          "version": version,
                          # DECCKM, cached from the agent's `mode` pushes (#23);
                          # send_keys reads it to pick CSI vs SS3 arrows.
