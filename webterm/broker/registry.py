@@ -268,21 +268,23 @@ class WindowEntry:
 
 def _run_on_register(hook: Callable[[WindowEntry, Optional[WindowEntry]], None],
                      entry: WindowEntry, old: Optional[WindowEntry]) -> None:
-    """Call an on_register hook under register()'s contract: an exception, a
+    """Call an on_register hook under register()'s contract: an Exception, a
     returned coroutine or any other returned awaitable is logged with the
-    window id, never raised and never awaited."""
+    window id, never raised and never awaited. A BaseException (e.g.
+    KeyboardInterrupt, CancelledError) deliberately propagates."""
     try:
         result = hook(entry, old)
         if inspect.iscoroutine(result):
             # An ``async def`` hook handed back a coroutine without running
-            # its body. Close it (no "never awaited" warning) and say so:
+            # its body. Say so, then close it (no "never awaited" warning):
             # dropped silently it would pass for a hook with nothing to apply.
-            # Inside the try: a coroutine the hook itself started can raise
-            # from close(), and that must not fail the registration either.
-            result.close()
+            # Log FIRST: a coroutine the hook itself started can raise from
+            # close(), and the "must be synchronous" diagnostic must survive
+            # that; the Exception is then logged below and not re-raised.
             LOGGER.error("on_register hook for window %s returned a coroutine;"
-                         " it must be synchronous, so the registry closed it"
-                         " unawaited", entry.id)
+                         " it must be synchronous, so the registry is closing"
+                         " it unawaited", entry.id)
+            result.close()
         elif inspect.isawaitable(result):
             # A Task/Future/other awaitable: not ours to close or cancel (a
             # Task is already scheduled), so only say it is ignored.
@@ -331,9 +333,11 @@ class BrokerRegistry:
           it runs after the lock and can delete the entry just inserted. The
           sync add_waiter/remove_waiter must not be touched either (a pending
           launcher spawn is parked on its waiter).
-        * Any exception is logged with the window id and swallowed: registration
-          never fails because of the hook, and the entry is inserted as the hook
-          left it (a partial apply is not rolled back).
+        * Any Exception raised by the hook, or by closing a coroutine it
+          returned, is logged with the window id and swallowed, and the entry
+          is inserted as the hook left it (a partial apply is not rolled
+          back). A BaseException (KeyboardInterrupt, CancelledError, ...) is
+          deliberately not caught and escapes before the insertion.
 
         With NO hook installed, a same-id replacement carries ``mcp_mode`` and
         ``mcp_scope`` over from ``old`` when both hellos report the same host
@@ -344,13 +348,16 @@ class BrokerRegistry:
         /sessions; the producer token is the boundary). An agent pinned with
         ``--window-id`` relaunches under the same id with a new shell pid, and
         two hosts pinning one id are different producers even with equal pids:
-        neither may inherit the other's access. A pid of 0 (unknown) never
-        matches. The carry-over only reaches that half-open window: a clean
-        close or an exit frame deregisters the old entry first, so that
-        reconnect is a fresh register and starts at None. With a hook
-        installed there is no default carry-over: the hook (the per-window
-        store) is the authority, so one that raises before applying anything
-        leaves both at None.
+        neither may inherit the other's access. A hello that omits ``host`` is
+        recorded as the broker's own hostname, so two such producers collide
+        on host: this is a collision guard, not an identity. The host match is
+        byte-exact after the parse-time strip (no case folding), and a pid of
+        0 (unknown) never matches. The carry-over only reaches that half-open
+        window: a clean close or an exit frame deregisters the old entry
+        first, so that reconnect is a fresh register and starts at None. With
+        a hook installed there is no default carry-over: the hook (the
+        per-window store) is the authority, so one that raises before applying
+        anything leaves both at None.
         """
         window_id = int(hello.get("window_id"))
         pid = int(hello.get("pid", 0))

@@ -393,8 +393,8 @@ def test_on_register_runs_under_the_registry_lock():
 
 
 def test_raising_on_register_hook_is_harmless(caplog):
-    """#227: a hook that raises never fails registration — the entry is still
-    inserted and visible, and the failure is logged (with its traceback) under
+    """#227: a hook that raises an Exception never fails registration — the
+    entry is still inserted and visible, and the failure is logged (with its traceback) under
     the window id. A hook that raises before applying anything leaves both MCP
     facts at None: no fallback to the default carry-over, even on a same-host,
     same-pid replacement whose old entry had them set."""
@@ -456,7 +456,9 @@ def test_async_on_register_hook_is_closed_and_logged(caplog):
 def test_on_register_coroutine_whose_close_raises_is_harmless(caplog):
     """#227: the coroutine's close() runs inside the hook's try. A coroutine the
     hook itself started, and that ignores GeneratorExit, makes close() raise
-    RuntimeError — and that still must not fail the registration."""
+    RuntimeError — that Exception must not fail the registration, and the
+    "must be synchronous" diagnostic is logged BEFORE the close, so it
+    survives the raise instead of being replaced by the generic failure."""
     caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
     state = {"stubborn": True}
 
@@ -487,6 +489,7 @@ def test_on_register_coroutine_whose_close_raises_is_harmless(caplog):
     records = _hook_records(caplog, 37, "failed")
     assert len(records) == 1
     assert records[0].exc_info[0] is RuntimeError
+    assert len(_hook_records(caplog, 37, "coroutine")) == 1
     # Let the coroutine finish so its finalizer has nothing left to raise.
     state["stubborn"] = False
     started[0].close()
@@ -639,19 +642,39 @@ def test_replacement_does_not_carry_pace_ms():
     asyncio.run(scenario())
 
 
+def test_replacement_with_the_same_explicit_host_carries():
+    """#227: the host term is pinned in the positive too. Every other carry
+    test lets both hellos fall back to the broker's own hostname; here both
+    name the same NON-local host explicitly, and both fields still carry."""
+    async def scenario():
+        reg = BrokerRegistry()
+        old = await reg.register(FeedWS(), _hello(45, pid=77, host="hostA"))
+        old.mcp_mode = "readwrite"
+        old.mcp_scope = "teamA"
+        new = await reg.register(FeedWS(), _hello(45, pid=77, host="hostA"))
+        assert new is not old
+        assert new.host == "hostA"
+        assert new.mcp_mode == "readwrite"
+        assert new.mcp_scope == "teamA"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("first,second", [
     ((77, "hostA"), (78, "hostA")),
     ((0, "hostA"), (0, "hostA")),
     ((77, "hostA"), (77, "hostB")),
-], ids=["pid-changed", "pid-unknown", "host-changed"])
+    ((77, "HOSTA"), (77, "hostA")),
+], ids=["pid-changed", "pid-unknown", "host-changed", "host-case"])
 def test_replacement_without_a_matching_host_and_pid_does_not_carry(first,
                                                                     second):
     """#227: the default carry-over needs the SAME host and the SAME NONZERO pid.
     An agent pinned with --window-id relaunches under the same id with a new
     shell pid; two hosts pinning one id are different producers even with equal
-    pids; two pid-less hellos (0 = unknown) are no evidence of one producer.
-    None of them may inherit the old entry's mode/scope. A collision guard, not
-    security: host and pid are self-reported."""
+    pids; two pid-less hellos (0 = unknown) are no evidence of one producer;
+    the host match is byte-exact, so a case-only difference is a different
+    host. None of them may inherit the old entry's mode/scope. A collision
+    guard, not security: host and pid are self-reported."""
     async def scenario():
         reg = BrokerRegistry()
         old = await reg.register(FeedWS(),
