@@ -16,6 +16,14 @@ real ``registry.register`` hook path. Writes are observed by wrapping
 variant holds the first store write open so a hello can land mid-write. Only
 ``app.test_client`` is used here, never ReusableClient: a ReusableClient
 app's listeners were measured firing during a later test's request.
+
+WIRE section (#230): the /mcp/* token routes honouring ``X-Browserland-Scope``
+on the same app template, with live windows injected straight into the
+registry (tagged by setting ``mcp_scope``) and a producer double that answers
+the correlated round-trips and records every frame it was sent. It pins the
+400 bad_scope refusal on every token route (an invalid name or a repeated
+header), the order of the gate's checks, and the empty value's unscoped
+meaning.
 """
 
 from __future__ import annotations
@@ -37,7 +45,8 @@ import webterm.broker.app as app_mod
 import webterm.broker.mcp_windows as mw
 import webterm.broker.registry as registry_mod
 from webterm.broker.mcp_windows import (MAX_ROWS, MCP_MODES, PRUNE_AGE_S,
-                                        PRUNE_GRACE_S, McpWindowStore)
+                                        PRUNE_GRACE_S, SCOPE_HEADER,
+                                        McpWindowStore)
 from webterm.broker.registry import WindowEntry
 
 from .auth_helpers import TEST_TOKEN
@@ -1493,3 +1502,170 @@ def test_a_failing_flush_logs_once_then_debug_then_recovery(
     assert flush_records()[2:] == [(logging.INFO, False)]
     assert app.ctx.mcp_windows.dirty is False
     assert _disk(_sidecar(tmp_path))["9"]["seen"] == T
+
+
+# =============================================================================
+# WIRE section: /mcp/* honours X-Browserland-Scope (#230)
+# =============================================================================
+
+#: Every /mcp/* route behind the MCP token gate (_mcp_auth_error), with a body
+#: that would SUCCEED (or fail for a reason of its own) on window 5 if the
+#: scope refusal were missing, so a 400 bad_scope can only come from the gate.
+MCP_TOKEN_ROUTES = {
+    "/mcp/info": ("GET", None),
+    "/mcp/terminals": ("GET", None),
+    "/mcp/read": ("POST", {"id": 5}),
+    "/mcp/input": ("POST", {"id": 5, "data": "x"}),
+    "/mcp/reset": ("POST", {"id": 5}),
+    "/mcp/flush": ("POST", {"id": 5}),
+    "/mcp/pace": ("POST", {"id": 5, "pace_ms": 40}),
+    "/mcp/profiles": ("GET", None),
+    "/mcp/launch": ("POST", {}),
+}
+BAD_SCOPES = ["a:b", "a b", "x" * 65, "-lead"]
+_ABSENT = object()
+
+
+class _Producer:
+    """Producer WS double that answers the three correlated round-trips the
+    /mcp routes make (screen_text_please, reset_please, flush_input_please)
+    and records every frame the broker sent it, so a refused call can be
+    shown to have reached nothing."""
+
+    def __init__(self):
+        self.entry = None
+        self.sent = []
+
+    async def send(self, text):
+        self.sent.append(text)
+        data = json.loads(text)
+        req = data.get("req")
+        kind = data.get("type")
+        if kind == "screen_text_please":
+            self.entry.resolve_rpc(req, "screen_text", {
+                "type": "screen_text", "req": req, "cols": 80, "rows": 24,
+                "text": "hi", "content_hash": "abc"})
+        elif kind == "reset_please":
+            self.entry.resolve_rpc(req, "reset_done", {
+                "type": "reset_done", "req": req, "ok": True})
+        elif kind == "flush_input_please":
+            self.entry.resolve_rpc(req, "flush_input_done", {
+                "type": "flush_input_done", "req": req, "ok": True})
+
+    async def close(self, *a, **k):
+        pass
+
+
+def _wire_app(tmp_path, monkeypatch, mode="readwrite", **extra):
+    return _make_app(tmp_path, monkeypatch, mcp_default_mode=mode, **extra)
+
+
+def _window(app, wid, scope=None, mcp_mode=None):
+    """A live producer entry tagged ``scope`` (None = untagged), injected
+    straight into the registry like test_mcp_pace does."""
+    ws = _Producer()
+    entry = WindowEntry(wid, 111, "t", 80, 24, ws, kind="agent")
+    entry.mcp_scope = scope
+    entry.mcp_mode = mcp_mode
+    ws.entry = entry
+    app.ctx.registry._entries[wid] = entry
+    return entry
+
+
+def _mcp(app, path, *, scope=_ABSENT, body=_ABSENT, token=MCP_TOKEN,
+         extra_headers=()):
+    """One call to an /mcp/* token route, as ``(request, response)``.
+    ``scope`` is the header value (``_ABSENT`` sends none); headers go as a
+    LIST so a repeated header survives to the wire; ``body`` defaults to the
+    route's MCP_TOKEN_ROUTES body."""
+    method, default_body = MCP_TOKEN_ROUTES[path]
+    headers = [("Authorization", f"Bearer {token}")]
+    if scope is not _ABSENT:
+        headers.append((SCOPE_HEADER, scope))
+    headers.extend(extra_headers)
+    payload = default_body if body is _ABSENT else body
+    if method == "GET":
+        return app.test_client.get(path, headers=headers)
+    return app.test_client.post(path, json=payload, headers=headers)
+
+
+def test_the_route_table_is_every_mcp_token_route(tmp_path, monkeypatch):
+    """#230: MCP_TOKEN_ROUTES is exactly the app's non-preflight /mcp/*
+    routes minus /mcp/config (browser realm, _gated_auth_error), so a new
+    token route cannot ship without its bad_scope cells."""
+    app = _wire_app(tmp_path, monkeypatch)
+    served = {("/" + r.path, method) for r in app.router.routes
+              for method in r.methods
+              if r.path.startswith("mcp/") and method != "OPTIONS"}
+    served -= {("/mcp/config", "GET"), ("/mcp/config", "POST")}
+    assert served == {(path, method) for path, (method, _body)
+                      in MCP_TOKEN_ROUTES.items()}
+
+
+@pytest.mark.parametrize("scope", BAD_SCOPES,
+                         ids=["colon", "space", "65chars", "leading-dash"])
+@pytest.mark.parametrize("path", sorted(MCP_TOKEN_ROUTES))
+def test_a_bad_scope_is_refused_on_every_mcp_route(tmp_path, monkeypatch,
+                                                   path, scope):
+    """#230: a present-but-invalid scope is 400 bad_scope on every token
+    route, from the gate, before the route does anything: the producer is
+    sent nothing and the pace is untouched."""
+    app = _wire_app(tmp_path, monkeypatch)
+    entry = _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope=scope)
+    assert (resp.status, resp.json) == (400, {"error": "bad_scope"})
+    assert entry.ws.sent == [] and entry.pace_ms == 0
+
+
+def test_two_scope_headers_reach_the_app_as_two_values(tmp_path, monkeypatch):
+    """#230: the premise the duplicate cells lean on. The test client sends a
+    repeated header as two header lines (a dict literal would collapse them
+    first), and the app sees both."""
+    app = _wire_app(tmp_path, monkeypatch)
+    request, _resp = _mcp(app, "/mcp/info", scope="a",
+                          extra_headers=[(SCOPE_HEADER, "b")])
+    assert request.headers.getall(SCOPE_HEADER) == ["a", "b"]
+
+
+@pytest.mark.parametrize("path", sorted(MCP_TOKEN_ROUTES))
+def test_a_repeated_scope_header_is_refused(tmp_path, monkeypatch, path):
+    """#230, a decision beyond the issue's text: two scope headers, even two
+    valid ones, are 400 bad_scope rather than a silent pick of the first."""
+    app = _wire_app(tmp_path, monkeypatch)
+    entry = _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope="a", extra_headers=[(SCOPE_HEADER, "b")])
+    assert (resp.status, resp.json) == (400, {"error": "bad_scope"})
+    assert entry.ws.sent == [] and entry.pace_ms == 0
+
+
+@pytest.mark.parametrize("path", sorted(MCP_TOKEN_ROUTES))
+def test_the_token_is_checked_before_the_scope(tmp_path, monkeypatch, path):
+    """#230: without the token a bad scope is 401 auth_required, so a caller
+    that cannot authenticate cannot probe scope validity."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope="a:b", token="wrong-token")
+    assert (resp.status, resp.json) == (401, {"error": "auth_required"})
+
+
+@pytest.mark.parametrize("path", sorted(MCP_TOKEN_ROUTES))
+def test_mcp_disabled_is_checked_before_the_scope(tmp_path, monkeypatch,
+                                                  path):
+    """#230: with the surface disabled a bad scope is 403 mcp_disabled."""
+    app = _wire_app(tmp_path, monkeypatch, mcp_enabled=False)
+    _window(app, 5, scope="a")
+    _, resp = _mcp(app, path, scope="a:b")
+    assert (resp.status, resp.json) == (403, {"error": "mcp_disabled"})
+
+
+def test_an_empty_scope_header_is_unscoped(tmp_path, monkeypatch):
+    """#230: a header sent with an EMPTY value is unscoped, like no header
+    (the fail-open direction _mcp_scope's docstring names): it is not
+    refused and the listing shows every window, tagged or not."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _window(app, 6)
+    request, resp = _mcp(app, "/mcp/terminals", scope="")
+    assert request.headers.getall(SCOPE_HEADER) == [""]
+    assert resp.status == 200
+    assert sorted(row["id"] for row in resp.json) == [5, 6]

@@ -88,8 +88,9 @@ from .. import build_version, protocol
 from . import auth, modinstall, relay, supervise, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
 # MCP_MODES (valid per-window / default MCP access modes) is defined beside
-# the per-window store that validates them (#228).
-from .mcp_windows import MCP_MODES, McpWindowStore
+# the per-window store that validates them (#228), and so are the scope
+# grammar and the header a client declares a scope on (#230).
+from .mcp_windows import MCP_MODES, SCOPE_HEADER, SCOPE_RE, McpWindowStore
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
@@ -6477,13 +6478,51 @@ def create_app(config: Optional[Dict[str, Any]] = None,
     # browser auth_token: MCP is opt-in, so with no token configured (or the
     # feature disabled) the whole surface is 403 mcp_disabled. CORS rides the
     # shared response middleware; OPTIONS preflights are registered alongside.
+    # A caller may also declare a scope on SCOPE_HEADER (#230, _mcp_scope),
+    # which narrows what it sees. It is not a credential: every client holds
+    # the same token and can declare any scope.
+    def _mcp_scope(request: Request) -> Optional[str]:
+        """The scope this caller declared on SCOPE_HEADER, or None for
+        unscoped. The ONLY reader of that header: _mcp_auth_error calls it to
+        validate (a ValueError is its 400 bad_scope), and _mcp_terminals,
+        _mcp_entry and _mcp_info call it again after that gate passed, so all
+        of them derive the same value from one parse.
+
+        * Absent, or sent with an EMPTY value: None, i.e. unscoped, which
+          sees every window its mode allows. That is the fail-OPEN direction,
+          so a client that must stay inside its scope cannot trust a listing
+          alone: /mcp/info echoes the scope it declared, null here.
+        * Sent more than once: ValueError. Taking the first would be a silent
+          pick; the cost is that a proxy adding its own copy turns every call
+          into a 400 instead of being ignored.
+        * Otherwise it must fullmatch SCOPE_RE, else ValueError. Never
+          stripped: the grammar is the contract and stray whitespace is a
+          client bug. Sanic itself drops LEADING spaces and tabs from a
+          header value (so a blank value arrives empty, i.e. unscoped) but
+          keeps trailing ones, which then fail the grammar."""
+        values = request.headers.getall(SCOPE_HEADER, None) or []
+        if len(values) > 1:
+            raise ValueError("more than one scope header")
+        value = values[0] if values else ""
+        if not value:
+            return None
+        if SCOPE_RE.fullmatch(value) is None:
+            raise ValueError("bad scope")
+        return value
+
     def _mcp_auth_error(request: Request):
+        # Order: mcp_disabled, then the token, then the scope, so a caller
+        # without the token cannot probe which scope names are valid.
         cfg = app.ctx.mcp_cfg
         if not cfg.get("enabled") or not cfg.get("token"):
             return sanic_json({"error": "mcp_disabled"}, status=403)
         if not auth.request_token_ok(request, cfg["token"]):
             LOGGER.warning("rejected unauthenticated /mcp from %s", request.ip)
             return sanic_json({"error": "auth_required"}, status=401)
+        try:
+            _mcp_scope(request)
+        except ValueError:
+            return sanic_json({"error": "bad_scope"}, status=400)
         return None
 
     def _mcp_effective_mode(entry) -> str:

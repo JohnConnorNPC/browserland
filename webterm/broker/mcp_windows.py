@@ -51,6 +51,10 @@ MCP_MODES = ("off", "read", "readwrite")
 #: no whitespace, 1-64 characters.
 SCOPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
+#: The request header an MCP client declares its scope on (#230). The broker
+#: reads it in exactly one place, app.py's ``_mcp_scope``.
+SCOPE_HEADER = "X-Browserland-Scope"
+
 #: :meth:`McpWindowStore.prune` is a no-op until the PROCESS has been up this
 #: long, so a restart gives every window this long to reconnect before any
 #: row can be judged stale.
