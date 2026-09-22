@@ -544,6 +544,11 @@
             }
         }
         // ---- MCP access section --------------------------------------------
+        // #235's Copy .mcp.json row (40_body.html). Declared ahead of
+        // renderMcpConfig, which enables the button.
+        const setMcpScopeEl = document.getElementById('set-mcp-scope');
+        const setMcpCopyJson = document.getElementById('set-mcp-copy-json');
+        const setMcpCopyErr = document.getElementById('set-mcp-copy-err');
         // The connect URL an external MCP server dials (the host's base + /mcp).
         // Local host has no stored url -> use this page's origin.
         function mcpConnectUrl(host) {
@@ -570,6 +575,7 @@
                 setMcpToken.value = '';
                 setMcpDefaultMode.value = 'off';
                 setMcpAllowLaunch.checked = false;
+                if (setMcpCopyJson) setMcpCopyJson.disabled = true;
                 // Re-render ONLY if the GET actually populated the cache. An
                 // unconditional re-render re-enters this branch and re-fetches,
                 // so a host that fast-fails (broker down, connection refused)
@@ -605,6 +611,17 @@
             setMcpToken.placeholder = pinned
                 ? 'set by WEB_TERMINAL_MCP_TOKEN (env)'
                 : '(none — MCP disabled)';
+            // #235: a file with no token cannot connect, and a broker that
+            // predates #235 does not name its python, so there is no command
+            // to write.
+            if (setMcpCopyJson) {
+                const canCopy = !!cfg.token
+                    && typeof cfg.python === 'string' && !!cfg.python;
+                setMcpCopyJson.disabled = !canCopy;
+                setMcpCopyJson.title = canCopy ? ''
+                    : (cfg.token ? 'this broker is too old to describe its MCP server'
+                                 : 'set a token first');
+            }
         }
         // POST a patch to /mcp/config on the settings-target host; on success
         // refresh the cache + re-render (so a server-minted token appears).
@@ -635,6 +652,105 @@
                 saveMcpConfig({ token: setMcpToken.value }));
             setMcpGenerate.addEventListener('click', () =>
                 saveMcpConfig({ generate: true }));
+        }
+
+        // ---- Copy .mcp.json (#235) -----------------------------------------
+        // A ready-to-save .mcp.json for ONE MCP client folder: the shipped
+        // stdio server (webterm.mcptool) pointed at the settings-target host,
+        // optionally limited to one scope. The machine-specific parts come from
+        // that broker's GET /mcp/config (python, pythonpath, local_url), so the
+        // file starts THIS broker's mcptool on the machine that broker runs on;
+        // the hint beside the button says what to edit for any other.
+        //
+        // Pure: the file's text for one host. BROWSERLAND_MCP_HOSTS is itself a
+        // JSON string inside the JSON, so a token's quotes and backslashes are
+        // escaped twice, which is right: the mcptool parses the env value.
+        // `scope` is present only when non-empty (absent = unscoped, the admin
+        // view), PYTHONPATH only when the broker named one.
+        function buildMcpJson(o) {
+            const host = { name: o.name, url: o.url, token: o.token };
+            if (o.scope) host.scope = o.scope;
+            const env = { BROWSERLAND_MCP_HOSTS: JSON.stringify([host]) };
+            if (o.pythonpath) env.PYTHONPATH = o.pythonpath;
+            return JSON.stringify({ mcpServers: { browserland: {
+                command: o.python,
+                args: ['-m', 'webterm.mcptool'],
+                env: env,
+            } } }, null, 2);
+        }
+        // The file's host name. The mcptool refuses a ':' (its namespaced-id
+        // separator) and an empty name; the serving broker is 'local'.
+        function mcpJsonHostName(host) {
+            if (!host || host.id === 'local') return 'local';
+            const n = String(host.label || '').replace(/:/g, '').trim();
+            return n || 'host';
+        }
+        // The clipboard refused (a denied permission, no gesture): show the
+        // text so it can still be selected and copied by hand.
+        function showMcpJsonText(text) {
+            openDialog({
+                title: 'Copy .mcp.json',
+                body: function (c) {
+                    const p = document.createElement('div');
+                    p.className = 'app-dialog-msg';
+                    p.textContent = 'The clipboard refused it: select the text '
+                        + 'and copy it by hand. It contains the MCP token, so '
+                        + 'keep the file out of git.';
+                    c.appendChild(p);
+                    const ta = document.createElement('textarea');
+                    ta.className = 'mcp-json-text';
+                    ta.readOnly = true;
+                    ta.spellcheck = false;
+                    ta.rows = 14;
+                    ta.value = text;
+                    c.appendChild(ta);
+                    setTimeout(() => { try { ta.focus(); ta.select(); } catch (_) {} }, 0);
+                },
+                buttons: [{ label: 'Close', value: true, primary: true }],
+            });
+        }
+        if (setMcpCopyJson) {
+            const copyLabel = setMcpCopyJson.textContent;
+            let copyTimer = null;
+            const flashCopy = (text) => {
+                setMcpCopyJson.textContent = text;
+                if (copyTimer) clearTimeout(copyTimer);
+                copyTimer = setTimeout(() => {
+                    copyTimer = null;
+                    setMcpCopyJson.textContent = copyLabel;
+                }, 2000);
+            };
+            setMcpCopyJson.addEventListener('click', () => {
+                const t = settingsTarget;
+                const host = t ? hostById(t.hostId) : null;
+                const cfg = host ? mcpConfigCache.get(host.id) : null;
+                if (!host || !cfg || !cfg.token) return;
+                const scope = setMcpScopeEl.value.trim();
+                // Inline, no dialog: the field is right there.
+                if (!mcpScopeInputOk(scope)) {
+                    setMcpCopyErr.textContent = 'not a scope name: 1-64 of '
+                        + 'A-Z a-z 0-9 . _ - starting with a letter or digit '
+                        + '(or leave it empty)';
+                    setMcpCopyErr.classList.add('show');
+                    return;
+                }
+                setMcpCopyErr.classList.remove('show');
+                const text = buildMcpJson({
+                    name: mcpJsonHostName(host),
+                    url: host.id === 'local' ? cfg.local_url
+                        : String(host.url || '').replace(/\/+$/, ''),
+                    token: cfg.token,
+                    scope: scope,
+                    python: cfg.python,
+                    pythonpath: cfg.pythonpath,
+                });
+                // Called inside the click itself: the legacy execCommand path
+                // needs the gesture.
+                copyTextToClipboard(text).then(ok => {
+                    flashCopy(ok ? 'copied' : 'copy failed');
+                    if (!ok) showMcpJsonText(text);
+                });
+            });
         }
 
         // ---- Launch profiles editor (#70) ----------------------------------

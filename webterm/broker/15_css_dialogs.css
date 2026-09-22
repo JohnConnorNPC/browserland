@@ -187,6 +187,11 @@
         }
         .app-dialog-field label { color: var(--fg-dim); flex: 0 0 auto; }
         .app-dialog-msg { white-space: pre-wrap; line-height: 1.4; }
+        /* #235: the .mcp.json the clipboard refused, shown to copy by hand. */
+        .app-dialog textarea.mcp-json-text {
+            display: block; width: 100%; box-sizing: border-box; margin-top: 8px;
+            font-family: monospace; font-size: 12px; white-space: pre;
+        }
         .app-dialog-rows { display: flex; flex-direction: column; gap: 4px; }
         .app-dialog-row {
             display: flex; gap: 10px; font-family: monospace; font-size: 12px;

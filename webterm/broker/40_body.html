@@ -293,6 +293,22 @@
                         the enable box; new windows start in "default mode", and each
                         window's mode is overridable from its title-bar menu. Connect
                         URL: <code id="set-mcp-url">&mdash;</code></div>
+                    <!-- #235: a ready-to-save .mcp.json for one MCP client
+                         folder, optionally limited to one scope. -->
+                    <div class="set-row"><label>scope</label>
+                        <input type="text" id="set-mcp-scope" maxlength="64"
+                               placeholder="(none: sees everything)"
+                               autocomplete="off" spellcheck="false" />
+                        <button type="button" id="set-mcp-copy-json" disabled>Copy .mcp.json</button></div>
+                    <div class="set-err" id="set-mcp-copy-err"></div>
+                    <div class="set-hint">Copy .mcp.json puts a <code>.mcp.json</code>
+                        for this host on the clipboard, ready to save in a project
+                        folder; with a scope, the MCP client started from that folder
+                        sees only the windows tagged with it. The file contains the
+                        MCP token, a bearer secret: keep <code>.mcp.json</code> out of
+                        git. Its <code>command</code>, <code>PYTHONPATH</code> and
+                        <code>url</code> are this broker's own; edit them for a client
+                        on another machine.</div>
                 </div>
                 <!-- #157: the mods THIS TAB'S BROKER serves, and the on/off it
                      pins for every browser that loads its page. Deliberately a

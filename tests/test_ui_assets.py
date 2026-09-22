@@ -31048,3 +31048,110 @@ const sess = (hostId, sid, mcp, extra) => Object.assign(
     assert r["downHeld"] == [] and r["downPrimes"] == 0
     assert r["inSync"] == [] and r["preMcp"] == []
     assert "const storesMode = hostMcpScopes(host.id);" in INDEX_HTML
+
+
+def test_the_copy_mcp_json_row_is_wired():
+    """#235: the scope field and the button exist in the Control Panel's MCP
+    section, are looked up by 81, and the button is off until the host's
+    /mcp/config is loaded with a token and a python; its click validates the
+    scope inline, copies through copyTextToClipboard, and falls back to a
+    dialog holding the text. The hint beside it names the secret, git, and
+    what to edit for a client on another machine."""
+    body = _src237("40_body.html")
+    mcp = body[body.index('<div class="set-title">MCP access</div>'):]
+    mcp = mcp[:mcp.index("<!-- #157:")]
+    assert re.search(r'<input type="text" id="set-mcp-scope" maxlength="64"\s+'
+                     r'placeholder="\(none: sees everything\)"', mcp)
+    assert '<button type="button" id="set-mcp-copy-json" disabled>' \
+           'Copy .mcp.json</button>' in mcp
+    hint = mcp[mcp.index("Copy .mcp.json puts"):]
+    hint = re.sub(r"\s+", " ", hint[:hint.index("</div>")])
+    for words in ("bearer secret", "out of git", "<code>command</code>",
+                  "<code>PYTHONPATH</code>", "<code>url</code>",
+                  "for a client on another machine"):
+        assert words in hint, f"the hint must say {words!r}"
+    cp = _src237("81_js_control_panel.js")
+    assert "document.getElementById('set-mcp-scope')" in cp
+    assert "document.getElementById('set-mcp-copy-json')" in cp
+    render = _fn237("81_js_control_panel.js", "function renderMcpConfig()")
+    assert "if (setMcpCopyJson) setMcpCopyJson.disabled = true;" in render
+    assert re.search(r"const canCopy = !!cfg\.token\s*&& typeof cfg\.python "
+                     r"=== 'string' && !!cfg\.python;\s*"
+                     r"setMcpCopyJson\.disabled = !canCopy;", render)
+    click = cp[cp.index("setMcpCopyJson.addEventListener('click', () => {"):]
+    click = click[:click.index("\n            });\n")]
+    assert click.index("if (!mcpScopeInputOk(scope)) {") < \
+        click.index("copyTextToClipboard(text)")
+    assert "setMcpCopyErr.classList.add('show');" in click
+    assert "flashCopy(ok ? 'copied' : 'copy failed');" in click
+    assert "if (!ok) showMcpJsonText(text);" in click
+    assert "url: host.id === 'local' ? cfg.local_url" in click
+    assert "name: mcpJsonHostName(host)," in click
+    fallback = _fn237("81_js_control_panel.js", "function showMcpJsonText(text)")
+    assert "openDialog({" in fallback and "ta.readOnly = true;" in fallback
+    assert "}, 2000);" in cp[cp.index("const flashCopy = (text) => {"):]
+    for needle in ('id="set-mcp-copy-json"', "function buildMcpJson(o)",
+                   "copyTextToClipboard(text).then(ok => {"):
+        assert needle in INDEX_HTML, needle
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_build_mcp_json_nests_the_hosts_json_and_round_trips(tmp_path):
+    """#235: the copied file parses, and so does the BROWSERLAND_MCP_HOSTS
+    value inside it (a JSON string in JSON, escaped twice): a token holding
+    `"` and `\\` survives both layers, an IPv6 URL survives, `scope` is there
+    only when given, and PYTHONPATH only when the broker named one."""
+    fn = _fn237("81_js_control_panel.js", "function buildMcpJson(o)")
+    token = 'to"k\\en'
+    r = _node237(tmp_path, fn + r"""
+const base = {name: 'local', url: 'http://[::1]:4445',
+              token: """ + json.dumps(token) + r""",
+              python: 'C:\\Py\\python.exe', pythonpath: 'X:\\repo'};
+process.stdout.write(JSON.stringify({
+    scoped: buildMcpJson(Object.assign({scope: 'projA'}, base)),
+    empty: buildMcpJson(Object.assign({scope: ''}, base)),
+    absent: buildMcpJson(base),
+    noPath: buildMcpJson(Object.assign({}, base, {pythonpath: ''})),
+}) + '\n');
+""")
+    outer = json.loads(r["scoped"])
+    assert list(outer) == ["mcpServers"] and list(outer["mcpServers"]) == [
+        "browserland"]
+    srv = outer["mcpServers"]["browserland"]
+    assert srv["command"] == "C:\\Py\\python.exe"
+    assert srv["args"] == ["-m", "webterm.mcptool"]
+    assert srv["env"]["PYTHONPATH"] == "X:\\repo"
+    assert isinstance(srv["env"]["BROWSERLAND_MCP_HOSTS"], str), \
+        "the hosts value is a JSON STRING, parsed by the mcptool"
+    hosts = json.loads(srv["env"]["BROWSERLAND_MCP_HOSTS"])
+    assert hosts == [{"name": "local", "url": "http://[::1]:4445",
+                      "token": token, "scope": "projA"}]
+    assert r["scoped"].startswith('{\n  "mcpServers": {\n    "browserland"')
+    for case in ("empty", "absent"):
+        h = json.loads(json.loads(r[case])["mcpServers"]["browserland"]["env"]
+                       ["BROWSERLAND_MCP_HOSTS"])
+        assert h == [{"name": "local", "url": "http://[::1]:4445",
+                      "token": token}], case
+    env = json.loads(r["noPath"])["mcpServers"]["browserland"]["env"]
+    assert "PYTHONPATH" not in env
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_copied_host_name_is_one_the_mcptool_accepts(tmp_path):
+    """#235: the mcptool refuses a host name holding ':' (its id separator)
+    or an empty one; the serving broker is 'local'."""
+    fn = _fn237("81_js_control_panel.js", "function mcpJsonHostName(host)")
+    r = _node237(tmp_path, fn + r"""
+process.stdout.write(JSON.stringify([
+    mcpJsonHostName({id: 'local', label: 'this broker'}),
+    mcpJsonHostName({id: 'r1', label: 'a:b:c'}),
+    mcpJsonHostName({id: 'r2', label: 'https://h.ts.net:4445'}),
+    mcpJsonHostName({id: 'r3', label: ' : : '}),
+    mcpJsonHostName({id: 'r4', label: 'box two'}),
+    mcpJsonHostName(null),
+]) + '\n');
+""")
+    assert r == ["local", "abc", "https//h.ts.net4445", "host", "box two",
+                 "local"]
+    for name in r:
+        assert name and ":" not in name
