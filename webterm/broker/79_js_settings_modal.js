@@ -53,7 +53,7 @@
         const setMcpDefaultMode = document.getElementById('set-mcp-default-mode');
         const setMcpAllowLaunch = document.getElementById('set-mcp-allow-launch');
         const setMcpUrlEl = document.getElementById('set-mcp-url');
-        const mcpConfigCache = new Map();     // hostId -> {enabled,token,default_mode,allow_launch}
+        const mcpConfigCache = new Map();     // hostId -> GET /mcp/config: {enabled,token,default_mode,allow_launch,token_env_pinned,known_scopes,python,pythonpath,local_url}
         const mcpConfigFetching = new Set();  // hostIds with an in-flight GET
         // #195: the CACHE joins the core-owned invalidation set; the in-flight
         // SET deliberately does not. It is a request guard that drops its own

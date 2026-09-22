@@ -572,8 +572,10 @@
         // dropdown sets THIS terminal's per-window MCP access mode (off / read /
         // read-write) — the same per-window pin as the title-bar context menu,
         // surfaced as a visible, at-a-glance control. The robot lights up (.on)
-        // when access is read/readwrite and dims when off. Terminals only (app
-        // docs aren't server sessions); mirrors attachColorPicker's popover.
+        // when access is read/readwrite and dims when off. On a broker that
+        // stores scopes the dropdown also holds the window's MCP scope (#233).
+        // Terminals only (app docs aren't server sessions); mirrors
+        // attachColorPicker's popover.
         const MCP_MODES = [['off', 'Off'], ['read', 'Read'],
                            ['readwrite', 'Read-write']];
         const MCP_ROBOT_SVG =
