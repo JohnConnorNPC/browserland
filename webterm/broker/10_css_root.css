@@ -534,6 +534,17 @@
         }
         .term-window .mcp-popover .mcp-opt:hover { background: rgba(255,255,255,0.12); }
         .term-window .mcp-popover .mcp-opt.sel { color: var(--accent-default); font-weight: 600; }
+        /* #233: the scope field under the modes. The title bar is
+           user-select:none, which must not reach a text field. */
+        .term-window .mcp-popover .mcp-scope-input {
+            display: block; width: 100%; box-sizing: border-box;
+            margin: 0 0 2px; padding: 3px 6px;
+            background: var(--bg, #1e1e1e); color: #ddd;
+            border: 1px solid var(--bg-3, #555); border-radius: 3px;
+            font-family: inherit; font-size: 12px;
+            user-select: text;
+        }
+        .term-window .mcp-popover .mcp-scope-input.invalid { border-color: #d66; }
         .term-window .tb-btn {
             width: 22px;
             height: 18px;

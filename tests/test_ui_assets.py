@@ -30850,3 +30850,107 @@ def test_the_window_menu_uses_the_scope_block_and_the_mode_mark():
         "the mark must come from mcpMenuMode, not a second copy of the rule"
     assert "for (const it of mcpScopeMenuItems(win)) items.push(it);" in \
         INDEX_HTML
+
+
+def _keybinding_dispatcher237():
+    """The keybinding dispatcher's listener, as registered: from its
+    `document.addEventListener('keydown'` to the capture flag that closes it."""
+    src = _src237("78_js_keybindings.js")
+    start = src.index("        document.addEventListener('keydown', (e) => {\n"
+                      "            // Recorder mode:")
+    end = src.index("\n        }, true);\n", start) + len("\n        }, true);\n")
+    return src[start:end]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_bound_combo_typed_in_the_scope_field_runs_no_action(tmp_path):
+    """#233: the keybinding dispatcher listens in CAPTURE, so the popover's
+    own stopPropagation cannot shield the scope field from it. It bails for a
+    keydown whose target is that field: the combo neither runs its action nor
+    is preventDefault'ed, while the same combo anywhere else still runs."""
+    listener = _keybinding_dispatcher237()
+    r = _node237(tmp_path, r"""
+const captured = [];
+const document = { addEventListener(t, fn, cap) { captured.push({t, fn, cap}); } };
+let _kbRecording = null;
+let ran = 0;
+function renderKeybindings() {}
+function getSettings() { return { keybindings: { 'new-terminal': 'Ctrl+Alt+t' } }; }
+function keyActionById(id) { return { id, run() { ran++; } }; }
+function isAppDialogOpen() { return false; }
+function isDetachedSurface() { return false; }
+const DETACHED_DENY_ACTIONS = new Set();
+""" + _fn237("78_js_keybindings.js", "function comboFromEvent(e)")
+        + _fn237("78_js_keybindings.js", "function keyInMcpScopeField(e)")
+        + listener + r"""
+const el = cls => ({ classList: { contains: c => c === cls } });
+function press(target) {
+    const e = { key: 't', ctrlKey: true, altKey: true, shiftKey: false,
+                metaKey: false, target, pd: false, sp: false,
+                preventDefault() { this.pd = true; },
+                stopPropagation() { this.sp = true; } };
+    const before = ran;
+    captured[0].fn(e);
+    return { ran: ran - before, pd: e.pd, sp: e.sp };
+}
+process.stdout.write(JSON.stringify({
+    registered: captured.map(c => [c.t, c.cap]),
+    field: press(el('mcp-scope-input')),
+    elsewhere: press(el('xterm-helper-textarea')),
+    noTarget: press(null),
+}) + '\n');
+""")
+    assert r["registered"] == [["keydown", True]], \
+        "the dispatcher is a capture listener: that is why it needs the bail"
+    assert r["field"] == {"ran": 0, "pd": False, "sp": False}
+    assert r["elsewhere"] == {"ran": 1, "pd": True, "sp": True}
+    assert r["noTarget"] == {"ran": 1, "pd": True, "sp": True}
+
+
+def test_the_robot_popover_scope_field_wiring():
+    """#233: the popover's scope field, piece by piece. It shows only for a
+    broker that stores scopes; the popover stops mousedown (no title-bar
+    drag), keydown and keyup (no bubbling to the page) and contextmenu (the
+    field's own menu, not the window's); the field is capped at 64 and fed by
+    knownScopes; the ONE commit path is guarded by `committed` and writes
+    through setWindowMcpScope; Escape and teardown discard; the robot's title
+    names the scope. Behaviour is proved live (the #233 Playwright pass)."""
+    src = _src237("65_js_display_theming.js")
+    btn = _fn237("65_js_display_theming.js",
+                 "function attachMcpButton(win, titleBar)")
+    for ev in ("mousedown", "keydown", "keyup", "contextmenu"):
+        assert f"pop.addEventListener('{ev}', stopProp);" in btn, \
+            f"the popover must stop {ev}"
+    assert "if (hostMcpScopes(win.hostId) === true) appendScopeField(pop);" \
+        in btn
+    field = btn[btn.index("const appendScopeField = (into) => {"):
+                btn.index("const openPop = () => {")]
+    assert "head.textContent = 'Scope';" in field
+    assert "input.maxLength = 64;" in field
+    assert "input.className = 'mcp-scope-input';" in field
+    assert "for (const n of knownScopes(win.hostId)) {" in field
+    assert "input.setAttribute('list', list.id);" in field
+    assert "'invalid', !mcpScopeInputOk(input.value)));" in field
+    assert "if (commitScope()) closePop();" in field
+    commit = btn[btn.index("const commitScope = () => {"):
+                 btn.index("const closePop = (discard) => {")]
+    assert "if (!edit || edit.committed) return true;" in commit
+    assert commit.index("if (!mcpScopeInputOk(v)) {") < \
+        commit.index("edit.committed = true;\n                setWindowMcpScope(")
+    assert "setWindowMcpScope(win, v || null);" in commit
+    close = btn[btn.index("const closePop = (discard) => {"):
+                btn.index("const onOutside = (e) => {")]
+    assert "if (discard !== true) commitScope();" in close
+    assert "e.preventDefault(); e.stopPropagation(); closePop(true);" in btn
+    assert "closePop(true);\n                win.refreshMcpBtn = null;" in btn
+    assert "(tag ? ' · scope: ' + tag : '')" in btn
+    # the dispatcher's bail sits with the dialog's, before any action is found
+    keys = _keybinding_dispatcher237()
+    assert keys.index("if (keyInMcpScopeField(e)) return;") < \
+        keys.index("const map = getSettings().keybindings || {};")
+    css = _src237("10_css_root.css")
+    assert ".term-window .mcp-popover .mcp-scope-input {" in css
+    for needle in ("appendScopeField(pop)", "if (keyInMcpScopeField(e)) return;",
+                   ".mcp-popover .mcp-scope-input"):
+        assert needle in INDEX_HTML, needle
+    assert "mcpScopeInputOk" in src

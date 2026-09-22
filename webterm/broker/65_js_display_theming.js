@@ -613,14 +613,37 @@
                 btn.classList.toggle('on', m !== 'off');
                 btn.classList.toggle('mcp-off', m === 'off');
                 const lab = (MCP_MODES.find(([v]) => v === m) || [, 'Off'])[1];
-                btn.title = 'MCP access: ' + lab;
+                // #233: and the window's MCP scope tag, when it has one.
+                const tag = (s && s.mcp_scope) ? s.mcp_scope : '';
+                btn.title = 'MCP access: ' + lab + (tag ? ' · scope: ' + tag : '');
             };
             win.refreshMcpBtn = refresh;   // kept live by refreshTaskbarInner
             win.mcpBtn = btn;              // #33: target for the activity flash
 
             let pop = null;
-            const closePop = () => {
+            // #233: the open popover's scope edit, or null. commitScope is its
+            // ONE write path and `committed` lets it fire at most once, whichever
+            // of Enter or a close gets there first. Escape and the window's
+            // teardown discard it (closePop(true)); any other close keeps a
+            // changed, valid scope, and drops one that is not valid (a field
+            // marked invalid while typing cannot be sent).
+            let edit = null;       // {input, from, committed}
+            const commitScope = () => {
+                if (!edit || edit.committed) return true;
+                const v = edit.input.value.trim();
+                if (v === edit.from) { edit.committed = true; return true; }
+                if (!mcpScopeInputOk(v)) {
+                    edit.input.classList.add('invalid');
+                    return false;
+                }
+                edit.committed = true;
+                setWindowMcpScope(win, v || null);
+                return true;
+            };
+            const closePop = (discard) => {
                 if (!pop) return;
+                if (discard !== true) commitScope();
+                edit = null;
                 document.removeEventListener('mousedown', onOutside, true);
                 document.removeEventListener('keydown', onKey, true);
                 try { pop.remove(); } catch (_) {}
@@ -632,8 +655,48 @@
             };
             const onKey = (e) => {
                 if (e.key === 'Escape') {
-                    e.preventDefault(); e.stopPropagation(); closePop();
+                    e.preventDefault(); e.stopPropagation(); closePop(true);
                 }
+            };
+            // The scope field (#233), shown only for a broker that stores the
+            // tag (hostMcpScopes, 78): prefilled with the window's scope, capped
+            // at a scope's 64 characters, offered the names knownScopes finds.
+            const appendScopeField = (into) => {
+                const s = sessions.get(win.id);
+                const from = (s && s.mcp_scope) ? s.mcp_scope : '';
+                const head = document.createElement('div');
+                head.className = 'mcp-head';
+                head.textContent = 'Scope';
+                into.appendChild(head);
+                const input = document.createElement('input');
+                input.type = 'text';
+                input.className = 'mcp-scope-input';
+                input.maxLength = 64;
+                input.placeholder = '(none)';
+                input.spellcheck = false;
+                input.autocomplete = 'off';
+                input.value = from;
+                // A page-unique id: the list is looked up by it. The counter is
+                // a function property, so there is no module state to order.
+                const list = document.createElement('datalist');
+                attachMcpButton._lists = (attachMcpButton._lists || 0) + 1;
+                list.id = 'mcp-scope-list-' + attachMcpButton._lists;
+                for (const n of knownScopes(win.hostId)) {
+                    const o = document.createElement('option');
+                    o.value = n;
+                    list.appendChild(o);
+                }
+                input.setAttribute('list', list.id);
+                input.addEventListener('input', () => input.classList.toggle(
+                    'invalid', !mcpScopeInputOk(input.value)));
+                input.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    if (commitScope()) closePop();
+                });
+                into.appendChild(input);
+                into.appendChild(list);
+                edit = { input, from, committed: false };
             };
             const openPop = () => {
                 if (pop) { closePop(); return; }   // toggle
@@ -658,6 +721,17 @@
                     });
                     pop.appendChild(opt);
                 });
+                // #233: the popover is a child of the title bar, so a press in it
+                // would start a window drag, a right-click would open the window
+                // menu over the field's own, and keys would bubble on to the
+                // page. The keybinding dispatcher listens in CAPTURE, above all
+                // of this, so it has its own bail for the scope field
+                // (keyInMcpScopeField, 78).
+                pop.addEventListener('mousedown', stopProp);
+                pop.addEventListener('keydown', stopProp);
+                pop.addEventListener('keyup', stopProp);
+                pop.addEventListener('contextmenu', stopProp);
+                if (hostMcpScopes(win.hostId) === true) appendScopeField(pop);
                 titleBar.appendChild(pop);
                 // Right-align under the button, clamped inside the title bar.
                 const popW = pop.offsetWidth;
@@ -675,7 +749,7 @@
             win.cleanups.push(() => {
                 btn.removeEventListener('mousedown', stopProp);
                 btn.removeEventListener('click', onClick);
-                closePop();
+                closePop(true);
                 win.refreshMcpBtn = null;
                 win.mcpBtn = null;
                 if (win._mcpFlashTimer) { clearTimeout(win._mcpFlashTimer);
