@@ -30932,6 +30932,10 @@ def test_the_robot_popover_scope_field_wiring():
     assert "input.setAttribute('list', list.id);" in field
     assert "'invalid', !mcpScopeInputOk(input.value)));" in field
     assert "if (commitScope()) closePop();" in field
+    # only a PLAIN Enter commits: Ctrl+Alt+Enter is New terminal by default,
+    # and the dispatcher already stands aside for this field
+    assert field.index("if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) "
+                       "return;") < field.index("if (commitScope()) closePop();")
     commit = btn[btn.index("const commitScope = () => {"):
                  btn.index("const closePop = (discard) => {")]
     assert "if (!edit || edit.committed) return true;" in commit

@@ -689,8 +689,13 @@
                 input.setAttribute('list', list.id);
                 input.addEventListener('input', () => input.classList.toggle(
                     'invalid', !mcpScopeInputOk(input.value)));
+                // A PLAIN Enter commits. A modified one is somebody's combo
+                // (Ctrl+Alt+Enter is New terminal by default): the dispatcher
+                // already stands aside for this field, so it must mean nothing
+                // here either, never a commit.
                 input.addEventListener('keydown', (e) => {
                     if (e.key !== 'Enter') return;
+                    if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
                     e.preventDefault();
                     if (commitScope()) closePop();
                 });
