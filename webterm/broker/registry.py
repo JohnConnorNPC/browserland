@@ -119,11 +119,12 @@ class WindowEntry:
         # first hello) re-applies both; failing that, both carry over from a
         # replaced same-id entry reporting the same host and the same nonzero
         # pid (registry.same_producer, the gate register() itself applies
-        # when no hook is installed). Everything else starts at
-        # None — a broker restart with no matching row, a reconnect after the
-        # old entry was already deregistered, a relaunch (launcher ids are
-        # fresh per launch; an agent pinned with --window-id comes back under
-        # the same id with a new shell pid).
+        # when no hook is installed). Everything else starts at None: a
+        # broker restart or a reconnect with no matching row (nothing was ever
+        # set for that producer: POST /session/mcp writes a row for every
+        # change), a relaunch (launcher ids are fresh per launch; an agent
+        # pinned with --window-id comes back under the same id with a new
+        # shell pid).
         self.mcp_mode: Optional[str] = None
         # Per-window MCP scope (#237): the MCP-client partition this window
         # belongs to, or None = unscoped. A bare str|None fact: nothing here
