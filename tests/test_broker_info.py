@@ -25,6 +25,7 @@ import pytest
 from .auth_helpers import TEST_TOKEN, authed
 from webterm.broker.app import (ADMIN_HEADER, ADMIN_ROUTES,
                                 _load_or_create_broker_id, create_app)
+from webterm.broker.mcp_windows import SCOPE_HEADER
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -228,9 +229,9 @@ def test_info_options_preflight_cors(tmp_path, monkeypatch):
 def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
     # #191: a cross-origin admin write (X-Webterm-Admin) must survive its own
     # preflight -- on a broker that HAS the realm. A broker with no
-    # admin_token has nothing to advertise and stays byte-identical to the
-    # build before this class existed (the absent-config invariant), so the
-    # two shapes are pinned separately here.
+    # admin_token has nothing to advertise and its preflight carries no trace
+    # of the admin header (the absent-config invariant), so the two shapes
+    # are pinned separately here. The scope header (#230) is listed on both.
     app = _make_app(tmp_path, monkeypatch, token="sekrit",
                     admin_token="preflight-admin-token-0123")
     assert app.ctx.admin_token is not None
@@ -239,12 +240,13 @@ def test_info_options_preflight_allows_admin_header(tmp_path, monkeypatch):
     allow = [h.strip() for h in
             response.headers.get("Access-Control-Allow-Headers", "").split(",")]
     assert ADMIN_HEADER in allow
+    assert SCOPE_HEADER in allow
     plain = _make_app(tmp_path, monkeypatch, token="sekrit")
     assert plain.ctx.admin_token is None
     _, r2 = authed(plain).options("/info")
     assert r2.status == 204
     assert (r2.headers.get("Access-Control-Allow-Headers")
-            == "Authorization, Content-Type")
+            == "Authorization, Content-Type, X-Browserland-Scope")
 
 
 # ---- /info admin-class advertisement (#191) --------------------------------

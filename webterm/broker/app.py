@@ -4631,28 +4631,36 @@ def create_app(config: Optional[Dict[str, Any]] = None,
             response.headers["Vary"] = "Cookie"
         elif "cookie" not in _vary.lower():
             response.headers["Vary"] = _vary + ", Cookie"
+        # #230: an /mcp/* body can depend on SCOPE_HEADER (the listing, the
+        # chokepoint's 404, /mcp/info's echo, 400 bad_scope). A shared cache
+        # will not store a response to a request carrying Authorization by
+        # default, but the token may ride ?token= instead, and then only Vary
+        # keeps two scopes' answers apart. Every /mcp/* response names it,
+        # /mcp/config (which ignores the header) and preflights included:
+        # that costs a cache a little precision, never correctness.
+        if request.path.startswith("/mcp/"):
+            _vary = response.headers["Vary"]
+            if SCOPE_HEADER.lower() not in _vary.lower():
+                response.headers["Vary"] = _vary + ", " + SCOPE_HEADER
         if request.method == "OPTIONS":
             # PUT is for /state; GET/POST cover the rest.
             response.headers["Access-Control-Allow-Methods"] = \
                 "GET, POST, PUT, OPTIONS"
-            # ADMIN_HEADER is allowed unconditionally, whether or not this
-            # broker actually enforces the admin class (#191): gating the
-            # Allow-Headers on admin_token would make preflight behavior
-            # config-dependent for zero security gain -- a client sending the
-            # header to a non-enforcing broker is inert, but an enforcing one
-            # whose preflight forgot to list it would 403 every cross-origin
-            # admin write in the browser before the request ever left.
-            # #191: the admin header is advertised ONLY by a broker that
-            # actually has the realm. An unconfigured broker stays
-            # byte-identical to the build before this class existed (its
-            # single trace is the boot warning), and no client ever sends
-            # the header to a broker whose /info did not advertise `admin`,
-            # so a conditional list costs nothing and keeps the
-            # absent-config invariant literally true.
-            response.headers["Access-Control-Allow-Headers"] = (
-                "Authorization, Content-Type, " + ADMIN_HEADER
-                if app.ctx.admin_token is not None
-                else "Authorization, Content-Type")
+            # SCOPE_HEADER is allowed unconditionally (#230): every build
+            # from this one on has the scope realm, so the list has no config
+            # to depend on. The preflights themselves are per-route OPTIONS
+            # handlers (_preflight) that never run _mcp_auth_error, so an
+            # OPTIONS is never answered 400 bad_scope; the request that
+            # follows it is.
+            # ADMIN_HEADER is advertised ONLY by a broker that actually has
+            # the admin realm (#191). An unconfigured broker's preflight
+            # carries no trace of it (its single trace is the boot warning),
+            # and no client ever sends the header to a broker whose /info did
+            # not advertise `admin`, so a conditional list costs nothing.
+            _allow = "Authorization, Content-Type, " + SCOPE_HEADER
+            if app.ctx.admin_token is not None:
+                _allow += ", " + ADMIN_HEADER
+            response.headers["Access-Control-Allow-Headers"] = _allow
             response.headers["Access-Control-Max-Age"] = "86400"
             # Chrome Private Network Access: a public-site page fetching a
             # private-network broker must see this echoed on the preflight.

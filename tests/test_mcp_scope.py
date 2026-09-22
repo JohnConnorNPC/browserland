@@ -28,7 +28,9 @@ _mcp_entry chokepoint: a window outside the declared scope answers byte for
 byte what a missing id answers, while an in-scope or unscoped caller still
 drives it; /mcp/info's echo of the declared scope (null when unscoped); and
 GET /mcp/config's known_scopes, which the header can never add to. The
-/mcp/config cells use the browser token (authed), that route's realm.
+/mcp/config cells use the browser token (authed), that route's realm. Last,
+the header's CORS and caching surface: the preflight allows it with no admin
+realm configured, and every /mcp/* answer (only those) names it in Vary.
 """
 
 from __future__ import annotations
@@ -1905,3 +1907,50 @@ def test_mcp_config_ignores_the_scope_header(tmp_path, monkeypatch):
     plain = _config(app)
     with_bad_scope = _config(app, headers=[(SCOPE_HEADER, "a:b")])
     assert with_bad_scope.body == plain.body
+
+
+def _tokens(value):
+    return [part.strip() for part in (value or "").split(",")]
+
+
+def test_a_preflight_allows_the_scope_header_without_an_admin_realm(
+        tmp_path, monkeypatch):
+    """#230: the scope header is in Access-Control-Allow-Headers on a broker
+    with no admin_token (the admin header is not), and a preflight never
+    runs the MCP gate, so one carrying even a bad scope is a plain 204."""
+    app = _wire_app(tmp_path, monkeypatch)
+    assert app.ctx.admin_token is None
+    for headers in ([], [(SCOPE_HEADER, "a:b")]):
+        _, resp = app.test_client.options(
+            "/mcp/terminals",
+            headers=[("Origin", "https://elsewhere.example"),
+                     ("Access-Control-Request-Method", "GET"),
+                     ("Access-Control-Request-Headers",
+                      "authorization, " + SCOPE_HEADER.lower()), *headers])
+        assert resp.status == 204
+        assert _tokens(resp.headers.get("Access-Control-Allow-Headers")) == [
+            "Authorization", "Content-Type", SCOPE_HEADER]
+
+
+def test_mcp_responses_vary_on_the_scope_header(tmp_path, monkeypatch):
+    """#230: an /mcp/* answer depends on the header, so it names it in Vary,
+    beside the Cookie the CSP policy already varies on: a listing and a
+    bad_scope refusal alike."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _window(app, 5, scope="a")
+    _, listing = _mcp(app, "/mcp/terminals", scope="a")
+    _, refused = _mcp(app, "/mcp/terminals", scope="a:b")
+    assert (listing.status, refused.status) == (200, 400)
+    for resp in (listing, refused):
+        vary = _tokens(resp.headers.get("Vary"))
+        assert "Cookie" in vary and SCOPE_HEADER in vary
+
+
+def test_a_browser_realm_response_does_not_vary_on_the_scope_header(
+        tmp_path, monkeypatch):
+    """#230: outside /mcp/* nothing reads the header, so Vary stays as it
+    was (Cookie only)."""
+    app = _wire_app(tmp_path, monkeypatch)
+    _, resp = authed(app).get("/info")
+    assert resp.status == 200
+    assert _tokens(resp.headers.get("Vary")) == ["Cookie"]
