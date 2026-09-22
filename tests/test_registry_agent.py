@@ -1,12 +1,19 @@
 """Foreground-agent plumbing through the broker registry: a producer 'agent'
 frame must update entry.agent (whitelisted), surface in summary(), and
 re-broadcast to attached browsers. The hello's optional 'agent' field seeds
-it; junk values collapse to ""."""
+it; junk values collapse to "".
+
+It also pins the registry's per-window MCP facts (#227): ``mcp_scope`` in
+summary() and the ``on_register`` hook's contract (args, ordering, lock,
+failure handling)."""
 
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import logging
+import warnings
 
 from webterm.broker.registry import (BrokerRegistry, _whitelist_agent,
                                       run_producer_session)
@@ -52,6 +59,23 @@ async def _wait(pred, tries=200):
             return True
         await asyncio.sleep(0.005)
     return False
+
+
+def _hello(window_id, pid=1):
+    return {"type": "hello", "window_id": window_id, "pid": pid, "title": "t",
+            "cols": 80, "rows": 24, "kind": "agent"}
+
+
+def _hook_records(caplog, window_id, text):
+    """ERROR records from the registry logger that name ``window_id`` and carry
+    ``text`` — the INFO 'registered'/'replacing' lines name the id too, so the
+    level and text filters are what make this specific."""
+    return [r for r in caplog.records
+            if r.name == "webterm.broker.registry"
+            and r.levelno == logging.ERROR
+            and "on_register" in r.getMessage()
+            and text in r.getMessage()
+            and str(window_id) in r.getMessage()]
 
 
 def test_agent_frame_updates_entry_summary_and_broadcasts():
@@ -294,6 +318,113 @@ def test_summary_carries_mcp_scope_raw():
         assert s["pace_ms"] == 0
 
     asyncio.run(scenario())
+
+
+def test_on_register_gets_old_entry_or_none():
+    """#227: the hook is called as (new_entry, old) — old is None on a fresh
+    register and the replaced entry (by identity) on a same-id re-register."""
+    async def scenario():
+        reg = BrokerRegistry()
+        calls = []
+        reg.on_register = lambda new, old: calls.append((new, old))
+        first = await reg.register(FeedWS(), _hello(31))
+        assert len(calls) == 1
+        assert calls[0][0] is first
+        assert calls[0][1] is None
+        second = await reg.register(FeedWS(), _hello(31))
+        assert second is not first
+        assert len(calls) == 2
+        assert calls[1][0] is second
+        assert calls[1][1] is first
+
+    asyncio.run(scenario())
+
+
+def test_on_register_runs_before_the_entry_is_visible():
+    """#227: the hook runs BEFORE insertion — a registry read from inside it
+    sees the old entry (or nothing), never the entry being registered."""
+    async def scenario():
+        reg = BrokerRegistry()
+        seen = []
+        reg.on_register = lambda new, old: seen.append((reg.get(32), 32 in reg))
+        first = await reg.register(FeedWS(), _hello(32))
+        assert seen[0] == (None, False)
+        second = await reg.register(FeedWS(), _hello(32))
+        assert seen[1][0] is first
+        assert seen[1][0] is not second
+        assert reg.get(32) is second             # visible once register returns
+
+    asyncio.run(scenario())
+
+
+def test_on_register_runs_under_the_registry_lock():
+    """#227: the hook runs INSIDE the registry lock (the contract that makes
+    'must not take any other lock' matter), on fresh and same-id registers."""
+    async def scenario():
+        reg = BrokerRegistry()
+        locked = []
+        reg.on_register = lambda new, old: locked.append(reg._lock.locked())
+        await reg.register(FeedWS(), _hello(33))
+        await reg.register(FeedWS(), _hello(33))
+        assert locked == [True, True]
+        assert not reg._lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_raising_on_register_hook_is_harmless(caplog):
+    """#227: a hook that raises never fails registration — the entry is still
+    inserted and visible, and the failure is logged (with its traceback) under
+    the window id."""
+    caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
+
+    def hook(new, old):
+        raise RuntimeError("hook boom")
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        entry = await reg.register(FeedWS(), _hello(34))
+        assert reg.get(34) is entry
+        again = await reg.register(FeedWS(), _hello(34))
+        assert reg.get(34) is again
+
+    asyncio.run(scenario())
+    records = _hook_records(caplog, 34, "failed")
+    assert len(records) == 2                     # one per register
+    for record in records:
+        assert record.exc_info is not None
+        assert record.exc_info[0] is RuntimeError
+
+
+def test_async_on_register_hook_is_closed_and_logged(caplog):
+    """#227: an accidentally ``async def`` hook returns a coroutine without
+    running its body. register() must not await it (the hook is sync by
+    contract): it closes the coroutine — so no 'never awaited' RuntimeWarning
+    escapes — logs an ERROR under the window id, and still registers."""
+    caplog.set_level(logging.DEBUG, logger="webterm.broker.registry")
+    ran = []
+
+    async def hook(new, old):
+        ran.append(new)
+
+    async def scenario():
+        reg = BrokerRegistry()
+        reg.on_register = hook
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            entry = await reg.register(FeedWS(), _hello(35))
+            gc.collect()
+        assert reg.get(35) is entry
+        return caught
+
+    caught = asyncio.run(scenario())
+    assert ran == []                             # the body never ran
+    assert not [w for w in caught
+                if issubclass(w.category, RuntimeWarning)
+                and "never awaited" in str(w.message)]
+    records = _hook_records(caplog, 35, "coroutine")
+    assert len(records) == 1
 
 
 def test_whitelist_agent_helper():

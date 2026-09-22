@@ -20,10 +20,11 @@ replaces the stale entry, binary frames broadcast verbatim to subscribers,
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import socket
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .. import protocol
 
@@ -255,6 +256,28 @@ class WindowEntry:
                 self.remove_subscriber(sub)
 
 
+def _run_on_register(hook: Callable[[WindowEntry, Optional[WindowEntry]], None],
+                     entry: WindowEntry, old: Optional[WindowEntry]) -> None:
+    """Call an on_register hook under register()'s contract: an exception or an
+    accidental coroutine is logged with the window id, never raised and never
+    awaited."""
+    try:
+        result = hook(entry, old)
+    except Exception:
+        LOGGER.exception("on_register hook failed for window %s; "
+                         "registering it anyway", entry.id)
+        return
+    if inspect.isawaitable(result):
+        # An ``async def`` hook handed back a coroutine without running its
+        # body. Close it (no "never awaited" warning) and say so: dropped
+        # silently it would pass for a hook that had nothing to re-apply.
+        close = getattr(result, "close", None)
+        if close is not None:
+            close()
+        LOGGER.error("on_register hook for window %s returned a coroutine; "
+                     "it must be synchronous, and its body never ran", entry.id)
+
+
 class BrokerRegistry:
     """Process-wide map id -> WindowEntry, plus launch waiters."""
 
@@ -262,8 +285,36 @@ class BrokerRegistry:
         self._entries: Dict[int, WindowEntry] = {}
         self._lock = asyncio.Lock()
         self._waiters: Dict[int, asyncio.Event] = {}
+        # The broker-installed re-apply hook for per-window facts; per-registry
+        # state beside _lock and _waiters. None = no hook. Contract: register().
+        self.on_register: Optional[
+            Callable[[WindowEntry, Optional[WindowEntry]], None]] = None
 
     async def register(self, ws, hello: Dict[str, Any]) -> WindowEntry:
+        """Build a WindowEntry from ``hello`` and make it visible, replacing any
+        stale entry with the same window_id.
+
+        ``on_register``, when installed, is called as ``hook(new_entry, old)``
+        INSIDE ``self._lock``, after the new entry is built and BEFORE it is
+        inserted, so the broker can re-apply persisted per-window facts before
+        anything can observe the entry. ``old`` is the replaced same-id entry,
+        or None on a fresh register. The contract:
+
+        * Synchronous and memory-only. It must not await (an ``async def`` hook
+          is closed unrun and logged, never awaited) and must not take any other
+          lock, the sidecar store's in particular: the store's durable writes
+          are its own separately scheduled job.
+        * It runs before ``old.fail_all_rpc`` and before old's subscribers get
+          their 1012 close, so ``old`` still has live subscribers and pending
+          RPCs: read it, don't drive it.
+        * Every sync registry read (get, __contains__, session_summaries,
+          live_cwds, is_pending) is lock-free and safe inside the hook, and sees
+          ``old`` or nothing, never ``new_entry``. register/deregister are async
+          and cannot be called from it.
+        * Any exception is logged with the window id and swallowed: registration
+          never fails because of the hook, and the entry is inserted as the hook
+          left it (a partial apply is not rolled back).
+        """
         window_id = int(hello.get("window_id"))
         pid = int(hello.get("pid", 0))
         title = str(hello.get("title", ""))
@@ -293,6 +344,9 @@ class BrokerRegistry:
             if old is not None:
                 # Stale entry from a dropped connection — replace.
                 LOGGER.info("replacing stale entry for window %s", window_id)
+            hook = self.on_register
+            if hook is not None:
+                _run_on_register(hook, entry, old)
             self._entries[window_id] = entry
             waiter = self._waiters.get(window_id)
         if old is not None:
