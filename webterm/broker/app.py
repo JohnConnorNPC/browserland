@@ -86,6 +86,9 @@ from sanic.response import empty, html, json as sanic_json, raw as sanic_raw
 from .. import build_version, protocol
 from . import auth, modinstall, relay, supervise, update as update_check
 from .launcher import LaunchError, Launcher, default_profiles
+# Valid per-window / default MCP access modes; defined beside the per-window
+# store that validates them (#228).
+from .mcp_windows import MCP_MODES
 from .registry import BrokerRegistry, run_producer_session
 # NB: .ui (INDEX_HTML) and .help_corpus (HELP_CORPUS) are imported lazily inside
 # create_app, gated on serve_ui — headless brokers (#87) must never assemble the
@@ -770,9 +773,6 @@ def _fetch_status_blocking(pid: str) -> Dict[str, Any]:
         return {"id": pid, "label": label, "indicator": "unknown",
                 "description": "", "incidents": [], "components": [],
                 "error": type(exc).__name__}
-
-# Valid per-window / default MCP access modes.
-MCP_MODES = ("off", "read", "readwrite")
 
 # /mcp/input: cap one input frame's UTF-8 payload. Terminal input (keystrokes,
 # a pasted command) is tiny; this just stops a readwrite MCP token from
