@@ -30487,3 +30487,29 @@ def test_a_dialog_field_can_cap_its_length():
     assert "maxLength: opts.maxLength," in prompt, \
         "openTextPrompt must forward opts.maxLength to its field"
     assert "input.maxLength = f.maxLength;" in INDEX_HTML
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_poll_merge_normalises_mcp_scope(tmp_path):
+    """#234: the merge literal itself, run on fake /sessions rows: a non-empty
+    string scope survives as-is; empty, missing or non-string becomes null, so
+    the chip never shows a badge for a value the broker did not send as a
+    tag."""
+    src = _src237("75_js_taskbar_hosts.js")
+    start = src.index("merged.set(key, {") + len("merged.set(key, ")
+    literal = src[start:src.index("});", start) + 1]
+    r = _node237(tmp_path, r"""
+function merge(s) {
+    const key = 'h:1', stale = false, host = {id: 'h', label: 'H'};
+    return (""" + literal + r""");
+}
+const out = {};
+for (const [name, v] of [['str', 'projA'], ['empty', ''], ['num', 7],
+                         ['nul', null]]) {
+    out[name] = merge({id: 1, mcp_scope: v}).mcp_scope;
+}
+out.missing = merge({id: 1}).mcp_scope;
+process.stdout.write(JSON.stringify(out) + '\n');
+""")
+    assert r == {"str": "projA", "empty": None, "num": None, "nul": None,
+                 "missing": None}
