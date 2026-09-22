@@ -30353,3 +30353,122 @@ process.stdout.write(JSON.stringify({
     assert r["scoped"] == "#7 · pid 42 · host h · agent · scope projA — t"
     assert r["none"] == "#7 · pid 42 · host h · agent — t"
     assert r["absent"] == r["none"]
+
+
+def test_the_scope_badge_is_styled_by_core_and_rendered_by_the_chip():
+    """#234: the .ti-scope badge lives in core (its own rule in the core CSS,
+    maintained by renderChipLabel), not in the workspaces mod whose .ti-ws
+    badge it is cloned from."""
+    css = _src237("10_css_root.css")
+    rule = css[css.index(".taskbar-item .ti-scope {"):]
+    rule = rule[:rule.index("}")]
+    for decl in ("font-size: 9px;", "opacity: 0.75;", "border-radius: 3px;",
+                 "max-width: 12ch;", "text-overflow: ellipsis;",
+                 "white-space: nowrap;"):
+        assert decl in rule, f".ti-scope is missing {decl!r}"
+    ws = (BROKER_DIR / "mods/workspaces/workspaces.css").read_text(
+        encoding="utf-8")
+    ws_rule = ws[ws.index(".taskbar-item .ti-ws {"):]
+    ws_bg = re.search(r"background: ([^;]+);", ws_rule[:ws_rule.index("}")])
+    assert ws_bg and ws_bg.group(1) not in rule, \
+        "the scope badge must not share the workspace badge's colour"
+    chip = _fn237("75_js_taskbar_hosts.js", "function renderChipLabel(el, sess)")
+    assert "scope.className = 'ti-scope';" in chip
+    assert ".taskbar-item .ti-scope {" in INDEX_HTML
+    assert "scope.className = 'ti-scope';" in INDEX_HTML
+
+
+_CHIP_DOM_237 = r"""
+class N {
+    constructor(tag) { this.tag = tag; this.className = ''; this._t = '';
+                       this.children = []; this.parent = null; this.isFrag = false; }
+    get textContent() { return this._t; }
+    set textContent(v) { this._t = String(v); }
+    remove() {
+        if (!this.parent) return;
+        this.parent.children.splice(this.parent.children.indexOf(this), 1);
+        this.parent = null;
+    }
+    _take(n) {
+        if (n.isFrag) { const k = n.children; n.children = []; return k; }
+        n.remove();
+        return [n];
+    }
+    appendChild(n) {
+        for (const k of this._take(n)) { k.parent = this; this.children.push(k); }
+        return n;
+    }
+    insertBefore(n, ref) {
+        const kids = this._take(n);
+        const i = this.children.indexOf(ref);
+        if (i < 0) throw new Error('insertBefore: ref is not a child');
+        for (const k of kids) k.parent = this;
+        this.children.splice(i, 0, ...kids);
+        return n;
+    }
+    querySelectorAll(sel) {
+        const c = sel.slice(1);
+        return this.children.filter(k => k.className.split(/\s+/).includes(c));
+    }
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+}
+const document = {
+    createElement: t => new N(t),
+    createDocumentFragment: () => { const f = new N('#f'); f.isFrag = true; return f; },
+};
+function composeLabelParts(sess) {
+    return [{cls: 'ti-id', text: '#7'}, {cls: 'ti-title', text: 'title'}];
+}
+const shape = el => el.children.map(k => k.className + '=' + k.textContent);
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_render_chip_label_maintains_the_scope_badge_before_the_ws_slot(
+        tmp_path):
+    """#234: the badge is added for a scoped session, kept (never duplicated)
+    and updated in place across relabels, removed once the scope clears, and
+    always sits after the label parts and before the workspaces mod's .ti-ws
+    badge, which it never touches."""
+    fn = _fn237("75_js_taskbar_hosts.js", "function renderChipLabel(el, sess)")
+    r = _node237(tmp_path, _CHIP_DOM_237 + fn + r"""
+const out = {};
+// A chip the workspaces mod already badged.
+const el = new N('div');
+const ws = new N('span'); ws.className = 'ti-ws'; ws.textContent = 'ws1';
+el.appendChild(ws);
+renderChipLabel(el, {mcp_scope: 'projA'});
+out.added = shape(el);
+const badge = el.querySelector('.ti-scope');
+renderChipLabel(el, {mcp_scope: 'projA'});
+out.again = shape(el);
+out.sameNodeAgain = el.querySelector('.ti-scope') === badge;
+renderChipLabel(el, {mcp_scope: 'projB'});
+out.changed = shape(el);
+out.sameNodeChanged = el.querySelector('.ti-scope') === badge;
+renderChipLabel(el, {mcp_scope: null});
+out.cleared = shape(el);
+out.wsKept = el.querySelector('.ti-ws') === ws;
+// A chip with no workspace badge yet; the mod appends one later.
+const bare = new N('div');
+renderChipLabel(bare, {mcp_scope: 'projA'});
+out.bare = shape(bare);
+const ws2 = new N('span'); ws2.className = 'ti-ws'; ws2.textContent = 'ws2';
+bare.appendChild(ws2);
+renderChipLabel(bare, {mcp_scope: 'projA'});
+out.bareThenWs = shape(bare);
+const plain = new N('div');
+renderChipLabel(plain, {});
+out.unscoped = shape(plain);
+process.stdout.write(JSON.stringify(out) + '\n');
+""")
+    parts = ["ti-part ti-id=#7", "ti-part ti-title=title"]
+    assert r["added"] == parts + ["ti-scope=projA", "ti-ws=ws1"]
+    assert r["again"] == r["added"] and r["sameNodeAgain"] is True
+    assert r["changed"] == parts + ["ti-scope=projB", "ti-ws=ws1"]
+    assert r["sameNodeChanged"] is True
+    assert r["cleared"] == parts + ["ti-ws=ws1"]
+    assert r["wsKept"] is True
+    assert r["bare"] == parts + ["ti-scope=projA"]
+    assert r["bareThenWs"] == parts + ["ti-scope=projA", "ti-ws=ws2"]
+    assert r["unscoped"] == parts

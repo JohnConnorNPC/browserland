@@ -13,12 +13,29 @@
         // from composeLabelParts each call so a toggle/order change converges on
         // the next tick. Each span keeps its per-part class (.ti-id dim color +
         // <110px container auto-hide, .ti-title ellipsis anchor). Re-insert
-        // BEFORE the trailing .ti-ws workspace badge (added by the workspaces mod)
-        // so the badge + off-workspace dimming survive per-tick relabels. The
-        // .ti-ws badge carries no .ti-part class, so the clear pass never removes
-        // it and it never duplicates.
+        // BEFORE the trailing badges so they survive per-tick relabels: #234's
+        // .ti-scope (the window's MCP scope, maintained here) and then the .ti-ws
+        // workspace badge (added by the workspaces mod, which appends it last).
+        // Neither badge carries the .ti-part class, so the clear pass never
+        // removes them and they never duplicate. The scope badge is updated in
+        // place, created only while sess.mcp_scope is set, removed once it is
+        // cleared, and always sits before .ti-ws so the chip reads scope then
+        // workspace.
         function renderChipLabel(el, sess) {
             el.querySelectorAll('.ti-part').forEach(n => n.remove());
+            const ws = el.querySelector('.ti-ws');
+            let scope = el.querySelector('.ti-scope');
+            const tag = sess && sess.mcp_scope ? String(sess.mcp_scope) : '';
+            if (!tag) {
+                if (scope) { scope.remove(); scope = null; }
+            } else {
+                if (!scope) {
+                    scope = document.createElement('span');
+                    scope.className = 'ti-scope';
+                    if (ws) el.insertBefore(scope, ws); else el.appendChild(scope);
+                }
+                if (scope.textContent !== tag) scope.textContent = tag;
+            }
             const frag = document.createDocumentFragment();
             for (const p of composeLabelParts(sess)) {
                 const span = document.createElement('span');
@@ -26,8 +43,8 @@
                 span.textContent = p.text;
                 frag.appendChild(span);
             }
-            const ws = el.querySelector('.ti-ws');
-            if (ws) el.insertBefore(frag, ws); else el.appendChild(frag);
+            const tail = scope || ws;
+            if (tail) el.insertBefore(frag, tail); else el.appendChild(frag);
         }
         // Single label/tooltip composer: only this function writes el.title,
         // so the stale suffix and the always-everything tooltip stay

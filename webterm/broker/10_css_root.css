@@ -287,6 +287,24 @@
             flex: 0 1 auto;
             min-width: 0;
         }
+        /* #234: the window's MCP scope. The workspaces mod's .ti-ws badge
+           (mods/workspaces/workspaces.css) cloned, in blue so the two never
+           read as one. Capped with an ellipsis: a scope may be 64 characters,
+           which would crowd the title out of a 280px chip; the tooltip carries
+           the whole name. */
+        .taskbar-item .ti-scope {
+            font-size: 9px;
+            opacity: 0.75;
+            margin-left: 3px;
+            padding: 0 3px;
+            border-radius: 3px;
+            background: rgba(90,160,255,0.22);
+            flex: 0 0 auto;
+            max-width: 12ch;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
         body.hide-ids .ti-id,
         body.hide-ids .ti-id-badge { display: none; }
 
