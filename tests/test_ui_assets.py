@@ -30729,3 +30729,124 @@ process.stdout.write(JSON.stringify(vals.map(mcpScopeInputOk)) + '\n');
 """)
     assert r == [True, True, True, True, True, True,
                  False, False, False, False]
+
+
+def _scope_menu_harness237():
+    src = "78_js_keybindings.js"
+    return "".join(_fn237(src, sig) for sig in (
+        "function validMcpScope(s)", "function mcpScopeInputOk(v)",
+        "function mcpScopeFieldError(v)", "function mcpScopeMenuItems(win)",
+        "function mcpMenuMode(win)"))
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_window_menu_scope_block(tmp_path):
+    """#233: no scope rows unless the window's broker advertises mcp_scopes
+    (false AND not-yet-known both hide them); on one that does, a disabled
+    header, `(none)`, the known scopes with the current one checked, then
+    `Set scope...`, whose prompt caps the field at 64 and whose validate
+    follows openDialog's contract: '' (a falsy string) accepts, a non-empty
+    message rejects."""
+    r = _node237(tmp_path, r"""
+const sessions = new Map();
+let cap = true, known = ['alpha', 'beta'];
+const calls = [];
+let prompted = null;
+function hostMcpScopes(h) { return cap; }
+function knownScopes(h) { return known.slice(); }
+function getMcpMode(k) { return null; }
+function setWindowMcpScope(win, s) { calls.push(s); return Promise.resolve(true); }
+function openTextPrompt(o) { prompted = o; return Promise.resolve('  gamma '); }
+""" + _scope_menu_harness237() + r"""
+(async function () {
+    const win = {id: 'h:1', hostId: 'h'};
+    const out = {};
+    const view = items => items.map(i => i.sep ? '--' :
+        (i.enabled ? '' : '[off]') + i.label);
+    for (const c of [false, null, 'true']) {
+        cap = c; out['cap_' + String(c)] = mcpScopeMenuItems(win).length;
+    }
+    cap = true;
+    sessions.set('h:1', {mcp_scope: null});
+    out.unscoped = view(mcpScopeMenuItems(win));
+    sessions.set('h:1', {mcp_scope: 'beta'});
+    const items = mcpScopeMenuItems(win);
+    out.scoped = view(items);
+    const row = t => items.find(i => !i.sep && i.label.endsWith(t));
+    row('alpha').action();
+    row('(none)').action();
+    items.find(i => i.label === 'Set scope...').action();
+    await new Promise(res => setTimeout(res, 0));
+    out.calls = calls;
+    out.prompt = {max: prompted.maxLength, value: prompted.value,
+                  ok: prompted.validate('ok'), empty: prompted.validate(''),
+                  bad: prompted.validate('a:b'), badType: typeof prompted.validate('a:b')};
+    sessions.set('h:1', {mcp_scope: 'lonely'});
+    out.unlisted = view(mcpScopeMenuItems(win));
+    process.stdout.write(JSON.stringify(out) + '\n');
+})();
+""")
+    assert r["cap_false"] == 0 and r["cap_null"] == 0 and r["cap_true"] == 0
+    assert r["unscoped"] == ["--", "[off]MCP scope", "✓ (none)",
+                             "   alpha", "   beta", "Set scope..."]
+    assert r["scoped"] == ["--", "[off]MCP scope", "   (none)",
+                           "   alpha", "✓ beta", "Set scope..."]
+    assert r["unlisted"] == ["--", "[off]MCP scope", "   (none)",
+                             "   alpha", "   beta", "✓ lonely", "Set scope..."]
+    # a row tags, (none) untags, and a typed name arrives trimmed
+    assert r["calls"] == ["alpha", None, "gamma"]
+    p = r["prompt"]
+    assert p["max"] == 64 and p["value"] == "beta", "prefilled with the tag"
+    assert p["ok"] == "" and p["empty"] == ""
+    assert p["badType"] == "string" and p["bad"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_menu_mode_mark_follows_the_broker_on_a_capable_broker(tmp_path):
+    """#233: once a broker persists the mode itself, the menu's check mark is
+    the POLLED mode; the synced pin only covers a window with no poll yet.
+    On an older broker the pin still wins, as before."""
+    r = _node237(tmp_path, r"""
+const sessions = new Map();
+let cap = true;
+const pins = {'h:1': 'readwrite'};
+function hostMcpScopes(h) { return cap; }
+function knownScopes(h) { return []; }
+function getMcpMode(k) { return pins[k] || null; }
+function setWindowMcpScope() {}
+function openTextPrompt() {}
+""" + _scope_menu_harness237() + r"""
+const win = {id: 'h:1', hostId: 'h'};
+const out = {};
+sessions.set('h:1', {mcp: 'read', mcpKnown: true});
+out.capable = mcpMenuMode(win);
+cap = null; out.unknown = mcpMenuMode(win);
+cap = false; out.old = mcpMenuMode(win);
+cap = true; sessions.delete('h:1'); out.firstPaint = mcpMenuMode(win);
+sessions.set('h:1', {mcp: 'read', mcpKnown: false});
+out.preMcp = mcpMenuMode(win);
+delete pins['h:1']; sessions.set('h:1', {mcp: '', mcpKnown: true});
+out.capableEmpty = mcpMenuMode(win);
+cap = false; out.oldNoPin = mcpMenuMode(win);
+process.stdout.write(JSON.stringify(out) + '\n');
+""")
+    assert r == {"capable": "read", "unknown": "readwrite", "old": "readwrite",
+                 "firstPaint": "readwrite", "preMcp": "readwrite",
+                 "capableEmpty": "off", "oldNoPin": "off"}
+
+
+def test_the_window_menu_uses_the_scope_block_and_the_mode_mark():
+    """#233: buildWindowMenu takes its MCP check mark from mcpMenuMode and
+    appends mcpScopeMenuItems after the mode rows, terminals only."""
+    menu = _fn237("78_js_keybindings.js",
+                  "function buildWindowMenu(win, x, y)")
+    block = menu[menu.index("if (win.type !== 'app') {\n"
+                            "                const curMode = mcpMenuMode(win);"):]
+    block = block[:block.index("\n            }\n")]
+    assert "const curMode = mcpMenuMode(win);" in block
+    assert block.index("['readwrite', 'Read-write']") < \
+        block.index("for (const it of mcpScopeMenuItems(win)) items.push(it);")
+    assert "getMcpMode(win.id)" not in block, \
+        "the mark must come from mcpMenuMode, not a second copy of the rule"
+    assert "for (const it of mcpScopeMenuItems(win)) items.push(it);" in \
+        INDEX_HTML

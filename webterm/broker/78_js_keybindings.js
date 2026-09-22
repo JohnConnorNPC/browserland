@@ -425,6 +425,64 @@
                 return false;
             }).finally(() => clearTimeout(timer));
         }
+        // openDialog's `validate` returns an ERROR STRING (69_js_dialog.js): ''
+        // accepts, any message rejects and is shown. So the menu's prompt gets
+        // this wrapper, never the bare boolean rule, which would reject every
+        // valid name.
+        function mcpScopeFieldError(v) {
+            return mcpScopeInputOk(v) ? ''
+                : 'A scope is 1-64 of A-Z a-z 0-9 . _ - and starts with a '
+                  + 'letter or digit. Leave it empty for no scope.';
+        }
+        // The window menu's MCP scope block: nothing unless the window's broker
+        // advertises mcp_scopes (an older one would drop the tag it cannot
+        // store). A disabled header, `(none)`, one row per known scope with the
+        // current one checked (listed even if no other window carries it), then
+        // `Set scope...` for a name not in the list.
+        function mcpScopeMenuItems(win) {
+            if (hostMcpScopes(win.hostId) !== true) return [];
+            const sess = sessions.get(win.id);
+            const cur = (sess && sess.mcp_scope) ? sess.mcp_scope : '';
+            const names = knownScopes(win.hostId);
+            if (cur && names.indexOf(cur) === -1) { names.push(cur); names.sort(); }
+            const mark = (on, lab) => (on ? '✓ ' : '   ') + lab;
+            const items = [
+                { sep: true },
+                { label: 'MCP scope', enabled: false },
+                { label: mark(!cur, '(none)'), enabled: true,
+                  action: () => setWindowMcpScope(win, null) },
+            ];
+            for (const n of names) {
+                items.push({ label: mark(n === cur, n), enabled: true,
+                             action: () => setWindowMcpScope(win, n) });
+            }
+            items.push({ label: 'Set scope...', enabled: true, action: () => {
+                openTextPrompt({
+                    title: 'Set MCP scope',
+                    label: 'scope',
+                    value: cur,
+                    placeholder: '(empty: no scope)',
+                    okLabel: 'Set',
+                    maxLength: 64,
+                    validate: mcpScopeFieldError,
+                }).then(v => {
+                    if (v !== null) setWindowMcpScope(win, v.trim() || null);
+                });
+            }});
+            return items;
+        }
+        // The mode the window menu checks. On a broker that advertises
+        // mcp_scopes the POLLED mode is the truth: that broker persists the
+        // override itself and the browser no longer re-asserts its pin (75), so
+        // the synced pin is only a first-paint cache for before the first poll.
+        // Elsewhere, today's rule: the pin, then the polled mode, then off.
+        function mcpMenuMode(win) {
+            const sess = sessions.get(win.id);
+            if (sess && sess.mcpKnown && hostMcpScopes(win.hostId) === true) {
+                return sess.mcp || 'off';
+            }
+            return getMcpMode(win.id) || ((sess && sess.mcp) ? sess.mcp : 'off');
+        }
 
         // POST /session/kill to one host record and normalize the result. A
         // network/CORS throw becomes status 0; a 409 session_gone counts as
@@ -699,14 +757,14 @@
                 _pushMenuItems(_windowMenuItems, items, win);
             }
             // MCP access (per-window mode): only for terminal sessions — app
-            // docs (notes/editor/etc.) are not server sessions. The ✓ prefers
-            // the saved pin (the DESIRED mode) so it is correct on first paint,
-            // before the first /sessions poll; with no pin it falls back to the
-            // effective mode carried on the 2s poll (= the live broker default).
+            // docs (notes/editor/etc.) are not server sessions. The ✓ is
+            // mcpMenuMode's: on a broker that stores the override itself
+            // (mcp_scopes) the polled mode, the saved pin only before the first
+            // poll; elsewhere the saved pin (the DESIRED mode, correct on first
+            // paint), then the effective mode carried on the 2s poll (= the
+            // live broker default). Then #233's scope rows, on such a broker.
             if (win.type !== 'app') {
-                const sess = sessions.get(win.id);
-                const curMode = getMcpMode(win.id)
-                    || ((sess && sess.mcp) ? sess.mcp : 'off');
+                const curMode = mcpMenuMode(win);
                 items.push({ sep: true });
                 items.push({ label: 'MCP access', enabled: false });
                 for (const [val, lab] of [['off', 'Off'], ['read', 'Read'],
@@ -717,6 +775,7 @@
                         action: () => setWindowMcpMode(win, val),
                     });
                 }
+                for (const it of mcpScopeMenuItems(win)) items.push(it);
             }
             items.push({ sep: true });
             // #226: terminals only — an app doc has no PTY to hand over.
