@@ -1,5 +1,5 @@
 """MCP scopes (#237): the durable per-window store, ``webterm_mcp_windows.json``
-(#228).
+(#228), and the /mcp/* wire that partitions on a declared scope (#230).
 
 STORE UNIT section: ``McpWindowStore`` on its own, driven with real
 ``WindowEntry`` objects and an injected wall clock; no app, no loop. It pins
