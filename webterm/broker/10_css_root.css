@@ -662,7 +662,9 @@
         .term-ctl-overlay {
             position: absolute;
             inset: 0;
-            z-index: 5;
+            /* Explicit: above every layer xterm.css stacks inside .xterm
+               (its highest is 10), so the overlay is seen and clickable. */
+            z-index: 20;
             display: flex;
             align-items: center;
             justify-content: center;

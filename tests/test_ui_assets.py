@@ -31471,6 +31471,9 @@ def test_controlled_view_label_is_text_only_and_the_grey_spares_the_overlay():
     # The overlay is a sibling of .xterm, so nothing may dim .term-body itself.
     assert ".term-window.controlled .term-body {" not in css
     assert ".taskbar-item.controlled {" in css
+    ov = css[css.index(".term-ctl-overlay {"):]
+    ov = ov[:ov.index("}")]
+    assert "z-index: 20;" in ov, "the overlay must stack above xterm's layers (max 10)"
 
 
 def test_controlled_view_poll_rows(tmp_path):
@@ -31535,7 +31538,10 @@ def test_controlled_view_sources_are_wired():
                 s75.index("if (win.missingPolls >= MISSING_POLLS_CLOSE) {")]
     assert "terminalControl" not in grace
     s67 = _src239("67_js_window_lifecycle.js")
-    assert s67.index("seedControlledWindow(win);") < s67.index("detachGateAttach(win);")
+    # Ruling (seed placement): right after the map insert and BEFORE the
+    # create-time emit, so a mod subscribing at create sees the true state;
+    # and before the attach tail, which it makes refuse.
+    assert s67.index("windows.set(id, win);") < s67.index("seedControlledWindow(win);")         < s67.index("for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);")         < s67.index("detachGateAttach(win);")
     s73 = _src239("73_js_window_runtime.js")
     assert "applyControlView(controlKey(win.hostId, win.sid), data, 'ws');" in s73
     # The socket's first `resized` is held for its first `control` frame.

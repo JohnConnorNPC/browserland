@@ -322,6 +322,11 @@
                 locked: !!getPref(id).locked,
             };
             windows.set(id, win);
+            // #239: a terminal another device controls right now is built
+            // greyed (dom, body and xterm all exist by here) and its attach at
+            // the end is refused (attachWebSocket's guard). BEFORE the create
+            // emit below, so a mod subscribing at create sees the true state.
+            seedControlledWindow(win);
             // #116: notify per-terminal-window mods (the git status widget) NOW —
             // right after the map insert and BEFORE the color/MCP buttons are
             // inserted below — so addTitleBarItem lands a control in its original
@@ -901,10 +906,6 @@
                 win.termReady = true;
                 maybeSendInitialResize(win);
             }));
-
-            // #239: a terminal another device controls right now is built
-            // greyed, and the attach below is refused (attachWebSocket's guard).
-            seedControlledWindow(win);
 
             // #226: on the desktop the attach is gated on who owns the PTY —
             // a key this browser handed to its own browser window is built
