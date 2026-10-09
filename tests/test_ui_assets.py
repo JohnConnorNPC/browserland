@@ -31890,3 +31890,462 @@ console.log(JSON.stringify(out));
     assert r["chips"] == [True, False, True]
     assert r["focus"] == ["btn", "overlay", "term"]
     assert r["unarmedAsk"] is False and r["armedAsk"] is True
+
+
+# --- #240 A1: info.control / info.onControlChanged ---------------------------
+# The per-terminal "controlled elsewhere" surface. Every case EXECUTES 86k's
+# shipped control range together with its taps range (_armTermTapRemoval),
+# #116's create hook out of 67, A37's onModTeardown range, #194's extender
+# registry and the loader's _runUnloads. Core is reduced to what 84b does to a
+# window: REPLACE win.controlled (null or a frozen {label, since, gen}) and then
+# call the hook. Every name carries `mod_control`.
+
+_CTL_SLICE_START = "// ---- info.control / info.onControlChanged (#240) ---"
+_CTL_SLICE_END = "// ---- end info.onControlChanged ---"
+
+
+def _term_control_source():
+    """86k's control range, verbatim."""
+    src = _term_taps_src()
+    start = src.index(_CTL_SLICE_START)
+    end = src.index(_CTL_SLICE_END)
+    assert start < end, "slice markers out of order"
+    body = src[start:end]
+    for needed in ("const _TERM_CTL_FREE = Object.freeze({ state: 'free' });",
+                   "function termControlView(win) {",
+                   "function _deliverTermCtl(rec, view) {",
+                   "function dispatchTermControl(win) {",
+                   "function _addTermCtlSub(win, fn, arm) {",
+                   "function _modTerminalControl(rec, info) {",
+                   "function _ctxTerminalControl(ctx, rec) {"):
+        assert needed in body, f"{needed} missing from the sliced range"
+    return body
+
+
+def test_mod_control_lands_in_86k_and_is_registered_as_an_extender():
+    frag = _term_taps_src()
+    assert len(frag.splitlines()) <= ui._MAX_LINES
+    loader, ext = _loader_src(), _ctx_ext_src()
+    for sym in ("function termControlView(win) {",
+                "function dispatchTermControl(win) {",
+                "function _addTermCtlSub(win, fn, arm) {",
+                "function _modTerminalControl(rec, info) {",
+                "function _ctxTerminalControl(ctx, rec) {"):
+        assert sym in frag, f"{sym!r} did not land in 86k"
+        assert sym not in loader and sym not in ext
+        assert INDEX_HTML.count(sym) == 1, \
+            f"#240 symbol missing/duplicated in the served page: {sym!r}"
+    _assert_guarded_ctx_registration(frag,
+                                     "_registerCtxExtender(_ctxTerminalControl);")
+    body = _frag_fn(frag, "function _ctxTerminalControl(ctx, rec) {")
+    assert "const sub = fam.onTerminalCreate;" in body
+    assert "cb(_modTerminalControl(rec, info))" in body
+
+
+def test_mod_control_owes_no_capability_and_adds_no_event_name():
+    # MEMBERS of the existing v1 `windows` family (feature-detected with
+    # `typeof info.onControlChanged === 'function'`): no capability entry, no
+    # ctxVersion bump, and no ctx.events name -- the event is per terminal.
+    for name in _core_js_fragments():
+        if name == "86k_js_mod_terminal_taps.js":
+            continue
+        src = _js_strip_comments_and_strings(
+            (BROKER_DIR / name).read_text(encoding="utf-8"))
+        for sym in ("onControlChanged", "termControlView", "_addTermCtlSub"):
+            assert sym not in src, f"{name} carries 86k's {sym}"
+    ext = _ctx_ext_src()
+    for word in ("'control'", "'control:changed'", "'terminal:control'"):
+        assert word not in ext, f"86c names a control capability/event {word}"
+
+
+_CTL_HARNESS = r"""
+'use strict';
+// #240/A1: the shipped control range, driven. Everything below the fixtures
+// is a sliced fragment or a reduced core driver.
+const errors = [];
+let throwingLogger = false;
+console.error = function () {
+    if (throwingLogger) throw new Error('the logger blew up');
+    errors.push(Array.prototype.map.call(arguments, String).join(' '));
+};
+
+function El(cls) { this.className = cls || ''; this.children = []; this.parentNode = null; }
+El.prototype.appendChild = function (kid) { kid.parentNode = this; this.children.push(kid); return kid; };
+El.prototype.insertBefore = function (kid, ref) {
+    const i = ref ? this.children.indexOf(ref) : -1;
+    if (i === -1) this.children.push(kid); else this.children.splice(i, 0, kid);
+    kid.parentNode = this;
+    return kid;
+};
+El.prototype.querySelector = function (sel) {
+    const want = String(sel).replace(/^\./, '');
+    for (const kid of this.children) {
+        if (kid.className.split(' ').indexOf(want) !== -1) return kid;
+        const deep = kid.querySelector(sel);
+        if (deep) return deep;
+    }
+    return null;
+};
+function hostById(id) { return { id: id, name: 'host ' + id }; }
+
+const windows = new Map();
+
+__TERMINALS__
+
+__REGISTRY__
+
+__TEARDOWN__
+
+__TAPS__
+
+__CONTROL__
+
+__UNLOADS__
+
+// ---- fixtures -------------------------------------------------------------
+let winSeq = 0;
+function openTerminal(controlled) {
+    winSeq += 1;
+    const id = 'h1:' + winSeq;
+    const dom = new El('term-window');
+    const bar = new El('title-bar');
+    bar.appendChild(new El('tb-btn btn-min'));
+    dom.appendChild(bar);
+    const win = { id: id, type: 'term', dom: dom, hostId: 'h1',
+                  sid: String(winSeq), cleanups: [], disposed: false,
+                  controlled: controlled || null };
+    windows.set(id, win);
+    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    return win;
+}
+function closeWindow(id) {
+    const win = windows.get(id);
+    if (!win) return;
+    win.disposed = true;
+    for (const fn of win.cleanups) { try { fn(); } catch (_) {} }
+    win.cleanups = [];
+    windows.delete(id);
+}
+// 84b, reduced to its contract: win.controlled is REPLACED (never mutated),
+// then controlStateChanged runs the dispatch.
+function C(label, gen) { return Object.freeze({ label: label, since: 1000, gen: gen }); }
+function setControlled(win, c) { win.controlled = c; return dispatchTermControl(win); }
+function modCtx(id) {
+    const rec = { id: id, unloads: [] };
+    const ctx = {
+        id: id, ctxVersion: 1,
+        onUnload: function (fn) {
+            if (typeof fn === 'function') rec.unloads.push(fn);
+        },
+        windows: {
+            onTerminalCreate: function (cb) {
+                const off = registerTerminalCreate(cb);
+                rec.unloads.push(off);
+                return off;
+            },
+        },
+    };
+    _applyCtxExtenders(ctx, rec);
+    return { ctx: ctx, rec: rec };
+}
+// One mod's bag for one window (the create hook replays over open windows).
+function bagFor(m, win) {
+    let bag = null;
+    m.ctx.windows.onTerminalCreate(function (info) { if (info.win === win) bag = info; });
+    return bag;
+}
+const plain = function (v) { return JSON.parse(JSON.stringify(v)); };
+
+const CASES = {};
+
+// Subscribed while free: the replay says free, the claim says controlled --
+// once each, and info.control() IS the last object delivered.
+CASES.sub_before_claim = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const seen = [];
+    bag.onControlChanged(function (c) { seen.push(c); });
+    const sent = setControlled(win, C('phone', 5));
+    return { seen: plain(seen), sent: sent,
+             controlIsLast: bag.control() === seen[seen.length - 1],
+             frozen: [Object.isFrozen(seen[0]), Object.isFrozen(seen[1])],
+             freeHasLabel: 'label' in seen[0], errors: errors };
+};
+
+// Subscribed mid-control: EXACTLY one replayed controlled, even when the hook
+// runs again for the same state; two mods share the one frozen object.
+CASES.sub_mid_control = function () {
+    const win = openTerminal();
+    setControlled(win, C('phone', 5));
+    const a = bagFor(modCtx('a'), win), b = bagFor(modCtx('b'), win);
+    const seenA = [], seenB = [];
+    a.onControlChanged(function (c) { seenA.push(c); });
+    b.onControlChanged(function (c) { seenB.push(c); });
+    const again = dispatchTermControl(win);
+    return { seenA: plain(seenA), again: again, countB: seenB.length,
+             shared: seenA[0] === seenB[0],
+             controlIsLast: a.control() === seenA[0], errors: errors };
+};
+
+CASES.release = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const seen = [];
+    bag.onControlChanged(function (c) { seen.push(c); });
+    setControlled(win, C('phone', 5));
+    setControlled(win, null);
+    return { seen: plain(seen), controlIsLast: bag.control() === seen[2],
+             control: plain(bag.control()), errors: errors };
+};
+
+// A relabel and a gen-only re-claim are new states (core hands a NEW frozen
+// object); the same object again is not.
+CASES.relabel = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const seen = [];
+    bag.onControlChanged(function (c) { seen.push(c); });
+    setControlled(win, C('phone', 5));
+    setControlled(win, C('tablet', 6));
+    const same = win.controlled;
+    setControlled(win, C('tablet', 7));
+    win.controlled = same;              // an old object back: still a change
+    dispatchTermControl(win);
+    const n = dispatchTermControl(win); // nothing new
+    return { seen: plain(seen), repeat: n, errors: errors };
+};
+
+// off(), a mod disable (the window stays open) and a window close each end
+// delivery; a closed window takes no subscriber and replays nothing.
+CASES.lifecycle = function () {
+    const win = openTerminal();
+    const a = modCtx('a'), b = modCtx('b'), c = modCtx('c');
+    const bagA = bagFor(a, win), bagB = bagFor(b, win), bagC = bagFor(c, win);
+    const seenA = [], seenB = [], seenC = [];
+    const offA = bagA.onControlChanged(function (v) { seenA.push(v.state); });
+    bagB.onControlChanged(function (v) { seenB.push(v.state); });
+    bagC.onControlChanged(function (v) { seenC.push(v.state); });
+    const offFirst = offA(), offAgain = offA();
+    setControlled(win, C('phone', 5));
+    _runUnloads(b.rec);
+    setControlled(win, null);
+    closeWindow(win.id);
+    const afterClose = setControlled(win, C('phone', 9));
+    const late = [];
+    const lateOff = bagC.onControlChanged(function (v) { late.push(v); });
+    return { seenA: seenA, seenB: seenB, seenC: seenC,
+             offFirst: offFirst, offAgain: offAgain, afterClose: afterClose,
+             late: late, lateOff: lateOff(), errors: errors };
+};
+
+// A throwing subscriber costs its sibling nothing, stays subscribed, and a
+// logger that throws too cannot break the walk.
+CASES.throwing = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    let calls = 0;
+    const seen = [];
+    bag.onControlChanged(function () { calls += 1; throw new Error('boom'); });
+    bag.onControlChanged(function (c) { seen.push(c.state + (c.gen || '')); });
+    setControlled(win, C('phone', 5));
+    const logged = errors.length;
+    throwingLogger = true;
+    setControlled(win, null);
+    throwingLogger = false;
+    return { calls: calls, seen: seen, logged: logged,
+             first: errors[0] || '', errors: [] };
+};
+
+// A handler that causes a change of its own: the walk finishes with the state
+// it started with, then walks again -- both subscribers hear the same
+// sequence, and nobody hears a state twice.
+CASES.nested = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const seenA = [], seenB = [];
+    bag.onControlChanged(function (c) {
+        seenA.push(c.label || c.state);
+        if (c.label === 'phone') setControlled(win, C('tablet', 6));
+    });
+    bag.onControlChanged(function (c) { seenB.push(c.label || c.state); });
+    setControlled(win, C('phone', 5));
+    const redundant = dispatchTermControl(win);
+    return { seenA: seenA, seenB: seenB, redundant: redundant, errors: errors };
+};
+
+// A subscriber added during a walk is told exactly once (its replay).
+CASES.mid_walk_subscriber = function () {
+    const win = openTerminal();
+    const bag = bagFor(modCtx('a'), win);
+    const late = [];
+    let added = false;
+    bag.onControlChanged(function (c) {
+        if (c.state === 'controlled' && !added) {
+            added = true;
+            bag.onControlChanged(function (v) { late.push(v.state); });
+        }
+    });
+    bag.onControlChanged(function () {});
+    setControlled(win, C('phone', 5));
+    return { late: late, errors: errors };
+};
+
+// A dead activation subscribes to nothing and is replayed nothing.
+CASES.dead_activation = function () {
+    const win = openTerminal();
+    const m = modCtx('a');
+    const bag = bagFor(m, win);
+    _runUnloads(m.rec);
+    const seen = [];
+    const off = bag.onControlChanged(function (c) { seen.push(c); });
+    setControlled(win, C('phone', 5));
+    return { seen: seen, off: off(), control: plain(bag.control()),
+             errors: errors };
+};
+
+// The removal is armed BEFORE the replay: a replay that disables its own mod
+// leaves no subscription behind.
+CASES.replay_disables_its_mod = function () {
+    const win = openTerminal();
+    const m = modCtx('a');
+    const bag = bagFor(m, win);
+    const seen = [];
+    bag.onControlChanged(function (c) {
+        seen.push(c.state);
+        if (seen.length === 1) _runUnloads(m.rec);
+    });
+    const sent = setControlled(win, C('phone', 5));
+    return { seen: seen, sent: sent, errors: errors };
+};
+
+const want = process.argv[2];
+if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
+const out = CASES[want]();
+process.stdout.write(JSON.stringify(out) + '\n');
+"""
+
+
+@pytest.fixture(scope="module")
+def control_harness(tmp_path_factory):
+    path = tmp_path_factory.mktemp("termcontrol") / "harness.js"
+    path.write_text(
+        _CTL_HARNESS
+        .replace("__TERMINALS__", _terminal_create_source())
+        .replace("__REGISTRY__", _ctx_registry_source())
+        .replace("__TEARDOWN__", _teardown_source())
+        .replace("__TAPS__", _term_taps_source())
+        .replace("__CONTROL__", _term_control_source())
+        .replace("__UNLOADS__", _run_unloads_source()),
+        encoding="utf-8")
+    return path
+
+
+def _run_control(harness, case):
+    proc = subprocess.run([NODE, str(harness), case],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        f"case {case} failed (rc={proc.returncode})\n"
+        f"stdout: {proc.stdout}\nstderr: {proc.stderr}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+_FREE = {"state": "free"}
+_PHONE5 = {"state": "controlled", "label": "phone", "since": 1000, "gen": 5}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_subscribe_before_claim_hears_free_then_controlled(
+        control_harness):
+    r = _run_control(control_harness, "sub_before_claim")
+    assert r["errors"] == []
+    assert r["seen"] == [_FREE, _PHONE5]
+    assert r["sent"] == 1
+    assert r["controlIsLast"] is True, "info.control() is not the last state"
+    assert r["frozen"] == [True, True]
+    assert r["freeHasLabel"] is False, "a free view carries no label"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_subscribe_mid_control_replays_exactly_once(control_harness):
+    r = _run_control(control_harness, "sub_mid_control")
+    assert r["errors"] == []
+    assert r["seenA"] == [_PHONE5], "the replay is missing or repeated"
+    assert r["again"] == 0 and r["countB"] == 1, \
+        "a re-run hook re-told a state the subscriber already had"
+    assert r["shared"] is True and r["controlIsLast"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_release_is_one_free(control_harness):
+    r = _run_control(control_harness, "release")
+    assert r["errors"] == []
+    assert r["seen"] == [_FREE, _PHONE5, _FREE]
+    assert r["controlIsLast"] is True and r["control"] == _FREE
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_relabel_and_regen_are_one_delivery_each(control_harness):
+    r = _run_control(control_harness, "relabel")
+    assert r["errors"] == []
+    labels = [(v.get("label"), v.get("gen")) for v in r["seen"]]
+    assert labels == [(None, None), ("phone", 5), ("tablet", 6), ("tablet", 7),
+                      ("tablet", 6)]
+    assert r["repeat"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_off_teardown_and_dispose_end_delivery(control_harness):
+    r = _run_control(control_harness, "lifecycle")
+    assert r["errors"] == []
+    assert r["seenA"] == ["free"] and r["offFirst"] is True \
+        and r["offAgain"] is False, "off() did not unsubscribe"
+    assert r["seenB"] == ["free", "controlled"], \
+        "a disabled mod still hears its terminal"
+    assert r["seenC"] == ["free", "controlled", "free"]
+    assert r["afterClose"] == 0, "a closed terminal still dispatches"
+    assert r["late"] == [] and r["lateOff"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_throwing_subscriber_is_isolated(control_harness):
+    r = _run_control(control_harness, "throwing")
+    assert r["seen"] == ["free", "controlled5", "free"], \
+        "a throwing subscriber (or logger) cost its sibling a delivery"
+    assert r["calls"] == 3, "a throw unsubscribed the subscriber"
+    assert r["logged"] == 2
+    assert "terminal control subscriber failed" in r["first"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_nested_change_is_heard_in_order_by_everyone(
+        control_harness):
+    r = _run_control(control_harness, "nested")
+    assert r["errors"] == []
+    assert r["seenA"] == ["free", "phone", "tablet"]
+    assert r["seenB"] == ["free", "phone", "tablet"], \
+        "a later subscriber skipped the state the walk started with"
+    assert r["redundant"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_mid_walk_subscriber_is_told_once(control_harness):
+    r = _run_control(control_harness, "mid_walk_subscriber")
+    assert r["errors"] == []
+    assert r["late"] == ["controlled"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_a_dead_activation_subscribes_to_nothing(control_harness):
+    r = _run_control(control_harness, "dead_activation")
+    assert r["errors"] == []
+    assert r["seen"] == [] and r["off"] is False
+    # control() is a pure read and still answers.
+    assert r["control"] == _PHONE5
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_mod_control_removal_is_armed_before_the_replay(control_harness):
+    r = _run_control(control_harness, "replay_disables_its_mod")
+    assert r["errors"] == []
+    assert r["seen"] == ["free"] and r["sent"] == 0, \
+        "a replay that disabled its own mod left the subscription alive"

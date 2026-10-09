@@ -522,3 +522,180 @@
             _registerCtxExtender(_ctxTerminalModes);
         }
         // ---- end info.onModesChanged ----------------------------------------
+
+        // ---- info.control / info.onControlChanged (#240) --------------------
+        //
+        // While another device controls a terminal (#238), its desktop window
+        // holds no socket (#239), so every surface above goes quiet: the taps
+        // see no traffic and onResize sees no resize. This says WHY, per
+        // terminal:
+        //
+        //     ctx.windows.onTerminalCreate(function (info) {
+        //         info.control();   // {state:'free'} | {state:'controlled',
+        //                           //  label, since, gen}, frozen
+        //         const off = info.onControlChanged(function (c) { ... });
+        //     });
+        //
+        // THE TRUTH IS win.controlled (84b): null, or a frozen {label, since,
+        // gen} that core REPLACES on every change and never mutates. So a view
+        // is cached per win.controlled OBJECT and its identity follows the
+        // state: info.control() and every subscriber are handed the same
+        // frozen object for one state, and "has this subscriber already been
+        // told this state" is an identity test.
+        //
+        // LEVEL, REPLAYED ONCE ON SUBSCRIBE, like onModesChanged: a subscriber
+        // arriving mid-control is told at once. Unlike onModesChanged it is not
+        // sampled or coalesced into a frame: 84b's controlStateChanged calls
+        // dispatchTermControl once per applied change, after core applied it
+        // (enter: socket already closed; leave: reattachWindow already
+        // called).
+        //
+        // SERIALIZED PER WINDOW. A handler can cause a change of its own (a
+        // closeWindow, or anything that lands an applyControlView), and a
+        // nested walk would tell the subscribers after it only the newer state
+        // while the ones before it heard both. Instead a dispatch that arrives
+        // mid-walk marks the window pending; the walk finishes with the state
+        // it started with, then walks again with the current one. Every
+        // subscriber hears the same sequence, and none hears one state twice.
+        const _TERM_CTL_FREE = Object.freeze({ state: 'free' });
+        const _termCtlViews = new WeakMap();  // win.controlled -> frozen view
+        const _termCtl = new WeakMap();       // win -> {subs, walking, pending}
+
+        function termControlView(win) {
+            const c = win && win.controlled;
+            if (!c || typeof c !== 'object') return _TERM_CTL_FREE;
+            let v = null;
+            try { v = _termCtlViews.get(c) || null; }
+            catch (_) { return _TERM_CTL_FREE; }
+            if (v) return v;
+            v = Object.freeze({ state: 'controlled', label: c.label,
+                                since: (typeof c.since === 'number')
+                                    ? c.since : null,
+                                gen: c.gen });
+            try { _termCtlViews.set(c, v); } catch (_) {}
+            return v;
+        }
+
+        function _termCtlState(win, create) {
+            if (!win || typeof win !== 'object') return null;
+            let st = null;
+            try { st = _termCtl.get(win) || null; }
+            catch (_) { return null; }
+            if (st || !create) return st;
+            st = { subs: [], walking: false, pending: false };
+            try { _termCtl.set(win, st); } catch (_) { return null; }
+            return st;
+        }
+
+        // `seen` is written BEFORE the call, so a handler that throws, or one
+        // that causes a nested dispatch, is never told this state again. The
+        // log line has its own try: a replaced console must not be able to
+        // turn one subscriber's throw into its siblings' silence.
+        function _deliverTermCtl(rec, view) {
+            rec.seen = view;
+            try { rec.fn(view); }
+            catch (e) {
+                try { console.error('[windows] terminal control subscriber'
+                    + ' failed:', e); } catch (_) {}
+            }
+        }
+
+        // Core's entry point (84b controlStateChanged). Never throws.
+        function dispatchTermControl(win) {
+            if (!win || win.disposed) return 0;
+            const st = _termCtlState(win, false);
+            if (!st || !st.subs.length) return 0;
+            if (st.walking) { st.pending = true; return 0; }
+            st.walking = true;
+            let n = 0;
+            try {
+                do {
+                    st.pending = false;
+                    const view = termControlView(win);
+                    const listed = st.subs.slice();
+                    for (let i = 0; i < listed.length; i++) {
+                        if (win.disposed) return n;
+                        const rec = listed[i];
+                        if (st.subs.indexOf(rec) === -1) continue;
+                        if (rec.seen === view) continue;
+                        _deliverTermCtl(rec, view);
+                        n += 1;
+                    }
+                } while (st.pending && !win.disposed);
+            } finally {
+                st.walking = false;
+                st.pending = false;
+            }
+            return n;
+        }
+
+        // `arm(off)` runs BEFORE the replay: the replay is synchronous mod
+        // code that may disable its own mod or close the terminal, and either
+        // drains the very cleanup that is meant to remove this subscription.
+        function _addTermCtlSub(win, fn, arm) {
+            const noop = function () { return false; };
+            if (typeof fn !== 'function') return noop;
+            if (win && win.disposed) return noop;
+            const st = _termCtlState(win, true);
+            if (!st) return noop;
+            const rec = { fn: fn, seen: null };
+            st.subs.push(rec);
+            let off = false;
+            const offFn = function () {
+                if (off) return false;
+                off = true;
+                const i = st.subs.indexOf(rec);
+                if (i === -1) return false;
+                st.subs.splice(i, 1);
+                return true;
+            };
+            if (typeof arm === 'function') {
+                try { arm(offFn); } catch (_) {}
+            }
+            if (st.subs.indexOf(rec) !== -1) {
+                _deliverTermCtl(rec, termControlView(win));
+            }
+            return offFn;
+        }
+
+        // The members. control() is a pure read, answered for a dead
+        // activation too; onControlChanged refuses one, for the reason the
+        // taps above give (its removal could only arm on window close).
+        function _modTerminalControl(rec, info) {
+            if (!info || typeof info !== 'object') return info;
+            const members = {
+                control: function () { return termControlView(info.win); },
+                onControlChanged: function (fn) {
+                    if (rec && rec.unloading) return function () { return false; };
+                    return _addTermCtlSub(info.win, fn, function (off) {
+                        _armTermTapRemoval(rec, info, off);
+                    });
+                },
+            };
+            try {
+                info.control = members.control;
+                info.onControlChanged = members.onControlChanged;
+                if (info.onControlChanged === members.onControlChanged) return info;
+            } catch (_) { /* a frozen bag under strict mode: copy instead */ }
+            return Object.assign({}, info, members);
+        }
+
+        // A THIRD extender, wrapping the two above: no capability entry, no
+        // contract version bump, no ctx.events name (the event is per
+        // terminal).
+        function _ctxTerminalControl(ctx, rec) {
+            const fam = ctx.windows;
+            if (!fam || typeof fam !== 'object') return;
+            const sub = fam.onTerminalCreate;
+            if (typeof sub !== 'function') return;
+            fam.onTerminalCreate = function (cb) {
+                if (typeof cb !== 'function') return sub.call(this, cb);
+                return sub.call(this, function (info) {
+                    return cb(_modTerminalControl(rec, info));
+                });
+            };
+        }
+        if (typeof _registerCtxExtender === 'function') {
+            _registerCtxExtender(_ctxTerminalControl);
+        }
+        // ---- end info.onControlChanged --------------------------------------
