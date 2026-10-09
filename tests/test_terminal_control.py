@@ -1287,6 +1287,21 @@ def test_sessions_and_mcp_rows_report_the_controller(tmp_path, monkeypatch):
     assert term["controlled"] is True
 
 
+def test_wiki_documents_the_contract():
+    wiki = REPO / "wiki"
+    tr = (wiki / "Technical-Reference.md").read_text(encoding="utf-8")
+    assert "### Terminal control (#238)" in tr
+    assert '`"terminal_control": 1`' in tr
+    assert "**`POST /session/control`**" in tr
+    assert "**stricter than `PUT /state`**" in tr
+    assert "clients may order\nviews by it" in tr
+    assert '"controlled":false' in tr
+    hosts = (wiki / "Hosts-and-Multi-Browser.md").read_text(encoding="utf-8")
+    assert ("One terminal can also be driven from outside without taking the "
+            "lease at all") in hosts
+    assert "[[Technical-Reference#terminal-control-238]]" in hosts
+
+
 def test_mcp_input_still_reaches_a_controlled_terminal(tmp_path, monkeypatch):
     # Owner decision 1: MCP is not a viewer; its input bypasses the gate.
     app = _control_app(tmp_path, monkeypatch)

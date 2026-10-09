@@ -445,6 +445,81 @@ any other key), but the sniffer inherits `altscreen.py`'s heuristic
 limits — 8-bit CSI (`0x9b`) is not matched, and `1005`/`1015` encodings
 are untracked because the vendored xterm.js logs both as unsupported.
 
+### Terminal control (#238)
+
+An outside client (first user: Notifier) can drive **one** terminal — its
+input and its size — without taking the broker's lease, so the desktop keeps
+every other terminal. It authenticates with the same browser token as `/ws`
+(no new token class); `GET /info` carries `"terminal_control": 1` on a build
+that enforces it. A client feature-detects on that integer.
+
+Every surface carries one **view**: `{"state": "free"|"controlled", "label":
+<str|null>, "since": <epoch ms|null>, "gen": <int>}` (`label`/`since` are
+`null` when free). `gen` is strictly increasing per terminal id — across a
+same-id producer reconnect and a broker restart too — so clients may order
+views by it and drop any older than the last one they applied.
+
+* **Claim / release, on the controller's own `/ws`** (so the grant can never
+  outlive the socket): attach as usual (`/ws?session=<id>&clientId=<own id>`,
+  e.g. `ext-<uuid>`, never a browser's lease id), then send `{"type":
+  "control", "op": "claim", "label": "<str>"}` or `{"type": "control", "op":
+  "release"}`. A claim while another socket holds the terminal **takes over**.
+  A claim from the holder relabels it at a new `gen`. The terminal is also
+  released when the controller's socket closes, the terminal exits, or its
+  producer drops or reconnects. A refused op answers `{"type": "error",
+  "reason": "bad_label"|"not_controller"|"bad_op"|"unknown_session",
+  "session_id": <id>}` and leaves the socket open.
+* **Label**: 1–64 Unicode code points (a JS `length` can read up to twice
+  that), not whitespace-only, shown to the owner verbatim (never normalized).
+  Refused: any control, surrogate, unassigned, line/paragraph-separator or
+  format character, except ZWNJ/ZWJ (U+200C/U+200D) — so every bidi control
+  (U+061C, U+200E–200F, U+202A–202E, U+2066–2069) and invisible ones like
+  U+200B/U+FEFF are out.
+* **The gate**: while a controller holds a terminal, only that socket's input
+  and resize reach the producer. Everyone else's, the lease holder's included,
+  is dropped, exactly like a non-active socket's. With no controller the lease
+  rule applies unchanged. A socket that lost the terminal (taken back, or
+  another claim) watches, and its input is dropped even if its clientId holds
+  the lease, until it claims again. A controller that dials with a browser's
+  lease id is one of that browser's sockets: a `become_active` elsewhere closes
+  it with 4409 like the rest, which releases.
+* **What reaches the producer while controlled**: the controller's `input`,
+  binary input and `resize`; legacy `paste` is gated like `input`, and mouse
+  reports ride `input`. The `mouse` frame type stays a no-op. The snapshot
+  request on every attach, MCP `/mcp/input`, and the `/session/*` and `/mcp/*`
+  management RPCs (read, reset, flush, kill, pace) are **not** gated: MCP
+  agents are not viewers (they can see `controlled` on `/mcp/terminals`).
+* **Size**: only the controller resizes; the producer's `resized` echo goes to
+  every viewer as always. Nothing is remembered or restored on release — the
+  next driver's first `resize` decides.
+
+**Telling everyone**, one ordered stream per terminal (each change is published
+in `gen` order, and every socket ends on the live view):
+
+1. `/ws`, to every subscriber of that terminal: `{"type": "control", ...view}`
+   on every change, and once on attach, right after `resized` and before the
+   snapshot. The controller that lost the terminal first gets `{"type":
+   "control", "state": "revoked", "by": "browser"|"claim", "gen": <new gen>}`.
+2. `/control`, to every connected browser: `{"type": "terminal_control",
+   "id": <id>, ...view}` (a controlled desktop window has closed its `/ws`, so
+   this is how it hears of a release it did not cause).
+3. `GET /sessions` rows: `"controller": {"label", "since", "gen"} | null`, so a
+   page that boots or rebuilds mid-control re-enters the state.
+
+**`POST /session/control`** (browser token) — body `{"id": <int>, "op":
+"release", "gen": <int>, "clientId": "<lease id>"}` takes the terminal back
+from its controller. The released controller gets `revoked` (`by: "browser"`)
+and keeps its socket as a watcher. Answers, in the order they are checked:
+`401 auth_required`; `400 bad_json` / `bad_id`; `404 unknown_session` (also for
+a terminal that is exiting); `400 bad_op` (`op` is not `"release"`); `400
+bad_gen` (not an integer ≥ 0; a boolean counts as bad); `409 {"ok": false,
+"error": "not_active"}` unless `clientId` (trimmed) equals the broker's active
+lease — **stricter than `PUT /state`**: with no active lease at all this also
+refuses, so a token alone never releases a controller; `409 {"ok": false,
+"error": "stale_gen", "id", ...live view}` when the terminal is free or held at
+another `gen` (a double click or a crossed claim never releases a newer
+controller); `200 {"ok": true, "id", ...the new free view}`.
+
 ## MCP HTTP interface
 
 The broker exposes an **opt-in HTTP API** (the `/mcp/*` surface) that an MCP
@@ -599,13 +674,15 @@ window's default `send_keys` inter-key pacing (#133, `0` = single-burst, set via
 is whether the agent has pyte installed: `false` means its `read_screen` uses the
 dependency-free textgrid fallback — no `attr_runs` (#128) and no keyframe repair
 (#130), so a sparse alt-screen frame after ring eviction comes back flagged
-`partial` only. It defaults `true` for a pre-#134 agent that omits the field:
+`partial` only. It defaults `true` for a pre-#134 agent that omits the field.
+`controlled` (#238) is whether an outside client is driving the terminal right
+now (see Terminal control); MCP input is not gated by it:
 
 ```json
 [{"id":4503603655475937,"title":"bash","host":"JC-SERVER","cwd":"/home/me",
   "agent":"","kind":"agent","cols":80,"rows":24,"mode":"read","scope":null,
   "version":"0.8.0+ba4b62e","stale":false,"app_cursor":false,"pace_ms":0,
-  "pyte":true}]
+  "controlled":false,"pyte":true}]
 ```
 
 **`POST /mcp/read`** — body `{"id": <int>}` plus optional fields:
@@ -668,6 +745,7 @@ Requires effective mode `readwrite` (else **403 `read_only`**); `data` must be a
 string (else **400 `bad_data`**) and ≤ **256 KiB** UTF-8 (else **413
 `too_large`**). Forwarded **verbatim** straight to the PTY and **deliberately
 bypasses the single-active-browser lease** — MCP is its own authorized channel.
+It bypasses a terminal's external controller (#238) the same way.
 The high-level MCP `send_input` *tool* maps newlines in `data` to a carriage
 return before calling this endpoint, so a command submits on PowerShell/PSReadLine
 (which treats a bare `\n` as a soft continuation) and on a Unix shell alike (#13);
