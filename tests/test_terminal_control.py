@@ -488,3 +488,546 @@ def test_send_to_producer_if_rechecks_under_the_send_lock():
         assert await entry.send_to_producer_if("y", lambda: True) is True
         assert entry.ws.sent == ["y"]
     asyncio.run(scenario())
+
+
+# ---- relay gate, in process (relay.py) -------------------------------------
+
+class FakeBrowser(FakeWS):
+    """A /ws socket the relay reads from: ``push`` a frame, ``hang_up`` to end
+    it. ``gate_first`` holds only the FIRST send (the attach's `resized`)."""
+
+    def __init__(self, gate=None, gate_first=None):
+        super().__init__(gate)
+        self.gate_first = gate_first
+        self.inbox = asyncio.Queue()
+
+    async def send(self, data):
+        if self.gate_first is not None:
+            gate, self.gate_first = self.gate_first, None
+            await gate.wait()
+        await super().send(data)
+
+    def push(self, frame):
+        self.inbox.put_nowait(frame if isinstance(frame, (bytes, str))
+                              else json.dumps(frame))
+
+    def hang_up(self):
+        self.inbox.put_nowait(None)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        message = await self.inbox.get()
+        if message is None:
+            raise StopAsyncIteration
+        return message
+
+
+class FakeRequest:
+    def __init__(self, sid, client_id=""):
+        self.args = {"session": str(sid), "clientId": client_id}
+
+
+class FakeCtx:
+    def __init__(self, active):
+        self.active_client_id = active
+
+
+def _producer_frames(entry, kinds=("input", "resize")):
+    out = []
+    for raw in entry.ws.sent:
+        frame = json.loads(raw)
+        if frame.get("type") in kinds:
+            out.append(frame)
+    return out
+
+
+async def _settle():
+    for _ in range(5):
+        await asyncio.sleep(0.005)
+
+
+def _attach(reg, ctx, entry, ws, client_id=""):
+    from webterm.broker import relay
+    return asyncio.get_running_loop().create_task(relay.handle_browser_ws(
+        FakeRequest(entry.id, client_id), ws, reg, ctx))
+
+
+def test_relay_frame_admitted_before_a_claim_does_not_land_after_it():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        holder, ctl = FakeBrowser(), FakeBrowser()
+        tasks = [_attach(reg, ctx, entry, holder, "lease"),
+                 _attach(reg, ctx, entry, ctl, "ext-c")]
+        await _settle()
+        await entry._send_lock.acquire()      # a snapshot/RPC in flight
+        holder.push({"type": "input", "data": "late"})
+        holder.push(b"late-binary")
+        holder.push({"type": "resize", "cols": 1, "rows": 1})
+        await _settle()                       # admitted, waiting on the lock
+        ctl.push({"type": "control", "op": "claim", "label": "phone"})
+        await _settle()
+        entry._send_lock.release()
+        await _settle()
+        assert _producer_frames(entry) == []
+        for ws in (holder, ctl):
+            ws.hang_up()
+        await asyncio.gather(*tasks)
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+def test_relay_attach_reads_resized_before_any_control_change():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        ctl = FakeBrowser()
+        tasks = [_attach(reg, ctx, entry, ctl, "ext-c")]
+        await _settle()
+        gate = asyncio.Event()
+        late = FakeBrowser(gate_first=gate)
+        tasks.append(_attach(reg, ctx, entry, late, "lease"))
+        await _settle()                       # late's `resized` is held
+        ctl.push({"type": "control", "op": "claim", "label": "phone"})
+        await _settle()
+        gate.set()
+        await _settle()
+        await reg.drain_control()
+        first = json.loads(late.sent[0])
+        assert first["type"] == "resized"
+        gens = [f["gen"] for f in late.controls()]
+        assert gens == sorted(gens)
+        assert late.controls()[-1] == _live_frame(entry)
+        assert late.controls()[-1]["state"] == "controlled"
+        for ws in (ctl, late):
+            ws.hang_up()
+        await asyncio.gather(*tasks)
+    asyncio.run(scenario())
+
+
+def test_relay_revoked_lease_holder_socket_stays_gated_until_it_reclaims():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        holder = FakeBrowser()
+        task = _attach(reg, ctx, entry, holder, "lease")
+        await _settle()
+        holder.push({"type": "control", "op": "claim", "label": "me"})
+        await _settle()
+        assert reg.release_by_gen(entry, entry.control_gen) is None
+        holder.push({"type": "input", "data": "after-revoke"})
+        holder.push(b"after-revoke-binary")
+        await _settle()
+        assert _producer_frames(entry) == []
+        holder.push({"type": "control", "op": "claim", "label": "me again"})
+        holder.push({"type": "input", "data": "reclaimed"})
+        await _settle()
+        assert _producer_frames(entry) == [
+            {"type": "input", "data": "reclaimed"}]
+        holder.hang_up()
+        await task
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+def test_relay_control_refusals_answer_and_keep_the_socket():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        a, b = FakeBrowser(), FakeBrowser()
+        tasks = [_attach(reg, ctx, entry, a, "ext-a"),
+                 _attach(reg, ctx, entry, b, "ext-b")]
+        await _settle()
+        a.push({"type": "control", "op": "claim", "label": ""})
+        a.push({"type": "control", "op": "claim"})
+        a.push({"type": "control", "op": "steal"})
+        a.push({"type": "control", "op": "release"})
+        a.push({"type": "control", "op": "claim", "label": "phone"})
+        b.push({"type": "control", "op": "release"})
+        await _settle()
+        errors = [json.loads(m) for m in a.sent if isinstance(m, str)
+                  and json.loads(m).get("type") == "error"]
+        assert errors == [
+            {"type": "error", "reason": r, "session_id": entry.id}
+            for r in ("bad_label", "bad_label", "bad_op", "not_controller")]
+        assert entry.controller.ws is a       # the socket stayed usable
+        b_errors = [json.loads(m) for m in b.sent if isinstance(m, str)
+                    and json.loads(m).get("type") == "error"]
+        assert b_errors == [{"type": "error", "reason": "not_controller",
+                             "session_id": entry.id}]
+        # On a dead terminal every op answers unknown_session.
+        await reg.deregister(entry.id, entry)
+        for op in ({"op": "claim", "label": "x"}, {"op": "release"},
+                   {"op": "steal"}):
+            b.push(dict({"type": "control"}, **op))
+        await _settle()
+        b_errors = [json.loads(m)["reason"] for m in b.sent
+                    if isinstance(m, str)
+                    and json.loads(m).get("type") == "error"]
+        assert b_errors == ["not_controller"] + ["unknown_session"] * 3
+        for ws in (a, b):
+            ws.hang_up()
+        await asyncio.gather(*tasks)
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+def test_relay_controller_socket_closing_releases():
+    async def scenario():
+        reg = BrokerRegistry()
+        ctx = FakeCtx("lease")
+        entry = await _registered(reg)
+        ctl, holder = FakeBrowser(), FakeBrowser()
+        tasks = [_attach(reg, ctx, entry, ctl, "ext-c"),
+                 _attach(reg, ctx, entry, holder, "lease")]
+        await _settle()
+        ctl.push({"type": "control", "op": "claim", "label": "phone"})
+        await _settle()
+        g1 = entry.control_gen
+        ctl.hang_up()
+        await tasks[0]
+        assert entry.controller is None and entry.control_gen > g1
+        holder.push({"type": "input", "data": "mine again"})
+        await _settle()
+        assert _producer_frames(entry) == [
+            {"type": "input", "data": "mine again"}]
+        holder.hang_up()
+        await tasks[1]
+        await reg.drain_control()
+    asyncio.run(scenario())
+
+
+# ---- end to end: a broker subprocess and real sockets ----------------------
+#
+# The fixture follows tests/test_broker_e2e.py's broker_proc (same env, same
+# readiness probe) minus its /mod-store reset, which nothing here touches.
+# Every test uses its own window ids and takes the lease explicitly, so the
+# order the tests run in does not matter.
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import websockets  # noqa: E402
+
+from tests.test_broker_e2e import _free_port, _http  # noqa: E402
+
+REPO = Path(__file__).resolve().parents[1]
+TOKEN = "terminal-control-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json"}
+
+
+@pytest.fixture(scope="module")
+def broker():
+    port = _free_port()
+    env = dict(os.environ)
+    env["WEB_TERMINAL_TOKEN"] = TOKEN
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("BROWSERLAND_BROKER_URL", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "webterm.broker",
+         "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(REPO), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 20
+    while True:
+        try:
+            status, _ = _http("GET", f"{base}/sessions?token={TOKEN}")
+            if status == 200:
+                break
+        except OSError:
+            pass
+        if proc.poll() is not None:
+            raise RuntimeError(f"broker exited early: {proc.returncode}")
+        if time.time() > deadline:
+            proc.kill()
+            raise RuntimeError("broker did not come up")
+        time.sleep(0.2)
+    yield port, base
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+async def _until(ws, pred, timeout=5.0):
+    """Read text frames until ``pred(frame)``; binary frames are skipped.
+    Returns the matching frame."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        raw = await asyncio.wait_for(ws.recv(), deadline - loop.time())
+        if isinstance(raw, bytes):
+            continue
+        frame = json.loads(raw)
+        if pred(frame):
+            return frame
+
+
+def _is_control(state=None):
+    return lambda f: f.get("type") == "control" and (
+        state is None or f.get("state") == state)
+
+
+async def _lease(port, client_id):
+    """A /control socket for ``client_id`` that holds the lease."""
+    ws = await websockets.connect(
+        f"ws://127.0.0.1:{port}/control?clientId={client_id}&token={TOKEN}")
+    status = json.loads(await asyncio.wait_for(ws.recv(), 5))
+    if not status["active"]:
+        await ws.send(json.dumps({"type": "become_active"}))
+        await _until(ws, lambda f: f.get("type") == "status"
+                     and f["active"] is True)
+    return ws
+
+
+async def _producer(port, base, wid):
+    ws = await websockets.connect(
+        f"ws://127.0.0.1:{port}/browserland?token={TOKEN}", max_size=None)
+    await ws.send(json.dumps({"type": "hello", "window_id": wid, "pid": 5,
+                              "title": "ctl", "cols": 80, "rows": 24}))
+    for _ in range(50):
+        _, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
+        if any(s["id"] == wid for s in sessions):
+            return ws
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"window {wid} never registered")
+
+
+async def _browser(port, wid, client_id):
+    """Attach a /ws socket and consume its attach frames; returns
+    (ws, [resized, control])."""
+    ws = await websockets.connect(
+        f"ws://127.0.0.1:{port}/ws?session={wid}&token={TOKEN}"
+        f"&clientId={client_id}", max_size=None)
+    first = json.loads(await asyncio.wait_for(ws.recv(), 5))
+    second = json.loads(await asyncio.wait_for(ws.recv(), 5))
+    return ws, [first, second]
+
+
+async def _next_drive(producer, timeout=5.0):
+    """The producer's next input/resize frame (snapshot_please skipped)."""
+    while True:
+        frame = json.loads(await asyncio.wait_for(producer.recv(), timeout))
+        if frame.get("type") != "snapshot_please":
+            return frame
+
+
+async def _claim(ws, label="phone"):
+    await ws.send(json.dumps({"type": "control", "op": "claim",
+                              "label": label}))
+    return await _until(ws, _is_control("controlled"))
+
+
+def _session(base, wid):
+    _, sessions = _http("GET", f"{base}/sessions?token={TOKEN}")
+    return next(s for s in sessions if s["id"] == wid)
+
+
+def test_e2e_attach_reads_resized_then_the_control_view(broker):
+    port, base = broker
+
+    async def scenario():
+        lease = await _lease(port, "tc-attach")
+        prod = await _producer(port, base, 238001)
+        first, frames = await _browser(port, 238001, "tc-attach")
+        assert frames[0] == {"type": "resized", "cols": 80, "rows": 24}
+        assert frames[1]["type"] == "control"
+        assert frames[1]["state"] == "free"
+        assert (frames[1]["label"], frames[1]["since"]) == (None, None)
+        ctl, _ = await _browser(port, 238001, "ext-attach")
+        claimed = await _claim(ctl, "Notifier")
+        # A socket attaching mid-control reads `controlled` right after
+        # `resized`, before the snapshot.
+        late, frames = await _browser(port, 238001, "tc-attach")
+        assert frames[0]["type"] == "resized"
+        assert frames[1] == claimed
+        assert frames[1]["label"] == "Notifier"
+        assert isinstance(frames[1]["since"], int)
+        # The already-attached watcher got the change too.
+        assert await _until(first, _is_control()) == claimed
+        for ws in (first, ctl, late, prod, lease):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+def test_e2e_gate_while_controlled(broker):
+    port, base = broker
+
+    async def scenario():
+        lease = await _lease(port, "tc-gate")
+        prod_a = await _producer(port, base, 238011)
+        prod_b = await _producer(port, base, 238012)
+        holder_a, _ = await _browser(port, 238011, "tc-gate")
+        holder_b, _ = await _browser(port, 238012, "tc-gate")
+        ctl, _ = await _browser(port, 238011, "ext-gate")
+        await _claim(ctl)
+        # The controller drives: text, binary, resize.
+        await ctl.send(json.dumps({"type": "input", "data": "c1"}))
+        assert await _next_drive(prod_a) == {"type": "input", "data": "c1"}
+        await ctl.send(b"c2")
+        assert await _next_drive(prod_a) == {"type": "input", "data": "c2"}
+        # The lease holder's text, BINARY, legacy paste and resize are all
+        # dropped on the controlled terminal: the next thing the producer
+        # sees is the controller's marker.
+        await holder_a.send(json.dumps({"type": "input", "data": "h1"}))
+        await holder_a.send(b"h2")
+        await holder_a.send(json.dumps({"type": "paste", "data": "h3"}))
+        await holder_a.send(json.dumps({"type": "resize", "cols": 100,
+                                        "rows": 30}))
+        await ctl.send(json.dumps({"type": "resize", "cols": 40,
+                                   "rows": 20}))
+        assert await _next_drive(prod_a) == {"type": "resize", "cols": 40,
+                                             "rows": 20}
+        # ...while the same holder still drives its OTHER terminal.
+        await holder_b.send(json.dumps({"type": "input", "data": "b1"}))
+        assert await _next_drive(prod_b) == {"type": "input", "data": "b1"}
+        for ws in (holder_a, holder_b, ctl, prod_a, prod_b, lease):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+def test_e2e_release_by_frame_close_and_exit(broker):
+    port, base = broker
+
+    async def scenario():
+        lease = await _lease(port, "tc-rel")
+        prod = await _producer(port, base, 238021)
+        holder, _ = await _browser(port, 238021, "tc-rel")
+        # 1. by frame
+        ctl, _ = await _browser(port, 238021, "ext-rel")
+        g1 = (await _claim(ctl))["gen"]
+        await ctl.send(json.dumps({"type": "control", "op": "release"}))
+        freed = await _until(holder, _is_control("free"))
+        assert freed["gen"] > g1
+        assert _session(base, 238021)["controller"] is None
+        await holder.send(json.dumps({"type": "input", "data": "h1"}))
+        assert await _next_drive(prod) == {"type": "input", "data": "h1"}
+        await holder.send(json.dumps({"type": "resize", "cols": 90,
+                                      "rows": 25}))
+        assert await _next_drive(prod) == {"type": "resize", "cols": 90,
+                                           "rows": 25}
+        # 2. by socket close
+        g2 = (await _claim(ctl))["gen"]
+        assert g2 > freed["gen"]
+        assert _session(base, 238021)["controller"]["gen"] == g2
+        await ctl.close()
+        freed = await _until(holder, _is_control("free"))
+        assert freed["gen"] > g2
+        await holder.send(json.dumps({"type": "input", "data": "h2"}))
+        assert await _next_drive(prod) == {"type": "input", "data": "h2"}
+        # 3. by terminal exit: the controller hears `exit`, then `free`.
+        ctl, _ = await _browser(port, 238021, "ext-rel")
+        g3 = (await _claim(ctl))["gen"]
+        await prod.send(json.dumps({"type": "exit", "code": 0}))
+        assert (await _until(ctl, lambda f: f.get("type") in
+                             ("exit", "control")))["type"] == "exit"
+        freed = await _until(ctl, _is_control("free"))
+        assert freed["gen"] > g3
+        for ws in (holder, ctl, prod, lease):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+def test_e2e_second_claim_revokes_the_first(broker):
+    port, base = broker
+
+    async def scenario():
+        lease = await _lease(port, "tc-take")
+        prod = await _producer(port, base, 238031)
+        first, _ = await _browser(port, 238031, "ext-one")
+        second, _ = await _browser(port, 238031, "ext-two")
+        await _claim(first, "one")
+        await _until(second, _is_control("controlled"))
+        taken = await _claim(second, "two")
+        revoked = await _until(first, _is_control())
+        assert revoked == {"type": "control", "state": "revoked",
+                           "by": "claim", "gen": taken["gen"]}
+        assert await _until(first, _is_control()) == taken
+        # The revoked socket stays open as a watcher, its input dropped.
+        await first.send(json.dumps({"type": "input", "data": "x"}))
+        await second.send(json.dumps({"type": "input", "data": "y"}))
+        assert await _next_drive(prod) == {"type": "input", "data": "y"}
+        for ws in (first, second, prod, lease):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+def test_e2e_become_active_spares_a_distinct_controller(broker):
+    port, base = broker
+
+    async def scenario():
+        loser = await _lease(port, "tc-loser")
+        prod = await _producer(port, base, 238041)
+        page, _ = await _browser(port, 238041, "tc-loser")
+        ctl, _ = await _browser(port, 238041, "ext-survivor")
+        claimed = await _claim(ctl)
+        # Another browser takes the lease: the loser's /ws gets 4409...
+        winner = await _lease(port, "tc-winner")
+        with pytest.raises(websockets.ConnectionClosed) as closed:
+            while True:
+                await asyncio.wait_for(page.recv(), 10)
+        assert closed.value.rcvd.code == 4409
+        # ...the controller's does not, and it still drives.
+        assert _session(base, 238041)["controller"]["gen"] == claimed["gen"]
+        await ctl.send(json.dumps({"type": "input", "data": "still"}))
+        assert await _next_drive(prod) == {"type": "input", "data": "still"}
+        for ws in (ctl, prod, loser, winner):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+def test_e2e_controller_sharing_the_losers_client_id_is_closed_and_released(
+        broker):
+    port, base = broker
+
+    async def scenario():
+        loser = await _lease(port, "tc-shared")
+        prod = await _producer(port, base, 238051)
+        watcher, _ = await _browser(port, 238051, "ext-watch")
+        ctl, _ = await _browser(port, 238051, "tc-shared")
+        claimed = await _claim(ctl)
+        winner = await _lease(port, "tc-shared-winner")
+        with pytest.raises(websockets.ConnectionClosed) as closed:
+            while True:
+                await asyncio.wait_for(ctl.recv(), 10)
+        assert closed.value.rcvd.code == 4409
+        freed = await _until(watcher, _is_control("free"))
+        assert freed["gen"] > claimed["gen"]
+        assert _session(base, 238051)["controller"] is None
+        for ws in (watcher, prod, loser, winner):
+            await ws.close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("label,wid", [
+    ("", 238061), ("x" * 65, 238062), ("bell\x07", 238063),
+    ("rlo‮", 238064)])
+def test_e2e_bad_label(broker, label, wid):
+    port, base = broker
+
+    async def scenario():
+        prod = await _producer(port, base, wid)
+        ctl, _ = await _browser(port, wid, "ext-label")
+        await ctl.send(json.dumps({"type": "control", "op": "claim",
+                                   "label": label}))
+        assert await _until(ctl, lambda f: f.get("type") == "error") == {
+            "type": "error", "reason": "bad_label", "session_id": wid}
+        assert _session(base, wid)["controller"] is None
+        # The socket stays open and a good claim then works.
+        assert (await _claim(ctl, "ok"))["label"] == "ok"
+        for ws in (ctl, prod):
+            await ws.close()
+    asyncio.run(scenario())

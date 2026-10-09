@@ -8,6 +8,13 @@ Attach order invariant (from the reference): send the authoritative
 ``resized`` BEFORE requesting the snapshot, so xterm.js sizes itself first
 and the snapshot's lines land at the right widths instead of being
 wrapped/cropped on arrival.
+
+Terminal control (#238): any subscriber may claim the terminal with a
+``control`` frame. While a controller holds it, ONLY that socket's input and
+resize reach the producer (the lease holder's included are dropped); with no
+controller the single-active-browser lease rule applies, unchanged. Output,
+the snapshot request and mouse (a no-op) are never gated. A socket attaching
+reads ``resized`` then the terminal's control view, then gets the snapshot.
 """
 
 from __future__ import annotations
@@ -19,6 +26,43 @@ from .. import protocol
 from .registry import BrokerRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _may_drive(entry, ws, client_id: str, ctx) -> bool:
+    """Whether ``ws`` may send input/resize to ``entry``'s producer NOW. Read
+    fresh per frame, and again under the send lock (send_to_producer_if)."""
+    if ws in entry.revoked:
+        # Lost the terminal (POST release / another claim): it watches, even
+        # if its clientId holds the lease, until it claims again.
+        return False
+    ctl = entry.controller
+    if ctl is not None:
+        return ctl.ws is ws
+    # Single-active-client backstop: only the browser that currently holds
+    # the lease may DRIVE this PTY. A fresh atomic read of the live lease per
+    # message closes the race between the lease flip and this socket's 4409
+    # close actually landing -- an id-less or non-active socket watches but
+    # its input/resize is silently dropped. Absent ctx (defensive) -> no
+    # lease tracked, so every socket is inactive.
+    return bool(client_id) and (
+        ctx is not None and ctx.active_client_id == client_id)
+
+
+async def _control_op(registry: BrokerRegistry, entry, ws, data) -> None:
+    """One ``control`` frame from a subscriber: claim or release. A refusal
+    answers an error frame and leaves the socket open."""
+    op = data.get("op")
+    if op == "claim":
+        err = registry.claim(entry, ws, data.get("label"))
+    elif op == "release":
+        err = registry.release_by_ws(entry, ws)
+    else:
+        err = "bad_op" if registry.is_live(entry) else "unknown_session"
+    if err is not None:
+        try:
+            await ws.send(protocol.error_frame(err, entry.id))
+        except Exception as exc:
+            LOGGER.debug("send control error failed: %s", exc)
 
 
 async def handle_browser_ws(request, ws, registry: BrokerRegistry,
@@ -42,37 +86,41 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
 
     # The browser's stable single-active-lease id (see app.py /control). A
     # socket dialed without it can still watch the stream but its input is
-    # dropped (see the backstop below). Absent ctx (defensive) -> no lease
-    # tracked, so the backstop treats every socket as inactive.
+    # dropped (the lease backstop in _may_drive). Absent ctx (defensive) -> no
+    # lease tracked, so the backstop treats every socket as inactive.
     client_id = request.args.get("clientId", "").strip()
 
-    entry.add_subscriber(ws, client_id)
     try:
-        try:
-            await ws.send(protocol.resized_frame(entry.cols, entry.rows))
-        except Exception as exc:
-            LOGGER.debug("send initial resized failed: %s", exc)
+        # Subscribe, then `resized`, then the control view, all inside the
+        # terminal's publisher section: no control change can be broadcast to
+        # this socket ahead of its `resized`, and every later one is newer
+        # than the PUBLISHED view it is told here. The finally covers a
+        # cancellation in here (remove_subscriber is idempotent).
+        async with registry.control_section(entry.id):
+            entry.add_subscriber(ws, client_id)
+            try:
+                await ws.send(protocol.resized_frame(entry.cols, entry.rows))
+                await ws.send(protocol.control_frame(entry.published_view))
+            except Exception as exc:
+                LOGGER.debug("send initial resized/control failed: %s", exc)
 
         # Fresh snapshot so this browser sees current state immediately.
         await entry.request_snapshot()
 
-        # Browser -> broker -> producer.
+        def may() -> bool:
+            return _may_drive(entry, ws, client_id, ctx)
+
+        # Browser -> broker -> producer. Every input/resize frame passes the
+        # gate (_may_drive) on arrival AND again under the send lock: a frame
+        # admitted just before a claim or revoke must not land after it.
+        # Output (broadcast) is never gated, so every viewer sees the stream.
         async for message in ws:
-            # Single-active-client backstop: only the browser that currently
-            # holds the lease may DRIVE this PTY. A fresh atomic read of the
-            # live lease per message closes the race between the lease flip and
-            # this socket's 4409 close actually landing — an id-less or
-            # non-active socket watches but its input/resize is silently
-            # dropped (mouse is already a no-op). Output (broadcast) is never
-            # gated, so every viewer still sees the stream.
-            active = bool(client_id) and (
-                ctx is not None and ctx.active_client_id == client_id)
             if isinstance(message, (bytes, bytearray)):
-                if not active:
+                if not may():
                     continue
                 # Bare binary from the browser = raw input bytes.
                 text = bytes(message).decode("utf-8", errors="replace")
-                await entry.send_to_producer(protocol.input_frame(text))
+                await entry.send_to_producer_if(protocol.input_frame(text), may)
                 continue
             data = protocol.parse(message)
             if data is None:
@@ -83,22 +131,29 @@ async def handle_browser_ws(request, ws, registry: BrokerRegistry,
             # served before the UI switched to xterm's paste(); pinned by
             # test_broker_e2e.py::test_large_frame_relay.
             if mtype in ("input", "paste"):
-                if not active:
+                if not may():
                     continue
-                await entry.send_to_producer(protocol.input_frame(
-                    str(data.get("data", ""))))
+                await entry.send_to_producer_if(protocol.input_frame(
+                    str(data.get("data", ""))), may)
             elif mtype == "resize":
-                if not active:
+                if not may():
                     continue
                 try:
                     cols = int(data.get("cols", 80))
                     rows = int(data.get("rows", 24))
                 except (TypeError, ValueError):
                     continue
-                await entry.send_to_producer(protocol.resize_frame(cols, rows))
+                await entry.send_to_producer_if(
+                    protocol.resize_frame(cols, rows), may)
+            elif mtype == "control":
+                await _control_op(registry, entry, ws, data)
             elif mtype == "mouse":
                 pass  # not forwarded in v1
             else:
                 LOGGER.debug("browser unknown msg type: %r", mtype)
     finally:
         entry.remove_subscriber(ws)
+        # The socket is the lease: a controller that goes away releases. A
+        # no-op for any other socket, or once the entry is dying (that path
+        # force-released it already).
+        registry.release_by_ws(entry, ws)

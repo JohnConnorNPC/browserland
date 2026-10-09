@@ -337,6 +337,11 @@ def test_fake_producer_relay(broker_proc):
             # Invariant: resized arrives BEFORE the snapshot is requested.
             first = json.loads(await asyncio.wait_for(browser.recv(), 5))
             assert first == {"type": "resized", "cols": 80, "rows": 24}
+            # #238: the terminal's control view rides right behind
+            # `resized` (free here: nothing claimed it).
+            ctl_view = json.loads(await asyncio.wait_for(browser.recv(), 5))
+            assert ctl_view["type"] == "control"
+            assert ctl_view["state"] == "free"
             req = json.loads(await asyncio.wait_for(producer.recv(), 5))
             assert req == {"type": "snapshot_please"}
 
@@ -402,6 +407,11 @@ def test_large_frame_relay(broker_proc):
         try:
             first = json.loads(await asyncio.wait_for(browser.recv(), 5))
             assert first["type"] == "resized"
+            # #238: the terminal's control view rides right behind
+            # `resized` (free here: nothing claimed it).
+            ctl_view = json.loads(await asyncio.wait_for(browser.recv(), 5))
+            assert ctl_view["type"] == "control"
+            assert ctl_view["state"] == "free"
             req = json.loads(await asyncio.wait_for(producer.recv(), 5))
             assert req == {"type": "snapshot_please"}
 
@@ -700,6 +710,11 @@ def test_title_broadcast(broker_proc):
         try:
             first = json.loads(await asyncio.wait_for(browser.recv(), 5))
             assert first["type"] == "resized"
+            # #238: the terminal's control view rides right behind
+            # `resized` (free here: nothing claimed it).
+            ctl_view = json.loads(await asyncio.wait_for(browser.recv(), 5))
+            assert ctl_view["type"] == "control"
+            assert ctl_view["state"] == "free"
             req = json.loads(await asyncio.wait_for(producer.recv(), 5))
             assert req == {"type": "snapshot_please"}
 
