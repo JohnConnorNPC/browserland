@@ -25407,7 +25407,7 @@ def _term_modes_source():
                    "function sampleTermModes(win) {",
                    "function armTermModesSample(win) {",
                    "function cancelTermModesSample(win) {",
-                   "function _addTermModesSub(win, fn) {",
+                   "function _addTermModesSub(win, fn, arm) {",
                    "function _modTerminalModes(rec, info) {",
                    "function _ctxTerminalModes(ctx, rec) {"):
         assert needed in body, f"{needed} missing from the sliced range"
@@ -25433,7 +25433,7 @@ def test_on_modes_changed_lands_in_86k_and_is_registered_as_an_extender():
     loader, ext = _loader_src(), _ctx_ext_src()
     for sym in ("function sampleTermModes(win) {",
                 "function armTermModesSample(win) {",
-                "function _addTermModesSub(win, fn) {",
+                "function _addTermModesSub(win, fn, arm) {",
                 "function _modTerminalModes(rec, info) {",
                 "function _ctxTerminalModes(ctx, rec) {"):
         assert sym in frag, f"{sym!r} did not land in 86k"
@@ -25809,6 +25809,85 @@ CASES.lifecycle_and_unreadable = function () {
              parsedAfter: win.term._parsed.length, errors: errors };
 };
 
+// #241: A REPLAY THAT DISABLES ITS OWN MOD. The removal is armed before the
+// replay, so the teardown the handler runs removes it; armed afterwards it
+// would land on the list _runUnloads already spliced. Both mods register
+// BEFORE the window opens: on the late path the loader's own onTerminalCreate
+// push comes after the replay, a separate leak (#242) this case must not
+// mistake for a pass.
+CASES.replay_disables_its_mod = function () {
+    const b = modCtx('b'), m = modCtx('self');
+    const seenB = [], seen = [];
+    let off = null;
+    b.ctx.windows.onTerminalCreate(function (info) {
+        info.onModesChanged(function (s) { seenB.push(s.mouseTracking); });
+    });
+    m.ctx.windows.onTerminalCreate(function (info) {
+        off = info.onModesChanged(function (s) {
+            seen.push(s.mouseTracking);
+            if (seen.length === 1) _runUnloads(m.rec);
+        });
+    });
+    const win = openTerminal(function (t) { t.protocol = 'any'; });
+    const st = _termModesState(win, false);
+    const subsAfter = st ? st.subs.length : -1;
+    const unloadsAfter = m.rec.unloads.length;
+    const createCbs = termCreateCbs.length;
+    win.term.parse('decrst', 1003);
+    flushFrames();
+    const offResult = off();
+    return { seen: seen, seenB: seenB, subsAfter: subsAfter,
+             unloadsAfter: unloadsAfter, createCbs: createCbs,
+             offResult: offResult, errors: errors };
+};
+
+// #241: A REPLAY THAT CLOSES ITS WINDOW. closeWindow runs win.cleanups and
+// then empties it, so the removal has to be on that list before the replay.
+// The late path is fine here: a close does not drain the mod's unloads.
+CASES.replay_closes_its_window = function () {
+    const win = openTerminal();
+    const m = modCtx('closer');
+    const seen = [];
+    let off = null;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        if (info.win !== win) return;
+        off = info.onModesChanged(function (s) {
+            seen.push(s.mouseTracking);
+            closeWindow(info.win.id);
+        });
+    });
+    const st = _termModesState(win, false);
+    const subsAfter = st ? st.subs.length : -1;
+    const cleanupsAfter = win.cleanups.length;
+    const offResult = off();
+    return { seen: seen, subsAfter: subsAfter, cleanupsAfter: cleanupsAfter,
+             offResult: offResult, stillOpen: windows.has(win.id),
+             errors: errors };
+};
+
+// #241: A SUB THE ARM ALREADY REMOVED IS NOT REPLAYED. The arm calls the
+// bag's onModTeardown, which a mod can overwrite. This relies on the bag being
+// decorated IN PLACE (core's fresh literal), so the arm reads the member this
+// mod wrote. A frozen bag is copied by the extenders, and then the arm would
+// read core's hook instead: armCalls stays 0 and the case reds rather than
+// passing without reaching the guard.
+CASES.arm_removes_before_replay = function () {
+    const m = modCtx('saboteur');
+    const seen = [];
+    let off = null, win = null, armCalls = 0;
+    m.ctx.windows.onTerminalCreate(function (info) {
+        win = info.win;
+        info.onModTeardown = function (fn) { armCalls += 1; fn(); return true; };
+        off = info.onModesChanged(function (s) { seen.push(s.mouseTracking); });
+    });
+    openTerminal();
+    const st = _termModesState(win, false);
+    const subsAfter = st ? st.subs.length : -1;
+    const offResult = off();
+    return { seen: seen, armCalls: armCalls, subsAfter: subsAfter,
+             offResult: offResult, errors: errors };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -25933,6 +26012,70 @@ def test_subscriptions_end_at_teardown_and_at_dispose(modes_harness):
     # Closing the window disposes the ONE sampler subscription.
     assert r["parsedBefore"] == 1 and r["parsedAfter"] == 0
     assert r["stillOpen"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_modes_replay_that_disables_its_own_mod_leaks_nothing(modes_harness):
+    r = _run_modes(modes_harness, "replay_disables_its_mod")
+    assert r["errors"] == []
+    # The replay arrived once, and nothing after the mod disabled itself...
+    assert r["seen"] == ["any"], "a disabled mod's subscriber is still fed"
+    # ...while the change WAS dispatched: b, still enabled, saw it.
+    assert r["seenB"] == ["any", "none"]
+    assert r["subsAfter"] == 1, "the disabled mod's subscription survived"
+    # Nothing was pushed onto the unload list after its drain, and the
+    # create callback went with the rest of the teardown.
+    assert r["unloadsAfter"] == 0
+    assert r["createCbs"] == 1
+    assert r["offResult"] is False, "teardown did not remove the subscription"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_modes_replay_that_closes_its_window_leaks_nothing(modes_harness):
+    r = _run_modes(modes_harness, "replay_closes_its_window")
+    assert r["errors"] == []
+    assert r["seen"] == ["none"]
+    assert r["stillOpen"] is False
+    assert r["subsAfter"] == 0, "the closed window still holds the subscription"
+    # Nothing landed on the emptied cleanup list, where it would never run.
+    assert r["cleanupsAfter"] == 0
+    assert r["offResult"] is False, "the close did not remove the subscription"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_modes_subscription_removed_while_arming_is_not_replayed(
+        modes_harness):
+    r = _run_modes(modes_harness, "arm_removes_before_replay")
+    assert r["errors"] == []
+    assert r["armCalls"] == 1, "the overwritten onModTeardown never armed"
+    assert r["seen"] == [], "a subscription the arm removed was replayed"
+    assert r["subsAfter"] == 0
+    assert r["offResult"] is False
+
+
+def test_on_modes_changed_arms_its_removal_before_the_replay():
+    # #241: the removal is armed BEFORE the synchronous replay, which may
+    # disable the mod or close the window. Pinned on the shipped code, apart
+    # from what the cases above observe.
+    frag = _term_taps_src()
+    raw = _frag_fn(frag, "function _addTermModesSub(win, fn, arm) {")
+    assert raw.count("if (typeof arm === 'function') {") == 1
+    code = _js_strip_comments_and_strings(raw)
+    # The guard wraps the arm in CODE (string contents are blanked here, so the
+    # literal itself is checked on the raw body above).
+    guarded = re.findall(r"if \(typeof arm === '\s+'\) \{\s*"
+                         r"try \{ arm\(offFn\); \} catch \(_\) \{\}\s*\}", code)
+    assert len(guarded) == 1, "arm(offFn) is not under its typeof guard"
+    assert code.count("arm(offFn)") == 1
+    assert code.index("arm(offFn)") < code.index("rec.fn("), \
+        "the removal is armed after the replay"
+    member = _js_strip_comments_and_strings(
+        _frag_fn(frag, "function _modTerminalModes(rec, info) {"))
+    assert member.count("_armTermTapRemoval(rec, info, off)") == 1
+    assert re.search(r"_addTermModesSub\(info && info\.win, fn, function \(off\) "
+                     r"\{\s*_armTermTapRemoval\(rec, info, off\);\s*\}\)",
+                     member), "the member does not pass the removal in as the arm"
+    assert "const off = _addTermModesSub" not in member
 
 
 # ---------------------------------------------------------------------------

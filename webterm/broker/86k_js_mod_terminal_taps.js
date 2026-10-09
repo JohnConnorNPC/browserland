@@ -428,7 +428,7 @@
             return true;
         }
 
-        function _addTermModesSub(win, fn) {
+        function _addTermModesSub(win, fn, arm) {
             const noop = function () { return false; };
             if (typeof fn !== 'function') return noop;
             // A DISPOSED terminal takes no subscribers. The sampler already
@@ -440,12 +440,13 @@
             if (!st) return noop;
             const rec = { fn: fn };
             st.subs.push(rec);
-            // off() is built and the removal is ARMED BEFORE the replay fires.
-            // The replay is synchronous mod code: it may close the terminal or
-            // disable its own mod, and either drains the cleanup that is
-            // supposed to remove this subscription. Arming afterwards means
-            // registering against a teardown that has already run, and the
-            // subscription outlives the thing that owned it.
+            // off() is built and the removal is ARMED BEFORE the replay fires:
+            // `arm(offFn)` below is the caller's _armTermTapRemoval. The replay
+            // is synchronous mod code: it may close the terminal or disable its
+            // own mod, and either drains the cleanup that is supposed to remove
+            // this subscription. Arming afterwards means registering against a
+            // teardown that has already run, and the subscription outlives the
+            // thing that owned it (#241).
             let off = false;
             const offFn = function () {
                 if (off) return false;
@@ -455,7 +456,13 @@
                 st.subs.splice(i, 1);
                 return true;
             };
-            // THE REPLAY, now that off() exists and can be armed by the caller.
+            if (typeof arm === 'function') {
+                try { arm(offFn); } catch (_) {}
+            }
+            // THE REPLAY, now that off() exists and is armed. Only for a sub
+            // the arm left in place: it calls the bag's onModTeardown and
+            // onDispose, which a mod can overwrite with ones that run off()
+            // at once.
             //
             // Read LIVE when a sample is already queued: `last` is the last
             // SAMPLED state, and between a mode change and the frame that
@@ -472,7 +479,7 @@
             // mouse-active, and the next successful sample would then report a
             // transition out of a state core never observed. Saying nothing is
             // the honest form of "we do not know yet".
-            if (snap) {
+            if (snap && st.subs.indexOf(rec) !== -1) {
                 try { rec.fn(_copyTermModes(snap)); }
                 catch (e) {
                     try { console.error('[windows] terminal modes subscriber'
@@ -493,11 +500,12 @@
                 // Same refusal as the taps above, for the same reason: a dead
                 // activation's subscription would arm only on window close,
                 // because _runUnloads has already spliced the list it would be
-                // pushed onto.
+                // pushed onto. The removal is passed IN as the arm, not done
+                // after the call returns: by then the replay has already run.
                 if (rec && rec.unloading) return function () { return false; };
-                const off = _addTermModesSub(info && info.win, fn);
-                if (typeof fn === 'function') _armTermTapRemoval(rec, info, off);
-                return off;
+                return _addTermModesSub(info && info.win, fn, function (off) {
+                    _armTermTapRemoval(rec, info, off);
+                });
             };
             try {
                 info.onModesChanged = member;
