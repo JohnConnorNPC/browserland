@@ -13935,8 +13935,10 @@ __UNLOADS__
 
 // ---- driver ---------------------------------------------------------------
 // openWindow's terminal half, reduced to what #116's create-time emit needs --
-// including the SNAPSHOT of termCreateCbs, so a callback that (un)subscribes
-// mid-emit cannot skip or revisit a sibling (67:319).
+// including the SNAPSHOT of termCreateCbs and #242's recheck of each entry
+// (67's openWindow, "termCreateCbs is snapshotted"): a callback that subscribes
+// mid-emit cannot skip or revisit a sibling, and one removed mid-emit is not
+// called after its removal.
 let winSeq = 0;
 function openTerminal() {
     winSeq += 1;
@@ -13950,7 +13952,9 @@ function openTerminal() {
                   dom: dom, cleanups: [], disposed: false };
     desktop.appendChild(dom);
     windows.set(id, win);
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     return win;
 }
 // closeWindow's teardown (73), reduced to the drain A37 rides: disposed, the
@@ -14381,6 +14385,25 @@ CASES.one_function_twice_is_two_registrations = function () {
              cbsAfter: termCreateCbs.length };
 };
 
+// #242 A2: the CREATE-TIME emit. One mod, two subscriptions; the first
+// disables the mod at create time, and the second -- already in the emit's
+// snapshot -- must not be called on that window.
+CASES.create_time_emit_skips_a_removed_sibling = function () {
+    const baseline = termCreateCbs.length;
+    const m = modCtx('self');
+    const calls = [];
+    m.ctx.windows.onTerminalCreate(function (info) {
+        calls.push('a:' + info.win.id);
+        _runUnloads(m.rec);
+    });
+    m.ctx.windows.onTerminalCreate(function (info) {
+        calls.push('b:' + info.win.id);
+    });
+    openTerminal();
+    return { baseline: baseline, calls: calls, cbsAfter: termCreateCbs.length,
+             unloadsAfter: m.rec.unloads.length };
+};
+
 const want = process.argv[2];
 if (!CASES[want]) { console.log('no such case: ' + want); process.exit(2); }
 const out = CASES[want]();
@@ -14680,6 +14703,60 @@ def test_one_function_registered_twice_for_terminal_create_is_two_registrations(
     assert r["calls"] == ["h1:1"], "B's off() removed A's registration"
     assert r["cbsMid"] == r["baseline"] + 1
     assert r["cbsAfter"] == r["baseline"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_terminal_create_emit_skips_a_registration_removed_mid_emit(
+        teardown_harness):
+    # #242 A2: the emit's snapshot still holds the sibling the disable removed.
+    r = _run_teardown(teardown_harness, "create_time_emit_skips_a_removed_sibling")
+    assert r["errors"] == []
+    assert r["calls"] == ["a:h1:1"], \
+        "a removed sibling was called on the window being created"
+    assert r["cbsAfter"] == r["baseline"]
+    assert r["unloadsAfter"] == 0
+
+
+def _terminal_create_emit_loops(src):
+    """Every `for (const cb of termCreateCbs.slice()) { ... }` in `src`,
+    whitespace-collapsed and closed on its matching brace."""
+    flat = " ".join(src.split())
+    head = "for (const cb of termCreateCbs.slice())"
+    out = []
+    i = flat.find(head)
+    while i != -1:
+        j = i + len(head)
+        assert flat[j:j + 2] == " {", "the emit loop lost its block: " + flat[i:j + 60]
+        depth = 0
+        for j in range(j + 1, len(flat)):
+            if flat[j] == "{":
+                depth += 1
+            elif flat[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        out.append(flat[i:j + 1])
+        i = flat.find(head, j)
+    return out
+
+
+def test_every_harness_driver_retypes_the_create_emit_verbatim():
+    # #242 A2: the harness drivers re-type openWindow's create emit (67 is
+    # sliced for the hook, not for openWindow), so the K7 case above observes a
+    # copy. Every copy must be the shipped loop, recheck included.
+    core = _js_strip_comments_and_strings(
+        (BROKER_DIR / "67_js_window_lifecycle.js").read_text(encoding="utf-8"))
+    shipped = _terminal_create_emit_loops(core)
+    assert shipped == [
+        "for (const cb of termCreateCbs.slice()) { "
+        "if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb); }"]
+    drivers = {name: val for name, val in globals().items()
+               if name != "INDEX_HTML" and isinstance(val, str)
+               and "termCreateCbs.slice()" in val}
+    assert len(drivers) == 6, sorted(drivers)
+    for name, val in drivers.items():
+        assert _terminal_create_emit_loops(val) == shipped, \
+            f"{name} re-types a stale create emit"
 
 
 def test_terminal_create_arms_its_unsubscribe_before_the_replay():
@@ -24682,7 +24759,9 @@ function openTerminal() {
     win.sendChunked = sendChunked;
     // --- 67's xterm-onResize subscription, verbatim ---
     __RESIZE_SUB__
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     return win;
 }
 function closeWindow(id) {
@@ -25369,7 +25448,9 @@ function openTerminal(rendered) {
     if (rendered) term._render();
     desktop.appendChild(dom);
     windows.set(id, win);
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     return win;
 }
 function closeWindow(id) {
@@ -25875,9 +25956,11 @@ function openTerminal(pre) {
     const win = { id: id, type: 'term', term: term, dom: dom, hostId: 'h1',
                   sid: String(winSeq), cleanups: [], disposed: false };
     windows.set(id, win);
-    // #116's emit fires BEFORE the sampler is armed, exactly as in 67 (line
-    // ~319 vs ~838) -- so a subscriber's replay must not depend on it.
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    // #116's emit fires BEFORE the sampler is armed, exactly as in 67's
+    // openWindow -- so a subscriber's replay must not depend on it.
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     // --- 67's sampler subscription, verbatim ---
     __SAMPLER__
     return win;
@@ -26560,7 +26643,9 @@ function openTerminal(pre) {
                   termReady: true, fitAddon: { fit: function () { refits += 1; } } };
     windows.set(id, win);
     // #116's emit fires BEFORE the sampler is armed, exactly as in 67.
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     __SAMPLER__
     return win;
 }
@@ -31986,7 +32071,7 @@ def test_controlled_view_sources_are_wired():
     # Ruling (seed placement): right after the map insert and BEFORE the
     # create-time emit, so a mod subscribing at create sees the true state;
     # and before the attach tail, which it makes refuse.
-    assert s67.index("windows.set(id, win);") < s67.index("seedControlledWindow(win);")         < s67.index("for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);")         < s67.index("detachGateAttach(win);")
+    assert s67.index("windows.set(id, win);") < s67.index("seedControlledWindow(win);")         < s67.index("if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);")         < s67.index("detachGateAttach(win);")
     s73 = _src239("73_js_window_runtime.js")
     assert "applyControlView(controlKey(win.hostId, win.sid), data, 'ws');" in s73
     # The socket's first `resized` is held for its first `control` frame.
@@ -32429,7 +32514,9 @@ function openTerminal(controlled) {
                   sid: String(winSeq), cleanups: [], disposed: false,
                   controlled: controlled || null };
     windows.set(id, win);
-    for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+    for (const cb of termCreateCbs.slice()) {
+        if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+    }
     return win;
 }
 function closeWindow(id) {

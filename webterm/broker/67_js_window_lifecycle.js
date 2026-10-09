@@ -352,9 +352,15 @@
             // slot (after AGENTS.md, before color/MCP/min), preserving today's
             // title-bar order. Firing at the end of openWindow would place it to
             // the RIGHT of color/MCP. termCreateCbs is snapshotted so a callback
-            // that (un)subscribes mid-emit can't skip or revisit a sibling.
+            // that subscribes mid-emit can't make the loop skip or revisit a
+            // sibling (the new one reaches this window through its own replay).
+            // #242: an entry is rechecked before its call, so a registration
+            // removed mid-emit (a sibling of a cb that disabled its mod) is not
+            // called on this window after its removal.
             if (win.type !== 'app') {
-                for (const cb of termCreateCbs.slice()) _emitTerminalCreate(win, cb);
+                for (const cb of termCreateCbs.slice()) {
+                    if (termCreateCbs.indexOf(cb) !== -1) _emitTerminalCreate(win, cb);
+                }
             }
             // Restore-on-refresh: remember every open TERMINAL so a browser
             // reload can reattach it. openWindow only ever builds terminals,
