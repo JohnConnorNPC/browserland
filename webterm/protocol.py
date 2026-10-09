@@ -29,9 +29,14 @@ Broker -> browser (text JSON):
     {"type": "cwd",     "data": "C:\\path\\to\\dir"}  # live working dir push
     {"type": "exit",    "code": <int>}    # session's child exited — tear down now
     {"type": "error", "reason": "unknown_session", "session_id": <int>}
+    {"type": "control", "state": "free"|"controlled", "label", "since", "gen"}
+    {"type": "control", "state": "revoked", "by": "browser"|"claim", "gen"}
+    {"type": "error", "reason": "bad_label"|"not_controller"|"bad_op",
+     "session_id": <int>}                # a refused control op; socket stays
 Broker -> browser (binary): producer bytes, verbatim.
 
-Browser -> broker (text JSON): input / paste / resize (mouse ignored).
+Browser -> broker (text JSON): input / paste / resize (mouse ignored), and
+``control`` claim/release (#238, see "Terminal control" below).
 ``paste`` is a LEGACY ALIAS for ``input`` (#138): the UI now routes clipboard
 text through xterm's paste() and sends plain ``input`` frames; the relay keeps
 accepting ``paste`` verbatim only so tabs served before the change keep
@@ -48,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, Dict, Optional
 
 
@@ -448,6 +454,7 @@ def mcp_activity_frame(kind: str) -> str:
 # ``active`` client per broker and tears down the others' terminal views.
 #   broker -> client: {"type": "status", "active": <bool>,
 #                      "activeClientId": <id|null>}
+#                     {"type": "terminal_control", ...}  (#238, below)
 #   client -> broker: {"type": "become_active"}
 # ---------------------------------------------------------------------------
 
@@ -460,6 +467,90 @@ def control_status_frame(active: bool,
         "active": bool(active),
         "activeClientId": active_client_id,
     })
+
+
+# ---------------------------------------------------------------------------
+# Terminal control (#238) — one external controller per terminal
+#
+# A controller is any /ws subscriber that claims the terminal; while it holds
+# it, only its socket's input and resize reach the producer. Every surface
+# carries the same VIEW: {state: "free"|"controlled", label: str|None,
+# since: epoch ms|None, gen: int} (label/since are None when free; gen is
+# opaque and strictly increasing per terminal id, compared for equality only).
+#   controller -> broker (/ws): {"type": "control", "op": "claim", "label": s}
+#                               {"type": "control", "op": "release"}
+#   broker -> /ws subscriber:   {"type": "control", **view}   (each change, and
+#                               once right after `resized` on attach)
+#   broker -> revoked ctrl:     {"type": "control", "state": "revoked",
+#                                "by": "browser"|"claim", "gen": g}
+#   broker -> /control socket:  {"type": "terminal_control", "id": n, **view}
+# ---------------------------------------------------------------------------
+
+#: The longest claim label, in Unicode code points (Python ``len``; a JS
+#: string's ``length`` counts UTF-16 units and can read up to twice this).
+CONTROL_LABEL_MAX = 64
+
+# Format characters (Cf) a label may carry: ZWNJ and ZWJ, which emoji and
+# several scripts need. Every other Cf is refused, which covers all of Unicode's
+# Bidi_Control set (U+061C, U+200E-200F, U+202A-202E, U+2066-2069) as well as
+# invisible ones like U+200B and U+FEFF.
+_LABEL_CF_ALLOWED = frozenset("‌‍")
+# Control, surrogate, unassigned, line/paragraph separator.
+_LABEL_REFUSED_CATEGORIES = frozenset(("Cc", "Cs", "Cn", "Zl", "Zp"))
+
+
+def control_label_ok(label: Any) -> bool:
+    """Whether ``label`` is a valid claim label: a str of 1..CONTROL_LABEL_MAX
+    code points, not whitespace-only, with no control, surrogate, unassigned,
+    line/paragraph-separator or format character (ZWNJ/ZWJ excepted). The
+    label is shown to the owner verbatim, so it is refused, never repaired
+    (no normalization, no stripping)."""
+    if not isinstance(label, str):
+        return False
+    if not 1 <= len(label) <= CONTROL_LABEL_MAX or not label.strip():
+        return False
+    for ch in label:
+        cat = unicodedata.category(ch)
+        if cat in _LABEL_REFUSED_CATEGORIES:
+            return False
+        if cat == "Cf" and ch not in _LABEL_CF_ALLOWED:
+            return False
+    return True
+
+
+def control_view(state: str, label: Optional[str], since: Optional[int],
+                 gen: int) -> Dict[str, Any]:
+    """The one control VIEW shape every surface carries (see above)."""
+    controlled = state == "controlled"
+    return {"state": "controlled" if controlled else "free",
+            "label": str(label) if controlled else None,
+            "since": int(since) if controlled else None,
+            "gen": int(gen)}
+
+
+def control_frame(view: Dict[str, Any]) -> str:
+    """Broker -> every /ws subscriber of a terminal: its control view."""
+    frame: Dict[str, Any] = {"type": "control"}
+    frame.update(view)
+    return json.dumps(frame)
+
+
+def control_revoked_frame(by: str, gen: int) -> str:
+    """Broker -> the controller that just lost the terminal, sent BEFORE the
+    broadcast of the view that replaced it. ``by`` is ``"browser"`` (POST
+    /session/control) or ``"claim"`` (another socket claimed). ``gen`` is the
+    new view's gen. The socket stays open as a watcher."""
+    return json.dumps({"type": "control", "state": "revoked",
+                       "by": str(by), "gen": int(gen)})
+
+
+def terminal_control_frame(window_id: int, view: Dict[str, Any]) -> str:
+    """Broker -> every /control socket: terminal ``window_id``'s control view
+    changed. A controlled desktop window has closed its /ws, so this is how it
+    hears of a release it did not cause."""
+    frame: Dict[str, Any] = {"type": "terminal_control", "id": int(window_id)}
+    frame.update(view)
+    return json.dumps(frame)
 
 
 # ---------------------------------------------------------------------------
