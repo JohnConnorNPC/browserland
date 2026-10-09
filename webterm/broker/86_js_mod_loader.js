@@ -700,9 +700,9 @@
                 // Returns an unsubscribe fn; ALSO auto-unsubscribed on the mod's
                 // teardown (rec.unloads), so a disabled mod stops decorating new
                 // windows (the mod tears down live widgets via its own onDispose
-                // set). #242: the arm pushes it BEFORE the replay, so a replayed cb
-                // that disables its own mod drains it too; a dead mod registers
-                // nothing. Additive — ctxVersion stays 1; feature-detect `if (ctx.windows)`.
+                // set). #242: armed BEFORE the replay, so a replayed cb that
+                // disables its mod drains it; a dead mod registers nothing.
+                // Additive — ctxVersion stays 1; feature-detect ctx.windows.
                 windows: {
                     onTerminalCreate: function (cb) {
                         if (rec.unloading) return function () {};

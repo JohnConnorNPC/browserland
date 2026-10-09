@@ -14783,6 +14783,10 @@ def test_terminal_create_arms_its_unsubscribe_before_the_replay():
     loop = code.index("for (const win of Array.from(windows.values())) {")
     assert loop < code.index(recheck) < code.index(emit), \
         "the replay does not recheck liveness before each delivery"
+    # One entry per REGISTRATION: a fresh closure, never the cb itself (one
+    # function registered twice must stay two registrations).
+    assert code.count("const entry = function (info) { return cb(info); };") == 1, \
+        "the registration entry is no longer its own closure"
     assert code.count("termCreateCbs.push(entry);") == 1
     assert "termCreateCbs.push(cb)" not in code
     flat = " ".join(_js_strip_comments_and_strings(
